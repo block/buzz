@@ -15,7 +15,7 @@ version: 1
 
 `BUZZ_RELAY_URL` defaults to `http://localhost:3000`. In development, the user may need to set this to a staging or production relay URL.
 
-`BUZZ_AUTH_TAG` is required for `buzz agents draft-create` and `buzz agents draft-update` because those commands send owner-reviewed Desktop drafts. If missing, explain that this managed agent cannot open owner-reviewed agent drafts from chat.
+`BUZZ_AUTH_TAG` is required for `buzz agents draft-create`, `draft-update`, and `draft-delete` because those commands send owner-reviewed Desktop drafts. If missing, explain that this managed agent cannot open owner-reviewed agent drafts from chat.
 
 Run the bundled CLI with `--help` and `<command> <subcommand> --help` to discover all flags, arguments, and usage. This skill documents only what `--help` cannot tell you.
 
@@ -40,6 +40,14 @@ buzz agents draft-update --channel <uuid> --agent-name "Current name" \
 ```
 
 Run `buzz agents draft-update --help` for optional runtime, provider, model, rename, and access changes. Prefer these CLI commands over any legacy MCP agent-management tools.
+
+To remove a personal agent, only when the owner explicitly asks for it, use:
+
+```bash
+buzz agents draft-delete --channel <uuid> --agent-name "Current name"
+```
+
+This sends an encrypted request to the owner's Desktop. Desktop asks the owner to confirm, and nothing is deleted until the owner clicks **Delete**. Report the result as “sent for the owner to confirm,” never “deleted.” If the name matches no personal agent, Desktop shows the owner an error and deletes nothing. A Desktop build that predates this command ignores the request without any message, so tell the owner to look for the confirmation and to update Buzz if none appears.
 
 ## Agent Activity
 

@@ -5,11 +5,19 @@ use serde_json::json;
 
 use super::agent_control::Control;
 use super::{agent_activity, agent_control};
-use crate::agent_management::{build_create, build_update, CreateAgentDraft, UpdateAgentDraft};
+use crate::agent_management::{
+    build_create, build_delete, build_update, BuiltDraftRequest, CreateAgentDraft,
+    DeleteAgentDraft, UpdateAgentDraft,
+};
 use crate::client::BuzzClient;
 use crate::error::CliError;
 use crate::validate::{read_or_stdin, validate_hex64};
 use crate::{AgentsCmd, RespondToArg};
+
+const DRAFT_MESSAGE: &str =
+    "Draft sent to Buzz Desktop for owner review. Nothing changes until the owner saves it.";
+const DELETE_DRAFT_MESSAGE: &str =
+    "Delete request sent to Buzz Desktop for owner review. Nothing is deleted until the owner confirms.";
 
 pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), CliError> {
     match command {
@@ -28,21 +36,7 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
                     system_prompt: read_or_stdin(&system_prompt)?,
                 },
             )?;
-            let response = client.publish_ephemeral_event(built.event).await?;
-            let mut output: serde_json::Value = serde_json::from_str(&response)
-                .map_err(|e| CliError::Other(format!("invalid relay response: {e}")))?;
-            if let Some(obj) = output.as_object_mut() {
-                obj.insert("request_id".into(), built.request_id.into());
-                obj.insert("action".into(), built.action.into());
-                obj.insert("saved".into(), false.into());
-                obj.insert(
-                    "message".into(),
-                    "Draft sent to Buzz Desktop for owner review. Nothing changes until the owner saves it."
-                        .into(),
-                );
-            }
-            println!("{output}");
-            Ok(())
+            send_draft(client, built, DRAFT_MESSAGE).await
         }
 
         AgentsCmd::DraftUpdate {
@@ -70,21 +64,23 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
                     respond_to: respond_to.map(RespondToArg::to_wire),
                 },
             )?;
-            let response = client.publish_ephemeral_event(built.event).await?;
-            let mut output: serde_json::Value = serde_json::from_str(&response)
-                .map_err(|e| CliError::Other(format!("invalid relay response: {e}")))?;
-            if let Some(obj) = output.as_object_mut() {
-                obj.insert("request_id".into(), built.request_id.into());
-                obj.insert("action".into(), built.action.into());
-                obj.insert("saved".into(), false.into());
-                obj.insert(
-                    "message".into(),
-                    "Draft sent to Buzz Desktop for owner review. Nothing changes until the owner saves it."
-                        .into(),
-                );
-            }
-            println!("{output}");
-            Ok(())
+            send_draft(client, built, DRAFT_MESSAGE).await
+        }
+
+        AgentsCmd::DraftDelete {
+            channel,
+            agent_name,
+        } => {
+            let owner = require_owner(client)?;
+            let built = build_delete(
+                client.keys(),
+                &owner,
+                DeleteAgentDraft {
+                    channel_id: channel,
+                    agent_name,
+                },
+            )?;
+            send_draft(client, built, DELETE_DRAFT_MESSAGE).await
         }
 
         AgentsCmd::Archive {
@@ -227,8 +223,35 @@ fn ensure_owner(
     }
 }
 
+async fn send_draft(
+    client: &BuzzClient,
+    built: BuiltDraftRequest,
+    message: &str,
+) -> Result<(), CliError> {
+    let response = client.publish_ephemeral_event(built.event.clone()).await?;
+    println!("{}", draft_output(&response, &built, message)?);
+    Ok(())
+}
+
+fn draft_output(
+    response: &str,
+    built: &BuiltDraftRequest,
+    message: &str,
+) -> Result<serde_json::Value, CliError> {
+    let mut output: serde_json::Value = serde_json::from_str(response)
+        .map_err(|e| CliError::Other(format!("invalid relay response: {e}")))?;
+    let obj = output
+        .as_object_mut()
+        .ok_or_else(|| CliError::Other("invalid relay response: expected a JSON object".into()))?;
+    obj.insert("request_id".into(), built.request_id.clone().into());
+    obj.insert("action".into(), built.action.into());
+    obj.insert("saved".into(), false.into());
+    obj.insert("message".into(), message.into());
+    Ok(output)
+}
+
 /// Require `BUZZ_AUTH_TAG` and parse the owner pubkey from it. Used only by
-/// the `draft-create` and `draft-update` paths.
+/// the `draft-create`, `draft-update`, and `draft-delete` paths.
 fn require_owner(client: &BuzzClient) -> Result<PublicKey, CliError> {
     let hex = client
         .auth_tag_owner_hex()
@@ -1134,6 +1157,75 @@ mod tests {
                 assert!(admin, "--admin must be true when flag is present");
             }
             _ => panic!("unexpected command variant"),
+        }
+    }
+
+    // --- draft-delete: arg parsing and relay-reply interpretation ---
+
+    fn built_delete() -> crate::agent_management::BuiltDraftRequest {
+        crate::agent_management::build_delete(
+            &Keys::generate(),
+            &Keys::generate().public_key(),
+            crate::agent_management::DeleteAgentDraft {
+                channel_id: "7c07e659-3610-42f4-9a5e-1e9973c09da9".into(),
+                agent_name: "Scout".into(),
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn draft_delete_args_are_parsed() {
+        use crate::Cli;
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "buzz",
+            "agents",
+            "draft-delete",
+            "--channel",
+            "7c07e659-3610-42f4-9a5e-1e9973c09da9",
+            "--agent-name",
+            "Scout",
+        ])
+        .expect("draft-delete must accept --channel and --agent-name");
+        match cli.command {
+            crate::Cmd::Agents(crate::AgentsCmd::DraftDelete {
+                channel,
+                agent_name,
+            }) => {
+                assert_eq!(channel, "7c07e659-3610-42f4-9a5e-1e9973c09da9");
+                assert_eq!(agent_name, "Scout");
+            }
+            _ => panic!("unexpected command variant"),
+        }
+        assert!(Cli::try_parse_from(["buzz", "agents", "draft-delete", "--channel", "c"]).is_err());
+    }
+
+    #[test]
+    fn draft_output_reports_an_unsaved_request_beside_the_relay_envelope() {
+        let built = built_delete();
+        let output = draft_output(
+            r#"{"event_id":"abc","accepted":true,"message":"ok"}"#,
+            &built,
+            DELETE_DRAFT_MESSAGE,
+        )
+        .unwrap();
+        assert_eq!(output["event_id"], "abc");
+        assert_eq!(output["accepted"], true);
+        assert_eq!(output["request_id"], built.request_id);
+        assert_eq!(output["action"], "delete");
+        assert_eq!(output["saved"], false);
+        assert_eq!(output["message"], DELETE_DRAFT_MESSAGE);
+    }
+
+    #[test]
+    fn draft_output_rejects_a_reply_it_cannot_annotate() {
+        for reply in ["not json", "[]", "\"ok\""] {
+            let error = draft_output(reply, &built_delete(), DELETE_DRAFT_MESSAGE).unwrap_err();
+            assert!(
+                error.to_string().contains("invalid relay response"),
+                "{reply}"
+            );
         }
     }
 

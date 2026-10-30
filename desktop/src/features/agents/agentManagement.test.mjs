@@ -6,6 +6,7 @@ import {
   createInputFromRequest,
   requestTargetsEditablePersona,
   parseAgentManagementRequest,
+  resolveDeleteTarget,
   updateInputFromRequest,
 } from "./agentManagement.ts";
 import {
@@ -142,5 +143,85 @@ test("agent-requested access edits preserve thread-scoped conversation context",
     respondToAllowlist: undefined,
     parallelism: 3,
     sessionPolicy: "thread",
+  });
+});
+
+function deletePayload(overrides = {}) {
+  return {
+    type: AGENT_MANAGEMENT_REQUEST,
+    action: "delete",
+    requestId: "request-5",
+    request: { channelId: CHANNEL_ID, agentName: "Scout" },
+    ...overrides,
+  };
+}
+
+test("parses a delete request that names only a channel and an agent", () => {
+  assert.deepEqual(
+    parseAgentManagementRequest(deletePayload()),
+    deletePayload(),
+  );
+});
+
+test("rejects malformed delete requests and unknown actions", () => {
+  const withRequest = (request) => deletePayload({ request });
+  for (const payload of [
+    withRequest({ agentName: "Scout" }),
+    withRequest({ channelId: CHANNEL_ID }),
+    withRequest({ channelId: CHANNEL_ID, agentName: "  " }),
+    withRequest({ channelId: CHANNEL_ID, agentName: "Scout", force: true }),
+    withRequest({ channelId: CHANNEL_ID, agentName: "Scout", personaId: "p1" }),
+    deletePayload({ requestId: "" }),
+    deletePayload({ action: "remove" }),
+    deletePayload({ action: "Delete" }),
+    deletePayload({ action: undefined }),
+    deletePayload({
+      action: "remove",
+      request: { channelId: CHANNEL_ID, agentName: "Scout", systemPrompt: "x" },
+    }),
+  ]) {
+    assert.equal(parseAgentManagementRequest(payload), null);
+  }
+});
+
+const persona = (overrides) => ({
+  id: "p1",
+  displayName: "Scout",
+  isBuiltIn: false,
+  sourceTeam: null,
+  ...overrides,
+});
+
+test("delete resolves a single personal agent by its name, ignoring case", () => {
+  const target = persona({ id: "p1", displayName: "Scout" });
+  assert.deepEqual(
+    resolveDeleteTarget(
+      [persona({ id: "p2", displayName: "Other" }), target],
+      " scout ",
+    ),
+    { status: "ready", persona: target },
+  );
+});
+
+test("delete of an unknown, ambiguous, built-in, or team-managed agent is an error, never a no-op", () => {
+  for (const [personas, pattern] of [
+    [[persona({ displayName: "Other" })], /No personal agent is named “Scout”/],
+    [[], /No personal agent is named “Scout”/],
+    [[persona({ sourceTeam: "team" })], /No personal agent is named “Scout”/],
+    [
+      [persona({ id: "a" }), persona({ id: "b" })],
+      /More than one personal agent/,
+    ],
+    [[persona({ isBuiltIn: true })], /built-in/],
+  ]) {
+    const target = resolveDeleteTarget(personas, "Scout");
+    assert.equal(target.status, "error");
+    assert.match(target.message, pattern);
+  }
+});
+
+test("delete waits for the agent list instead of reporting an unknown agent", () => {
+  assert.deepEqual(resolveDeleteTarget(undefined, "Scout"), {
+    status: "loading",
   });
 });

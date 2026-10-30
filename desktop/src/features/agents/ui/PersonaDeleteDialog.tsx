@@ -16,6 +16,10 @@ type PersonaDeleteDialogProps = {
   persona: AgentPersona | null;
   /** Number of managed-agent instances backed by this persona. Omit or pass 0 to suppress the instance-count sentence. */
   instanceCount?: number;
+  error?: string | null;
+  isPending?: boolean;
+  /** Keep the dialog open after Delete so the caller can show the result or error. */
+  keepOpenOnConfirm?: boolean;
   onConfirm: (persona: AgentPersona) => void;
   onOpenChange: (open: boolean) => void;
 };
@@ -48,6 +52,9 @@ export function PersonaDeleteDialog({
   open,
   persona,
   instanceCount = 0,
+  error = null,
+  isPending = false,
+  keepOpenOnConfirm = false,
   onConfirm,
   onOpenChange,
 }: PersonaDeleteDialogProps) {
@@ -59,6 +66,11 @@ export function PersonaDeleteDialog({
           <AlertDialogDescription>
             {personaDeleteDescription(persona, instanceCount)}
           </AlertDialogDescription>
+          {error ? (
+            <p className="text-sm text-destructive" role="alert">
+              {error}
+            </p>
+          ) : null}
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel asChild>
@@ -68,7 +80,11 @@ export function PersonaDeleteDialog({
           </AlertDialogCancel>
           <AlertDialogAction asChild>
             <Button
-              onClick={() => {
+              disabled={isPending}
+              onClick={(event) => {
+                if (keepOpenOnConfirm) {
+                  event.preventDefault();
+                }
                 if (persona) {
                   onConfirm(persona);
                 }

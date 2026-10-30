@@ -4,7 +4,9 @@ import { useQueryClient } from "@tanstack/react-query";
 import {
   createInputFromRequest,
   requestTargetsEditablePersona,
+  resolveDeleteTarget,
   type AgentManagementRequest,
+  type DeleteTarget,
   updateInputFromRequest,
 } from "./agentManagement";
 import { subscribeAgentManagementRequests } from "./observerRelayStore";
@@ -14,6 +16,7 @@ import {
   useAcpRuntimesQuery,
   useCreateManagedAgentMutation,
   useCreatePersonaMutation,
+  useDeletePersonaMutation,
   useManagedAgentsQuery,
   usePersonasQuery,
   useUpdatePersonaMutation,
@@ -30,6 +33,7 @@ import { resolveManagedAgentAvatarUrl } from "./ui/managedAgentAvatar";
 import type { AgentCreateIntent } from "./ui/agentCreateIntent";
 import { editPersonaDialogState } from "./ui/personaDialogState";
 import type {
+  AgentPersona,
   CreatePersonaInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
@@ -43,6 +47,7 @@ export function useAgentManagement() {
   const createPersonaMutation = useCreatePersonaMutation();
   const updatePersonaMutation = useUpdatePersonaMutation();
   const createAgentMutation = useCreateManagedAgentMutation();
+  const deletePersonaMutation = useDeletePersonaMutation();
   const [request, setRequest] = React.useState<AgentManagementRequest | null>(
     null,
   );
@@ -50,6 +55,7 @@ export function useAgentManagement() {
   const createdAgentAttachment = useCreatedAgentChannelAttachment();
   const seenRequestIds = React.useRef(new Set<string>());
   const pendingRequestId = React.useRef<string | null>(null);
+  const isDeleting = React.useRef(false);
   const sourceAgentPubkey = React.useRef<string | null>(null);
   const managedAgentsRef = React.useRef(managedAgentsQuery.data);
   const channelsRef = React.useRef(channelsQuery.data);
@@ -132,7 +138,8 @@ export function useAgentManagement() {
   const isPending =
     createPersonaMutation.isPending ||
     updatePersonaMutation.isPending ||
-    createAgentMutation.isPending;
+    createAgentMutation.isPending ||
+    deletePersonaMutation.isPending;
 
   function assertAgentCanActFromOrigin(channelId: string) {
     const targetChannel = (channelsQuery.data ?? []).find(
@@ -238,6 +245,27 @@ export function useAgentManagement() {
     }
   }
 
+  async function submitDelete(persona: AgentPersona) {
+    if (request?.action !== "delete" || isDeleting.current) return;
+    isDeleting.current = true;
+    setError(null);
+    try {
+      assertAgentCanActFromOrigin(request.request.channelId);
+      await deletePersonaMutation.mutateAsync(persona.id);
+      isDeleting.current = false;
+      dismiss();
+    } catch (cause) {
+      isDeleting.current = false;
+      setError(
+        cause instanceof Error ? cause.message : "Could not delete this agent.",
+      );
+    }
+  }
+
+  function closeDeleteRequest() {
+    if (!isDeleting.current) dismiss();
+  }
+
   function dismiss() {
     pendingRequestId.current = null;
     sourceAgentPubkey.current = null;
@@ -259,6 +287,24 @@ export function useAgentManagement() {
     );
   }, [currentPersona, request]);
 
+  const deleteTarget = React.useMemo<DeleteTarget | null>(() => {
+    if (request?.action !== "delete") return null;
+    if (personasQuery.isError) {
+      return {
+        status: "error",
+        message: "Could not load your agents. Nothing was deleted.",
+      };
+    }
+    return resolveDeleteTarget(personasQuery.data, request.request.agentName);
+  }, [personasQuery.data, personasQuery.isError, request]);
+
+  const deleteInstanceCount = React.useMemo(() => {
+    if (deleteTarget?.status !== "ready") return 0;
+    return (managedAgentsQuery.data ?? []).filter(
+      (agent) => agent.personaId === deleteTarget.persona.id,
+    ).length;
+  }, [deleteTarget, managedAgentsQuery.data]);
+
   const editError = React.useMemo(() => {
     if (request?.action !== "update") return error;
     if (error) return error;
@@ -276,6 +322,8 @@ export function useAgentManagement() {
     createInitialValues,
     editInitialValues,
     editError,
+    deleteTarget,
+    deleteInstanceCount,
     error,
     ...createdAgentAttachment,
     isPending,
@@ -287,6 +335,8 @@ export function useAgentManagement() {
         : ("ready" as const),
     submitCreate,
     submitUpdate,
+    submitDelete,
+    closeDeleteRequest,
     dismiss,
   };
 }

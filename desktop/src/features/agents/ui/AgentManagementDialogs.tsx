@@ -1,6 +1,7 @@
 import { useAgentManagement } from "@/features/agents/useAgentManagement";
 import { ProjectChannelRequestDialog } from "@/features/projects/ui/ProjectChannelRequestDialog";
 import { AgentCardDialogs } from "./AgentCardViewerDialog";
+import { AgentDeleteRequestDialog } from "./AgentDeleteRequestDialog";
 import { AgentDialog } from "./AgentDialog";
 
 /** Global review surfaces opened by owned agents through the Buzz harness. */
@@ -41,6 +42,18 @@ export function AgentManagementDialogs() {
           runtimeCatalogStatus={management.runtimeCatalogStatus}
           submitLabel="Save changes"
           title="Edit agent"
+        />
+      ) : null}
+      {management.deleteTarget ? (
+        <AgentDeleteRequestDialog
+          error={management.error}
+          instanceCount={management.deleteInstanceCount}
+          isPending={management.isPending}
+          onClose={management.closeDeleteRequest}
+          onConfirm={(persona) => {
+            void management.submitDelete(persona);
+          }}
+          target={management.deleteTarget}
         />
       ) : null}
       <ProjectChannelRequestDialog />

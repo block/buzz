@@ -81,6 +81,9 @@ buzz agents activity --agent <hex|npub> --since 1783497600 --limit 20 --wait 30
 buzz agents cancel-turn --agent Scout --channel <UUID>
 buzz agents set-model --agent Scout --channel <UUID> --model <MODEL_ID> --wait 15
 
+# Owner-reviewed agent drafts (BUZZ_AUTH_TAG required; the owner confirms in Buzz Desktop)
+buzz agents draft-delete --channel <UUID> --agent-name "Scout"
+
 # DMs
 buzz dms open --pubkey <hex>
 buzz dms list
@@ -198,6 +201,15 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `set` | Write a memory value (use `-` for stdin) |
 | | `patch` | Apply unified diff to memory value |
 | | `rm` | Publish a tombstone to delete memory |
+
+### Agent draft delete
+
+`agents draft-delete` never deletes anything. It sends one encrypted request to
+the owner's Buzz Desktop, which shows a confirmation that names the agent. It
+prints the write envelope plus `{request_id, action: "delete", saved: false}`.
+Desktop deletes the agent only after the owner clicks **Delete**. If the name
+matches no personal agent, Desktop shows an error. A Desktop build without
+`delete` support ignores the request silently.
 
 ### Agent activity output
 

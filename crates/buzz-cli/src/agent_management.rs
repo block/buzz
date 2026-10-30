@@ -40,6 +40,13 @@ pub struct UpdateAgentDraft {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DeleteAgentDraft {
+    pub channel_id: String,
+    pub agent_name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateProjectChannelDraft {
     pub home_channel_id: String,
     pub name: String,
@@ -215,6 +222,28 @@ pub fn build_update(
     )
 }
 
+pub fn build_delete(
+    keys: &Keys,
+    owner: &PublicKey,
+    draft: DeleteAgentDraft,
+) -> Result<BuiltDraftRequest, CliError> {
+    let channel_id = required(draft.channel_id, "channel", 128)?;
+    uuid::Uuid::parse_str(&channel_id)
+        .map_err(|_| CliError::Usage(format!("invalid channel UUID: {channel_id}")))?;
+    let request = DeleteAgentDraft {
+        channel_id: channel_id.clone(),
+        agent_name: required(draft.agent_name, "agent name", MAX_NAME_CHARS)?,
+    };
+    build(
+        keys,
+        owner,
+        channel_id,
+        AGENT_REQUEST_KIND,
+        "delete",
+        request,
+    )
+}
+
 pub fn build_project_channel(
     keys: &Keys,
     owner: &PublicKey,
@@ -304,6 +333,60 @@ mod tests {
         );
         assert!(payload["payload"]["request"].get("runtime").is_none());
         assert!(payload["payload"]["request"].get("respondTo").is_none());
+    }
+
+    #[test]
+    fn delete_payload_names_only_the_agent_and_channel() {
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let built = build_delete(
+            &agent,
+            &owner.public_key(),
+            DeleteAgentDraft {
+                channel_id: CHANNEL.into(),
+                agent_name: "  Scout  ".into(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(built.action, "delete");
+        assert_eq!(built.event.kind.as_u16(), 24_200);
+        let payload: serde_json::Value = decrypt_observer_payload(&owner, &built.event).unwrap();
+        assert_eq!(payload["kind"], AGENT_REQUEST_KIND);
+        assert_eq!(payload["channelId"], CHANNEL);
+        assert_eq!(
+            payload["payload"],
+            serde_json::json!({
+                "type": AGENT_REQUEST_KIND,
+                "action": "delete",
+                "requestId": built.request_id,
+                "request": {"channelId": CHANNEL, "agentName": "Scout"},
+            })
+        );
+        assert!(
+            decrypt_observer_payload::<serde_json::Value>(&Keys::generate(), &built.event).is_err(),
+            "only the owner can read the request"
+        );
+    }
+
+    #[test]
+    fn delete_rejects_bad_input() {
+        for (channel, name, expected) in [
+            ("general", "Scout", "invalid channel UUID"),
+            (CHANNEL, "   ", "agent name is required"),
+            (CHANNEL, &"x".repeat(MAX_NAME_CHARS + 1), "too long"),
+        ] {
+            let error = build_delete(
+                &Keys::generate(),
+                &Keys::generate().public_key(),
+                DeleteAgentDraft {
+                    channel_id: channel.into(),
+                    agent_name: name.into(),
+                },
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
     }
 
     #[test]

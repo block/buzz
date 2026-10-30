@@ -34,9 +34,20 @@ export type AgentManagementUpdateRequest = {
   };
 };
 
+export type AgentManagementDeleteRequest = {
+  type: typeof AGENT_MANAGEMENT_REQUEST;
+  action: "delete";
+  requestId: string;
+  request: {
+    channelId: string;
+    agentName: string;
+  };
+};
+
 export type AgentManagementRequest =
   | AgentManagementCreateRequest
-  | AgentManagementUpdateRequest;
+  | AgentManagementUpdateRequest
+  | AgentManagementDeleteRequest;
 
 function isText(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
@@ -62,7 +73,9 @@ export function parseAgentManagementRequest(
   if (
     payload.type !== AGENT_MANAGEMENT_REQUEST ||
     !isText(payload.requestId) ||
-    (payload.action !== "create" && payload.action !== "update") ||
+    (payload.action !== "create" &&
+      payload.action !== "update" &&
+      payload.action !== "delete") ||
     typeof payload.request !== "object" ||
     payload.request === null
   ) {
@@ -89,6 +102,25 @@ export function parseAgentManagementRequest(
         channelId: request.channelId,
         displayName: request.displayName,
         systemPrompt: request.systemPrompt,
+      },
+    };
+  }
+
+  if (payload.action === "delete") {
+    if (
+      !hasOnlyKeys(request, ["channelId", "agentName"]) ||
+      !isText(request.channelId) ||
+      !isText(request.agentName)
+    ) {
+      return null;
+    }
+    return {
+      type: AGENT_MANAGEMENT_REQUEST,
+      action: "delete",
+      requestId: payload.requestId,
+      request: {
+        channelId: request.channelId,
+        agentName: request.agentName,
       },
     };
   }
@@ -139,6 +171,45 @@ export function requestTargetsEditablePersona(
   persona: AgentPersona | undefined,
 ): persona is AgentPersona {
   return Boolean(persona && !persona.sourceTeam);
+}
+
+export type DeleteTarget =
+  | { status: "loading" }
+  | { status: "ready"; persona: AgentPersona }
+  | { status: "error"; message: string };
+
+/** Resolves a delete request to exactly one deletable personal agent, or says why not. */
+export function resolveDeleteTarget(
+  personas: readonly AgentPersona[] | undefined,
+  agentName: string,
+): DeleteTarget {
+  if (personas === undefined) return { status: "loading" };
+  const name = agentName.trim();
+  const target = name.toLocaleLowerCase();
+  const matches = personas.filter(
+    (persona) =>
+      persona.displayName.trim().toLocaleLowerCase() === target &&
+      requestTargetsEditablePersona(persona),
+  );
+  if (matches.length === 0) {
+    return {
+      status: "error",
+      message: `No personal agent is named “${name}”. Nothing was deleted.`,
+    };
+  }
+  if (matches.length > 1) {
+    return {
+      status: "error",
+      message: `More than one personal agent is named “${name}”. Rename one in Agents, then ask the agent again. Nothing was deleted.`,
+    };
+  }
+  if (matches[0].isBuiltIn) {
+    return {
+      status: "error",
+      message: `“${name}” is a built-in agent and cannot be deleted. Deactivate it in Agents instead.`,
+    };
+  }
+  return { status: "ready", persona: matches[0] };
 }
 
 export function createInputFromRequest(

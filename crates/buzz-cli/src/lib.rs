@@ -33,7 +33,7 @@ where
     // and aws-lc-rs (from reqwest's rustls feature via hyper-rustls). With both on,
     // rustls cannot auto-select a provider, and any code that reaches
     // ClientConfig::builder() — specifically the WSS path in publish_ephemeral_event
-    // used by `agents draft-create`, `agents draft-update`, and `users set-presence`
+    // used by `agents draft-*` and `users set-presence`
     // — panics at rustls crypto/mod.rs. The `let _ =` swallow is intentional: when
     // buzz-dev-mcp delegates to run_from_args, it has already installed ring; the
     // double-install returns Err and is harmless.
@@ -260,7 +260,7 @@ pub enum OutputFormat {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Draft owner-reviewed agent creation and updates
+    /// Draft owner-reviewed agent creation, updates, and deletion
     #[command(subcommand)]
     Agents(AgentsCmd),
     /// Send, read, search, and manage messages
@@ -384,6 +384,15 @@ pub enum AgentsCmd {
         model: Option<String>,
         #[arg(long, value_enum)]
         respond_to: Option<RespondToArg>,
+    },
+    /// Ask the owner to delete a personal agent; Buzz Desktop shows a confirmation
+    DraftDelete {
+        /// Current channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Current name of the personal agent to delete
+        #[arg(long)]
+        agent_name: String,
     },
     /// Submit a NIP-IA archive request for an identity (kind 9035)
     #[command(
@@ -2609,6 +2618,7 @@ mod tests {
                 "archived",
                 "cancel-turn",
                 "draft-create",
+                "draft-delete",
                 "draft-update",
                 "set-model",
                 "unarchive"
@@ -2754,7 +2764,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 8),
+            ("agents", 9),
             ("canvas", 4),
             ("channels", 16),
             ("dms", 4),
