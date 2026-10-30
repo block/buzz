@@ -96,4 +96,7 @@ mod legacy_channel_types_postgres_tests;
 mod unlisted_channels_postgres_tests;
 
 #[cfg(test)]
+mod channel_name_postgres_tests;
+
+#[cfg(test)]
 mod admission_postgres_tests;
