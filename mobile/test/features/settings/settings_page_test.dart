@@ -5,9 +5,11 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
 import 'package:buzz/features/settings/settings_page.dart';
+import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/community/community_membership_provider.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
+import 'package:buzz/shared/community/community_storage.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/shared/push/dev_push_lease.dart';
@@ -21,6 +23,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import '../../shared/community/community_storage_test.dart'
+    show FakeSecureStorage;
 
 void main() {
   setUp(() {
@@ -190,9 +195,70 @@ void main() {
       find.byKey(const ValueKey('push-notifications-enabled')),
       findsOneWidget,
     );
-    expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+    expect(
+      tester
+          .widget<Switch>(
+            find.byKey(const ValueKey('push-notifications-switch')),
+          )
+          .value,
+      isTrue,
+    );
     debugDefaultTargetPlatformOverride = null;
   });
+
+  for (final enabled in [true, false]) {
+    testWidgets('agent mute is offered only while notifications are on '
+        '(enabled=$enabled) and persists', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final storage = CommunityStorage(secure: FakeSecureStorage());
+      final community = Community.create(
+        name: 'Team',
+        relayUrl: 'wss://relay.example',
+      ).copyWith(pushNotificationsEnabled: enabled);
+      await storage.save(community);
+      await storage.saveActiveId(community.id);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            authProvider.overrideWith(_Auth.new),
+            communityStorageProvider.overrideWithValue(storage),
+            communitySnapshotWriterProvider.overrideWithValue((_) async {}),
+            currentRelayPushDescriptorProvider.overrideWith(
+              (ref) async => _pushDescriptor,
+            ),
+            appLifecycleProvider.overrideWith(_SettingsLifecycleNotifier.new),
+            buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
+              () async => BuzzPushAuthorizationStatus.authorized,
+            ),
+          ],
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: SettingsPage(
+              profileHeader: const SizedBox.shrink(),
+              identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final mute = find.byKey(const ValueKey('push-mute-agents-switch'));
+      expect(mute, enabled ? findsOneWidget : findsNothing);
+      if (enabled) {
+        expect(tester.widget<Switch>(mute).value, isFalse);
+        await tester.tap(find.text('Mute agents'));
+        await tester.pumpAndSettle();
+        expect(tester.widget<Switch>(mute).value, isTrue);
+        expect((await storage.loadAll()).single.pushMuteAgents, isTrue);
+      }
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
 
   for (final brightness in Brightness.values) {
     testWidgets(
@@ -488,6 +554,12 @@ void main() {
       isTrue,
     );
   });
+}
+
+class _Auth extends AuthNotifier {
+  @override
+  Future<AuthState> build() async =>
+      const AuthState(status: AuthStatus.unauthenticated);
 }
 
 class _SettingsLifecycleNotifier extends AppLifecycleNotifier {

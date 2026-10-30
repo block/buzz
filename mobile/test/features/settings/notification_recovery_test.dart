@@ -109,15 +109,24 @@ void main() {
         reason:
             '${container.read(activeCommunityProvider)} / ${container.read(communityListProvider)}',
       );
-      expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
-      await tester.tap(find.byType(Switch));
+      expect(
+        tester
+            .widget<Switch>(
+              find.byKey(const ValueKey('push-notifications-switch')),
+            )
+            .value,
+        isTrue,
+      );
+      await tester.tap(find.byKey(const ValueKey('push-notifications-switch')));
       await tester.pumpAndSettle();
       final stored = (await storage.loadAll()).single;
       expect(stored.pushNotificationsEnabled, isFalse);
       expect(stored.pushSubscriptionState.pendingTombstoneGeneration, 8);
       expect(tombstones, [8]);
       expect(snapshots.last.single.pushNotificationsEnabled, isFalse);
-      final offSwitch = tester.widget<Switch>(find.byType(Switch));
+      final offSwitch = tester.widget<Switch>(
+        find.byKey(const ValueKey('push-notifications-switch')),
+      );
       expect(offSwitch.value, isFalse);
       expect(offSwitch.onChanged, isNull);
       relayAvailable = true;

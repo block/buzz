@@ -205,7 +205,14 @@ void main() {
       expect(session.leases.single['active'], isTrue);
       // Capability discovery plus the active publication.
       expect(discoveries, 2);
-      expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+      expect(
+        tester
+            .widget<Switch>(
+              find.byKey(const ValueKey('push-notifications-switch')),
+            )
+            .value,
+        isTrue,
+      );
       expect(
         tester.getSemantics(
           find.byKey(const ValueKey('push-notifications-setting')),
@@ -217,7 +224,9 @@ void main() {
         ),
       );
       expect(
-        tester.getSize(find.byType(Switch)).height,
+        tester
+            .getSize(find.byKey(const ValueKey('push-notifications-switch')))
+            .height,
         greaterThanOrEqualTo(48),
       );
       // Compare rendered row bounds, not just their padding parameters.
@@ -232,7 +241,7 @@ void main() {
         statusHeight,
         reason: 'single-line settings rows share a height',
       );
-      await tester.tap(find.byType(Switch));
+      await tester.tap(find.byKey(const ValueKey('push-notifications-switch')));
       await tester.pumpAndSettle();
       final stored = (await storage.loadAll()).single;
       expect(stored.pushNotificationsEnabled, isFalse);
@@ -259,7 +268,9 @@ void main() {
       );
       expect(discoveries, 3);
       expect(snapshots.last.single.pushNotificationsEnabled, isFalse);
-      final offSwitch = tester.widget<Switch>(find.byType(Switch));
+      final offSwitch = tester.widget<Switch>(
+        find.byKey(const ValueKey('push-notifications-switch')),
+      );
       expect(offSwitch.value, isFalse);
       expect(offSwitch.onChanged, isNotNull);
       // Closing and reopening Settings must not strand the off control either.
@@ -267,10 +278,24 @@ void main() {
       await tester.pumpAndSettle();
       showingSettings.value = true;
       await tester.pumpAndSettle();
-      expect(tester.widget<Switch>(find.byType(Switch)).onChanged, isNotNull);
+      expect(
+        tester
+            .widget<Switch>(
+              find.byKey(const ValueKey('push-notifications-switch')),
+            )
+            .onChanged,
+        isNotNull,
+      );
       await tester.tap(find.text('Notifications'));
       await tester.pumpAndSettle();
-      expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+      expect(
+        tester
+            .widget<Switch>(
+              find.byKey(const ValueKey('push-notifications-switch')),
+            )
+            .value,
+        isTrue,
+      );
       expect((await storage.loadAll()).single.pushNotificationsEnabled, isTrue);
       expect(
         session.leases.where((lease) => lease['active'] == true).length,
@@ -307,7 +332,14 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(discoveries, 5);
-      expect(tester.widget<Switch>(find.byType(Switch)).onChanged, isNotNull);
+      expect(
+        tester
+            .widget<Switch>(
+              find.byKey(const ValueKey('push-notifications-switch')),
+            )
+            .onChanged,
+        isNotNull,
+      );
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pumpAndSettle();

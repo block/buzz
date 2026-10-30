@@ -22,6 +22,7 @@ class Community {
   static const _defaultPushNotificationsEnabled = true;
 
   static const _pushNotificationsEnabledKey = 'pushNotificationsEnabledV2';
+  static const _pushMuteAgentsKey = 'pushMuteAgents';
 
   final String id;
   final String name;
@@ -30,6 +31,9 @@ class Community {
   final String? nsec;
   final SensitiveActionPolicy sensitiveActionPolicy;
   final bool pushNotificationsEnabled;
+
+  /// Drops notifications authored by known agents, so only people notify.
+  final bool pushMuteAgents;
   final BuzzPushLeaseSubscriptionState pushSubscriptionState;
 
   /// Stable random address component for this community's relay push lease.
@@ -50,6 +54,7 @@ class Community {
     this.nsec,
     this.sensitiveActionPolicy = SensitiveActionPolicy.disabledByUser,
     this.pushNotificationsEnabled = _defaultPushNotificationsEnabled,
+    this.pushMuteAgents = false,
     this.pushSubscriptionState = const BuzzPushLeaseSubscriptionState.desired(),
     this.pushLeaseInstallationId,
     this.starterSetupIncomplete = false,
@@ -85,6 +90,7 @@ class Community {
     Object? nsec = _sentinel,
     SensitiveActionPolicy? sensitiveActionPolicy,
     bool? pushNotificationsEnabled,
+    bool? pushMuteAgents,
     BuzzPushLeaseSubscriptionState? pushSubscriptionState,
     Object? pushLeaseInstallationId = _sentinel,
     bool? starterSetupIncomplete,
@@ -99,6 +105,7 @@ class Community {
           sensitiveActionPolicy ?? this.sensitiveActionPolicy,
       pushNotificationsEnabled:
           pushNotificationsEnabled ?? this.pushNotificationsEnabled,
+      pushMuteAgents: pushMuteAgents ?? this.pushMuteAgents,
       pushSubscriptionState:
           pushSubscriptionState ?? this.pushSubscriptionState,
       pushLeaseInstallationId: pushLeaseInstallationId == _sentinel
@@ -118,6 +125,7 @@ class Community {
     if (nsec != null) 'nsec': nsec,
     'sensitiveActionPolicy': sensitiveActionPolicy.name,
     _pushNotificationsEnabledKey: pushNotificationsEnabled,
+    _pushMuteAgentsKey: pushMuteAgents,
     'pushSubscriptionState': pushSubscriptionState.toJson(),
     if (pushLeaseInstallationId != null)
       'pushLeaseInstallationId': pushLeaseInstallationId,
@@ -157,6 +165,7 @@ class Community {
         orElse: () => SensitiveActionPolicy.disabledByUser,
       ),
       pushNotificationsEnabled: pushNotificationsEnabled,
+      pushMuteAgents: json[_pushMuteAgentsKey] as bool? ?? false,
       pushSubscriptionState: pushSubscriptionState,
       pushLeaseInstallationId: pushLeaseInstallationId,
       starterSetupIncomplete: json['starterSetupIncomplete'] as bool? ?? false,

@@ -166,6 +166,27 @@ void main() {
       },
     );
 
+    test('agent push mute persists across restart', () async {
+      container = createContainer();
+      await container.read(communityListProvider.future);
+      final community = Community.create(
+        name: 'Test',
+        relayUrl: 'https://test.example.com',
+      );
+      final notifier = container.read(communityListProvider.notifier);
+      await notifier.addCommunity(community);
+      await notifier.setPushMuteAgents(community.id, true);
+      container.dispose();
+      container = createContainer();
+
+      expect(
+        (await container.read(
+          communityListProvider.future,
+        )).single.pushMuteAgents,
+        isTrue,
+      );
+    });
+
     test(
       'lease retry reserves beyond a locally unaccepted generation',
       () async {

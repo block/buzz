@@ -113,7 +113,9 @@ void main() {
           );
           expect(find.text('Push notifications'), findsNothing);
           if (enabled) {
-            final toggle = tester.widget<Switch>(find.byType(Switch));
+            final toggle = tester.widget<Switch>(
+              find.byKey(const ValueKey('push-notifications-switch')),
+            );
             expect(toggle.value, isTrue);
             expect(toggle.onChanged, isNotNull);
           } else {

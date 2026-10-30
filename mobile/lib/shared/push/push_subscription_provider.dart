@@ -4,7 +4,8 @@ import '../../features/channels/channel.dart';
 import '../../features/channels/channel_mutes/channel_mutes_provider.dart';
 import '../../features/channels/channels_provider.dart';
 import '../auth/auth.dart';
-import '../relay/relay_provider.dart';
+import '../mentions/agent_identity_provider.dart';
+import '../relay/relay.dart';
 import 'push_subscription.dart';
 import 'push_relay_capability_provider.dart';
 import 'push_setup_recovery.dart';
@@ -31,6 +32,18 @@ final pushSubscriptionSyncProvider = FutureProvider.autoDispose<void>((
       return;
     }
 
+    var mutedAuthors = const <String>{};
+    if (active.pushMuteAgents) {
+      // An empty directory from a dropped connection must not erase the agent
+      // filters of the lease already published; wait for the real one.
+      if (ref.watch(relaySessionProvider).status != SessionStatus.connected) {
+        return;
+      }
+      await ref.watch(agentDirectoryProvider.future);
+      await ref.watch(agentOwnersProvider.future);
+      mutedAuthors = ref.read(knownAgentPubkeysProvider);
+    }
+
     final subscriptions = desiredBuzzPushSubscriptions(
       community: active,
       channels: channels,
@@ -38,6 +51,7 @@ final pushSubscriptionSyncProvider = FutureProvider.autoDispose<void>((
         for (final entry in mutes.store.channels.entries)
           if (entry.value.muted) entry.key,
       ],
+      mutedAuthorPubkeys: mutedAuthors,
     );
     if (subscriptions == null) return;
     await ref
@@ -53,6 +67,7 @@ List<BuzzPushSubscription>? desiredBuzzPushSubscriptions({
   required Community community,
   required Iterable<Channel> channels,
   required Iterable<String> mutedChannelIds,
+  Iterable<String> mutedAuthorPubkeys = const [],
 }) {
   final pubkey = community.pubkey ?? pubkeyFromNsec(community.nsec);
   if (pubkey == null || pubkey.isEmpty) return null;
@@ -67,5 +82,6 @@ List<BuzzPushSubscription>? desiredBuzzPushSubscriptions({
         if (channel.isDm && channel.isMember && !channel.isArchived) channel.id,
     ],
     mutedChannelIds: mutedChannelIds,
+    mutedAuthorPubkeys: mutedAuthorPubkeys,
   );
 }
