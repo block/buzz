@@ -1203,6 +1203,71 @@ impl BuzzClient {
         .to_string())
     }
 
+    /// Subscribe with `filter` over an authenticated WebSocket and collect the
+    /// matching events that arrive during `window`, stored or live.
+    ///
+    /// The window starts once NIP-42 auth completes and ends early after
+    /// `max_events` distinct events. A relay refusal of the subscription is an
+    /// error, never an empty result.
+    pub async fn listen_events(
+        &self,
+        filter: &serde_json::Value,
+        window: Duration,
+        max_events: usize,
+    ) -> Result<Vec<nostr::Event>, CliError> {
+        use buzz_ws_client::{NostrWsConnection, RelayMessage, WsClientError};
+
+        const SUB_ID: &str = "buzz-cli-listen";
+        let ws_error = |e: WsClientError| match e {
+            WsClientError::AuthFailed(message) => CliError::Auth(message),
+            other => CliError::Other(other.to_string()),
+        };
+        let mut conn = NostrWsConnection::connect_authenticated(
+            &to_ws_url(&self.relay_url),
+            &self.keys,
+            self.auth_tag.as_ref(),
+        )
+        .await
+        .map_err(ws_error)?;
+        conn.send_raw(&serde_json::json!(["REQ", SUB_ID, filter]))
+            .await
+            .map_err(ws_error)?;
+
+        let deadline = tokio::time::Instant::now() + window;
+        let mut events: Vec<nostr::Event> = Vec::new();
+        while events.len() < max_events {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match conn.next_event(remaining).await {
+                Ok(RelayMessage::Event {
+                    subscription_id,
+                    event,
+                }) if subscription_id == SUB_ID => {
+                    if !events.iter().any(|seen| seen.id == event.id) {
+                        events.push(*event);
+                    }
+                }
+                Ok(RelayMessage::Closed { message, .. }) => {
+                    return Err(
+                        if message.starts_with("auth") || message.starts_with("restricted") {
+                            CliError::Auth(message)
+                        } else {
+                            CliError::Other(format!("relay closed the subscription: {message}"))
+                        },
+                    );
+                }
+                Ok(_) => {}
+                Err(WsClientError::Timeout) => break,
+                Err(e) => return Err(ws_error(e)),
+            }
+        }
+        let _ = conn.send_raw(&serde_json::json!(["CLOSE", SUB_ID])).await;
+        let _ = conn.disconnect().await;
+        Ok(events)
+    }
+
     /// Upload a file to the relay's Blossom endpoint.
     /// Returns a BlobDescriptor on success.
     pub async fn upload_file(&self, file_path: &str) -> Result<BlobDescriptor, CliError> {

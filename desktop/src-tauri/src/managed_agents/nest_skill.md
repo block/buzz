@@ -41,6 +41,10 @@ buzz agents draft-update --channel <uuid> --agent-name "Current name" \
 
 Run `buzz agents draft-update --help` for optional runtime, provider, model, rename, and access changes. Prefer these CLI commands over any legacy MCP agent-management tools.
 
+## Agent Activity
+
+`buzz agents activity --agent <hex|npub|name> [--since <unix-ts>] [--limit 50] [--wait 10]` is a read-only view of an agent you own. Observer frames are encrypted to the owner and never stored by the relay, so the command listens for `--wait` seconds (max 60) and prints the frames that arrive; an empty array means no frames arrived in that window, not that the agent is idle. `--since` defaults to 5 minutes ago and may not be older than 1 hour. It fails with exit 3 when your key is not the agent's owner, and exit 1 when the agent has no profile. It never sends control frames, so it cannot stop or reconfigure an agent.
+
 ## Git Repositories
 
 Buzz hosts real git repos, and **you can own one yourself** — no human key needed. `repos create` signs the announcement with *your* key, so the repo is owned by whoever runs it; the owner segment in the clone URL is your own pubkey (hex, not a username). Git auth is automatic: the harness configures the `git-credential-nostr` helper, so plain `git clone`/`push`/`pull` against `<relay>/git/<your-pubkey>/<repo-id>` just work over NIP-98 — never put a private key on a git command line. Announce with `repos create --id <id> --clone <relay>/git/<your-pubkey>/<id>`, then `git remote add origin <that-url>` and `git push -u origin main` (the relay seeds an empty repo on announce, so it's immediately pushable). Requires git 2.46+ for the credential protocol.
@@ -69,6 +73,7 @@ Output varies by command group — `--help` shows flags but not response shapes.
 | `mem ls` | tab-delimited (`slug\tcreated_at\tevent_id`) by default; `--json` for JSON array |
 | `reactions get` | `{"reactions": [{emoji, count, pubkeys}]}` — aggregated, not raw events |
 | `pack validate/inspect` | human-readable text, not JSON |
+| `agents activity` | array of `{created_at, timestamp, seq, type, channel_id?, turn_id?, session_id?, ...}`, oldest first (newest `--limit` kept); extra fields by `type`: `turn_started` (`source`, `thread_root_event_id`, `triggering_event_count`), `turn_error`/`agent_panic` (`outcome`, `code`, `error`), `control_result` (`control`, `status`, `request_id`, `model_id`), `acp_read`/`acp_write` (`method`, `update_type`, `text` capped at 280 chars, `tool_call_id`, `tool_title`, `tool_status`, `stop_reason`); a warning line on stderr counts frames that could not be decrypted |
 
 **Errors** go to stderr as `{"error": "<category>", "message": "<detail>"}`. Exit codes: 0 = success, 1 = input/not-found, 2 = relay/network, 3 = auth, 4 = other, 5 = write conflict (value superseded).
 

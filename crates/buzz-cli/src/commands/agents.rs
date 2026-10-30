@@ -3,6 +3,7 @@ use buzz_sdk::builders::{build_archive_identity_request, build_unarchive_identit
 use nostr::PublicKey;
 use serde_json::json;
 
+use super::agent_activity;
 use crate::agent_management::{build_create, build_update, CreateAgentDraft, UpdateAgentDraft};
 use crate::client::BuzzClient;
 use crate::error::CliError;
@@ -164,6 +165,42 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
         }
 
         AgentsCmd::Archived => cmd_archived(client).await,
+
+        AgentsCmd::Activity {
+            agent,
+            since,
+            limit,
+            wait,
+        } => agent_activity::run(client, &agent, since, limit, wait).await,
+    }
+}
+
+/// Fail with an auth error unless the agent's kind:0 `auth` tag names the
+/// signer as its owner. A friendlier early failure only: the NIP-44 payloads
+/// decrypt solely for the owner key whatever this check says.
+pub(super) async fn require_agent_owner(
+    client: &BuzzClient,
+    agent_hex: &str,
+) -> Result<(), CliError> {
+    let signer_hex = client.keys().public_key().to_hex();
+    let profile = fetch_kind0(client, agent_hex).await?;
+    ensure_owner(profile.as_ref(), agent_hex, &signer_hex)
+}
+
+fn ensure_owner(
+    profile: Option<&serde_json::Value>,
+    agent_hex: &str,
+    signer_hex: &str,
+) -> Result<(), CliError> {
+    match extract_auth(profile, agent_hex, signer_hex) {
+        Ok(_) => Ok(()),
+        Err(AuthFailure::NoProfile(agent)) => Err(CliError::NotFound(format!(
+            "no profile found for agent {agent}"
+        ))),
+        Err(failure) => Err(CliError::Auth(format!(
+            "only the agent's owner can read its activity: {}",
+            failure.message()
+        ))),
     }
 }
 
