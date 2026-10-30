@@ -114,31 +114,42 @@ export function mentionMatchCandidates({
   return candidates;
 }
 
-/** Extract recipients from the same exact occurrences used by draft routing. */
-export function extractMentionPubkeys(options: {
+type ExtractMentionOptions = {
   text: string;
   selectedMentions: ReadonlyMap<string, string>;
   selectedDisplayNames?: Iterable<string>;
   competingDisplayNames?: Iterable<string>;
   memberCandidates: readonly MentionPubkeyCandidate[];
-}): string[] {
-  const { text, selectedMentions, memberCandidates } = options;
+};
+
+/** A resolved mention in `text`: `start` is its `@`, `end` is exclusive. */
+export type MentionRange = { pubkey: string; start: number; end: number };
+
+function resolveMentionOccurrences(options: ExtractMentionOptions) {
   const candidates = mentionMatchCandidates(options);
-  const winningPubkeys = new Set<string>();
-  for (const { candidates: winners } of mentionOccurrences(text, candidates)) {
-    const identities = new Set(
-      winners.flatMap((match) =>
-        match.pubkey ? [match.pubkey.toLowerCase()] : [],
-      ),
-    );
-    if (identities.size > 1) {
-      throw new Error(
-        `The mention @${winners[0].displayName} is ambiguous. Choose a recipient from the mention picker.`,
+  return mentionOccurrences(options.text, candidates).map(
+    ({ start, end, candidates: winners }) => {
+      const pubkeys = winners.flatMap((match) =>
+        match.pubkey ? [match.pubkey] : [],
       );
-    }
-    for (const match of winners) {
-      if (match.pubkey) winningPubkeys.add(match.pubkey);
-    }
+      if (new Set(pubkeys.map((pubkey) => pubkey.toLowerCase())).size > 1) {
+        throw new Error(
+          `The mention @${winners[0].displayName} is ambiguous. Choose a recipient from the mention picker.`,
+        );
+      }
+      return { start, end, pubkeys };
+    },
+  );
+}
+
+/** Extract recipients from the same exact occurrences used by draft routing. */
+export function extractMentionPubkeys(
+  options: ExtractMentionOptions,
+): string[] {
+  const { selectedMentions, memberCandidates } = options;
+  const winningPubkeys = new Set<string>();
+  for (const { pubkeys } of resolveMentionOccurrences(options)) {
+    for (const pubkey of pubkeys) winningPubkeys.add(pubkey);
   }
 
   const pubkeys: string[] = [];
@@ -151,4 +162,14 @@ export function extractMentionPubkeys(options: {
     }
   }
   return pubkeys;
+}
+
+/** The resolved mentions of `text` with their positions, in text order. */
+export function extractMentionRanges(
+  options: ExtractMentionOptions,
+): MentionRange[] {
+  return resolveMentionOccurrences(options).flatMap(
+    ({ start, end, pubkeys }) =>
+      pubkeys.length > 0 ? [{ pubkey: pubkeys[0], start, end }] : [],
+  );
 }

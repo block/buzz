@@ -40,6 +40,7 @@ export const MessageComposerToolbar = React.memo(
     extraActions,
     formattingDisabled,
     gifMediaController,
+    gifQuery = null,
     isEmojiPickerOpen,
     isFormattingOpen,
     isSending,
@@ -72,6 +73,7 @@ export const MessageComposerToolbar = React.memo(
     extraActions?: React.ReactNode;
     formattingDisabled: boolean;
     gifMediaController: Pick<MediaUploadController, "setPendingImeta">;
+    gifQuery?: string | null;
     isEmojiPickerOpen: boolean;
     isFormattingOpen: boolean;
     isSending: boolean;
@@ -284,6 +286,7 @@ export const MessageComposerToolbar = React.memo(
                   disabled={composerDisabled || isVoiceNoteRecording}
                   gifsDisabled={hasVoiceNoteAttachment}
                   gifMediaController={gifMediaController}
+                  gifQuery={gifQuery}
                   onClose={() => editor?.commands.focus()}
                   onEmojiSelect={onEmojiSelect}
                   onOpenChange={onEmojiPickerOpenChange}

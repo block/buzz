@@ -1,13 +1,12 @@
-import { useQuery } from "@tanstack/react-query";
 import { Images, Smile, SmilePlus } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
 import * as React from "react";
 
 import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
 import { klipyGifAttachment, type KlipyGif } from "@/features/gifs/api";
-import { relayKlipyEndpoints, reportKlipyShare } from "@/features/gifs/relay";
+import { reportKlipyShare } from "@/features/gifs/relay";
+import { useKlipyCapability } from "@/features/gifs/useKlipyCapability";
 import { KlipyGifPicker } from "@/features/gifs/ui/KlipyGifPicker";
-import { useCommunities } from "@/features/communities/useCommunities";
 import type { MediaUploadController } from "@/features/messages/lib/useMediaUpload";
 import { Button } from "@/shared/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
@@ -18,6 +17,8 @@ type ComposerEmojiPickerProps = {
   disabled?: boolean;
   gifsDisabled?: boolean;
   gifMediaController: Pick<MediaUploadController, "setPendingImeta">;
+  /** Open on the GIFs tab with this search; null opens on the emoji tab. */
+  gifQuery?: string | null;
   /** Called when the popover closes without an emoji selection (Escape,
    *  click-outside). Use this to restore focus to the editor. */
   onClose?: () => void;
@@ -36,6 +37,7 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
   disabled = false,
   gifsDisabled = false,
   gifMediaController,
+  gifQuery = null,
   onClose,
   onEmojiSelect,
   onOpenChange,
@@ -44,22 +46,19 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
 }: ComposerEmojiPickerProps) {
   const [pickerTab, setPickerTab] = React.useState<ComposerPickerTab>("emoji");
   const shouldReduceMotion = useReducedMotion();
-  const { activeCommunity } = useCommunities();
-  const relayUrl = activeCommunity?.relayUrl ?? "";
-  const klipyCapabilityQuery = useQuery({
-    enabled: relayUrl.length > 0,
-    queryFn: ({ signal }) => relayKlipyEndpoints(relayUrl, signal),
-    queryKey: ["relay-capability", relayUrl, "klipy"],
-    retry: 1,
-    staleTime: 5 * 60 * 1_000,
-  });
-  const gifSearchPath = klipyCapabilityQuery.data?.searchPath ?? "";
-  const gifSharePath = klipyCapabilityQuery.data?.sharePath ?? "";
-  const gifsAvailable = gifSearchPath.length > 0 && gifSharePath.length > 0;
+  const {
+    available: gifsAvailable,
+    relayUrl,
+    searchPath: gifSearchPath,
+    sharePath: gifSharePath,
+  } = useKlipyCapability();
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     if (!open) setPickerTab("emoji");
-  }, [open]);
+    else if (gifQuery !== null && gifsAvailable && !gifsDisabled) {
+      setPickerTab("gifs");
+    }
+  }, [open, gifQuery, gifsAvailable, gifsDisabled]);
 
   const handleGifSelect = React.useCallback(
     (gif: KlipyGif) => {
@@ -181,6 +180,7 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
             </TabsContent>
             <TabsContent className="m-0" value="gifs">
               <KlipyGifPicker
+                initialQuery={gifQuery ?? ""}
                 onSelect={handleGifSelect}
                 relayUrl={relayUrl}
                 searchPath={gifSearchPath}

@@ -2,6 +2,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import type { MentionRange } from "@/features/messages/lib/extractMentionPubkeys";
 import { deleteDraftEntry } from "@/features/messages/lib/useDrafts";
 import type { Channel, ChannelType } from "@/shared/api/types";
 import { executeSlashCommand } from "./lib/executeSlashCommand";
@@ -26,7 +27,9 @@ type UseSlashCommandRunnerOptions = {
   getComposerRevision: () => number;
   getThreadContext: () => SlashCommandThreadContext | null;
   /** Waits for pending mention checks, then resolves `@` mentions in `text`. */
-  resolveMentions: (text: string) => Promise<string[]>;
+  resolveMentions: (
+    text: string,
+  ) => Promise<{ pubkeys: string[]; ranges: MentionRange[] }>;
   /** Publishes through the composer's `onSend` and rejects on failure. */
   send: (
     content: string,
@@ -88,7 +91,7 @@ export function useSlashCommandRunner(options: UseSlashCommandRunnerOptions) {
             if (threadContext && !threadContext.parentEventId) {
               throw new Error("This thread is still loading. Try again.");
             }
-            const mentionPubkeys = await start.resolveMentions(args);
+            const mentions = await start.resolveMentions(args);
             const latest = optionsRef.current;
             return {
               channelId,
@@ -98,7 +101,8 @@ export function useSlashCommandRunner(options: UseSlashCommandRunnerOptions) {
               threadRootId: threadContext?.threadHeadId ?? null,
               threadContext,
               args,
-              mentionPubkeys,
+              mentionPubkeys: mentions.pubkeys,
+              mentionRanges: mentions.ranges,
               channelLinkIds: resolveChannelLinkIds(args, latest.channels),
               sendMessage: (content) =>
                 optionsRef.current.send(content, threadContext),

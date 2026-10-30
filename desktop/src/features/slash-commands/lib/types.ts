@@ -1,6 +1,7 @@
 import type { toast } from "sonner";
 
 import type { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import type { MentionRange } from "@/features/messages/lib/extractMentionPubkeys";
 import type { ChannelType } from "@/shared/api/types";
 
 /** `channel` commands act on a non-DM channel or a thread inside one. */
@@ -43,6 +44,8 @@ export type SlashCommandRunContext = {
    * before `run` is called.
    */
   mentionPubkeys: readonly string[];
+  /** The same mentions with their offsets in `args`, in text order. */
+  mentionRanges: readonly MentionRange[];
   /** Ids of the non-DM channels referenced as `#name` in `args`. */
   channelLinkIds: readonly string[];
   /**

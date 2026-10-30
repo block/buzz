@@ -44,6 +44,7 @@ import {
 import { useVerifyMentionIdentities } from "./useVerifyMentionIdentities";
 import {
   extractMentionPubkeys,
+  extractMentionRanges,
   mentionMatchCandidates,
   selectedMentionLabel,
   selectedMentionLabels,
@@ -771,6 +772,16 @@ export function useMentions(
     },
     [mentionCandidates],
   );
+  const extractMentionRangesForCurrentMentions = React.useCallback(
+    (text: string) =>
+      extractMentionRanges({
+        text,
+        selectedMentions: mentionMapRef.current,
+        selectedDisplayNames: personaMentionMapRef.current.keys(),
+        memberCandidates: mentionCandidates,
+      }),
+    [mentionCandidates],
+  );
   const getSelectedAgentPubkeys = React.useRef(
     () => selectedAgentMentionPubkeysRef.current,
   ).current;
@@ -933,6 +944,7 @@ export function useMentions(
     getDefaultAgentSuggestion,
     extractMentionPersonas,
     extractMentionPubkeys: extractMentionPubkeysForCurrentMentions,
+    extractMentionRanges: extractMentionRangesForCurrentMentions,
     revalidateMentionPubkeys,
     getDraftMentionRefs,
     getMentionIdentities,
