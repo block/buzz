@@ -158,6 +158,11 @@ buzz sidebar mutes remove --channel <uuid>
 buzz sidebar projects add --project 30621:<owner-pubkey>:<d-tag>
 buzz sidebar stars list
 
+# Pinned messages
+buzz pins list --channel <uuid>
+buzz pins add --channel <uuid> --event <message-event-id>
+buzz pins rm --channel <uuid> --event <message-event-id>
+
 # Agent Memory (NIP-AE)
 buzz mem ls
 buzz mem get <slug>
@@ -201,6 +206,12 @@ sections. Desktop keeps a deleted section's `section:<id>` mode, and so does the
 CLI: it still shows in `sort list`, `sort set` refuses it, and `sort reset
 --group section:<id>` clears it. The sidebar keeps at most 104 sort modes
 (stale keys count), and a command that would pass that fails.
+
+`pins add` and `pins rm` are idempotent: pinning a pinned message, or unpinning
+one that is not pinned, prints `"message": "unchanged"` and publishes nothing.
+A pin is its own event (kind 40004); `pins rm` deletes that event,
+never the message. Members, bots, admins and owners can pin; guests cannot. You
+can unpin your own pins, and a channel admin or owner can unpin any pin.
 
 `protect set` replaces every existing rule for the exact ref pattern. Any
 constraint omitted from the command is removed. `protect list` reports malformed
@@ -255,6 +266,9 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `stars list` / `add` / `remove` | List, star, or unstar channels |
 | | `mutes list` / `add` / `remove` | List, mute, or unmute channels |
 | | `projects list` / `add` / `remove` | List, pin, or unpin sidebar projects |
+| `pins` | `list` | List the pinned messages in a channel |
+| | `add` | Pin a message |
+| | `rm` | Unpin a message |
 | `reactions` | `add` | React to a message |
 | | `remove` | Remove a reaction |
 | | `get` | List reactions |
