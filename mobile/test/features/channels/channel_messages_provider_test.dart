@@ -623,6 +623,106 @@ void main() {
     expect(joined.reactions.single.currentUserReactionId, reactions.last.id);
   });
 
+  test('a notice keeps a reaction from below the oldest loaded row', () async {
+    const id = _paddedId;
+    // The reaction shares the oldest row's second but sorts after it, so it
+    // is below the floor while its notice is above it.
+    final relaySession = _RecordingRelaySessionNotifier(
+      queryResults: [
+        [
+          _event(id: id('88'), createdAt: 50),
+          _bounds(hasMore: true, cursorCreatedAt: 50, cursorId: id('88')),
+        ],
+      ],
+    );
+    relaySession.noticeResults.add([_joinNotice(id('22'), 50)]);
+    relaySession.auxEvents.add(
+      NostrEvent(
+        id: id('cc'),
+        pubkey: 'bob',
+        createdAt: 50,
+        kind: EventKind.reaction,
+        tags: [
+          const ['h', _channelId],
+          ['e', id('22')],
+        ],
+        content: '👍',
+        sig: 'sig',
+      ),
+    );
+    final container = _buildContainer(relaySession);
+    addTearDown(container.dispose);
+
+    container.read(channelMessagesProvider(_channelId));
+    await relaySession.subscribed;
+    await _pumpEventQueue();
+
+    final notice = formatTimeline(
+      container.read(channelMessagesProvider(_channelId)).value!,
+    ).singleWhere((message) => message.id == id('22'));
+    expect(notice.reactions.map((reaction) => reaction.emoji), ['👍']);
+  });
+
+  test('notice aux reads name at most 500 targets each', () async {
+    final reactions = [
+      for (var i = 0; i <= 500; i++)
+        NostrEvent(
+          id: _paddedId('r${i.toString().padLeft(4, '0')}'),
+          pubkey: 'user-$i',
+          createdAt: 2000 - i,
+          kind: EventKind.reaction,
+          tags: const [
+            ['h', _channelId],
+            ['e', 'joined'],
+          ],
+          content: '👍',
+          sig: 'sig',
+        ),
+    ];
+    final relaySession = _RecordingRelaySessionNotifier(
+      queryResults: [
+        [_event(id: 'message', createdAt: 10), _bounds()],
+      ],
+    );
+    relaySession.noticeResults.add([_joinNotice('joined', 20)]);
+    relaySession.auxEvents.addAll([
+      ...reactions,
+      // Removes the reaction only the second batch names.
+      NostrEvent(
+        id: 'removal',
+        pubkey: 'user-500',
+        createdAt: 3000,
+        kind: EventKind.deletion,
+        tags: [
+          const ['h', _channelId],
+          ['e', reactions.last.id],
+        ],
+        content: '',
+        sig: 'sig',
+      ),
+    ]);
+    final container = _buildContainer(relaySession);
+    addTearDown(container.dispose);
+
+    container.read(channelMessagesProvider(_channelId));
+    await relaySession.subscribed;
+    await _pumpEventQueue();
+
+    final deletionReads = relaySession.auxFilters.skip(2).toList();
+    expect(deletionReads, hasLength(4));
+    for (final read in deletionReads) {
+      expect(read.tags['#e']!.length, lessThanOrEqualTo(500));
+    }
+    expect(
+      deletionReads.expand((read) => read.tags['#e']!).toSet(),
+      reactions.map((event) => event.id).toSet(),
+    );
+    final joined = formatTimeline(
+      container.read(channelMessagesProvider(_channelId)).value!,
+    ).singleWhere((message) => message.id == 'joined');
+    expect(joined.reactions.single.count, 500);
+  });
+
   test(
     'a page that loads during a failed notice read gets its notices',
     () async {

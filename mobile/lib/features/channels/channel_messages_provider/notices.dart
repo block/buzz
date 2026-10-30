@@ -10,6 +10,10 @@ const _maxAuxPages = 64;
 
 const _deletionKinds = [EventKind.deletion, EventKind.nip29DeleteEvent];
 
+/// Target ids one auxiliary filter names, which keeps each request well
+/// under the relay's 1 MiB body limit.
+const _auxTargetBatch = 500;
+
 /// Where the read after the full page [events] starts: its oldest event in
 /// relay order (by time, then the greatest id). Throws when the page did not
 /// move below [cursor].
@@ -97,10 +101,10 @@ extension _ChannelNotices on ChannelMessagesNotifier {
         final current =
             _historyState.value ?? _lastKnownMessages ?? const <NostrEvent>[];
         final ids = current.map((event) => event.id).toSet();
-        final added = channelWindowVisibleNotices(_windowStore, [
-          ...events,
+        final added = [
+          ...channelWindowVisibleNotices(_windowStore, events),
           ...aux,
-        ]).where((event) => ids.add(event.id)).toList();
+        ].where((event) => ids.add(event.id)).toList();
         if (added.isEmpty) continue;
         final merged = [...current, ...added]
           ..sort(compareChannelTimelineEventsChronologically);
@@ -142,23 +146,28 @@ extension _ChannelNotices on ChannelMessagesNotifier {
   }
 
   /// The events of [kinds] in this channel that target [eventIds], and the
-  /// deletions that target them with no channel. See
-  /// [NostrFilters.channelAux].
+  /// deletions that target them with no channel, [_auxTargetBatch] targets
+  /// per read. See [NostrFilters.channelAux].
   Future<List<NostrEvent>> _readTargeting(
     RelaySessionNotifier session,
     List<String> eventIds,
     List<int> kinds,
   ) async {
-    final inChannel = await _readAllAux(
-      session,
-      eventIds,
-      kinds,
-      channelId: channelId,
-    );
-    final deletions = await _readAllAux(session, eventIds, _deletionKinds);
-    return {
-      for (final event in [...inChannel, ...deletions]) event.id: event,
-    }.values.toList();
+    final byId = <String, NostrEvent>{};
+    for (var start = 0; start < eventIds.length; start += _auxTargetBatch) {
+      final batch = eventIds.skip(start).take(_auxTargetBatch).toList();
+      final inChannel = await _readAllAux(
+        session,
+        batch,
+        kinds,
+        channelId: channelId,
+      );
+      final deletions = await _readAllAux(session, batch, _deletionKinds);
+      for (final event in [...inChannel, ...deletions]) {
+        byId[event.id] = event;
+      }
+    }
+    return byId.values.toList();
   }
 
   /// Every [NostrFilters.channelAux] event of [kinds] for [eventIds], page

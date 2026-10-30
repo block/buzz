@@ -921,7 +921,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
 
   List<NostrEvent> _windowEvents() => flattenChannelWindowEvents(
     _windowStore,
-    notices: _notices.values.followedBy(_noticeAux.values),
+    notices: _notices.values,
+    noticeAux: _noticeAux.values,
   );
 
   /// Stops live work for a chat that stayed hidden; resume catches it up.

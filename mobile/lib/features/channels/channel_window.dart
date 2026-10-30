@@ -361,14 +361,18 @@ ChannelWindowStore mergeLiveChannelWindowEvent(
 }
 
 /// Flattens a window into timeline order. [notices] are system notices
-/// read apart from the pages (see [channelWindowVisibleNotices]).
+/// read apart from the pages (see [channelWindowVisibleNotices]), and
+/// [noticeAux] their reactions and deletions. Like a page's aux, those show
+/// whatever their own position: they apply to their targets.
 List<NostrEvent> flattenChannelWindowEvents(
   ChannelWindowStore store, {
   Iterable<NostrEvent> notices = const [],
+  Iterable<NostrEvent> noticeAux = const [],
 }) {
   final byId = <String, NostrEvent>{
     for (final event in channelWindowVisibleNotices(store, notices))
       event.id: event,
+    for (final event in noticeAux) event.id: event,
   };
   for (final page in store.pages) {
     for (final row in page.rows) {
