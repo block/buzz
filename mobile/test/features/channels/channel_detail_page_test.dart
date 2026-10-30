@@ -11203,11 +11203,21 @@ void main() {
           typingNotifier: typing,
           disableAnimations: true,
           huddleCurrentPubkey: 'self',
-          knownAgentPubkeys: const {'morty', 'rick'},
+          knownAgentPubkeys: const {'morty', 'summer', 'jerry', 'rick'},
           users: const {
             'morty': UserProfile(
               pubkey: 'morty',
               displayName: 'Morty',
+              ownerPubkey: 'self',
+            ),
+            'summer': UserProfile(
+              pubkey: 'summer',
+              displayName: 'Summer',
+              ownerPubkey: 'self',
+            ),
+            'jerry': UserProfile(
+              pubkey: 'jerry',
+              displayName: 'Jerry',
               ownerPubkey: 'self',
             ),
             'rick': UserProfile(
@@ -11236,6 +11246,33 @@ void main() {
       await tester.pumpAndSettle();
       expect(row, findsNothing);
 
+      // As on desktop, at most two working avatars show, then a count.
+      typing.setEntries([
+        for (final pubkey in ['morty', 'summer', 'jerry', 'rick'])
+          TypingEntry(
+            pubkey: pubkey,
+            threadHeadId: threadIdRoot,
+            expiresAtMs: (now + 8) * 1000,
+          ),
+      ]);
+      await tester.pumpAndSettle();
+      expect(
+        find.bySemanticsLabel('View thread: 3 agents are working'),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: row, matching: find.byType(SmallAvatar)),
+        findsNWidgets(2),
+      );
+      expect(
+        find.descendant(of: row, matching: find.text('+1')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: row, matching: find.text('View thread')),
+        findsOneWidget,
+      );
+
       typing.setEntries([
         TypingEntry(
           pubkey: 'morty',
@@ -11258,6 +11295,19 @@ void main() {
         findsOneWidget,
       );
 
+      // The row opens the thread before its first reply.
+      await tester.tap(row);
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<ThreadDetailPage>(find.byType(ThreadDetailPage))
+            .threadHead
+            .id,
+        threadIdRoot,
+      );
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+
       final container = ProviderScope.containerOf(
         tester.element(find.byType(ChannelDetailPage)),
       );
@@ -11276,6 +11326,12 @@ void main() {
           ],
         ),
       ]);
+      await tester.pumpAndSettle();
+      expect(
+        find.bySemanticsLabel('View thread: 1 reply. Morty working'),
+        findsOneWidget,
+      );
+
       typing.setEntries(const []);
       await tester.pumpAndSettle();
       expect(row, findsOneWidget);

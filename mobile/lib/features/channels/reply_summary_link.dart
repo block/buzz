@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/profile/user_cache_provider.dart';
+import '../../shared/profile/user_profile.dart';
 import '../../shared/theme/theme.dart';
 import 'small_avatar.dart';
 import 'timeline_message.dart';
@@ -16,7 +17,7 @@ class ReplySummaryLink extends ConsumerWidget {
     this.hasReactions = false,
     this.mirrored = false,
     this.working = const [],
-    this.workingLabel,
+    this.workingNames = const [],
   });
 
   /// Null while agents work on a message that has no replies yet.
@@ -24,11 +25,11 @@ class ReplySummaryLink extends ConsumerWidget {
   final VoidCallback onTap;
   final bool hasReactions;
 
-  /// Agents working in this thread, shown first with typing dots, as on desktop.
+  /// Agents working in this thread, shown with typing dots, as on desktop.
   final List<String> working;
 
-  /// Spoken description of [working], such as "Morty is working".
-  final String? workingLabel;
+  /// Display names for [working], in the same order, for the spoken label.
+  final List<String> workingNames;
 
   /// Places the connector on the outgoing edge without reversing its contents.
   final bool mirrored;
@@ -36,18 +37,28 @@ class ReplySummaryLink extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final summary = this.summary;
-    final participants = {
-      for (final pubkey in working) pubkey.toLowerCase(),
+    final workingKeys = {for (final pubkey in working) pubkey.toLowerCase()};
+    // As on desktop, working agents leave the participant stack for the
+    // working group: at most two avatars, then a count.
+    final participants = [
       for (final pubkey in summary?.participantPubkeys ?? const <String>[])
-        pubkey.toLowerCase(),
-    }.take(3).toList();
+        if (!workingKeys.contains(pubkey.toLowerCase())) pubkey,
+    ].take(3).toList();
+    final shownWorking = workingKeys.take(2).toList();
+    final hiddenWorking = workingKeys.length - shownWorking.length;
     final userCache = ref.watch(userCacheProvider);
     final label = summary == null
-        ? null
+        ? 'View thread'
         : summary.isCountPending
         ? 'Replies'
         : '${summary.replyCount}${summary.isLowerBound ? '+' : ''} ${summary.replyCount == 1 ? 'reply' : 'replies'}';
-    final spoken = [?label, if (working.isNotEmpty) ?workingLabel].join(', ');
+    // Desktop's spoken strings, in MessageRow's thread summary.
+    final spoken = switch (workingNames) {
+      [] => summary == null ? '' : label,
+      _ when summary != null => '$label. ${workingNames.join(', ')} working',
+      [final only] => '$only is working',
+      _ => '${workingNames.length} agents are working',
+    };
     final connectorTop = hasReactions ? -Grid.half : Grid.half;
     return Padding(
       padding: EdgeInsets.only(
@@ -90,44 +101,37 @@ class ReplySummaryLink extends ConsumerWidget {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         if (participants.isNotEmpty) ...[
-                          SizedBox(
-                            width:
-                                Grid.gutter +
-                                (participants.length - 1) * Grid.twelve,
-                            height: Grid.gutter,
-                            child: Stack(
-                              children: [
-                                for (var i = 0; i < participants.length; i++)
-                                  PositionedDirectional(
-                                    start: i * Grid.twelve,
-                                    child: SmallAvatar(
-                                      pubkey: participants[i],
-                                      userCache: userCache,
-                                    ),
-                                  ),
-                              ],
-                            ),
-                          ),
+                          _AvatarStack(participants, userCache),
                           const SizedBox(width: Grid.half),
                         ],
-                        if (label != null)
-                          Flexible(
-                            child: Text(
-                              label,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
+                        if (shownWorking.isNotEmpty) ...[
+                          _AvatarStack(shownWorking, userCache),
+                          if (hiddenWorking > 0) ...[
+                            const SizedBox(width: Grid.xxs),
+                            Text(
+                              '+$hiddenWorking',
                               style: context.textTheme.labelMedium?.copyWith(
                                 color: context.colors.onSurfaceVariant,
                               ),
                             ),
-                          ),
-                        if (working.isNotEmpty) ...[
-                          if (label != null) const SizedBox(width: Grid.xs),
+                          ],
+                          const SizedBox(width: Grid.xs),
                           const TypingDots(
                             key: ValueKey('thread-working-dots'),
                             dotSize: 5,
                           ),
+                          const SizedBox(width: Grid.half),
                         ],
+                        Flexible(
+                          child: Text(
+                            label,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: context.textTheme.labelMedium?.copyWith(
+                              color: context.colors.onSurfaceVariant,
+                            ),
+                          ),
+                        ),
                       ],
                     ),
                   ),
@@ -139,6 +143,27 @@ class ReplySummaryLink extends ConsumerWidget {
       ),
     );
   }
+}
+
+class _AvatarStack extends StatelessWidget {
+  const _AvatarStack(this.pubkeys, this.userCache);
+  final List<String> pubkeys;
+  final Map<String, UserProfile> userCache;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: Grid.gutter + (pubkeys.length - 1) * Grid.twelve,
+    height: Grid.gutter,
+    child: Stack(
+      children: [
+        for (var i = 0; i < pubkeys.length; i++)
+          PositionedDirectional(
+            start: i * Grid.twelve,
+            child: SmallAvatar(pubkey: pubkeys[i], userCache: userCache),
+          ),
+      ],
+    ),
+  );
 }
 
 class _ReplyConnector extends CustomPainter {
