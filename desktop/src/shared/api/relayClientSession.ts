@@ -27,6 +27,8 @@ import {
   buildChannelFilter,
   buildChannelHistoryFilter,
   buildGlobalStreamFilter,
+  buildHuddleEventsFilter,
+  buildTypingIndicatorFilter,
 } from "@/shared/api/relayChannelFilters";
 import {
   clearClosedRetry,
@@ -115,6 +117,21 @@ export class RelayClient {
       this.resetConnection(error);
     },
   });
+  /** The relay this client connects to, or `null` before one is known. */
+  getRelayUrl(): string | null {
+    return this.relayUrl;
+  }
+  /**
+   * Pins the relay just applied to the backend. A socket or attempt on any
+   * other relay is the previous community's, so it is torn down.
+   */
+  bindRelayUrl(relayUrl: string) {
+    if (this.relayUrl === relayUrl) return;
+    if (this.relayUrl || this.wsId !== null || this.connectPromise)
+      this.disconnect();
+    this.relayUrl = relayUrl;
+  }
+
   setVisibleChannelId(id: string | null) {
     this.visibleChannelId = id;
   }
@@ -360,29 +377,14 @@ export class RelayClient {
     channelId: string,
     onEvent: (event: RelayEvent) => void,
   ) {
-    return this.subscribe(
-      {
-        kinds: [48100, 48101, 48102, 48103],
-        "#h": [channelId],
-        limit: 100,
-      },
-      onEvent,
-    );
+    return this.subscribe(buildHuddleEventsFilter(channelId), onEvent);
   }
 
   async subscribeToTypingIndicators(
     channelId: string,
     onEvent: (event: RelayEvent) => void,
   ) {
-    return this.subscribe(
-      {
-        kinds: [KIND_TYPING_INDICATOR],
-        "#h": [channelId],
-        limit: 10,
-        since: Math.floor(Date.now() / 1_000) - 10,
-      },
-      onEvent,
-    );
+    return this.subscribe(buildTypingIndicatorFilter(channelId), onEvent);
   }
   async publishUserStatus(status: UserStatusInput): Promise<RelayEvent> {
     await this.ensureConnected();
@@ -561,9 +563,11 @@ export class RelayClient {
       inbound.receive(delivery),
     );
     try {
-      if (!this.relayUrl) {
-        this.relayUrl = await getRelayWsUrl();
-      }
+      const relayUrl = this.relayUrl ?? (await getRelayWsUrl());
+      // A switch during the lookup makes this the previous community's relay.
+      if (generation !== this.connectionGeneration)
+        throw new Error("Relay connection attempt was superseded.");
+      this.relayUrl = relayUrl;
       const wsId = await invoke<number>("plugin:websocket|connect", {
         url: this.relayUrl,
         onMessage: this.onMessageChannel,
@@ -951,13 +955,9 @@ export class RelayClient {
   }
 
   private async handleAuthChallenge(challenge: string, generation: number) {
-    if (!this.relayUrl) {
-      this.relayUrl = await getRelayWsUrl();
-    }
-
     const event = await createAuthEvent({
       challenge,
-      relayUrl: this.relayUrl,
+      relayUrl: this.relayUrl ?? (await getRelayWsUrl()),
     });
 
     if (generation !== this.connectionGeneration || !this.authRequest) {

@@ -3,6 +3,7 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import * as React from "react";
 import { toast } from "sonner";
 
+import { useCommunities } from "@/features/communities/useCommunities";
 import {
   useAddRelayMemberMutation,
   useRelayMembersQuery,
@@ -423,6 +424,8 @@ export function AddMemberDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const communityName = useCommunities().activeCommunity?.name;
+
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent
@@ -433,7 +436,11 @@ export function AddMemberDialog({
           <DialogHeader className="border-b border-border/60 px-6 py-5 pr-14">
             <DialogTitle>Add member</DialogTitle>
             <DialogDescription>
-              Add a person to this community by their public key.
+              Add a person to{" "}
+              <span className="font-medium text-foreground">
+                {communityName ?? "this community"}
+              </span>{" "}
+              by their public key.
             </DialogDescription>
           </DialogHeader>
           <div className="px-6 py-4">
