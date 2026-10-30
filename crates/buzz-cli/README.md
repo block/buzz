@@ -158,6 +158,15 @@ buzz sidebar mutes remove --channel <uuid>
 buzz sidebar projects add --project 30621:<owner-pubkey>:<d-tag>
 buzz sidebar stars list
 
+# Channel artifacts (NIP-AR): typed, titled, editable records in a channel
+buzz artifacts create --channel <uuid> --type buzz.task --title "Fix timeout" --content '{"version":1}'
+buzz artifacts list --channel <uuid> --type buzz.task
+buzz artifacts get --channel <uuid> --id <artifact-uuid>
+buzz artifacts update --channel <uuid> --id <artifact-uuid> --content-file task.json
+buzz artifacts move --channel <uuid> --id <artifact-uuid> --to <other-channel-uuid>  # shows the audience; add --yes to confirm
+buzz artifacts delete --channel <uuid> --id <artifact-uuid>
+buzz artifacts create --channel <uuid> --type buzz.config --title Theme --ensure theme  # idempotent create-or-reconcile
+
 # Agent Memory (NIP-AE)
 buzz mem ls
 buzz mem get <slug>
@@ -255,6 +264,13 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `stars list` / `add` / `remove` | List, star, or unstar channels |
 | | `mutes list` / `add` / `remove` | List, mute, or unmute channels |
 | | `projects list` / `add` / `remove` | List, pin, or unpin sidebar projects |
+| `artifacts` | `list` | List the current revision of each live artifact in a channel |
+| | `get` | Get one live artifact |
+| | `create` | Create an artifact (`--ensure KEY` for an idempotent derived id) |
+| | `update` | Edit title/content; keeps id, type, channel and other tags |
+| | `move` | Move an artifact into another channel (`--yes` to confirm) |
+| | `delete` | Soft-delete an artifact |
+| | `restore` | Restore a deleted artifact from a new snapshot |
 | `reactions` | `add` | React to a message |
 | | `remove` | Remove a reaction |
 | | `get` | List reactions |
@@ -312,6 +328,44 @@ a huddle. Each scans at most 5000 newest events of the channel. If older events 
 snapshots are not served over HTTP, so `liveness_checked` is always `false`.
 Rosters come from the relay's join and leave events only. Desktop's roster view also lists the
 creator from the start event; the CLI lists the creator once the relay records their join.
+
+### Channel artifacts (NIP-AR)
+
+`buzz artifacts` reads and writes kind 45010 revisions. An artifact has a
+stable UUID (`d`), one home channel (`h`), an immutable namespaced `type`
+(lowercase dot-separated, at least two parts, for example `buzz.task`), a
+`title` (at most 512 bytes, visible to every reader of the channel), and
+opaque `content` text (at most 64 KiB). The CLI defines no content schema.
+
+- `list` returns the current revision of each live artifact, at most
+  `--limit` (default 100, maximum 1000). Deleted artifacts are omitted. Narrow
+  with `--type` when a channel holds more.
+- `get` returns one live artifact as a one-element array. An unknown,
+  deleted, moved or unreadable artifact is not-found (exit 1).
+- `update` publishes a complete snapshot against the current revision. It
+  keeps `d`, `h`, `type`, the conversation anchor and every client-defined
+  tag, and changes only the fields you pass.
+- `move` publishes the current snapshot into another channel under the same
+  `d` and drops the conversation anchor, which belongs to the source. Everyone
+  who reads the destination can read it, so without `--yes` the command writes
+  nothing and prints the destination name, visibility and what would be shared.
+- `delete` is a soft delete; the id stays reserved. `restore` revives it from a
+  complete new snapshot (`--title` is required).
+- `create --ensure KEY` derives `d` from the channel, type and key
+  (`UUIDv8(SHA-256("nip-ar-artifact\0" + h + "\0" + type + "\0" + key))`), so
+  independent clients agree on it. If the artifact already exists the command
+  restores it when deleted, does nothing when the title and content already
+  match, and otherwise updates it, trying at most 3 times.
+
+**Concurrent edits.** Every write after create names the current revision in
+`prev`, and the relay accepts only one of two competing writes. The loser gets
+exit code 5 (`conflict`). Run `buzz artifacts get`, reapply your change to the
+current revision, and retry. The CLI never retries a conflict with only `prev`
+replaced, because that would overwrite the competing edit. Only
+`create --ensure` retries on its own.
+
+Reads are bounded `POST /query` artifact views (`current` and `head`); the CLI
+does not use sync subscriptions or incremental reads.
 
 ## Architecture
 
