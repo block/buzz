@@ -36,6 +36,9 @@ fn now() -> std::time::Duration {
 
 /// The relay's current sections event for this identity, decoded. An absent
 /// head is an empty tree; an unreadable one is an error, never an empty list.
+/// The read is pinned to the writer (`consistency: strong`): a write derives a
+/// full snapshot from it, and a lagging replica would drop the caller's own
+/// just-accepted edits.
 async fn fetch_head(client: &BuzzClient) -> Result<Head, CliError> {
     let me = client.keys().public_key();
     let filter = json!({
@@ -43,6 +46,7 @@ async fn fetch_head(client: &BuzzClient) -> Result<Head, CliError> {
         "authors": [me.to_hex()],
         "#d": [D_TAG],
         "limit": 1,
+        "consistency": "strong",
     });
     let raw = client.query(&filter).await?;
     let events: Vec<Value> = serde_json::from_str(&raw)
@@ -316,6 +320,7 @@ mod tests {
                     assert_eq!(filter["kinds"], json!([KIND_READ_STATE]));
                     assert_eq!(filter["#d"], json!([D_TAG]));
                     assert_eq!(filter["limit"], json!(1));
+                    assert_eq!(filter["consistency"], json!("strong"));
                     let author = &filter["authors"][0];
                     let relay = relay.lock().unwrap();
                     let matching: Vec<_> = relay
