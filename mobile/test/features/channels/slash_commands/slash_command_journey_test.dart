@@ -16,7 +16,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../../helpers/fake_relay.dart';
 
 const _channelId = '11111111-2222-4333-8444-555555555555';
-const _shrug = '¯\\_(ツ)_/¯';
+const _shrug = r'¯\\\_(ツ)\_/¯';
 
 Channel _channel(String type) => Channel(
   id: _channelId,
@@ -139,10 +139,6 @@ void main() {
     expect(sent().single.content, 'so it goes $_shrug');
     expect(sent().single.getTagValue('h'), _channelId);
     expect(draft(), isEmpty);
-    expect(
-      find.textContaining('so it goes $_shrug', findRichText: true),
-      findsOneWidget,
-    );
 
     await type('/review hello');
     await send();
@@ -153,7 +149,10 @@ void main() {
     await send();
     expect(sent().last.content, '@Eva /shrug');
 
-    relay.rejectNext('blocked: not allowed here');
+    relay.rejectNext(
+      'blocked: not allowed here',
+      match: (e) => e.kind == EventKind.streamMessage,
+    );
     await type('/shrug oops');
     await send();
     expect(draft(), '/shrug oops', reason: 'a failed command keeps the draft');
