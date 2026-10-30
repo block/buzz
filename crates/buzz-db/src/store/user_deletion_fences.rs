@@ -1,13 +1,26 @@
-//! Operator-global restriction storage and identity locks; no serving or worker
-//! path calls these helpers yet. Installing fences does not itself enforce them.
+//! Operator-global restriction storage and identity locks. Shared event insertion
+//! paths consult these restrictions; the real user-deletion worker is not integrated.
 //!
-//! Callers use a writer-pool READ COMMITTED transaction. Acquire existing
-//! community guards first, then `lock_request` for the worker, then all human
-//! locks, then scoped agent locks.
-//! Within each group acquire the whole set in one call (sorted here), never
-//! upgrade shared locks to exclusive. Gate workers may discover agents after
-//! locking humans, then lock the complete agent set. Keep the transaction open
-//! through the protected write/checkpoint; commit or rollback releases the locks.
+//! Callers use writer-pool READ COMMITTED transactions. Community admission
+//! precedes identity locking. Each lock call sorts global keys before scoped
+//! keys, but this is NOT a transaction-wide order for serving writes: artifact
+//! and channel writers can already hold domain row/advisory locks, and a later
+//! relay-signed event can acquire another global identity lock in the same tx.
+//!
+//! Exclusive fencing transactions must lock the request first, acquire their
+//! complete global identity set before their complete scoped set, then persist
+//! only restriction/request/checkpoint state. They must not lock or mutate
+//! users, channels, artifacts, events, or other serving-domain rows while
+//! holding exclusive identity locks. Perform cleanup in later transactions.
+//! Otherwise a writer holding a domain lock and waiting for a shared identity
+//! lock can cycle with the fencing transaction. Ownership discovery under the
+//! fence uses ordinary reads, not FOR UPDATE or owner mutation.
+//!
+//! Never upgrade shared identity locks to exclusive. Before enabling a worker,
+//! audit its complete exclusive sets against multi-author event transactions;
+//! per-call sorting alone does not prove arbitrary multi-key batches deadlock
+//! free. Keep locks through the protected write/checkpoint; commit or rollback
+//! releases them. The real deletion worker remains disabled.
 
 use buzz_core::CommunityId;
 use chrono::{DateTime, Utc};

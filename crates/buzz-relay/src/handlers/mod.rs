@@ -58,6 +58,8 @@ pub mod side_effects;
 mod system_channel_postgres_tests;
 /// Per-filter query scope for system channels.
 pub(crate) mod system_channels;
+#[cfg(test)]
+mod user_deletion_message_postgres_tests;
 
 /// Extract an optional TTL (in seconds) from a Nostr event's `ttl` tag,
 /// applying the server-side override when configured.
@@ -87,3 +89,14 @@ pub fn resolve_ttl(event: &nostr::Event, ephemeral_ttl_override: Option<i32>) ->
 
 /// NIP-AR artifact lifecycle.
 pub mod artifact;
+
+#[cfg(test)]
+mod user_deletion_archive_postgres_tests;
+#[cfg(test)]
+mod user_deletion_error_postgres_tests;
+#[cfg(test)]
+mod user_deletion_expanded_postgres_tests;
+#[cfg(test)]
+mod user_deletion_lifecycle_postgres_tests;
+#[cfg(test)]
+mod user_deletion_test_support;

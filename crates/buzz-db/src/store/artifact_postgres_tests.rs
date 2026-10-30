@@ -699,6 +699,186 @@ async fn head_outside_authorized_channel_matches_missing_head() {
     ));
 }
 
+/// Exercise the production Move transaction, including its second, relay-signed
+/// insert after domain row writes. Exclusive holders do not touch domain rows.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn artifact_move_and_identity_fences_finish_without_partial_writes_or_deadlocks() {
+    use crate::user_deletion_fences::{self as fences, FenceIdentity};
+    use std::{sync::Arc, time::Duration};
+    for block_relay in [false, true] {
+        let f = Arc::new(Fixture::new().await);
+        let d = Uuid::new_v4();
+        let create = f.revision(d, "create", f.a, None, &f.owner, vec![]);
+        f.accept(&create, None).await;
+        let moved = f.revision(d, "move", f.b, Some(&create), &f.owner, vec![]);
+        let move_id = moved.id;
+        let store = f.db.entity_deletion_store();
+        let request =
+            f.db.user_deletion_store()
+                .submit(&format!("demo:{}", Uuid::new_v4()), "operator", None)
+                .await
+                .unwrap();
+        store
+            .approve(
+                request.id,
+                "reviewer",
+                request.inventory_digest.as_deref().unwrap(),
+            )
+            .await
+            .unwrap();
+        let lease = store
+            .claim(request.id, "worker", Duration::from_secs(300))
+            .await
+            .unwrap()
+            .unwrap();
+        let identity = FenceIdentity::user(f.owner.public_key());
+        let mut gate = f.db.pool.begin().await.unwrap();
+        if block_relay {
+            fences::lock_exclusive(&mut gate, &[FenceIdentity::user(f.relay.public_key())])
+                .await
+                .unwrap();
+        } else {
+            fences::insert(&mut gate, identity, &lease, None)
+                .await
+                .unwrap();
+        }
+        let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *gate)
+            .await
+            .unwrap();
+        let task_f = f.clone();
+        let task = tokio::spawn(async move {
+            let env = artifact::validate(&moved).unwrap();
+            task_f
+                .db
+                .accept_artifact(
+                    task_f.community,
+                    &moved,
+                    &env,
+                    Some(task_f.a),
+                    &task_f.relay,
+                )
+                .await
+        });
+        wait_for_artifact_blocker(&f.db.pool, gate_pid).await;
+        let writer_pid: i32 = sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid)) LIMIT 1")
+            .bind(gate_pid).fetch_one(&f.db.pool).await.unwrap();
+        let coordinate_held: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory' AND granted AND mode='ExclusiveLock'
+             AND classid=((hashtextextended($2,0) >> 32) & 4294967295)::oid AND objid=(hashtextextended($2,0) & 4294967295)::oid)")
+            .bind(writer_pid).bind(format!("artifact:{}:{}", f.community.as_uuid(), d)).fetch_one(&f.db.pool).await.unwrap();
+        assert!(
+            coordinate_held,
+            "actual artifact caller must hold its domain lock before waiting"
+        );
+        let pending_user_fence = if block_relay {
+            let mut user_gate = f.db.pool.begin().await.unwrap();
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *user_gate)
+                .await
+                .unwrap();
+            let fence_task = tokio::spawn(async move {
+                fences::insert(&mut user_gate, identity, &lease, None)
+                    .await
+                    .unwrap();
+                user_gate.commit().await.unwrap();
+            });
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let blockers: Vec<i32> = sqlx::query_scalar("SELECT pg_blocking_pids($1)")
+                        .bind(pid)
+                        .fetch_one(&f.db.pool)
+                        .await
+                        .unwrap();
+                    if blockers.contains(&writer_pid) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("fence must wait on Move's already acquired author lock");
+            Some(fence_task)
+        } else {
+            None
+        };
+        gate.commit().await.unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(8), task)
+            .await
+            .unwrap()
+            .unwrap();
+        if let Some(task) = pending_user_fence {
+            tokio::time::timeout(Duration::from_secs(8), task)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        if block_relay {
+            let ArtifactOutcome::Accepted(events) = outcome.unwrap() else {
+                panic!("Move should finish before queued author fence");
+            };
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[1].event.kind.as_u16(), 45011);
+        } else {
+            assert!(matches!(
+                outcome,
+                Err(crate::DbError::UserDeletionRestricted)
+            ));
+        }
+        let head: Vec<u8> = sqlx::query_scalar(
+            "SELECT event_id FROM artifact_heads WHERE community_id=$1 AND artifact_id=$2",
+        )
+        .bind(f.community.as_uuid())
+        .bind(d)
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            head,
+            if block_relay {
+                move_id.as_bytes()
+            } else {
+                create.id.as_bytes()
+            }
+        );
+        let revision_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM artifact_revisions WHERE community_id=$1 AND event_id=$2)",
+        )
+        .bind(f.community.as_uuid())
+        .bind(move_id.as_bytes().as_slice())
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+        assert_eq!(revision_exists, block_relay);
+        let removals: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id=$1 AND kind=45011")
+                .bind(f.community.as_uuid())
+                .fetch_one(&f.db.pool)
+                .await
+                .unwrap();
+        assert_eq!(removals, i64::from(block_relay));
+        let deadlocks: i64 = sqlx::query_scalar(
+            "SELECT deadlocks FROM pg_stat_database WHERE datname=current_database()",
+        )
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+        assert_eq!(deadlocks, 0);
+    }
+}
+
+async fn wait_for_artifact_blocker(pool: &PgPool, pid: i32) {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid)))")
+                .bind(pid).fetch_one(pool).await.unwrap();
+            if waiting { return; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.expect("artifact writer must wait on identity lock");
+}
+
 /// Sync's complete-set read: keyset pages by `d` share one snapshot, so a
 /// change committed after it opens is in no page. Mutation: drop the
 /// `REPEATABLE READ` statement → the late create appears in a later page →

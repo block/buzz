@@ -9636,6 +9636,8 @@ pub(crate) mod postgres_tests {
             sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
                 "CREATE SCHEMA {schema}; \
                  CREATE TABLE {schema}.users (LIKE public.users INCLUDING ALL); \
+                 CREATE TABLE {schema}.user_deletion_fences \
+                     (LIKE public.user_deletion_fences INCLUDING ALL); \
                  CREATE TABLE {schema}.community_bans (LIKE public.community_bans INCLUDING ALL); \
                  CREATE TABLE {schema}.relay_invites (LIKE public.relay_invites INCLUDING ALL); \
                  CREATE TABLE {schema}.relay_members (LIKE public.relay_members INCLUDING ALL); \
@@ -9783,6 +9785,8 @@ pub(crate) mod postgres_tests {
                         .expect("removal commits");
                 }
             }
+            // Break only the revocation lookup. The membership writes above
+            // now also read users while checking their event author's fence.
             sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
                 "ALTER TABLE {schema}.users RENAME TO users_unavailable"
             )))
