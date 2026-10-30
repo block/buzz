@@ -920,6 +920,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 admitted_owner,
                 final_check.owner_was_relay_member_at_admission,
                 final_check.membership_via_owner,
+                token_owner.is_some(),
                 crate::nip_fi_session::NipFiWsRoute::Root,
                 final_check_started_at,
             );

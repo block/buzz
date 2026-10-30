@@ -114,6 +114,7 @@ struct LiveAuthorizationRecord {
     owner_pubkey: Option<[u8; 32]>,
     owner_was_relay_member_at_admission: bool,
     membership_via_owner: bool,
+    membership_via_token_owner: bool,
     route: crate::nip_fi_session::NipFiWsRoute,
     last_checked_at: TokioInstant,
 }
@@ -227,12 +228,14 @@ impl CommunityConnectionControl {
     }
 
     /// Mark the socket admitted after its final authoritative policy check.
+    #[allow(clippy::too_many_arguments)] // Captures the distinct admission policy facts.
     pub(crate) fn mark_live_authorized(
         &self,
         pubkey: [u8; 32],
         owner_pubkey: Option<[u8; 32]>,
         owner_was_relay_member_at_admission: bool,
         membership_via_owner: bool,
+        membership_via_token_owner: bool,
         route: crate::nip_fi_session::NipFiWsRoute,
         checked_at: TokioInstant,
     ) {
@@ -245,6 +248,7 @@ impl CommunityConnectionControl {
             owner_pubkey,
             owner_was_relay_member_at_admission,
             membership_via_owner,
+            membership_via_token_owner,
             route,
             last_checked_at: checked_at,
         });
@@ -624,6 +628,7 @@ impl CommunityConnectionRegistry {
                     owner_pubkey: record.owner_pubkey,
                     owner_was_relay_member_at_admission: record.owner_was_relay_member_at_admission,
                     membership_via_owner: record.membership_via_owner,
+                    membership_via_token_owner: record.membership_via_token_owner,
                     last_checked_at: record.last_checked_at,
                 })
             })
@@ -1185,7 +1190,7 @@ fn live_authorization_allowed(
         return true;
     }
     session.membership_via_owner
-        && allow_nip_oa_auth
+        && (session.membership_via_token_owner || allow_nip_oa_auth)
         && session.owner_pubkey.is_some()
         && access.owner_is_relay_member
 }
@@ -1464,10 +1469,7 @@ impl ConnectionManager {
             return false;
         }
 
-        let nip_fi = entry
-            .nip_fi
-            .read()
-            .is_ok_and(|issuer| issuer.is_some());
+        let nip_fi = entry.nip_fi.read().is_ok_and(|issuer| issuer.is_some());
         if nip_fi {
             entry
                 .community_control
@@ -5598,7 +5600,10 @@ mod live_authorization_tests {
         let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
 
         if route == crate::nip_fi_session::NipFiWsRoute::Audio {
-            control.set_proven_identity(pubkey.to_vec(), nip_fi.then(|| TEST_ISSUER.to_owned()));
+            control.set_proven_identity(
+                pubkey.to_vec(),
+                nip_fi.then(|| NipFiSession::new(TEST_ISSUER, owner_pubkey)),
+            );
             control.set_terminal_frame_sender(terminal_tx.clone());
         }
         control.mark_live_authorized(
@@ -5606,6 +5611,7 @@ mod live_authorization_tests {
             owner_pubkey,
             owner_was_relay_member_at_admission,
             membership_via_owner,
+            nip_fi && membership_via_owner,
             route,
             TokioInstant::now(),
         );
@@ -5629,7 +5635,7 @@ mod live_authorization_tests {
             conn_manager.set_authenticated_identity(
                 connection_id,
                 pubkey.to_vec(),
-                nip_fi.then(|| TEST_ISSUER.to_owned()),
+                nip_fi.then(|| NipFiSession::new(TEST_ISSUER, owner_pubkey)),
             );
             if let Some(owner) = owner_pubkey {
                 conn_manager.set_admitted_owner(connection_id, owner);
@@ -5661,6 +5667,7 @@ mod live_authorization_tests {
             None,
             false,
             false,
+            false,
             crate::nip_fi_session::NipFiWsRoute::Audio,
             checked_at,
         );
@@ -5686,6 +5693,7 @@ mod live_authorization_tests {
         control.mark_live_authorized(
             [0x10; 32],
             None,
+            false,
             false,
             false,
             crate::nip_fi_session::NipFiWsRoute::Root,
@@ -5714,6 +5722,7 @@ mod live_authorization_tests {
             owner_pubkey: Some(old_owner),
             owner_was_relay_member_at_admission: false,
             membership_via_owner: false,
+            membership_via_token_owner: false,
             last_checked_at: TokioInstant::now(),
         };
         let owner_derived = LiveAuthorizationSession {
@@ -6643,6 +6652,7 @@ mod live_authorization_tests {
                 None,
                 false,
                 false,
+                false,
                 crate::nip_fi_session::NipFiWsRoute::Audio,
                 TokioInstant::now(),
             );
@@ -6712,6 +6722,116 @@ mod live_authorization_tests {
     mod postgres_tests {
         use super::*;
 
+        /// A token owner's membership is independent of the NIP-OA feature flag.
+        /// Drive the production final admission check and scan with the same facts.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn token_owner_admission_survives_scan_with_nip_oa_disabled_until_owner_removal() {
+            let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+                .await
+                .expect("connect to isolated database");
+            let mut state =
+                (*crate::state::tests::test_state_with_database_pool(pool).await).clone();
+            let mut config = (*state.config).clone();
+            config.require_relay_membership = true;
+            config.allow_nip_oa_auth = false;
+            state.config = Arc::new(config);
+            let tenant = state
+                .db
+                .ensure_configured_community(&format!(
+                    "token-owner-revalidation-{}.example",
+                    Uuid::new_v4()
+                ))
+                .await
+                .expect("create community")
+                .id;
+            let owner = nostr::Keys::generate();
+            let agent = nostr::Keys::generate();
+            let owner_bytes = owner.public_key().to_bytes();
+            let agent_bytes = agent.public_key().to_bytes();
+            for key in [owner_bytes, agent_bytes] {
+                state
+                    .db
+                    .ensure_user_for_authorization(tenant, &key)
+                    .await
+                    .expect("create user");
+            }
+            state
+                .db
+                .set_agent_owner_for_authorization(tenant, &agent_bytes, &owner_bytes)
+                .await
+                .expect("record verified owner");
+            let write = state
+                .db
+                .add_relay_member(
+                    tenant,
+                    &owner.public_key().to_hex(),
+                    "member",
+                    None,
+                    &state.relay_keypair,
+                )
+                .await
+                .expect("add owner");
+            assert!(write.outcome);
+
+            let admitted = crate::handlers::auth::final_admission_check(
+                &state,
+                tenant,
+                agent.public_key(),
+                None,
+                None,
+                Some(owner.public_key()),
+                Some(owner_bytes),
+            )
+            .await;
+            assert!(admitted.denial.is_none());
+            assert!(admitted.membership_via_owner);
+            let without_token = crate::handlers::auth::final_admission_check(
+                &state,
+                tenant,
+                agent.public_key(),
+                None,
+                None,
+                None,
+                Some(owner_bytes),
+            )
+            .await;
+            assert!(without_token.denial.is_some(), "NIP-OA remains disabled");
+            let sessions = [
+                crate::nip_fi_session::NipFiWsRoute::Root,
+                crate::nip_fi_session::NipFiWsRoute::Audio,
+            ]
+            .map(|route| {
+                register_live_connection_with_owner_membership(
+                    &state.community_connections,
+                    &state.conn_manager,
+                    tenant,
+                    agent_bytes,
+                    Some(owner_bytes),
+                    admitted.owner_was_relay_member_at_admission,
+                    admitted.membership_via_owner,
+                    route,
+                    true,
+                )
+            });
+            assert_eq!(state.revalidate_live_authorizations().await, 0);
+            assert!(sessions
+                .iter()
+                .all(|session| !session.cancel.is_cancelled()));
+
+            let removed = state
+                .db
+                .remove_relay_member(tenant, &owner.public_key().to_hex(), &state.relay_keypair)
+                .await
+                .expect("remove owner without Redis delivery");
+            assert_eq!(
+                removed.outcome,
+                buzz_db::relay_members::RemoveResult::Removed
+            );
+            assert_eq!(state.revalidate_live_authorizations().await, 2);
+            assert!(sessions.iter().all(|session| session.cancel.is_cancelled()));
+        }
+
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn missed_member_owner_ban_and_first_owner_link_revoke_root_audio_sessions() {
@@ -6719,6 +6839,7 @@ mod live_authorization_tests {
                 .await
                 .expect("connect to disposable PostgreSQL test database");
             let db = Db::from_pool(pool);
+            let relay_keypair = nostr::Keys::generate();
             let host = format!("live-authorization-{}.example", Uuid::new_v4().simple());
             let tenant = db
                 .ensure_configured_community(&host)
@@ -6759,10 +6880,12 @@ mod live_authorization_tests {
                 late_link_agent,
                 stable_agent,
             ] {
-                assert!(db
-                    .add_relay_member(tenant, &hex::encode(key), "member", None)
-                    .await
-                    .expect("add disposable roster member"));
+                assert!(
+                    db.add_relay_member(tenant, &hex::encode(key), "member", None, &relay_keypair)
+                        .await
+                        .expect("add disposable roster member")
+                        .outcome
+                );
             }
             db.set_agent_owner_for_authorization(tenant, &removed_agent, &removed_owner)
                 .await
@@ -6882,15 +7005,17 @@ mod live_authorization_tests {
                 .await
                 .expect("commit first stored owner link after admission");
             assert_eq!(
-                db.remove_relay_member(tenant, &hex::encode(direct_member))
+                db.remove_relay_member(tenant, &hex::encode(direct_member), &relay_keypair)
                     .await
-                    .expect("commit direct member removal"),
+                    .expect("commit direct member removal")
+                    .outcome,
                 buzz_db::relay_members::RemoveResult::Removed
             );
             assert_eq!(
-                db.remove_relay_member(tenant, &hex::encode(removed_owner))
+                db.remove_relay_member(tenant, &hex::encode(removed_owner), &relay_keypair)
                     .await
-                    .expect("commit captured owner removal"),
+                    .expect("commit captured owner removal")
+                    .outcome,
                 buzz_db::relay_members::RemoveResult::Removed
             );
             db.ban_community_member(tenant, &banned_owner, &actor, None, None)
@@ -6967,8 +7092,10 @@ pub(crate) struct LiveAuthorizationSession {
     pub owner_pubkey: Option<[u8; 32]>,
     /// Whether the captured owner was a relay member when this socket was admitted.
     pub owner_was_relay_member_at_admission: bool,
-    /// Whether closed-relay membership was granted through NIP-OA delegation.
+    /// Whether closed-relay membership was granted through owner delegation.
     pub membership_via_owner: bool,
+    /// Whether delegation came from a verified NIP-FI token rather than NIP-OA.
+    pub membership_via_token_owner: bool,
     /// Most recent successful authoritative access check.
     pub last_checked_at: TokioInstant,
 }

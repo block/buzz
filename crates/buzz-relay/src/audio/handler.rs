@@ -1061,6 +1061,7 @@ async fn run_active_audio_connection(
         admitted_owner,
         final_check.owner_was_relay_member_at_admission,
         final_check.membership_via_owner,
+        token_owner.is_some(),
         crate::nip_fi_session::NipFiWsRoute::Audio,
         final_check_started_at,
     );
