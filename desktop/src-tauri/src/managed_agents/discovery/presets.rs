@@ -78,7 +78,9 @@ pub(super) fn preset_catalog_entry(
             def.command,
             def.args.iter().map(|arg| arg.to_string()).collect(),
         ),
-        mcp_command: None,
+        // Preset ACP harnesses publish replies through buzz-dev-mcp, same as
+        // the built-in runtimes that already carry an MCP command (#7023).
+        mcp_command: Some("buzz-dev-mcp".to_string()),
         model_env_var: None,
         provider_env_var: None,
         thinking_env_var: None,
@@ -264,6 +266,20 @@ pub(super) fn preset_command_for_id(id: &str) -> Option<&'static str> {
         .map(|p| p.command)
 }
 
+/// MCP command for a preset harness matched by command (or path basename).
+///
+/// Presets are absent from `KNOWN_ACP_RUNTIMES`, so spawn must consult this
+/// when resolving `BUZZ_ACP_MCP_COMMAND` (#7023).
+pub(crate) fn preset_mcp_command_for(command: &str) -> Option<&'static str> {
+    let normalized = super::normalize_command_identity(command);
+    PRESET_HARNESSES
+        .iter()
+        .any(|preset| {
+            super::normalize_command_identity(preset.command) == normalized || preset.id == normalized
+        })
+        .then_some("buzz-dev-mcp")
+}
+
 /// Return the primary harness command for a given runtime id, or `None`.
 ///
 /// Checks static builtins, then the static preset list (always available,
@@ -366,6 +382,7 @@ mod tests {
         assert_eq!(entry.binary_path.as_deref(), Some("/usr/local/bin/devin"));
         assert_eq!(entry.auth_status, AuthStatus::NotApplicable);
         assert_eq!(entry.source, HarnessSource::Preset);
+        assert_eq!(entry.mcp_command.as_deref(), Some("buzz-dev-mcp"));
 
         let missing_entry = preset_catalog_entry(preset, |_| None);
         assert_eq!(
@@ -600,5 +617,36 @@ mod tests {
             entry.max_parallelism, None,
             "uncapped preset (devin) must have max_parallelism: None"
         );
+    }
+
+    #[test]
+    fn preset_mcp_command_resolves_for_hermes_and_paths() {
+        assert_eq!(
+            super::preset_mcp_command_for("hermes-acp"),
+            Some("buzz-dev-mcp")
+        );
+        assert_eq!(
+            super::preset_mcp_command_for("/opt/homebrew/bin/hermes-acp"),
+            Some("buzz-dev-mcp")
+        );
+        assert_eq!(
+            super::preset_mcp_command_for("hermes"),
+            Some("buzz-dev-mcp")
+        );
+        assert_eq!(super::preset_mcp_command_for("totally-unknown-agent"), None);
+    }
+
+    #[test]
+    fn resolve_mcp_command_prefers_builtin_then_preset() {
+        assert_eq!(
+            crate::managed_agents::resolve_mcp_command("codex-acp"),
+            Some("buzz-dev-mcp")
+        );
+        assert_eq!(
+            crate::managed_agents::resolve_mcp_command("hermes-acp"),
+            Some("buzz-dev-mcp")
+        );
+        // Goose is a builtin without an MCP sidecar declaration.
+        assert_eq!(crate::managed_agents::resolve_mcp_command("goose"), None);
     }
 }
