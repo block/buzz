@@ -206,8 +206,10 @@ class BuilderlabAccountClient {
   BuilderlabAccount _adopt(String credential, BuilderlabAccount verified) {
     if (_disposed) throw AccountFailure.unavailable;
     _credential = credential;
+    // Assigned before notifying, so subject listeners see the new account.
+    _account = verified;
     _subject.value = verified.subject;
-    return _account = verified;
+    return verified;
   }
 
   Future<BuilderlabAccount> _verify(String credential) async {

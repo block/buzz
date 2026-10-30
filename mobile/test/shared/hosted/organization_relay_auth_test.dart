@@ -386,4 +386,50 @@ void main() {
     expect(account.account?.subject, 'member');
     signIn.dispose();
   });
+
+  test(
+    'a restore after an offline start shows the session signed in',
+    () async {
+      await const FlutterSecureStorage().write(
+        key: 'buzz_hosted_session_block_example_com_v1',
+        value: jsonEncode({
+          'origin': organization.toString(),
+          'credential': 'org-secret',
+          'subject': 'member',
+          'expires_at': expiry.toIso8601String(),
+        }),
+      );
+      var online = false;
+      final account = BuilderlabAccountClient(
+        accountOrigin: organization,
+        httpClient: MockClient((request) async {
+          if (!online) return http.Response('{}', 503);
+          expect(request.url.path, '/api/goose/v1/auth/me');
+          return http.Response(
+            jsonEncode({
+              'subject': 'member',
+              'expires_at': expiry.toIso8601String(),
+            }),
+            200,
+          );
+        }),
+      );
+      final signIn = OrganizationSignIn(
+        account: account,
+        browser: BrowserAuth(
+          origin: organization,
+          openBrowser: (uri) async => null,
+        ),
+        reconnect: () async {},
+      );
+      await signIn.initialize();
+      expect(signIn.status, OrganizationSessionStatus.signedOut);
+
+      // A relay connection retry restores the session once back online.
+      online = true;
+      await account.restore();
+      expect(signIn.status, OrganizationSessionStatus.signedIn);
+      signIn.dispose();
+    },
+  );
 }
