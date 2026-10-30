@@ -1,22 +1,21 @@
 //! NIP-IA identity archive request handler (kinds 9035–9036).
 //!
-//! These events are processed before storage: the request mutates the
-//! `archived_identities` table and may emit relay-signed NIP-IA deltas and a
-//! snapshot, then the ingest pipeline stores the request itself for audit.
+//! Validate consent before storage. Persist the request, archive mutation and
+//! relay delta atomically; publish only after commit.
 
 use std::sync::Arc;
 
 use nostr::{Event, PublicKey};
-use tracing::{info, warn};
 
-use buzz_core::kind::{KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_PROFILE};
+use buzz_core::kind::{
+    KIND_IA_ARCHIVED, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVED, KIND_IA_UNARCHIVE_REQUEST,
+    KIND_PROFILE,
+};
 use buzz_core::tenant::TenantContext;
-use buzz_core::CommunityId;
+use buzz_core::{CommunityId, StoredEvent};
 use buzz_db::EventQuery;
 
-use crate::handlers::side_effects::{
-    publish_nipia_archival_list, publish_nipia_archived, publish_nipia_unarchived,
-};
+use crate::handlers::side_effects::{build_nipia_delta, publish_nipia_archival_list};
 use crate::state::AppState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,12 +35,20 @@ impl ConsentPath {
     }
 }
 
-/// Validate and execute a NIP-IA archive/unarchive request.
-pub async fn handle_identity_archive_event(
+/// Validated archive parameters; no persistence occurs during validation.
+pub(super) struct IdentityArchivePlan {
+    target: String,
+    consent: ConsentPath,
+    reason: Option<String>,
+    replaced_by: Option<String>,
+}
+
+/// Validate a NIP-IA archive/unarchive request without changing state.
+pub(super) async fn validate_identity_archive_event(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     event: &Event,
-) -> Result<(), String> {
+) -> Result<IdentityArchivePlan, String> {
     let kind = event.kind.as_u16() as u32;
     let actor_hex = event.pubkey.to_hex();
 
@@ -64,77 +71,83 @@ pub async fn handle_identity_archive_event(
     let reason = extract_tag_value(event, "reason");
     let consent_path =
         determine_consent_path(tenant.community(), state, event, &target_hex, &actor_hex).await?;
-    let request_event_id = event.id.to_hex();
+    Ok(IdentityArchivePlan {
+        target: target_hex,
+        consent: consent_path,
+        reason,
+        replaced_by,
+    })
+}
 
-    let changed = if kind == KIND_IA_ARCHIVE_REQUEST {
-        state
-            .db
-            .archive(
-                tenant.community(),
-                &target_hex,
-                consent_path.as_str(),
-                &actor_hex,
-                reason.as_deref(),
-                replaced_by.as_deref(),
-                &request_event_id,
-            )
-            .await
-            .map_err(|e| format!("database error: {e}"))?
+/// Commit archive state and its audit events before publishing notifications.
+pub(super) async fn persist_identity_archive_event(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+    plan: IdentityArchivePlan,
+) -> anyhow::Result<(StoredEvent, bool)> {
+    let archive = u32::from(event.kind.as_u16()) == KIND_IA_ARCHIVE_REQUEST;
+    let delta_kind = if archive {
+        KIND_IA_ARCHIVED
     } else {
-        state
-            .db
-            .unarchive(tenant.community(), &target_hex)
-            .await
-            .map_err(|e| format!("database error: {e}"))?
+        KIND_IA_UNARCHIVED
     };
-
-    info!(
-        actor = %actor_hex,
-        target = %target_hex,
-        consent = consent_path.as_str(),
-        changed,
-        kind,
-        "identity archive request processed"
-    );
-
-    if !changed {
-        return Ok(());
-    }
-
-    let publish_delta = if kind == KIND_IA_ARCHIVE_REQUEST {
-        publish_nipia_archived(
+    // Use the request timestamp for its corresponding relay notification.
+    let delta = build_nipia_delta(
+        state,
+        delta_kind,
+        &plan.target,
+        plan.consent.as_str(),
+        &event.pubkey.to_hex(),
+        &event.id.to_hex(),
+        &event.content,
+        event.created_at,
+        plan.reason.as_deref(),
+        plan.replaced_by.as_deref(),
+    )?;
+    let (stored, inserted, notification) = state
+        .db
+        .apply_identity_archive_event(
+            tenant.community(),
+            event,
+            buzz_db::archived_identities::IdentityArchiveChange {
+                target: &plan.target,
+                archive,
+                consent_path: plan.consent.as_str(),
+                reason: plan.reason.as_deref(),
+                replaced_by: plan.replaced_by.as_deref(),
+            },
+            &delta,
+        )
+        .await?;
+    if let Some(notification) = notification {
+        super::event::dispatch_persistent_event(
             tenant,
             state,
-            &target_hex,
-            consent_path.as_str(),
-            &actor_hex,
-            &request_event_id,
-            &event.content,
-            reason.as_deref(),
-            replaced_by.as_deref(),
+            &notification,
+            delta_kind,
+            &state.relay_keypair.public_key().to_hex(),
+            None,
         )
-        .await
-    } else {
-        publish_nipia_unarchived(
-            tenant,
-            state,
-            &target_hex,
-            consent_path.as_str(),
-            &actor_hex,
-            &request_event_id,
-            &event.content,
-            reason.as_deref(),
-        )
-        .await
-    };
-
-    if let Err(e) = publish_delta {
-        warn!(error = %e, "failed to publish NIP-IA delta");
+        .await;
     }
-    if let Err(e) = publish_nipia_archival_list(tenant, state).await {
-        warn!(error = %e, "failed to publish NIP-IA archival list");
-    }
+    // Also refresh on duplicate retries: a previous post-commit refresh may
+    // have failed. Propagate failures so callers can retry without reapplying
+    // the archive mutation. The stored delta remains available for replay.
+    publish_nipia_archival_list(tenant, state).await?;
+    Ok((stored, inserted))
+}
 
+#[cfg(test)]
+async fn handle_identity_archive_event(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+) -> Result<(), String> {
+    let plan = validate_identity_archive_event(tenant, state, event).await?;
+    persist_identity_archive_event(tenant, state, event, plan)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 

@@ -3082,15 +3082,19 @@ async fn ingest_event_inner(
         None
     };
 
-    // Processed here (verify consent, mutate archived_identities, emit the
-    // relay-signed 8002/8003 delta + 13535 snapshot), then — unlike the
-    // NIP-43 admin commands above — the request itself falls through to normal
-    // storage so the delta's `["e", request_id]` audit reference resolves.
-    if is_identity_archive_request_kind(kind_u32) {
-        crate::handlers::identity_archive::handle_identity_archive_event(tenant, state, &event)
+    // Consent validation has no side effects. Persistence below commits the
+    // request, archive mutation and relay delta in one guarded transaction.
+    let identity_archive = if is_identity_archive_request_kind(kind_u32) {
+        Some(
+            crate::handlers::identity_archive::validate_identity_archive_event(
+                tenant, state, &event,
+            )
             .await
-            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
-    }
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?,
+        )
+    } else {
+        None
+    };
 
     if kind_u32 == KIND_DELETION {
         // The target's archived channel blocks the deletion, so it must
@@ -3601,6 +3605,18 @@ async fn ingest_event_inner(
                 });
             }
         }
+    } else if let Some(plan) = identity_archive {
+        crate::handlers::identity_archive::persist_identity_archive_event(
+            tenant, state, &event, plan,
+        )
+        .await
+        .map_err(|e| {
+            e.downcast_ref::<buzz_db::DbError>()
+                .and_then(event_write_error)
+                .unwrap_or_else(|| {
+                    IngestError::Internal(format!("error: archive write failed: {e}"))
+                })
+        })?
     } else if workflow_deletion {
         // A single commit owns public acceptance, domain mutation, and dispatch.
         // Failure rolls everything back; identical concurrent requests cannot

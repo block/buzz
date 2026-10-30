@@ -261,3 +261,6 @@ mod expanded_postgres_tests;
 
 #[path = "user_deletion_error_postgres_tests.rs"]
 mod error_postgres_tests;
+
+#[path = "user_deletion_archive_postgres_tests.rs"]
+mod archive_postgres_tests;

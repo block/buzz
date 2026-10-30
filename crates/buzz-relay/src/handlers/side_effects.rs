@@ -8,10 +8,10 @@ use uuid::Uuid;
 
 use buzz_core::kind::{
     event_kind_u32, is_parameterized_replaceable, AUTHOR_ONLY_KINDS, KIND_AGENT_PROFILE,
-    KIND_DM_VISIBILITY, KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST,
-    KIND_IA_UNARCHIVED, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
-    KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA,
-    KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION, KIND_THREAD_SUMMARY,
+    KIND_DM_VISIBILITY, KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED_LIST,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_GROUP_ADMINS,
+    KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION,
+    KIND_THREAD_SUMMARY,
 };
 use buzz_core::StoredEvent;
 use buzz_db::channel::{MemberRecord, MemberRole};
@@ -4135,8 +4135,7 @@ pub async fn publish_dm_visibility_snapshot(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn publish_nipia_delta(
-    tenant: &TenantContext,
+pub(super) fn build_nipia_delta(
     state: &Arc<AppState>,
     kind: u32,
     target_pubkey_hex: &str,
@@ -4144,11 +4143,10 @@ async fn publish_nipia_delta(
     actor_pubkey_hex: &str,
     request_event_id: &str,
     content: &str,
+    created_at: nostr::Timestamp,
     reason: Option<&str>,
     replaced_by: Option<&str>,
-) -> anyhow::Result<()> {
-    let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
-
+) -> anyhow::Result<Event> {
     let mut tags = vec![
         Tag::parse(["-"]).map_err(|e| anyhow::anyhow!("failed to build '-' tag: {e}"))?,
         Tag::parse(["p", target_pubkey_hex])
@@ -4174,82 +4172,12 @@ async fn publish_nipia_delta(
 
     let event = EventBuilder::new(Kind::Custom(kind as u16), content)
         .tags(tags)
+        .allow_self_tagging()
+        .custom_created_at(created_at)
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign kind:{kind}: {e}"))?;
 
-    let (stored, was_inserted) = state
-        .db
-        .insert_event(tenant.community(), &event, None)
-        .await?;
-    if !was_inserted {
-        return Ok(());
-    }
-
-    dispatch_persistent_event(tenant, state, &stored, kind, &relay_pubkey_hex, None).await;
-
-    info!(
-        target = %target_pubkey_hex,
-        relay = %relay_pubkey_hex,
-        kind,
-        consent = %consent_path,
-        "NIP-IA delta event published"
-    );
-    Ok(())
-}
-
-/// Publish a kind:8002 archived-identity delta event (NIP-IA).
-#[allow(clippy::too_many_arguments)]
-pub async fn publish_nipia_archived(
-    tenant: &TenantContext,
-    state: &Arc<AppState>,
-    target_pubkey_hex: &str,
-    consent_path: &str,
-    actor_pubkey_hex: &str,
-    request_event_id: &str,
-    content: &str,
-    reason: Option<&str>,
-    replaced_by: Option<&str>,
-) -> anyhow::Result<()> {
-    publish_nipia_delta(
-        tenant,
-        state,
-        KIND_IA_ARCHIVED,
-        target_pubkey_hex,
-        consent_path,
-        actor_pubkey_hex,
-        request_event_id,
-        content,
-        reason,
-        replaced_by,
-    )
-    .await
-}
-
-/// Publish a kind:8003 unarchived-identity delta event (NIP-IA).
-#[allow(clippy::too_many_arguments)]
-pub async fn publish_nipia_unarchived(
-    tenant: &TenantContext,
-    state: &Arc<AppState>,
-    target_pubkey_hex: &str,
-    consent_path: &str,
-    actor_pubkey_hex: &str,
-    request_event_id: &str,
-    content: &str,
-    reason: Option<&str>,
-) -> anyhow::Result<()> {
-    publish_nipia_delta(
-        tenant,
-        state,
-        KIND_IA_UNARCHIVED,
-        target_pubkey_hex,
-        consent_path,
-        actor_pubkey_hex,
-        request_event_id,
-        content,
-        reason,
-        None,
-    )
-    .await
+    Ok(event)
 }
 
 #[cfg(test)]
