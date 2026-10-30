@@ -1632,6 +1632,11 @@ declare global {
     __BUZZ_E2E_HOLD_USERS_BATCH__?: (hold: boolean) => number;
     /** Number of `get_users_batch` calls currently held. */
     __BUZZ_E2E_USERS_BATCH_PENDING__?: () => number;
+    /** Start or stop holding older-page `get_channel_window` responses (any
+     *  call with a cursor). Turning the hold off flushes everything held;
+     *  either call returns the number released, so a spec can prove the page
+     *  stayed in flight until it let go. */
+    __BUZZ_E2E_HOLD_CHANNEL_WINDOW_PAGES__?: (hold: boolean) => number;
     /** Release every `get_profile` response held by `deferProfileReads`. */
     __BUZZ_E2E_RELEASE_PROFILE_READS__?: () => number;
     /** Number of `get_profile` responses currently held. */
@@ -1776,6 +1781,10 @@ let profileReadsReleased = false;
 // second paste of the same label is provably still deciding).
 let holdUsersBatch = false;
 let heldUsersBatchReleases: Array<() => void> = [];
+// Older channel-window pages held by `__BUZZ_E2E_HOLD_CHANNEL_WINDOW_PAGES__`,
+// so a spec can finish driving scroll input before the fetched page exists.
+let holdChannelWindowPages = false;
+let heldChannelWindowPageReleases: Array<() => void> = [];
 // Starts currently held behind `startManagedAgentDelayMs`, releasable early
 // via `__BUZZ_E2E_RELEASE_MANAGED_AGENT_STARTS__()`: a spec that holds a
 // start across a community round-trip needs the hold long enough to be
@@ -6011,6 +6020,11 @@ async function handleGetChannelWindow(
   if (args.cursor !== null) {
     probe.__CHANNEL_WINDOW_FETCH_COUNT__ =
       (probe.__CHANNEL_WINDOW_FETCH_COUNT__ ?? 0) + 1;
+    if (holdChannelWindowPages) {
+      await new Promise<void>((resolve) => {
+        heldChannelWindowPageReleases.push(resolve);
+      });
+    }
   }
 
   const delayMs =
@@ -11458,6 +11472,8 @@ export function maybeInstallE2eTauriMocks() {
   profileReadsReleased = false;
   holdUsersBatch = false;
   heldUsersBatchReleases = [];
+  holdChannelWindowPages = false;
+  heldChannelWindowPageReleases = [];
   cancelledMediaUploadIds = new Set<string>();
   for (const controller of mockMediaFetchControllers.values()) {
     controller.abort();
@@ -11503,6 +11519,12 @@ export function maybeInstallE2eTauriMocks() {
     return queued.length;
   };
   window.__BUZZ_E2E_USERS_BATCH_PENDING__ = () => heldUsersBatchReleases.length;
+  window.__BUZZ_E2E_HOLD_CHANNEL_WINDOW_PAGES__ = (hold: boolean) => {
+    holdChannelWindowPages = hold;
+    const queued = hold ? [] : heldChannelWindowPageReleases.splice(0);
+    for (const release of queued) release();
+    return queued.length;
+  };
   mockGlobalAgentConfig = config.mock?.globalAgentConfig
     ? { ...config.mock.globalAgentConfig }
     : null;

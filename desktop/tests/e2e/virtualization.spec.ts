@@ -268,13 +268,10 @@ test.describe("list virtualization", () => {
     // reproduce Chromium/WebKit's native wheel → scroll callback ordering. The
     // old boundary rollback moved the viewport back down before the fetch
     // committed; keep that pre-prepend reversal below the same 5px frame bar.
-    // A 300ms relay delay leaves the input boundary and prepend commit as two
-    // distinct phases so this assertion cannot accidentally measure only the
-    // later anchor correction.
-    await installMockBridge(page, {
-      deepHistoryMessageCount: 1_800,
-      channelWindowDelayMs: 300,
-    });
+    // Each older page stays in flight until the burst has been traced, so the
+    // input boundary and prepend commit are two distinct phases and this
+    // assertion cannot accidentally measure only the later anchor correction.
+    await installMockBridge(page, { deepHistoryMessageCount: 1_800 });
     await page.goto("/#/channels/feedf00d-0000-4000-8000-000000000007");
     const timeline = page.getByTestId("message-timeline");
     await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
@@ -322,6 +319,12 @@ test.describe("list virtualization", () => {
         element.scrollTop = 4000;
       });
       await page.waitForTimeout(300);
+      // Hold the page this crossing fetches. A slow runner can pause between
+      // wheels for longer than the settle gate's quiet window, and the gate
+      // would then rightly commit a page that had already arrived mid-burst.
+      await page.evaluate(() =>
+        window.__BUZZ_E2E_HOLD_CHANNEL_WINDOW_PAGES__?.(true),
+      );
       await timeline.evaluate((element) => {
         element.scrollTop = 180;
       });
@@ -353,8 +356,8 @@ test.describe("list virtualization", () => {
       // CDP can deliver a wheel burst late (Linux Chromium more than macOS),
       // so a window timed from before the burst can close before the input
       // lands. Time the 120 ms window from the first wheel the page receives
-      // and keep it open until every wheel has arrived. Stop early at the
-      // prepend commit: its anchor correction is not a boundary rollback.
+      // and keep it open until every wheel has arrived. The held page cannot
+      // commit meanwhile, so no anchor correction is read as a rollback.
       const upDeltas = [-60, -30, -20, -15];
       const wheelTracePromise = timeline.evaluate(
         async (scroller, wheelCount) => {
@@ -364,14 +367,12 @@ test.describe("list virtualization", () => {
             if (!event.ctrlKey) received += 1;
           };
           s.addEventListener("wheel", countWheel, { passive: true });
-          const startHeight = s.scrollHeight;
           let previousScrollTop = s.scrollTop;
           let maxBoundaryRollback = 0;
           let minScrollTop = s.scrollTop;
           let firstWheelAt: number | null = null;
           const giveUpAt = performance.now() + 5_000;
           while (performance.now() < giveUpAt) {
-            if (s.scrollHeight > startHeight + 800) break;
             if (firstWheelAt === null && received > 0) {
               firstWheelAt = performance.now();
             }
@@ -426,6 +427,10 @@ test.describe("list virtualization", () => {
       const motion = await timeline.evaluate(
         async (scroller, { anchorId, anchorTop, oldHeight }) => {
           const s = scroller as HTMLElement;
+          // Let the held page go only once this trace is running, so it sees
+          // every frame of the commit against a baseline taken before it.
+          const released =
+            window.__BUZZ_E2E_HOLD_CHANNEL_WINDOW_PAGES__?.(false) ?? 0;
           let maxDrift = 0;
           let sawPrepend = false;
           let sawAnchorAfterPrepend = false;
@@ -453,7 +458,7 @@ test.describe("list virtualization", () => {
             if (sawAnchorAfterPrepend && stableFrames >= 8) break;
             await new Promise((resolve) => requestAnimationFrame(resolve));
           }
-          return { maxDrift, sawPrepend };
+          return { maxDrift, released, sawPrepend };
         },
         {
           anchorId: committedAnchor.id,
@@ -461,6 +466,7 @@ test.describe("list virtualization", () => {
           oldHeight: before.scrollHeight,
         },
       );
+      expect(motion.released).toBe(1);
       expect(motion.sawPrepend).toBe(true);
       if (pageIndex === 0) expect(await ctrlWheelPromise).toBe(true);
       expect(motion.maxDrift).toBeLessThan(5);
