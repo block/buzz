@@ -152,7 +152,7 @@ fn env_duration_secs(name: &str, default: u64) -> Duration {
 /// and the character `s`. Works on both extracted field values (`rate-limited:
 /// quota exceeded; retry in 4s`) and substrings of raw relay JSON bodies.
 /// Returns `None` when the pattern is absent or the digit sequence is empty.
-fn parse_retry_hint_text(text: &str) -> Option<u64> {
+pub(crate) fn parse_retry_hint_text(text: &str) -> Option<u64> {
     const PREFIX: &str = "retry in ";
     let after = text.find(PREFIX).map(|i| &text[i + PREFIX.len()..])?;
     let end = after
@@ -1215,7 +1215,12 @@ impl BuzzClient {
 
         let bytes = std::fs::read(file_path)
             .map_err(|e| CliError::Other(format!("failed to read {file_path}: {e}")))?;
+        self.upload_bytes(bytes).await
+    }
 
+    /// Upload in-memory bytes to the relay's Blossom endpoint.
+    /// Returns a BlobDescriptor on success.
+    pub async fn upload_bytes(&self, bytes: Vec<u8>) -> Result<BlobDescriptor, CliError> {
         // 2. Detect MIME from magic bytes
         let mime = infer::get(&bytes)
             .map(|t| t.mime_type().to_string())
@@ -1361,6 +1366,33 @@ impl BuzzClient {
             }
         })
         .await
+    }
+
+    /// Check that a Blossom blob answers an authenticated `HEAD` with a 2xx.
+    /// Returns `Ok(false)` for a 404 and an error for any other failure.
+    pub async fn media_exists(&self, input: &str) -> Result<bool, CliError> {
+        let url = media_url_from_input(&self.relay_url, input)?;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| CliError::Other(format!("http client init failed: {e}")))?;
+        let auth_header = sign_blossom_get(&self.keys, &url)?;
+        let resp = self
+            .with_auth_tag(client.head(&url).header("Authorization", auth_header))
+            .send()
+            .await?;
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(true);
+        }
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        Err(CliError::Relay {
+            status: status.as_u16(),
+            body: String::new(),
+        })
     }
 
     async fn handle_response(&self, resp: reqwest::Response) -> Result<String, CliError> {
