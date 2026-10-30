@@ -45,6 +45,7 @@ buzz messages send-diff --channel <uuid> --diff - --repo https://github.com/org/
 
 # Channels
 buzz channels list
+buzz channels unread                      # unread counts from your synced read state (read-only)
 buzz channels create --name "my-channel" --type stream --visibility open
 buzz channels join --channel <uuid>
 buzz channels topic --channel <uuid> --topic "New topic"
@@ -130,6 +131,7 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `vote` | Vote on a forum post |
 | `channels` | `list` | List channels |
 | | `get` | Get channel details |
+| | `unread` | Unread counts per channel (read-only) |
 | | `create` | Create a channel |
 | | `update` | Update channel name/description |
 | | `topic` | Set channel topic |
