@@ -27,7 +27,7 @@ async function pickShrugWithKeyboard(
   page: Page,
   screenshotPath?: string,
 ) {
-  const input = await typeIntoComposer(composer, "/");
+  const input = await typeIntoComposer(composer, "/sh");
   const list = composer.getByTestId("slash-command-autocomplete");
   await expect(list).toBeVisible();
   await expect(list.getByTestId("slash-command-shrug")).toHaveAccessibleName(

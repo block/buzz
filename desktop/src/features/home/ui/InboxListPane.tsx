@@ -26,6 +26,7 @@ import {
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import type { Reminder } from "@/features/reminders/lib/reminderTypes";
 import { isDue } from "@/features/reminders/lib/reminderFilters";
+import { reminderPreviewText } from "@/features/reminders/lib/reminderPresentation";
 import {
   RemindersPanel,
   useReminderSources,
@@ -732,11 +733,7 @@ export function InboxListPane({
                     onClick={() => {
                       onSelectReminder(row.reminder.id);
                     }}
-                    preview={
-                      row.reminder.content.target?.preview ||
-                      row.reminder.content.note ||
-                      "Reminder"
-                    }
+                    preview={reminderPreviewText(row.reminder)}
                     selected={selectedReminderId === row.reminder.id}
                     status={formatReminderStatus(row.reminder.notBefore)}
                   />

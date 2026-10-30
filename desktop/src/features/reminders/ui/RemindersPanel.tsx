@@ -18,6 +18,7 @@ import {
   hasNavigableTarget,
   resolveReminderDestination,
 } from "@/features/reminders/lib/reminderNavigation";
+import { reminderPreviewText } from "@/features/reminders/lib/reminderPresentation";
 import type { Reminder } from "@/features/reminders/lib/reminderTypes";
 import { SnoozeMenu } from "@/features/reminders/ui/SnoozeMenu";
 import { resolveChannelDisplayLabel } from "@/features/sidebar/lib/channelLabels";
@@ -211,9 +212,7 @@ function ReminderRow({
           </div>
         ) : null}
         <p className="max-w-full truncate text-sm font-medium">
-          {reminder.content.target?.preview ||
-            reminder.content.note ||
-            "Reminder"}
+          {reminderPreviewText(reminder)}
         </p>
         {reminder.content.target && reminder.content.note ? (
           <p className="max-w-full truncate text-xs text-muted-foreground">
@@ -404,8 +403,7 @@ export function ReminderDetailPane({
   const isDone = reminder.content.status === "done";
   const isActing = complete.isPending || snooze.isPending || cancel.isPending;
   const isNavigable = hasNavigableTarget(reminder.content.target);
-  const preview =
-    reminder.content.target?.preview || reminder.content.note || "Reminder";
+  const preview = reminderPreviewText(reminder);
 
   const handleNavigate = async () => {
     const destination = await resolveReminderDestination(
@@ -482,16 +480,17 @@ export function ReminderDetailPane({
           ) : null}
 
           <div className="mt-8 flex flex-wrap items-center gap-2">
-            <Button
-              disabled={!isNavigable}
-              onClick={() => void handleNavigate()}
-              size="sm"
-              type="button"
-              variant="outline"
-            >
-              <ExternalLink className="h-4 w-4" />
-              Open message
-            </Button>
+            {isNavigable ? (
+              <Button
+                onClick={() => void handleNavigate()}
+                size="sm"
+                type="button"
+                variant="outline"
+              >
+                <ExternalLink className="h-4 w-4" />
+                Open message
+              </Button>
+            ) : null}
             {isDone ? null : (
               <>
                 <Button

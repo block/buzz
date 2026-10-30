@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   cancelReminder,
   completeReminder,
+  createNoteReminder,
   createReminder,
   fetchReminders,
   snoozeReminder,
@@ -72,6 +73,11 @@ export function useReminderMutations(pubkey: string) {
     }) => createReminder(input.target, input.notBefore, input.note),
     onSuccess: invalidate,
   });
+  const createNote = useMutation({
+    mutationFn: (input: { note: string; notBefore: number }) =>
+      createNoteReminder(input.note, input.notBefore),
+    onSuccess: invalidate,
+  });
   const complete = useMutation({
     mutationFn: (reminder: Reminder) => completeReminder(pubkey, reminder),
     onSuccess: invalidate,
@@ -86,5 +92,5 @@ export function useReminderMutations(pubkey: string) {
     onSuccess: invalidate,
   });
 
-  return { create, complete, snooze, cancel };
+  return { create, createNote, complete, snooze, cancel };
 }

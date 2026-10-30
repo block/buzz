@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseNotBefore, parseReminderContent } from "./reminderService.ts";
+import {
+  buildNewReminderTags,
+  buildNoteReminderPlaintext,
+  parseNotBefore,
+  parseReminderContent,
+} from "./reminderService.ts";
 
 const VALID_TARGET = {
   eventId: "abc123",
@@ -138,4 +143,24 @@ test("parseNotBefore_non_digit_returns_undefined", () => {
 test("parseNotBefore_above_max_safe_integer_returns_undefined", () => {
   assert.equal(parseNotBefore("9007199254740991"), 9_007_199_254_740_991);
   assert.equal(parseNotBefore("9007199254740992"), undefined);
+});
+
+test("note_only_reminder_plaintext_is_exactly_note_and_pending", () => {
+  const plaintext = buildNoteReminderPlaintext("stretch");
+  assert.equal(plaintext, '{"note":"stretch","status":"pending"}');
+  assert.deepEqual(parseReminderContent(plaintext), {
+    status: "pending",
+    target: undefined,
+    note: "stretch",
+  });
+});
+
+test("new_reminder_tags_are_a_32_hex_d_tag_and_not_before_seconds", () => {
+  const tags = buildNewReminderTags(1_800_000_000);
+  assert.equal(tags.length, 2);
+  assert.match(tags[0][1], /^[0-9a-f]{32}$/);
+  assert.deepEqual(tags, [
+    ["d", tags[0][1]],
+    ["not_before", "1800000000"],
+  ]);
 });

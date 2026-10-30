@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { useRemindersQuery } from "@/features/reminders/hooks";
+import { activeReminderEventIds as activeIds } from "@/features/reminders/lib/reminderPresentation";
 import type { ReminderTarget } from "@/features/reminders/lib/reminderTypes";
 import { RemindMeLaterDialog } from "./RemindMeLaterDialog";
 
@@ -36,18 +37,10 @@ export function RemindMeLaterProvider({
 
   const remindersQuery = useRemindersQuery(pubkey);
   const reminders = remindersQuery.data;
-  const activeReminderEventIds = React.useMemo(() => {
-    const ids = new Set<string>();
-    for (const reminder of reminders ?? []) {
-      if (
-        reminder.content.status === "pending" &&
-        reminder.content.target?.eventId
-      ) {
-        ids.add(reminder.content.target.eventId);
-      }
-    }
-    return ids;
-  }, [reminders]);
+  const activeReminderEventIds = React.useMemo(
+    () => activeIds(reminders ?? []),
+    [reminders],
+  );
 
   const contextValue = React.useMemo(
     () => ({ openReminder, activeReminderEventIds }),

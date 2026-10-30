@@ -104,3 +104,18 @@ test("due reminder without a represented conversation sorts at trigger time", ()
     ["reminder", "inbox"],
   );
 });
+
+test("a note-only reminder is its own row beside conversations", () => {
+  const rows = buildInboxListRows({
+    items: [inboxItem("message", 1_753_099_300)],
+    reminders: [
+      reminder("note", 1_753_099_100, "pending", { notBefore: 1_753_099_400 }),
+    ],
+  });
+
+  assert.deepEqual(
+    rows.map((row) => row.kind),
+    ["reminder", "inbox"],
+  );
+  assert.equal(rows[1].dueReminder, undefined);
+});

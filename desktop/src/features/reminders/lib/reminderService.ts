@@ -152,28 +152,34 @@ export async function fetchReminders(pubkey: string): Promise<Reminder[]> {
   return results.filter((r): r is Reminder => r !== null);
 }
 
-export async function createReminder(
-  target: ReminderTarget,
-  notBefore: number,
-  note?: string,
-): Promise<RelayEvent> {
-  const dTag = randomDTag();
-  const content: ReminderContent = {
-    target,
-    note,
-    status: "pending",
-  };
+/**
+ * Plaintext for a standalone reminder: the note and `pending`, with no
+ * `target` key. Same bytes mobile writes in `buildReminderPlaintext`.
+ */
+export function buildNoteReminderPlaintext(note: string): string {
+  const content: ReminderContent = { note, status: "pending" };
+  return JSON.stringify(content);
+}
 
-  const ciphertext = await nip44EncryptToSelf(JSON.stringify(content));
-  const tags: string[][] = [
+export function buildNewReminderTags(
+  notBefore: number,
+  dTag: string = randomDTag(),
+): string[][] {
+  return [
     ["d", dTag],
     ["not_before", String(notBefore)],
   ];
+}
 
+async function publishNewReminder(
+  plaintext: string,
+  notBefore: number,
+): Promise<RelayEvent> {
+  const ciphertext = await nip44EncryptToSelf(plaintext);
   const event = await signRelayEvent({
     kind: KIND_EVENT_REMINDER,
     content: ciphertext,
-    tags,
+    tags: buildNewReminderTags(notBefore),
   });
 
   return relayClient.publishEvent(
@@ -181,6 +187,27 @@ export async function createReminder(
     "Timed out creating reminder.",
     "Failed to create reminder.",
   );
+}
+
+export function createReminder(
+  target: ReminderTarget,
+  notBefore: number,
+  note?: string,
+): Promise<RelayEvent> {
+  const content: ReminderContent = {
+    target,
+    note,
+    status: "pending",
+  };
+  return publishNewReminder(JSON.stringify(content), notBefore);
+}
+
+/** Creates a standalone reminder: a note and a due time, no target message. */
+export function createNoteReminder(
+  note: string,
+  notBefore: number,
+): Promise<RelayEvent> {
+  return publishNewReminder(buildNoteReminderPlaintext(note), notBefore);
 }
 
 export async function completeReminder(

@@ -12,12 +12,8 @@ import {
   sendDesktopNotification,
 } from "@/features/notifications/lib/desktop";
 import type { NotificationSettings } from "@/features/notifications/hooks";
+import { describeDueReminders } from "@/features/reminders/lib/reminderPresentation";
 import { startReminderNotificationPoll } from "@/features/reminders/lib/reminderNotificationPoll";
-import {
-  formatNotificationTitle,
-  resolveNotificationChannelLabel,
-  truncateNotificationBody,
-} from "@/features/notifications/lib/notificationFormat";
 import {
   playNotificationSound,
   resolveSlotSound,
@@ -86,29 +82,9 @@ export function useReminderNotifications(
       return;
     }
 
-    // For a single reminder, try to resolve the channel name from its target.
-    // Multiple reminders may span different channels, so we omit channel context
-    // in that case and let the body count speak for itself.
-    const channelLabel =
-      due.length === 1
-        ? resolveNotificationChannelLabel(
-            due[0].content.target?.channelId ?? null,
-            channelsRef.current,
-          )
-        : null;
+    const { title, body } = describeDueReminders(due, channelsRef.current);
 
-    const body =
-      due.length === 1
-        ? truncateNotificationBody(
-            due[0].content.target?.preview ?? due[0].content.note ?? "",
-            "A reminder is waiting",
-          )
-        : `${due.length} reminders are due`;
-
-    void sendDesktopNotification({
-      title: formatNotificationTitle({ prefix: "Reminder due", channelLabel }),
-      body,
-    }).then((didSend) => {
+    void sendDesktopNotification({ title, body }).then((didSend) => {
       if (!didSend) return;
       playNotificationSound(resolveSlotSound(current, "needs_action"));
       void requestDockBounce();
