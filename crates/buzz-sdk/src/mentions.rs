@@ -238,104 +238,220 @@ pub fn normalize_mention_pubkeys(pubkeys: &[String], sender_pubkey: Option<&str>
 
 /// Remove fenced code blocks and inline code spans from content.
 ///
-/// Returns a copy of `content` with ` ```…``` ` blocks and `` `…` `` spans
-/// replaced by spaces. Used only for mention scanning — the original
-/// content is stored verbatim. Preserves valid UTF-8 throughout.
+/// Returns a copy of `content` with fenced blocks and inline spans replaced by
+/// a single space. Used only for mention scanning — the original content is
+/// stored verbatim. Preserves valid UTF-8 throughout.
+///
+/// Mirrors `maskMarkdownCode` in
+/// `desktop/src/features/messages/lib/hasMention.ts`, which is what decides
+/// whether Desktop renders and notifies a mention. Where the two disagree the
+/// signed `p` tags disagree with what a reader sees: text that renders as code
+/// still wakes an agent, or a visible mention carries no tag at all. So this is
+/// a transcription of that algorithm, in the same two passes — all fenced
+/// blocks first, then spans over what is left — with the same rules for fence
+/// markers, delimiter-run lengths, escapes and line endings. Each is spelled
+/// out at the pass that applies it, and the parity tests below check the
+/// combined result against Desktop's own `hasMention` output.
+///
+/// Not mirrored: Desktop additionally masks any line indented by four spaces
+/// or a tab. That is not CommonMark — an indented line continuing a list item
+/// is ordinary text — and copying it here would drop `p` tags from list
+/// continuations, which is the more harmful direction. See the PR discussion.
 pub fn strip_code_regions(content: &str) -> String {
+    let bytes = content.as_bytes();
+    let mut masked = vec![false; bytes.len()];
+
+    mask_fenced_blocks(content, &mut masked);
+    mask_code_spans(bytes, &mut masked);
+
+    // Each contiguous masked run collapses to one space. Line terminators are
+    // never masked, so a fenced block keeps its line structure — harmless for
+    // mention scanning, and it keeps offsets from drifting inside a line.
     let mut out = String::with_capacity(content.len());
-    let mut chars = content.char_indices().peekable();
-
-    while let Some(&(i, ch)) = chars.peek() {
-        // Fenced code block: ``` at line start (possibly after whitespace)
-        if ch == '`' && content[i..].starts_with("```") {
-            let is_fence_start = if i == 0 {
-                true
-            } else {
-                let before = &content[..i];
-                before.ends_with('\n')
-                    || before.chars().all(|c| c.is_ascii_whitespace())
-                    || before.rsplit_once('\n').is_some_and(|(_, after_nl)| {
-                        after_nl.chars().all(|c| c.is_ascii_whitespace())
-                    })
-            };
-
-            if is_fence_start {
-                // Find end of opening fence line
-                let after_fence = i + 3;
-                let rest = &content[after_fence..];
-                let line_end = rest
-                    .find('\n')
-                    .map_or(content.len(), |p| after_fence + p + 1);
-
-                // Find closing fence
-                let mut search_from = line_end;
-                let close_end = loop {
-                    if search_from >= content.len() {
-                        break content.len();
-                    }
-                    if let Some(pos) = content[search_from..].find("```") {
-                        let abs_pos = search_from + pos;
-                        let at_line_start = abs_pos == 0
-                            || content.as_bytes()[abs_pos - 1] == b'\n'
-                            || content[..abs_pos]
-                                .rsplit_once('\n')
-                                .is_some_and(|(_, after_nl)| {
-                                    after_nl.chars().all(|c| c.is_ascii_whitespace())
-                                });
-                        if at_line_start {
-                            // Skip to end of closing fence line
-                            let after_close = abs_pos + 3;
-                            let end = content[after_close..]
-                                .find('\n')
-                                .map_or(content.len(), |p| after_close + p + 1);
-                            break end;
-                        }
-                        search_from = abs_pos + 3;
-                    } else {
-                        break content.len();
-                    }
-                };
-
+    let mut in_run = false;
+    for (index, ch) in content.char_indices() {
+        if masked[index] {
+            if !in_run {
                 out.push(' ');
-                // Advance chars iterator past the fenced block
-                while let Some(&(ci, _)) = chars.peek() {
-                    if ci >= close_end {
-                        break;
-                    }
-                    chars.next();
+                in_run = true;
+            }
+        } else {
+            in_run = false;
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Mask every byte in `start..end`, leaving line terminators alone so line
+/// structure survives — the same carve-out Desktop's `maskRange` makes.
+fn mask_range(bytes: &[u8], masked: &mut [bool], start: usize, end: usize) {
+    for index in start..end.min(bytes.len()) {
+        if bytes[index] != b'\n' && bytes[index] != b'\r' {
+            masked[index] = true;
+        }
+    }
+}
+
+/// Byte range of each line, excluding its terminator.
+///
+/// Recognizes all three conventions — LF, CRLF and CR — because Desktop does,
+/// explicitly. A CR-only message whose fences went unrecognized here would be
+/// masked by Desktop and not by us, so its `@name` would be tagged for text
+/// the reader sees as code.
+fn line_ranges(content: &str) -> Vec<(usize, usize)> {
+    let bytes = content.as_bytes();
+    let mut lines = Vec::new();
+    let mut start = 0usize;
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\n' => {
+                lines.push((start, cursor));
+                cursor += 1;
+                start = cursor;
+            }
+            b'\r' => {
+                lines.push((start, cursor));
+                cursor += if bytes.get(cursor + 1) == Some(&b'\n') {
+                    2
+                } else {
+                    1
+                };
+                start = cursor;
+            }
+            _ => cursor += 1,
+        }
+    }
+    if start < bytes.len() {
+        lines.push((start, bytes.len()));
+    }
+    lines
+}
+
+/// First pass: mask every fenced block, whole lines at a time.
+///
+/// Runs before spans, exactly as Desktop does, and that order is load-bearing:
+/// scanning both in one pass lets a backtick inside a fenced body close an
+/// outer span, after which the real closing fence reads as a fresh unterminated
+/// opener and swallows the rest of the message — suppressing a mention that is
+/// plainly visible below the block.
+fn mask_fenced_blocks(content: &str, masked: &mut [bool]) {
+    let bytes = content.as_bytes();
+    let mut fence: Option<(u8, usize)> = None;
+
+    for (start, end) in line_ranges(content) {
+        let line = &content[start..end];
+        let indent = line.len() - line.trim_start_matches(' ').len();
+
+        if let Some((marker, length)) = fence {
+            mask_range(bytes, masked, start, end);
+            if indent <= 3 {
+                let run = run_length(bytes, start + indent, marker);
+                // A closing fence is at least as long as the opener and carries
+                // nothing but trailing whitespace.
+                if run >= length && line[indent + run..].chars().all(|c| c == ' ' || c == '\t') {
+                    fence = None;
                 }
+            }
+            continue;
+        }
+
+        if indent > 3 {
+            continue;
+        }
+        let marker = match bytes.get(start + indent) {
+            Some(&b @ (b'`' | b'~')) => b,
+            _ => continue,
+        };
+        let length = run_length(bytes, start + indent, marker);
+        if length < 3 {
+            continue;
+        }
+        // A backtick fence's info string may not contain a backtick
+        // (CommonMark), so ``` `x` ``` on one line is a span, not a block.
+        if marker == b'`' && line[indent + length..].contains('`') {
+            continue;
+        }
+        mask_range(bytes, masked, start, end);
+        fence = Some((marker, length));
+    }
+}
+
+/// Second pass: mask inline code spans across the unmasked text.
+///
+/// A transcription of Desktop's span loop, including the two rules that are
+/// easy to get wrong in the other direction:
+///
+/// * a span may cross a line ending. CommonMark allows it and Desktop allows
+///   it, so refusing here left `` `code\n@alice` `` tagged as a live mention;
+/// * a backslash before a *closing* run does not escape it. Backslashes are
+///   literal inside a code span, so Desktop pairs with that run — skipping it
+///   pairs with a later delimiter instead and can swallow a visible mention.
+///
+/// An opener with no matching closer advances past the whole run, not one
+/// backtick: reconsidering its remaining backticks as shorter openers makes the
+/// two implementations pair later delimiters differently.
+fn mask_code_spans(bytes: &[u8], masked: &mut [bool]) {
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] != b'`' || masked[index] || is_escaped(bytes, index) {
+            index += 1;
+            continue;
+        }
+
+        let opener_end = index + unmasked_run_length(bytes, masked, index);
+        let delimiter = opener_end - index;
+
+        let mut closer = opener_end;
+        let mut closed = None;
+        while closer < bytes.len() {
+            if bytes[closer] != b'`' || masked[closer] {
+                closer += 1;
                 continue;
             }
-        }
-
-        // Inline code span: `…`
-        if ch == '`' {
-            let after_tick = i + 1;
-            if after_tick < content.len() {
-                // Find closing backtick on same line
-                if let Some(rel_end) = content[after_tick..].find('`') {
-                    let close_pos = after_tick + rel_end;
-                    // Only treat as code span if no newline between the backticks
-                    if !content[after_tick..close_pos].contains('\n') {
-                        out.push(' ');
-                        // Advance past closing backtick
-                        while let Some(&(ci, _)) = chars.peek() {
-                            if ci > close_pos {
-                                break;
-                            }
-                            chars.next();
-                        }
-                        continue;
-                    }
-                }
+            let closer_end = closer + unmasked_run_length(bytes, masked, closer);
+            if closer_end - closer == delimiter {
+                closed = Some(closer_end);
+                break;
             }
+            closer = closer_end;
         }
 
-        out.push(ch);
-        chars.next();
+        match closed {
+            Some(closer_end) => {
+                mask_range(bytes, masked, index, closer_end);
+                index = closer_end;
+            }
+            None => index = opener_end,
+        }
     }
+}
 
-    out
+/// How many consecutive `marker` bytes start at `index`.
+fn run_length(bytes: &[u8], index: usize, marker: u8) -> usize {
+    bytes[index..].iter().take_while(|&&b| b == marker).count()
+}
+
+/// Run of backticks at `index` that stops at the first already-masked one — a
+/// fenced block's backticks are not part of a span's delimiter run.
+fn unmasked_run_length(bytes: &[u8], masked: &[bool], index: usize) -> usize {
+    let mut length = 0usize;
+    while index + length < bytes.len() && bytes[index + length] == b'`' && !masked[index + length] {
+        length += 1;
+    }
+    length
+}
+
+/// Whether the byte at `index` is preceded by an odd number of backslashes.
+fn is_escaped(bytes: &[u8], index: usize) -> bool {
+    let mut backslashes = 0usize;
+    let mut cursor = index;
+    while cursor > 0 && bytes[cursor - 1] == b'\\' {
+        backslashes += 1;
+        cursor -= 1;
+    }
+    backslashes % 2 == 1
 }
 
 /// Bech32 alphabet used by NIP-19.
@@ -816,5 +932,147 @@ mod tests {
         let content = format!("nostr:{}", npub_mixed);
         let result = extract_nostr_uris(&content);
         assert_eq!(result, vec![TEST_HEX1]);
+    }
+}
+
+#[cfg(test)]
+mod code_region_parity_tests {
+    use super::{extract_at_mentions_with_known, strip_code_regions};
+
+    /// Whether the send path would emit a `p` tag for `alice`.
+    fn tags_alice(content: &str) -> bool {
+        !extract_at_mentions_with_known(&strip_code_regions(content), &["alice"]).is_empty()
+    }
+
+    /// Each of these renders as code in Desktop, so `hasMention` returns false
+    /// for it — verified by running Desktop's own `hasMention` over the same
+    /// inputs. Tagging them anyway wakes an agent for text nobody addressed.
+    #[test]
+    fn code_desktop_masks_never_produces_a_mention() {
+        for content in [
+            "~~~\n@alice\n~~~",
+            "~~~~\n@alice\n~~~~",
+            "```\n@alice\n```",
+            "``@alice``",
+            "``` @alice ```",
+            "`@alice`",
+            // A longer opener is not closed by a shorter run.
+            "````\n@alice\n```\nstill code\n````",
+            // Never closed: code to the end of the message, as Desktop treats it.
+            "```\n@alice",
+            "~~~\n@alice",
+            // CommonMark allows up to three spaces of indent before a fence.
+            "   ```\n@alice\n   ```",
+        ] {
+            assert!(
+                !tags_alice(content),
+                "must not tag a mention in {content:?}"
+            );
+        }
+    }
+
+    /// The other direction: a visible mention must keep its tag. A missed tag
+    /// is the worse failure — the agent never wakes at all.
+    #[test]
+    fn a_visible_mention_still_tags() {
+        for content in [
+            "hi @alice",
+            "```\ncode\n```\nhi @alice",
+            "~~~\ncode\n~~~\nhi @alice",
+            "``code`` and @alice",
+            "`code` then @alice",
+            // A fence marker mid-line opens nothing.
+            "look at ``` @alice",
+            // A backtick fence's info string cannot contain a backtick, so
+            // this is a span followed by text, not an unterminated block.
+            "``` `x` ``` @alice",
+        ] {
+            assert!(tags_alice(content), "must tag the mention in {content:?}");
+        }
+    }
+
+    /// An escaped backtick does not open a code span — matching Desktop, which
+    /// skips escaped delimiters when masking. The text survives stripping; it
+    /// still resolves to no mention because a backtick is not a mention opener,
+    /// which is exactly what Desktop concludes.
+    #[test]
+    fn an_escaped_backtick_does_not_open_a_span() {
+        assert_eq!(strip_code_regions("\\`@alice\\`"), "\\`@alice\\`");
+        assert!(!tags_alice("\\`@alice\\`"));
+        // The mention outside the escaped pair is untouched.
+        assert!(tags_alice("\\`x\\` @alice"));
+    }
+
+    /// A code span may cross a line ending — CommonMark allows it and Desktop
+    /// allows it. Refusing here left the span unmasked, so `` `code\n@alice` ``
+    /// emitted a `p` tag and could wake alice for code.
+    #[test]
+    fn a_code_span_may_cross_a_line_ending() {
+        assert!(!tags_alice("`code\n@alice` after"));
+        assert!(!tags_alice("`code\r\n@alice` after"));
+    }
+
+    /// Backslashes are literal inside a code span, so a backtick run preceded
+    /// by one still closes it — Desktop pairs with that run. Treating it as
+    /// escaped pairs the opener with a later delimiter instead, swallowing
+    /// everything between, including a visible mention.
+    #[test]
+    fn a_backslash_does_not_escape_a_closing_run() {
+        assert!(tags_alice("`x\\` @alice `y"));
+        assert!(tags_alice("a `x\\` @alice ok"));
+        // An escaped backtick still does not *open* a span, as before.
+        assert!(tags_alice("\\`x\\` @alice"));
+    }
+
+    /// An opener with no matching closer advances past the whole run.
+    /// Reconsidering its remaining backticks as shorter openers makes the two
+    /// implementations pair later delimiters differently.
+    #[test]
+    fn an_unmatched_opener_advances_past_its_whole_run() {
+        assert!(tags_alice("``a`b @alice"));
+        assert!(tags_alice("```a`b @alice"));
+    }
+
+    /// Fenced blocks are masked before spans are scanned, as Desktop does.
+    /// In one pass, the backtick inside the body closes an outer span, the real
+    /// closing fence then reads as a fresh unterminated opener, and the visible
+    /// mention below the block loses its tag.
+    #[test]
+    fn fences_are_masked_before_spans_are_scanned() {
+        assert!(tags_alice("```\n`\n```\n@alice"));
+        assert!(tags_alice("```\n``\n```\n@alice"));
+    }
+
+    /// Desktop recognizes LF, CRLF and CR line endings explicitly. A CR-only
+    /// message whose fences went unrecognized here would be masked there and
+    /// not here, tagging a mention the reader sees as code.
+    #[test]
+    fn fence_lines_are_found_under_all_three_line_endings() {
+        for content in [
+            "```\n@alice\n```",
+            "```\r\n@alice\r\n```",
+            "```\r@alice\r```",
+        ] {
+            assert!(!tags_alice(content), "must not tag inside {content:?}");
+        }
+        for content in [
+            "```\ncode\n```\n@alice",
+            "```\r\ncode\r\n```\r\n@alice",
+            "```\rcode\r```\r@alice",
+        ] {
+            assert!(
+                tags_alice(content),
+                "must tag after the block in {content:?}"
+            );
+        }
+    }
+
+    /// Documented divergence: Desktop also masks any line indented four spaces
+    /// or a tab. That is not CommonMark — the indented line here continues a
+    /// list item and renders as ordinary text — so copying the rule would drop
+    /// a `p` tag from a message whose mention is plainly visible.
+    #[test]
+    fn an_indented_list_continuation_keeps_its_mention() {
+        assert!(tags_alice("- item\n    @alice look"));
     }
 }
