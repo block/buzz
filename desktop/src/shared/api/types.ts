@@ -225,7 +225,6 @@ export type HomeFeed = {
 export type HomeFeedMeta = {
   since: number;
   total: number;
-  generatedAt: number;
 };
 
 export type HomeFeedResponse = {
