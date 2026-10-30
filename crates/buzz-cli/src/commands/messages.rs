@@ -1829,3 +1829,34 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod compact_format_tests {
+    use super::format_events;
+    use crate::OutputFormat;
+
+    #[test]
+    fn compact_format_keeps_pubkey_and_tags() {
+        let normalized = r#"[{"id":"aa","pubkey":"bb","kind":9,"content":"hi","created_at":1,"tags":[["p","cc"],["h","ch"]]}]"#;
+        let out = format_events(normalized, &OutputFormat::Compact);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let row = &v[0];
+        assert_eq!(row["id"], "aa");
+        assert_eq!(row["pubkey"], "bb");
+        assert_eq!(row["content"], "hi");
+        assert_eq!(row["created_at"], 1);
+        assert_eq!(row["tags"][0][0], "p");
+        assert_eq!(row["tags"][0][1], "cc");
+        assert!(row.get("kind").is_none(), "compact omits kind");
+    }
+
+    #[test]
+    fn compact_format_defaults_missing_tags() {
+        let normalized = r#"[{"id":"aa","content":"x","created_at":2}]"#;
+        let out = format_events(normalized, &OutputFormat::Compact);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        // Missing keys become JSON null via Value::default, tags become [].
+        assert_eq!(v[0]["pubkey"], "");
+        assert_eq!(v[0]["tags"], serde_json::json!([]));
+    }
+}
