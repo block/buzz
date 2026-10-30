@@ -222,12 +222,13 @@ test("getPersonaModelOptions for buzz-agent with no provider returns default mod
   assert.equal(options[0]?.id, "");
 });
 
-// ── formatModelDiscoveryErrorStatus — runtime unavailable ────────────────────
+// ── formatModelDiscoveryErrorStatus — unrecognised error text ────────────────
 //
-// When selectedRuntime.availability !== "available", AgentDefinitionDialog and
-// usePersonaModelDiscovery now call formatModelDiscoveryErrorStatus with a
-// synthetic "Runtime not available: <availability>" error. Verify the status
-// is non-null (so the UI surfaces the reason) for each unavailability reason.
+// Availability reasons no longer reach this formatter — they are mapped by
+// `formatRuntimeAvailabilityStatus` (see #7088 and its tests in
+// personaModelDiscoveryStatus.test.mjs). This case is kept because it pins the
+// formatter's behaviour for error text it has no specific handler for: it must
+// still return a usable status rather than null.
 
 test("formatModelDiscoveryErrorStatus returns a non-null status for runtime unavailable errors", () => {
   for (const availability of [
