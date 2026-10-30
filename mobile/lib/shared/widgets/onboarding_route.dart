@@ -11,7 +11,11 @@ Route<T> onboardingRoute<T>(
       settings: settings,
       transitionDuration: Duration.zero,
       reverseTransitionDuration: Duration.zero,
-      pageBuilder: (context, _, _) => builder(context),
+      pageBuilder: (context, _, _) => Semantics(
+        scopesRoute: true,
+        explicitChildNodes: true,
+        child: builder(context),
+      ),
     );
   }
   return MaterialPageRoute<T>(settings: settings, builder: builder);
@@ -44,5 +48,9 @@ class _InstantOnboardingRoute<T> extends PageRouteBuilder<T> {
     BuildContext context,
     Animation<double> animation,
     Animation<double> secondaryAnimation,
-  ) => (settings as OnboardingPage<T>).child;
+  ) => Semantics(
+    scopesRoute: true,
+    explicitChildNodes: true,
+    child: (settings as OnboardingPage<T>).child,
+  );
 }

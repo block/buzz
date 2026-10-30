@@ -1,6 +1,7 @@
 import 'package:buzz/features/onboarding/hosted_connect_page.dart';
 import 'package:buzz/features/pairing/add_community_page.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -11,6 +12,17 @@ void main() {
   testWidgets('reduced motion swaps Add and hosted steps instantly', (
     tester,
   ) async {
+    final semantics = tester.ensureSemantics();
+    void expectRouteScopes(Finder content, int count) {
+      var scopes = 0;
+      SemanticsNode? node = tester.getSemantics(content);
+      while (node != null) {
+        if (node.flagsCollection.scopesRoute) scopes++;
+        node = node.parent;
+      }
+      expect(scopes, count);
+    }
+
     final pair = ValueNotifier(false);
     addTearDown(pair.dispose);
     Widget app(Widget home, {List<NavigatorObserver> observers = const []}) =>
@@ -50,6 +62,7 @@ void main() {
     expect(pairRoute.animation!.isCompleted, isTrue);
     expect(pairRoute.transitionDuration, Duration.zero);
     expect(find.text('Add a community'), findsNothing);
+    expectRouteScopes(find.byType(TextField).first, 2);
     pair.value = false;
     await tester.pump();
     await tester.pump();
@@ -90,6 +103,8 @@ void main() {
     await tester.pump();
     final title = find.text('Select a community');
     expect(title, findsOneWidget);
+    // The imperative hosted route and its declarative step each own a scope.
+    expectRouteScopes(title, 2);
     final inner = ModalRoute.of(tester.element(title))!;
     expect(inner.transitionDuration, Duration.zero);
     expect(inner.animation!.isCompleted, isTrue);
@@ -102,6 +117,7 @@ void main() {
     await profile;
     await tester.pumpWidget(const SizedBox());
     await tester.pumpAndSettle();
+    semantics.dispose();
   });
 }
 
