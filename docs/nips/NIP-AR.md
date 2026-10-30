@@ -107,6 +107,8 @@ Sync lets a client hold an exact local copy of a set of artifacts and keep it cu
 
 Sync is additive. A client that does not use it keeps working unchanged, and a relay advertises each part separately (see Relay information document). A reader receives through sync only artifacts that it can already read with a current-state query, under the same channel read permission.
 
+Incremental reads (below) are a separate HTTP protocol with their own capability. They let a client update a saved store after a disconnect without reading the whole set again, but they do not prove the complete set that `EOSE` proves here.
+
 ```mermaid
 sequenceDiagram
   participant C as Client
