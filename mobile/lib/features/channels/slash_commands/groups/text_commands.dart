@@ -1,8 +1,6 @@
 import '../slash_command.dart';
 
-/// The message renderer does not process backslash escapes, so the shrug is
-/// sent literally.
-const shrugMarkdown = r'¯\_(ツ)_/¯';
+const shrugMarkdown = r'¯\\\_(ツ)\_/¯';
 
 final List<SlashCommand> textSlashCommands = [
   SlashCommand(
