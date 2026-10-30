@@ -102,4 +102,7 @@ at most 50:
 - A snapshot replaced before it was delivered is never sent. Alert on
   `time() - buzz_storage_usage_delivered_snapshot_timestamp_seconds` alongside
   snapshot age; `buzz_storage_usage_deliveries_total{outcome}` counts
-  `accepted`, `retry`, and `rejected` checks.
+  `accepted`, `retry`, and `rejected` checks. The leader re-publishes the
+  delivered timestamp on every check, so it survives the gauge idle timeout
+  between daily snapshots. After a restart or leader change it has no sample
+  until the next delivery succeeds, so treat a missing series as failing too.

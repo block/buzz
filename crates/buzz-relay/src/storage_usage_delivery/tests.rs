@@ -231,14 +231,14 @@ fn records_cover_snapshot_communities_and_zero_absent_active_ones() {
 async fn new_snapshot_is_delivered_once_in_bounded_batches() {
     let source = three_batch_source(1_700_000_000);
     let transport = MockTransport::default();
-    let mut handled = None;
+    let mut progress = DeliveryProgress::default();
 
     let outcome = check_once(
         &source,
         &transport,
         &endpoint(),
         &Keys::generate(),
-        &mut handled,
+        &mut progress,
     )
     .await;
 
@@ -258,7 +258,7 @@ async fn new_snapshot_is_delivered_once_in_bounded_batches() {
         &transport,
         &endpoint(),
         &Keys::generate(),
-        &mut handled,
+        &mut progress,
     )
     .await;
     assert_eq!(outcome, CheckOutcome::Unchanged);
@@ -273,7 +273,7 @@ async fn new_snapshot_is_delivered_once_in_bounded_batches() {
         &transport,
         &endpoint(),
         &Keys::generate(),
-        &mut handled,
+        &mut progress,
     )
     .await;
     assert_eq!(outcome, CheckOutcome::Delivered);
@@ -292,18 +292,18 @@ async fn retryable_failures_resend_the_whole_snapshot_next_check() {
     ] {
         let source = three_batch_source(1_700_000_000);
         let transport = MockTransport::answering([Ok(StatusCode::OK), failure.clone()]);
-        let mut handled = None;
+        let mut progress = DeliveryProgress::default();
 
         let outcome = check_once(
             &source,
             &transport,
             &endpoint(),
             &Keys::generate(),
-            &mut handled,
+            &mut progress,
         )
         .await;
         assert_eq!(outcome, CheckOutcome::Retry, "{failure:?}");
-        assert_eq!(handled, None, "{failure:?}");
+        assert_eq!(progress.handled, None, "{failure:?}");
         assert_eq!(transport.take_bodies().len(), 2, "{failure:?}");
 
         let outcome = check_once(
@@ -311,7 +311,7 @@ async fn retryable_failures_resend_the_whole_snapshot_next_check() {
             &transport,
             &endpoint(),
             &Keys::generate(),
-            &mut handled,
+            &mut progress,
         )
         .await;
         assert_eq!(outcome, CheckOutcome::Delivered, "{failure:?}");
@@ -331,14 +331,14 @@ async fn retryable_failures_resend_the_whole_snapshot_next_check() {
 async fn client_error_abandons_only_that_snapshot() {
     let source = three_batch_source(1_700_000_000);
     let transport = MockTransport::answering([Ok(StatusCode::BAD_REQUEST)]);
-    let mut handled = None;
+    let mut progress = DeliveryProgress::default();
 
     let outcome = check_once(
         &source,
         &transport,
         &endpoint(),
         &Keys::generate(),
-        &mut handled,
+        &mut progress,
     )
     .await;
     assert_eq!(outcome, CheckOutcome::Rejected);
@@ -349,7 +349,7 @@ async fn client_error_abandons_only_that_snapshot() {
         &transport,
         &endpoint(),
         &Keys::generate(),
-        &mut handled,
+        &mut progress,
     )
     .await;
     assert_eq!(outcome, CheckOutcome::Unchanged);
@@ -364,7 +364,7 @@ async fn client_error_abandons_only_that_snapshot() {
         &transport,
         &endpoint(),
         &Keys::generate(),
-        &mut handled,
+        &mut progress,
     )
     .await;
     assert_eq!(outcome, CheckOutcome::Delivered);
@@ -374,19 +374,96 @@ async fn client_error_abandons_only_that_snapshot() {
 async fn missing_snapshot_sends_nothing() {
     let source = MockSource::new(None, vec![community(1, true)]);
     let transport = MockTransport::default();
-    let mut handled = None;
+    let mut progress = DeliveryProgress::default();
 
     let outcome = check_once(
         &source,
         &transport,
         &endpoint(),
         &Keys::generate(),
-        &mut handled,
+        &mut progress,
     )
     .await;
 
     assert_eq!(outcome, CheckOutcome::Unchanged);
     assert!(transport.take_bodies().is_empty());
+}
+
+/// Runs one real `check_once` against a fresh recorder and returns the
+/// delivered-snapshot gauge that check published, if any.
+fn check_publishing(
+    runtime: &tokio::runtime::Runtime,
+    source: &MockSource,
+    transport: &MockTransport,
+    progress: &mut DeliveryProgress,
+) -> (CheckOutcome, Option<f64>) {
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let outcome = metrics::with_local_recorder(&recorder, || {
+        runtime.block_on(check_once(
+            source,
+            transport,
+            &endpoint(),
+            &Keys::generate(),
+            progress,
+        ))
+    });
+    let gauge = snapshotter
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .find_map(|(key, _, _, value)| match value {
+            DebugValue::Gauge(value)
+                if key.key().name()
+                    == "buzz_storage_usage_delivered_snapshot_timestamp_seconds" =>
+            {
+                Some(value.into_inner())
+            }
+            _ => None,
+        });
+    (outcome, gauge)
+}
+
+#[test]
+fn every_check_republishes_the_last_delivered_snapshot_time() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let source = MockSource::new(
+        Some(stored(&snapshot_of(&[(1, 100, 2)]), 1_700_000_000)),
+        vec![community(1, true)],
+    );
+    let transport = MockTransport::default();
+    let mut progress = DeliveryProgress::default();
+
+    assert_eq!(
+        check_publishing(&runtime, &source, &transport, &mut progress),
+        (CheckOutcome::Delivered, Some(1_700_000_000.0))
+    );
+    // Between daily snapshots the gauge must keep its sample, or the
+    // exporter's idle timeout drops it and a freshness alert cannot fire.
+    assert_eq!(
+        check_publishing(&runtime, &source, &transport, &mut progress),
+        (CheckOutcome::Unchanged, Some(1_700_000_000.0))
+    );
+    // A failing new snapshot keeps reporting the old delivery time.
+    source.replace(stored(&snapshot_of(&[(1, 1, 1)]), 1_700_086_400));
+    let failing = MockTransport::answering([Ok(StatusCode::SERVICE_UNAVAILABLE)]);
+    assert_eq!(
+        check_publishing(&runtime, &source, &failing, &mut progress),
+        (CheckOutcome::Retry, Some(1_700_000_000.0))
+    );
+
+    // Nothing delivered yet: no sample, rather than a misleading zero.
+    let mut fresh = DeliveryProgress::default();
+    let failing = MockTransport::answering([Ok(StatusCode::SERVICE_UNAVAILABLE)]);
+    assert_eq!(
+        check_publishing(&runtime, &source, &failing, &mut fresh),
+        (CheckOutcome::Retry, None)
+    );
 }
 
 async fn read_http_request(stream: &mut TcpStream) -> (String, Vec<u8>, String) {
@@ -449,9 +526,9 @@ async fn http_delivery_is_signed_by_the_relay_key() {
     let transport = ReqwestDeliveryTransport {
         http: build_delivery_http_client().expect("delivery client"),
     };
-    let mut handled = None;
+    let mut progress = DeliveryProgress::default();
 
-    let outcome = check_once(&source, &transport, &url, &relay_keypair, &mut handled).await;
+    let outcome = check_once(&source, &transport, &url, &relay_keypair, &mut progress).await;
 
     assert_eq!(outcome, CheckOutcome::Delivered);
     let (request_line, body, authorization) = tokio::time::timeout(Duration::from_secs(2), server)

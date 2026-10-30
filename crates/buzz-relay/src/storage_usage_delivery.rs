@@ -223,15 +223,46 @@ impl CheckOutcome {
     }
 }
 
-/// Deliver the stored snapshot if it differs from `handled`, the
-/// `completed_at` of the last snapshot this pod delivered or abandoned.
-/// Updates `handled` only on a terminal outcome.
+/// What this pod has handled, kept across checks while it leads.
+#[derive(Debug, Default)]
+struct DeliveryProgress {
+    /// `completed_at` of the last snapshot delivered or abandoned. Set only
+    /// on a terminal outcome.
+    handled: Option<DateTime<Utc>>,
+    /// `completed_at` of the last snapshot whose every batch was accepted.
+    delivered: Option<DateTime<Utc>>,
+}
+
+/// One leader check: deliver the stored snapshot if it is new, then record
+/// the outcome. The delivered-snapshot gauge is re-published on every check,
+/// including unchanged and failed ones, so it outlives the exporter's gauge
+/// idle timeout between daily snapshots and a freshness alert always has a
+/// sample to fire on.
 async fn check_once<S: UsageSource, T: DeliveryTransport>(
     source: &S,
     transport: &T,
     url: &url::Url,
     relay_keypair: &nostr::Keys,
-    handled: &mut Option<DateTime<Utc>>,
+    progress: &mut DeliveryProgress,
+) -> CheckOutcome {
+    let outcome = deliver_new_snapshot(source, transport, url, relay_keypair, progress).await;
+    if let Some(label) = outcome.metric_label() {
+        metrics::counter!("buzz_storage_usage_deliveries_total", "outcome" => label).increment(1);
+    }
+    if let Some(delivered) = progress.delivered {
+        metrics::gauge!("buzz_storage_usage_delivered_snapshot_timestamp_seconds")
+            .set(delivered.timestamp() as f64);
+    }
+    outcome
+}
+
+/// Deliver the stored snapshot if it differs from `progress.handled`.
+async fn deliver_new_snapshot<S: UsageSource, T: DeliveryTransport>(
+    source: &S,
+    transport: &T,
+    url: &url::Url,
+    relay_keypair: &nostr::Keys,
+    progress: &mut DeliveryProgress,
 ) -> CheckOutcome {
     let latest = match source.completed_at().await {
         Ok(Some(latest)) => latest,
@@ -241,7 +272,7 @@ async fn check_once<S: UsageSource, T: DeliveryTransport>(
             return CheckOutcome::Retry;
         }
     };
-    if *handled == Some(latest) {
+    if progress.handled == Some(latest) {
         return CheckOutcome::Unchanged;
     }
     let stored = match source.snapshot().await {
@@ -257,7 +288,7 @@ async fn check_once<S: UsageSource, T: DeliveryTransport>(
         Err(error) => {
             // Re-reading the same row cannot succeed; wait for the next run.
             error!(%error, "stored storage snapshot does not decode; skipping it");
-            *handled = Some(stored.completed_at);
+            progress.handled = Some(stored.completed_at);
             return CheckOutcome::Rejected;
         }
     };
@@ -281,7 +312,7 @@ async fn check_once<S: UsageSource, T: DeliveryTransport>(
             Ok(body) => body,
             Err(error) => {
                 error!(%error, "storage-usage batch encoding failed");
-                *handled = Some(stored.completed_at);
+                progress.handled = Some(stored.completed_at);
                 return CheckOutcome::Rejected;
             }
         };
@@ -304,7 +335,7 @@ async fn check_once<S: UsageSource, T: DeliveryTransport>(
             }
             Ok(status) => {
                 error!(%status, batch = index, "storage-usage delivery rejected; skipping this snapshot");
-                *handled = Some(stored.completed_at);
+                progress.handled = Some(stored.completed_at);
                 return CheckOutcome::Rejected;
             }
             Err(error) => {
@@ -313,9 +344,8 @@ async fn check_once<S: UsageSource, T: DeliveryTransport>(
             }
         }
     }
-    *handled = Some(stored.completed_at);
-    metrics::gauge!("buzz_storage_usage_delivered_snapshot_timestamp_seconds")
-        .set(stored.completed_at.timestamp() as f64);
+    progress.handled = Some(stored.completed_at);
+    progress.delivered = Some(stored.completed_at);
     info!(
         %measured_at,
         communities = records.len(),
@@ -335,7 +365,7 @@ pub async fn run_delivery_worker(state: Arc<AppState>, url: url::Url) {
     };
     let source = DbUsageSource { db: &state.db };
     let mut leader: Option<buzz_db::SessionLeader> = None;
-    let mut handled = None;
+    let mut progress = DeliveryProgress::default();
     let mut interval = tokio::time::interval(CHECK_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -362,18 +392,14 @@ pub async fn run_delivery_worker(state: Arc<AppState>, url: url::Url) {
         if leader.is_none() {
             continue;
         }
-        let outcome = check_once(
+        check_once(
             &source,
             &transport,
             &url,
             &state.relay_keypair,
-            &mut handled,
+            &mut progress,
         )
         .await;
-        if let Some(label) = outcome.metric_label() {
-            metrics::counter!("buzz_storage_usage_deliveries_total", "outcome" => label)
-                .increment(1);
-        }
     }
 }
 
