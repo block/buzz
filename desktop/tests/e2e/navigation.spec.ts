@@ -597,48 +597,85 @@ test("composer Buzz chip labels wrap without orphaning their icons", async ({
   await expect(chip).toHaveText("relaytoolsobservabilityconsole-main");
   await page.getByTestId("send-message").click();
 
-  const sentChip = page.getByTestId("message-row").last().getByRole("button", {
+  const sentRow = page.getByTestId("message-row").last();
+  const sentChip = sentRow.getByRole("button", {
     name: "Open repository relaytoolsobservabilityconsole-main",
   });
   await expect(sentChip).toBeVisible();
   await expect(sentChip).toHaveClass(/wrapping-inline-chip/);
-  await sentChip.evaluate((element) => {
-    const container = element.parentElement;
-    if (container) container.style.width = "220px";
-  });
-  const fragmentMetrics = await sentChip.evaluate((element) => {
-    const chipStyle = getComputedStyle(element);
-    const rects = Array.from(element.getClientRects(), (rect) => ({
-      bottom: rect.bottom,
-      height: rect.height,
-      left: rect.left,
-      right: rect.right,
-      top: rect.top,
-      width: rect.width,
-    })).filter((rect) => rect.width > 0 && rect.height > 0);
-    const fragmentTops = Array.from(
-      new Set(rects.map((rect) => Math.round(rect.top))),
-    ).sort((a, b) => a - b);
-    return {
-      boxDecorationBreak:
-        chipStyle.getPropertyValue("box-decoration-break") ||
-        chipStyle.getPropertyValue("-webkit-box-decoration-break"),
-      fragmentStep:
-        fragmentTops.length > 1 ? fragmentTops[1] - fragmentTops[0] : null,
-      lineHeight: Number.parseFloat(chipStyle.lineHeight),
-      rects,
-    };
-  });
-  expect(fragmentMetrics.boxDecorationBreak).toBe("clone");
-  expect(fragmentMetrics.lineHeight).toBe(22);
-  expect(fragmentMetrics.fragmentStep).toBe(22);
-  expect(fragmentMetrics.rects.length).toBeGreaterThanOrEqual(2);
+  // The optimistic message row can be re-created when the relay echo lands,
+  // dropping any inline style applied before the swap — apply the width and
+  // measure in one evaluate, polling until the chip settles into wrapped
+  // fragments with the expected cloned-box metrics.
+  await expect
+    .poll(() =>
+      sentChip.evaluate((element) => {
+        const container = element.parentElement;
+        if (container) container.style.width = "220px";
+        const chipStyle = getComputedStyle(element);
+        const rects = Array.from(element.getClientRects()).filter(
+          (rect) => rect.width > 0 && rect.height > 0,
+        );
+        const fragmentTops = Array.from(
+          new Set(rects.map((rect) => Math.round(rect.top))),
+        ).sort((a, b) => a - b);
+        return {
+          boxDecorationBreak:
+            chipStyle.getPropertyValue("box-decoration-break") ||
+            chipStyle.getPropertyValue("-webkit-box-decoration-break"),
+          fragmentStep:
+            fragmentTops.length > 1 ? fragmentTops[1] - fragmentTops[0] : null,
+          lineHeight: Number.parseFloat(chipStyle.lineHeight),
+          wrapped: rects.length >= 2,
+        };
+      }),
+    )
+    .toMatchObject({
+      boxDecorationBreak: "clone",
+      fragmentStep: 22,
+      lineHeight: 22,
+      wrapped: true,
+    });
+
+  // The send and the wrap settle the timeline at its floor over several
+  // frames, and Radix closes an open tooltip whenever an ancestor of its
+  // trigger scrolls. That settle scrolls only when layout changes, and it ends
+  // at the floor. So focus the chip once the timeline sits at its floor and
+  // holds there for two frames: a timeline that hasn't started settling yet
+  // isn't at the floor. The send's ack is one more layout change: it drops
+  // the row's "Sending…" status, and the confirmed row can lose its header.
+  // Wait for it first, so the floor the poll sees is the final one.
+  await expect(sentRow.getByTestId("message-send-status")).toHaveCount(0);
+  const timeline = page.getByTestId("message-timeline");
+  await expect
+    .poll(() =>
+      timeline.evaluate(
+        (element) =>
+          new Promise<boolean>((resolve) => {
+            const atFloor = () =>
+              element.scrollHeight - element.clientHeight - element.scrollTop <=
+              1;
+            if (!atFloor()) {
+              resolve(false);
+              return;
+            }
+            const scrollTop = element.scrollTop;
+            requestAnimationFrame(() =>
+              requestAnimationFrame(() =>
+                resolve(atFloor() && element.scrollTop === scrollTop),
+              ),
+            );
+          }),
+      ),
+    )
+    .toBe(true);
 
   const tooltip = page.getByRole("tooltip");
   await sentChip.focus();
-  await expect(tooltip).toBeVisible();
   const positionOverFragment = async (index: number) => {
     const fragment = await sentChip.evaluate((element, fragmentIndex) => {
+      const container = element.parentElement;
+      if (container) container.style.width = "220px";
       const rects = Array.from(element.getClientRects()).filter(
         (rect) => rect.width > 0 && rect.height > 0,
       );
@@ -653,9 +690,9 @@ test("composer Buzz chip labels wrap without orphaning their icons", async ({
     }, index);
     if (!fragment) throw new Error(`Expected chip fragment ${index}`);
     const cursorX = fragment.left + fragment.width / 2;
-    const cursorY = fragment.top + fragment.height / 2;
-    await page.mouse.move(cursorX, cursorY);
-    await expect(tooltip).toBeVisible();
+    await page.mouse.move(cursorX, fragment.top + fragment.height / 2);
+    // A closing tooltip stays visible through its exit animation.
+    await expect(tooltip).toHaveAttribute("data-state", /open/);
     let tooltipCenter = Number.NaN;
     await expect
       .poll(async () => {
