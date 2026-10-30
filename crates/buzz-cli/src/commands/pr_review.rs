@@ -54,10 +54,16 @@ fn allowed_actors(root: &Root) -> HashSet<String> {
 /// owner, else of the root. An update without a `c` tag leaves no tip.
 async fn tip_commit(client: &BuzzClient, root: &Root) -> Result<String, CliError> {
     let allowed = allowed_actors(root);
+    let authors: Vec<&String> = allowed.iter().collect();
     let repo_address = format!("30617:{}:{}", root.repo.owner, root.repo.id);
     let updates = fetch_bounded(
         client,
-        serde_json::json!({"kinds": [KIND_GIT_PR_UPDATE], "#a": [repo_address]}),
+        serde_json::json!({
+            "kinds": [KIND_GIT_PR_UPDATE],
+            "authors": authors,
+            "#a": [repo_address],
+            "#E": [root.event.id],
+        }),
     )
     .await?;
     let mut latest: Option<&WireEvent> = None;
@@ -226,9 +232,17 @@ pub async fn cmd_pr_review(
             publish(client, builder).await
         }
         ReviewAction::Approve | ReviewAction::RequestChanges => {
-            let (decision, default_body) = match action {
-                ReviewAction::Approve => (GitReviewDecision::Approve, "Approved these changes"),
-                _ => (GitReviewDecision::RequestChanges, "Requested changes"),
+            let (decision, body) = match action {
+                ReviewAction::Approve => (
+                    GitReviewDecision::Approve,
+                    body.unwrap_or_else(|| "Approved these changes".into()),
+                ),
+                _ => (
+                    GitReviewDecision::RequestChanges,
+                    body.ok_or_else(|| {
+                        CliError::Usage("--request-changes needs non-empty --content".into())
+                    })?,
+                ),
             };
             if signer == root.author {
                 return Err(CliError::Usage(
@@ -258,7 +272,7 @@ pub async fn cmd_pr_review(
                 &root.repo,
                 &root.event.id,
                 decision,
-                body.as_deref().unwrap_or(default_body),
+                &body,
                 &recipients,
                 &commit,
             )
@@ -272,6 +286,7 @@ pub async fn cmd_pr_review(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::git_thread::THREAD_READ_BOUND;
     use crate::commands::issues::cmd_issue_comment;
     use axum::{body::Bytes, extract::State, routing::post, Json, Router};
     use buzz_sdk::{GitIssueMeta, GitPullRequestMeta, GitRepoCoord, GitStatus, GitStatusMeta};
@@ -507,6 +522,14 @@ mod tests {
         }
         assert_eq!(w.published().len(), 1);
 
+        for blank in [None, Some(""), Some(" \n")] {
+            assert!(matches!(
+                decide(&w.reviewer, ReviewAction::RequestChanges, blank).await,
+                Err(CliError::Usage(_))
+            ));
+        }
+        assert_eq!(w.published().len(), 1);
+
         decide(&w.reviewer, ReviewAction::Approve, None)
             .await
             .unwrap();
@@ -526,6 +549,10 @@ mod tests {
 
         w.seed_update(&w.author, &pr, C2, 5_000);
         w.seed_update(&w.stranger, &pr, C3, 6_000);
+        let other_pr = "9".repeat(64);
+        for created_at in 0..=THREAD_READ_BOUND as u64 {
+            w.seed_update(&w.owner, &other_pr, C3, 2_000 + created_at);
+        }
         decide(
             &w.reviewer,
             ReviewAction::RequestChanges,
