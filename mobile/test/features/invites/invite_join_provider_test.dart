@@ -1,3 +1,4 @@
+import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -17,6 +18,47 @@ import 'package:buzz/shared/deeplink/deep_link.dart';
 import '../../shared/community/community_storage_test.dart';
 
 void main() {
+  test(
+    'legacy invite entry refuses staging before key generation or claim',
+    () async {
+      final storage = CommunityStorage(secure: FakeSecureStorage());
+      var generated = 0;
+      var requests = 0;
+      final container = ProviderContainer(
+        overrides: [
+          communityStorageProvider.overrideWithValue(storage),
+          inviteKeyGeneratorProvider.overrideWithValue(() {
+            generated++;
+            return nostr.Keys.generate();
+          }),
+          inviteJoinHttpClientProvider.overrideWithValue(
+            http_testing.MockClient((_) async {
+              requests++;
+              return http.Response('{}', 500);
+            }),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(communityListProvider.future);
+      final notifier = container.read(inviteJoinProvider.notifier);
+      await notifier.prepare(
+        const InviteDeepLink(
+          relayUrl: 'wss://team.communities.public.builderlabstaging.xyz',
+          code: 'fixture',
+        ),
+      );
+      await notifier.confirmJoin();
+      expect(container.read(inviteJoinProvider).status, InviteJoinStatus.error);
+      expect(generated, 0);
+      expect(requests, 0);
+      expect(await storage.loadAll(), isEmpty);
+    },
+    skip: !HostedEnvironment.requiresAuth(
+      'team.communities.public.builderlabstaging.xyz',
+    ),
+  );
+
   for (final existingRelayUrl in [
     'wss://relay.example.com',
     'https://relay.example.com',
@@ -572,6 +614,68 @@ void main() {
     expect(attempts, 1);
   });
 
+  for (final (sentinel, guidance) in [
+    (
+      'invite_restricted',
+      'This account, or the account that owns it, is restricted in this community. Contact a community administrator. If the restriction is temporary, try again after it ends.',
+    ),
+    (
+      'invite_owner_mismatch',
+      'This account does not match its recorded owner. Use the correct account or owner identity to join this community.',
+    ),
+  ]) {
+    test('$sentinel explains recovery without replacing the invite', () async {
+      final keys = nostr.Keys.generate();
+      var attempts = 0;
+      final storage = CommunityStorage(secure: FakeSecureStorage());
+      final auth = _RecordingAuthNotifier();
+      final container = ProviderContainer(
+        overrides: [
+          communityStorageProvider.overrideWithValue(storage),
+          authProvider.overrideWith(() => auth),
+          inviteKeyGeneratorProvider.overrideWithValue(() => keys),
+          inviteJoinRecoveryProvider.overrideWithValue(
+            (_) => _successfulRecovery(),
+          ),
+          inviteJoinHttpClientProvider.overrideWithValue(
+            http_testing.MockClient((request) async {
+              attempts++;
+              expect(jsonDecode(request.body)['code'], 'same-code');
+              return attempts == 1
+                  ? http.Response(jsonEncode({'error': sentinel}), 403)
+                  : http.Response(jsonEncode({'status': 'joined'}), 200);
+            }),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      final notifier = container.read(inviteJoinProvider.notifier);
+      await notifier.prepare(
+        const InviteDeepLink(
+          relayUrl: 'wss://relay.example.com',
+          code: 'same-code',
+        ),
+      );
+      await notifier.confirmJoin();
+
+      final denied = container.read(inviteJoinProvider);
+      expect(denied.status, InviteJoinStatus.error);
+      expect(denied.errorMessage, guidance);
+      expect(denied.requiresFreshInvite, isFalse);
+      expect(attempts, 1);
+      expect(auth.authenticatedCommunities, isEmpty);
+      expect(await storage.loadAll(), isEmpty);
+
+      // Model an explicit retry after the restriction or identity is corrected.
+      await notifier.confirmJoin();
+      expect(
+        container.read(inviteJoinProvider).status,
+        InviteJoinStatus.success,
+      );
+      expect(attempts, 2);
+    });
+  }
+
   test('failed claim can be retried and preserves policy receipt', () async {
     final keys = nostr.Keys.generate();
     var attempts = 0;
@@ -749,7 +853,12 @@ class _RecordingAuthNotifier extends AuthNotifier {
       const AuthState(status: AuthStatus.unauthenticated);
 
   @override
-  Future<void> authenticateWithCommunity(Community community) async {
+  Future<void> authenticateWithCommunity(
+    Community community, {
+    bool Function()? shouldContinue,
+    bool activate = true,
+  }) async {
+    if (shouldContinue != null && !shouldContinue()) return;
     final storage = ref.read(communityStorageProvider);
     await storage.save(community);
     await storage.saveActiveId(community.id);

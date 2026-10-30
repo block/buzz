@@ -7,6 +7,7 @@ import 'package:buzz/features/invites/invite_join_provider.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
+import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -15,6 +16,64 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/community/community_storage_test.dart';
 
 void main() {
+  for (final outcome in ['handled', 'declined', 'failed']) {
+    testWidgets('hosted handler drains queued links after $outcome setup', (
+      tester,
+    ) async {
+      final BuzzDeepLink first = outcome == 'declined'
+          ? const AddCommunityDeepLink(
+              relayUrl: 'wss://one.communities.buzz.xyz',
+              name: 'One',
+            )
+          : const InviteDeepLink(
+              relayUrl: 'wss://one.communities.buzz.xyz',
+              code: 'same',
+            );
+      final duplicate = outcome == 'declined'
+          ? first
+          : InviteDeepLink(
+              relayUrl: 'wss://one.communities.buzz.xyz',
+              code: 'same',
+            );
+      const second = InviteDeepLink(
+        relayUrl: 'wss://two.communities.buzz.xyz',
+        code: 'invite',
+      );
+      final pending = _QueuedPendingDeepLinkNotifier([
+        first,
+        duplicate,
+        second,
+      ]);
+      final handled = <BuzzDeepLink>[];
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            pendingDeepLinkProvider.overrideWith(() => pending),
+            inviteKeyGeneratorProvider.overrideWithValue(
+              () => throw StateError('must not generate'),
+            ),
+          ],
+          child: MaterialApp(
+            home: DeepLinkDispatcher(
+              dispatchMessageLinks: false,
+              onboardingHandler: (_, link) async {
+                handled.add(link);
+                if (link == first) {
+                  if (outcome == 'declined') return false;
+                  if (outcome == 'failed') throw StateError('setup failed');
+                }
+                return true;
+              },
+              child: const Scaffold(body: SizedBox()),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(handled, [first, duplicate, second]);
+      expect(pending.consumeCalls, 3);
+    });
+  }
   testWidgets('queues deep links in arrival order until acknowledged', (
     tester,
   ) async {
@@ -55,11 +114,13 @@ void main() {
     const missing = ChannelDeepLink(channelId: 'missing-channel');
     const next = ChannelDeepLink(channelId: 'channel-1');
     final pending = _QueuedPendingDeepLinkNotifier([missing, next]);
+    final session = _MetadataRelaySession(const []);
 
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
           pendingDeepLinkProvider.overrideWith(() => pending),
+          relaySessionProvider.overrideWith(() => session),
           channelsProvider.overrideWith(
             () => _FakeChannelsNotifier(Future.value([_channel])),
           ),
@@ -82,6 +143,392 @@ void main() {
     );
     expect(destination.channel.id, 'channel-1');
     expect(destination.link, same(next));
+  });
+
+  for (final visibility in ['open', 'private']) {
+    testWidgets('resolves an unlisted $visibility channel from the relay', (
+      tester,
+    ) async {
+      const link = MessageDeepLink(
+        channelId: 'unjoined-channel',
+        messageId: 'message-2',
+        threadRootId: 'message-1',
+      );
+      final pending = _RecordingPendingDeepLinkNotifier(link);
+      final session = _MetadataRelaySession([
+        _channelMeta('unjoined-channel', 'agents', visibility, createdAt: 1),
+        _channelMeta('unjoined-channel', 'agents-renamed', visibility),
+      ]);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            pendingDeepLinkProvider.overrideWith(() => pending),
+            relaySessionProvider.overrideWith(() => session),
+            channelsProvider.overrideWith(
+              () => _FakeChannelsNotifier(Future.value([_channel])),
+            ),
+          ],
+          child: MaterialApp(
+            home: DeepLinkDispatcher(
+              destinationBuilder: (channel, link) =>
+                  _CapturedDestination(channel: channel, link: link),
+              child: const Scaffold(body: SizedBox()),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(session.filters, hasLength(1));
+      expect(session.filters.single.kinds, [39000]);
+      expect(session.filters.single.tags['#d'], ['unjoined-channel']);
+      expect(pending.consumeCalls, 1);
+      if (visibility == 'private') {
+        expect(find.byType(_CapturedDestination), findsNothing);
+        expect(
+          find.text('Channel not found in this workspace'),
+          findsOneWidget,
+        );
+        return;
+      }
+      final destination = tester.widget<_CapturedDestination>(
+        find.byType(_CapturedDestination),
+      );
+      expect(destination.channel.id, 'unjoined-channel');
+      expect(destination.channel.name, 'agents-renamed');
+      expect(destination.channel.isMember, isFalse);
+      expect(destination.link, same(link));
+    });
+  }
+
+  testWidgets('holds a link whose lookup ends while dispatch is off', (
+    tester,
+  ) async {
+    const link = ChannelDeepLink(channelId: 'unjoined-channel');
+    final pending = _RecordingPendingDeepLinkNotifier(link);
+    final gate = Completer<void>();
+    final session = _MetadataRelaySession([
+      _channelMeta('unjoined-channel', 'agents', 'open'),
+    ], gate: gate);
+    final dispatch = ValueNotifier(true);
+    addTearDown(dispatch.dispose);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          pendingDeepLinkProvider.overrideWith(() => pending),
+          relaySessionProvider.overrideWith(() => session),
+          channelsProvider.overrideWith(
+            () => _FakeChannelsNotifier(Future.value([_channel])),
+          ),
+        ],
+        child: MaterialApp(
+          home: ValueListenableBuilder<bool>(
+            valueListenable: dispatch,
+            builder: (_, enabled, _) => DeepLinkDispatcher(
+              dispatchMessageLinks: enabled,
+              destinationBuilder: (channel, link) =>
+                  _CapturedDestination(channel: channel, link: link),
+              child: const Scaffold(body: SizedBox()),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(session.filters, hasLength(1));
+
+    // Hosted setup appears while the lookup is still waiting on the relay.
+    dispatch.value = false;
+    await tester.pump();
+    gate.complete();
+    await tester.pumpAndSettle();
+
+    expect(find.byType(_CapturedDestination), findsNothing);
+    expect(pending.consumeCalls, 0);
+    expect(find.text('Channel not found in this workspace'), findsNothing);
+
+    // Setup closes: the parked link opens without a new link or channel event.
+    dispatch.value = true;
+    await tester.pumpAndSettle();
+
+    final destination = tester.widget<_CapturedDestination>(
+      find.byType(_CapturedDestination),
+    );
+    expect(destination.channel.id, 'unjoined-channel');
+    expect(destination.link, same(link));
+    expect(pending.consumeCalls, 1);
+  });
+
+  testWidgets('parks an unlisted channel link until the session connects', (
+    tester,
+  ) async {
+    const link = ChannelDeepLink(channelId: 'unjoined-channel');
+    final pending = _RecordingPendingDeepLinkNotifier(link);
+    final session = _MetadataRelaySession([
+      _channelMeta('unjoined-channel', 'agents', 'open'),
+    ], initialStatus: SessionStatus.reconnecting);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          pendingDeepLinkProvider.overrideWith(() => pending),
+          relaySessionProvider.overrideWith(() => session),
+          channelsProvider.overrideWith(
+            () => _FakeChannelsNotifier(Future.value([_channel])),
+          ),
+        ],
+        child: MaterialApp(
+          home: DeepLinkDispatcher(
+            destinationBuilder: (channel, link) =>
+                _CapturedDestination(channel: channel, link: link),
+            child: const Scaffold(body: SizedBox()),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Cached channels are loaded, but no lookup goes to an unauthenticated
+    // socket and the link stays parked.
+    expect(session.filters, isEmpty);
+    expect(pending.consumeCalls, 0);
+    expect(find.byType(_CapturedDestination), findsNothing);
+    expect(find.byType(SnackBar), findsNothing);
+
+    session.setStatus(SessionStatus.connected);
+    await tester.pumpAndSettle();
+
+    expect(session.filters, hasLength(1));
+    final destination = tester.widget<_CapturedDestination>(
+      find.byType(_CapturedDestination),
+    );
+    expect(destination.channel.id, 'unjoined-channel');
+    expect(destination.link, same(link));
+    expect(pending.consumeCalls, 1);
+  });
+
+  testWidgets('opens a listed channel link while the session reconnects', (
+    tester,
+  ) async {
+    const link = ChannelDeepLink(channelId: 'channel-1');
+    final pending = _RecordingPendingDeepLinkNotifier(link);
+    final session = _MetadataRelaySession(
+      const [],
+      initialStatus: SessionStatus.reconnecting,
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          pendingDeepLinkProvider.overrideWith(() => pending),
+          relaySessionProvider.overrideWith(() => session),
+          channelsProvider.overrideWith(
+            () => _FakeChannelsNotifier(Future.value([_channel])),
+          ),
+        ],
+        child: MaterialApp(
+          home: DeepLinkDispatcher(
+            destinationBuilder: (channel, link) =>
+                _CapturedDestination(channel: channel, link: link),
+            child: const Scaffold(body: SizedBox()),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(session.filters, isEmpty);
+    final destination = tester.widget<_CapturedDestination>(
+      find.byType(_CapturedDestination),
+    );
+    expect(destination.channel.id, 'channel-1');
+    expect(pending.consumeCalls, 1);
+  });
+
+  for (final backBeforeLookupEnds in [false, true]) {
+    testWidgets('retries a lookup cancelled by a session drop '
+        '(back before it ends: $backBeforeLookupEnds)', (tester) async {
+      const link = ChannelDeepLink(channelId: 'unjoined-channel');
+      final pending = _RecordingPendingDeepLinkNotifier(link);
+      final gate = Completer<void>();
+      final session = _MetadataRelaySession([
+        _channelMeta('unjoined-channel', 'agents', 'open'),
+      ], gate: gate);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            pendingDeepLinkProvider.overrideWith(() => pending),
+            relaySessionProvider.overrideWith(() => session),
+            channelsProvider.overrideWith(
+              () => _FakeChannelsNotifier(Future.value([_channel])),
+            ),
+          ],
+          child: MaterialApp(
+            home: DeepLinkDispatcher(
+              destinationBuilder: (channel, link) =>
+                  _CapturedDestination(channel: channel, link: link),
+              child: const Scaffold(body: SizedBox()),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(session.filters, hasLength(1));
+
+      session.drop();
+      if (backBeforeLookupEnds) {
+        session.setStatus(SessionStatus.connected);
+      } else {
+        await tester.pumpAndSettle();
+        expect(pending.consumeCalls, 0);
+        expect(find.byType(_CapturedDestination), findsNothing);
+        expect(find.byType(SnackBar), findsNothing);
+        session.setStatus(SessionStatus.connected);
+      }
+      await tester.pump();
+      gate.complete();
+      await tester.pumpAndSettle();
+
+      expect(session.filters, hasLength(2));
+      expect(find.byType(SnackBar), findsNothing);
+      final destination = tester.widget<_CapturedDestination>(
+        find.byType(_CapturedDestination),
+      );
+      expect(destination.channel.id, 'unjoined-channel');
+      expect(destination.link, same(link));
+      expect(pending.consumeCalls, 1);
+    });
+  }
+
+  testWidgets('dispatches a queued link after a slow lookup finishes', (
+    tester,
+  ) async {
+    const slow = ChannelDeepLink(channelId: 'unjoined-channel');
+    const next = ChannelDeepLink(channelId: 'channel-1');
+    final pending = _QueuedPendingDeepLinkNotifier([slow, next]);
+    final gate = Completer<void>();
+    final session = _MetadataRelaySession([
+      _channelMeta('unjoined-channel', 'agents', 'open'),
+    ], gate: gate);
+    final opened = <BuzzDeepLink>[];
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          pendingDeepLinkProvider.overrideWith(() => pending),
+          relaySessionProvider.overrideWith(() => session),
+          channelsProvider.overrideWith(
+            () => _FakeChannelsNotifier(Future.value([_channel])),
+          ),
+        ],
+        child: MaterialApp(
+          home: DeepLinkDispatcher(
+            destinationBuilder: (channel, link) {
+              opened.add(link);
+              return _CapturedDestination(channel: channel, link: link);
+            },
+            child: const Scaffold(body: SizedBox()),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(opened, isEmpty);
+    expect(pending.consumeCalls, 0);
+
+    gate.complete();
+    await tester.pumpAndSettle();
+
+    expect(opened, [slow, next]);
+    expect(pending.consumeCalls, 2);
+  });
+
+  testWidgets('drops a lookup that ends after the dispatcher unmounts', (
+    tester,
+  ) async {
+    const link = ChannelDeepLink(channelId: 'unjoined-channel');
+    final pending = _RecordingPendingDeepLinkNotifier(link);
+    final gate = Completer<void>();
+    final session = _MetadataRelaySession([
+      _channelMeta('unjoined-channel', 'agents', 'open'),
+    ], gate: gate);
+    final container = ProviderContainer(
+      overrides: [
+        pendingDeepLinkProvider.overrideWith(() => pending),
+        relaySessionProvider.overrideWith(() => session),
+        channelsProvider.overrideWith(
+          () => _FakeChannelsNotifier(Future.value([_channel])),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          home: DeepLinkDispatcher(
+            destinationBuilder: (channel, link) =>
+                _CapturedDestination(channel: channel, link: link),
+            child: const Scaffold(body: SizedBox()),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(session.filters, hasLength(1));
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(home: Scaffold(body: Text('Signed out'))),
+      ),
+    );
+    gate.complete();
+    await tester.pumpAndSettle();
+
+    expect(find.byType(_CapturedDestination), findsNothing);
+    expect(pending.consumeCalls, 0);
+    expect(container.read(pendingDeepLinkProvider), same(link));
+  });
+
+  testWidgets('reports a failed relay lookup and drops the link', (
+    tester,
+  ) async {
+    const link = ChannelDeepLink(channelId: 'unjoined-channel');
+    final pending = _RecordingPendingDeepLinkNotifier(link);
+    final session = _MetadataRelaySession(const [], fail: true);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          pendingDeepLinkProvider.overrideWith(() => pending),
+          relaySessionProvider.overrideWith(() => session),
+          channelsProvider.overrideWith(
+            () => _FakeChannelsNotifier(Future.value([_channel])),
+          ),
+        ],
+        child: MaterialApp(
+          home: DeepLinkDispatcher(
+            destinationBuilder: (channel, link) =>
+                _CapturedDestination(channel: channel, link: link),
+            child: const Scaffold(body: SizedBox()),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(pending.consumeCalls, 1);
+    expect(find.byType(_CapturedDestination), findsNothing);
+    expect(find.text('Could not open the channel'), findsOneWidget);
   });
 
   testWidgets('dispatches a link that is already ready on mount', (
@@ -814,6 +1261,85 @@ class _FakePendingDeepLinkNotifier extends PendingDeepLinkNotifier {
 
   @override
   BuzzDeepLink? build() => link;
+}
+
+NostrEvent _channelMeta(
+  String id,
+  String name,
+  String visibility, {
+  int createdAt = 2,
+}) => NostrEvent(
+  id: 'meta-$id-$createdAt',
+  pubkey: 'relay',
+  createdAt: createdAt,
+  kind: 39000,
+  tags: [
+    ['d', id],
+    ['name', name],
+    ['t', 'stream'],
+    [visibility == 'private' ? 'private' : 'public'],
+  ],
+  content: '',
+  sig: 'sig',
+);
+
+/// Answers kind:39000 lookups with canned metadata and records each filter.
+class _MetadataRelaySession extends RelaySessionNotifier {
+  _MetadataRelaySession(
+    this.metas, {
+    this.fail = false,
+    this.gate,
+    this.initialStatus = SessionStatus.connected,
+  });
+
+  final List<NostrEvent> metas;
+  final bool fail;
+
+  /// When set, each lookup waits for it, so tests can act mid-lookup.
+  final Completer<void>? gate;
+  final SessionStatus initialStatus;
+  final filters = <NostrFilter>[];
+  final _running = <Completer<List<NostrEvent>>>[];
+
+  @override
+  SessionState build() => SessionState(status: initialStatus);
+
+  void setStatus(SessionStatus status) => state = SessionState(status: status);
+
+  /// A socket drop cancels every running lookup, then starts reconnecting.
+  void drop() {
+    for (final lookup in _running) {
+      if (!lookup.isCompleted) lookup.completeError(Exception('Lost'));
+    }
+    _running.clear();
+    setStatus(SessionStatus.reconnecting);
+  }
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) {
+    filters.add(filter);
+    final lookup = Completer<List<NostrEvent>>();
+    _running.add(lookup);
+    Future<void> answer() async {
+      if (gate case final gate?) await gate.future;
+      if (lookup.isCompleted) return;
+      if (fail) {
+        lookup.completeError(StateError('relay unavailable'));
+        return;
+      }
+      final ids = filter.tags['#d'] ?? const <String>[];
+      lookup.complete([
+        for (final event in metas)
+          if (ids.contains(event.getTagValue('d'))) event,
+      ]);
+    }
+
+    unawaited(answer());
+    return lookup.future;
+  }
 }
 
 class _FakeChannelsNotifier extends ChannelsNotifier {

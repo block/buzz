@@ -132,6 +132,7 @@ class _ChannelRefreshFence {
 
   /// Whether the refresh still owns the active scope and generation.
   bool get isCurrent =>
+      _coordinator.isMounted() &&
       _generation == _coordinator.generation &&
       scope == _coordinator.currentScope();
 
@@ -194,15 +195,15 @@ Future<T> _fenced<T>(_ChannelRefreshFence fence, Future<T> future) async {
 /// Lives in this part file because `channels_provider.dart` sits against the
 /// repository-wide 1200-line file ceiling enforced by `just file-size-check`.
 Future<Map<String, String>> _resolveDmDisplayNames(
-  RelaySessionNotifier session,
+  Ref ref,
   _ChannelRefreshFence fence,
-  Iterable<NostrEvent> dedupedMetas,
-  String myPk,
-) async {
+  Iterable<ChannelData> channelMetas,
+  String myPk, {
+  required bool refreshCached,
+}) async {
   final dmParticipants = <String>{};
   final myPkLower = myPk.toLowerCase();
-  for (final event in dedupedMetas) {
-    final data = ChannelData.fromEvent(event);
+  for (final data in channelMetas) {
     if (data.channelType != 'dm') continue;
     for (final pk in data.participantPubkeys) {
       final lower = pk.toLowerCase();
@@ -211,22 +212,42 @@ Future<Map<String, String>> _resolveDmDisplayNames(
   }
   if (dmParticipants.isEmpty) return const {};
 
-  final profileEvents = await _fenced(
+  final profiles = await _fenced(
     fence,
-    session.fetchHistory(NostrFilters.profilesBatch(dmParticipants.toList())),
+    ref
+        .read(userCacheProvider.notifier)
+        .resolve(dmParticipants.toList(), refreshCached: refreshCached),
   );
   final displayNames = <String, String>{};
-  for (final event in profileEvents) {
-    if (event.kind != 0) continue;
-    final profile = ProfileData.fromEvent(event);
+  for (final profile in profiles.values) {
     final label = profile.displayName?.trim().isNotEmpty == true
         ? profile.displayName!.trim()
-        : profile.nip05?.trim().isNotEmpty == true
-        ? profile.nip05!.trim()
+        : profile.nip05Handle?.trim().isNotEmpty == true
+        ? profile.nip05Handle!.trim()
         : shortPubkey(profile.pubkey);
     displayNames[profile.pubkey.toLowerCase()] = label;
   }
   return displayNames;
+}
+
+List<NostrEvent> _latestChannelEvents(
+  Iterable<NostrEvent> events, {
+  required int kind,
+}) {
+  final latestById = <String, NostrEvent>{};
+  for (final event in events) {
+    if (event.kind != kind) continue;
+    final id = event.getTagValue('d');
+    if (id == null) continue;
+    final current = latestById[id];
+    if (current == null ||
+        event.createdAt > current.createdAt ||
+        (event.createdAt == current.createdAt &&
+            event.id.compareTo(current.id) < 0)) {
+      latestById[id] = event;
+    }
+  }
+  return latestById.values.toList();
 }
 
 Future<Set<String>> _fetchHiddenDmIds(
@@ -234,19 +255,25 @@ Future<Set<String>> _fetchHiddenDmIds(
   String myPk,
 ) async {
   try {
-    final events = await session.fetchHistory(NostrFilters.hiddenDms(myPk));
-    if (events.isEmpty) return const {};
-    NostrEvent latest = events.first;
-    for (final event in events.skip(1)) {
-      if (event.createdAt > latest.createdAt) latest = event;
-    }
-    return {
-      for (final tag in latest.tags)
-        if (tag.length >= 2 && tag[0] == 'h') tag[1],
-    };
+    return hiddenDmIdsFromEvents(
+      await session.fetchHistory(NostrFilters.hiddenDms(myPk)),
+    );
   } catch (_) {
     return const {};
   }
+}
+
+/// The DM ids hidden by the newest of the caller's NIP-DV snapshots.
+Set<String> hiddenDmIdsFromEvents(List<NostrEvent> events) {
+  if (events.isEmpty) return const {};
+  NostrEvent latest = events.first;
+  for (final event in events.skip(1)) {
+    if (event.createdAt > latest.createdAt) latest = event;
+  }
+  return {
+    for (final tag in latest.tags)
+      if (tag.length >= 2 && tag[0] == 'h') tag[1],
+  };
 }
 
 Future<List<NostrEvent>> _fetchHuddleStarts(
@@ -256,14 +283,44 @@ Future<List<NostrEvent>> _fetchHuddleStarts(
   if (parentChannelIds.isEmpty) return const [];
   try {
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    return await session.fetchHistory(
-      NostrFilter(
-        kinds: const [EventKind.huddleStarted],
-        tags: {'#h': parentChannelIds},
-        since: now - const Duration(hours: 2).inSeconds,
-        limit: 500,
-      ),
-    );
+    // Each REQ stays within the relay's aggregate explicit-channel cap, with
+    // the same bounded concurrency as channel history.
+    final filters = [
+      for (
+        var start = 0;
+        start < parentChannelIds.length;
+        start += kMaxExplicitChannelValues
+      )
+        NostrFilter(
+          kinds: const [EventKind.huddleStarted],
+          tags: {
+            '#h': parentChannelIds.sublist(
+              start,
+              min(start + kMaxExplicitChannelValues, parentChannelIds.length),
+            ),
+          },
+          since: now - const Duration(hours: 2).inSeconds,
+          limit: 500,
+        ),
+    ];
+    final results = <List<NostrEvent>>[];
+    for (
+      var start = 0;
+      start < filters.length;
+      start += _historyRequestConcurrency
+    ) {
+      results.addAll(
+        await Future.wait(
+          filters
+              .sublist(
+                start,
+                min(start + _historyRequestConcurrency, filters.length),
+              )
+              .map(session.fetchHistory),
+        ),
+      );
+    }
+    return [for (final events in results) ...events];
   } catch (error) {
     debugPrint(
       '[ChannelsNotifier] Huddle backing-channel query failed: $error',
@@ -303,6 +360,9 @@ Map<String, int> _memberCountsByChannelId(Iterable<NostrEvent> memberEvents) {
 /// Lives in this part file because `channels_provider.dart` sits against the
 /// repository-wide 1200-line file ceiling enforced by `just file-size-check`.
 class _ChannelRefreshCoordinator {
+  /// Whether the owning provider can still read its current scope.
+  final bool Function() isMounted;
+
   /// Resolves the relay-and-identity scope that is active right now.
   final String Function() currentScope;
 
@@ -315,16 +375,18 @@ class _ChannelRefreshCoordinator {
   int get generation => _generation;
 
   _ChannelRefreshCoordinator({
+    required this.isMounted,
     required this.currentScope,
     required this.loadStatus,
   });
 
   /// Binds the fence to a notifier's [Ref] so the provider needs one line.
   ///
-  /// Both closures read rather than watch: the fence asks what the scope is
-  /// right now, and must not make the notifier depend on it.
+  /// The closures read rather than watch: the fence checks the current
+  /// lifecycle and scope without making the notifier depend on them.
   factory _ChannelRefreshCoordinator.forRef(Ref ref) =>
       _ChannelRefreshCoordinator(
+        isMounted: () => ref.mounted,
         currentScope: () => channelDirectoryScope(
           ref.read(relayConfigProvider).baseUrl,
           ref.read(myPubkeyProvider),
@@ -343,9 +405,16 @@ class _ChannelRefreshCoordinator {
   /// Used by callers that must carry the scope across later awaits even when
   /// they do not refresh discovery, so a membership-only refresh cannot install
   /// an old scope's list either.
-  _ChannelRefreshFence beginRefresh({required bool fetchesDirectory}) {
+  Future<_ChannelRefreshFence> beginRefresh({
+    required bool fetchesDirectory,
+  }) async {
     final scope = currentScope();
     final generation = ++_generation;
+    final fence = _ChannelRefreshFence(this, scope, generation);
+    // Acquire ownership synchronously, but let the provider finish building
+    // before changing another provider's directory status.
+    await Future<void>.value();
+    fence.ensureCurrent();
     if (!fetchesDirectory) {
       final status = loadStatus();
       if (status.isLoading(scope)) {
@@ -359,7 +428,7 @@ class _ChannelRefreshCoordinator {
         status.markError(scope);
       }
     }
-    return _ChannelRefreshFence(this, scope, generation);
+    return fence;
   }
 
   /// Fetches the directory under [fence], or throws if the fence is retired.

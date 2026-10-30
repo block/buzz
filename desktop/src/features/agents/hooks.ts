@@ -35,12 +35,12 @@ import {
   getManagedAgentLog,
   getRuntimeFileConfig,
   installAcpRuntime,
-  invokeTauri,
   listManagedAgents,
   listRelayAgents,
   saveCustomHarness,
   updateManagedAgent,
 } from "@/shared/api/tauri";
+import { syncAgentsToActiveHuddle } from "@/shared/api/tauriChannels";
 import { discoverAcpCommands } from "@/shared/api/acpCommands";
 import type { HarnessDefinitionInput } from "@/shared/api/tauri";
 import { discoverAcpRuntimes } from "@/shared/api/tauriAcpDiscovery";
@@ -726,10 +726,9 @@ export function useAttachManagedAgentToChannelMutation(
           pubkey: result.agent.pubkey,
         }),
       );
-      void invokeTauri("sync_agents_to_active_huddle", {
-        channelId: effectiveChannelId,
-        agentPubkeys: [result.agent.pubkey],
-      }).catch((error) => {
+      void syncAgentsToActiveHuddle(effectiveChannelId, [
+        result.agent.pubkey,
+      ]).catch((error) => {
         console.warn("Could not sync attached agent into Huddle:", error);
       });
     },

@@ -23,6 +23,47 @@ pub enum NipFiMode {
     /// enforce-mode deployment was misconfigured and must fail closed while
     /// the operator repairs configuration. [FI-INV-14]
     DenyProtected,
+    /// Evaluates evidence as `Enforce` would but only records the verdict;
+    /// admission is identical to `Off`.
+    Shadow,
+}
+
+impl NipFiMode {
+    /// NIP-FI is disabled.
+    pub const fn is_off(self) -> bool {
+        matches!(self, Self::Off)
+    }
+
+    /// Admission may deny on NIP-FI grounds; other modes admit as `Off`.
+    pub const fn restricts(self) -> bool {
+        match self {
+            Self::Enforce | Self::DenyProtected => true,
+            Self::Off | Self::Shadow => false,
+        }
+    }
+
+    /// The full enforce configuration is loaded and evidence is evaluated.
+    pub const fn evaluates(self) -> bool {
+        match self {
+            Self::Enforce | Self::Shadow => true,
+            Self::Off | Self::DenyProtected => false,
+        }
+    }
+
+    /// Evidence is evaluated and its verdict is authoritative.
+    pub const fn enforces(self) -> bool {
+        self.restricts() && self.evaluates()
+    }
+
+    /// Every protected request is denied without evaluating evidence.
+    pub const fn denies_unconditionally(self) -> bool {
+        self.restricts() && !self.evaluates()
+    }
+
+    /// Evidence is evaluated only to record its would-be verdict.
+    pub const fn observes_only(self) -> bool {
+        self.evaluates() && !self.restricts()
+    }
 }
 
 /// Every variant corresponds to a concrete, operator-actionable defect.
@@ -68,7 +109,7 @@ pub fn validate_nip_fi_config(
     registry: &IssuerRegistry,
     jwks_configs: &[IssuerJwksConfig],
 ) -> Result<(), NipFiStartupError> {
-    if let NipFiMode::Off | NipFiMode::DenyProtected = mode {
+    if !mode.evaluates() {
         return Ok(());
     }
 

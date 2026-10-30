@@ -1,14 +1,31 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart';
+
+/// The default transport. `dart:io` would inflate gzip responses on the
+/// calling isolate, so leave them compressed for the response decoder.
+///
+/// A non-`dart:io` client supplied through `http.runWithClient`, such as a
+/// `MockClient`, is used as is. An `IOClient` is replaced, not closed, since
+/// it may be shared.
+http.Client _gzipPassthroughClient() {
+  final client = http.Client();
+  if (client is! IOClient) return client;
+  return IOClient(HttpClient()..autoUncompress = false);
+}
 
 /// Owns the reusable HTTP transport used for relay `/query` requests.
+///
+/// Requests advertise gzip. A response body may therefore come back
+/// compressed; decode it with `relayResponseText` or `decodeRelayQueryResponse`.
 class RelayHttpQueryClient {
   RelayHttpQueryClient({
     http.Client? client,
     http.Client Function()? clientFactory,
   }) : _injectedClient = client,
-       _clientFactory = clientFactory ?? (() => http.Client());
+       _clientFactory = clientFactory ?? _gzipPassthroughClient;
 
   final http.Client? _injectedClient;
   final http.Client Function() _clientFactory;
@@ -20,14 +37,24 @@ class RelayHttpQueryClient {
     required Map<String, String> headers,
     required List<int> body,
     required Duration timeout,
+    http.Client Function(http.Client, bool Function())? decorate,
   }) async {
     final generation = _injectedClient == null
         ? (_currentGeneration ??= _createGeneration())
         : null;
     generation?.acquire();
+    var active = true;
     try {
-      return await (_injectedClient ?? generation!.client)
-          .post(url, headers: headers, body: body)
+      final request = http.Request('POST', url)
+        ..followRedirects = false
+        ..headers['Accept-Encoding'] = 'gzip'
+        ..headers.addAll(headers)
+        ..bodyBytes = body;
+      final transport = _injectedClient ?? generation!.client;
+      final client = decorate?.call(transport, () => active) ?? transport;
+      return await client
+          .send(request)
+          .then(http.Response.fromStream)
           .timeout(timeout);
     } on TimeoutException {
       if (identical(_currentGeneration, generation)) {
@@ -36,6 +63,7 @@ class RelayHttpQueryClient {
       generation?.retire();
       rethrow;
     } finally {
+      active = false;
       generation?.release();
     }
   }

@@ -190,3 +190,88 @@ test("dense single second beyond one window page is fully reachable via composit
     Array.from({ length: DENSE_COUNT }, (_, index) => index),
   );
 });
+
+// The live cache merge and the channel-window projection both write the
+// rendered timeline. They must tie-break a shared second identically, or the
+// pair flips as each write lands (closing any menu open on either row).
+test("same-second live messages render in one order and never swap", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+            channelName: "general",
+            kind: 9,
+            exactChannel: true,
+          }) ?? false,
+      ),
+    )
+    .toBe(true);
+
+  const low = "1".repeat(64);
+  const high = "f".repeat(64);
+  // Record every order the pair is ever committed in. The observer runs right
+  // after each DOM commit, before any later task, so the read below has seen
+  // the final commit. Sampling on animation frames missed it whenever the read
+  // beat the next frame.
+  await page.evaluate(
+    ({ low, high }) => {
+      const orders: string[] = [];
+      Object.assign(window, { __SAME_SECOND_ORDERS__: orders });
+      new MutationObserver(() => {
+        const order = [...document.querySelectorAll("[data-message-id]")]
+          .map((row) => row.getAttribute("data-message-id"))
+          .filter((id) => id === low || id === high)
+          .join(",");
+        if (order.includes(",") && orders.at(-1) !== order) orders.push(order);
+      }).observe(document.body, {
+        attributeFilter: ["data-message-id"],
+        childList: true,
+        subtree: true,
+      });
+    },
+    { low, high },
+  );
+  const createdAt = Math.floor(Date.now() / 1000);
+  for (const id of [low, high]) {
+    await page.evaluate(
+      ({ createdAt, id }) =>
+        window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+          channelName: "general",
+          content: `same second ${id[0]}`,
+          createdAt,
+          id,
+        }),
+      { createdAt, id },
+    );
+  }
+  // Live events apply in order, so once a later message renders, both writes
+  // for the pair have landed.
+  await page.evaluate(
+    (createdAt) =>
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: "one second later",
+        createdAt: createdAt + 1,
+      }),
+    createdAt,
+  );
+  await expect(
+    page.getByTestId("message-timeline").getByText("one second later"),
+  ).toBeVisible();
+
+  // Within a second the larger id is older: the reverse of relay order.
+  expect(
+    await page.evaluate(
+      () =>
+        (window as Window & { __SAME_SECOND_ORDERS__?: string[] })
+          .__SAME_SECOND_ORDERS__,
+    ),
+  ).toEqual([`${high},${low}`]);
+});

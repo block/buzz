@@ -44,6 +44,20 @@ grep -Fq "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10" <<<"$merge_
   exit 1
 }
 
+# Staging auto-promotes the newest main-<ts>-<7> gateway image, so the gateway
+# must publish that tag and only from a source the relay CI qualified. Match
+# whole lines (-x) so a commented-out or otherwise inactive copy cannot satisfy
+# the contract after the live line regresses.
+gateway_merge_job=$(awk '/^  push-gateway-merge:/{f=1} f&&/^  [a-z][a-z_-]*:$/&&!/^  push-gateway-merge:/{exit} f' "$workflow")
+grep -Fxq "    needs: [push-gateway-build, qualify]" <<<"$gateway_merge_job" || {
+  echo "push gateway image must publish only after same-SHA CI qualification" >&2
+  exit 1
+}
+grep -Fxq "            type=raw,value=main-{{commit_date 'YYYYMMDDHHmmss'}}-{{sha}},enable=\${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}" <<<"$gateway_merge_job" || {
+  echo "push gateway image must publish the sortable main-<commit UTC>-<7> tag on main pushes" >&2
+  exit 1
+}
+
 select_run() {
   jq -r --arg source_sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -f "$selector" | jq -r '.id // empty'
 }

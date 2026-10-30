@@ -37,6 +37,34 @@ Widget _testable(String content, {List<List<String>> tags = const []}) {
 }
 
 void main() {
+  // Regression: https://github.com/block/buzz/issues/6124
+  //
+  // A custom-emoji WidgetSpan inside a link's own WidgetSpan does not paint on
+  // iOS, so the whole link renders as nothing. `CustomEmojiMd` opts out of
+  // `MarkdownScope.linkLabel`; this fails if that override is removed.
+  testWidgets('an emoji shortcode in a link label stays link text', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_testable('Say [:wave:](https://example.com/x)'));
+
+    expect(find.byType(CustomEmojiImage), findsNothing);
+    final text = tester
+        .widgetList<RichText>(
+          find.byWidgetPredicate((widget) => widget is RichText),
+        )
+        .map((widget) => widget.text.toPlainText())
+        .join();
+    expect(text, contains(':wave:'));
+  });
+
+  testWidgets('an emoji shortcode outside a link label still renders', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_testable('Say :wave: now'));
+
+    expect(find.byType(CustomEmojiImage), findsOneWidget);
+  });
+
   testWidgets('message wiring excludes unrelated emoji from the regex', (
     tester,
   ) async {

@@ -47,6 +47,13 @@ void exactMentionTests() {
     }
   }
 
+  // Same-name members get contextual picker labels (`Scout · <npub suffix>`);
+  // the inserted mention text still uses the plain name.
+  Finder scoutRows() => find.descendant(
+    of: find.byKey(const ValueKey('mention-suggestions-popover')),
+    matching: find.textContaining('Scout'),
+  );
+
   Future<void> pick(
     WidgetTester tester,
     String text, {
@@ -54,7 +61,8 @@ void exactMentionTests() {
   }) async {
     await tester.enterText(find.byType(TextField), text);
     await tester.pumpAndSettle();
-    await tester.tap(last ? find.text('Scout').last : find.text('Scout').first);
+    final rows = scoutRows();
+    await tester.tap(last ? rows.last : rows.first);
     await tester.pumpAndSettle();
   }
 
@@ -187,7 +195,7 @@ void exactMentionTests() {
           }
         }
       }
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
       if (scenario == 'non-member human') {
         expect(
@@ -253,6 +261,14 @@ void exactMentionTests() {
         members(),
         (_, keys, {mediaTags = const []}) async => sent = keys,
       );
+      await tester.enterText(find.byType(TextField), '@');
+      await tester.pumpAndSettle();
+      final labels = [
+        for (final row in scoutRows().evaluate()) (row.widget as Text).data!,
+      ];
+      expect(labels, hasLength(2));
+      expect(labels.toSet(), hasLength(2));
+      expect(labels, everyElement(startsWith('Scout · ')));
       await pick(tester, '@');
       final controller = tester
           .widget<TextField>(find.byType(TextField))
@@ -260,14 +276,14 @@ void exactMentionTests() {
       expect(controller.text, '@Scout ');
       await pick(tester, '@Scout @', last: true);
       expect(controller.text, '@Scout @Scout ($second) ');
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
       expect(sent, [first, second]);
       await pick(tester, '@');
       await pick(tester, '@Scout @', last: true);
       await tester.enterText(find.byType(TextField), '@Scout ($second) ');
       await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
       expect(sent, [second]);
     },
@@ -282,7 +298,7 @@ void exactMentionTests() {
     ], (_, keys, {mediaTags = const []}) async => sent = keys);
     await tester.enterText(find.byType(TextField), '@Scout ($second)');
     await tester.pumpAndSettle();
-    await tester.tap(find.byIcon(LucideIcons.arrowUp));
+    await tester.tap(find.byIcon(BuzzIcons.arrowUp));
     await tester.pumpAndSettle();
     expect(sent, isEmpty);
   });
@@ -300,7 +316,7 @@ void exactMentionTests() {
     });
     await tester.enterText(find.byType(TextField), '@Scout hello');
     await tester.pumpAndSettle();
-    await tester.tap(find.byIcon(LucideIcons.arrowUp));
+    await tester.tap(find.byIcon(BuzzIcons.arrowUp));
     await tester.pumpAndSettle();
     expect(sent, isFalse);
     expect(

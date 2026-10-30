@@ -1,3 +1,4 @@
+import '../../shared/identity_names/identity_names.dart';
 import '../../shared/utils/string_utils.dart';
 import 'channel.dart';
 
@@ -22,18 +23,41 @@ String formatDmParticipantDisplayName(List<String> displayNames) {
       : visible.join(', ');
 }
 
-String resolveDmChannelDisplayLabel(Channel channel, {String? currentPubkey}) {
+/// Contextual participant labels for a DM: its participants are the whole
+/// comparison context, and relay participant names are fallbacks.
+IdentityNames dmParticipantNames(Channel channel, IdentityNameSources names) =>
+    names.scope(
+      channel.participantPubkeys,
+      fallbackNames: {
+        for (var index = 0; index < channel.participantPubkeys.length; index++)
+          if (index < channel.participants.length)
+            channel.participantPubkeys[index]: channel.participants[index],
+      },
+    );
+
+/// The DM's display label. With [names], participant labels follow the
+/// contextual identity-name policy, so namesakes stay distinguishable.
+String resolveDmChannelDisplayLabel(
+  Channel channel, {
+  String? currentPubkey,
+  IdentityNameSources? names,
+}) {
   if (!channel.isDm || !isGenericDmChannelName(channel.name)) {
     return channel.name;
   }
 
   final normalizedCurrent = currentPubkey?.toLowerCase();
+  final participantNames = names == null
+      ? null
+      : dmParticipantNames(channel, names);
   final participants = <({String label, String? pubkey})>[
     for (var index = 0; index < channel.participantPubkeys.length; index++)
       (
-        label: index < channel.participants.length
-            ? channel.participants[index]
-            : shortPubkey(channel.participantPubkeys[index]),
+        label:
+            participantNames?.labelFor(channel.participantPubkeys[index]) ??
+            (index < channel.participants.length
+                ? channel.participants[index]
+                : shortPubkey(channel.participantPubkeys[index])),
         pubkey: channel.participantPubkeys[index].toLowerCase(),
       ),
   ];
@@ -104,25 +128,29 @@ String dmAvatarInitial(Channel channel, {String? currentPubkey}) {
   return label.isNotEmpty ? label[0].toUpperCase() : '?';
 }
 
+/// Sorts by the visible label, resolving each label only once per invocation.
 List<Channel> sortDmChannelsByDisplayLabel(
   Iterable<Channel> channels, {
   String? currentPubkey,
+  IdentityNameSources? names,
 }) {
-  final sorted = channels.toList();
+  // Keep sort keys local: the next call must reflect current viewer, channel
+  // participants, and community profile/owner names.
+  final sorted = [
+    for (final channel in channels)
+      (
+        channel: channel,
+        label: resolveDmChannelDisplayLabel(
+          channel,
+          currentPubkey: currentPubkey,
+          names: names,
+        ).toLowerCase(),
+      ),
+  ];
   sorted.sort((left, right) {
-    final leftLabel = resolveDmChannelDisplayLabel(
-      left,
-      currentPubkey: currentPubkey,
-    );
-    final rightLabel = resolveDmChannelDisplayLabel(
-      right,
-      currentPubkey: currentPubkey,
-    );
-    final labelCompare = leftLabel.toLowerCase().compareTo(
-      rightLabel.toLowerCase(),
-    );
+    final labelCompare = left.label.compareTo(right.label);
     if (labelCompare != 0) return labelCompare;
-    return left.id.compareTo(right.id);
+    return left.channel.id.compareTo(right.channel.id);
   });
-  return sorted;
+  return [for (final entry in sorted) entry.channel];
 }

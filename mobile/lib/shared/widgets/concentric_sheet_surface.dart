@@ -26,6 +26,7 @@ class ConcentricSheetSurface extends HookWidget {
     ),
     this.providesSheetSurface = true,
     this.usesGlass = false,
+    this.glassTintColor,
     this.minimumRadius = Radii.dialog,
     this.contentClipRadius,
     super.key,
@@ -39,6 +40,9 @@ class ConcentricSheetSurface extends HookWidget {
   final EdgeInsetsGeometry padding;
   final bool providesSheetSurface;
   final bool usesGlass;
+
+  /// Optional tint applied to the native Liquid Glass material.
+  final Color? glassTintColor;
   final double minimumRadius;
   final double? contentClipRadius;
 
@@ -50,6 +54,7 @@ class ConcentricSheetSurface extends HookWidget {
 
   static const _surfaceChannel = MethodChannel('buzz/concentric_sheet_surface');
   static const _nativeContentClipRadius = Radii.dialog * 2;
+  static const sheetTopRadius = _nativeContentClipRadius - Grid.xxs;
 
   BorderRadius _borderRadius(double radius) => switch (corners) {
     ConcentricSurfaceCorners.all => BorderRadius.circular(radius),
@@ -80,6 +85,7 @@ class ConcentricSheetSurface extends HookWidget {
       await channel.invokeMethod<void>('updateColors', <String, Object?>{
         'color': surfaceColor.toARGB32(),
         'backdropColor': backdropColor?.toARGB32(),
+        'glassTintColor': glassTintColor?.toARGB32(),
       });
     } on MissingPluginException {
       // The platform view may have been disposed while its theme was changing.
@@ -142,6 +148,7 @@ class ConcentricSheetSurface extends HookWidget {
         nativeSurfaceChannel.value,
         surfaceColor,
         backdropColor,
+        glassTintColor,
       ],
     );
     useEffect(
@@ -183,26 +190,32 @@ class ConcentricSheetSurface extends HookWidget {
           if (nativeSurfaceSupported)
             Positioned.fill(
               child: ExcludeSemantics(
-                child: IgnorePointer(
-                  child: UiKitView(
-                    viewType: 'buzz/concentric_sheet_surface',
-                    hitTestBehavior: PlatformViewHitTestBehavior.transparent,
-                    onPlatformViewCreated: (viewId) {
-                      nativeSurfaceChannel.value = MethodChannel(
-                        'buzz/concentric_sheet_surface/$viewId',
-                      );
-                    },
-                    creationParams: <String, Object>{
-                      'color': surfaceColor.toARGB32(),
-                      if (backdropColor case final color?)
-                        'backdropColor': color.toARGB32(),
-                      'minimumRadius': minimumRadius,
-                      'corners': corners.name,
-                      'usesGlass': usesGlass,
-                      'brightness': brightness.name,
-                    },
-                    creationParamsCodec: const StandardMessageCodec(),
-                  ),
+                child: UiKitView(
+                  viewType: 'buzz/concentric_sheet_surface',
+                  // Keep the platform view in gesture arbitration. Excluding
+                  // it with IgnorePointer leaves UIKit intercepting touches
+                  // over Flutter controls after the native surface appears.
+                  hitTestBehavior: PlatformViewHitTestBehavior.translucent,
+                  onPlatformViewCreated: (viewId) {
+                    nativeSurfaceChannel.value = MethodChannel(
+                      'buzz/concentric_sheet_surface/$viewId',
+                    );
+                  },
+                  creationParams: <String, Object>{
+                    'color': surfaceColor.toARGB32(),
+                    if (backdropColor case final color?)
+                      'backdropColor': color.toARGB32(),
+                    'minimumRadius': minimumRadius,
+                    'corners': corners.name,
+                    if (providesSheetSurface &&
+                        corners == ConcentricSurfaceCorners.all)
+                      'topRadius': sheetTopRadius,
+                    'usesGlass': usesGlass,
+                    if (glassTintColor case final tint?)
+                      'glassTintColor': tint.toARGB32(),
+                    'brightness': brightness.name,
+                  },
+                  creationParamsCodec: const StandardMessageCodec(),
                 ),
               ),
             )
@@ -221,12 +234,22 @@ class ConcentricSheetSurface extends HookWidget {
             // the Flutter content inside that continuous outline; a 24pt
             // circular clip still lets scrolling rows show through the native
             // corner cutouts.
-            borderRadius: _borderRadius(
-              contentClipRadius ??
-                  (nativeSurfaceSupported
-                      ? _nativeContentClipRadius
-                      : minimumRadius),
-            ),
+            borderRadius:
+                nativeSurfaceSupported &&
+                    providesSheetSurface &&
+                    corners == ConcentricSurfaceCorners.all
+                ? BorderRadius.vertical(
+                    top: const Radius.circular(sheetTopRadius),
+                    bottom: Radius.circular(
+                      contentClipRadius ?? _nativeContentClipRadius,
+                    ),
+                  )
+                : _borderRadius(
+                    contentClipRadius ??
+                        (nativeSurfaceSupported
+                            ? _nativeContentClipRadius
+                            : minimumRadius),
+                  ),
             clipBehavior: Clip.antiAlias,
             child: providesSheetSurface
                 ? _ConcentricSheetSurfaceScope(

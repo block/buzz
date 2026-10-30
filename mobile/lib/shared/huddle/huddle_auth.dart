@@ -3,6 +3,7 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../relay/nostr_models.dart';
 import 'huddle_wire.dart';
+import 'package:buzz/shared/crypto/event_signing.dart';
 
 /// Immutable connection inputs for one Huddle audio WebSocket.
 @immutable
@@ -66,7 +67,7 @@ abstract final class HuddleAuthV2 {
     }
 
     final secretKey = _decodeSecretKey(parameters.nsec);
-    final event = nostr.Event.from(
+    final event = signNostrEvent(
       kind: EventKind.auth,
       content: '',
       tags: [
@@ -75,7 +76,6 @@ abstract final class HuddleAuthV2 {
       ],
       secretKey: secretKey,
       createdAt: createdAt ?? DateTime.now().millisecondsSinceEpoch ~/ 1000,
-      verify: false,
     );
 
     return {

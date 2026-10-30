@@ -17,7 +17,9 @@ jobs:
   changes:
     name: Detect Changed Paths
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    # The steps take about 75 seconds, but GitHub can finish the job minutes
+    # after the last step. A 2-minute limit cancelled finished runs.
+    timeout-minutes: 10
     permissions:
       contents: read
       pull-requests: read
@@ -51,6 +53,8 @@ jobs:
               - '.config/nextest.toml'
               - 'scripts/postgres-test-*.sh'
               - 'scripts/reconcile-schema-after-pgschema.sql'
+              - 'scripts/repair-events-pkey.sql'
+              - 'scripts/start-relay-for-tests.sh'
               - 'bin/pgschema'
               - 'bin/.pgschema-*.pkg'
               - 'scripts/check-postgres-test-discovery.py'
@@ -64,12 +68,24 @@ jobs:
               - 'scripts/run-tests.sh'
               - 'scripts/model-capabilities.json'
               - 'scripts/normative-corpus.json'
-              - 'justfile'
+              - 'scripts/ci-apt-retry.sh'
+              - 'Justfile'
             desktop:
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/_ci-desktop.yml'
+              - 'scripts/ci-apt-retry.sh'
+              - 'Justfile'
+              - 'scripts/generate-macos-icon.py'
+              - 'scripts/macos-icon.sh'
+              - 'bin/uv'
+              - 'bin/.uv-*.pkg'
               - 'scripts/model-capabilities.json'
               - 'scripts/normative-corpus.json'
               - 'desktop/**'
               - 'pnpm-lock.yaml'
+              - 'scripts/flake-check.mjs'
+              - 'scripts/flake-check.test.mjs'
+              - '.github/workflows/_ci-flake.yml'
             desktop-rust:
               - 'desktop/src-tauri/**'
             web:
@@ -77,7 +93,10 @@ jobs:
               - 'pnpm-lock.yaml'
             mobile:
               - 'mobile/**'
+              - 'Justfile'
+              - 'scripts/test-mobile-gateway-recipes.sh'
               - 'scripts/mobile-release.sh'
+              - 'scripts/mobile-release-source.sh'
               - 'scripts/mobile-worktree-overrides.sh'
               - 'scripts/mobile-worktree-clean.sh'
               - 'scripts/publish-mobile-release-candidate.sh'
@@ -125,7 +144,7 @@ jobs:
       - name: CI required-context isolation contract
         run: scripts/test-ci-required-context-isolation.sh
       - name: CI path selection regression tests
-        run: node --test scripts/ci-selection.test.mjs scripts/ci-required-gates.test.mjs
+        run: node --test scripts/ci-selection.test.mjs scripts/ci-required-gates.test.mjs scripts/ci-apt-retry.test.mjs
       - name: File size policy
         run: just file-size-check
 
@@ -242,6 +261,14 @@ jobs:
       web: ${{ needs.changes.outputs.web == 'true' }}
       mobile: ${{ needs.changes.outputs.mobile == 'true' }}
       lane: mobile-swift
+
+  # Advisory flake check: repeats the tests a pull request changes. Its lanes
+  # skip when no test changed and none of the required gates below reads them;
+  # their own statuses and step summaries carry the result.
+  flake-check:
+    name: Flake Check
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/_ci-flake.yml
 
   security-domain:
     name: Security Domain

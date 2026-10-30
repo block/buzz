@@ -850,6 +850,10 @@ test("assigns distinct agent voices and exposes compact per-agent controls", asy
   });
   expect(new Set(assignedVoices).size).toBe(2);
 
+  // Let the huddle chat finish mounting and autofocus before opening an
+  // overlay; a late composer focus would dismiss the popover.
+  await expect(page.getByTestId("message-input")).toBeFocused();
+
   await page.getByRole("button", { name: "Voice settings for alice" }).click();
   await waitForAnimations(page);
   const voiceMenu = page.locator(
@@ -926,6 +930,8 @@ test("adds channel-mentioned agents to the live huddle roster", async ({
   expect(result).toEqual({
     matched_active_huddle: true,
     added: [TEST_IDENTITIES.bob.pubkey],
+    changed_channel_ids: [HUDDLE_CHANNEL_ID],
+    error: null,
   });
   await expect(participantTiles).toHaveCount(3);
   await expect(

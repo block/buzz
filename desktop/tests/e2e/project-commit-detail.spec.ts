@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { CREATE_PROJECT_REFOCUS_DELAY_MS } from "../../src/features/projects/ui/createProjectFormFocus";
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
@@ -262,6 +263,15 @@ test("creating a project opens its channel conversation", async ({ page }) => {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-projects-view").click();
   await openCreateProjectDialog(page);
+  // The dialog autofocuses the name field on open and focuses it again from a
+  // timer, which can land mid-fill and type the description into the name.
+  // Once the field is focused, that timer is set; a page timer of the same
+  // delay set now fires after it (equal-delay timers run in order).
+  await expect(page.getByTestId("create-project-name")).toBeFocused();
+  await page.evaluate(
+    (delayMs) => new Promise((resolve) => window.setTimeout(resolve, delayMs)),
+    CREATE_PROJECT_REFOCUS_DELAY_MS,
+  );
   await page.getByTestId("create-project-name").fill("multi-repo-demo");
   await page
     .getByTestId("create-project-description")

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:buzz/features/channels/composer_send_origin.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
@@ -11,11 +12,12 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
 import 'package:image_picker/image_picker.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
+import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
 import 'package:buzz/features/channels/send_message_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/photo_library.dart';
@@ -36,6 +38,7 @@ import 'package:buzz/shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 part 'compose_bar_test/exact_mention_tests.dart';
+part 'compose_bar_test/durable_mention_tests.dart';
 
 final _pngBytes = Uint8List.fromList([
   0x89,
@@ -181,8 +184,11 @@ Widget _buildComposeBar({
   required ComposeBarOnSend onSend,
   List<ChannelMember> members = const <ChannelMember>[],
   Future<List<ChannelMember>>? membersFuture,
+  Future<List<ChannelMember>> Function()? loadMembers,
   List<AgentDirectoryEntry> relayAgents = const <AgentDirectoryEntry>[],
   List<Channel> channels = const <Channel>[],
+  bool stallChannels = false,
+  Channel? openedAhead,
   List<ChannelMember> cachedMembers = const <ChannelMember>[],
   String? currentPubkey,
   bool? supportsShowingSystemContextMenu,
@@ -197,11 +203,19 @@ Widget _buildComposeBar({
   ValueChanged<VoidCallback>? onFocusRestorerChanged,
   AppLifecycleNotifier Function()? appLifecycle,
   String composeBarKey = 'compose-bar',
+  String? threadHeadId,
   VoiceNoteRecorder Function()? voiceNoteRecorderFactory,
   VoiceNotePlayerController Function()? voiceNotePlayerFactory,
+  Future<List<UserProfile>> Function(String query)? searchPeople,
 }) {
   return ProviderScope(
     overrides: [
+      // Directory people by exact query, found after the real typing pause.
+      if (searchPeople != null)
+        mentionUserSearchProvider.overrideWith((ref, query) async {
+          await Future<void>.delayed(mentionSearchDebounce);
+          return searchPeople(query.trim());
+        }),
       customEmojiListProvider.overrideWithValue(customEmoji),
       mediaUploadServiceProvider.overrideWithValue(uploadService),
       if (voiceNoteRecorderFactory != null)
@@ -214,9 +228,9 @@ Widget _buildComposeBar({
         ),
       photoLibraryProvider.overrideWithValue(photoLibrary),
       currentPubkeyProvider.overrideWith((ref) => currentPubkey),
-      channelMembersProvider(
-        'channel-1',
-      ).overrideWith((ref) => membersFuture ?? Future.value(members)),
+      channelMembersProvider('channel-1').overrideWith(
+        (ref) => loadMembers?.call() ?? membersFuture ?? Future.value(members),
+      ),
       agentDirectoryProvider.overrideWith((ref) async => relayAgents),
       agentOwnersProvider.overrideWith((ref) async => const <String, String>{}),
       relayClientProvider.overrideWithValue(
@@ -228,7 +242,12 @@ Widget _buildComposeBar({
       if (appLifecycle != null) appLifecycleProvider.overrideWith(appLifecycle),
       savedPrefsProvider.overrideWithValue(_testPrefs),
       channelsProvider.overrideWith(
-        () => _FakeChannelsNotifier(channels, cachedMembers: cachedMembers),
+        () => _FakeChannelsNotifier(
+          channels,
+          cachedMembers: cachedMembers,
+          stall: stallChannels,
+          openedAhead: openedAhead,
+        ),
       ),
     ],
     child: MaterialApp(
@@ -260,6 +279,7 @@ Widget _buildComposeBar({
                 final composeBar = ComposeBar(
                   key: ValueKey(composeBarKey),
                   channelId: 'channel-1',
+                  threadHeadId: threadHeadId,
                   focusNode: focusNode,
                   onFocusRestorerChanged: onFocusRestorerChanged,
                   onFocusRequested: onFocusRequested,
@@ -625,17 +645,29 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
   final List<Channel> _channels;
   final List<ChannelMember> _cachedMembers;
 
+  /// Keeps the channel list loading, like a slow full reload.
+  final bool _stall;
+
   _FakeChannelsNotifier(
     this._channels, {
     List<ChannelMember> cachedMembers = const [],
-  }) : _cachedMembers = cachedMembers;
+    bool stall = false,
+    Channel? openedAhead,
+  }) : _cachedMembers = cachedMembers,
+       _stall = stall,
+       _openedAheadChannel = openedAhead;
+
+  final Channel? _openedAheadChannel;
 
   @override
   List<ChannelMember> cachedMembersForChannel(String channelId) =>
       channelId == 'channel-1' ? _cachedMembers : const [];
 
   @override
-  Future<List<Channel>> build() async => _channels;
+  Future<List<Channel>> build() {
+    if (_openedAheadChannel case final channel?) rememberOpened(channel);
+    return _stall ? Completer<List<Channel>>().future : Future.value(_channels);
+  }
 
   @override
   Future<void> refresh({bool fetchDirectory = false}) async {
@@ -649,6 +681,7 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
 
 void main() {
   exactMentionTests();
+  durableMentionTests();
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() async {
@@ -694,7 +727,7 @@ void main() {
 
       expect(find.byType(TextField), findsNothing);
       expect(find.byTooltip('Add attachment').hitTestable(), findsOneWidget);
-      expect(find.byIcon(LucideIcons.arrowUp).hitTestable(), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.arrowUp).hitTestable(), findsOneWidget);
       expect(find.byKey(const ValueKey('composer-footer-gradient')), findsOne);
       final composerBackdrop = find.descendant(
         of: find.byKey(const ValueKey('composer-footer-gradient')),
@@ -749,10 +782,10 @@ void main() {
         BorderRadius.circular(Radii.dialog),
       );
       expect(find.byType(TextField), findsOneWidget);
-      expect(find.byIcon(LucideIcons.atSign), findsOneWidget);
-      expect(find.byIcon(LucideIcons.hash), findsOneWidget);
-      expect(find.byIcon(LucideIcons.smilePlus), findsOneWidget);
-      expect(find.byIcon(LucideIcons.aLargeSmall), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.atSign), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.smilePlus), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.aLargeSmall), findsOneWidget);
     });
 
     testWidgets('notifies focus intent before attaching the focused field', (
@@ -1120,7 +1153,7 @@ void main() {
 
       final sendButton = find
           .ancestor(
-            of: find.byIcon(LucideIcons.arrowUp),
+            of: find.byIcon(BuzzIcons.arrowUp),
             matching: find.byType(IconButton),
           )
           .hitTestable();
@@ -1147,7 +1180,7 @@ void main() {
       await _expandComposer(tester);
       await tester.enterText(find.byType(TextField), 'hello');
       await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       for (var i = 0; i < 20; i++) {
         await tester.pump(const Duration(milliseconds: 20));
         if (tester
@@ -1184,7 +1217,7 @@ void main() {
       await _expandComposer(tester);
       await tester.enterText(find.byType(TextField), 'retry me');
       await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       for (var i = 0; i < 20; i++) {
         await tester.pump(const Duration(milliseconds: 20));
         if (tester
@@ -1223,7 +1256,7 @@ void main() {
       await _expandComposer(tester);
       await tester.enterText(find.byType(TextField), 'first draft');
       await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       for (var i = 0; i < 20; i++) {
         await tester.pump(const Duration(milliseconds: 20));
         if (tester
@@ -1453,9 +1486,9 @@ void main() {
         offset: 6,
       );
 
-      await tester.tap(find.byIcon(LucideIcons.smilePlus));
+      await tester.tap(find.byIcon(BuzzIcons.smilePlus));
       await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(LucideIcons.sparkles));
+      await tester.tap(find.byIcon(BuzzIcons.sparkles));
       await tester.pump();
       await tester.tap(find.byTooltip(':meow:'));
       await tester.pumpAndSettle();
@@ -1586,14 +1619,14 @@ void main() {
       await _expandComposer(tester);
       hapticCalls.clear();
 
-      await tester.tap(find.byIcon(LucideIcons.atSign));
+      await tester.tap(find.byIcon(BuzzIcons.atSign));
       tester.widget<TextField>(find.byType(TextField)).controller!.clear();
       await tester.pump();
-      await tester.tap(find.byIcon(LucideIcons.hash));
+      await tester.tap(find.byIcon(BuzzIcons.hash));
       await tester.pump();
-      await tester.tap(find.byIcon(LucideIcons.aLargeSmall));
+      await tester.tap(find.byIcon(BuzzIcons.aLargeSmall));
       await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(LucideIcons.bold));
+      await tester.tap(find.byIcon(BuzzIcons.bold));
       await tester.pump();
       await tester.tap(find.byTooltip('Close formatting'));
       await tester.pumpAndSettle();
@@ -1625,7 +1658,7 @@ void main() {
         ),
       );
       await _expandComposer(tester);
-      await tester.tap(find.byIcon(LucideIcons.hash));
+      await tester.tap(find.byIcon(BuzzIcons.hash));
       await tester.pumpAndSettle();
 
       final surface = find.byKey(const ValueKey('channel-suggestions-popover'));
@@ -1691,7 +1724,7 @@ void main() {
       );
 
       await _expandComposer(tester);
-      await tester.tap(find.byIcon(LucideIcons.atSign));
+      await tester.tap(find.byIcon(BuzzIcons.atSign));
       await tester.pump();
 
       expect(pendingMembers.isCompleted, isFalse);
@@ -1707,6 +1740,179 @@ void main() {
       expect(find.text(shortPubkey(a11ce)), findsOneWidget);
       expect(_suggestionAvatarInitial(tester, shortPubkey(a11ce)), 'A');
       expect(_suggestionAvatarInitial(tester, 'Carol'), 'C');
+    });
+
+    group('portable mention rules', () {
+      Future<TextEditingController> pumpMembers(
+        WidgetTester tester,
+        List<String> names, {
+        Future<List<UserProfile>> Function(String query)? searchPeople,
+      }) async {
+        final members = [
+          for (var i = 0; i < names.length; i++)
+            ChannelMember(
+              pubkey: '${i + 1}' * 64,
+              role: 'member',
+              joinedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+              displayName: names[i],
+            ),
+        ];
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            membersFuture: Future.value(members),
+            cachedMembers: members,
+            channels: [_makeCurrentChannel()],
+            onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+            // No directory people unless a test supplies them.
+            searchPeople: searchPeople ?? (_) async => const [],
+          ),
+        );
+        await _expandComposer(tester);
+        return tester.widget<TextField>(find.byType(TextField)).controller!;
+      }
+
+      // Let the debounced directory search finish before teardown.
+      Future<void> settleSearch(WidgetTester tester) =>
+          tester.pump(mentionSearchDebounce * 2);
+
+      Finder popover() =>
+          find.byKey(const ValueKey('mention-suggestions-popover'));
+
+      testWidgets('Space after an exact, unique name selects it', (
+        tester,
+      ) async {
+        final controller = await pumpMembers(tester, ['Alice', 'Bob']);
+        await tester.enterText(find.byType(TextField), 'hi @alice');
+        await tester.pump();
+        expect(popover(), findsOneWidget);
+        await tester.enterText(find.byType(TextField), 'hi @alice ');
+        await tester.pump();
+
+        expect(controller.text, 'hi @Alice ');
+        expect(popover(), findsNothing);
+        await settleSearch(tester);
+      });
+
+      testWidgets('Space is a plain space when a longer name continues', (
+        tester,
+      ) async {
+        final controller = await pumpMembers(tester, ['Alice', 'Alice Smith']);
+        await tester.enterText(find.byType(TextField), '@alice');
+        await tester.pump();
+        await tester.enterText(find.byType(TextField), '@alice ');
+        await tester.pump();
+
+        // Not selected: another name starts with the query plus a space.
+        expect(controller.text, '@alice ');
+        await tester.enterText(find.byType(TextField), '@alice s');
+        await tester.pump();
+        expect(find.text('Alice Smith'), findsOneWidget);
+        expect(find.text('Alice'), findsNothing);
+        // Close the chooser so its pending search is dropped.
+        await tester.enterText(find.byType(TextField), '');
+        await settleSearch(tester);
+      });
+
+      testWidgets('a query that continues no name is prose', (tester) async {
+        await pumpMembers(tester, ['Alice Smith']);
+        await tester.enterText(find.byType(TextField), '@alice sm');
+        await tester.pump();
+        expect(popover(), findsOneWidget);
+        await tester.enterText(find.byType(TextField), '@alice said');
+        await tester.pump();
+        expect(popover(), findsNothing);
+        await settleSearch(tester);
+      });
+
+      const maryJane = UserProfile(
+        pubkey:
+            'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+        displayName: 'Mary Jane',
+      );
+
+      testWidgets('a failed multi-word search keeps its error and retry', (
+        tester,
+      ) async {
+        var attempts = 0;
+        await pumpMembers(
+          tester,
+          ['Alice'],
+          searchPeople: (query) async {
+            attempts++;
+            if (attempts == 1) throw StateError('relay down');
+            return [maryJane];
+          },
+        );
+        await tester.enterText(find.byType(TextField), '@Mary J');
+        await tester.pump();
+        await settleSearch(tester);
+        expect(
+          find.byKey(const ValueKey('mention-search-error')),
+          findsOneWidget,
+        );
+        expect(find.text('Mary Jane'), findsNothing);
+
+        await tester.tap(find.text('Retry'));
+        await tester.pump();
+        await settleSearch(tester);
+        expect(
+          find.byKey(const ValueKey('mention-search-error')),
+          findsNothing,
+        );
+        expect(find.text('Mary Jane'), findsOneWidget);
+      });
+
+      testWidgets('a multi-word query still finds a directory person', (
+        tester,
+      ) async {
+        await pumpMembers(
+          tester,
+          ['Alice'],
+          searchPeople: (query) async =>
+              query == 'Mary J' ? [maryJane] : const [],
+        );
+        await tester.enterText(find.byType(TextField), '@Mary J');
+        await tester.pump();
+        // No known name continues the query yet, so no rows show.
+        expect(popover(), findsNothing);
+        await settleSearch(tester);
+        expect(popover(), findsOneWidget);
+        expect(find.text('Mary Jane'), findsOneWidget);
+      });
+
+      testWidgets('a DM finds directory people too, marked not in DM', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            membersFuture: Future.value(const <ChannelMember>[]),
+            channels: [_makeCurrentChannel(channelType: 'dm')],
+            onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+            searchPeople: (query) async =>
+                query == 'Mary J' ? [maryJane] : const [],
+          ),
+        );
+        await _expandComposer(tester);
+        await tester.enterText(find.byType(TextField), '@Mary J');
+        await tester.pump();
+        await settleSearch(tester);
+        expect(popover(), findsOneWidget);
+        expect(find.text('Mary Jane'), findsOneWidget);
+        expect(find.text('not in DM'), findsOneWidget);
+      });
+
+      testWidgets('@ opens after an opening bracket', (tester) async {
+        await pumpMembers(tester, ['Alice']);
+        await tester.enterText(find.byType(TextField), 'see (@al');
+        await tester.pump();
+        expect(popover(), findsOneWidget);
+        await tester.enterText(find.byType(TextField), 'mail@al');
+        await tester.pump();
+        expect(popover(), findsNothing);
+        await settleSearch(tester);
+      });
     });
 
     testWidgets('dismisses mention suggestions in the selection frame', (
@@ -2457,7 +2663,7 @@ void main() {
       expect(find.byTooltip('Remove attachment'), findsOneWidget);
 
       await _expandComposer(tester);
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pump();
       await tester.pumpAndSettle();
 
@@ -2528,7 +2734,7 @@ void main() {
       expect(find.byTooltip('Remove attachment'), findsNWidgets(2));
 
       await _expandComposer(tester);
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
 
       expect(
@@ -2976,6 +3182,79 @@ void main() {
       );
     });
 
+    testWidgets('ComposeBar retains submitted origin through delayed upload', (
+      tester,
+    ) async {
+      final uploadResponse = Completer<http.Response>();
+      Rect? submittedOrigin;
+      var sent = false;
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        httpClient: http_testing.MockClient((_) => uploadResponse.future),
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async => null,
+        pickGalleryImages: () async => [
+          XFile.fromData(_pngBytes, name: 'tiny.png'),
+        ],
+      );
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                sent = true;
+                submittedOrigin = ComposerSendOrigin.current;
+              },
+        ),
+      );
+      await _openSystemPhotoPicker(tester);
+      await tester.pumpAndSettle();
+      await _expandComposer(tester);
+      final composer = tester.getRect(
+        find.byKey(const ValueKey('composer-surface')),
+      );
+      await tester.tap(
+        find
+            .ancestor(
+              of: find.byIcon(BuzzIcons.arrowUp),
+              matching: find.byType(IconButton),
+            )
+            .hitTestable(),
+      );
+      await tester.pump(const Duration(seconds: 5));
+      expect(sent, isFalse);
+      // Layout changes during upload must not replace the submitted geometry.
+      tester.view.physicalSize = Size(
+        tester.view.physicalSize.width,
+        tester.view.physicalSize.height + 200,
+      );
+      addTearDown(tester.view.resetPhysicalSize);
+      await tester.pump();
+      uploadResponse.complete(
+        http.Response(
+          jsonEncode({
+            'url': 'https://relay.example/media/test.png',
+            'sha256':
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+            'size': 16,
+            'type': 'image/png',
+            'uploaded': 1,
+          }),
+          200,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(sent, isTrue);
+      expect(submittedOrigin, isNotNull);
+      expect(submittedOrigin, composer);
+      expect(ComposerSendOrigin.current, isNull);
+    });
+
     testWidgets(
       'shows post-send upload progress above the composer and cancels',
       (tester) async {
@@ -3017,7 +3296,7 @@ void main() {
         );
 
         await _expandComposer(tester);
-        await tester.tap(find.byIcon(LucideIcons.arrowUp));
+        await tester.tap(find.byIcon(BuzzIcons.arrowUp));
         await tester.pump();
 
         expect(
@@ -3150,7 +3429,8 @@ void main() {
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await _inviteOutside(tester);
       await tester.pumpAndSettle();
 
       // The cancelled send must not reach the relay.
@@ -3282,7 +3562,8 @@ void main() {
         await tester.tap(find.text('Helper Bot'));
         await tester.pumpAndSettle();
         await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-        await tester.tap(find.byIcon(LucideIcons.arrowUp));
+        await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+        await _inviteOutside(tester);
         await tester.pump();
 
         expect(
@@ -3509,10 +3790,10 @@ void main() {
       );
 
       await _expandComposer(tester);
-      await tester.tap(find.byIcon(LucideIcons.aLargeSmall));
+      await tester.tap(find.byIcon(BuzzIcons.aLargeSmall));
       await tester.pumpAndSettle();
 
-      final boldFinder = find.byIcon(LucideIcons.bold);
+      final boldFinder = find.byIcon(BuzzIcons.bold);
       final boldIcon = tester.widget<Icon>(boldFinder);
       final colors = tester.element(boldFinder).colors;
       expect(boldIcon.color, colors.primary);
@@ -3596,7 +3877,7 @@ void main() {
         findsOneWidget,
       );
 
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
 
       expect(uploadedBytes, _pngBytes);
@@ -4027,7 +4308,7 @@ void main() {
       await tester.pumpAndSettle();
       await _expandComposer(tester);
       await tester.enterText(find.byType(TextField), 'Keep this draft');
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
 
       expect(find.textContaining('upload failed'), findsOneWidget);
@@ -4072,7 +4353,7 @@ void main() {
         await _openSystemPhotoPicker(tester);
         await tester.pumpAndSettle();
         await _expandComposer(tester);
-        await tester.tap(find.byIcon(LucideIcons.arrowUp));
+        await tester.tap(find.byIcon(BuzzIcons.arrowUp));
         await tester.pumpAndSettle();
 
         expect(
@@ -4181,13 +4462,14 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
-      expect(find.byIcon(LucideIcons.bot), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.bot), findsOneWidget);
       expect(
         find.byKey(const ValueKey('composer-agent-mention-chip')),
         findsOneWidget,
       );
       await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await _inviteOutside(tester);
       await tester.pumpAndSettle();
 
       expect(sentContent, 'hello @Helper Bot');
@@ -4202,7 +4484,7 @@ void main() {
       ]);
     });
 
-    testWidgets('preserves edits made while a mentioned agent is being added', (
+    testWidgets('keeps edits made while a mentioned agent is being added', (
       tester,
     ) async {
       final agentPubkey = 'c' * 64;
@@ -4255,7 +4537,8 @@ void main() {
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await _inviteOutside(tester);
       await tester.pump();
 
       expect(
@@ -4263,11 +4546,16 @@ void main() {
         hasLength(1),
       );
 
+      // The prompt took focus; reopen the composer to edit the draft.
+      await tester.pump(const Duration(milliseconds: 200));
+      await tester.tap(find.text('hello @Helper Bot'));
+      await tester.pump(const Duration(milliseconds: 200));
       await tester.enterText(find.byType(TextField), 'newer draft');
       addMemberAcknowledgement.complete();
       await tester.pumpAndSettle();
 
-      expect(sentContent, 'hello @Helper Bot');
+      // The draft changed while adding ran: send nothing, keep the draft.
+      expect(sentContent, isNull);
       expect(
         tester.widget<TextField>(find.byType(TextField)).controller!.text,
         'newer draft',
@@ -4338,13 +4626,281 @@ void main() {
       },
     );
 
-    testWidgets('does not mutate a DM when mentioning a non-member agent', (
+    group('outside-person sends', () {
+      const maryJane = UserProfile(
+        pubkey:
+            'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+        displayName: 'Mary Jane',
+      );
+      ChannelMember member(String pubkey) => ChannelMember(
+        pubkey: pubkey,
+        role: 'member',
+        joinedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+      );
+
+      Future<void> mentionMaryAndSend(WidgetTester tester) async {
+        await _expandComposer(tester);
+        await tester.enterText(find.byType(TextField), '@Mary J');
+        await tester.pump();
+        await tester.pump(mentionSearchDebounce * 2);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Mary Jane'));
+        await tester.pumpAndSettle();
+        await tester.enterText(find.byType(TextField), 'hello @Mary Jane');
+        await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+        await tester.pumpAndSettle();
+      }
+
+      testWidgets('a stale DM participant is sent as a reference', (
+        tester,
+      ) async {
+        final signer = nostr.Keys.generate();
+        List<String>? sentRecipients;
+        List<List<String>>? sentTags;
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(signer.nsec),
+            currentPubkey: signer.public,
+            // Current membership no longer has Mary; the DM metadata lags.
+            members: [member(signer.public), member('1' * 64)],
+            channels: [
+              _makeCurrentChannel(
+                channelType: 'dm',
+                participantPubkeys: [signer.public, '1' * 64, maryJane.pubkey],
+              ),
+            ],
+            searchPeople: (query) async => [maryJane],
+            onSend:
+                (_, recipients, {mediaTags = const <List<String>>[]}) async {
+                  sentRecipients = recipients;
+                  sentTags = mediaTags;
+                },
+          ),
+        );
+        await mentionMaryAndSend(tester);
+
+        expect(find.byType(AlertDialog), findsNothing);
+        expect(sentRecipients, isNot(contains(maryJane.pubkey)));
+        expect(sentTags, contains(orderedEquals(['mention', maryJane.pubkey])));
+      });
+
+      testWidgets('a DM without membership uses its participants and sends', (
+        tester,
+      ) async {
+        final signer = nostr.Keys.generate();
+        List<String>? sentRecipients;
+        List<List<String>>? sentTags;
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(signer.nsec),
+            currentPubkey: signer.public,
+            loadMembers: () => Future.error(StateError('relay down')),
+            channels: [
+              _makeCurrentChannel(
+                channelType: 'dm',
+                participantPubkeys: [signer.public, '1' * 64],
+              ),
+            ],
+            searchPeople: (query) async => [maryJane],
+            onSend:
+                (_, recipients, {mediaTags = const <List<String>>[]}) async {
+                  sentRecipients = recipients;
+                  sentTags = mediaTags;
+                },
+          ),
+        );
+        await mentionMaryAndSend(tester);
+
+        expect(find.byType(AlertDialog), findsNothing);
+        expect(sentRecipients, isNotNull);
+        expect(sentRecipients, isNot(contains(maryJane.pubkey)));
+        expect(sentTags, contains(orderedEquals(['mention', maryJane.pubkey])));
+      });
+
+      testWidgets('a DM opened before the channel list loads sends mentions', (
+        tester,
+      ) async {
+        final signer = nostr.Keys.generate();
+        final pat = '1' * 64;
+        List<String>? sentRecipients;
+        List<List<String>>? sentTags;
+        var searches = 0;
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(signer.nsec),
+            currentPubkey: signer.public,
+            members: [
+              member(signer.public),
+              ChannelMember(
+                pubkey: pat,
+                role: 'member',
+                joinedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+                displayName: 'Pat Peer',
+              ),
+            ],
+            // The DM was opened from its own metadata and roster while the
+            // full channel list is still loading.
+            stallChannels: true,
+            openedAhead: _makeCurrentChannel(
+              channelType: 'dm',
+              participantPubkeys: [signer.public, pat],
+            ),
+            searchPeople: (query) async {
+              if (query != 'Mary J') return const [];
+              if (++searches == 1) throw StateError('relay down');
+              return [maryJane];
+            },
+            onSend:
+                (_, recipients, {mediaTags = const <List<String>>[]}) async {
+                  sentRecipients = recipients;
+                  sentTags = mediaTags;
+                },
+          ),
+        );
+        await _expandComposer(tester);
+        // The picker searches the directory for people outside the DM, as it
+        // does once the list has the DM, and keeps a failed search's retry.
+        await tester.enterText(find.byType(TextField), '@Mary J');
+        await tester.pump();
+        await tester.pump(mentionSearchDebounce * 2);
+        expect(
+          find.byKey(const ValueKey('mention-search-error')),
+          findsOneWidget,
+        );
+        await tester.tap(find.text('Retry'));
+        await tester.pump();
+        await tester.pump(mentionSearchDebounce * 2);
+        expect(find.text('Mary Jane'), findsOneWidget);
+        expect(find.text('not in DM'), findsOneWidget);
+
+        await tester.enterText(find.byType(TextField), '@Pat');
+        await tester.pump();
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Pat Peer'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.text('Message not sent: could not check who is in this channel'),
+          findsNothing,
+        );
+        expect(sentRecipients, contains(pat));
+        expect(sentTags, isNot(contains(orderedEquals(['mention', pat]))));
+      });
+
+      testWidgets('a failed member check keeps the draft and Retry sends', (
+        tester,
+      ) async {
+        final signer = nostr.Keys.generate();
+        var membersReady = false;
+        var sendCount = 0;
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(signer.nsec),
+            currentPubkey: signer.public,
+            loadMembers: () async {
+              if (!membersReady) throw StateError('relay down');
+              return [member(signer.public), member(maryJane.pubkey)];
+            },
+            channels: [_makeCurrentChannel()],
+            searchPeople: (query) async => [maryJane],
+            onSend: (_, _, {mediaTags = const <List<String>>[]}) async {
+              sendCount++;
+            },
+          ),
+        );
+        await mentionMaryAndSend(tester);
+
+        expect(sendCount, 0);
+        expect(
+          find.text('Message not sent: could not check who is in this channel'),
+          findsOneWidget,
+        );
+        final field = tester.widget<TextField>(find.byType(TextField));
+        expect(field.controller!.text, 'hello @Mary Jane');
+
+        // The membership comes back, as after the relay's own retry.
+        membersReady = true;
+        ProviderScope.containerOf(
+          tester.element(find.byType(ComposeBar)),
+        ).invalidate(channelMembersProvider('channel-1'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Retry'));
+        await tester.pumpAndSettle();
+
+        expect(sendCount, 1);
+        expect(find.byType(AlertDialog), findsNothing);
+      });
+
+      testWidgets('Invite after a community switch adds nobody', (
+        tester,
+      ) async {
+        final signer = nostr.Keys.generate();
+        final publishedEvents = <Map<String, dynamic>>[];
+        var sendCount = 0;
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(signer.nsec),
+            currentPubkey: signer.public,
+            members: [member(signer.public)],
+            channels: [_makeCurrentChannel()],
+            searchPeople: (query) async => [maryJane],
+            relayConfig: () => _SwitchableRelayConfigNotifier(
+              RelayConfig(baseUrl: 'https://relay.example', nsec: signer.nsec),
+            ),
+            onSend: (_, _, {mediaTags = const <List<String>>[]}) async {
+              sendCount++;
+            },
+          ),
+        );
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(ComposeBar)),
+        );
+        final session = container.read(relaySessionProvider.notifier);
+        session.debugAttachSocketForTest(
+          _RecordingRelaySocket(
+            publishedEvents,
+            session.debugHandleSocketMessageForTest,
+          ),
+        );
+
+        await mentionMaryAndSend(tester);
+        expect(find.byType(AlertDialog), findsOneWidget);
+
+        // The community changes while the question is open.
+        container
+            .read(relayConfigProvider.notifier)
+            .update(baseUrl: 'https://other.example', nsec: signer.nsec);
+        await tester.pump();
+        // The session reconnects to the new community, so an add sent now
+        // would land there.
+        session.debugAttachSocketForTest(
+          _RecordingRelaySocket(
+            publishedEvents,
+            session.debugHandleSocketMessageForTest,
+          ),
+        );
+        await _inviteOutside(tester);
+        await tester.pumpAndSettle();
+
+        expect(
+          publishedEvents.where((event) => event['kind'] == 9000),
+          isEmpty,
+        );
+        expect(sendCount, 0);
+      });
+    });
+
+    testWidgets('sends a non-member in a DM as a reference without asking', (
       tester,
     ) async {
       final agentPubkey = 'd' * 64;
       final signer = nostr.Keys.generate();
       final publishedEvents = <Map<String, dynamic>>[];
       String? sentContent;
+      List<String>? sentMentionPubkeys;
+      List<List<String>>? sentMediaTags;
 
       await tester.pumpWidget(
         _buildComposeBar(
@@ -4362,6 +4918,8 @@ void main() {
                 mediaTags = const <List<String>>[],
               }) async {
                 sentContent = content;
+                sentMentionPubkeys = mentionPubkeys;
+                sentMediaTags = mediaTags;
               },
         ),
       );
@@ -4378,7 +4936,13 @@ void main() {
 
       await _selectAndSendAgentMention(tester);
 
+      // Nobody can be added to a DM, so there is no choice to ask about:
+      // the message sends at once and the agent becomes a reference.
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsNothing);
       expect(sentContent, 'hello @Helper Bot');
+      expect(sentMentionPubkeys, isNot(contains(agentPubkey)));
+      expect(sentMediaTags, contains(orderedEquals(['mention', agentPubkey])));
       expect(publishedEvents.where((event) => event['kind'] == 9000), isEmpty);
     });
 
@@ -4425,7 +4989,7 @@ void main() {
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pump();
 
       expect(didSend, isFalse);
@@ -4501,7 +5065,8 @@ void main() {
         await tester.tap(find.text('Helper Bot'));
         await tester.pumpAndSettle();
         await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-        await tester.tap(find.byIcon(LucideIcons.arrowUp));
+        await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+        await _inviteOutside(tester);
         await tester.pumpAndSettle();
 
         expect(didSend, isTrue);
@@ -4589,11 +5154,11 @@ void main() {
       await tester.tap(find.text('Video'));
       await tester.pumpAndSettle();
 
-      expect(find.byIcon(LucideIcons.video), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.video), findsOneWidget);
 
       final sendButton = find
           .ancestor(
-            of: find.byIcon(LucideIcons.arrowUp),
+            of: find.byIcon(BuzzIcons.arrowUp),
             matching: find.byType(IconButton),
           )
           .hitTestable();
@@ -4664,7 +5229,7 @@ void main() {
       );
       expect(find.byKey(const ValueKey('voice-note-waveform')), findsOneWidget);
       expect(find.byType(TextField), findsNothing);
-      expect(find.byIcon(LucideIcons.arrowUp), findsNothing);
+      expect(find.byIcon(BuzzIcons.arrowUp), findsNothing);
       expect(find.byTooltip('Add attachment'), findsNothing);
 
       final recordingWidth = tester
@@ -4815,7 +5380,7 @@ void main() {
       );
       final sendButton = find
           .ancestor(
-            of: find.byIcon(LucideIcons.arrowUp),
+            of: find.byIcon(BuzzIcons.arrowUp),
             matching: find.byType(IconButton),
           )
           .hitTestable();
@@ -5129,7 +5694,7 @@ void main() {
         await tester.pumpAndSettle();
         final sendButton = find
             .ancestor(
-              of: find.byIcon(LucideIcons.arrowUp),
+              of: find.byIcon(BuzzIcons.arrowUp),
               matching: find.byType(IconButton),
             )
             .hitTestable();
@@ -5563,7 +6128,7 @@ Future<void> _selectAndSendAgentMention(WidgetTester tester) async {
   await tester.tap(find.text('Helper Bot'));
   await tester.pumpAndSettle();
   await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-  await tester.tap(find.byIcon(LucideIcons.arrowUp));
+  await tester.tap(find.byIcon(BuzzIcons.arrowUp));
   await tester.pumpAndSettle();
 }
 
@@ -5604,8 +6169,10 @@ String _suggestionAvatarInitial(WidgetTester tester, String labelText) {
 Channel _makeCurrentChannel({
   String channelType = 'stream',
   String visibility = 'open',
+  List<String> participantPubkeys = const [],
 }) {
   return Channel(
+    participantPubkeys: participantPubkeys,
     id: 'channel-1',
     name: 'current',
     channelType: channelType,
@@ -5643,4 +6210,10 @@ Channel _makeChannel({required String name, required String channelType}) {
     createdAt: DateTime(2024),
     memberCount: 5,
   );
+}
+
+/// Answers the outside-channel mention prompt with Invite.
+Future<void> _inviteOutside(WidgetTester tester) async {
+  await tester.pumpAndSettle();
+  await tester.tap(find.widgetWithText(TextButton, 'Invite'));
 }

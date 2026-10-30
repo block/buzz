@@ -14,6 +14,8 @@ import 'push_bridge.dart';
 import 'push_lease_revocation_outbox.dart';
 import 'push_relay_capability_provider.dart';
 import 'push_subscription.dart';
+import 'push_subscription_provider.dart';
+import 'push_setup_recovery.dart';
 
 const _pushBootstrapRetryDelay = Duration(seconds: 5);
 
@@ -35,11 +37,12 @@ class BuzzPushAttemptGate {
 
   void failed(String attempt, {required VoidCallback retry}) {
     if (_attempt != attempt) return;
-    _attempt = null;
     _retryTimer?.cancel();
     _retryTimer = Timer(retryDelay, () {
       _retryTimer = null;
-      if (_attempt == null) retry();
+      if (_attempt != attempt) return;
+      _attempt = null;
+      retry();
     });
   }
 
@@ -81,6 +84,7 @@ String buzzPushPublicationAttemptKey({
   token,
   descriptor.executorKeyId,
   descriptor.executorPubkey,
+  descriptor.hGrammar,
   buzzPushSubscriptionsFingerprint(subscriptions),
 ].join('|');
 
@@ -150,12 +154,118 @@ Future<int> publishBuzzPushLeaseRecoverably({
   return generation;
 }
 
-/// Starts the push lifecycle only after authenticated relay connectivity and a
-/// push-capable NIP-11 descriptor are both present.
+typedef _PushInputs = ({
+  BuzzPushLeaseRevocationOutbox revocationOutbox,
+  SessionState session,
+  List<Community> communities,
+  RelayConfig config,
+  Community? community,
+  String? memberPubkey,
+  BuzzPushLeaseDescriptor? descriptor,
+});
+
+// Convert synchronous provider failures into data before they reach a widget
+// build. Dependencies remain watched so corrected inputs recover immediately.
+final _pushInputsProvider = Provider.autoDispose<AsyncValue<_PushInputs>>((
+  ref,
+) {
+  try {
+    return AsyncData((
+      revocationOutbox: ref.watch(buzzPushLeaseRevocationOutboxProvider),
+      session: ref.watch(relaySessionProvider),
+      communities: ref.watch(communityListProvider).value ?? const [],
+      config: ref.watch(relayConfigProvider),
+      community: ref.watch(activeCommunityProvider).value,
+      memberPubkey: ref.watch(myPubkeyProvider),
+      descriptor: ref.watch(currentRelayPushDescriptorProvider).value,
+    ));
+  } catch (error, stack) {
+    reportPushSetupError('initialization', error, stack);
+    return AsyncError(error, stack);
+  }
+});
+
+// Pull cold-start notification routing after runApp. A failed platform call
+// must not prevent the first frame or disappear as an unobserved future.
+final _pendingNotificationResponseProvider = FutureProvider.autoDispose<void>((
+  ref,
+) async {
+  try {
+    await syncPendingBuzzPushNotificationResponse();
+  } catch (error, stack) {
+    reportPushSetupError('pending notification response', error, stack);
+    rethrow;
+  }
+}, retry: pushSetupRetry);
+
+/// Observable startup/synchronization status, independent of core app rendering.
+final buzzPushSetupStatusProvider = Provider.autoDispose<AsyncValue<void>>((
+  ref,
+) {
+  final inputs = ref.watch(_pushInputsProvider);
+  final response = ref.watch(_pendingNotificationResponseProvider);
+  final subscriptions = ref.watch(pushSubscriptionSyncProvider);
+  if (response.hasError) return response;
+  if (inputs.hasError) return AsyncError(inputs.error!, inputs.stackTrace!);
+  return subscriptions;
+});
+
+/// Retries push-owned setup dependencies without resetting the app or session.
+void retryBuzzPushSetup(WidgetRef ref) {
+  // Unrelated setup failures must not dispose a healthy cleanup worker.
+  // Reconstruct only a worker whose provider actually failed to initialize.
+  try {
+    ref.read(buzzPushLeaseRevocationOutboxProvider);
+  } catch (error, stack) {
+    reportPushSetupError('revocation worker retry', error, stack);
+    ref.invalidate(buzzPushLeaseRevocationOutboxProvider);
+  }
+  ref.invalidate(currentRelayPushDescriptorProvider);
+  ref.invalidate(pushSubscriptionSyncProvider);
+  ref.invalidate(_pendingNotificationResponseProvider);
+  ref.invalidate(_pushInputsProvider);
+}
+
+/// Starts push independently of [child], which stays mounted during failures.
 class BuzzPushBootstrap extends HookConsumerWidget {
   const BuzzPushBootstrap({required this.child, super.key});
 
   final Widget child;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final inputs = ref.watch(_pushInputsProvider);
+    ref.watch(buzzPushSetupStatusProvider);
+    final failures = useRef(0);
+    useEffect(() {
+      if (!inputs.hasError) {
+        failures.value = 0;
+        return null;
+      }
+      final delay = pushSetupRetry(failures.value++, inputs.error!);
+      if (delay == null) return null;
+      final timer = Timer(delay, () {
+        if (context.mounted) retryBuzzPushSetup(ref);
+      });
+      return timer.cancel;
+    }, [inputs]);
+    // A stable sibling slot preserves navigation and widget state when push
+    // fails, retries, or becomes available after startup.
+    return Stack(
+      textDirection: TextDirection.ltr,
+      children: [
+        child,
+        if (inputs.asData case final data?)
+          _BuzzPushLifecycle(inputs: data.value),
+      ],
+    );
+  }
+}
+
+class _BuzzPushLifecycle extends HookConsumerWidget {
+  const _BuzzPushLifecycle({required this.inputs});
+
+  final _PushInputs inputs;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -164,13 +274,25 @@ class BuzzPushBootstrap extends HookConsumerWidget {
     final tombstoneAttempt = useMemoized(BuzzPushAttemptGate.new);
     final publicationRetry = useState(0);
     final tombstoneRetry = useState(0);
-    final revocationOutbox = ref.watch(buzzPushLeaseRevocationOutboxProvider);
-    final session = ref.watch(relaySessionProvider);
-    final communities = ref.watch(communityListProvider).value ?? const [];
-    final config = ref.watch(relayConfigProvider);
-    final community = ref.watch(activeCommunityProvider).value;
-    final memberPubkey = ref.watch(myPubkeyProvider);
-    final descriptor = ref.watch(currentRelayPushDescriptorProvider).value;
+    final (
+      :revocationOutbox,
+      :session,
+      :communities,
+      :config,
+      :community,
+      :memberPubkey,
+      :descriptor,
+    ) = inputs;
+    final enablementEpoch = useRef(0);
+    useEffect(() {
+      // Each opt-in needs a fresh active lease even when endpoint, executor,
+      // and subscriptions match the lease replaced by the opt-out tombstone.
+      // A distinct key also fences renewal callbacks from the prior opt-in.
+      if (community?.pushNotificationsEnabled == true) {
+        enablementEpoch.value += 1;
+      }
+      return null;
+    }, [community?.id, community?.pushNotificationsEnabled]);
 
     useEffect(() {
       final listener = AppLifecycleListener(
@@ -269,13 +391,14 @@ class BuzzPushBootstrap extends HookConsumerWidget {
         final activeDescriptor = descriptor!;
         final state = activeCommunity.pushSubscriptionState;
         if (state.desired.isEmpty) return null;
-        final attempt = buzzPushPublicationAttemptKey(
+        final publicationKey = buzzPushPublicationAttemptKey(
           communityId: activeCommunity.id,
           relayBaseUrl: config.baseUrl,
           token: token,
           descriptor: activeDescriptor,
           subscriptions: state.desired,
         );
+        final attempt = '${enablementEpoch.value}|$publicationKey';
         if (!publicationAttempt.tryBegin(attempt)) return null;
         final relay = SignedEventRelay(
           session: ref.read(relaySessionProvider.notifier),
@@ -306,8 +429,13 @@ class BuzzPushBootstrap extends HookConsumerWidget {
               },
             );
           } catch (error, stack) {
-            publicationAttempt.failed(
+            publicationAttempt.retryAfter(
               attempt,
+              // Re-fetch capabilities after a relay upgrade without repeatedly
+              // enrolling or publishing a lease the old relay cannot accept.
+              delay: error is BuzzPushChannelGrammarException
+                  ? const Duration(minutes: 5)
+                  : _pushBootstrapRetryDelay,
               retry: () {
                 if (context.mounted) publicationRetry.value += 1;
               },
@@ -339,7 +467,7 @@ class BuzzPushBootstrap extends HookConsumerWidget {
             descriptor: descriptor,
           ),
       attemptKey: '${community?.id}|${config.baseUrl}',
-      child: child,
+      child: const SizedBox.shrink(),
     );
   }
 
@@ -365,7 +493,10 @@ class BuzzPushBootstrap extends HookConsumerWidget {
   ) async {
     final state = community.pushSubscriptionState;
     final desired = state.desired;
-    final descriptor = await fetchBuzzPushLeaseDescriptor(config.baseUrl);
+    final descriptor = await ref.read(buzzPushDescriptorFetcherProvider)(
+      config.baseUrl,
+    );
+    validateBuzzPushChannelGrammar(descriptor, desired);
     final grant = await enrollBuzzPush(
       config.wsUrl,
       Env.pushGatewayUrl,

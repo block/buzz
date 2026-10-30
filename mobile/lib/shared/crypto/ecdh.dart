@@ -1,38 +1,28 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
-import 'package:pointycastle/ecc/curves/secp256k1.dart';
+import 'package:buzz_secp256k1/buzz_secp256k1.dart' as secp256k1;
 
 /// Compute secp256k1 ECDH shared secret (raw x-coordinate, unhashed).
 ///
 /// Both [privateKeyHex] and [publicKeyHex] are 64-char lowercase hex strings
-/// (32 bytes each). The public key is an x-only BIP-340 key.
+/// (32 bytes each). The public key is an x-only BIP-340 key, lifted to even Y.
 ///
-/// Returns the 32-byte x-coordinate of the shared point.
+/// Returns the 32-byte x-coordinate of the shared point, computed in constant
+/// time by libsecp256k1. Throws [ArgumentError] when either key is invalid.
 Uint8List ecdhSharedSecret(String privateKeyHex, String publicKeyHex) {
-  final params = ECCurve_secp256k1();
-
-  // Parse private key scalar.
-  final d = BigInt.parse(privateKeyHex, radix: 16);
-
-  // Lift x-only public key to a full curve point (assume even y / prefix 02).
-  final xBytes = hexToBytes(publicKeyHex);
-  final compressed = Uint8List(33);
-  compressed[0] = 0x02; // even y
-  compressed.setRange(1, 33, xBytes);
-  final pubPoint = params.curve.decodePoint(compressed);
-  if (pubPoint == null) {
-    throw ArgumentError('Invalid public key: cannot decode point');
+  if (privateKeyHex.length != 64 || publicKeyHex.length != 64) {
+    throw ArgumentError('ECDH keys must be 64 hex characters');
   }
-
-  // Scalar multiplication: shared = d * Q
-  final shared = pubPoint * d;
-  if (shared == null || shared.isInfinity) {
-    throw StateError('ECDH produced point at infinity');
+  final secretKey = hexToBytes(privateKeyHex);
+  try {
+    return secp256k1.ecdhX(
+      secretKey: secretKey,
+      publicKey: hexToBytes(publicKeyHex),
+    );
+  } finally {
+    secretKey.fillRange(0, secretKey.length, 0);
   }
-
-  // Extract 32-byte x-coordinate (big-endian, zero-padded).
-  return bigIntTo32Bytes(shared.x!.toBigInteger()!);
 }
 
 /// Generate secure random bytes.
@@ -57,9 +47,4 @@ Uint8List hexToBytes(String hex) {
 
 String bytesToHex(Uint8List bytes) {
   return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-}
-
-Uint8List bigIntTo32Bytes(BigInt value) {
-  final hexStr = value.toRadixString(16).padLeft(64, '0');
-  return hexToBytes(hexStr);
 }

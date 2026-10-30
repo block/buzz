@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -11,10 +13,15 @@ import 'thread_reply_ownership.dart';
 import 'timeline_message.dart';
 
 part 'channel_messages_provider/thread_summaries.dart';
+part 'channel_messages_provider/pagination.dart';
 
 // Channel history keeps partial reply evidence; full threads stay route-scoped.
 const _maxCachedRepliesPerRoot = 256;
 const _maxCachedReplies = 2048;
+
+/// How long a chat nobody shows keeps its live subscription. A brief cover,
+/// such as a profile pushed over the chat, returns without a catch-up fetch.
+const _liveDetachDelay = Duration(seconds: 30);
 
 const _channelLiveEventKinds = [
   ...EventKind.channelEventKinds,
@@ -27,10 +34,12 @@ const _channelLiveEventKinds = [
 /// relay does not return a valid NIP-CW bounds overlay.
 class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   final String channelId;
+  final bool flatTimeline;
   void Function()? _unsubscribe;
   bool _reachedOldest = false;
   bool _initInFlight = false;
   bool _usingChannelWindow = false;
+  NostrEvent? _legacyHistoryCursor;
   bool _initialWindowQueryInFlight = false;
   int _initVersion = 0;
   ChannelWindowStore _windowStore = const ChannelWindowStore.empty();
@@ -56,6 +65,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         ref.read(relaySessionProvider).status == SessionStatus.connected,
   );
   bool _hasListeners = true;
+  Timer? _liveDetachTimer;
+  bool _liveDetached = false;
   late final _summaryRefreshes = ThreadSummaryRefreshQueue(
     refresh: _refreshOverflowSummary,
     canRun: () =>
@@ -68,7 +79,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     },
   );
 
-  ChannelMessagesNotifier(this.channelId);
+  ChannelMessagesNotifier(this.channelId, {this.flatTimeline = false});
 
   bool get _summaryMounted => ref.mounted;
   RelaySessionNotifier get _summarySession =>
@@ -112,18 +123,38 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   @override
   AsyncValue<List<NostrEvent>> build() {
     final sessionState = ref.watch(relaySessionProvider);
+    // Riverpod defers rebuilding a provider nobody is listening to until it
+    // is listened to or read again, and then skips onResume. So a build
+    // always means the chat is wanted.
+    _hasListeners = true;
+    _liveDetached = false;
     ref.onCancel(() {
       _hasListeners = false;
       _deletionOwnerQueue.pause();
       _summaryRefreshes.pause();
+      _liveDetachTimer?.cancel();
+      _liveDetachTimer = Timer(_liveDetachDelay, _detachLive);
     });
     ref.onResume(() {
       _hasListeners = true;
+      _liveDetachTimer?.cancel();
+      _liveDetachTimer = null;
+      if (_liveDetached) {
+        // Keep the cached timeline on screen while a rebuild resubscribes
+        // and catches up, as it does after a reconnect. Life-cycle callbacks
+        // can't use ref, so rebuild just after.
+        _liveDetached = false;
+        Future.microtask(() {
+          if (ref.mounted) ref.invalidateSelf();
+        });
+      }
       Future.microtask(_summaryRefreshes.resume);
       Future.microtask(_deletionOwnerQueue.resume);
     });
     ref.onDispose(() {
       _initVersion++;
+      _liveDetachTimer?.cancel();
+      _liveDetachTimer = null;
       _deletionOwnerQueue.pause();
       _summaryRefreshes.pause();
       _clearSubscription();
@@ -193,6 +224,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       final historyVersion = ++_threadQuerySerial;
       final history = await _fetchNewestHistory(session);
       if (!_isCurrentInit(initVersion)) return;
+      if (!_usingChannelWindow) _legacyHistoryCursor = history.firstOrNull;
       _confirmLocalMessages(history.map((event) => event.id));
 
       final existing = state.value ?? const <NostrEvent>[];
@@ -228,6 +260,14 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   Future<List<NostrEvent>> _fetchNewestHistory(
     RelaySessionNotifier session,
   ) async {
+    if (flatTimeline) {
+      _usingChannelWindow = false;
+      final history = await session.fetchHistory(
+        NostrFilters.messages(channelId),
+      );
+      history.sort(compareChannelTimelineEventsChronologically);
+      return history;
+    }
     try {
       _initialWindowQueryInFlight = true;
       final pageVersion = ++_threadQuerySerial;
@@ -247,6 +287,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     } catch (error) {
       _initialWindowQueryInFlight = false;
       _liveSummaryRootsDuringInitialWindowQuery.clear();
+      // Legacy history would re-run the timed-out work another way.
+      if (isRelayDeadlineError(error)) rethrow;
       debugPrint(
         '[ChannelMessagesNotifier] channel window unavailable for $channelId, falling back to WS history: $error',
       );
@@ -458,6 +500,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   }
 
   List<NostrEvent> _boundEventReplies(List<NostrEvent> events) {
+    if (flatTimeline) return events;
     final replies = events.where(
       (event) =>
           EventKind.channelTimelineContentKinds.contains(event.kind) &&
@@ -853,6 +896,18 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
 
   bool _isCurrentInit(int initVersion) => initVersion == _initVersion;
 
+  /// Stops live work for a chat that stayed hidden; resume catches it up.
+  void _detachLive() {
+    _liveDetachTimer = null;
+    _liveDetached = true;
+    // Retire an unfinished init so its subscription can't install later.
+    _initVersion++;
+    _initInFlight = false;
+    _initialWindowQueryInFlight = false;
+    _liveSummaryRootsDuringInitialWindowQuery.clear();
+    _clearSubscription();
+  }
+
   void _clearSubscription() {
     _unsubscribe?.call();
     _unsubscribe = null;
@@ -917,61 +972,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     ]..sort(compareChannelTimelineEventsChronologically);
   }
 
-  Future<bool> fetchOlder() async {
-    if (_reachedOldest || _initInFlight) return false;
+  AsyncValue<List<NostrEvent>> get _historyState => state;
+  set _historyState(AsyncValue<List<NostrEvent>> value) => state = value;
 
-    final session = ref.read(relaySessionProvider.notifier);
-    if (_usingChannelWindow) {
-      final cursor = channelWindowNextCursor(_windowStore);
-      if (cursor == null) {
-        _reachedOldest = true;
-        return false;
-      }
-      try {
-        final pageVersion = ++_threadQuerySerial;
-        final page = await _fetchWindowPage(session, cursor);
-        _windowStore = appendOlderChannelWindow(_windowStore, page);
-        _reconcilePageSummaries(page, pageVersion);
-        _reachedOldest = !channelWindowHasMore(_windowStore);
-        final flattened = _withDeepLinkEvents(
-          flattenChannelWindowEvents(_windowStore),
-        );
-        _lastKnownMessages = flattened;
-        _reconcileRetainedSummaryPayloads(page.rows.map((row) => row.event));
-        state = AsyncData(flattened);
-        return page.rows.isNotEmpty || page.aux.isNotEmpty;
-      } catch (error) {
-        debugPrint(
-          '[ChannelMessagesNotifier] failed to fetch older channel window page for $channelId: $error',
-        );
-        return false;
-      }
-    }
-
-    final currentEvents = state.value;
-    if (currentEvents == null || currentEvents.isEmpty) return false;
-    final oldest = currentEvents.first.createdAt;
-    final older = await session.fetchHistory(
-      NostrFilters.messages(channelId, limit: 100, until: oldest),
-    );
-    if (older.isEmpty) {
-      _reachedOldest = true;
-      return false;
-    }
-    final currentIds = state.value?.map((e) => e.id).toSet() ?? {};
-    final deduped = older.where((e) => !currentIds.contains(e.id)).toList();
-    if (deduped.isEmpty) {
-      _reachedOldest = true;
-      return false;
-    }
-    state = state.whenData((events) {
-      final merged = [...deduped, ...events];
-      merged.sort(compareChannelTimelineEventsChronologically);
-      _lastKnownMessages = merged;
-      return merged;
-    });
-    return true;
-  }
+  Future<bool> fetchOlder() => _fetchOlder();
 }
 
 int _currentUnixSeconds() => DateTime.now().millisecondsSinceEpoch ~/ 1000;

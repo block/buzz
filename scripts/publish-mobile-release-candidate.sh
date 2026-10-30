@@ -8,11 +8,14 @@ fail() {
 
 # shellcheck source=scripts/release-rulesets.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/release-rulesets.sh"
+# shellcheck source=scripts/mobile-release-source.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mobile-release-source.sh"
 
-[[ "$#" -eq 3 ]] || fail "usage: $0 X.Y.Z N COMMIT_SHA"
+[[ "$#" -eq 4 ]] || fail "usage: $0 X.Y.Z N COMMIT_SHA SOURCE_BRANCH"
 version="$1"
 candidate_number="$2"
 target_sha="$3"
+MOBILE_RELEASE_SOURCE_BRANCH="$4"
 repo="${GITHUB_REPOSITORY:-}"
 
 [[ "$repo" == "block/buzz" ]] || fail "candidate publishing is restricted to block/buzz"
@@ -21,17 +24,19 @@ repo="${GITHUB_REPOSITORY:-}"
 [[ "$candidate_number" =~ ^[1-9][0-9]*$ ]] || \
   fail "'$candidate_number' is not a candidate number (expected N >= 1)"
 [[ "$target_sha" =~ ^[0-9a-f]{40}$ ]] || fail "'$target_sha' is not a full commit SHA"
+require_mobile_release_source "$version" "$MOBILE_RELEASE_SOURCE_BRANCH" || exit 1
 command -v gh >/dev/null 2>&1 || fail "gh is required"
 require_release_tag_ruleset || exit 1
+require_mobile_release_branch_ruleset "$MOBILE_RELEASE_SOURCE_BRANCH" || exit 1
 
-main_sha="$(gh api "repos/$repo/git/ref/heads/main" --jq .object.sha)" || \
-  fail "could not resolve $repo main"
-[[ "$main_sha" == "$target_sha" ]] || \
-  fail "$repo main moved from requested commit $target_sha to $main_sha"
+source_sha="$(gh api "repos/$repo/git/ref/heads/$MOBILE_RELEASE_SOURCE_BRANCH" --jq .object.sha)" || \
+  fail "could not resolve $repo $MOBILE_RELEASE_SOURCE_BRANCH"
+[[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || fail "GitHub returned an invalid source commit SHA"
 commit_sha="$(gh api "repos/$repo/commits/$target_sha" --jq .sha)" || \
   fail "$target_sha is not a commit in $repo"
 [[ "$commit_sha" == "$target_sha" ]] || \
   fail "GitHub resolved requested commit $target_sha as $commit_sha"
+require_mobile_release_commit_ancestor "$target_sha" "$source_sha" || exit 1
 
 refs="$(
   gh api --paginate "repos/$repo/git/matching-refs/tags/mobile-v${version}-rc." --jq '.[].ref'

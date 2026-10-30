@@ -4,6 +4,7 @@ List<MarkdownComponent> _useMessageInlineComponents({
   required String content,
   required String finalContent,
   required Map<String, String> mentionNames,
+  required Map<String, String> mentionLabels,
   required Map<String, Set<String>> bindings,
   required Set<String> agentPubkeys,
   required Map<String, String> channelNames,
@@ -33,6 +34,7 @@ List<MarkdownComponent> _useMessageInlineComponents({
     content: content,
     finalContent: finalContent,
     mentionNames: mentionNames,
+    mentionLabels: mentionLabels,
     bindings: bindings,
     agentPubkeys: agentPubkeys,
     channelNames: channelNames,
@@ -50,6 +52,7 @@ List<MarkdownComponent> _useMessageInlineComponents({
     () => [
       _MentionMd(
         mentionNames: inputs.mentionNames,
+        mentionLabels: inputs.mentionLabels,
         bindings: inputs.bindings,
         displayLabels: {
           for (final range in mentionOccurrences(content, bindings.keys))
@@ -63,7 +66,9 @@ List<MarkdownComponent> _useMessageInlineComponents({
         channelNames: inputs.channelNames,
         onChannelTap: channelTap,
       ),
-      ...MarkdownComponent.inlineComponents,
+      _MarkdownLabelEntityMd(),
+      for (final component in MarkdownComponent.inlineComponents)
+        component is ATagMd ? _MessageLinkMd() : component,
     ],
     [inputs],
   );
@@ -73,6 +78,7 @@ class _InlineComponentInputs {
   final String content;
   final String finalContent;
   final Map<String, String> mentionNames;
+  final Map<String, String> mentionLabels;
   final Map<String, Set<String>> bindings;
   final Set<String> agentPubkeys;
   final Map<String, String> channelNames;
@@ -87,6 +93,7 @@ class _InlineComponentInputs {
     required this.content,
     required this.finalContent,
     required Map<String, String> mentionNames,
+    required Map<String, String> mentionLabels,
     required Map<String, Set<String>> bindings,
     required Set<String> agentPubkeys,
     required Map<String, String> channelNames,
@@ -100,6 +107,7 @@ class _InlineComponentInputs {
          tags.map((tag) => List<String>.unmodifiable(tag)),
        ),
        mentionNames = Map.unmodifiable(mentionNames),
+       mentionLabels = Map.unmodifiable(mentionLabels),
        bindings = Map.unmodifiable({
          for (final entry in bindings.entries)
            entry.key: Set<String>.unmodifiable(entry.value),
@@ -122,6 +130,7 @@ class _InlineComponentInputs {
         (entry) => listEquals(entry.$2, other.tags[entry.$1]),
       ) &&
       mapEquals(mentionNames, other.mentionNames) &&
+      mapEquals(mentionLabels, other.mentionLabels) &&
       mapEquals(channelNames, other.channelNames) &&
       setEquals(agentPubkeys, other.agentPubkeys) &&
       listEquals(customEmoji, other.customEmoji) &&
@@ -133,4 +142,28 @@ class _InlineComponentInputs {
   @override
   int get hashCode =>
       Object.hash(content, finalContent, emojiSize, hasMentionHandler);
+}
+
+// Encoded label punctuation must remain literal even inside nested formatting.
+class _MarkdownLabelEntityMd extends InlineMd {
+  @override
+  RegExp get exp => RegExp(r'&#(?:91|92|93);');
+
+  @override
+  Set<MarkdownScope> get scopes => const {MarkdownScope.linkLabel};
+
+  @override
+  InlineSpan span(
+    BuildContext context,
+    String text,
+    GptMarkdownConfig config,
+  ) => TextSpan(text: decodeMarkdownLabelSyntax(text), style: config.style);
+}
+
+// Labels are already normalized, including literal/nested brackets. The
+// package's permissive .*? label matcher can otherwise start at a prose '['
+// and swallow a later image or link before its own component gets to render.
+class _MessageLinkMd extends ATagMd {
+  @override
+  RegExp get exp => RegExp(r'(?<!!)\[[^\[\]\n]*\]\([^\s]*\)');
 }

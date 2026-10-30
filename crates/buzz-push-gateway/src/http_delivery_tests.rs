@@ -10,8 +10,8 @@ use crate::{
     app_attest::AppAttestVerifier,
     authority::{AuthorityStore, Delegation, MemoryAuthorityStore, NewInstallation},
     grant::{GrantKey, GrantKeyring},
-    http::ProfileRuntime,
-    model::{AppProfile, EndpointGrant},
+    http::ApplicationRuntime,
+    model::EndpointGrant,
     router,
     token::{TokenKey, TokenKeyring},
     AppState,
@@ -58,7 +58,7 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
                 app_attest_key_id: vec![3; 32],
                 app_attest_public_key: vec![4; 65],
                 assertion_counter: 0,
-                profile: AppProfile::BuzzIosDogfood,
+
                 token_ciphertext: token_keyring.seal(&[1, 2, 3, 4]).unwrap(),
                 token_fingerprint: [5; 32],
                 endpoint_epoch: 1,
@@ -87,7 +87,7 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
             v: 1,
             delegation_id,
             relay_pubkey: keys.public_key().to_hex(),
-            app_profile: AppProfile::BuzzIosDogfood,
+
             endpoint_epoch: 1,
             generation: 1,
             expires_at: now() + 600,
@@ -98,10 +98,10 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
         grant_keyring,
         authority,
         token_keyring,
-        profile: Arc::new(ProfileRuntime {
+        application: Arc::new(ApplicationRuntime {
             app_attest: Arc::new(
                 AppAttestVerifier::new(
-                    "TEAMID.xyz.block.buzz.dogfood.mobile".into(),
+                    "TEAMID.com.example.buzz".into(),
                     include_bytes!("../tests/fixtures/apple-app-attestation-root.pem").to_vec(),
                 )
                 .unwrap(),

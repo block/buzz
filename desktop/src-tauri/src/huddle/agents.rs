@@ -18,10 +18,8 @@ use uuid::Uuid;
 use crate::{
     app_state::AppState,
     events,
-    huddle::relay_api::{
-        fetch_channel_members, fetch_channel_members_with_roles, validate_pubkey_hex,
-        MAX_HUDDLE_AGENTS,
-    },
+    huddle::relay_api::{fetch_channel_members_with_roles, validate_pubkey_hex, MAX_HUDDLE_AGENTS},
+    huddle::roster::fetch_huddle_roster,
     relay::submit_event,
 };
 
@@ -75,6 +73,12 @@ pub struct AgentHuddleSyncResult {
     pub matched_active_huddle: bool,
     /// Agents newly enrolled in the Huddle's ephemeral channel.
     pub added: Vec<String>,
+    /// Channels whose membership this sync changed (ephemeral, and the parent
+    /// when an agent was enrolled there), so the frontend can refresh them.
+    /// Reported even when `error` is set, because earlier adds still landed.
+    pub changed_channel_ids: Vec<String>,
+    /// Failure that stopped the sync after `changed_channel_ids` were written.
+    pub error: Option<String>,
 }
 
 // Multiple frontend mutation paths can observe the same membership addition
@@ -163,6 +167,8 @@ pub(crate) async fn sync_agents_for_active_huddle(
         return Ok(AgentHuddleSyncResult {
             matched_active_huddle: false,
             added: Vec::new(),
+            changed_channel_ids: Vec::new(),
+            error: None,
         });
     }
     let _sync_guard = AGENT_SYNC_LOCK.lock().await;
@@ -173,6 +179,8 @@ pub(crate) async fn sync_agents_for_active_huddle(
             return Ok(AgentHuddleSyncResult {
                 matched_active_huddle: false,
                 added: Vec::new(),
+                changed_channel_ids: Vec::new(),
+                error: None,
             });
         }
         let ephemeral_channel_id = huddle
@@ -187,6 +195,8 @@ pub(crate) async fn sync_agents_for_active_huddle(
             return Ok(AgentHuddleSyncResult {
                 matched_active_huddle: false,
                 added: Vec::new(),
+                changed_channel_ids: Vec::new(),
+                error: None,
             });
         }
         let state_agents = huddle
@@ -204,8 +214,9 @@ pub(crate) async fn sync_agents_for_active_huddle(
 
     // Membership reads can lag a just-accepted write, so merge the relay view
     // with local state instead of allowing a stale snapshot to remove agents.
-    let fresh_agents = fetch_channel_members(&ephemeral_channel_id, Some("bot"), state)
+    let fresh_agents = fetch_huddle_roster(&ephemeral_channel_id, state)
         .await
+        .map(|roster| roster.agents)
         .unwrap_or_default();
     let mut known_agents = HashSet::new();
     let mut merged_agents = Vec::new();
@@ -231,8 +242,26 @@ pub(crate) async fn sync_agents_for_active_huddle(
     let ephemeral_uuid = Uuid::parse_str(&ephemeral_channel_id).map_err(|e| e.to_string())?;
     let parent_uuid = Uuid::parse_str(&parent_channel_id).map_err(|e| e.to_string())?;
     let mut added = Vec::new();
+    let mut changed_channel_ids = Vec::new();
     for pubkey in missing {
-        add_agent_to_huddle(ephemeral_uuid, parent_uuid, &pubkey, state).await?;
+        match add_agent_to_huddle(ephemeral_uuid, parent_uuid, &pubkey, state).await {
+            Ok(result) => {
+                note_changed(&mut changed_channel_ids, &ephemeral_channel_id);
+                if result.parent_added {
+                    note_changed(&mut changed_channel_ids, &parent_channel_id);
+                }
+            }
+            Err(error) => {
+                // The ephemeral add may have landed before the failure.
+                note_changed(&mut changed_channel_ids, &ephemeral_channel_id);
+                return Ok(AgentHuddleSyncResult {
+                    matched_active_huddle: true,
+                    added,
+                    changed_channel_ids,
+                    error: Some(error),
+                });
+            }
+        }
         merged_agents.push(pubkey.clone());
         added.push(pubkey);
     }
@@ -243,6 +272,8 @@ pub(crate) async fn sync_agents_for_active_huddle(
             return Ok(AgentHuddleSyncResult {
                 matched_active_huddle: true,
                 added,
+                changed_channel_ids,
+                error: None,
             });
         }
         let mut roster_changed = false;
@@ -277,6 +308,8 @@ pub(crate) async fn sync_agents_for_active_huddle(
     Ok(AgentHuddleSyncResult {
         matched_active_huddle: true,
         added,
+        changed_channel_ids,
+        error: None,
     })
 }
 
@@ -287,6 +320,12 @@ pub async fn sync_agents_to_active_huddle(
     state: State<'_, AppState>,
 ) -> Result<AgentHuddleSyncResult, String> {
     sync_agents_for_active_huddle(&channel_id, agent_pubkeys, &state).await
+}
+
+fn note_changed(changed: &mut Vec<String>, channel_id: &str) {
+    if !changed.iter().any(|id| id == channel_id) {
+        changed.push(channel_id.to_owned());
+    }
 }
 
 fn contains_member(members: &[(String, Option<String>)], pubkey: &str) -> bool {

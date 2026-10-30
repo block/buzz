@@ -24,9 +24,16 @@ use buzz_core::invite::{
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row as _};
+use uuid::Uuid;
 
 use crate::error::Result;
+use crate::relay_members::{write_nip43_membership_snapshot, MembershipWrite};
 use crate::{CommunityId, Db};
+
+mod claim_owner;
+mod revocation;
+pub use claim_owner::{claim_relay_membership_with_owner, MembershipClaimResult};
+pub(crate) use revocation::{revoke_banned_issuer_invites, revoke_restricted_agent_invites};
 
 /// Outcome of a v2 invite claim. Expected invalid/expired/exhausted states are
 /// typed variants so the relay layer can map them to distinct HTTP responses
@@ -54,6 +61,32 @@ pub enum ClaimOutcome {
     Exhausted,
     /// No invite row matches `(community_id, token_hash)`.
     Invalid,
+    /// The issuer's invitation was permanently revoked.
+    Revoked,
+    /// The issuer or its owner is currently banned or timed out.
+    IssuerRestricted,
+    /// The claimant or its verified owner is banned or timed out.
+    Restricted,
+}
+
+/// A completed claim and whether its committed transaction first recorded an owner.
+pub struct InviteClaimResult {
+    /// Membership or denial outcome.
+    pub outcome: ClaimOutcome,
+    /// Notify ownerless sockets only after a successful commit created the link.
+    pub owner_link_created: bool,
+    /// User rows first created by this successful transaction.
+    pub users_created: u64,
+}
+
+impl From<ClaimOutcome> for InviteClaimResult {
+    fn from(outcome: ClaimOutcome) -> Self {
+        Self {
+            outcome,
+            owner_link_created: false,
+            users_created: 0,
+        }
+    }
 }
 
 /// A freshly minted v2 invite, including the plaintext code and metadata.
@@ -91,6 +124,13 @@ fn validate_mint_inputs(ttl_secs: u64, max_uses: Option<i32>) -> Result<()> {
     Ok(())
 }
 
+fn is_canonical_invite_pubkey(pubkey: &str) -> bool {
+    pubkey.len() == 64
+        && pubkey
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 /// Mint a v2 invite: generate a 32-byte random secret, hash it, persist the
 /// row, and return the plaintext code plus metadata.
 ///
@@ -104,6 +144,11 @@ pub async fn mint_relay_invite(
     max_uses: Option<i32>,
 ) -> Result<MintedInvite> {
     validate_mint_inputs(ttl_secs, max_uses)?;
+    if !is_canonical_invite_pubkey(created_by) {
+        return Err(crate::error::DbError::InvalidData(
+            "invalid invitation issuer".into(),
+        ));
+    }
 
     // Generate 32 random bytes and encode as base64url — this is the secret.
     let secret: [u8; V2_SECRET_LEN] = rand::random();
@@ -116,18 +161,20 @@ pub async fn mint_relay_invite(
     // community-scoped database write. The trigger remains the final backstop,
     // but this typed guard keeps a quiescing community from surfacing as an
     // opaque SQLSTATE/HTTP 500 at the API boundary.
-    let connection = crate::observability::acquire_writer(
+    let mut tx = crate::begin_community_write_transaction(
         pool,
+        community,
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
-    let mut tx = sqlx::Transaction::begin(connection, None).await?;
-    crate::deletion::DeletionStore::new(pool.clone())
-        .guard_transaction(&mut tx, community)
-        .await?;
+    lock_admission(tx.conn(), community).await?;
+    if principal_restricted(tx.conn(), community, created_by).await? {
+        return Err(crate::DbError::InviteRestricted);
+    }
     let row = sqlx::query(
-        "INSERT INTO relay_invites (community_id, token_hash, max_uses, expires_at, created_by) \
-         VALUES ($1, $2, $3, $4, $5) \
+        "INSERT INTO relay_invites \
+         (community_id, token_hash, max_uses, expires_at, created_by, legacy_admission) \
+         VALUES ($1, $2, $3, $4, $5, false) \
          RETURNING id",
     )
     .bind(community.as_uuid())
@@ -135,7 +182,7 @@ pub async fn mint_relay_invite(
     .bind(max_uses)
     .bind(expires_at)
     .bind(created_by)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.conn())
     .await?;
     tx.commit().await?;
 
@@ -148,6 +195,95 @@ pub async fn mint_relay_invite(
         uses_remaining: max_uses,
         invite_id,
     })
+}
+
+/// Lock invitation admission against community restriction and owner writes.
+/// Call before reading restrictions or locking an invite row, and hold to commit.
+/// A joined claim holds it through its NIP-43 membership snapshot, so mint, ban,
+/// timeout and first owner link wait for that snapshot, which grows with the
+/// member count. Claims reject unknown codes before taking it.
+pub(crate) async fn lock_admission(
+    tx: &mut sqlx::PgConnection,
+    community: CommunityId,
+) -> Result<()> {
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(\
+         hashtextextended('invite-admission:' || $1::text, 0))",
+    )
+    .bind(community.as_uuid())
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
+}
+
+/// Authoritative, transaction-local lookup; nonmembers need no user row.
+pub(crate) async fn principal_restricted(
+    tx: &mut sqlx::PgConnection,
+    community: CommunityId,
+    pubkey: &str,
+) -> Result<bool> {
+    if !is_canonical_invite_pubkey(pubkey) {
+        return Err(crate::DbError::InvalidData(
+            "invalid invitation principal".into(),
+        ));
+    }
+    let bytes = hex::decode(pubkey)
+        .map_err(|_| crate::DbError::InvalidData("invalid invitation principal".into()))?;
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM community_bans \
+         WHERE community_id = $1 AND pubkey IN (\
+             SELECT $2::bytea UNION ALL \
+             SELECT agent_owner_pubkey FROM users WHERE community_id = $1 AND pubkey = $2\
+         ) AND ((banned AND (ban_expires_at IS NULL OR ban_expires_at > clock_timestamp())) \
+                OR muted_until > clock_timestamp()))",
+    )
+    .bind(community.as_uuid())
+    .bind(bytes)
+    .fetch_one(&mut *tx)
+    .await?)
+}
+
+/// Whether a restriction row permanently revokes an invite from this principal.
+/// Unrepaired legacy rows treat every retained restriction as history; the
+/// maintenance repair clears that marker after its historical decision. New
+/// and repaired rows only treat a currently active ban as permanent revocation.
+async fn has_revoking_restriction(
+    tx: &mut sqlx::PgConnection,
+    community: CommunityId,
+    pubkey: &[u8],
+    legacy_admission: bool,
+) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM community_bans restriction \
+         WHERE restriction.community_id = $1 \
+           AND (restriction.pubkey = $2 OR restriction.pubkey = ( \
+               SELECT agent_owner_pubkey FROM users \
+               WHERE community_id = $1 AND pubkey = $2)) \
+           AND ($3 OR (restriction.banned \
+               AND (restriction.ban_expires_at IS NULL \
+                    OR restriction.ban_expires_at > clock_timestamp()))))",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .bind(legacy_admission)
+    .fetch_one(&mut *tx)
+    .await?)
+}
+
+async fn persist_claim_revocation(
+    tx: &mut sqlx::PgConnection,
+    community: CommunityId,
+    invite_id: uuid::Uuid,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE relay_invites SET revoked_at = clock_timestamp() \
+         WHERE community_id = $1 AND id = $2 AND revoked_at IS NULL",
+    )
+    .bind(community.as_uuid())
+    .bind(invite_id)
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
 }
 
 fn log_claim_outcome(
@@ -182,22 +318,54 @@ pub async fn reap_expired_relay_invites(pool: &PgPool, cutoff: DateTime<Utc>) ->
         crate::observability::WriterOperation::Maintenance,
     )
     .await?;
-    let result = sqlx::query(
-        "DELETE FROM relay_invites \
-         WHERE (community_id, id) IN (\
-             SELECT community_id, id FROM relay_invites \
-             WHERE expires_at < $1 \
-               AND community_write_allowed(community_id) \
-             ORDER BY expires_at \
-             LIMIT $2\
-         )",
+    // Keep the original global expiry order and 1,000-row ceiling. The state
+    // read only narrows candidates; admission below is the write authority.
+    // Exclude fenced tenants so they cannot fill the LIMIT page.
+    let candidates = sqlx::query(
+        "SELECT invite.community_id, invite.id FROM relay_invites invite \
+         JOIN communities community ON community.id = invite.community_id \
+         WHERE invite.expires_at < $1 AND community.deletion_state = 'active' \
+           AND community.deleted_at IS NULL \
+         ORDER BY invite.expires_at LIMIT $2",
     )
     .bind(cutoff)
     .bind(RETENTION_SWEEP_BATCH_SIZE)
-    .execute(&mut *connection)
+    .fetch_all(&mut *connection)
     .await?;
+    drop(connection);
 
-    Ok(result.rows_affected())
+    let mut ordered_communities = Vec::new();
+    let mut ids_by_community = std::collections::HashMap::<Uuid, Vec<Uuid>>::new();
+    for row in candidates {
+        let community: Uuid = row.try_get("community_id")?;
+        let id: Uuid = row.try_get("id")?;
+        if !ids_by_community.contains_key(&community) {
+            ordered_communities.push(community);
+        }
+        ids_by_community.entry(community).or_default().push(id);
+    }
+
+    let ids_by_community = &ids_by_community;
+    let deleted = crate::sweep_admitted_communities(
+        pool,
+        ordered_communities,
+        crate::observability::WriterOperation::Maintenance,
+        "relay_invite_reap",
+        |id, mut tx| async move {
+            let result = sqlx::query(
+                "DELETE FROM relay_invites WHERE community_id = $1 AND id = ANY($2) AND expires_at < $3",
+            )
+            .bind(id)
+            .bind(&ids_by_community[&id])
+            .bind(cutoff)
+            .execute(tx.conn())
+            .await?;
+            tx.commit().await?;
+            Ok(result.rows_affected())
+        },
+    )
+    .await;
+    Ok(deleted.into_iter().sum())
 }
 
 /// Atomically claim a v2 relay invite.
@@ -225,41 +393,92 @@ pub async fn claim_relay_invite(
     token_hash: &[u8; 32],
     claimer_pubkey: &str,
     policy_version: Option<&str>,
-) -> Result<ClaimOutcome> {
-    let connection = crate::observability::acquire_writer(
+    relay_keypair: &nostr::Keys,
+) -> Result<MembershipWrite<ClaimOutcome>> {
+    let write = claim_relay_invite_with_owner(
         pool,
+        community,
+        token_hash,
+        claimer_pubkey,
+        policy_version,
+        None,
+        relay_keypair,
+    )
+    .await?;
+    Ok(MembershipWrite {
+        outcome: write.outcome.outcome,
+        snapshot: write.snapshot,
+    })
+}
+
+/// Claim an invite with a caller-verified owner while keeping restriction checks,
+/// owner persistence, membership, policy evidence, invite consumption, and the
+/// NIP-43 membership snapshot in one admitted transaction.
+pub async fn claim_relay_invite_with_owner(
+    pool: &PgPool,
+    community: CommunityId,
+    token_hash: &[u8; 32],
+    claimer_pubkey: &str,
+    policy_version: Option<&str>,
+    verified_owner: Option<&str>,
+    relay_keypair: &nostr::Keys,
+) -> Result<MembershipWrite<InviteClaimResult>> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
-    let mut tx = sqlx::Transaction::begin(connection, None).await?;
 
-    // 2. SELECT FOR UPDATE — lock the invite row for the duration of this txn.
+    // Unknown codes are free to forge, so reject them after the tenant fence
+    // but before the community-wide admission lock; the locked read below
+    // stays authoritative.
+    let known: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM relay_invites \
+         WHERE community_id = $1 AND token_hash = $2)",
+    )
+    .bind(community.as_uuid())
+    .bind(token_hash)
+    .fetch_one(tx.conn())
+    .await?;
+    if !known {
+        tx.rollback().await?;
+        log_claim_outcome(community, None, "invalid", None, None);
+        return Ok(MembershipWrite::unchanged(ClaimOutcome::Invalid.into()));
+    }
+
+    lock_admission(tx.conn(), community).await?;
+    if claim_owner::claimant_restricted(tx.conn(), community, claimer_pubkey, verified_owner)
+        .await?
+    {
+        tx.rollback().await?;
+        log_claim_outcome(community, None, "restricted", None, None);
+        return Ok(MembershipWrite::unchanged(ClaimOutcome::Restricted.into()));
+    }
+
+    // `FOR UPDATE` serializes concurrent claims so exactly one claimant wins
+    // the final slot, while admission serializes issuer/owner restriction changes.
     let row = sqlx::query(
-        "SELECT id, max_uses, use_count, expires_at \
+        "SELECT id, max_uses, use_count, expires_at, created_by, revoked_at, legacy_admission \
          FROM relay_invites \
          WHERE community_id = $1 AND token_hash = $2 \
          FOR UPDATE",
     )
     .bind(community.as_uuid())
     .bind(token_hash)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.conn())
     .await?;
 
-    // 3. No matching invite.
     let Some(invite) = row else {
         tx.rollback().await?;
         log_claim_outcome(community, None, "invalid", None, None);
-        return Ok(ClaimOutcome::Invalid);
+        return Ok(MembershipWrite::unchanged(ClaimOutcome::Invalid.into()));
     };
 
     let invite_id: uuid::Uuid = invite.try_get("id")?;
     let max_uses: Option<i32> = invite.try_get("max_uses")?;
     let use_count: i32 = invite.try_get("use_count")?;
     let expires_at: DateTime<Utc> = invite.try_get("expires_at")?;
-
-    // Expiry is checked before membership deliberately. An expired bearer must
-    // not authorize fresh policy-acceptance evidence, even for an existing
-    // member; exhausted-but-live invites remain valid for idempotent retries.
     if expires_at <= Utc::now() {
         tx.rollback().await?;
         log_claim_outcome(
@@ -269,21 +488,84 @@ pub async fn claim_relay_invite(
             max_uses,
             Some(use_count),
         );
-        return Ok(ClaimOutcome::Expired);
+        return Ok(MembershipWrite::unchanged(ClaimOutcome::Expired.into()));
+    }
+
+    let revoked_at: Option<DateTime<Utc>> = invite.try_get("revoked_at")?;
+    let issuer: String = invite.try_get("created_by")?;
+    let legacy_admission: bool = invite.try_get("legacy_admission")?;
+    if revoked_at.is_some() {
+        tx.rollback().await?;
+        log_claim_outcome(
+            community,
+            Some(invite_id),
+            "revoked",
+            max_uses,
+            Some(use_count),
+        );
+        return Ok(MembershipWrite::unchanged(ClaimOutcome::Revoked.into()));
+    }
+    if !is_canonical_invite_pubkey(&issuer) {
+        if legacy_admission {
+            persist_claim_revocation(tx.conn(), community, invite_id).await?;
+            tx.commit().await?;
+            log_claim_outcome(
+                community,
+                Some(invite_id),
+                "revoked",
+                max_uses,
+                Some(use_count),
+            );
+            return Ok(MembershipWrite::unchanged(ClaimOutcome::Revoked.into()));
+        }
+        tx.rollback().await?;
+        log_claim_outcome(
+            community,
+            Some(invite_id),
+            "invalid",
+            max_uses,
+            Some(use_count),
+        );
+        return Ok(MembershipWrite::unchanged(ClaimOutcome::Invalid.into()));
+    }
+
+    let issuer_bytes = hex::decode(&issuer)
+        .map_err(|_| crate::DbError::InvalidData("invalid invitation issuer".into()))?;
+    if has_revoking_restriction(tx.conn(), community, &issuer_bytes, legacy_admission).await? {
+        persist_claim_revocation(tx.conn(), community, invite_id).await?;
+        tx.commit().await?;
+        log_claim_outcome(
+            community,
+            Some(invite_id),
+            "revoked",
+            max_uses,
+            Some(use_count),
+        );
+        return Ok(MembershipWrite::unchanged(ClaimOutcome::Revoked.into()));
+    }
+    if principal_restricted(tx.conn(), community, &issuer).await? {
+        tx.rollback().await?;
+        log_claim_outcome(
+            community,
+            Some(invite_id),
+            "issuer_restricted",
+            max_uses,
+            Some(use_count),
+        );
+        return Ok(MembershipWrite::unchanged(
+            ClaimOutcome::IssuerRestricted.into(),
+        ));
     }
 
     let uses_remaining = || max_uses.map(|mu| mu - use_count);
-
-    // 5. Check existing membership.
     let existing =
         sqlx::query("SELECT 1 FROM relay_members WHERE community_id = $1 AND pubkey = $2")
             .bind(community.as_uuid())
             .bind(claimer_pubkey)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(tx.conn())
             .await?;
 
     if existing.is_some() {
-        // 6. Already a member — insert policy evidence but do NOT increment.
         if let Some(version) = policy_version {
             sqlx::query(
                 "INSERT INTO join_policy_acceptances (community_id, pubkey, policy_version) \
@@ -292,9 +574,12 @@ pub async fn claim_relay_invite(
             .bind(community.as_uuid())
             .bind(claimer_pubkey)
             .bind(version)
-            .execute(&mut *tx)
+            .execute(tx.conn())
             .await?;
         }
+        let owner =
+            claim_owner::persist_claim_owner(tx.conn(), community, claimer_pubkey, verified_owner)
+                .await?;
         tx.commit().await?;
         log_claim_outcome(
             community,
@@ -303,30 +588,28 @@ pub async fn claim_relay_invite(
             max_uses,
             Some(use_count),
         );
-        return Ok(ClaimOutcome::AlreadyMember {
-            use_count,
-            uses_remaining: uses_remaining(),
-        });
+        return Ok(MembershipWrite::unchanged(InviteClaimResult {
+            outcome: ClaimOutcome::AlreadyMember {
+                use_count,
+                uses_remaining: uses_remaining(),
+            },
+            owner_link_created: owner.link_created,
+            users_created: owner.users_created,
+        }));
     }
 
-    // 7. Capacity check.
-    if let Some(mu) = max_uses {
-        if use_count >= mu {
-            tx.rollback().await?;
-            log_claim_outcome(
-                community,
-                Some(invite_id),
-                "exhausted",
-                max_uses,
-                Some(use_count),
-            );
-            return Ok(ClaimOutcome::Exhausted);
-        }
+    if max_uses.is_some_and(|max_uses| use_count >= max_uses) {
+        tx.rollback().await?;
+        log_claim_outcome(
+            community,
+            Some(invite_id),
+            "exhausted",
+            max_uses,
+            Some(use_count),
+        );
+        return Ok(MembershipWrite::unchanged(ClaimOutcome::Exhausted.into()));
     }
 
-    // 8. Insert relay member. The conflict branch covers a claimant admitted
-    // concurrently through a different invite: only the transaction that
-    // actually inserted membership may consume this invite.
     let inserted = sqlx::query(
         "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
          VALUES ($1, $2, 'member', 'invite') \
@@ -334,13 +617,11 @@ pub async fn claim_relay_invite(
     )
     .bind(community.as_uuid())
     .bind(claimer_pubkey)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?
     .rows_affected()
         > 0;
 
-    // 9. Insert join-policy acceptance evidence. This is required for both a
-    // new member and a claimant whose concurrent membership insert won first.
     if let Some(version) = policy_version {
         sqlx::query(
             "INSERT INTO join_policy_acceptances (community_id, pubkey, policy_version) \
@@ -349,11 +630,14 @@ pub async fn claim_relay_invite(
         .bind(community.as_uuid())
         .bind(claimer_pubkey)
         .bind(version)
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await?;
     }
 
     if !inserted {
+        let owner =
+            claim_owner::persist_claim_owner(tx.conn(), community, claimer_pubkey, verified_owner)
+                .await?;
         tx.commit().await?;
         log_claim_outcome(
             community,
@@ -362,26 +646,31 @@ pub async fn claim_relay_invite(
             max_uses,
             Some(use_count),
         );
-        return Ok(ClaimOutcome::AlreadyMember {
-            use_count,
-            uses_remaining: uses_remaining(),
-        });
+        return Ok(MembershipWrite::unchanged(InviteClaimResult {
+            outcome: ClaimOutcome::AlreadyMember {
+                use_count,
+                uses_remaining: uses_remaining(),
+            },
+            owner_link_created: owner.link_created,
+            users_created: owner.users_created,
+        }));
     }
 
-    // 10. Increment use_count (for every new member, even unlimited).
     let new_use_count = use_count + 1;
     sqlx::query("UPDATE relay_invites SET use_count = $1 WHERE community_id = $2 AND id = $3")
         .bind(new_use_count)
         .bind(community.as_uuid())
         .bind(invite_id)
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await?;
 
-    // 11. Commit.
+    let owner =
+        claim_owner::persist_claim_owner(tx.conn(), community, claimer_pubkey, verified_owner)
+            .await?;
+    let snapshot = write_nip43_membership_snapshot(&mut tx, relay_keypair).await?;
     tx.commit().await?;
 
     let new_uses_remaining = max_uses.map(|mu| mu - new_use_count);
-
     log_claim_outcome(
         community,
         Some(invite_id),
@@ -390,9 +679,16 @@ pub async fn claim_relay_invite(
         Some(new_use_count),
     );
 
-    Ok(ClaimOutcome::Joined {
-        use_count: new_use_count,
-        uses_remaining: new_uses_remaining,
+    Ok(MembershipWrite {
+        outcome: InviteClaimResult {
+            outcome: ClaimOutcome::Joined {
+                use_count: new_use_count,
+                uses_remaining: new_uses_remaining,
+            },
+            owner_link_created: owner.link_created,
+            users_created: owner.users_created,
+        },
+        snapshot: Some(snapshot),
     })
 }
 
@@ -413,6 +709,29 @@ impl Db {
         mint_relay_invite(&self.pool, community, created_by, ttl_secs, max_uses).await
     }
 
+    /// Claim an invite and persist caller-verified ownership atomically.
+    #[datastore_span(name = "claim_relay_invite_with_owner", system = "postgresql")]
+    pub async fn claim_relay_invite_with_owner(
+        &self,
+        community: CommunityId,
+        token_hash: &[u8; 32],
+        claimer_pubkey: &str,
+        policy_version: Option<&str>,
+        verified_owner: Option<&str>,
+        relay_keypair: &nostr::Keys,
+    ) -> Result<MembershipWrite<InviteClaimResult>> {
+        claim_relay_invite_with_owner(
+            &self.pool,
+            community,
+            token_hash,
+            claimer_pubkey,
+            policy_version,
+            verified_owner,
+            relay_keypair,
+        )
+        .await
+    }
+
     /// Delete one bounded batch of invites expired before `cutoff`.
     #[datastore_span(name = "reap_expired_relay_invites", system = "postgresql")]
     pub async fn reap_expired_relay_invites(&self, cutoff: DateTime<Utc>) -> Result<u64> {
@@ -431,13 +750,15 @@ impl Db {
         token_hash: &[u8; 32],
         claimer_pubkey: &str,
         policy_version: Option<&str>,
-    ) -> Result<ClaimOutcome> {
+        relay_keypair: &nostr::Keys,
+    ) -> Result<MembershipWrite<ClaimOutcome>> {
         claim_relay_invite(
             &self.pool,
             community,
             token_hash,
             claimer_pubkey,
             policy_version,
+            relay_keypair,
         )
         .await
     }
@@ -451,7 +772,7 @@ mod postgres_tests {
     use sqlx::PgPool;
     use uuid::Uuid;
 
-    async fn setup_pool() -> PgPool {
+    pub(super) async fn setup_pool() -> PgPool {
         PgPool::connect(&crate::test_support::database_url())
             .await
             .expect("connect to test DB")
@@ -486,7 +807,7 @@ mod postgres_tests {
         admin.close().await;
     }
 
-    async fn make_test_community(pool: &PgPool) -> CommunityId {
+    pub(super) async fn make_test_community(pool: &PgPool) -> CommunityId {
         let id = Uuid::new_v4();
         sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
             .bind(id)
@@ -509,6 +830,12 @@ mod postgres_tests {
             .execute(&mut *tx)
             .await
             .expect("delete test members");
+        // Membership changes write the community's kind:13534 list.
+        sqlx::query("DELETE FROM events WHERE community_id = $1")
+            .bind(community.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .expect("delete test membership lists");
         sqlx::query("DELETE FROM communities WHERE id = $1")
             .bind(community.as_uuid())
             .execute(&mut *tx)
@@ -517,11 +844,11 @@ mod postgres_tests {
         tx.commit().await.expect("commit test cleanup");
     }
 
-    fn test_pubkey() -> String {
+    pub(super) fn test_pubkey() -> String {
         format!("{:064x}", Uuid::new_v4().as_u128())
     }
 
-    async fn use_count(pool: &PgPool, community: CommunityId, invite_id: Uuid) -> i32 {
+    pub(super) async fn use_count(pool: &PgPool, community: CommunityId, invite_id: Uuid) -> i32 {
         sqlx::query_scalar(
             "SELECT use_count FROM relay_invites WHERE community_id = $1 AND id = $2",
         )
@@ -569,7 +896,7 @@ mod postgres_tests {
             .expect("create fenced invite community")
             .id;
         let request = store
-            .submit(&host, "owner", None)
+            .submit(Some(&host), "owner", None, None)
             .await
             .expect("submit deletion request");
         let empty_digest = hex::encode(sha2::Sha256::digest([]));
@@ -617,7 +944,7 @@ mod postgres_tests {
             .await
             .expect("begin quiescing");
 
-        let error = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+        let error = mint_relay_invite(&pool, community, &test_pubkey(), 3600, Some(1))
             .await
             .expect_err("quiescing must reject invite minting");
         assert!(matches!(error, crate::error::DbError::AccessDenied(_)));
@@ -642,33 +969,58 @@ mod postgres_tests {
         let community = make_test_community(&pool).await;
         let first = test_pubkey();
         let second = test_pubkey();
-        let invite = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+        let invite = mint_relay_invite(&pool, community, &test_pubkey(), 3600, Some(1))
             .await
             .expect("mint bounded invite");
         let hash = hash_v2_code(&invite.code);
 
+        let keys = nostr::Keys::generate();
+        let joined = claim_relay_invite(&pool, community, &hash, &first, None, &keys)
+            .await
+            .expect("first claim");
+        crate::relay_members::assert_membership_list_matches(
+            &pool,
+            community,
+            &keys,
+            joined.snapshot.as_ref(),
+        )
+        .await;
         assert_eq!(
-            claim_relay_invite(&pool, community, &hash, &first, None)
-                .await
-                .expect("first claim"),
+            joined.outcome,
             ClaimOutcome::Joined {
                 use_count: 1,
                 uses_remaining: Some(0),
             }
         );
         assert_eq!(
-            claim_relay_invite(&pool, community, &hash, &first, None)
-                .await
-                .expect("idempotent retry"),
+            claim_relay_invite(
+                &pool,
+                community,
+                &hash,
+                &first,
+                None,
+                &nostr::Keys::generate()
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("idempotent retry"),
             ClaimOutcome::AlreadyMember {
                 use_count: 1,
                 uses_remaining: Some(0),
             }
         );
         assert_eq!(
-            claim_relay_invite(&pool, community, &hash, &second, None)
-                .await
-                .expect("exhausted claim"),
+            claim_relay_invite(
+                &pool,
+                community,
+                &hash,
+                &second,
+                None,
+                &nostr::Keys::generate()
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("exhausted claim"),
             ClaimOutcome::Exhausted
         );
         assert_eq!(use_count(&pool, community, invite.invite_id).await, 1);
@@ -688,18 +1040,23 @@ mod postgres_tests {
         let community = make_test_community(&pool).await;
         let first = test_pubkey();
         let second = test_pubkey();
-        let invite = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+        let invite = mint_relay_invite(&pool, community, &test_pubkey(), 3600, Some(1))
             .await
             .expect("mint bounded invite");
         let hash = hash_v2_code(&invite.code);
 
+        let keys = nostr::Keys::generate();
         let (first_outcome, second_outcome) = tokio::join!(
-            claim_relay_invite(&pool, community, &hash, &first, None),
-            claim_relay_invite(&pool, community, &hash, &second, None),
+            claim_relay_invite(&pool, community, &hash, &first, None, &keys),
+            claim_relay_invite(&pool, community, &hash, &second, None, &keys),
         );
         let outcomes = [
-            first_outcome.expect("first concurrent claim"),
-            second_outcome.expect("second concurrent claim"),
+            first_outcome
+                .map(|write| write.outcome)
+                .expect("first concurrent claim"),
+            second_outcome
+                .map(|write| write.outcome)
+                .expect("second concurrent claim"),
         ];
         assert_eq!(
             outcomes
@@ -732,15 +1089,23 @@ mod postgres_tests {
         let pool = setup_pool().await;
         let community_a = make_test_community(&pool).await;
         let community_b = make_test_community(&pool).await;
-        let invite = mint_relay_invite(&pool, community_a, "owner", 3600, Some(2))
+        let invite = mint_relay_invite(&pool, community_a, &test_pubkey(), 3600, Some(2))
             .await
             .expect("mint invite");
         let hash = hash_v2_code(&invite.code);
 
         assert_eq!(
-            claim_relay_invite(&pool, community_b, &hash, &test_pubkey(), None)
-                .await
-                .expect("cross-tenant claim"),
+            claim_relay_invite(
+                &pool,
+                community_b,
+                &hash,
+                &test_pubkey(),
+                None,
+                &nostr::Keys::generate()
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("cross-tenant claim"),
             ClaimOutcome::Invalid
         );
 
@@ -754,9 +1119,17 @@ mod postgres_tests {
         .await
         .expect("expire invite");
         assert_eq!(
-            claim_relay_invite(&pool, community_a, &hash, &test_pubkey(), None)
-                .await
-                .expect("expired claim"),
+            claim_relay_invite(
+                &pool,
+                community_a,
+                &hash,
+                &test_pubkey(),
+                None,
+                &nostr::Keys::generate()
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("expired claim"),
             ClaimOutcome::Expired
         );
         assert_eq!(use_count(&pool, community_a, invite.invite_id).await, 0);
@@ -769,10 +1142,10 @@ mod postgres_tests {
     async fn retention_sweep_deletes_only_invites_older_than_cutoff() {
         let pool = setup_pool().await;
         let community = make_test_community(&pool).await;
-        let old = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+        let old = mint_relay_invite(&pool, community, &test_pubkey(), 3600, Some(1))
             .await
             .expect("mint old invite");
-        let recent = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+        let recent = mint_relay_invite(&pool, community, &test_pubkey(), 3600, Some(1))
             .await
             .expect("mint recent invite");
         let cutoff = Utc::now() - chrono::Duration::days(30);
@@ -874,16 +1247,24 @@ mod postgres_tests {
     async fn unlimited_invites_count_each_new_member() {
         let pool = setup_pool().await;
         let community = make_test_community(&pool).await;
-        let invite = mint_relay_invite(&pool, community, "owner", 3600, None)
+        let invite = mint_relay_invite(&pool, community, &test_pubkey(), 3600, None)
             .await
             .expect("mint unlimited invite");
         let hash = hash_v2_code(&invite.code);
 
         for (expected_count, pubkey) in [(1, test_pubkey()), (2, test_pubkey())] {
             assert_eq!(
-                claim_relay_invite(&pool, community, &hash, &pubkey, None)
-                    .await
-                    .expect("unlimited claim"),
+                claim_relay_invite(
+                    &pool,
+                    community,
+                    &hash,
+                    &pubkey,
+                    None,
+                    &nostr::Keys::generate()
+                )
+                .await
+                .map(|write| write.outcome)
+                .expect("unlimited claim"),
                 ClaimOutcome::Joined {
                     use_count: expected_count,
                     uses_remaining: None,
@@ -900,14 +1281,22 @@ mod postgres_tests {
         let pool = setup_pool().await;
         let community = make_test_community(&pool).await;
         let pubkey = test_pubkey();
-        let invite = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+        let invite = mint_relay_invite(&pool, community, &test_pubkey(), 3600, Some(1))
             .await
             .expect("mint bounded invite");
         let hash = hash_v2_code(&invite.code);
 
-        let error = claim_relay_invite(&pool, community, &hash, &pubkey, Some("too-short"))
-            .await
-            .expect_err("policy CHECK must reject an invalid version");
+        let error = claim_relay_invite(
+            &pool,
+            community,
+            &hash,
+            &pubkey,
+            Some("too-short"),
+            &nostr::Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect_err("policy CHECK must reject an invalid version");
         assert!(matches!(error, crate::DbError::Sqlx(_)), "{error:?}");
         assert!(!is_relay_member(&pool, community, &pubkey)
             .await
@@ -915,11 +1304,32 @@ mod postgres_tests {
         assert_eq!(use_count(&pool, community, invite.invite_id).await, 0);
 
         assert!(matches!(
-            claim_relay_invite(&pool, community, &hash, &pubkey, None)
-                .await
-                .expect("claim after rollback"),
+            claim_relay_invite(
+                &pool,
+                community,
+                &hash,
+                &pubkey,
+                None,
+                &nostr::Keys::generate()
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("claim after rollback"),
             ClaimOutcome::Joined { use_count: 1, .. }
         ));
         delete_test_community(&pool, community).await;
     }
 }
+
+#[cfg(test)]
+mod revocation_postgres_tests;
+
+#[cfg(test)]
+#[path = "relay_invite/upgrade_postgres_tests.rs"]
+mod upgrade_postgres_tests;
+
+#[cfg(test)]
+mod owner_admission_postgres_tests;
+
+#[cfg(test)]
+mod writer_protocol_postgres_tests;

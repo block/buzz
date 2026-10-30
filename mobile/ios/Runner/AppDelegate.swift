@@ -1,3 +1,4 @@
+import AuthenticationServices
 import AVFoundation
 import BuzzPushKit
 import DeclaredAgeRange
@@ -8,6 +9,7 @@ import os.log
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
+  private var nativeMessagePresentationCoordinator: NativeMessagePresentationCoordinator?
   private var mediaUploadChannel: FlutterMethodChannel?
   private var pushChannel: FlutterMethodChannel?
   private let apnsRegistrationBuffer = APNsRegistrationBuffer()
@@ -28,6 +30,9 @@ import os.log
     endpointGrantStore: endpointGrantStore,
     keychainAccessGroup: pushKeychainAccessGroup
   )
+  private var communityKeyboardChannel: FlutterMethodChannel?
+  private var communityKeyboardObserver: NSObjectProtocol?
+  private var hapticsChannel: FlutterMethodChannel?
   private var qrScannerChannel: FlutterMethodChannel?
   private var inlinePhotoPickerSupportChannel: FlutterMethodChannel?
   private var ageSignalChannel: FlutterMethodChannel?
@@ -39,8 +44,15 @@ import os.log
   private var concentricSheetSurfaceChannel: FlutterMethodChannel?
   private var nativeAttachmentPopoverCoordinator: NativeAttachmentPopoverCoordinator?
   private var nativeEmojiPickerCoordinator: NativeEmojiPickerCoordinator?
+  private var nativeAddMembersSheetCoordinator: NativeAddMembersSheetCoordinator?
+  private var nativeConfirmationDialogCoordinator: NativeConfirmationDialogCoordinator?
+  private var nativeProfileSetupCoordinator: NativeProfileSetupCoordinator?
+  private var nativeCommunityEntryCoordinator: NativeCommunityEntryCoordinator?
   private var nativeProfileTextEditorCoordinator: NativeProfileTextEditorCoordinator?
   private var nativeMessageActionSurfaceSupportChannel: FlutterMethodChannel?
+  private var identityFilePlugin: IdentityFilePlugin?
+  private var hostedHpkeChannel: FlutterMethodChannel?
+  private var browserAuthBridge: BuzzBrowserAuthBridge?
   private var huddleMediaPlugin: HuddleMediaPlugin?
 
   override func application(
@@ -55,8 +67,50 @@ import os.log
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "BuzzIosMediaCarousel") {
+      registrar.register(IosMediaCarouselFactory(messenger: registrar.messenger()), withId: "buzz/ios_media_carousel")
+    }
+
     let messenger = engineBridge.applicationRegistrar.messenger()
+    let keyboardChannel = FlutterMethodChannel(
+      name: "buzz/community_keyboard", binaryMessenger: messenger)
+    communityKeyboardChannel = keyboardChannel
+    if let observer = communityKeyboardObserver {
+      NotificationCenter.default.removeObserver(observer)
+    }
+    communityKeyboardObserver = NotificationCenter.default.addObserver(
+      forName: UIResponder.keyboardWillShowNotification, object: nil, queue: .main
+    ) { _ in
+      // Deliver after UIKit finishes preparing the keyboard in this run-loop turn.
+      DispatchQueue.main.async {
+        keyboardChannel.invokeMethod("willShow", arguments: nil)
+      }
+    }
+    identityFilePlugin = IdentityFilePlugin(messenger: messenger)
+    browserAuthBridge = BuzzBrowserAuthBridge(messenger: messenger)
+    hostedHpkeChannel = FlutterMethodChannel(name: "buzz/hosted_hpke", binaryMessenger: messenger)
+    hostedHpkeChannel?.setMethodCallHandler { call, result in
+      guard call.method == "seal" else { result(FlutterMethodNotImplemented); return }
+      guard #available(iOS 17.0, *) else {
+        result(FlutterError(code: "unsupported", message: "Backup requires iOS 17 or later", details: nil)); return
+      }
+      guard let args = call.arguments as? [String: Any],
+        let recipient = args["recipient"] as? FlutterStandardTypedData,
+        let plaintext = args["plaintext"] as? FlutterStandardTypedData,
+        let aad = args["aad"] as? FlutterStandardTypedData else {
+        result(FlutterError(code: "invalid_input", message: nil, details: nil)); return
+      }
+      do {
+        let sealed = try HostedHpkeBackup.seal(recipient: recipient.data, plaintext: plaintext.data, aad: aad.data)
+        result(["enc": FlutterStandardTypedData(bytes: sealed.enc), "ciphertext": FlutterStandardTypedData(bytes: sealed.ciphertext)])
+      } catch {
+        result(FlutterError(code: "backup_unavailable", message: nil, details: nil))
+      }
+    }
     huddleMediaPlugin = HuddleMediaPlugin(messenger: messenger)
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "BuzzIosNavigationBar") {
+      registrar.register(IosNavigationBarFactory(messenger: messenger, parent: registrar.viewController), withId: "buzz/ios_navigation_bar")
+    }
     mediaUploadChannel = FlutterMethodChannel(
       name: "buzz/media_upload",
       binaryMessenger: messenger
@@ -73,6 +127,20 @@ import os.log
     }
     apnsRegistrationBuffer.attach { [weak self] update in
       self?.pushChannel?.invokeMethod(update.method, arguments: update.arguments)
+    }
+    hapticsChannel = FlutterMethodChannel(
+      name: "buzz/haptics",
+      binaryMessenger: messenger
+    )
+    hapticsChannel?.setMethodCallHandler { call, result in
+      guard call.method == "success" || call.method == "error" else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      let generator = UINotificationFeedbackGenerator()
+      generator.prepare()
+      generator.notificationOccurred(call.method == "error" ? .error : .success)
+      result(nil)
     }
     qrScannerChannel = FlutterMethodChannel(
       name: "buzz/qr_scanner",
@@ -201,6 +269,12 @@ import os.log
         withId: "buzz/theme_pagination_glass"
       )
     }
+    nativeMessagePresentationCoordinator = NativeMessagePresentationCoordinator(
+      messenger: messenger,
+      parentViewController: engineBridge.pluginRegistry.registrar(
+        forPlugin: "BuzzNativeMessagePresentation"
+      )?.viewController
+    )
 
     let nativeAttachmentRegistrar = engineBridge.pluginRegistry.registrar(
       forPlugin: "BuzzNativeAttachmentPopover"
@@ -217,6 +291,30 @@ import os.log
       messenger: messenger,
       parentViewController: nativeEmojiPickerRegistrar?.viewController
     )
+
+    engineBridge.pluginRegistry.registrar(forPlugin: "BuzzNativePresenceMenu")?.register(
+      NativePresenceMenuFactory(messenger: messenger), withId: "buzz/presence_menu"
+    )
+
+    nativeAddMembersSheetCoordinator = NativeAddMembersSheetCoordinator(
+      messenger: messenger,
+      parentViewController: engineBridge.pluginRegistry.registrar(
+        forPlugin: "BuzzNativeAddMembersSheet"
+      )?.viewController
+    )
+
+    nativeConfirmationDialogCoordinator = NativeConfirmationDialogCoordinator(
+      messenger: messenger,
+      parentViewController: engineBridge.pluginRegistry.registrar(
+        forPlugin: "BuzzNativeConfirmationDialog"
+      )?.viewController
+    )
+
+    nativeProfileSetupCoordinator = NativeProfileSetupCoordinator(messenger: messenger) { [weak self] engine in
+      let channel = FlutterMethodChannel(name: "buzz/media_upload", binaryMessenger: engine.binaryMessenger)
+      channel.setMethodCallHandler { [weak self] call, result in self?.handleMediaUploadMethodCall(call, result: result) }
+    }
+    nativeCommunityEntryCoordinator = NativeCommunityEntryCoordinator(messenger: messenger)
 
     let nativeProfileTextEditorRegistrar = engineBridge.pluginRegistry.registrar(
       forPlugin: "BuzzNativeProfileTextEditor"
@@ -368,7 +466,12 @@ import os.log
         )
         return
       }
-      UIApplication.shared.setStatusBarHidden(hidden, with: .fade)
+      let controller = UIApplication.shared.connectedScenes
+        .compactMap { $0 as? UIWindowScene }
+        .flatMap(\.windows)
+        .compactMap { $0.rootViewController as? BuzzFlutterViewController }
+        .first
+      controller?.setScannerStatusBarHidden(hidden)
       result(nil)
     case "performDynamicIslandQrScanSuccessHaptic":
       let generator = UINotificationFeedbackGenerator()
@@ -1028,11 +1131,13 @@ import os.log
 }
 
 extension BuzzPushNavigationTarget {
-  fileprivate var flutterArguments: [String: String] {
-    [
+  var flutterArguments: [String: String] {
+    var arguments = [
       "eventId": eventID,
       "communityId": communityID,
       "channelId": channelID,
     ]
+    arguments["threadRootId"] = threadRootID
+    return arguments
   }
 }

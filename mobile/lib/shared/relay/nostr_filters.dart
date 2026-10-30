@@ -47,6 +47,7 @@ abstract final class NostrFilters {
     String channelId, {
     int limit = 200,
     int? until,
+    String? beforeId,
   }) => NostrFilter(
     kinds: EventKind.channelEventKinds,
     tags: {
@@ -54,6 +55,7 @@ abstract final class NostrFilters {
     },
     limit: limit,
     until: until,
+    extensions: {'before_id': ?beforeId},
   );
 
   /// Huddle lifecycle state for one parent channel, independent of timeline paging.
@@ -161,61 +163,6 @@ abstract final class NostrFilters {
     limit: limit,
     extensions: const {'search_mode': 'prefix'},
   );
-
-  /// Deletions (kind:5) targeting event IDs.
-  static NostrFilter deletionsByTargetIds(
-    List<String> ids, {
-    List<String>? authors,
-  }) => NostrFilter(
-    kinds: [EventKind.deletion],
-    authors: authors,
-    tags: {'#e': ids},
-    limit: ids.length,
-  );
-
-  /// User notes (kind:1) for the global Pulse timeline.
-  static NostrFilter globalNotes({int limit = 50, int? until}) =>
-      NostrFilter(kinds: [EventKind.note], limit: limit, until: until);
-
-  /// Notes by a set of authors for Pulse timelines.
-  static NostrFilter notesTimeline(
-    List<String> pubkeys, {
-    int limit = 200,
-    int? until,
-  }) => NostrFilter(
-    kinds: [EventKind.note],
-    authors: pubkeys,
-    limit: limit,
-    until: until,
-  );
-
-  /// Reactions authored by a user.
-  static NostrFilter userReactions(String pubkey, {int limit = 200}) =>
-      NostrFilter(kinds: [EventKind.reaction], authors: [pubkey], limit: limit);
-
-  /// Reactions targeting notes.
-  static NostrFilter noteReactions(List<String> noteIds) => NostrFilter(
-    kinds: [EventKind.reaction],
-    tags: {'#e': noteIds},
-    limit: 500,
-  );
-
-  /// Fetch notes by ids.
-  static NostrFilter notesByIds(List<String> ids) =>
-      NostrFilter(kinds: [EventKind.note], ids: ids, limit: ids.length);
-
-  /// User notes (kind:1) for a single author.
-  static NostrFilter userNotes(String pubkey, {int limit = 20, int? until}) =>
-      NostrFilter(
-        kinds: [EventKind.note],
-        authors: [pubkey],
-        limit: limit,
-        until: until,
-      );
-
-  /// Contact list (kind:3) for a user.
-  static NostrFilter contactList(String pubkey) =>
-      NostrFilter(kinds: [EventKind.contactList], authors: [pubkey], limit: 1);
 
   /// Relay membership list (kind:13534).
   static NostrFilter relayMembers() =>

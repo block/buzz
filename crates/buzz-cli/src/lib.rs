@@ -6,7 +6,7 @@ mod help_tree;
 mod links;
 mod validate;
 
-use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use client::BuzzClient;
 use error::CliError;
 use nostr::Keys;
@@ -93,7 +93,27 @@ where
     S: Into<std::ffi::OsString> + Clone,
 {
     let matches = build_command().try_get_matches_from(args)?;
-    Cli::from_arg_matches(&matches)
+    let mut cli = Cli::from_arg_matches(&matches)?;
+    if matches.value_source("format") == Some(clap::parser::ValueSource::DefaultValue) {
+        cli.format = env_output_format(std::env::var_os("BUZZ_OUTPUT_FORMAT").as_deref());
+    }
+    Ok(cli)
+}
+
+/// `BUZZ_OUTPUT_FORMAT` only picks the default `--format`, so an empty or
+/// unknown value (e.g. one a newer harness sets) falls back to `json` rather
+/// than failing every command, writes included.
+fn env_output_format(value: Option<&std::ffi::OsStr>) -> OutputFormat {
+    let Some(value) = value.filter(|value| !value.is_empty()) else {
+        return OutputFormat::default();
+    };
+    value
+        .to_str()
+        .and_then(|value| OutputFormat::from_str(value, false).ok())
+        .unwrap_or_else(|| {
+            eprintln!("warning: ignoring unsupported BUZZ_OUTPUT_FORMAT={value:?}; using json");
+            OutputFormat::default()
+        })
 }
 
 #[derive(Parser)]
@@ -107,6 +127,7 @@ Configuration (flags override env vars):
   BUZZ_RELAY_URL     Relay base URL        [default: http://localhost:3000]
   BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [required]
   BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
+  BUZZ_OUTPUT_FORMAT Default --format; unknown values fall back to json  [optional]
 
 The 'pack' subcommand runs locally and does not require a relay connection.
 
@@ -126,7 +147,9 @@ struct Cli {
     #[arg(long, env = "BUZZ_AUTH_TAG", hide_env_values = true)]
     auth_tag: Option<String>,
 
-    /// Output format: 'json' (default, full fields) or 'compact' (reduced fields).
+    /// Output format: 'json' (default, full fields), 'compact' (reduced fields),
+    /// or 'agent' (event reads without signature material). Defaults to
+    /// `BUZZ_OUTPUT_FORMAT` when that names a known format.
     #[arg(long, value_enum, default_value = "json")]
     format: OutputFormat,
 
@@ -164,6 +187,27 @@ impl std::fmt::Display for ChannelVisibility {
         match self {
             Self::Open => write!(f, "open"),
             Self::Private => write!(f, "private"),
+        }
+    }
+}
+
+/// The role a new person gets in a channel (`join_role`).
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum ChannelJoinRoleArg {
+    /// New people become members (default).
+    #[value(name = "member")]
+    Member,
+    /// New people become guests, who can read but not write. On an open
+    /// channel this makes an announce channel.
+    #[value(name = "guest")]
+    Guest,
+}
+
+impl From<ChannelJoinRoleArg> for buzz_sdk::ChannelJoinRole {
+    fn from(value: ChannelJoinRoleArg) -> Self {
+        match value {
+            ChannelJoinRoleArg::Member => Self::Member,
+            ChannelJoinRoleArg::Guest => Self::Guest,
         }
     }
 }
@@ -206,6 +250,12 @@ pub enum OutputFormat {
     /// Reduced fields for agent scanning
     #[value(name = "compact")]
     Compact,
+    /// Event reads drop signature material (`sig`, NIP-OA `auth` conditions and
+    /// signature) and fold NIP-10 thread markers into `reply_to`/`thread_root`;
+    /// other reads match `json`.
+    /// Default for harness-managed agents.
+    #[value(name = "agent")]
+    Agent,
 }
 
 #[derive(Subcommand)]
@@ -612,7 +662,7 @@ pub enum ChannelsCmd {
     },
     /// Create a new channel
     #[command(
-        after_help = "Examples:\n  buzz channels create --name general --type stream --visibility open\n  buzz channels create --name design --type forum --visibility open --description \"Design discussions\"\n  buzz channels create --name standup --type stream --visibility open --ttl 3600  # ephemeral, archived after 1h idle\n  buzz channels create --name project-x --template \"Buzz Team\"  # type/visibility/canvas/roster from the template; explicit flags override"
+        after_help = "Examples:\n  buzz channels create --name general --type stream --visibility open\n  buzz channels create --name design --type forum --visibility open --description \"Design discussions\"\n  buzz channels create --name standup --type stream --visibility open --ttl 3600  # ephemeral, archived after 1h idle\n  buzz channels create --name project-x --template \"Buzz Team\"  # type/visibility/canvas/roster from the template; explicit flags override\n  buzz channels create --name notes --type stream --visibility private --unlisted  # never listed, even after it is made open"
     )]
     Create {
         /// Channel name
@@ -632,6 +682,13 @@ pub enum ChannelsCmd {
         /// many seconds pass without a new message.
         #[arg(long, value_name = "SECONDS")]
         ttl: Option<i64>,
+        /// Create the channel unlisted: left out of channel lists for people
+        /// who are not members. Anyone can still read and join an unlisted
+        /// open channel by its id. Change it later with `channels update
+        /// --unlisted`. Refused if the relay does not advertise
+        /// `buzz-unlisted-channels`.
+        #[arg(long)]
+        unlisted: bool,
         /// Apply a desktop-local channel template by name (case-insensitive):
         /// supplies default type/visibility/description/canvas, and resolves
         /// its agent roster against the relay to add as members.
@@ -642,9 +699,9 @@ pub enum ChannelsCmd {
         #[arg(long, value_name = "PATH")]
         templates_file: Option<String>,
     },
-    /// Update channel name, description, visibility, or ephemeral TTL
+    /// Update channel name, description, visibility, join role, unlisted, or ephemeral TTL
     #[command(
-        after_help = "Examples:\n  buzz channels update --channel <uuid> --name general\n  buzz channels update --channel <uuid> --visibility open\n  buzz channels update --channel <uuid> --visibility private"
+        after_help = "Examples:\n  buzz channels update --channel <uuid> --name general\n  buzz channels update --channel <uuid> --visibility open\n  buzz channels update --channel <uuid> --visibility private\n  buzz channels update --channel <uuid> --join-role guest\n  buzz channels update --channel <uuid> --visibility open --unlisted true"
     )]
     Update {
         /// Channel UUID
@@ -666,6 +723,18 @@ pub enum ChannelsCmd {
         /// Clear an existing TTL, making the channel permanent.
         #[arg(long)]
         no_ttl: bool,
+        /// The role a new person gets when nobody picks one. `guest` on an
+        /// open channel makes an announce channel: people who join can read
+        /// but not write. Does not change existing members. Owner/admin only.
+        #[arg(long, value_enum)]
+        join_role: Option<ChannelJoinRoleArg>,
+        /// Leave the channel out of channel lists for people who are not
+        /// members (`true`), or list it again (`false`). Anyone can still read
+        /// and join an unlisted open channel by its id. Matters only while the
+        /// channel is open. Owner/admin only. `true` is refused if the relay
+        /// does not advertise `buzz-unlisted-channels`.
+        #[arg(long, value_name = "BOOL", action = clap::ArgAction::Set)]
+        unlisted: Option<bool>,
     },
     /// Set the channel topic
     Topic {
@@ -2269,6 +2338,24 @@ mod tests {
     }
 
     /// Smoke test: CLI definition is valid and parseable.
+    #[test]
+    fn output_format_env_is_a_lenient_default_but_the_flag_stays_strict() {
+        use std::ffi::OsStr;
+        assert!(matches!(env_output_format(None), OutputFormat::Json));
+        for ignored in ["", "agent-v2"] {
+            assert!(matches!(
+                env_output_format(Some(OsStr::new(ignored))),
+                OutputFormat::Json
+            ));
+        }
+        assert!(matches!(
+            env_output_format(Some(OsStr::new("agent"))),
+            OutputFormat::Agent
+        ));
+        assert!(parse_args(["buzz", "--format", "agent", "pack", "validate", "x"]).is_ok());
+        assert!(parse_args(["buzz", "--format", "agent-v2", "pack", "validate", "x"]).is_err());
+    }
+
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();

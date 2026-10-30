@@ -1353,7 +1353,6 @@ test("fast middle-page scroll settles with continuous mounted coverage", async (
       element.dispatchEvent(new Event("scroll", { bubbles: true }));
     }
   });
-  await page.waitForTimeout(250);
 
   const viewportCoverage = () =>
     timeline.evaluate((element) => {
@@ -1376,6 +1375,11 @@ test("fast middle-page scroll settles with continuous mounted coverage", async (
       }
       return Math.max(largestGap, viewport.bottom - cursor);
     });
+
+  // Virtua remounts the new range a few frames after the last scroll; under
+  // load that can take longer than any fixed wait. Wait for coverage first,
+  // then sample it while idle: a stale range stays blank, so it still fails.
+  await expect.poll(viewportCoverage).toBeLessThan(100);
 
   // A day heading can produce a small legitimate gap between message rows;
   // the stale-range failure leaves a viewport-scale hole. Check repeatedly
@@ -2172,6 +2176,13 @@ test("thread summary badge survives a retained older-history prepend", async ({
 
   await page.getByTestId("channel-deep-history").click();
   await expect(page.getByTestId("chat-title")).toHaveText("deep-history");
+  // Page only after live admission and its head refresh. That refresh
+  // replaces the window, so an earlier prepend can be discarded.
+  await waitForMockChannelHeadReady(
+    page,
+    "deep-history",
+    "feedf00d-0000-4000-8000-000000000007",
+  );
   const timeline = page.getByTestId("message-timeline");
   const badgeSelector =
     '[data-testid="message-thread-summary"][data-thread-head-id="mock-deep-history-599"]';

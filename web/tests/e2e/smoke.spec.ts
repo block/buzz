@@ -79,6 +79,9 @@ test("invite requires age and legal consent before opening Buzz", async ({
     "href",
     "https://github.com/block/buzz/releases/download/v0.4.9/Buzz_0.4.9_x64-setup_alpha-unsigned.exe",
   );
+  await expect(
+    page.getByRole("link", { name: "Browse releases" }),
+  ).toHaveAttribute("href", "https://github.com/block/buzz/releases");
 
   const ageConfirmation = page.getByLabel("I am 18 years of age or older.");
   const agreementConfirmation = page.getByLabel(
@@ -205,6 +208,66 @@ test("invite can enroll a NIP-07 identity for browser access", async ({
   await expect(page).toHaveURL("/");
   expect(claimObserved).toBe(true);
 });
+
+for (const [sentinel, guidance] of [
+  [
+    "invite_restricted",
+    "This account, or the account that owns it, is restricted in this community. Contact a community administrator. If the restriction is temporary, try again after it ends.",
+  ],
+  [
+    "invite_owner_mismatch",
+    "This account does not match its recorded owner. Use the correct account or owner identity to join this community.",
+  ],
+]) {
+  test(`invite shows recovery for ${sentinel} without automatically retrying`, async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      Object.assign(window, {
+        nostr: {
+          async getPublicKey() {
+            return "ab".repeat(32);
+          },
+          async signEvent(event: Record<string, unknown>) {
+            return {
+              ...event,
+              id: "cd".repeat(32),
+              pubkey: "ab".repeat(32),
+              sig: "ef".repeat(64),
+            };
+          },
+        },
+      });
+    });
+    await page.route("**/api/join-policy", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ policy: null }),
+      }),
+    );
+    let attempts = 0;
+    await page.route("**/api/invites/claim", async (route) => {
+      attempts++;
+      expect(route.request().postDataJSON()).toEqual({ code: "browser-code" });
+      await route.fulfill({
+        status: 403,
+        contentType: "application/json",
+        body: JSON.stringify({ error: sentinel }),
+      });
+    });
+    await page.goto("/invite/browser-code");
+    const join = page.getByRole("button", { name: "Join in browser" });
+    await join.click();
+    await expect(page.getByRole("alert")).toHaveText(guidance);
+    await expect(join).toBeEnabled();
+    expect(attempts).toBe(1);
+    await expect(page).toHaveURL(/\/invite\/browser-code$/);
+    await join.click();
+    await expect(page.getByRole("alert")).toHaveText(guidance);
+    expect(attempts).toBe(2);
+  });
+}
 
 test("invite asks Safari users to choose their Mac download", async ({
   browser,
@@ -366,6 +429,10 @@ test("invite download links to the appropriate platform destination", async ({
       page.getByRole("link", { name: "Download it now" }),
       device.name,
     ).toHaveAttribute("href", device.expectedUrl);
+    await expect(
+      page.getByRole("link", { name: "Browse releases" }),
+      device.name,
+    ).toHaveAttribute("href", "https://github.com/block/buzz/releases");
     await context.route(device.expectedUrl, (route) =>
       route.fulfill({ contentType: "text/html", body: "Store destination" }),
     );

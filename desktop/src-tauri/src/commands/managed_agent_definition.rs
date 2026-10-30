@@ -1,12 +1,15 @@
 //! Managed-agent definition validation at local mutation boundaries.
 
-use crate::managed_agents::{CreateManagedAgentRequest, ManagedAgentRecord};
+use crate::managed_agents::{BackendKind, CreateManagedAgentRequest, ManagedAgentRecord};
 
 pub(super) fn validate_create_definition(
     name: &str,
     persona_id: Option<&str>,
     input: &CreateManagedAgentRequest,
 ) -> Result<(), String> {
+    if input.effort_level.is_some() && input.backend != BackendKind::Local {
+        return Err("remote effort is set at deploy time".to_string());
+    }
     validate_definition_fields(name, persona_id, input.system_prompt.as_deref())
 }
 
@@ -94,6 +97,23 @@ mod tests {
                 .expect_err("create must reject unsafe definition text");
             assert!(error.contains(code), "unexpected error: {error}");
         }
+    }
+
+    #[test]
+    fn create_rejects_effort_for_non_local_backend_only() {
+        let mut input = create_request("Review code.");
+        input.effort_level = Some("high".to_string());
+        validate_create_definition("Reviewer", None, &input).expect("local effort is accepted");
+        input.backend = BackendKind::Provider {
+            id: "provider".into(),
+            config: serde_json::json!({}),
+        };
+        let error = validate_create_definition("Reviewer", None, &input)
+            .expect_err("provider create must reject effort before any side effect");
+        assert!(error.contains("deploy time"), "unexpected error: {error}");
+        input.effort_level = None;
+        validate_create_definition("Reviewer", None, &input)
+            .expect("provider create without effort is unchanged");
     }
 
     #[test]

@@ -59,9 +59,16 @@ pub struct Llm {
 /// network/reachability problem, not a slow generation.
 const LLM_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// `User-Agent` sent on every LLM request. reqwest sends no User-Agent by
+/// default, so OpenAI-compatible providers that identify clients by product
+/// token saw buzz-agent as an anonymous caller. The version is the crate
+/// version, matching the `agentInfo` reported over ACP.
+const LLM_USER_AGENT: &str = concat!("buzz-agent/", env!("CARGO_PKG_VERSION"));
+
 impl Llm {
     pub fn new(cfg: &Config) -> Result<Self, AgentError> {
         let http = Client::builder()
+            .user_agent(LLM_USER_AGENT)
             .connect_timeout(LLM_CONNECT_TIMEOUT)
             // No client-level read_timeout: we apply a per-request total
             // timeout via RequestBuilder::timeout() so that escalated budgets
@@ -2654,6 +2661,7 @@ mod tests {
     struct CapturedHttpRequest {
         method: String,
         path: String,
+        user_agent: Option<String>,
         body: Option<Value>,
     }
 
@@ -2728,6 +2736,11 @@ mod tests {
                         Ok(read) => bytes.extend_from_slice(&chunk[..read]),
                     }
                 }
+                let user_agent = header_text.lines().find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("user-agent")
+                        .then(|| value.trim().to_string())
+                });
                 let mut request_line = header_text.lines().next().unwrap_or_default().split(' ');
                 let method = request_line.next().unwrap_or_default().to_string();
                 let path = request_line.next().unwrap_or_default().to_string();
@@ -2736,10 +2749,12 @@ mod tests {
                 } else {
                     serde_json::from_slice(&bytes[header_end..header_end + content_length]).ok()
                 };
-                captured_for_server
-                    .lock()
-                    .await
-                    .push(CapturedHttpRequest { method, path, body });
+                captured_for_server.lock().await.push(CapturedHttpRequest {
+                    method,
+                    path,
+                    user_agent,
+                    body,
+                });
 
                 let response = responses.lock().await.pop_front().unwrap_or_else(|| {
                     StubHttpResponse::error(500, "stub response sequence exhausted")
@@ -2798,6 +2813,23 @@ mod tests {
             .filter(|request| request.method == "POST")
             .filter_map(|request| request.body.as_ref()?.get("model")?.as_str())
             .collect()
+    }
+
+    /// Every LLM request identifies the client to the provider via the
+    /// first User-Agent product token.
+    #[tokio::test]
+    async fn llm_requests_carry_buzz_agent_user_agent() {
+        let (base_url, captured) =
+            spawn_sequence_stub(vec![StubHttpResponse::ok(chat_response("ok"))]).await;
+        let mut config = cfg(Provider::OpenAi);
+        config.base_url = base_url;
+        let llm = Llm::new(&config).unwrap();
+
+        complete_model(&llm, &config, "gpt-test").await.unwrap();
+        let requests = captured.lock().await;
+        let expected = format!("buzz-agent/{}", env!("CARGO_PKG_VERSION"));
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].user_agent.as_deref(), Some(expected.as_str()));
     }
 
     /// An explicit model is sent verbatim and never rewritten to something

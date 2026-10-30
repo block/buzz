@@ -131,15 +131,13 @@ class CommunityThemeSyncManager {
     if (_disposed) return false;
     final epoch = ++_subscriptionEpoch;
     try {
-      final unsubscribe = await relaySession.subscribe(
-        _themeFilter(limit: 0),
-        (event) {
-          if (_disposed || epoch != _subscriptionEpoch) return;
-          final remote = _decode(event);
-          if (remote != null) _accept(remote);
-        },
-        onClosed: (message) => _handleSubscriptionClosed(epoch, message),
-      );
+      final unsubscribe = await relaySession.subscribe(_themeFilter(limit: 0), (
+        event,
+      ) {
+        if (_disposed || epoch != _subscriptionEpoch) return;
+        final remote = _decode(event);
+        if (remote != null) _accept(remote);
+      }, onClosed: (message) => _handleSubscriptionClosed(epoch, message));
       if (_disposed || epoch != _subscriptionEpoch) {
         unsubscribe();
         return false;

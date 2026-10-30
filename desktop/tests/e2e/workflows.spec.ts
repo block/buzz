@@ -15,12 +15,18 @@ async function navigateToWorkflows(page: import("@playwright/test").Page) {
   await expect(page.getByTestId("workflows-view")).toBeVisible();
 }
 
+// A new workflow's channel picker opens itself one animation frame after the
+// dialog mounts. A visibility probe taken before that frame reads "closed",
+// and the click that follows can land after it and toggle the list shut, so
+// create dialogs wait for the list instead. Dialogs that never open it
+// themselves (duplicate) open it with a click.
 async function selectWorkflowChannel(
   page: import("@playwright/test").Page,
   dialog: import("@playwright/test").Locator,
+  { opensItself = true }: { opensItself?: boolean } = {},
 ) {
   const channelList = page.getByTestId("channel-combobox-list");
-  if (!(await channelList.isVisible())) {
+  if (!opensItself) {
     await dialog.getByRole("combobox", { name: "Channel" }).click();
   }
   await expect(channelList).toBeVisible();
@@ -96,7 +102,19 @@ async function createWorkflow(
 
   await dialog.getByRole("button", { name: "Add step", exact: true }).click();
   await page.getByRole("menuitem", { name: "Send Message" }).click();
-  await dialog.getByLabel("Message text").fill("Workflow notification");
+  // The inspector swaps from the trigger to the new step after the click; an
+  // unscoped fill can land in the trigger's message-text condition instead.
+  // The "Action" header switches at once, but the trigger body stays mounted
+  // through its exit animation (AnimatePresence mode="wait"), so also wait
+  // for a control only the step body renders.
+  const stepInspector = dialog.getByTestId("workflow-node-inspector");
+  await expect(
+    stepInspector.getByRole("button", { name: "Action", exact: true }),
+  ).toBeVisible();
+  await expect(
+    stepInspector.getByRole("button", { name: "Step details" }),
+  ).toBeVisible();
+  await stepInspector.getByLabel("Message text").fill("Workflow notification");
   if (options?.stepName) {
     await dialog.getByRole("button", { name: "Step details" }).click();
     await dialog.getByLabel("Name (optional)").fill(options.stepName);
@@ -568,7 +586,7 @@ test("duplicates a workflow", async ({ page }) => {
 
   // Submit the duplicate after deliberately choosing its destination channel.
   const dialog = page.getByRole("dialog", { name: "Duplicate workflow" });
-  await selectWorkflowChannel(page, dialog);
+  await selectWorkflowChannel(page, dialog, { opensItself: false });
   await dialog.getByRole("button", { name: "Create copy" }).click();
   const activationConfirmation = page.getByRole("alertdialog", {
     name: "This workflow may run often",

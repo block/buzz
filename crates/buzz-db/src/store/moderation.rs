@@ -188,6 +188,12 @@ pub async fn insert_report(
     community: CommunityId,
     report: NewReport<'_>,
 ) -> Result<Uuid> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let (target_kind, target_event_id, target_pubkey, target_blob_sha256) = match &report.target {
         ReportTarget::Event(id) => ("event", Some(id.as_slice()), None, None),
         ReportTarget::Pubkey(pubkey) => ("pubkey", None, Some(pubkey.as_slice()), None),
@@ -223,8 +229,9 @@ pub async fn insert_report(
     .bind(report.report_type)
     .bind(report.note)
     .bind(initial_status)
-    .fetch_one(pool)
+    .fetch_one(tx.conn())
     .await?;
+    tx.commit().await?;
 
     Ok(row.try_get("id")?)
 }
@@ -313,6 +320,12 @@ pub async fn resolve_report(
     resolved_by: &[u8],
     action_id: Option<Uuid>,
 ) -> Result<bool> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let result = sqlx::query(
         r#"
         UPDATE moderation_reports
@@ -325,8 +338,9 @@ pub async fn resolve_report(
     .bind(status)
     .bind(resolved_by)
     .bind(action_id)
-    .execute(pool)
+    .execute(tx.conn())
     .await?;
+    tx.commit().await?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -340,6 +354,13 @@ pub async fn ban_member(
     reason: Option<&str>,
     expires_at: Option<DateTime<Utc>>,
 ) -> Result<()> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    crate::relay_invite::lock_admission(tx.conn(), community).await?;
     sqlx::query(
         r#"
         INSERT INTO community_bans (
@@ -358,9 +379,10 @@ pub async fn ban_member(
     .bind(expires_at)
     .bind(reason)
     .bind(actor)
-    .execute(pool)
+    .execute(tx.conn())
     .await?;
-
+    crate::relay_invite::revoke_banned_issuer_invites(tx.conn(), community, pubkey).await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -371,6 +393,12 @@ pub async fn unban_member(
     pubkey: &[u8],
     actor: &[u8],
 ) -> Result<bool> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let result = sqlx::query(
         r#"
         UPDATE community_bans
@@ -383,8 +411,9 @@ pub async fn unban_member(
     .bind(community.as_uuid())
     .bind(pubkey)
     .bind(actor)
-    .execute(pool)
+    .execute(tx.conn())
     .await?;
+    tx.commit().await?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -404,7 +433,12 @@ pub async fn unban_member_with_audit(
     actor: &[u8],
     actor_authority: &str,
 ) -> Result<bool> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
 
     let result = sqlx::query(
         r#"
@@ -418,7 +452,7 @@ pub async fn unban_member_with_audit(
     .bind(community.as_uuid())
     .bind(pubkey)
     .bind(actor)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     if result.rows_affected() == 0 {
@@ -438,7 +472,7 @@ pub async fn unban_member_with_audit(
     .bind(actor)
     .bind(pubkey)
     .bind(actor_authority)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     tx.commit().await?;
@@ -456,7 +490,12 @@ pub async fn untimeout_member_with_audit(
     actor: &[u8],
     actor_authority: &str,
 ) -> Result<bool> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
 
     let result = sqlx::query(
         r#"
@@ -469,7 +508,7 @@ pub async fn untimeout_member_with_audit(
     .bind(community.as_uuid())
     .bind(pubkey)
     .bind(actor)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     if result.rows_affected() == 0 {
@@ -488,7 +527,7 @@ pub async fn untimeout_member_with_audit(
     .bind(actor)
     .bind(pubkey)
     .bind(actor_authority)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     tx.commit().await?;
@@ -504,6 +543,13 @@ pub async fn timeout_member(
     muted_until: DateTime<Utc>,
     reason: Option<&str>,
 ) -> Result<()> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    crate::relay_invite::lock_admission(tx.conn(), community).await?;
     sqlx::query(
         r#"
         INSERT INTO community_bans (
@@ -521,9 +567,10 @@ pub async fn timeout_member(
     .bind(muted_until)
     .bind(reason)
     .bind(actor)
-    .execute(pool)
+    .execute(tx.conn())
     .await?;
-
+    crate::relay_invite::revoke_banned_issuer_invites(tx.conn(), community, pubkey).await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -534,6 +581,12 @@ pub async fn untimeout_member(
     pubkey: &[u8],
     actor: &[u8],
 ) -> Result<bool> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let result = sqlx::query(
         r#"
         UPDATE community_bans
@@ -545,8 +598,9 @@ pub async fn untimeout_member(
     .bind(community.as_uuid())
     .bind(pubkey)
     .bind(actor)
-    .execute(pool)
+    .execute(tx.conn())
     .await?;
+    tx.commit().await?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -564,8 +618,12 @@ pub struct RestrictionState {
     pub muted_until: Option<DateTime<Utc>>,
 }
 
-/// Fetch the current restriction state for a pubkey in one community.
-/// Missing row ⇒ `RestrictionState::default()` (unrestricted).
+/// Fetch the effective restriction state for a pubkey in one community.
+///
+/// An agent is restricted by its own row and by its owner's row
+/// (`users.agent_owner_pubkey`), read now rather than copied onto the agent,
+/// so lifting the owner's restriction restores the agent with no extra step.
+/// No rows ⇒ `RestrictionState::default()` (unrestricted).
 pub async fn restriction_state(
     pool: &PgPool,
     community: CommunityId,
@@ -579,24 +637,28 @@ pub async fn restriction_state(
     let row = sqlx::query(
         r#"
         SELECT
-            (banned AND (ban_expires_at IS NULL OR ban_expires_at > now())) AS banned,
-            CASE WHEN muted_until > now() THEN muted_until ELSE NULL END AS muted_until
+            COALESCE(bool_or(banned AND (ban_expires_at IS NULL OR ban_expires_at > now())), false)
+                AS banned,
+            max(CASE WHEN muted_until > now() THEN muted_until END) AS muted_until
         FROM community_bans
-        WHERE community_id = $1 AND pubkey = $2
+        WHERE community_id = $1
+          AND pubkey IN (
+              SELECT $2::bytea
+              UNION ALL
+              SELECT agent_owner_pubkey FROM users
+              WHERE community_id = $1 AND pubkey = $2 AND agent_owner_pubkey IS NOT NULL
+          )
         "#,
     )
     .bind(community.as_uuid())
     .bind(pubkey)
-    .fetch_optional(&mut *connection)
+    .fetch_one(&mut *connection)
     .await?;
 
-    match row {
-        Some(row) => Ok(RestrictionState {
-            banned: row.try_get("banned")?,
-            muted_until: row.try_get("muted_until")?,
-        }),
-        None => Ok(RestrictionState::default()),
-    }
+    Ok(RestrictionState {
+        banned: row.try_get("banned")?,
+        muted_until: row.try_get("muted_until")?,
+    })
 }
 
 /// Fetch the full ban/timeout row (moderation queue / audit views).
@@ -696,6 +758,12 @@ pub async fn insert_action(
     community: CommunityId,
     action: NewAction<'_>,
 ) -> Result<Uuid> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let row = sqlx::query(
         r#"
         INSERT INTO moderation_actions (
@@ -717,8 +785,9 @@ pub async fn insert_action(
     .bind(action.private_reason)
     .bind(action.matched_principal)
     .bind(action.actor_authority.unwrap_or("community"))
-    .fetch_one(pool)
+    .fetch_one(tx.conn())
     .await?;
+    tx.commit().await?;
 
     Ok(row.try_get("id")?)
 }
@@ -949,7 +1018,8 @@ impl Db {
         untimeout_member(&self.pool, community, pubkey, actor).await
     }
 
-    /// Fetch the active ban/timeout restriction state for enforcement hot paths.
+    /// Fetch the effective (own or agent-owner) ban/timeout restriction state
+    /// for enforcement hot paths.
     #[datastore_span(name = "moderation_restriction_state", system = "postgresql")]
     pub async fn moderation_restriction_state(
         &self,

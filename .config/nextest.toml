@@ -32,6 +32,10 @@ max-threads = 1
 [[profile.postgres-ci.overrides]]
 filter = "test(/cluster_global_/)"
 test-group = "postgres-cluster-global"
+# The group only serializes these tests with each other. They read unfiltered,
+# cluster-wide `pg_stat_activity`, so any overlapping test's session can mask
+# activity; claim every worker so they run alone.
+threads-required = "num-test-threads"
 
 [[profile.postgres-ci.scripts]]
 # Script filters are separate from default-filter: they attach the setup and
@@ -39,3 +43,13 @@ test-group = "postgres-cluster-global"
 filter = "(test(/postgres_tests::/) or binary(/^postgres_/)) and not test(/(^|::)external_infra[^:]*::/)"
 setup = "postgres-template"
 run-wrapper = "postgres-isolation"
+
+[profile.flake]
+# The advisory pull-request flake lane (scripts/flake-check.mjs rust) repeats
+# a selection and must see every failed repetition, so no retries; the JUnit
+# report gives it per-test statuses.
+retries = 0
+fail-fast = false
+
+[profile.flake.junit]
+path = "junit.xml"

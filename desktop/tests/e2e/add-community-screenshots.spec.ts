@@ -118,6 +118,61 @@ test("identity: padded same-key hex is a ready create flow, not a mismatch", asy
   ).toHaveCount(0);
 });
 
+test("create flow follows server permission with five owned communities", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      builderlabAuth: {
+        email: "owner@example.com",
+        expiresAt: "2099-01-01T00:00:00Z",
+      },
+      builderlabIdentity: { pubkey_hex: DEFAULT_MOCK_PUBKEY },
+      builderlabCommunities: Array.from({ length: 5 }, (_, index) => ({
+        id: `owned-${index}`,
+      })),
+      builderlabQuota: { quota_used: 5, quota_limit: 50, can_create: true },
+    },
+    { skipCommunitySeed: true },
+  );
+  await page.reload();
+  await page.getByTestId("community-rail-add").click();
+  await page.getByTestId("add-community-create").click();
+  await page.getByTestId("hosted-community-create-name").fill("new-team");
+  await expect(
+    page.getByTestId("hosted-community-create-submit"),
+  ).toBeEnabled();
+});
+
+test("create flow blocks when lifetime quota is exhausted", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      builderlabAuth: {
+        email: "owner@example.com",
+        expiresAt: "2099-01-01T00:00:00Z",
+      },
+      builderlabIdentity: { pubkey_hex: DEFAULT_MOCK_PUBKEY },
+      builderlabCommunities: [],
+      builderlabQuota: { quota_used: 0, quota_limit: 50, can_create: false },
+    },
+    { skipCommunitySeed: true },
+  );
+  await page.reload();
+  await page.getByTestId("community-rail-add").click();
+  await page.getByTestId("add-community-create").click();
+  await expect(page.getByTestId("hosted-community-create-name")).toBeDisabled();
+  await expect(
+    page.getByTestId("hosted-community-create-submit"),
+  ).toBeDisabled();
+  await expect(
+    page.getByText(/reached your hosted community creation limit/),
+  ).toBeVisible();
+});
+
 test("capture: add-community choices", async ({ page }) => {
   const dialog = page.getByTestId("add-community-dialog");
   await dialog.waitFor();

@@ -7,7 +7,7 @@ members = ["crates/buzz-terminal"]
 
 [package]
 name = "buzz-desktop"
-version = "0.5.25"
+version = "0.5.28"
 description = "Buzz desktop app"
 authors = ["you"]
 edition = "2021"
@@ -93,8 +93,6 @@ tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 bytes = "1"
 futures-util = "0.3"
-opus = "0.3"
-neteq = { version = "0.8", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
@@ -112,6 +110,7 @@ buzz_core_pkg = { package = "buzz-core", path = "../../crates/buzz-core" }
 buzz_persona_pkg = { package = "buzz-persona", path = "../../crates/buzz-persona" }
 buzz_sdk_pkg = { package = "buzz-sdk", path = "../../crates/buzz-sdk" }
 buzz_agent_pkg = { package = "buzz-agent", path = "../../crates/buzz-agent" }
+buzz_audio_client = { package = "buzz-audio-client", path = "../../crates/buzz-audio-client", default-features = false, features = ["webpki-roots"] }
 buzz_voice_pkg = { package = "buzz-voice", path = "../../crates/buzz-voice" }
 buzz_terminal = { package = "buzz-terminal", path = "crates/buzz-terminal" }
 buzz_ws_client_pkg = { package = "buzz-ws-client", path = "../../crates/buzz-ws-client" }
@@ -140,7 +139,7 @@ png = "0.18"
 # target-gated inside arboard; at runtime X11 sessions still fall back to X11.
 arboard = { version = "3", features = ["wayland-data-control"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
-zip = "8"
+zip = "9"
 flate2 = "1"
 sherpa-onnx = "1.12"
 regex = "1"

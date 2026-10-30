@@ -106,18 +106,22 @@ MessageDeepLink? _pushNotificationLink(Object? arguments) {
   final eventId = arguments['eventId'];
   final communityId = arguments['communityId'];
   final channelId = arguments['channelId'];
+  final threadRootId = arguments['threadRootId'];
   if (eventId is! String ||
       eventId.isEmpty ||
       communityId is! String ||
       communityId.isEmpty ||
       channelId is! String ||
-      channelId.isEmpty) {
+      channelId.isEmpty ||
+      (threadRootId != null &&
+          (threadRootId is! String || threadRootId.isEmpty))) {
     return null;
   }
   return MessageDeepLink(
     communityId: communityId,
     channelId: channelId,
     messageId: eventId,
+    threadRootId: threadRootId as String?,
   );
 }
 
@@ -157,7 +161,6 @@ class BuzzPushEndpointGrant {
   final String installationId;
   final String endpointGrant;
   final String endpointHash;
-  final String appProfile;
   final int endpointEpoch;
   final int generation;
   final int expiresAt;
@@ -168,7 +171,6 @@ class BuzzPushEndpointGrant {
     required this.installationId,
     required this.endpointGrant,
     required this.endpointHash,
-    required this.appProfile,
     required this.endpointEpoch,
     required this.generation,
     required this.expiresAt,
@@ -182,7 +184,6 @@ class BuzzPushEndpointGrant {
       installationId: map['installationId'] as String,
       endpointGrant: map['endpointGrant'] as String,
       endpointHash: map['endpointHash'] as String,
-      appProfile: map['appProfile'] as String,
       endpointEpoch: map['endpointEpoch'] as int,
       generation: generation,
       expiresAt: map['expiresAt'] as int,

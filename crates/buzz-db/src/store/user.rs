@@ -57,7 +57,23 @@ async fn ensure_user_with_operation(
     pubkey: &[u8],
     operation: crate::observability::WriterOperation,
 ) -> Result<bool> {
+    // Almost every call finds the user already registered. Answer that with
+    // one read, so the hot path skips the admission round trips; no write
+    // happens, so the fence contract is unaffected.
     let mut connection = crate::observability::acquire_writer(pool, operation).await?;
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM users WHERE community_id = $1 AND pubkey = $2)",
+    )
+    .bind(community_id.as_uuid())
+    .bind(pubkey)
+    .fetch_one(&mut *connection)
+    .await?;
+    if exists {
+        return Ok(false);
+    }
+    drop(connection);
+
+    let mut tx = crate::begin_community_write_transaction(pool, community_id, operation).await?;
     let result = sqlx::query(
         r#"
         INSERT INTO users (community_id, pubkey)
@@ -67,8 +83,9 @@ async fn ensure_user_with_operation(
     )
     .bind(community_id.as_uuid())
     .bind(pubkey)
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?;
+    tx.commit().await?;
     Ok(result.rows_affected() == 1)
 }
 
@@ -178,7 +195,14 @@ pub async fn update_user_profile(
     }
     query = query.bind(community_id.as_uuid());
     query = query.bind(pubkey);
-    query.execute(pool).await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    query.execute(tx.conn()).await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -229,7 +253,7 @@ pub async fn get_user_by_nip05(
 ///
 /// Without this, a search query of `"%"` would match every row (full table
 /// scan) and `"_"` would act as a single-character wildcard.
-fn escape_like(input: &str) -> String {
+pub(crate) fn escape_like(input: &str) -> String {
     input
         .replace('\\', "\\\\")
         .replace('%', "\\%")
@@ -330,6 +354,28 @@ async fn set_agent_owner_with_operation(
     operation: crate::observability::WriterOperation,
 ) -> Result<bool> {
     let mut connection = crate::observability::acquire_writer(pool, operation).await?;
+    // Ownership is first-write-wins and is never cleared by supported writers.
+    // Already-linked agents are the common authorization path: avoid queuing
+    // those read-only calls behind a community's claim/restriction transaction.
+    let recorded: Option<Option<Vec<u8>>> = sqlx::query_scalar(
+        "SELECT agent_owner_pubkey FROM users WHERE community_id = $1 AND pubkey = $2",
+    )
+    .bind(community_id.as_uuid())
+    .bind(agent_pubkey)
+    .fetch_optional(&mut *connection)
+    .await?;
+    match recorded {
+        None => {
+            return Err(crate::error::DbError::NotFound(
+                "agent pubkey not found in users table".into(),
+            ))
+        }
+        Some(Some(_)) => return Ok(false),
+        Some(None) => {}
+    }
+    drop(connection);
+    let mut tx = crate::begin_community_write_transaction(pool, community_id, operation).await?;
+    crate::relay_invite::lock_admission(tx.conn(), community_id).await?;
     // Conditional UPDATE: only set owner if currently NULL. This makes
     // "first mint wins" atomic — no TOCTOU race between concurrent mints.
     let result = sqlx::query(
@@ -338,7 +384,7 @@ async fn set_agent_owner_with_operation(
     .bind(owner_pubkey)
     .bind(community_id.as_uuid())
     .bind(agent_pubkey)
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?;
 
     if result.rows_affected() == 0 {
@@ -347,7 +393,7 @@ async fn set_agent_owner_with_operation(
         let exists = sqlx::query(r#"SELECT 1 FROM users WHERE community_id = $1 AND pubkey = $2"#)
             .bind(community_id.as_uuid())
             .bind(agent_pubkey)
-            .fetch_optional(&mut *connection)
+            .fetch_optional(tx.conn())
             .await?;
         if exists.is_none() {
             return Err(crate::error::DbError::NotFound(
@@ -355,8 +401,17 @@ async fn set_agent_owner_with_operation(
             ));
         }
         // Row exists but owner already set — return false (not an error).
+        tx.commit().await?;
         return Ok(false);
     }
+    crate::relay_invite::revoke_restricted_agent_invites(
+        tx.conn(),
+        community_id,
+        agent_pubkey,
+        owner_pubkey,
+    )
+    .await?;
+    tx.commit().await?;
     Ok(true)
 }
 
@@ -387,6 +442,75 @@ pub async fn get_agent_channel_policy(
         Ok((policy, owner))
     })
     .transpose()
+}
+
+/// A user's `channel_add_policy`, and their `agent_owner_pubkey` if any.
+pub type AgentChannelPolicy = (String, Option<Vec<u8>>);
+
+/// [`get_agent_channel_policy`] for several pubkeys in one query. A pubkey
+/// missing from the map is not in the users table.
+pub async fn get_agent_channel_policies(
+    pool: &PgPool,
+    community_id: CommunityId,
+    pubkeys: &[Vec<u8>],
+) -> Result<std::collections::HashMap<Vec<u8>, AgentChannelPolicy>> {
+    if pubkeys.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    let rows = sqlx::query(
+        r#"SELECT pubkey, channel_add_policy::text AS channel_add_policy, agent_owner_pubkey FROM users WHERE community_id = $1 AND pubkey = ANY($2)"#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(pubkeys)
+    .fetch_all(&mut *connection)
+    .await?;
+
+    rows.into_iter()
+        .map(|r| -> Result<(Vec<u8>, AgentChannelPolicy)> {
+            let pubkey: Vec<u8> = r.try_get("pubkey")?;
+            let policy: String = r.try_get("channel_add_policy")?;
+            let owner: Option<Vec<u8>> = r.try_get("agent_owner_pubkey").unwrap_or(None);
+            Ok((pubkey, (policy, owner)))
+        })
+        .collect()
+}
+
+/// List the agents whose `agent_owner_pubkey` is `owner_pubkey` in one community.
+pub async fn list_agents_for_owner(
+    pool: &PgPool,
+    community_id: CommunityId,
+    owner_pubkey: &[u8],
+) -> Result<Vec<Vec<u8>>> {
+    Ok(sqlx::query_scalar::<_, Vec<u8>>(
+        "SELECT pubkey FROM users WHERE community_id = $1 AND agent_owner_pubkey = $2",
+    )
+    .bind(community_id.as_uuid())
+    .bind(owner_pubkey)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Of `candidates`, the agents whose `agent_owner_pubkey` is `owner_pubkey` in
+/// one community.
+pub async fn owned_agents_among(
+    pool: &PgPool,
+    community_id: CommunityId,
+    owner_pubkey: &[u8],
+    candidates: &[Vec<u8>],
+) -> Result<Vec<Vec<u8>>> {
+    Ok(sqlx::query_scalar::<_, Vec<u8>>(
+        "SELECT pubkey FROM users WHERE community_id = $1 AND agent_owner_pubkey = $2 AND pubkey = ANY($3)",
+    )
+    .bind(community_id.as_uuid())
+    .bind(owner_pubkey)
+    .bind(candidates)
+    .fetch_all(pool)
+    .await?)
 }
 
 /// Check whether `actor_pubkey` is the `agent_owner_pubkey` of `target_pubkey`.
@@ -428,14 +552,21 @@ pub async fn set_channel_add_policy(
             "invalid channel_add_policy: {policy}"
         )));
     }
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let result = sqlx::query(
         r#"UPDATE users SET channel_add_policy = $1::channel_add_policy WHERE community_id = $2 AND pubkey = $3"#,
     )
     .bind(policy)
     .bind(community_id.as_uuid())
     .bind(pubkey)
-    .execute(pool)
+    .execute(tx.conn())
     .await?;
+    tx.commit().await?;
     if result.rows_affected() == 0 {
         return Err(crate::error::DbError::NotFound(
             "pubkey not found in users table".into(),
@@ -566,6 +697,37 @@ impl Db {
         pubkey: &[u8],
     ) -> Result<Option<(String, Option<Vec<u8>>)>> {
         crate::user::get_agent_channel_policy(&self.pool, community_id, pubkey).await
+    }
+
+    /// [`Db::get_agent_channel_policy`] for several pubkeys in one query.
+    #[datastore_span(name = "get_agent_channel_policies", system = "postgresql")]
+    pub async fn get_agent_channel_policies(
+        &self,
+        community_id: CommunityId,
+        pubkeys: &[Vec<u8>],
+    ) -> Result<std::collections::HashMap<Vec<u8>, AgentChannelPolicy>> {
+        crate::user::get_agent_channel_policies(&self.pool, community_id, pubkeys).await
+    }
+
+    /// List the agents owned by `owner_pubkey` in one community.
+    #[datastore_span(name = "list_agents_for_owner", system = "postgresql")]
+    pub async fn list_agents_for_owner(
+        &self,
+        community_id: CommunityId,
+        owner_pubkey: &[u8],
+    ) -> Result<Vec<Vec<u8>>> {
+        crate::user::list_agents_for_owner(&self.pool, community_id, owner_pubkey).await
+    }
+
+    /// Of `candidates`, the agents owned by `owner_pubkey` in one community.
+    #[datastore_span(name = "owned_agents_among", system = "postgresql")]
+    pub async fn owned_agents_among(
+        &self,
+        community_id: CommunityId,
+        owner_pubkey: &[u8],
+        candidates: &[Vec<u8>],
+    ) -> Result<Vec<Vec<u8>>> {
+        crate::user::owned_agents_among(&self.pool, community_id, owner_pubkey, candidates).await
     }
 
     /// Check whether `actor_pubkey` is the agent owner of `target_pubkey`.

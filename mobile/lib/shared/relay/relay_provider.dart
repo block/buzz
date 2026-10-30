@@ -1,6 +1,8 @@
+import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
+import '../hosted/hosted_relay_auth.dart';
 import '../community/community_provider.dart';
 import 'relay_client.dart';
 
@@ -10,13 +12,17 @@ import 'relay_client.dart';
 ///   - `baseUrl` — where the relay lives (used for WS + media upload)
 ///   - `nsec`    — the user's signing key (drives NIP-42 AUTH and event sigs)
 class RelayConfig {
-  const RelayConfig({required String baseUrl, this.nsec}) : _baseUrl = baseUrl;
+  const RelayConfig({required String baseUrl, String? nsec})
+    : _baseUrl = baseUrl,
+      _nsec = nsec;
 
   /// Relay origin exactly as the active community stored it.
   final String _baseUrl;
 
-  /// Nostr secret key (bech32 nsec) for signing events and NIP-42 AUTH.
-  final String? nsec;
+  /// Normalized Nostr secret key shared by identity, signing, and NIP-42 AUTH.
+  String? get nsec => _nsec?.trim();
+
+  final String? _nsec;
 
   /// The origin as persisted, before scheme canonicalization.
   ///
@@ -113,7 +119,7 @@ String? pubkeyFromNsec(String? nsec) {
   try {
     final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
     if (privkeyHex.isEmpty) return null;
-    return nostr.Keys(privkeyHex).public;
+    return derivePublicKeyHex(privkeyHex);
   } catch (_) {
     return null;
   }
@@ -131,7 +137,10 @@ final myPubkeyProvider = Provider<String?>((ref) {
 /// through the relay WebSocket session.
 final relayClientProvider = Provider<RelayClient>((ref) {
   final config = ref.watch(relayConfigProvider);
-  final client = RelayClient(baseUrl: config.baseUrl);
+  final client = RelayClient(
+    baseUrl: config.baseUrl,
+    httpClient: ref.watch(hostedHttpClientFactoryProvider)(),
+  );
   ref.onDispose(client.dispose);
   return client;
 });

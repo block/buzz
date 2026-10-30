@@ -311,3 +311,63 @@ test("capture: community icon picker sits beside its hosted community", async ({
     path: `${OUTDIR}/01-community-icon-row.png`,
   });
 });
+
+test("server quota controls the create gate, not the visible list length", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    builderlabAuth: {
+      email: "owner@example.com",
+      expiresAt: "2099-01-01T00:00:00Z",
+    },
+    builderlabIdentity: { pubkey_hex: DEFAULT_MOCK_PUBKEY },
+    builderlabCommunities: Array.from({ length: 5 }, (_, index) => ({
+      id: `community-${index}`,
+      name: `Community ${index}`,
+      normalized_host: `community-${index}.communities.buzz.xyz`,
+    })),
+    builderlabQuota: { quota_used: 5, quota_limit: 50, can_create: true },
+  });
+  await page.goto("/");
+  await openSettings(page, "hosted-communities");
+  await expect(page.getByText("5 of 50 used")).toBeVisible();
+  await expect(page.getByLabel("Community address")).toBeEnabled();
+
+  // A lifetime tombstone can exhaust creation even when active usage is low.
+  await installMockBridge(page, {
+    builderlabAuth: {
+      email: "owner@example.com",
+      expiresAt: "2099-01-01T00:00:00Z",
+    },
+    builderlabIdentity: { pubkey_hex: DEFAULT_MOCK_PUBKEY },
+    builderlabCommunities: [],
+    builderlabQuota: { quota_used: 0, quota_limit: 50, can_create: false },
+  });
+  await page.reload();
+  await expect(page.getByTestId("hosted-communities-settings")).toBeVisible();
+  await expect(page.getByText("0 of 50 used")).toBeVisible();
+  await expect(page.getByLabel("Community address")).toBeDisabled();
+  await expect(
+    page.getByText(/reached your hosted community creation limit/),
+  ).toBeVisible();
+});
+
+test("missing server quota does not impose a guessed limit", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    builderlabAuth: {
+      email: "owner@example.com",
+      expiresAt: "2099-01-01T00:00:00Z",
+    },
+    builderlabIdentity: { pubkey_hex: DEFAULT_MOCK_PUBKEY },
+    builderlabCommunities: Array.from({ length: 20 }, (_, index) => ({
+      id: `community-${index}`,
+      normalized_host: `community-${index}.communities.buzz.xyz`,
+    })),
+  });
+  await page.goto("/");
+  await openSettings(page, "hosted-communities");
+  await expect(page.getByText("20 used")).toBeVisible();
+  await expect(page.getByLabel("Community address")).toBeEnabled();
+});

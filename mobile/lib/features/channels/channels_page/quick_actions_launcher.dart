@@ -7,11 +7,17 @@ const _kQuickActionsHiddenScale = 0.8;
 
 /// Places the channel quick-actions button beside mobile navigation.
 ///
-/// The button remains available only on Home and moves behind the navigation
-/// bar when another destination is selected.
+/// Home opens the creation menu; Solo uses the same button for a new chat.
 class ChannelQuickActionsLauncher extends HookConsumerWidget {
   /// Whether the launcher should be visible beside the navigation bar.
   final bool visible;
+
+  /// Reuses the plus for Solo chat creation instead of the Home menu.
+  final bool newChatMode;
+  final VoidCallback? onNewChat;
+
+  /// Left gutter of the navigation bar.
+  final double navigationBarLeft;
 
   /// Height of the navigation bar used to vertically center the closed button.
   final double navigationBarHeight;
@@ -32,6 +38,9 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
   const ChannelQuickActionsLauncher({
     super.key,
     required this.visible,
+    this.newChatMode = false,
+    this.onNewChat,
+    this.navigationBarLeft = Grid.gutter,
     required this.navigationBarHeight,
     required this.navigationBarBottomGap,
     required this.navigationBarWidth,
@@ -53,25 +62,28 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
         navigationBarHeight +
         Grid.xxs -
         ((navigationBarHeight - _kMorphClosedSize) / 2);
-    final effectiveOpen = visible && quickActionsOpen.value;
+    final effectiveOpen = visible && !newChatMode && quickActionsOpen.value;
     final screenWidth = MediaQuery.sizeOf(context).width;
-    final navigationBarRight = (screenWidth + navigationBarWidth) / 2;
+    final navigationBarRight = navigationBarLeft + navigationBarWidth;
     final launcherRight = screenWidth - rightInset;
     final hiddenHorizontalOffset =
         navigationBarRight - launcherRight - _kQuickActionsHiddenOverlap;
 
     useEffect(() {
-      if (!visible && quickActionsOpen.value) {
+      if ((!visible || newChatMode) && quickActionsOpen.value) {
         quickActionsOpen.value = false;
       }
       return null;
-    }, [visible]);
+    }, [visible, newChatMode]);
 
     Future<void> openChannel(Channel channel) async {
       if (!context.mounted) return;
       await Navigator.of(context).push(
         MaterialPageRoute<void>(
-          builder: (_) => ChannelDetailPage(channel: channel),
+          builder: (_) => ChannelDetailPage(
+            channel: channel,
+            placement: ChannelRoutePlacement.ordinary,
+          ),
         ),
       );
     }
@@ -109,15 +121,6 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
           if (opened != null && context.mounted) {
             await openChannel(opened);
           }
-        case _QuickAction.browseChannels:
-          await showBuzzModalBottomSheet<void>(
-            context: context,
-            title: 'Browse channels',
-            constraints: _quickActionSheetConstraints(context),
-            isScrollControlled: true,
-            showDragHandle: true,
-            builder: (_) => const _BrowseChannelsSheet(),
-          );
       }
     }
 
@@ -125,7 +128,7 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
       fit: StackFit.expand,
       clipBehavior: Clip.none,
       children: [
-        if (quickActionsOpen.value)
+        if (effectiveOpen)
           Positioned.fill(
             child: Semantics(
               button: true,
@@ -171,11 +174,21 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
                 ),
                 child: _MorphingQuickActionsButton(
                   open: effectiveOpen,
+                  icon: newChatMode ? BuzzIcons.edit : BuzzIcons.plus,
                   openEdgeOffset: rightInset - Grid.gutter,
-                  onToggle: () {
-                    unawaited(HapticFeedback.lightImpact());
-                    quickActionsOpen.value = !quickActionsOpen.value;
-                  },
+                  label: newChatMode
+                      ? 'New chat'
+                      : 'Create or start conversation',
+                  onToggle: newChatMode && onNewChat == null
+                      ? null
+                      : () {
+                          unawaited(HapticFeedback.lightImpact());
+                          if (newChatMode) {
+                            onNewChat?.call();
+                          } else {
+                            quickActionsOpen.value = !quickActionsOpen.value;
+                          }
+                        },
                   onSelected: (action) => unawaited(selectQuickAction(action)),
                 ),
               ),

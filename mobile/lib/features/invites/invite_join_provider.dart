@@ -4,6 +4,8 @@ import 'package:http/http.dart' as http;
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
+import '../../shared/hosted/hosted_relay_auth.dart';
+import '../../shared/hosted/community_entry_requirements.dart';
 import '../../shared/auth/auth.dart';
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/relay/relay_provider.dart';
@@ -11,7 +13,7 @@ import '../../shared/relay/relay_session.dart';
 import '../../shared/relay/relay_validation.dart';
 
 final inviteJoinHttpClientProvider = Provider<http.Client>((ref) {
-  final client = http.Client();
+  final client = ref.watch(hostedHttpClientFactoryProvider)();
   ref.onDispose(client.close);
   return client;
 });
@@ -171,6 +173,7 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
       requiresFreshInvite: false,
     );
     try {
+      CommunityEntryRequirements.requireSelfHosted(invite.relayUrl);
       final communities = await ref.read(communityListProvider.future);
       final existing = _existingCommunity(communities, invite.relayUrl);
       if (existing != null) {
@@ -434,6 +437,12 @@ bool _requiresFreshInvite(Object error) {
 
 String _friendlyInviteError(Object error) {
   final message = error.toString();
+  if (message.contains('invite_restricted')) {
+    return 'This account, or the account that owns it, is restricted in this community. Contact a community administrator. If the restriction is temporary, try again after it ends.';
+  }
+  if (message.contains('invite_owner_mismatch')) {
+    return 'This account does not match its recorded owner. Use the correct account or owner identity to join this community.';
+  }
   if (message.contains('invite_expired')) return 'This invite has expired.';
   if (message.contains('invite_exhausted')) {
     return 'This invite has reached its use limit. Ask for a new invite.';

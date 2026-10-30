@@ -130,6 +130,7 @@ export function MessageRowItem({
   );
   const canDelete = canManage && onDelete ? onDelete : undefined;
   const canEdit = canManage && onEdit ? onEdit : undefined;
+  const effectiveThreadRootId = message.rootId ?? message.id;
 
   if (summary && onOpenThread) {
     const isHighlighted = message.id === highlightedMessageId;
@@ -149,8 +150,8 @@ export function MessageRowItem({
           huddleMemberPubkeysPending={huddleMemberPubkeysPending}
           hideAgentAccessBadge={hideAgentAccessBadges}
           isFollowingThread={
-            isFollowingThreadById
-              ? isFollowingThreadById(message.id)
+            !message.pending && isFollowingThreadById
+              ? isFollowingThreadById(effectiveThreadRootId)
               : undefined
           }
           isUnread={isUnread}
@@ -161,15 +162,17 @@ export function MessageRowItem({
           onDelete={canDelete}
           onEdit={canEdit}
           onFollowThread={
-            followThreadById ? () => followThreadById(message.id) : undefined
+            !message.pending && followThreadById
+              ? () => followThreadById(effectiveThreadRootId)
+              : undefined
           }
           onMarkRead={onMarkRead}
           onMarkUnread={onMarkUnread}
           onToggleReaction={onToggleReaction}
           onReply={onReply}
           onUnfollowThread={
-            unfollowThreadById
-              ? () => unfollowThreadById(message.id)
+            !message.pending && unfollowThreadById
+              ? () => unfollowThreadById(effectiveThreadRootId)
               : undefined
           }
           profiles={profiles}
@@ -207,16 +210,31 @@ export function MessageRowItem({
         huddleMemberPubkeysPending={huddleMemberPubkeysPending}
         hideAgentAccessBadge={hideAgentAccessBadges}
         isContinuation={isContinuation}
+        isFollowingThread={
+          !message.pending && isFollowingThreadById
+            ? isFollowingThreadById(effectiveThreadRootId)
+            : undefined
+        }
         isUnread={isUnread}
         playEntrance={playEntrance}
         onEntranceComplete={onEntranceComplete}
         message={message}
         onDelete={canDelete}
         onEdit={canEdit}
+        onFollowThread={
+          !message.pending && followThreadById
+            ? () => followThreadById(effectiveThreadRootId)
+            : undefined
+        }
         onMarkRead={onMarkRead}
         onMarkUnread={onMarkUnread}
         onToggleReaction={onToggleReaction}
         onReply={onReply}
+        onUnfollowThread={
+          !message.pending && unfollowThreadById
+            ? () => unfollowThreadById(effectiveThreadRootId)
+            : undefined
+        }
         profiles={profiles}
         searchQuery={isSearchMatch ? searchQuery : undefined}
         showDepthGuides={false}

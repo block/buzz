@@ -511,11 +511,22 @@ const capitalize = (word: string) =>
  * Parse a Databricks endpoint id into a display label, or `null` when any part
  * of the id falls outside the grammar.
  */
-export function generateDatabricksLabel(rawModelId: string): string | null {
-  // Refuse non-ASCII before trimming or folding, so no Unicode case or
-  // whitespace rule can turn an unsupported id into an ASCII-looking one.
+/** Refuse non-ASCII before trimming or folding, so no Unicode case or
+ * whitespace rule can turn an unsupported id into an ASCII-looking one. */
+function foldLabelInput(rawModelId: string): string | null {
   if ([...rawModelId].some((ch) => ch.charCodeAt(0) > 0x7f)) return null;
-  const id = rawModelId.trim().toLowerCase();
+  return rawModelId.trim().toLowerCase();
+}
+
+/** Generated label for an unwrapped model id (`claude-sonnet-4-6`). */
+export function generateBareModelLabel(rawModelId: string): string | null {
+  const id = foldLabelInput(rawModelId);
+  return id === null ? null : labelFromModelBody(id);
+}
+
+export function generateDatabricksLabel(rawModelId: string): string | null {
+  const id = foldLabelInput(rawModelId);
+  if (id === null) return null;
   const isFqn = isDatabricksModelServiceFqn(id);
   const service = isFqn ? id.slice(id.lastIndexOf(".") + 1) : id;
   // Only a UC FQN or a wrapped endpoint name is attributable to Databricks; a
@@ -524,7 +535,10 @@ export function generateDatabricksLabel(rawModelId: string): string | null {
   if (!wrapper && !isFqn) return null;
   let body = wrapper ? service.slice(wrapper.length) : service;
   if (body.startsWith("meta-llama-")) body = body.slice("meta-".length);
+  return labelFromModelBody(body);
+}
 
+function labelFromModelBody(body: string): string | null {
   const [head, ...rest] = body.split("-");
   const familyMatch = /^([a-z]+)(\d{0,2})$/.exec(head);
   if (!familyMatch) return null;

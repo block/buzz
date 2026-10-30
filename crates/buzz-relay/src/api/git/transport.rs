@@ -8,6 +8,9 @@
 //! Auth: NIP-98 on all routes (clone + push). No public repos for v1.
 //! Transport: shells out to `git --stateless-rpc` with `env_clear()`.
 
+// Response is the natural error type for axum handlers.
+#![allow(clippy::result_large_err)]
+
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
@@ -102,8 +105,13 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         // must be verified against the tenant-bound host, not a process-global
         // domain.
         let mode = state.config.nip_fi.mode;
-        if matches!(mode, buzz_auth::NipFiMode::Off) {
-            parse_git_auth_header(&parts.headers, method)?;
+        if !mode.restricts() {
+            if let Err(rejection) = parse_git_auth_header(&parts.headers, method) {
+                // Off returns `rejection` as is; shadow also records the
+                // enforce verdict for the failed proof.
+                crate::nip_fi_http::observe_failed_proof(state, &parts.headers).await;
+                return Err(rejection);
+            }
         }
 
         // Row zero for Git HTTP: bind the request Host to a server-resolved
@@ -111,14 +119,9 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         // headers; the signed `u` tag is checked against the host that resolved
         // through the authoritative communities table, not a deployment-global
         // `config.relay_url` and not any client-supplied community value.
-        let raw_host = parts
-            .headers
-            .get(header::HOST)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        let tenant = crate::tenant::bind_community(&state.db, raw_host)
+        let tenant = crate::nip_fi_shadow::bind_tenant(state, &parts.headers)
             .await
-            .map_err(|_| (StatusCode::NOT_FOUND, "repository not found").into_response())?;
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "repository not found").into_response())?;
         let expected_url = git_expected_url(
             &state.config.relay_url,
             &tenant,
@@ -195,9 +198,11 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
                     (event, signed_auth_created_at),
                 ))
             },
-        )?;
+        )
+        .await?;
 
         let pubkey = *admission.proven_pubkey();
+        let token_owner = admission.token_owner();
         let (event, signed_auth_created_at) = admission.into_extra();
 
         // Relay membership gate (NIP-43). Git cannot carry a standalone
@@ -207,18 +212,53 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         let event_auth_tag = crate::handlers::auth::extract_auth_tag_json(&event);
         let header_auth_tag = crate::api::relay_members::extract_auth_tag_header(&parts.headers);
         let auth_tag = event_auth_tag.as_deref().or(header_auth_tag);
-        if crate::api::relay_members::enforce_relay_membership(
+        // A failed policy lookup is 503 (the canonical NIP-FI body when the
+        // mode restricts); only a real refusal is 403.
+        let unavailable = |legacy: Response| {
+            if mode.restricts() {
+                crate::nip_fi_core::http_denial(buzz_auth::DenialClass::AuthorizationUnavailable)
+            } else {
+                legacy
+            }
+        };
+        // A verified agent token gets only NIP-FI's fixed denial, so the
+        // response never shows which step refused it.
+        let denied = |legacy: Response| {
+            if token_owner.is_some() {
+                crate::nip_fi_core::http_denial(buzz_auth::DenialClass::AuthorizationDenied)
+            } else {
+                legacy
+            }
+        };
+        #[cfg(test)]
+        crate::nip_fi_test_hooks::before_git_membership(tenant.community()).await;
+        match crate::api::relay_members::check_relay_membership(
             state,
             tenant.community(),
             pubkey.as_bytes(),
             auth_tag,
             Some(signed_auth_created_at),
+            token_owner,
         )
         .await
-        .is_err()
         {
-            warn!(pubkey = %pubkey.to_hex(), "git: relay membership denied");
-            return Err((StatusCode::FORBIDDEN, "restricted: not a relay member").into_response());
+            Ok(crate::api::relay_members::MembershipDecision::Denied) => {
+                warn!(pubkey = %pubkey.to_hex(), "git: relay membership denied");
+                return Err(denied(
+                    (StatusCode::FORBIDDEN, "restricted: not a relay member").into_response(),
+                ));
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!(pubkey = %pubkey.to_hex(), error = %e, "git: relay membership lookup failed");
+                return Err(unavailable(
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "error: internal error checking relay membership",
+                    )
+                        .into_response(),
+                ));
+            }
         }
 
         deny_banned_git_principal(
@@ -227,8 +267,39 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
             &pubkey,
             auth_tag,
             Some(signed_auth_created_at),
+            token_owner,
         )
-        .await?;
+        .await
+        .map_err(|denial| {
+            if denial.status() == StatusCode::SERVICE_UNAVAILABLE {
+                unavailable(denial)
+            } else {
+                denied(denial)
+            }
+        })?;
+
+        // A token owner other than the agent's stored owner is refused; an
+        // unset stored owner is recorded.
+        if let Some(owner) = token_owner {
+            use crate::api::relay_members::{link_agent_owner, OwnerLink};
+            match link_agent_owner(state, &tenant, &pubkey, &owner).await {
+                OwnerLink::Linked => {}
+                OwnerLink::Conflict => {
+                    return Err(crate::nip_fi_core::http_denial(
+                        buzz_auth::DenialClass::AuthorizationDenied,
+                    ))
+                }
+                OwnerLink::Unavailable => {
+                    return Err(unavailable(
+                        (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            crate::handlers::auth::OWNER_LINK_ERROR,
+                        )
+                            .into_response(),
+                    ))
+                }
+            }
+        }
 
         Ok(GitAuth { pubkey, tenant })
     }
@@ -251,6 +322,7 @@ pub(super) async fn deny_banned_git_principal(
     pubkey: &nostr::PublicKey,
     auth_tag: Option<&str>,
     signed_auth_created_at: Option<u64>,
+    token_owner: Option<nostr::PublicKey>,
 ) -> Result<(), Response> {
     let agent = git_restriction_state(db, community, pubkey).await?;
 
@@ -259,11 +331,13 @@ pub(super) async fn deny_banned_git_principal(
     let owner = if agent.banned {
         None
     } else {
-        crate::api::relay_members::extract_nip_oa_owner(
-            pubkey.as_bytes(),
-            auth_tag,
-            signed_auth_created_at,
-        )
+        token_owner.or_else(|| {
+            crate::api::relay_members::extract_nip_oa_owner(
+                pubkey.as_bytes(),
+                auth_tag,
+                signed_auth_created_at,
+            )
+        })
     };
     let owner_state = match owner {
         Some(owner) => Some(git_restriction_state(db, community, &owner).await?),
@@ -2367,7 +2441,7 @@ mod track_c_tests {
 
     async fn finalize_test_state() -> (Arc<AppState>, sqlx::PgPool) {
         const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
-        let mut config = crate::config::Config::from_env().expect("default config loads");
+        let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         config.database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
@@ -2423,7 +2497,12 @@ mod track_c_tests {
 
         let store = state.db.deletion_store();
         let request = store
-            .submit(host, "git-finalize-test", Some("post-CAS lease regression"))
+            .submit(
+                Some(host),
+                "git-finalize-test",
+                Some("post-CAS lease regression"),
+                None,
+            )
             .await
             .expect("submit deletion");
         let inventory = FrozenInventory {
@@ -3756,7 +3835,7 @@ mod sec005_postgres_tests {
         db.ensure_user(community, &member_pk).await.expect("member");
 
         assert!(
-            deny_banned_git_principal(&db, community, &member.public_key(), None, None)
+            deny_banned_git_principal(&db, community, &member.public_key(), None, None, None)
                 .await
                 .is_ok(),
             "precondition: an unbanned member passes the git ban gate"
@@ -3767,7 +3846,7 @@ mod sec005_postgres_tests {
             .expect("ban");
 
         let (status, body) = denial_parts(
-            deny_banned_git_principal(&db, community, &member.public_key(), None, None).await,
+            deny_banned_git_principal(&db, community, &member.public_key(), None, None, None).await,
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -3796,6 +3875,7 @@ mod sec005_postgres_tests {
                 &agent.public_key(),
                 Some(&auth_tag),
                 Some(200),
+                None,
             )
             .await
             .is_ok(),
@@ -3814,6 +3894,7 @@ mod sec005_postgres_tests {
                 &agent.public_key(),
                 Some(&auth_tag),
                 Some(200),
+                None,
             )
             .await,
         )
@@ -3827,7 +3908,7 @@ mod sec005_postgres_tests {
         // An unattested request from the same agent key is unaffected: the
         // cascade must follow a verified owner, not punish every agent.
         assert!(
-            deny_banned_git_principal(&db, community, &agent.public_key(), None, None)
+            deny_banned_git_principal(&db, community, &agent.public_key(), None, None, None)
                 .await
                 .is_ok(),
             "without an attestation there is no owner to inherit from"
@@ -3849,8 +3930,15 @@ mod sec005_postgres_tests {
 
         let community = buzz_core::CommunityId::from_uuid(uuid::Uuid::new_v4());
         let (status, body) = denial_parts(
-            deny_banned_git_principal(&db, community, &Keys::generate().public_key(), None, None)
-                .await,
+            deny_banned_git_principal(
+                &db,
+                community,
+                &Keys::generate().public_key(),
+                None,
+                None,
+                None,
+            )
+            .await,
         )
         .await;
         assert_eq!(
@@ -4055,7 +4143,7 @@ mod off_mode_precedence_tests {
         );
 
         async fn off_mode_state() -> Option<Arc<AppState>> {
-            let mut config = crate::config::Config::from_env().ok()?;
+            let mut config = crate::config::Config::for_test();
             config.nip_fi.mode = buzz_auth::NipFiMode::Off;
             config.require_auth_token = false;
             config.require_relay_membership = false;
@@ -4096,6 +4184,109 @@ mod off_mode_precedence_tests {
                 media_storage,
             );
             Some(Arc::new(state))
+        }
+
+        /// A NIP-98-authenticated Git request whose restriction lookup fails
+        /// answers 503, not the 403 a real ban or non-member gets. Enforce sends
+        /// the canonical NIP-FI `authorization unavailable` bytes; Off keeps the
+        /// legacy text. Mutations: treat every membership-step error as 403, or
+        /// skip the Enforce mapping → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn failed_restriction_lookup_is_503_not_403() {
+            use base64::Engine as _;
+            struct AdmitAnyAssertion(nostr::PublicKey);
+            impl buzz_auth::VerifyAssertion for AdmitAnyAssertion {
+                fn verify_assertion(
+                    &self,
+                    _token: &str,
+                    _community: &buzz_auth::CommunityBinding,
+                ) -> Result<buzz_auth::VerifiedAssertion, buzz_auth::VerifierError>
+                {
+                    Ok(buzz_auth::VerifiedAssertion::new_for_test(self.0))
+                }
+            }
+            for mode in [buzz_auth::NipFiMode::Off, buzz_auth::NipFiMode::Enforce] {
+                let Some(mut state) = off_mode_state().await else {
+                    panic!("local Postgres not reachable");
+                };
+                let host = format!("git-ban-lookup-{}.test", uuid::Uuid::new_v4().simple());
+                state
+                    .db
+                    .ensure_configured_community(&host)
+                    .await
+                    .expect("ensure community");
+                let (db, admin, schema) =
+                    crate::test_support::restriction_lookup_failing_db().await;
+                let keys = nostr::Keys::generate();
+                {
+                    let s = Arc::get_mut(&mut state).expect("fixture state is uniquely owned");
+                    s.db = db;
+                    Arc::make_mut(&mut s.config).nip_fi.mode = mode;
+                    Arc::make_mut(&mut s.config).nip_fi.communities =
+                        crate::nip_fi_core::test_support::any_host(
+                            "https://git-ban-lookup.relay.invalid",
+                        );
+                    s.nip_fi_verifier = Some(Arc::new(AdmitAnyAssertion(keys.public_key())));
+                }
+                let scheme = if state.config.relay_url.starts_with("wss://") {
+                    "https"
+                } else {
+                    "http"
+                };
+                let signed_url = format!("{scheme}://{host}/git/{OWNER_HEX}/myrepo");
+                let event_json = serde_json::to_string(
+                    &nostr::EventBuilder::new(nostr::Kind::HttpAuth, "")
+                        .tags([
+                            nostr::Tag::parse(["u", signed_url.as_str()]).expect("u tag"),
+                            nostr::Tag::parse(["method", "GET"]).expect("method tag"),
+                        ])
+                        .sign_with_keys(&keys)
+                        .expect("sign NIP-98 event"),
+                )
+                .expect("serialize");
+                let auth = format!(
+                    "Nostr {}",
+                    base64::engine::general_purpose::STANDARD.encode(event_json)
+                );
+                let req = axum::http::Request::builder()
+                    .method("GET")
+                    .uri(GIT_PATH)
+                    .header("host", &host)
+                    .header("authorization", &auth)
+                    .header(buzz_auth::CLIENT_ATTACHED_HEADER, "Bearer any.valid.token")
+                    .body(axum::body::Body::empty())
+                    .expect("build request");
+                let resp = git_router(Arc::clone(&state))
+                    .oneshot(req)
+                    .await
+                    .expect("router oneshot");
+                let status = resp.status();
+                let content_type = resp
+                    .headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned);
+                let body = to_bytes(resp.into_body(), 4096).await.unwrap_or_default();
+                let expected: &[u8] = match mode {
+                    buzz_auth::NipFiMode::Off => b"authorization unavailable",
+                    _ => b"authorization unavailable\n",
+                };
+                assert_eq!(
+                    status,
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "{mode:?}: {body:?}"
+                );
+                assert_eq!(
+                    content_type.as_deref(),
+                    Some("text/plain; charset=utf-8"),
+                    "{mode:?}"
+                );
+                assert_eq!(body.as_ref(), expected, "{mode:?}");
+                let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+                    .execute(&admin)
+                    .await;
+            }
         }
 
         async fn git_request(
@@ -4438,11 +4629,10 @@ mod off_mode_precedence_tests {
         async fn enforce_mode_git_info_refs_missing_assertion_exact_bytes() {
             use buzz_auth::NipFiMode;
 
-            let mut config = match crate::config::Config::from_env() {
-                Ok(c) => c,
-                Err(_) => panic!("local Postgres not reachable (enforce git): config"),
-            };
+            let mut config = crate::config::Config::for_test();
             config.nip_fi.mode = NipFiMode::Enforce;
+            config.nip_fi.communities =
+                crate::nip_fi_core::test_support::any_host("https://git-pack-test.relay.invalid");
             config.require_auth_token = false;
             config.require_relay_membership = false;
             // Pin relay_url to a ws:// value so git_expected_url() deterministically
@@ -4580,11 +4770,10 @@ mod off_mode_precedence_tests {
         async fn enforce_mode_git_pack_routes_missing_assertion_exact_bytes() {
             use buzz_auth::NipFiMode;
 
-            let mut config = match crate::config::Config::from_env() {
-                Ok(c) => c,
-                Err(_) => panic!("local Postgres not reachable (pack routes): config"),
-            };
+            let mut config = crate::config::Config::for_test();
             config.nip_fi.mode = NipFiMode::Enforce;
+            config.nip_fi.communities =
+                crate::nip_fi_core::test_support::any_host("https://git-pack-test.relay.invalid");
             config.require_auth_token = false;
             config.require_relay_membership = false;
             config.relay_url = "ws://nip-fi-git-pack-test.invalid".to_string();
@@ -4634,7 +4823,7 @@ mod off_mode_precedence_tests {
             // hitting the absent-verifier 503.  Without this, Case 3 sends
             // `Bearer !!!not-valid-base64!!!` which passes `extract_bearer_token`
             // (scheme/cardinality checks only) and then trips the absent-verifier
-            // check at nip_fi_http.rs:332-335 → 503, not 403.
+            // check in `nip_fi_core::evaluate_attached_assertion` → 503, not 403.
             // [FI-TRACE-DENIAL-ORACLE: verifier required for all crypto cases]
             let state = {
                 use buzz_auth::{
@@ -4646,11 +4835,13 @@ mod off_mode_precedence_tests {
                 const GIT_TEST_ISSUER: &str = "https://git-pack-test.issuer.invalid";
                 const GIT_TEST_AUDIENCE: &str = "https://git-pack-test.relay.invalid";
                 const GIT_TEST_KID: &str = "git-pack-test-key-1";
-                const GIT_TEST_EC_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
-                    MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n\
-                    WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n\
-                    zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n\
-                    -----END PRIVATE KEY-----\n";
+                const GIT_TEST_EC_PEM: &str = concat!(
+                    "-----BEGIN PRIVATE KEY-----\n", // sadscan:disable kingfisher.privkey.2 -- test-only ES256 fixture
+                    "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n",
+                    "WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n",
+                    "zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n",
+                    "-----END PRIVATE KEY-----\n",
+                );
 
                 let jwks: JwkSet = serde_json::from_value(serde_json::json!({
                     "keys": [{

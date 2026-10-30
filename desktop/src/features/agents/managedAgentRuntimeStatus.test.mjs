@@ -94,6 +94,16 @@ test("canonicalRelayUrl mirrors the backend pair-key normalization", () => {
     "wss://relay.example/path",
   );
   assert.equal(canonicalRelayUrl("ws://[::1]:3000"), "ws://127.0.0.1:3000");
+  assert.equal(
+    canonicalRelayUrl("ws://127.8.9.10:3000"),
+    "ws://127.0.0.1:3000",
+  );
+  // Only loopback IP addresses fold, as in buzz-core: a domain whose first
+  // label is "127" is an ordinary host.
+  assert.equal(
+    canonicalRelayUrl("wss://127.preview.example"),
+    "wss://127.preview.example",
+  );
   assert.equal(canonicalRelayUrl("https://relay.example"), null);
   assert.equal(canonicalRelayUrl("not a url"), null);
 });

@@ -174,3 +174,30 @@ test("failed hydration releases ids so the next render can retry", async () => {
     [messageId],
   );
 });
+
+for (const message of [
+  "error: query timed out",
+  "relay returned 503 Service Unavailable: query timed out",
+]) {
+  test(`deadline-failed hydration keeps ids claimed: ${message}`, async () => {
+    const messageId = hex("1");
+    const queryClient = makeQueryClientStub([event(messageId, 9)]);
+
+    await hydrateRenderScopedReactions({
+      channelId: CHANNEL_ID,
+      messageIds: [messageId],
+      queryClient,
+      deps: {
+        fetchReactionEventsForMessages: async () => {
+          throw new Error(message);
+        },
+      },
+    });
+
+    // Still claimed: the next render must not re-send the same slow read.
+    assert.deepEqual(
+      claimUnhydratedRenderScopedReactionIds(CHANNEL_ID, [messageId]),
+      [],
+    );
+  });
+}

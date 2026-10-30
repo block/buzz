@@ -43,8 +43,13 @@ test("useUsersBatchQuery: global queryClient defaults are unchanged", async () =
     new URL("../../shared/api/queryClient.ts", import.meta.url),
     "utf8",
   );
-  // Global retry must remain 1 — other queries chose that semantics.
-  assert.match(source, /retry:\s*1/, "global retry default must remain 1");
+  // Global retry budget must remain 1 — other queries chose that semantics.
+  // Query-deadline failures are exempt so a slow server query is not re-run.
+  assert.match(
+    source,
+    /failureCount < 1 && !isQueryDeadlineError\(error\)/,
+    "global retry default must remain 1, skipping query deadlines",
+  );
   // Global refetchOnWindowFocus must remain false.
   assert.match(
     source,

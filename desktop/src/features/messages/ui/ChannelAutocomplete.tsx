@@ -58,6 +58,7 @@ export const ChannelAutocomplete = React.memo(function ChannelAutocomplete({
             : "origin-bottom slide-in-from-bottom-1",
           POPOVER_SURFACE_CLASS,
         )}
+        data-testid="channel-autocomplete"
         onMouseDown={(event) => event.preventDefault()}
         ref={listRef}
         style={POPOVER_SHADOW_STYLE}

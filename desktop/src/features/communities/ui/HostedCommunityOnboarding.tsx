@@ -10,7 +10,6 @@ import {
   createHostedCommunity,
   deleteBuilderlabIdentity,
   getBuilderlabAuth,
-  HOSTED_COMMUNITY_LIMIT,
   HOSTED_COMMUNITY_SUFFIX,
   hostedCommunityErrorMessage,
   hostedCommunityRelayUrl,
@@ -87,6 +86,7 @@ export function HostedCommunityOnboarding({
     null,
   );
   const [communities, setCommunities] = React.useState<HostedCommunity[]>([]);
+  const [canCreate, setCanCreate] = React.useState(true);
   const [showCreate, setShowCreate] = React.useState(false);
   const [name, setName] = React.useState("");
   const [availability, setAvailability] = React.useState<boolean | null>(null);
@@ -100,6 +100,7 @@ export function HostedCommunityOnboarding({
     const account = await loadHostedCommunityAccount();
     setIdentity(account.identity);
     setCommunities(account.communities);
+    setCanCreate(account.canCreate);
   }, []);
 
   React.useEffect(() => {
@@ -170,6 +171,7 @@ export function HostedCommunityOnboarding({
       setAuth(null);
       setIdentity(null);
       setCommunities([]);
+      setCanCreate(true);
       setShowCreate(false);
       setName("");
       setAvailability(null);
@@ -259,7 +261,7 @@ export function HostedCommunityOnboarding({
   const validName =
     normalizedName.length <= 63 &&
     VALID_HOSTED_COMMUNITY_NAME.test(normalizedName);
-  const atCommunityLimit = communities.length >= HOSTED_COMMUNITY_LIMIT;
+  const atCommunityLimit = !canCreate;
   const hasCommunities = activeCommunities.length > 0;
 
   React.useEffect(() => {
@@ -385,7 +387,7 @@ export function HostedCommunityOnboarding({
   ) : null;
 
   const creationFeedback = atCommunityLimit
-    ? `You’ve reached the limit of ${HOSTED_COMMUNITY_LIMIT} hosted communities.`
+    ? "You’ve reached your hosted community creation limit."
     : name && !validName
       ? "Use lowercase letters, numbers, and single hyphens."
       : checkingName

@@ -15,9 +15,10 @@ import {
 
 import { useIdentityQuery } from "@/shared/api/hooks";
 import {
-  HOSTED_COMMUNITY_LIMIT as MAX_COMMUNITIES,
   HOSTED_COMMUNITY_SUFFIX as HOST_SUFFIX,
   hostedCommunityErrorMessage as errorMessage,
+  hostedCommunityQuotaLimit,
+  hostedCommunityQuotaUsed,
   hostedCommunityRelayUrl as relayUrl,
   normalizedBoundKeyHex,
   usableBoundIdentityNpub,
@@ -72,6 +73,9 @@ export function HostedCommunitiesSettingsCard() {
   const localPubkey = useIdentityQuery().data?.pubkey ?? null;
   const [auth, setAuth] = React.useState<BuilderlabAuth | null>(null);
   const [communities, setCommunities] = React.useState<HostedCommunity[]>([]);
+  const [quotaUsed, setQuotaUsed] = React.useState<number | null>(null);
+  const [quotaLimit, setQuotaLimit] = React.useState<number | null>(null);
+  const [canCreate, setCanCreate] = React.useState(true);
   const [identity, setIdentity] = React.useState<NostrIdentity | null>(null);
   const [name, setName] = React.useState("");
   const [availability, setAvailability] = React.useState<boolean | null>(null);
@@ -113,6 +117,9 @@ export function HostedCommunitiesSettingsCard() {
     }
     setIdentity(identityResponse.identity ?? null);
     setCommunities(communitiesResponse.communities ?? []);
+    setQuotaUsed(hostedCommunityQuotaUsed(communitiesResponse.quota_used));
+    setQuotaLimit(hostedCommunityQuotaLimit(communitiesResponse.quota_limit));
+    setCanCreate(communitiesResponse.can_create !== false);
   }, []);
 
   React.useEffect(() => {
@@ -163,6 +170,9 @@ export function HostedCommunitiesSettingsCard() {
       setAuth(null);
       setIdentity(null);
       setCommunities([]);
+      setQuotaUsed(null);
+      setQuotaLimit(null);
+      setCanCreate(true);
       setName("");
       setAvailability(null);
     });
@@ -382,12 +392,7 @@ export function HostedCommunitiesSettingsCard() {
 
   const createCommunity = (event: React.FormEvent) => {
     event.preventDefault();
-    if (
-      !validName ||
-      !usableBoundIdentity ||
-      identityMismatch ||
-      communities.length >= MAX_COMMUNITIES
-    )
+    if (!validName || !usableBoundIdentity || identityMismatch || !canCreate)
       return;
     void run("Creating community…", async () => {
       const availabilityResponse = await invoke<AvailabilityResponse>(
@@ -438,7 +443,7 @@ export function HostedCommunitiesSettingsCard() {
   };
 
   const busy = action != null;
-  const atCommunityLimit = communities.length >= MAX_COMMUNITIES;
+  const atCommunityLimit = !canCreate;
 
   return (
     <section className="space-y-6" data-testid="hosted-communities-settings">
@@ -592,7 +597,8 @@ export function HostedCommunitiesSettingsCard() {
               <h3 className="font-medium">
                 Your communities
                 <span className="ml-2 text-xs font-normal text-muted-foreground">
-                  {communities.length} of {MAX_COMMUNITIES} used
+                  {quotaUsed ?? communities.length}
+                  {quotaLimit === null ? " used" : ` of ${quotaLimit} used`}
                 </span>
               </h3>
               <Button
@@ -667,9 +673,9 @@ export function HostedCommunitiesSettingsCard() {
             </div>
             {atCommunityLimit ? (
               <p className="text-sm text-muted-foreground">
-                You&apos;ve reached the limit of {MAX_COMMUNITIES} hosted
-                communities. Transfer one to free up a slot before creating
-                another.
+                You&apos;ve reached your hosted community creation limit.
+                Transferring a community may free an active slot; deleted
+                community addresses remain reserved.
               </p>
             ) : null}
             <div className="flex max-w-xl items-center gap-2">

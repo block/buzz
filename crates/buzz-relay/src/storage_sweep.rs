@@ -113,7 +113,7 @@ pub async fn run_storage_metrics_tick(
     db: &Db,
     state: &Mutex<StorageSweepState>,
     mode: StorageMetricsMode,
-    host_map: &HashMap<Uuid, String>,
+    host_map: Option<&HashMap<Uuid, String>>,
     allows: impl Fn(&Uuid) -> bool,
 ) -> anyhow::Result<()> {
     if mode == StorageMetricsMode::Disabled {
@@ -179,7 +179,7 @@ async fn record_persisted_snapshot_load_failure(state: &Mutex<StorageSweepState>
 async fn emit_storage_metrics(
     state: &Mutex<StorageSweepState>,
     mode: StorageMetricsMode,
-    host_map: &HashMap<Uuid, String>,
+    host_map: Option<&HashMap<Uuid, String>>,
     allows: impl Fn(&Uuid) -> bool,
 ) {
     if mode == StorageMetricsMode::Disabled {
@@ -195,7 +195,7 @@ async fn emit_storage_metrics(
 
 fn emit_cached_storage_metrics(
     state: &mut StorageSweepState,
-    host_map: &HashMap<Uuid, String>,
+    host_map: Option<&HashMap<Uuid, String>>,
     allows: impl Fn(&Uuid) -> bool,
 ) {
     let Some(cached) = &state.cached else {
@@ -229,24 +229,29 @@ fn emit_cached_storage_metrics(
     metrics::gauge!("buzz_storage_snapshot_cap_utilization")
         .set(snapshot.physical_objects as f64 / cached.max_objects as f64);
 
+    // Without a host map (fleet-only emission) the relay attributes nothing,
+    // so it emits neither community series nor the unmapped total: every byte
+    // would otherwise miss the empty map and read as a false unmapped anomaly.
     let mut current = HashSet::new();
-    let mut unmapped_bytes = 0u64;
-    for (community_id, storage) in &snapshot.per_community {
-        let Some(host) = host_map.get(community_id) else {
-            unmapped_bytes += storage.bytes;
-            continue;
-        };
-        if !allows(community_id) {
-            continue;
+    if let Some(host_map) = host_map {
+        let mut unmapped_bytes = 0u64;
+        for (community_id, storage) in &snapshot.per_community {
+            let Some(host) = host_map.get(community_id) else {
+                unmapped_bytes += storage.bytes;
+                continue;
+            };
+            if !allows(community_id) {
+                continue;
+            }
+            metrics::gauge!("buzz_community_storage_bytes", "community" => host.clone())
+                .set(storage.bytes as f64);
+            metrics::gauge!("buzz_community_storage_objects", "community" => host.clone())
+                .set(storage.objects as f64);
+            current.insert(StorageEmittedKey::Bytes(host.clone()));
+            current.insert(StorageEmittedKey::Objects(host.clone()));
         }
-        metrics::gauge!("buzz_community_storage_bytes", "community" => host.clone())
-            .set(storage.bytes as f64);
-        metrics::gauge!("buzz_community_storage_objects", "community" => host.clone())
-            .set(storage.objects as f64);
-        current.insert(StorageEmittedKey::Bytes(host.clone()));
-        current.insert(StorageEmittedKey::Objects(host.clone()));
+        metrics::gauge!("buzz_storage_unmapped_community_bytes").set(unmapped_bytes as f64);
     }
-    metrics::gauge!("buzz_storage_unmapped_community_bytes").set(unmapped_bytes as f64);
 
     // Zero series for communities that were emitted last tick but are no longer
     // present in the current snapshot (community removed, host renamed, or
@@ -332,7 +337,7 @@ mod tests {
             futures::executor::block_on(emit_storage_metrics(
                 &state,
                 StorageMetricsMode::Snapshot,
-                &HashMap::new(),
+                Some(&HashMap::new()),
                 |_| true,
             ));
         });
@@ -353,7 +358,7 @@ mod tests {
                 &db,
                 &state,
                 StorageMetricsMode::Disabled,
-                &HashMap::new(),
+                Some(&HashMap::new()),
                 |_| true,
             ))
         });
@@ -375,7 +380,7 @@ mod tests {
                 &db,
                 &state,
                 StorageMetricsMode::Snapshot,
-                &HashMap::new(),
+                Some(&HashMap::new()),
                 |_| true,
             ))
         });
@@ -442,7 +447,7 @@ mod tests {
             futures::executor::block_on(emit_storage_metrics(
                 &state,
                 StorageMetricsMode::Snapshot,
-                &host_map,
+                Some(&host_map),
                 |id| *id != excluded,
             ));
         });
@@ -455,6 +460,60 @@ mod tests {
             Some(&30.0)
         );
         assert_eq!(values.get("buzz_community_storage_bytes"), Some(&100.0));
+    }
+
+    #[tokio::test]
+    async fn fleet_only_emission_omits_attribution_without_false_unmapped_bytes() {
+        let community = Uuid::new_v4();
+        let state = Mutex::new(StorageSweepState {
+            cached: Some(CachedSnapshot {
+                data: snapshot_with(community, 64, 2),
+                completed_at_wall: Utc::now(),
+                duration: Duration::from_millis(100),
+                max_objects: 1_000,
+            }),
+            persisted_load_ok: Some(true),
+            ..Default::default()
+        });
+
+        let recorder = DebuggingRecorder::new();
+        metrics::with_local_recorder(&recorder, || {
+            futures::executor::block_on(emit_storage_metrics(
+                &state,
+                StorageMetricsMode::Snapshot,
+                None,
+                |_| true,
+            ));
+        });
+        let values = gauge_snapshot(&recorder);
+        assert_eq!(values.get("buzz_total_storage_bytes"), Some(&64.0));
+        assert_eq!(values.get("buzz_storage_unmapped_community_bytes"), None);
+        assert!(labeled_community_gauges(&recorder).is_empty());
+
+        // A previously attributed series is zeroed once attribution stops.
+        let host_map = HashMap::from([(community, "host.example".to_string())]);
+        let recorder = DebuggingRecorder::new();
+        metrics::with_local_recorder(&recorder, || {
+            futures::executor::block_on(emit_storage_metrics(
+                &state,
+                StorageMetricsMode::Snapshot,
+                Some(&host_map),
+                |_| true,
+            ));
+            futures::executor::block_on(emit_storage_metrics(
+                &state,
+                StorageMetricsMode::Snapshot,
+                None,
+                |_| true,
+            ));
+        });
+        assert_eq!(
+            labeled_community_gauges(&recorder).get(&(
+                "buzz_community_storage_bytes".to_string(),
+                "host.example".to_string()
+            )),
+            Some(&0.0)
+        );
     }
 
     // --- F-EXT1 regression: stale per-community series are zeroed ---
@@ -555,7 +614,7 @@ mod tests {
             futures::executor::block_on(emit_storage_metrics(
                 &state,
                 StorageMetricsMode::Snapshot,
-                &host_map_1,
+                Some(&host_map_1),
                 |_| true,
             ));
         });
@@ -597,7 +656,7 @@ mod tests {
             futures::executor::block_on(emit_storage_metrics(
                 &state,
                 StorageMetricsMode::Snapshot,
-                &host_map_2,
+                Some(&host_map_2),
                 |id| *id != community_c, // (c) scope-excluded
             ));
         });
@@ -677,7 +736,7 @@ mod tests {
             futures::executor::block_on(emit_storage_metrics(
                 &state,
                 StorageMetricsMode::Snapshot,
-                &host_map,
+                Some(&host_map),
                 |_| true,
             ));
         });
@@ -721,7 +780,7 @@ mod tests {
             futures::executor::block_on(emit_storage_metrics(
                 &state,
                 StorageMetricsMode::Snapshot,
-                &host_map,
+                Some(&host_map),
                 |_| true,
             ));
         });
@@ -754,7 +813,7 @@ mod tests {
             futures::executor::block_on(emit_storage_metrics(
                 &state,
                 StorageMetricsMode::Snapshot,
-                &host_map,
+                Some(&host_map),
                 |_| true,
             ));
         });

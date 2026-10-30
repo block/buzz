@@ -154,16 +154,21 @@ class _ThreadTailIntent {
 
 /// Thread-scoped typing status with optional size animation.
 class _ThreadTypingIndicator extends StatelessWidget {
+  final String channelId;
   final List<TypingEntry> entries;
   final bool animated;
 
-  const _ThreadTypingIndicator({required this.entries, this.animated = true});
+  const _ThreadTypingIndicator({
+    required this.channelId,
+    required this.entries,
+    this.animated = true,
+  });
 
   @override
   Widget build(BuildContext context) {
     final child = entries.isEmpty
         ? const SizedBox.shrink()
-        : ChannelTypingIndicator(entries: entries);
+        : ChannelTypingIndicator(channelId: channelId, entries: entries);
     if (!animated || MediaQuery.disableAnimationsOf(context)) return child;
     return AnimatedSize(
       duration: const Duration(milliseconds: 180),
@@ -172,4 +177,24 @@ class _ThreadTypingIndicator extends StatelessWidget {
       child: child,
     );
   }
+}
+
+/// Display evidence while the authoritative thread query has no value (still
+/// loading, or failed on first load): the route snapshot plus live, cached
+/// and optimistic replies. The page keeps the query's loading/error status,
+/// so this list is never presented as complete, and nothing is re-queried.
+List<TimelineMessage> _provisionalThreadMessages(
+  List<TimelineMessage> routeSnapshot,
+  List<TimelineMessage> observed,
+  List<NostrEvent> liveChannelEvents,
+) {
+  final byId = <String, TimelineMessage>{
+    for (final message in routeSnapshot)
+      if (!_isDeletedBy(liveChannelEvents, message.id)) message.id: message,
+    for (final message in observed) message.id: message,
+  };
+  return byId.values.toList()..sort((a, b) {
+    final order = a.createdAt.compareTo(b.createdAt);
+    return order != 0 ? order : a.id.compareTo(b.id);
+  });
 }

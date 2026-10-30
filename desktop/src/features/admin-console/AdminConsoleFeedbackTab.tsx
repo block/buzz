@@ -23,6 +23,7 @@ import {
   type AdminFeedbackStatus,
   type AdminFeedbackSummaryDto,
 } from "./api";
+import { CommunityBadge } from "./AdminConsoleCommunityBadge";
 import {
   type AsyncState,
   type AttachmentMeta,
@@ -359,7 +360,10 @@ function FeedbackFields({ data }: { data: AdminFeedbackDto }) {
       <DetailRow label="Submitter" value={data.submitterPubkey} mono />
       <DetailRow label="Category" value={data.category ?? null} />
       <DetailRow label="Community" value={data.communityId} mono />
-      <DetailRow label="Host" value={data.communityHost} />
+      <div className="flex items-center gap-2 text-xs">
+        <span className="text-muted-foreground">Host</span>
+        <CommunityBadge host={data.communityHost} id={data.communityId} />
+      </div>
       <DetailRow label="Event ID" value={data.eventId} mono />
       <DetailRow
         label="Event created"

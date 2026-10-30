@@ -53,6 +53,12 @@ with a TypeScript lookup table or an id comparison in a component.
    `ownedByModelId`; Claude effort is `deferredUntilNativeOptionsAvailable`.
    New absences get new named reasons in `AgentConfigOmission` /
    `render` — never a `showX` prop.
+   Known exception, pending follow-up: the effort write control (rule 14)
+   derives Claude's levels in `ui/effortPicker.ts`, including a TypeScript
+   table for Claude Code's model aliases (`default`, `opus`, `opusplan`,
+   `sonnet`), while this descriptor still says
+   `deferredUntilNativeOptionsAvailable`. Move those levels into the runtime
+   catalog or model data rather than extending the table.
 4. **The clearing policy is the named types.** `onContextChange:
    "resetDependentValues"` (user changed harness/provider → dependent values
    reset everywhere) vs `onCatalogMismatch: "explainOnly" | "onboardingCleanup"`
@@ -223,23 +229,35 @@ with a TypeScript lookup table or an id comparison in a component.
    [the provenance contract](../../../../docs/agent-management-provenance.md).
 14. **Thinking effort has two surfaces: a local-only WRITE control and a
    read-only two-facts DISPLAY.** The write control is `EffortPickerField`
-   (`ui/EffortPickerField.tsx`), a self-contained section component mounted in
-   `AgentInstanceEditDialog` beside the Model block. It is **Save-gated, not
-   direct-write**: the control is fully controlled by the parent dialog
-   (`value`/`onChange`) and owns no mutation. The dialog persists the selection
-   by embedding `effortLevel` in the locked `update_managed_agent` IPC call, so
+   (`ui/EffortPickerField.tsx`), mounted in `AgentInstanceEditDialog` beside
+   the Model block and in the create dialog (`AgentDialog`, local agents
+   only). It is **Save-gated, not direct-write**: the control is fully
+   controlled by the parent dialog (`value`/`onChange`) and owns no mutation.
+   Edit embeds `effortLevel` in the locked `update_managed_agent` IPC call, so
    the effort write is atomic with any access-policy change and can never race
-   or survive a Cancel or failed Save. There is no standalone
-   `persistAgentEffortLevel` setter. Its gating and option compute live in the
-   pure helper `ui/effortPicker.ts` (`effortPickerState`): the picker renders
-   only when `agent.backend.type === "local"` **AND** a `thought_level`
-   `effortConfigId` has been discovered from the running session (absent
-   pre-first-session and for runtimes/models without effort support). Local-only
+   or survive a Cancel or failed Save; Create passes it to
+   `create_managed_agent`, which sets it when it builds the record. There is
+   no standalone `persistAgentEffortLevel` setter. Gating and option compute
+   live in the pure helper `ui/effortPicker.ts`: `effortChoices` returns the
+   levels the model that will run offers, and `effortPickerState` renders only
+   when `agent.backend.type === "local"` **AND** levels are known or a level
+   is stored. Claude's levels come from the model data for the model Claude
+   will launch: the explicit or linked-definition model, then the structured
+   global model, then the adapter default from model discovery — never baked
+   `BUZZ_AGENT_MODEL` or provider fallbacks, which Claude never launches with,
+   and never the stored session, which does not record which model produced
+   it. While that model is unknown (`EFFORT_LEVELS_UNKNOWN`) the picker hides
+   but a pending pick is kept. Other runtimes use the running session's
+   `thought_level` list while the runtime is unchanged (absent
+   pre-first-session). A stored level is only the agent's own saved value
+   (`ownEffortLevel`, origin `buzzExplicit`) — never a session, inherited, or
+   config-file value the dialog cannot clear. It stays shown and clearable
+   across model and runtime switches, even when the model doesn't list it,
+   and is hidden only on the pin→inherit transition, which clears it. Local-only
    is load-bearing, not cosmetic — the Rust command rejects non-local backends
-   because remote effort is set at deploy time via `policy_env`. Because the
-   control reads its inputs from the config surface the dialog already fetches
-   (`useAgentConfigSurface`), it integrates into the dialog's existing field
-   group without additional IPC. The read-only display is the `thinkingEffort`
+   because remote effort is set at deploy time via `policy_env`. The control
+   reads the config surface, model discovery, and global config the dialogs
+   already fetch, so it adds no IPC of its own. The read-only display is the `thinkingEffort`
    normalized field rendered by `AgentConfigPanel` via `NormalizedRow`, which
    already shows both facts — `field.value` (canonical, the effort the next
    spawn will launch with) and, when a running ACP session differs,
@@ -386,10 +404,11 @@ buzz messages send --channel <channel-id> --reply-to <thread-root-id> \
 - `ui/acpCommandPicker.test.mjs` — stock/discovered/unavailable command mode,
   late discovery, query-failure compatibility, and conventional replacement of
   persisted unknown commands.
-- `ui/effortPicker.test.mjs` — `effortPickerState` gating (local + discovered
-  `effortConfigId` renders; provider backend or missing configId hides) and
-  option/preselect compute, plus `effortSelectionToPersistedValue` sentinel →
-  null. This is where the v4 provider regression is pinned: the write control
+- `ui/effortPicker.test.mjs` — `effortChoices` level resolution (Claude model
+  data and aliases, unknown model, other runtimes' session list),
+  `effortPickerState` gating (local + known levels or a stored level renders;
+  provider backend hides) and option/preselect/note compute, `ownEffortLevel`,
+  and `effortSelectionToPersistedValue` sentinel → null. This is where the v4 provider regression is pinned: the write control
   must never render for a provider backend.
 - `desktop/tests/e2e/onboarding-agent-defaults.spec.ts` — onboarding behavior
   acceptance coverage for readiness, failure states, defaults, session-draft

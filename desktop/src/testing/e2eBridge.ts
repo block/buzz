@@ -120,6 +120,8 @@ export type MockManagedAgentSeed = {
   personaId?: string | null;
   /** Harness/runtime id pin; `null` = inherit from persona (native default). */
   runtime?: string | null;
+  /** Model pinned on the instance record. */
+  model?: string | null;
   status?: RawManagedAgent["status"];
   channelNames?: string[];
   channelIds?: string[];
@@ -253,6 +255,11 @@ type E2eConfig = {
       normalized_host?: string;
       archived_at?: string | null;
     }>;
+    builderlabQuota?: {
+      quota_used?: number;
+      quota_limit?: number;
+      can_create?: boolean;
+    };
     /** Override the community returned after hosted creation. */
     builderlabCreatedCommunity?: {
       id?: string;
@@ -370,6 +377,11 @@ type E2eConfig = {
     /** Reject successive mock `join_channel` calls, then resume. */
     joinChannelErrors?: string[];
     channelsReadDelayMs?: number;
+    /**
+     * Hold the first `get_channels` read until
+     * `__BUZZ_E2E_RELEASE_CHANNELS_READ__` is called.
+     */
+    deferFirstChannelsRead?: boolean;
     /** Return not-modified for this many reads before resuming full payloads. */
     channelsNotModifiedResponses?: number;
     /** When true, a matching knownHash returns a not-modified channel payload. */
@@ -508,6 +520,8 @@ type E2eConfig = {
     oaOwnerIsMe?: boolean;
     /** Whether the mock relay advertises NIP-43 membership support. Defaults to false. */
     relayRequiresMembership?: boolean;
+    /** Reject the membership probe, as an unreachable relay's `/info` does. */
+    relayRequiresMembershipError?: string;
     /** Delay EOSE for membership snapshots after delivering the event. */
     relayMembershipEoseDelayMs?: number;
     relayRole?: "owner" | "admin" | "member" | null;
@@ -677,6 +691,10 @@ type E2eConfig = {
      * returning a catalog.
      */
     discoverAgentModelsError?: string;
+    /** Delay (ms) before `discover_agent_models` settles. */
+    discoverAgentModelsDelayMs?: number;
+    /** Config surface returned for every agent instead of the per-runtime mocks. */
+    agentConfigSurface?: Record<string, unknown>;
     /** ACP commands returned by the discovery IPC in mock mode. */
     acpCommands?: Array<{ command: string; binaryPath: string }>;
     // Backend provider mocks for the create-agent "Run on" section. See
@@ -1259,6 +1277,8 @@ declare global {
       command: string;
       payload: unknown;
     }>;
+    /** Community ids still saved when `remove_community_relay` ran. */
+    __BUZZ_E2E_SAVED_COMMUNITIES_AT_RELAY_REMOVAL__?: string[];
     /** Release a mock media proxy held at port 0 and return its ready port. */
     __BUZZ_E2E_RELEASE_MEDIA_PROXY__?: () => number;
     /** Release mock send events that were stored but withheld from live subscribers. */
@@ -1337,6 +1357,11 @@ declare global {
       event: string,
       payload: unknown,
     ) => Promise<void>;
+    /**
+     * Number of live app listeners for a mocked Tauri event. Spec
+     * subscriptions made through `__TAURI_INTERNALS__.listen` are not counted.
+     */
+    __BUZZ_E2E_EVENT_LISTENER_COUNT__?: (event: string) => number;
     __BUZZ_E2E_SET_MOCK_HUDDLE_SNAPSHOT__?: (input: {
       members: MockHuddleMemberSeed[];
       transcriptionEnabled: boolean;
@@ -1607,6 +1632,11 @@ declare global {
     __BUZZ_E2E_HOLD_USERS_BATCH__?: (hold: boolean) => number;
     /** Number of `get_users_batch` calls currently held. */
     __BUZZ_E2E_USERS_BATCH_PENDING__?: () => number;
+    /** Start or stop holding older-page `get_channel_window` responses (any
+     *  call with a cursor). Turning the hold off flushes everything held;
+     *  either call returns the number released, so a spec can prove the page
+     *  stayed in flight until it let go. */
+    __BUZZ_E2E_HOLD_CHANNEL_WINDOW_PAGES__?: (hold: boolean) => number;
     /** Release every `get_profile` response held by `deferProfileReads`. */
     __BUZZ_E2E_RELEASE_PROFILE_READS__?: () => number;
     /** Number of `get_profile` responses currently held. */
@@ -1751,6 +1781,10 @@ let profileReadsReleased = false;
 // second paste of the same label is provably still deciding).
 let holdUsersBatch = false;
 let heldUsersBatchReleases: Array<() => void> = [];
+// Older channel-window pages held by `__BUZZ_E2E_HOLD_CHANNEL_WINDOW_PAGES__`,
+// so a spec can finish driving scroll input before the fetched page exists.
+let holdChannelWindowPages = false;
+let heldChannelWindowPageReleases: Array<() => void> = [];
 // Starts currently held behind `startManagedAgentDelayMs`, releasable early
 // via `__BUZZ_E2E_RELEASE_MANAGED_AGENT_STARTS__()`: a spec that holds a
 // start across a community round-trip needs the hold long enough to be
@@ -2536,7 +2570,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     parallelism: 1,
     system_prompt: null,
     avatar_url: seed.avatarUrl ?? null,
-    model: null,
+    model: seed.model ?? null,
     env_vars: { ...(seed.envVars ?? {}) },
     status,
     pid: status === "running" ? 42000 + mockManagedAgents.length : null,
@@ -5986,6 +6020,11 @@ async function handleGetChannelWindow(
   if (args.cursor !== null) {
     probe.__CHANNEL_WINDOW_FETCH_COUNT__ =
       (probe.__CHANNEL_WINDOW_FETCH_COUNT__ ?? 0) + 1;
+    if (holdChannelWindowPages) {
+      await new Promise<void>((resolve) => {
+        heldChannelWindowPageReleases.push(resolve);
+      });
+    }
   }
 
   const delayMs =
@@ -7221,7 +7260,11 @@ async function handleGetPresence(
 
 async function handleEnsureStarterChannels(
   config: E2eConfig | undefined,
-): Promise<RawChannelWithMembership[]> {
+): Promise<{
+  channels: RawChannelWithMembership[];
+  changed_channel_ids: string[];
+  error: null;
+}> {
   const starterChannelError =
     config?.mock?.ensureStarterChannelsErrors?.shift();
   if (starterChannelError) {
@@ -7229,6 +7272,7 @@ async function handleEnsureStarterChannels(
   }
 
   const currentPubkey = getMockMemberPubkey(config);
+  const changedChannelIds: string[] = [];
   const ensureMember = (channel: MockChannel) => {
     if (
       channel.members.some(
@@ -7242,6 +7286,7 @@ async function handleEnsureStarterChannels(
     channel.members.push(createCurrentMember(config, "member"));
     syncMockChannel(channel);
     touchMockChannel(channel);
+    changedChannelIds.push(channel.id);
   };
 
   for (const channelName of [
@@ -7261,7 +7306,11 @@ async function handleEnsureStarterChannels(
     ensureMember(channel);
   }
 
-  return listMockChannels(config);
+  return {
+    channels: listMockChannels(config),
+    changed_channel_ids: changedChannelIds,
+    error: null,
+  };
 }
 
 async function handleCreateChannel(
@@ -7332,7 +7381,7 @@ async function handleCreateChannel(
   // Fetch the created channel via pure Nostr query.
   // The relay emits kind:39000 as a side effect of kind:9007.
   const metaEvents = await relayQuery(config, [
-    { kinds: [39000], "#d": [channelId], limit: 1 },
+    { kinds: [39000], "#d": [channelId], limit: 1, consistency: "strong" },
   ]);
   const ev = metaEvents[0];
   if (!ev) {
@@ -7440,7 +7489,7 @@ async function handleOpenDm(
 
   // Fetch channel metadata
   const metaEvents = await relayQuery(config, [
-    { kinds: [39000], "#d": [channelId], limit: 1 },
+    { kinds: [39000], "#d": [channelId], limit: 1, consistency: "strong" },
   ]);
   const ev = metaEvents[0];
   const evTags = (ev?.tags ?? []) as string[][];
@@ -7536,7 +7585,7 @@ async function handleGetChannelDetails(
 }
 
 async function handleGetChannelMembers(
-  args: { channelId: string },
+  args: { channelId: string; readYourWrites?: boolean },
   config: E2eConfig | undefined,
 ): Promise<RawChannelMembersResponse> {
   const delayMs = config?.mock?.channelMembersReadDelayMs ?? 0;
@@ -7554,7 +7603,12 @@ async function handleGetChannelMembers(
   }
 
   const memberEvents = await relayQuery(config, [
-    { kinds: [39002], "#d": [args.channelId], limit: 1 },
+    {
+      kinds: [39002],
+      "#d": [args.channelId],
+      limit: 1,
+      ...(args.readYourWrites ? { consistency: "strong" } : {}),
+    },
   ]);
   const memberTags = ((memberEvents[0]?.tags ?? []) as string[][]).filter(
     (t) => t[0] === "p",
@@ -7630,7 +7684,7 @@ async function handleUpdateChannel(
 
   // Re-fetch updated metadata
   const metaEvents = await relayQuery(config, [
-    { kinds: [39000], "#d": [args.channelId], limit: 1 },
+    { kinds: [39000], "#d": [args.channelId], limit: 1, consistency: "strong" },
   ]);
   const ev = metaEvents[0];
   const evTags = (ev?.tags ?? []) as string[][];
@@ -8741,7 +8795,7 @@ async function replayInstallOutput(
       );
     }
     // `emit` reaches listeners registered through the real `listen` API, which
-    // is what the UI hook uses; mockIPC's shouldMockEvents wires the two.
+    // is what the UI hook uses; the bridge's mocked event plugin wires the two.
     await emit("acp-install-output", {
       runtime_id: runtimeId,
       seq: installOutputSeq++,
@@ -11418,6 +11472,8 @@ export function maybeInstallE2eTauriMocks() {
   profileReadsReleased = false;
   holdUsersBatch = false;
   heldUsersBatchReleases = [];
+  holdChannelWindowPages = false;
+  heldChannelWindowPageReleases = [];
   cancelledMediaUploadIds = new Set<string>();
   for (const controller of mockMediaFetchControllers.values()) {
     controller.abort();
@@ -11463,6 +11519,12 @@ export function maybeInstallE2eTauriMocks() {
     return queued.length;
   };
   window.__BUZZ_E2E_USERS_BATCH_PENDING__ = () => heldUsersBatchReleases.length;
+  window.__BUZZ_E2E_HOLD_CHANNEL_WINDOW_PAGES__ = (hold: boolean) => {
+    holdChannelWindowPages = hold;
+    const queued = hold ? [] : heldChannelWindowPageReleases.splice(0);
+    for (const release of queued) release();
+    return queued.length;
+  };
   mockGlobalAgentConfig = config.mock?.globalAgentConfig
     ? { ...config.mock.globalAgentConfig }
     : null;
@@ -11794,7 +11856,7 @@ export function maybeInstallE2eTauriMocks() {
     for (const release of held) release();
     return held.length;
   };
-  deferNextChannelsRead = false;
+  deferNextChannelsRead = config.mock?.deferFirstChannelsRead === true;
   deferredChannelsReadResolve = null;
   window.__BUZZ_E2E_CHANNELS_READ_PENDING__ = 0;
   window.__BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__ = () => {
@@ -12252,7 +12314,12 @@ export function maybeInstallE2eTauriMocks() {
           (request.channelId !== mockHuddle.state.parent_channel_id &&
             request.channelId !== mockHuddle.state.ephemeral_channel_id)
         ) {
-          return { matched_active_huddle: false, added: [] };
+          return {
+            matched_active_huddle: false,
+            added: [],
+            changed_channel_ids: [],
+            error: null,
+          };
         }
 
         const existingAgents = new Set(
@@ -12272,7 +12339,13 @@ export function maybeInstallE2eTauriMocks() {
         if (added.length > 0) {
           await emitMockHuddleState();
         }
-        return { matched_active_huddle: true, added };
+        return {
+          matched_active_huddle: true,
+          added,
+          changed_channel_ids:
+            added.length > 0 ? [mockHuddle.state.ephemeral_channel_id] : [],
+          error: null,
+        };
       }
       case "add_agent_to_huddle": {
         const error = activeConfig?.mock?.addAgentToHuddleError;
@@ -12573,6 +12646,7 @@ export function maybeInstallE2eTauriMocks() {
       case "list_builderlab_communities":
         return {
           communities: activeConfig?.mock?.builderlabCommunities ?? [],
+          ...activeConfig?.mock?.builderlabQuota,
         };
       case "check_builderlab_community_name":
         return {
@@ -12880,6 +12954,15 @@ export function maybeInstallE2eTauriMocks() {
         }
         return;
       }
+      case "readd_community_relay":
+        return undefined;
+      case "remove_community_relay":
+        window.__BUZZ_E2E_SAVED_COMMUNITIES_AT_RELAY_REMOVAL__ = (
+          JSON.parse(
+            window.localStorage.getItem("buzz-communities") ?? "[]",
+          ) as Array<{ id: string }>
+        ).map((community) => community.id);
+        return undefined;
       case "update_tray_agent_activity":
       case "clear_tray_agent_activity":
       case "requeue_tray_actions":
@@ -13564,6 +13647,9 @@ export function maybeInstallE2eTauriMocks() {
       case "get_relay_http_url":
         return getRelayHttpUrl(activeConfig);
       case "relay_requires_membership":
+        if (activeConfig?.mock?.relayRequiresMembershipError) {
+          throw new Error(activeConfig.mock.relayRequiresMembershipError);
+        }
         return activeConfig?.mock?.relayRequiresMembership ?? false;
       case "discover_acp_providers":
         return handleDiscoverAcpRuntimes(activeConfig);
@@ -14133,6 +14219,10 @@ export function maybeInstallE2eTauriMocks() {
           supportsSwitching: false,
         };
       case "discover_agent_models": {
+        const discoverDelayMs = activeConfig?.mock?.discoverAgentModelsDelayMs;
+        if (discoverDelayMs) {
+          await new Promise((resolve) => setTimeout(resolve, discoverDelayMs));
+        }
         const discoverError = activeConfig?.mock?.discoverAgentModelsError;
         if (discoverError) {
           throw new Error(discoverError);
@@ -14238,6 +14328,8 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "get_agent_config_surface": {
         const configArgs = payload as { pubkey: string };
+        const surfaceOverride = activeConfig?.mock?.agentConfigSurface;
+        if (surfaceOverride) return surfaceOverride;
         return buildMockConfigSurface(configArgs.pubkey);
       }
       case "get_runtime_file_config": {
@@ -15320,21 +15412,78 @@ export function maybeInstallE2eTauriMocks() {
     handleMockCommand(command, payload ?? null);
   window.__BUZZ_E2E_EMIT_TAURI_EVENT__ = (event, payload) =>
     emit(event, payload);
-  mockIPC(handleMockCommand, { shouldMockEvents: true });
-  const tauriInternals = (
-    window as typeof window & {
-      __TAURI_INTERNALS__: {
-        listen?: (
-          event: string,
-          callback: () => void,
-        ) => Promise<() => Promise<void>>;
-      };
+  // The mocked emit drops events that have no listener yet. The event plugin is
+  // mocked here, as mockIPC's `shouldMockEvents` would, so live app listeners
+  // can be counted per event and specs can wait for the app to subscribe first.
+  // Wrapping `__TAURI_INTERNALS__.invoke` instead would break specs that trap
+  // mockIPC's assignment of it.
+  // Spec subscriptions pass this target object, which listen() forwards as is
+  // and the mock ignores, so a spec that subscribes first cannot satisfy that
+  // wait for the app.
+  const tauriInternals = () =>
+    (
+      window as typeof window & {
+        __TAURI_INTERNALS__: {
+          runCallback: (id: number, data: unknown) => void;
+          listen?: (
+            event: string,
+            callback: () => void,
+          ) => Promise<() => Promise<void>>;
+        };
+      }
+    ).__TAURI_INTERNALS__;
+  const specListenTarget = { kind: "Any" } as const;
+  const eventHandlers = new Map<string, number[]>();
+  const appEventHandlers = new Map<string, Set<number>>();
+  const handleMockIpc = (command: string, payload: unknown) => {
+    const args = (payload ?? {}) as {
+      event: string;
+      handler?: number;
+      eventId?: number;
+      target?: unknown;
+    };
+    switch (command) {
+      case "plugin:event|listen": {
+        const handler = args.handler as number;
+        eventHandlers.set(args.event, [
+          ...(eventHandlers.get(args.event) ?? []),
+          handler,
+        ]);
+        if (args.target !== specListenTarget) {
+          const handlers =
+            appEventHandlers.get(args.event) ?? new Set<number>();
+          handlers.add(handler);
+          appEventHandlers.set(args.event, handlers);
+        }
+        return Promise.resolve(handler);
+      }
+      case "plugin:event|emit":
+        for (const handler of eventHandlers.get(args.event) ?? []) {
+          tauriInternals().runCallback(handler, args);
+        }
+        return Promise.resolve(null);
+      case "plugin:event|unlisten":
+        eventHandlers.set(
+          args.event,
+          (eventHandlers.get(args.event) ?? []).filter(
+            (handler) => handler !== args.eventId,
+          ),
+        );
+        appEventHandlers.get(args.event)?.delete(args.eventId as number);
+        return Promise.resolve(null);
+      default:
+        return handleMockCommand(command, payload);
     }
-  ).__TAURI_INTERNALS__;
+  };
+  mockIPC(handleMockIpc);
+  window.__BUZZ_E2E_EVENT_LISTENER_COUNT__ = (event) =>
+    appEventHandlers.get(event)?.size ?? 0;
   // Page-evaluated E2E specs use this surface; delegate to Tauri's mocked channel
   // so their listeners observe the same events emitted by application test seams.
-  tauriInternals.listen = async (event, callback) => {
-    const unlisten = await listen(event, () => callback());
+  tauriInternals().listen = async (event, callback) => {
+    const unlisten = await listen(event, () => callback(), {
+      target: specListenTarget,
+    });
     return async () => unlisten();
   };
 

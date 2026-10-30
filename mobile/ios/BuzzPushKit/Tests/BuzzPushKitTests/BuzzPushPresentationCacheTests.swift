@@ -1,6 +1,5 @@
 import CryptoKit
 import Foundation
-import P256K
 import Testing
 
 @testable import BuzzPushKit
@@ -675,8 +674,8 @@ struct BuzzPushPresentationCacheTests {
     #expect(snapshot.channels.count == 1)
   }
 
-  @Test("Community removal prunes profile and channel state")
-  func communityPruning() throws {
+  @Test("Account sync discards old presentation exports even for a retained account")
+  func discardLegacyExports() throws {
     let directory = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = BuzzPushPresentationCacheStore(containerURL: directory)
@@ -687,12 +686,12 @@ struct BuzzPushPresentationCacheTests {
       tags: [["d", "opaque"], ["name", "General"]]
     )
     try store.updateProfiles(
-      communityID: "removed",
+      communityID: "retained",
       relayOrigin: "https://relay.example",
       updates: [BuzzPushProfileCacheUpdate(event: profile)]
     )
     try store.updateChannels(
-      communityID: "removed",
+      communityID: "retained",
       relayOrigin: "https://relay.example",
       relayMetadataPubkey: try pubkey(for: relayKey),
       metadataEvents: [channel],
@@ -834,8 +833,8 @@ struct BuzzPushPresentationCacheTests {
 
   private func pubkey(for privateKey: String) throws -> String {
     let bytes = try #require(VerifiedNostrEvent.hexBytes(privateKey))
-    let key = try P256K.Schnorr.PrivateKey(dataRepresentation: bytes)
-    return VerifiedNostrEvent.hex(key.xonly.bytes)
+    let key = bytes
+    return VerifiedNostrEvent.hex(try NostrSchnorr.publicKey(secret: key))
   }
 
   private func signedEvent(
@@ -846,8 +845,8 @@ struct BuzzPushPresentationCacheTests {
     content: String = ""
   ) throws -> VerifiedNostrEvent {
     let privateKeyBytes = try #require(VerifiedNostrEvent.hexBytes(privateKey))
-    let key = try P256K.Schnorr.PrivateKey(dataRepresentation: privateKeyBytes)
-    let pubkey = VerifiedNostrEvent.hex(key.xonly.bytes)
+    let key = privateKeyBytes
+    let pubkey = VerifiedNostrEvent.hex(try NostrSchnorr.publicKey(secret: key))
     let serialization = try VerifiedNostrEvent.canonicalSerialization(
       pubkey: pubkey,
       createdAt: createdAt,
@@ -856,9 +855,9 @@ struct BuzzPushPresentationCacheTests {
       content: content
     )
     let digest = Array(SHA256.hash(data: serialization))
-    var message = digest
-    var randomness = [UInt8](repeating: UInt8(truncatingIfNeeded: createdAt), count: 32)
-    let signature = try key.signature(message: &message, auxiliaryRand: &randomness)
+    let message = digest
+    let randomness = [UInt8](repeating: UInt8(truncatingIfNeeded: createdAt), count: 32)
+    let signature = try NostrSchnorr.sign(message: message, secret: key, auxiliaryRandomness: randomness)
     return VerifiedNostrEvent(
       id: VerifiedNostrEvent.hex(digest),
       pubkey: pubkey,
@@ -866,7 +865,7 @@ struct BuzzPushPresentationCacheTests {
       kind: kind,
       tags: tags,
       content: content,
-      sig: VerifiedNostrEvent.hex(signature.dataRepresentation)
+      sig: VerifiedNostrEvent.hex(signature)
     )
   }
 }

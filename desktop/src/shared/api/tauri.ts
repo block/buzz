@@ -1,4 +1,5 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { beginChannelMembershipWrite } from "@/shared/api/channelMembershipWrites";
 import {
   fromRawInstallRuntimeResult,
   type RawInstallRuntimeResult,
@@ -243,7 +244,7 @@ export class TauriInvokeError extends Error {
   }
 }
 
-function toTauriError(error: unknown): Error {
+export function toTauriError(error: unknown): Error {
   if (error instanceof Error) {
     return error;
   }
@@ -348,14 +349,22 @@ export function getRelayHttpUrl(): Promise<string> {
 export async function addChannelMembers(
   input: AddChannelMembersInput,
 ): Promise<AddChannelMembersResult> {
-  return invokeTauri<RawAddChannelMembersResult>("add_channel_members", input);
+  const record = beginChannelMembershipWrite();
+  const result = await invokeTauri<RawAddChannelMembersResult>(
+    "add_channel_members",
+    input,
+  );
+  record(input.channelId);
+  return result;
 }
 
 export async function removeChannelMember(
   channelId: string,
   pubkey: string,
 ): Promise<void> {
+  const record = beginChannelMembershipWrite();
   await invokeTauri("remove_channel_member", { channelId, pubkey });
+  record(channelId);
 }
 
 export async function changeChannelMemberRole(
@@ -363,15 +372,21 @@ export async function changeChannelMemberRole(
   pubkey: string,
   role: string,
 ): Promise<void> {
+  const record = beginChannelMembershipWrite();
   await invokeTauri("change_channel_member_role", { channelId, pubkey, role });
+  record(channelId);
 }
 
 export async function joinChannel(channelId: string): Promise<void> {
+  const record = beginChannelMembershipWrite();
   await invokeTauri("join_channel", { channelId });
+  record(channelId);
 }
 
 export async function leaveChannel(channelId: string): Promise<void> {
+  const record = beginChannelMembershipWrite();
   await invokeTauri("leave_channel", { channelId });
+  record(channelId);
 }
 
 export async function getHomeFeed(
@@ -767,6 +782,7 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
         spawnAfterCreate: input.spawnAfterCreate,
         startOnAppLaunch: input.startOnAppLaunch,
         backend: input.backend,
+        effortLevel: input.effortLevel,
         respondTo: input.respondTo,
         respondToAllowlist: input.respondToAllowlist,
         relayMesh: input.relayMesh,

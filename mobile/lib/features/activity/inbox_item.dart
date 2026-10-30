@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 
+import '../../shared/relay/thread_reference.dart';
 import 'feed_item.dart';
 
 /// Inbox filters, mirroring desktop's `InboxFilter` in
@@ -26,22 +27,10 @@ int categoryPriority(String category) {
   };
 }
 
-/// Thread reference from NIP-10 tags — desktop's `getThreadReference`.
+/// Validated, lowercase thread IDs shared with timeline navigation.
 ({String? parentId, String? rootId}) threadReferenceOf(
   List<List<String>> tags,
-) {
-  List<String>? rootTag;
-  List<String>? replyTag;
-  for (final tag in tags) {
-    if (tag.length >= 4 && tag[0] == 'e') {
-      if (tag[3] == 'root') rootTag = tag;
-      if (tag[3] == 'reply') replyTag = tag;
-    }
-  }
-  if (replyTag == null) return (parentId: null, rootId: null);
-  final parentId = replyTag[1];
-  return (parentId: parentId, rootId: rootTag?[1] ?? parentId);
-}
+) => parseThreadReference(tags);
 
 /// Broadcast replies surface at the channel top level — desktop's
 /// `isBroadcastReply`.
@@ -113,20 +102,18 @@ class InboxItem {
     return null;
   }
 
-  /// The event the row should deep-link to: the oldest event in the group
-  /// newer than [readAt] (oldest unread), falling back to the latest event.
-  FeedItem deepLinkTarget(int? readAt) {
-    if (readAt != null) {
-      FeedItem? oldestUnread;
-      for (final candidate in groupItems) {
-        if (candidate.createdAt <= readAt) continue;
-        if (oldestUnread == null ||
-            candidate.createdAt < oldestUnread.createdAt) {
-          oldestUnread = candidate;
-        }
+  /// The event the row should deep-link to: the oldest grouped event that
+  /// [isRead] rejects (oldest unread), falling back to the latest event.
+  FeedItem deepLinkTarget(bool Function(FeedItem event) isRead) {
+    FeedItem? oldestUnread;
+    for (final candidate in groupItems) {
+      if (isRead(candidate)) continue;
+      if (oldestUnread == null ||
+          candidate.createdAt < oldestUnread.createdAt) {
+        oldestUnread = candidate;
       }
-      if (oldestUnread != null) return oldestUnread;
     }
+    if (oldestUnread != null) return oldestUnread;
     return item;
   }
 }

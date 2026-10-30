@@ -41,13 +41,15 @@ pub(crate) enum AuthOutcome {
     AllowlistDenied,
     RelayMembershipCheckError,
     NotRelayMember,
+    /// NIP-FI key pairing mismatch: the NIP-42 key differs from the asserted key.
+    PairingMismatch,
     Timeout,
     Disconnect,
     Shutdown,
 }
 
 impl AuthOutcome {
-    pub(crate) const ALL: [Self; 11] = [
+    pub(crate) const ALL: [Self; 12] = [
         Self::Success,
         Self::Invalid,
         Self::Banned,
@@ -56,6 +58,7 @@ impl AuthOutcome {
         Self::AllowlistDenied,
         Self::RelayMembershipCheckError,
         Self::NotRelayMember,
+        Self::PairingMismatch,
         Self::Timeout,
         Self::Disconnect,
         Self::Shutdown,
@@ -71,6 +74,7 @@ impl AuthOutcome {
             Self::AllowlistDenied => "allowlist_denied",
             Self::RelayMembershipCheckError => "relay_membership_check_error",
             Self::NotRelayMember => "not_relay_member",
+            Self::PairingMismatch => "pairing_mismatch",
             Self::Timeout => "timeout",
             Self::Disconnect => "disconnect",
             Self::Shutdown => "shutdown",
@@ -126,6 +130,13 @@ const DB_CONNECTION_STEP_DURATION_BUCKETS_S: [f64; 10] = [
 /// Seconds-scale buckets for Git hydration and pack streams.
 const GIT_DURATION_BUCKETS_S: [f64; 13] = [
     0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
+];
+
+/// Mesh dial and reconcile-pass buckets. A pass dials peers serially, so a
+/// large or stale peer table can stretch it to minutes; the default
+/// five-second ceiling would hide exactly the stall these exist to show.
+const MESH_DURATION_BUCKETS_S: [f64; 14] = [
+    0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
 ];
 
 /// Byte buckets for hydrated repositories and streamed clone/fetch responses.
@@ -230,6 +241,16 @@ fn configured_prometheus_builder(gauge_idle_timeout_secs: u64) -> PrometheusBuil
             &GIT_PACK_BUCKETS,
         )
         .expect("valid git compaction output pack-count bucket boundaries")
+        .set_buckets_for_metric(
+            Matcher::Full(buzz_relay_mesh::telemetry::DIAL_DURATION_SECONDS.to_owned()),
+            &MESH_DURATION_BUCKETS_S,
+        )
+        .expect("valid mesh dial bucket boundaries")
+        .set_buckets_for_metric(
+            Matcher::Full(buzz_relay_mesh::telemetry::RECONCILE_PASS_SECONDS.to_owned()),
+            &MESH_DURATION_BUCKETS_S,
+        )
+        .expect("valid mesh reconcile pass bucket boundaries")
         .set_buckets_for_metric(Matcher::Suffix("_seconds".to_owned()), &DURATION_BUCKETS_S)
         .expect("valid seconds bucket boundaries")
         .set_buckets_for_metric(
@@ -290,9 +311,13 @@ pub fn try_install(port: u16, gauge_idle_timeout_secs: u64) -> Result<(), Metric
     metrics::set_global_recorder(recorder)
         .map_err(|_error| MetricsInstallError::RecorderConflict)?;
     describe_readiness_metrics();
+    describe_community_admission_metrics();
     describe_db_pool_metrics();
     describe_auth_metrics();
+    crate::startup_steps::describe_metrics();
+    buzz_relay_mesh::telemetry::describe_metrics();
     initialize_auth_metric_series();
+    initialize_partition_audit_metric_series();
     tokio::spawn(exporter);
     Ok(())
 }
@@ -306,24 +331,42 @@ pub fn install(port: u16, gauge_idle_timeout_secs: u64) {
         .unwrap_or_else(|error| panic!("metrics exporter must install exactly once: {error}"));
 }
 
-/// Register the frozen readiness metric descriptions with the active recorder.
+/// Register the frozen readiness and dependency-diagnostic metric descriptions.
+///
+/// The two `buzz_readiness_*` probe families describe local process lifecycle.
+/// The dependency families keep their names for dashboard continuity but are
+/// published by the per-pod dependency sampler, not by the Kubernetes probe or
+/// by an `/_status` request — a shared-dependency failure no longer deroutes
+/// the pod, and nobody has to read the endpoint for the metrics to move.
 pub(crate) fn describe_readiness_metrics() {
     metrics::describe_counter!(
         "buzz_readiness_checks_total",
-        "Kubernetes health-listener readiness probes by terminal bounded reason"
+        "Kubernetes health-listener readiness probes by lifecycle reason (ready, shutting_down)"
     );
     metrics::describe_counter!(
         "buzz_readiness_dependency_checks_total",
-        "Completed readiness dependency attempts by dependency and bounded outcome"
+        "Completed dependency-sampler attempts by dependency and bounded outcome"
     );
     metrics::describe_histogram!(
         "buzz_readiness_check_duration_seconds",
         metrics::Unit::Seconds,
-        "Completed readiness check duration without outcome label multiplication"
+        "Completed dependency-sampler check duration without outcome label multiplication"
     );
     metrics::describe_gauge!(
         "buzz_readiness_state",
-        "Latest publishable readiness state by check, where 1 is ready and 0 is not ready"
+        "Latest private readiness-probe observation, where 1 is ready and 0 is shutting down"
+    );
+    metrics::describe_gauge!(
+        "buzz_readiness_dependency_sample_completed_timestamp_seconds",
+        "Unix time the cached /_status dependency report completed, absent until the first sample completes; sampler completion advances it and the publisher re-emits it"
+    );
+}
+
+/// Register the bounded community-admission contract.
+pub(crate) fn describe_community_admission_metrics() {
+    metrics::describe_counter!(
+        "buzz_community_admission_checks_total",
+        "Durable community-active checks at socket admission by bounded outcome"
     );
 }
 
@@ -498,6 +541,13 @@ pub(crate) fn initialize_auth_metric_series() {
     metrics::gauge!("buzz_ws_authenticated_connections_active").set(0.0);
 }
 
+/// Export the partition audit counters at zero before the first audit, so
+/// `increase()`-based alerts count the first failure and every new outcome.
+pub(crate) fn initialize_partition_audit_metric_series() {
+    buzz_db::partition::initialize_audit_metric_series();
+    metrics::counter!("buzz_partition_audit_failures_total").increment(0);
+}
+
 /// Record one issued NIP-42 challenge after it enters the connection writer.
 ///
 /// Before this lifecycle contract, `buzz_auth_attempts_total` incremented only
@@ -541,7 +591,17 @@ pub(crate) fn readiness_test_recorder() -> (
     metrics_exporter_prometheus::PrometheusRecorder,
     metrics_exporter_prometheus::PrometheusHandle,
 ) {
-    let recorder = configured_prometheus_builder(300).build_recorder();
+    readiness_test_recorder_with_idle_timeout(300)
+}
+
+#[cfg(test)]
+pub(crate) fn readiness_test_recorder_with_idle_timeout(
+    gauge_idle_timeout_secs: u64,
+) -> (
+    metrics_exporter_prometheus::PrometheusRecorder,
+    metrics_exporter_prometheus::PrometheusHandle,
+) {
+    let recorder = configured_prometheus_builder(gauge_idle_timeout_secs).build_recorder();
     let handle = recorder.handle();
     (recorder, handle)
 }
@@ -1064,9 +1124,14 @@ mod contract_tests {
                     || line.starts_with("buzz_ws_authenticated_connections_active ")
             })
             .collect::<Vec<_>>();
-        // 1 challenge + 11 outcomes + 2 post-terminal states + 1 active gauge +, for each outcome,
-        // 11 histogram buckets (including +Inf), sum, and count.
-        assert_eq!(raw_series.len(), 158, "unexpected raw scrape:\n{scrape}");
+        // 1 challenge + one series per outcome + 2 post-terminal states + 1 active gauge +, for
+        // each outcome, 11 histogram buckets (including +Inf), sum, and count.
+        let n = super::AuthOutcome::ALL.len();
+        assert_eq!(
+            raw_series.len(),
+            1 + n + 2 + 1 + n * 13,
+            "unexpected raw scrape:\n{scrape}"
+        );
 
         for line in raw_series {
             let keys = label_keys(line);
@@ -1120,5 +1185,169 @@ mod tests {
             "metrics::tests::recorder_conflict_is_typed_in_an_isolated_process",
             CHILD_ENV,
         );
+    }
+}
+
+/// Fixtures for the partition audit alerts in
+/// `docs/partition-catalog-monitoring.md`: the production exporter configuration
+/// and audit metric emission export the series those rules read.
+#[cfg(test)]
+mod partition_alert_tests {
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+
+    const RUNS: &str = "buzz_partition_audit_runs_total";
+    const LAST_SUCCESS: &str = "buzz_partition_audit_last_success_timestamp_seconds";
+    const MANAGED_TABLES: [&str; 2] = ["delivery_log", "events"];
+
+    /// Sample value by `table` label for every sample of `metric` in a scrape.
+    /// Counters with several `outcome` labels keep the last sample per table.
+    fn samples(scrape: &str, metric: &str) -> BTreeMap<String, f64> {
+        scrape
+            .lines()
+            .filter_map(|line| line.strip_prefix(metric)?.strip_prefix('{'))
+            .filter_map(|labels| {
+                let (_, rest) = labels.split_once(r#"table=""#)?;
+                let (table, rest) = rest.split_once('"')?;
+                let (_, value) = rest.rsplit_once(' ')?;
+                Some((table.to_string(), value.parse().expect("numeric sample")))
+            })
+            .collect()
+    }
+
+    fn tables(scrape: &str, metric: &str) -> Vec<String> {
+        samples(scrape, metric).into_keys().collect()
+    }
+
+    fn managed_tables() -> Vec<String> {
+        MANAGED_TABLES
+            .iter()
+            .map(|table| table.to_string())
+            .collect()
+    }
+
+    fn unreachable_db() -> buzz_db::Db {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(200))
+            .connect_lazy("postgres://127.0.0.1:1/buzz")
+            .expect("lazy test pool");
+        buzz_db::Db::from_pool(pool)
+    }
+
+    fn current_thread_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime")
+    }
+
+    #[test]
+    fn never_successful_audits_export_a_zero_success_timestamp() {
+        let (recorder, handle) = super::readiness_test_recorder_with_idle_timeout(1);
+        metrics::with_local_recorder(&recorder, || {
+            current_thread_runtime().block_on(async {
+                assert!(unreachable_db().audit_partitions(3).await.is_err());
+            });
+        });
+
+        let scrape = handle.render();
+        assert_eq!(tables(&scrape, RUNS), managed_tables(), "{scrape}");
+        let zero = MANAGED_TABLES
+            .iter()
+            .map(|table| (table.to_string(), 0.0))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(samples(&scrape, LAST_SUCCESS), zero, "{scrape}");
+    }
+
+    #[test]
+    fn audit_counters_export_zero_baselines_before_the_first_audit() {
+        let (recorder, handle) = super::readiness_test_recorder_with_idle_timeout(1);
+        metrics::with_local_recorder(&recorder, super::initialize_partition_audit_metric_series);
+
+        let scrape = handle.render();
+        let zero_runs = scrape
+            .lines()
+            .filter(|line| line.starts_with(&format!("{RUNS}{{")) && line.ends_with(" 0"))
+            .count();
+        assert_eq!(zero_runs, MANAGED_TABLES.len() * 3, "{scrape}");
+        assert!(
+            scrape
+                .lines()
+                .any(|line| line == "buzz_partition_audit_failures_total 0"),
+            "{scrape}"
+        );
+
+        // A first failure then reads as an increase from the zero baseline.
+        metrics::with_local_recorder(&recorder, || {
+            current_thread_runtime().block_on(async {
+                assert!(unreachable_db().audit_partitions(3).await.is_err());
+            });
+        });
+        let scrape = handle.render();
+        for table in MANAGED_TABLES {
+            for (outcome, value) in [("ok", 0), ("degraded", 0), ("error", 1)] {
+                let line = scrape
+                    .lines()
+                    .find(|line| {
+                        line.starts_with(&format!("{RUNS}{{"))
+                            && line.contains(&format!(r#"table="{table}""#))
+                            && line.contains(&format!(r#"outcome="{outcome}""#))
+                    })
+                    .unwrap_or_else(|| panic!("{table}/{outcome} missing:\n{scrape}"));
+                assert!(line.ends_with(&format!(" {value}")), "{line}");
+            }
+        }
+    }
+
+    mod postgres_tests {
+        use super::*;
+
+        #[test]
+        #[ignore = "requires Postgres"]
+        fn failed_audits_keep_the_last_success_past_the_idle_timeout() {
+            let idle_timeout = Duration::from_secs(1);
+            let (recorder, handle) =
+                crate::metrics::readiness_test_recorder_with_idle_timeout(idle_timeout.as_secs());
+            let runtime = current_thread_runtime();
+            let (working, failing) = metrics::with_local_recorder(&recorder, || {
+                runtime.block_on(async {
+                    let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+                        .await
+                        .expect("connect test database");
+                    let working = buzz_db::Db::from_pool(pool);
+                    working.audit_partitions(3).await.expect("successful audit");
+                    (working, unreachable_db())
+                })
+            });
+
+            let scrape = handle.render();
+            let first = samples(&scrape, LAST_SUCCESS);
+            assert_eq!(first.keys().cloned().collect::<Vec<_>>(), managed_tables());
+
+            let audit = |db: &buzz_db::Db| {
+                metrics::with_local_recorder(&recorder, || {
+                    runtime.block_on(async { db.audit_partitions(3).await.is_ok() })
+                })
+            };
+            // A failed audit never makes the last success look fresh, and
+            // sustained failures keep it exported past the idle timeout, so its
+            // age keeps rising instead of the series disappearing.
+            assert!(!audit(&failing));
+            assert_eq!(samples(&handle.render(), LAST_SUCCESS), first);
+            std::thread::sleep(idle_timeout + Duration::from_millis(250));
+            assert!(!audit(&failing));
+            assert_eq!(samples(&handle.render(), LAST_SUCCESS), first);
+
+            // When audits stop running altogether the timestamp is evicted,
+            // but the run counters remain for the not-running rule.
+            std::thread::sleep(idle_timeout + Duration::from_millis(250));
+            let scrape = handle.render();
+            assert!(tables(&scrape, LAST_SUCCESS).is_empty(), "{scrape}");
+            assert_eq!(tables(&scrape, RUNS), managed_tables(), "{scrape}");
+
+            // The next success exports a fresh timestamp again.
+            assert!(audit(&working));
+            assert_eq!(tables(&handle.render(), LAST_SUCCESS), managed_tables());
+        }
     }
 }

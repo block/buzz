@@ -22,12 +22,19 @@ final buzzPushDescriptorFetcherProvider = Provider<BuzzPushDescriptorFetcher>(
 final currentRelayPushDescriptorProvider =
     FutureProvider.autoDispose<BuzzPushLeaseDescriptor?>((ref) async {
       if (!Env.pushGatewayConfigured) return null;
-      final session = ref.watch(relaySessionProvider);
+      final sessionStatus = ref.watch(
+        relaySessionProvider.select((session) => session.status),
+      );
       final config = ref.watch(relayConfigProvider);
-      final community = ref.watch(activeCommunityProvider).value;
+      // Preference and lease bookkeeping do not change relay capability.
+      // Watching the whole community rediscovered NIP-11 after every toggle,
+      // disabling the off switch when that redundant request could not finish.
+      final communityId = ref.watch(
+        activeCommunityProvider.select((value) => value.value?.id),
+      );
       final memberPubkey = ref.watch(myPubkeyProvider);
-      if (session.status != SessionStatus.connected ||
-          community == null ||
+      if (sessionStatus != SessionStatus.connected ||
+          communityId == null ||
           config.nsec == null ||
           config.nsec!.isEmpty ||
           memberPubkey == null ||

@@ -30,6 +30,9 @@ buzz-relay-mesh = { workspace = true }
 async-trait = "0.1"
 postcard = { workspace = true }
 axum = { workspace = true }
+# Axum's WebSocket errors wrap tungstenite's; matching them tells a close
+# handshake already under way apart from a failed terminal-frame write.
+tungstenite = { version = "0.29", default-features = false }
 tokio = { workspace = true }
 # `io` (ReaderStream) is needed to stream git subprocess stdout straight into
 # the HTTP response body — see api::git::transport read-path streaming. The
@@ -78,6 +81,8 @@ rand            = { workspace = true }
 hex             = { workspace = true }
 url             = { workspace = true }
 moka            = { workspace = true }
+arc-swap        = { workspace = true }
+lru             = { workspace = true }
 metrics         = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 metrics-util    = { workspace = true }
@@ -88,6 +93,8 @@ async-compression = { version = "0.4.42", features = ["tokio", "gzip"] }
 dev = ["buzz-auth/dev"]
 
 [dev-dependencies]
+# Generate ephemeral P-256 signing fixtures; already in the runtime dependency graph.
+ring = "0.17"
 # The mesh-llm smoke harnesses moved to `crates/buzz-mesh-smoke`. A
 # dev-dependency feeds every target of its package, so keeping the mesh-llm
 # SDK here forced the entire mesh-llm/skippy/rmcp tree to compile before any
@@ -101,6 +108,7 @@ buzz-core = { workspace = true, features = ["test-utils"] }
 buzz-auth = { workspace = true, features = ["dev", "test-utils"] }
 reqwest = { workspace = true }
 tokio-tungstenite = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 futures = "0.3"
 flate2 = "1.1.9"
 opentelemetry_sdk = { workspace = true, features = ["testing"] }

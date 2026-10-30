@@ -82,7 +82,26 @@ class _InboxRow extends HookConsumerWidget {
     final profile = profiles[senderPubkey];
     // The shared label contract: blank cached names (empty or whitespace-only
     // are relay-valid) fall back to the compact npub, never a blank sender.
-    final senderLabel = profile?.label ?? shortPubkey(item.item.pubkey);
+    // Rows compare names within their own channel, like the channel itself.
+    final channelId = channel?.id ?? item.item.channelId;
+    final Map<String, String> contextualLabels;
+    if (channelId == null) {
+      // No channel: the row's own identities are the comparison context.
+      final names = watchIdentityNames(ref, relevantPubkeys);
+      contextualLabels = {
+        for (final key in names.candidates) key: names.labelFor(key),
+      };
+    } else {
+      contextualLabels = watchChannelIdentityLabels(
+        ref,
+        channelId,
+        relevantPubkeys,
+      );
+    }
+    final senderLabel =
+        contextualLabels[senderPubkey] ??
+        profile?.label ??
+        shortPubkey(item.item.pubkey);
     final profileMentionNames = {
       for (final pubkey in mentionPubkeys)
         if (profiles[pubkey]?.displayName?.trim().isNotEmpty == true)
@@ -159,7 +178,7 @@ class _InboxRow extends HookConsumerWidget {
                       key: ValueKey('inbox-swipe-read-${item.id}'),
                       color: actionColor,
                       foregroundColor: contrastForeground(actionColor),
-                      icon: isDone ? LucideIcons.mail : LucideIcons.mailOpen,
+                      icon: isDone ? BuzzIcons.mail : BuzzIcons.mailOpen,
                       label: isDone ? 'Mark unread' : 'Mark as read',
                       onTap: toggleReadState,
                     ),
@@ -322,9 +341,10 @@ class _InboxRow extends HookConsumerWidget {
                                   ),
                                   const SizedBox(height: Grid.half),
                                   // Message preview.
-                                  MessageContent(
+                                  MessagePreview(
                                     content: item.item.displayContent,
                                     mentionNames: mentionNames,
+                                    mentionLabels: contextualLabels,
                                     agentMentionPubkeys: agentMentionPubkeys,
                                     tags: item.item.tags,
                                     maxLines: 2,
@@ -363,13 +383,10 @@ class _InboxRow extends HookConsumerWidget {
           ),
           child: IconTheme.merge(
             data: const IconThemeData(size: 18),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
+            child: SheetActionSection(
               children: [
                 ListTile(
-                  leading: Icon(
-                    isDone ? LucideIcons.mail : LucideIcons.mailOpen,
-                  ),
+                  leading: Icon(isDone ? BuzzIcons.mail : BuzzIcons.mailOpen),
                   title: Text(isDone ? 'Mark unread' : 'Mark as read'),
                   onTap: () {
                     Navigator.of(sheetContext).pop();
@@ -377,7 +394,7 @@ class _InboxRow extends HookConsumerWidget {
                   },
                 ),
                 ListTile(
-                  leading: const Icon(LucideIcons.externalLink),
+                  leading: const Icon(BuzzIcons.externalLink),
                   title: const Text('Open conversation'),
                   onTap: () {
                     Navigator.of(sheetContext).pop();
@@ -474,7 +491,7 @@ class _RowAvatar extends StatelessWidget {
     return AvatarImage(
       imageUrl: profile?.avatarUrl,
       radius: activityAvatarSize / 2,
-      backgroundColor: context.colors.primaryContainer,
+      backgroundColor: context.controlSurface,
       fallback: Text(
         initial,
         style: TextStyle(

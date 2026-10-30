@@ -2,6 +2,8 @@ import 'package:buzz/features/channels/thread_reply_ownership.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../../helpers/thread_ids.dart';
+
 void main() {
   test(
     'identity evidence is bounded while keeping recent evicted-payload owners',
@@ -16,15 +18,15 @@ void main() {
             kind: EventKind.streamMessage,
             tags: const [
               ['h', 'channel'],
-              ['e', 'root', '', 'reply'],
+              ['e', threadIdRoot, '', 'reply'],
             ],
             content: '',
             sig: '',
           ),
       ]);
       expect(owners.rootFor('reply-0'), isNull);
-      expect(owners.rootFor('reply-1'), 'root');
-      expect(owners.rootFor('reply-8192'), 'root');
+      expect(owners.rootFor('reply-1'), threadIdRoot);
+      expect(owners.rootFor('reply-8192'), threadIdRoot);
     },
   );
 }
