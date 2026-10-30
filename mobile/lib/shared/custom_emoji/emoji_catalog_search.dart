@@ -40,10 +40,11 @@ class EmojiCatalogSearchNotifier extends Notifier<EmojiCatalogSearchState> {
   /// Search for [text], which [emojiCatalogSearchText] already normalized.
   Future<void> search(String text) async {
     final request = ++_request;
+    final sameQuery = state.query == text;
     state = EmojiCatalogSearchState(
       query: text,
       loading: true,
-      results: state.results,
+      results: sameQuery ? state.results : const [],
     );
     try {
       final events = await ref.read(relaySessionProvider.notifier).queryRelay([

@@ -192,12 +192,6 @@ class _ContinuousEmojiGrid extends StatelessWidget {
           ),
         // Clear the home indicator so the last row isn't half-swallowed. Sits
         // outside the sections so it doesn't skew their offsets.
-        if (catalogState != null)
-          _CatalogResultsSliver(
-            state: catalogState,
-            results: catalogResults,
-            onSelect: onSelectCatalog,
-          ),
         SliverToBoxAdapter(
           child: SizedBox(
             height: MediaQuery.viewPaddingOf(context).bottom + Grid.xxs,
@@ -286,6 +280,12 @@ class _EmojiSearchResults extends StatelessWidget {
             ),
           ),
         ],
+        if (catalogState != null)
+          _CatalogResultsSliver(
+            state: catalogState,
+            results: catalogResults,
+            onSelect: onSelectCatalog,
+          ),
         SliverToBoxAdapter(
           child: SizedBox(
             height: MediaQuery.viewPaddingOf(context).bottom + Grid.xxs,

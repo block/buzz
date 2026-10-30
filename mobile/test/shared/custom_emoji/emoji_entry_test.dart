@@ -58,6 +58,8 @@ void main() {
       'javascript url': _event(url: 'javascript:alert(1)'),
       'relative url': _event(url: '/media/p.png'),
       'file url': _event(url: 'file:///etc/passwd'),
+      'long name': _event(d: 'a' * 65),
+      'long url': _event(url: 'https://cdn.test/${'a' * 2048}.png'),
     };
     for (final entry in invalid.entries) {
       expect(emojiFromEntryEvent(entry.value), isNull, reason: entry.key);

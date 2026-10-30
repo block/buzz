@@ -6,6 +6,11 @@ import 'custom_emoji.dart';
 /// Most catalog emoji one search shows.
 const int maxEmojiCatalogResults = 50;
 
+/// Longest shortcode and URL a catalog entry may have. The shortcode cap is the
+/// SDK's `MAX_CUSTOM_EMOJI_SHORTCODE_LEN`.
+const int maxEmojiEntryShortcodeLength = 64;
+const int maxEmojiEntryUrlLength = 2048;
+
 /// Catalog emoji that survived validation, plus the names two authors both
 /// published.
 @immutable
@@ -37,9 +42,13 @@ CustomEmoji? emojiFromEntryEvent(NostrEvent event) {
   final emoji = emojiTags.single;
   if (d.length < 2 || emoji.length < 3) return null;
   final name = normalizeShortcode(d[1]);
-  if (name == null || name != d[1] || normalizeShortcode(emoji[1]) != name) {
+  if (name == null ||
+      name != d[1] ||
+      name.length > maxEmojiEntryShortcodeLength ||
+      normalizeShortcode(emoji[1]) != name) {
     return null;
   }
+  if (emoji[2].length > maxEmojiEntryUrlLength) return null;
   final uri = Uri.tryParse(emoji[2]);
   if (uri == null || !uri.hasAuthority) return null;
   if (uri.scheme != 'http' && uri.scheme != 'https') return null;
