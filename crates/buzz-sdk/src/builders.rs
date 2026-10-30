@@ -6,8 +6,8 @@
 use buzz_core::{
     kind::{
         KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_DELETION,
-        KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH,
-        KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
+        KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_ENTRY, KIND_EMOJI_SET, KIND_GIT_ISSUE,
+        KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
         KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
@@ -154,7 +154,8 @@ pub fn normalize_custom_emoji_shortcode(shortcode: &str) -> Result<String, SdkEr
     Ok(trimmed.to_ascii_lowercase())
 }
 
-fn check_custom_emoji_url(url: &str) -> Result<(), SdkError> {
+/// Validate a custom emoji image URL: non-empty, at most 2048 bytes, `http(s)://`.
+pub fn check_custom_emoji_url(url: &str) -> Result<(), SdkError> {
     if url.is_empty() {
         return Err(SdkError::InvalidInput(
             "emoji image URL must not be empty".into(),
@@ -572,6 +573,29 @@ pub fn build_custom_emoji_set(emojis: &[CustomEmoji]) -> Result<EventBuilder, Sd
         tags.push(tag(&["emoji", &shortcode, &emoji.url])?);
     }
     Ok(EventBuilder::new(Kind::Custom(KIND_EMOJI_SET as u16), "").tags(tags))
+}
+
+/// Search text for a kind:30180 emoji entry: the normalized shortcode with `_`
+/// and `-` turned into spaces, so full-text search sees each word.
+pub fn emoji_entry_search_text(normalized_shortcode: &str) -> String {
+    normalized_shortcode.replace(['_', '-'], " ")
+}
+
+/// Build one custom emoji entry event (kind:30180).
+///
+/// User-signed and parameterized-replaceable, keyed by `(pubkey, 30180, d)`
+/// where `d` is the normalized shortcode. Publishing the same shortcode again
+/// replaces the caller's earlier entry. `content` is the search text from
+/// [`emoji_entry_search_text`].
+pub fn build_emoji_entry(shortcode: &str, url: &str) -> Result<EventBuilder, SdkError> {
+    let shortcode = normalize_custom_emoji_shortcode(shortcode)?;
+    check_custom_emoji_url(url)?;
+    let tags = vec![tag(&["d", &shortcode])?, tag(&["emoji", &shortcode, url])?];
+    Ok(EventBuilder::new(
+        Kind::Custom(KIND_EMOJI_ENTRY as u16),
+        emoji_entry_search_text(&shortcode),
+    )
+    .tags(tags))
 }
 
 /// Build a canvas update event (kind 40100).
@@ -3335,6 +3359,51 @@ mod tests {
         assert_eq!(ev.kind.as_u16(), 30030);
         assert!(has_tag(&ev, "d", CUSTOM_EMOJI_SET_D_TAG));
         assert!(has_tag(&ev, "emoji", "party"));
+    }
+
+    #[test]
+    fn emoji_entry_happy_path() {
+        let ev = sign(build_emoji_entry(":Party_Parrot-2:", "https://example.com/p.gif").unwrap());
+        assert_eq!(ev.kind.as_u16(), 30180);
+        assert_eq!(ev.content, "party parrot 2");
+        assert!(has_tag(&ev, "d", "party_parrot-2"));
+        let emoji: Vec<_> = ev
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().is_some_and(|k| k == "emoji"))
+            .map(|t| t.as_slice().to_vec())
+            .collect();
+        assert_eq!(
+            emoji,
+            vec![vec![
+                "emoji".to_string(),
+                "party_parrot-2".to_string(),
+                "https://example.com/p.gif".to_string()
+            ]]
+        );
+        assert!(!ev
+            .tags
+            .iter()
+            .any(|t| t.as_slice().first().is_some_and(|k| k == "h")));
+    }
+
+    #[test]
+    fn emoji_entry_rejects_bad_input() {
+        for (shortcode, url) in [
+            ("", "https://example.com/p.gif"),
+            ("bad name", "https://example.com/p.gif"),
+            ("bad!", "https://example.com/p.gif"),
+            ("ok", ""),
+            ("ok", "ftp://example.com/p.gif"),
+            ("ok", "javascript:alert(1)"),
+        ] {
+            assert!(
+                build_emoji_entry(shortcode, url).is_err(),
+                "{shortcode:?} {url:?} must be rejected"
+            );
+        }
+        let long = "a".repeat(MAX_CUSTOM_EMOJI_SHORTCODE_LEN + 1);
+        assert!(build_emoji_entry(&long, "https://example.com/p.gif").is_err());
     }
 
     #[test]
