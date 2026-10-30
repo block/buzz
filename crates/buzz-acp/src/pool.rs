@@ -901,6 +901,9 @@ pub struct PromptContext {
     /// Channel sessions add the channel name; thread sessions also add the root
     /// ID prefix. Never part of the prompt.
     pub session_title: Option<String>,
+    /// Start Claude sessions with Remote Control registration. This remains
+    /// opt-in because it exposes session presence to the owner's Claude app.
+    pub claude_remote_control: bool,
     pub team_instructions: Option<String>,
     pub heartbeat_prompt: Option<String>,
     /// Base instructions with the configured policy's Session Model appended,
@@ -1622,6 +1625,9 @@ async fn create_session_and_apply_model(
         channel.channel_type,
         ctx.session_title.as_deref(),
     );
+    let claude_remote_control_name = ctx
+        .claude_remote_control
+        .then(|| session_title.as_deref().unwrap_or("Buzz agent"));
 
     let resp = agent
         .acp
@@ -1637,6 +1643,34 @@ async fn create_session_and_apply_model(
             session_title.as_deref(),
         )
         .await?;
+
+    if let Some(name) = claude_remote_control_name {
+        let command = format!("/remote-control {name}");
+        match agent
+            .acp
+            .session_prompt_with_idle_timeout(
+                &resp.session_id,
+                &command,
+                std::time::Duration::from_secs(15),
+                std::time::Duration::from_secs(30),
+            )
+            .await
+        {
+            Ok(_) => tracing::info!(
+                target: "pool::session",
+                session_id = %resp.session_id,
+                name,
+                "Claude Remote Control registered through the adapter"
+            ),
+            Err(error) => tracing::warn!(
+                target: "pool::session",
+                session_id = %resp.session_id,
+                name,
+                %error,
+                "Claude Remote Control registration failed; continuing with the local session"
+            ),
+        }
+    }
 
     if is_goose && agent.goose_system_prompt_supported != Some(false) {
         if let Some(prompt) = combined_system_prompt.as_deref() {
@@ -10456,6 +10490,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             dedup_mode: DedupMode::Drop,
             system_prompt: None,
             session_title: None,
+            claude_remote_control: false,
             team_instructions: None,
             heartbeat_prompt: None,
             base_prompt: None,
@@ -11743,6 +11778,82 @@ exit 0"#
         let mut opts = serde_json::Value::Null;
         patch_config_option_current_value(&mut opts, "effort", "high");
         assert!(opts.is_null(), "a null snapshot must stay null");
+    }
+}
+
+#[cfg(test)]
+mod claude_remote_control_tests {
+    use super::*;
+    use crate::acp::AcpClient;
+    use tests::make_prompt_context_no_owner;
+
+    #[tokio::test]
+    async fn opt_in_starts_remote_control_through_the_adapter_command() {
+        let dir =
+            std::env::temp_dir().join(format!("buzz-claude-remote-control-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let capture = dir.join("remote-control-request.json");
+        let script = format!(
+            r#"IFS= read -r _session_new
+printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"sessionId":"claude-session"}}}}'
+if IFS= read -r remote_control; then
+  printf '%s\n' "$remote_control" > '{}'
+  printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"stopReason":"end_turn"}}}}'
+else
+  printf '%s\n' 'MISSING' > '{}'
+fi"#,
+            capture.display(),
+            capture.display(),
+        );
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+            .await
+            .expect("spawn scripted Claude adapter");
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: CLAUDE_AGENT_ACP_NAME.into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.session_title = Some("Buzz Claude".into());
+        ctx.claude_remote_control = true;
+
+        create_session_and_apply_model(
+            &mut agent,
+            &ctx,
+            None,
+            NewSessionChannelContext {
+                huddle_instructions: None,
+                canvas: None,
+                name: Some("general"),
+                scope: None,
+                channel_type: Some("public"),
+            },
+        )
+        .await
+        .expect("session creation must succeed");
+        agent.acp.shutdown().await;
+
+        let request: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&capture).expect("remote-control request capture"),
+        )
+        .expect("captured request is JSON");
+        assert_eq!(request["method"], "session/prompt");
+        assert_eq!(request["params"]["sessionId"], "claude-session");
+        assert_eq!(
+            request["params"]["prompt"][0]["text"],
+            "/remote-control Buzz Claude · #general"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 

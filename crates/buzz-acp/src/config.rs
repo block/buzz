@@ -461,6 +461,13 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_SESSION_TITLE")]
     pub session_title: Option<String>,
 
+    /// Register Claude Agent SDK sessions with Claude Remote Control so they
+    /// are discoverable in the owner's Claude app. Claude-only and opt-in:
+    /// other ACP adapters ignore it, and the default preserves local-only
+    /// session behavior.
+    #[arg(long, env = "BUZZ_ACP_CLAUDE_REMOTE_CONTROL", default_value_t = false)]
+    pub claude_remote_control: bool,
+
     /// Permission mode for agents that support `session/set_config_option`
     /// with `configId: "mode"` (e.g. `claude-agent-acp`).
     ///
@@ -594,6 +601,8 @@ pub struct Config {
     /// Sanitized session title, sent as `_meta.sessionTitle` on `session/new`.
     /// `None` when unset or when the configured value sanitized to empty.
     pub session_title: Option<String>,
+    /// Whether Claude sessions should start the Remote Control bridge.
+    pub claude_remote_control: bool,
     /// Permission mode to apply after session creation. `Default` = skip.
     pub permission_mode: PermissionMode,
     /// Inbound author gate mode.
@@ -1223,6 +1232,7 @@ impl Config {
                 .session_title
                 .as_deref()
                 .and_then(sanitize_session_title),
+            claude_remote_control: args.claude_remote_control,
             permission_mode: args.permission_mode,
             respond_to: args.respond_to,
             respond_to_allowlist,
@@ -1601,6 +1611,7 @@ mod tests {
             model: None,
             effort_level: None,
             session_title: None,
+            claude_remote_control: false,
             permission_mode: PermissionMode::BypassPermissions,
             respond_to: RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
@@ -3244,5 +3255,33 @@ channels = "ALL"
             "Found secret-bearing env args without hide_env_values=true. \
              Add `hide_env_values = true` to each: {violations:?}"
         );
+    }
+
+    #[test]
+    fn help_exposes_explicit_claude_remote_control_opt_in() {
+        use clap::CommandFactory;
+
+        let help = CliArgs::command().render_long_help().to_string();
+        assert!(
+            help.contains("--claude-remote-control"),
+            "operators need an explicit opt-in before Claude ACP sessions register for Remote Control"
+        );
+    }
+
+    #[test]
+    fn claude_remote_control_is_opt_in_and_reaches_config() {
+        let defaults = CliArgs::try_parse_from(["buzz-acp", "--private-key", TEST_PRIVATE_KEY])
+            .expect("parse defaults");
+        assert!(!defaults.claude_remote_control);
+
+        let enabled = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--claude-remote-control",
+        ])
+        .expect("parse opt-in");
+        let config = Config::from_args(enabled).expect("build config");
+        assert!(config.claude_remote_control);
     }
 }
