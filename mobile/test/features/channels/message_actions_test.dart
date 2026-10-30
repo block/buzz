@@ -950,7 +950,9 @@ void main() {
       expect(find.byType(BottomSheet), findsNothing);
     });
 
-    testWidgets('shows Edit/Delete only with manage rights', (tester) async {
+    testWidgets('manage rights open sentence-capitalized editing and cancel', (
+      tester,
+    ) async {
       final prefs = await _mockPrefs();
       await _pumpSheet(
         tester,
@@ -961,6 +963,30 @@ void main() {
 
       expect(find.text('Edit message'), findsOneWidget);
       expect(find.text('Delete message'), findsOneWidget);
+      await tester.ensureVisible(find.text('Edit message'));
+      await tester.tap(find.text('Edit message'));
+      await tester.pumpAndSettle();
+
+      final editor = find.byType(TextField);
+      expect(
+        tester.widget<TextField>(editor).textCapitalization,
+        TextCapitalization.sentences,
+      );
+      expect(tester.widget<TextField>(editor).controller!.text, 'hello world');
+      await tester.enterText(editor, 'Changed draft');
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(editor, findsNothing);
+
+      // Cancel must leave the original content available on the next edit.
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('Edit message'));
+      await tester.tap(find.text('Edit message'));
+      await tester.pumpAndSettle();
+      expect(tester.widget<TextField>(editor).controller!.text, 'hello world');
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
     });
 
     testWidgets('Mark read appears for unread messages and advances the '
