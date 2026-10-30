@@ -1111,6 +1111,12 @@ pub enum WorkflowsCmd {
         /// Maximum number of results to return
         #[arg(long)]
         limit: Option<u32>,
+        /// Page cursor: `next.before` from the previous page (RFC 3339)
+        #[arg(long, requires = "before_id")]
+        before: Option<String>,
+        /// Page cursor: `next.before_id` from the previous page
+        #[arg(long, requires = "before")]
+        before_id: Option<String>,
     },
     /// List the approvals of a workflow run
     #[command(

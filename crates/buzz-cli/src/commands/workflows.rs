@@ -60,17 +60,37 @@ pub async fn cmd_get_workflow(client: &BuzzClient, workflow_id: &str) -> Result<
 /// Fetch one page of workflow run history from `GET /workflows/{id}/runs`.
 ///
 /// Returns the relay's `{runs, next}` body. Relay failures and malformed
-/// bodies are errors, never an empty list.
+/// bodies are errors, never an empty list. `before` and `before_id` are the
+/// paired cursor from a previous page's `next`; supply both or neither.
 async fn fetch_workflow_runs(
     client: &BuzzClient,
     workflow_id: &str,
     limit: Option<u32>,
+    before: Option<&str>,
+    before_id: Option<&str>,
 ) -> Result<String, CliError> {
     validate_uuid(workflow_id)?;
     let limit = limit.unwrap_or(20).clamp(1, 100);
-    let body = client
-        .get_authed(&format!("/workflows/{workflow_id}/runs?limit={limit}"))
-        .await?;
+    let mut path = format!("/workflows/{workflow_id}/runs?limit={limit}");
+    match (before, before_id) {
+        (None, None) => {}
+        (Some(before), Some(before_id)) => {
+            validate_uuid(before_id)?;
+            let before = chrono::DateTime::parse_from_rfc3339(before).map_err(|e| {
+                CliError::Usage(format!("--before must be an RFC 3339 timestamp: {e}"))
+            })?;
+            let before = before
+                .with_timezone(&chrono::Utc)
+                .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true);
+            path.push_str(&format!("&before={before}&before_id={before_id}"));
+        }
+        _ => {
+            return Err(CliError::Usage(
+                "--before and --before-id must be supplied together".into(),
+            ))
+        }
+    }
+    let body = client.get_authed(&path).await?;
     require_array_field(&body, "runs")
 }
 
@@ -104,8 +124,13 @@ pub async fn cmd_get_workflow_runs(
     client: &BuzzClient,
     workflow_id: &str,
     limit: Option<u32>,
+    before: Option<&str>,
+    before_id: Option<&str>,
 ) -> Result<(), CliError> {
-    println!("{}", fetch_workflow_runs(client, workflow_id, limit).await?);
+    println!(
+        "{}",
+        fetch_workflow_runs(client, workflow_id, limit, before, before_id).await?
+    );
     Ok(())
 }
 
@@ -295,8 +320,20 @@ pub async fn dispatch(cmd: crate::WorkflowsCmd, client: &BuzzClient) -> Result<(
         WorkflowsCmd::Trigger { workflow, inputs } => {
             cmd_trigger_workflow(client, &workflow, inputs.as_deref()).await
         }
-        WorkflowsCmd::Runs { workflow, limit } => {
-            cmd_get_workflow_runs(client, &workflow, limit).await
+        WorkflowsCmd::Runs {
+            workflow,
+            limit,
+            before,
+            before_id,
+        } => {
+            cmd_get_workflow_runs(
+                client,
+                &workflow,
+                limit,
+                before.as_deref(),
+                before_id.as_deref(),
+            )
+            .await
         }
         WorkflowsCmd::Approvals { workflow, run } => {
             cmd_get_run_approvals(client, &workflow, &run).await
@@ -398,29 +435,72 @@ mod tests {
         let mut r = relay();
         let body = json!({
             "runs": [{"id": RUN, "workflow_id": WF, "status": "completed", "created_at": 5}],
-            "next": {"before": 5, "before_id": RUN},
+            "next": {"before": "2026-10-30T19:48:31.5Z", "before_id": RUN},
         });
         r.runs = (StatusCode::OK, body.to_string());
         let seen = r.seen.clone();
         let client = fake_relay(r).await;
 
-        let out = fetch_workflow_runs(&client, WF, Some(500)).await.unwrap();
+        let out = fetch_workflow_runs(&client, WF, Some(500), None, None)
+            .await
+            .unwrap();
         assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), body);
-        fetch_workflow_runs(&client, WF, None).await.unwrap();
-        fetch_workflow_runs(&client, WF, Some(0)).await.unwrap();
+        fetch_workflow_runs(&client, WF, None, None, None)
+            .await
+            .unwrap();
+        fetch_workflow_runs(&client, WF, Some(0), None, None)
+            .await
+            .unwrap();
+        let next = &body["next"];
+        let before = next["before"].as_str().unwrap();
+        let before_id = next["before_id"].as_str().unwrap();
+        fetch_workflow_runs(&client, WF, Some(5), Some(before), Some(before_id))
+            .await
+            .unwrap();
+        fetch_workflow_runs(
+            &client,
+            WF,
+            Some(5),
+            Some("2026-10-30T14:48:31+00:00"),
+            Some(before_id),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             *seen.lock().unwrap(),
             vec![
                 format!("GET /workflows/{WF}/runs?limit=100"),
                 format!("GET /workflows/{WF}/runs?limit=20"),
                 format!("GET /workflows/{WF}/runs?limit=1"),
+                format!(
+                    "GET /workflows/{WF}/runs?limit=5&before=2026-10-30T19:48:31.500Z&before_id={RUN}"
+                ),
+                format!(
+                    "GET /workflows/{WF}/runs?limit=5&before=2026-10-30T14:48:31Z&before_id={RUN}"
+                ),
             ]
         );
 
         assert!(matches!(
-            fetch_workflow_runs(&client, "not-a-uuid", None).await,
+            fetch_workflow_runs(&client, "not-a-uuid", None, None, None).await,
             Err(CliError::Usage(_))
         ));
+        for (before, before_id) in [
+            (Some("2026-10-30T19:48:31Z"), None),
+            (None, Some(RUN)),
+            (Some("yesterday"), Some(RUN)),
+            (Some("2026-10-30T19:48:31Z"), Some("nope")),
+        ] {
+            assert!(matches!(
+                fetch_workflow_runs(&client, WF, None, before, before_id).await,
+                Err(CliError::Usage(_))
+            ));
+        }
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            5,
+            "invalid cursors never reach the relay"
+        );
 
         for (status, body, want_relay) in [
             (
@@ -439,7 +519,9 @@ mod tests {
             let mut r = relay();
             r.runs = (status, body);
             let client = fake_relay(r).await;
-            let err = fetch_workflow_runs(&client, WF, None).await.unwrap_err();
+            let err = fetch_workflow_runs(&client, WF, None, None, None)
+                .await
+                .unwrap_err();
             assert_eq!(matches!(err, CliError::Relay { .. }), want_relay, "{err:?}");
         }
     }
