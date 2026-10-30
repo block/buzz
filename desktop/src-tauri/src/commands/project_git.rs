@@ -9,7 +9,9 @@ pub use super::project_git_types::{
     ProjectRepoContributorInfo, ProjectRepoFileInfo, ProjectRepoPullResult, ProjectRepoPushResult,
     ProjectRepoSnapshotInfo, ProjectRepoSyncStatusInfo,
 };
-use super::project_repo_paths::{canonical_repos_roots, find_local_repo_dir};
+use super::project_repo_paths::{
+    canonical_repos_roots, discover_local_repo_dirs, find_local_repo_dir,
+};
 use crate::app_state::AppState;
 use std::time::UNIX_EPOCH;
 use tauri::{AppHandle, State};
@@ -695,26 +697,15 @@ pub async fn list_project_local_repositories(
         let mut seen_paths = std::collections::HashSet::new();
         let mut repos = Vec::new();
         for repos_root in repos_roots {
-            let entries = std::fs::read_dir(&repos_root)
-                .map_err(|error| format!("read reposDir: {error}"))?;
-            for entry in entries.filter_map(Result::ok) {
-                let Some(file_type) = entry.file_type().ok() else {
-                    continue;
-                };
-                if !file_type.is_dir() && !file_type.is_symlink() {
-                    continue;
-                }
-                let Ok(path) = entry.path().canonicalize() else {
-                    continue;
-                };
-                if !path.starts_with(&repos_root) || !path.is_dir() || !path.join(".git").exists() {
-                    continue;
-                }
+            for path in discover_local_repo_dirs(&repos_root)? {
                 if !seen_paths.insert(path.clone()) {
                     continue;
                 }
                 repos.push(ProjectLocalRepoInfo {
-                    name: entry.file_name().to_string_lossy().to_string(),
+                    name: path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_default(),
                     path: path.display().to_string(),
                 });
             }
