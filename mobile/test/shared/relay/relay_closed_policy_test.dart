@@ -43,4 +43,25 @@ void main() {
       isNull,
     );
   });
+
+  group('relayErrorMessage', () {
+    // Messages as relay_session completes a rejected publish: Exception(message).
+    const cases = {
+      'invalid: an open channel named "Launch" already exists':
+          'An open channel named "Launch" already exists',
+      'blocked: community policy': 'Community policy',
+      'relay unavailable': 'Relay unavailable',
+      'Event rejected': 'Event rejected',
+    };
+    for (final entry in cases.entries) {
+      test(entry.key, () {
+        expect(relayErrorMessage(Exception(entry.key)), entry.value);
+      });
+    }
+
+    test('a bare string error and an empty remainder stay readable', () {
+      expect(relayErrorMessage('invalid: bad name'), 'Bad name');
+      expect(relayErrorMessage(Exception('')), 'Exception:');
+    });
+  });
 }

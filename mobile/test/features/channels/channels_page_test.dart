@@ -2919,6 +2919,49 @@ void main() {
     },
   );
 
+  testWidgets('create channel sheet shows a taken-name refusal as plain text', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          // Same shape relay_session completes a refused publish with.
+          channelActionsProvider.overrideWith(
+            (ref) => _RefusingCreateActions(
+              Exception(
+                'invalid: an open channel named "Launch" already exists',
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Create'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('New channel'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('create-channel-name')),
+      'Launch',
+    );
+    await tester.pump();
+    // The sheet submits from the keyboard's done action.
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('An open channel named "Launch" already exists'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Exception'), findsNothing);
+    expect(find.textContaining('invalid:'), findsNothing);
+    // The sheet stays open so the user can pick another name.
+    expect(find.text('New channel'), findsOneWidget);
+  });
+
   dmRecipientLayoutTests(
     (overrides) => buildTestable(
       keyboardInset: 300,
@@ -3978,6 +4021,27 @@ class _CreateSheetActions implements ChannelActions {
     });
     throw StateError('Try again');
   }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _RefusingCreateActions implements ChannelActions {
+  _RefusingCreateActions(this.error);
+
+  final Object error;
+
+  @override
+  Future<Channel> createChannel({
+    String? channelId,
+    required String name,
+    required String channelType,
+    required String visibility,
+    List<String> labels = const [],
+    String? description,
+    int? ttlSeconds,
+    bool waitForChannelList = true,
+  }) async => throw error;
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
