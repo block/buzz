@@ -565,6 +565,20 @@ class ComposeBar extends HookConsumerWidget {
         return;
       }
       final outgoing = _OutgoingMentions(selectedMentions);
+      // A prefill is not typing: skip typing indicators and the mention picker.
+      void rememberNotifiedAgents(Map<String, MentionCandidate> sent) {
+        isModifyingText.value = true;
+        try {
+          _prefillAgentMentions(
+            controller,
+            mentionMap.value,
+            _notifiedAgentMentions(sent, selectedMentions, outgoing.pubkeys),
+          );
+        } finally {
+          isModifyingText.value = false;
+        }
+      }
+
       // Read before any await. These actions belong to this community and
       // refuse to run after a switch, so an Invite answered after a switch
       // cannot add people in the new community.
@@ -642,6 +656,7 @@ class ComposeBar extends HookConsumerWidget {
             ),
             outgoing: outgoing,
             onSend: sendWithOrigin,
+            onSent: rememberNotifiedAgents,
             messenger: messenger,
           );
           return;
@@ -698,6 +713,10 @@ class ComposeBar extends HookConsumerWidget {
               outgoing.pubkeys,
               mediaTags: [...payload.mediaTags, ...outgoing.referenceTags],
             );
+            if (context.mounted &&
+                draftRevision.value == clearedDraftRevision) {
+              rememberNotifiedAgents(draftMentions);
+            }
           } catch (error) {
             if (cancellation.isCancelled) return;
             if (context.mounted) uploadError.value = _formatUploadError(error);
