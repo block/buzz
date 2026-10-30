@@ -394,8 +394,8 @@ fn dial_candidates(inner: &Inner) -> Vec<RuntimeId> {
         .collect()
 }
 
-/// Dial `runtime_id`'s addresses in turn. Each dial can take a minute against
-/// a dead runtime, so before every attempt this re-reads the record and stops
+/// Dial `runtime_id`'s addresses in turn. Each attempt is capped at
+/// `DIAL_TIMEOUT`, and before every attempt this re-reads the record and stops
 /// once it has expired or started draining, or a connection has landed
 /// (inbound accept, or a tie-break).
 async fn dial_peer(inner: &Arc<Inner>, runtime_id: RuntimeId) {
