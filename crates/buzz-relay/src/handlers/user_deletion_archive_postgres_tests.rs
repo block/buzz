@@ -1,4 +1,8 @@
-use super::*;
+use super::user_deletion_test_support::Fixture;
+use nostr::{Event, EventBuilder, Keys, Kind, Tag};
+use serde_json::Value;
+use std::{sync::Arc, time::Duration};
+use uuid::Uuid;
 
 fn archive_request(key: &Keys, kind: u16) -> Event {
     EventBuilder::new(Kind::Custom(kind), Uuid::new_v4().to_string())

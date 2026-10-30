@@ -85,3 +85,14 @@ pub fn resolve_ttl(event: &nostr::Event, ephemeral_ttl_override: Option<i32>) ->
 
 /// NIP-AR artifact lifecycle.
 pub mod artifact;
+
+#[cfg(test)]
+mod user_deletion_archive_postgres_tests;
+#[cfg(test)]
+mod user_deletion_error_postgres_tests;
+#[cfg(test)]
+mod user_deletion_expanded_postgres_tests;
+#[cfg(test)]
+mod user_deletion_lifecycle_postgres_tests;
+#[cfg(test)]
+mod user_deletion_test_support;

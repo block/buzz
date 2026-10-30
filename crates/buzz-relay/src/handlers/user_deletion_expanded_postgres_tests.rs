@@ -1,43 +1,9 @@
 //! Persistent insertion coverage through HTTP and WebSocket event handling.
-use super::*;
-
-fn action(key: &Keys, channel: Uuid, kind: u16, content: &str, extra: Vec<Vec<String>>) -> Event {
-    let mut tags = vec![Tag::parse(["h", &channel.to_string()]).unwrap()];
-    tags.extend(extra.into_iter().map(|tag| Tag::parse(tag).unwrap()));
-    EventBuilder::new(Kind::Custom(kind), content)
-        .tags(tags)
-        .sign_with_keys(key)
-        .unwrap()
-}
-
-async fn snapshot(f: &Fixture) -> Vec<Value> {
-    let mut rows = Vec::new();
-    for table in [
-        "events",
-        "channels",
-        "channel_members",
-        "reactions",
-        "thread_metadata",
-        "event_mentions",
-        "operator_listener_outbox",
-        "artifact_heads",
-        "artifact_revisions",
-        "workflows",
-    ] {
-        let query = format!("SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]'::jsonb) FROM {table} t WHERE community_id=$1");
-        rows.push(
-            sqlx::query_scalar(sqlx::AssertSqlSafe(query))
-                .bind(f.tenant.community().as_uuid())
-                .fetch_one(&f.pool)
-                .await
-                .unwrap(),
-        );
-    }
-    rows
-}
-
-#[path = "user_deletion_lifecycle_postgres_tests.rs"]
-mod lifecycle_postgres_tests;
+use super::group_state_postgres_tests::create_channel;
+use super::user_deletion_test_support::{action, snapshot, Fixture};
+use nostr::{EventBuilder, Keys, Kind, Tag};
+use std::{sync::Arc, time::Duration};
+use uuid::Uuid;
 
 /// Each case must succeed before fencing, then leave every relevant table
 /// unchanged on rejection. Both real HTTP routing and the WS EVENT handler run.

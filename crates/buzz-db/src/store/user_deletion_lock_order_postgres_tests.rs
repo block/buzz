@@ -1,4 +1,9 @@
-use super::*;
+use super::user_deletion_fences::{self as fences, FenceIdentity};
+use super::user_deletion_test_support::{message, restricted, wait_for_waiter, Fixture};
+use crate::{event, Db, DbError};
+use nostr::Keys;
+use std::time::Duration;
+use uuid::Uuid;
 
 /// Exercise the actual TTL-before-author settings writer against a message
 /// holding the author's shared lock and a queued exclusive fence. PostgreSQL

@@ -101,3 +101,8 @@ mod unlisted_channels_postgres_tests;
 
 #[cfg(test)]
 mod admission_postgres_tests;
+
+#[cfg(test)]
+mod user_deletion_lock_order_postgres_tests;
+#[cfg(test)]
+mod user_deletion_test_support;
