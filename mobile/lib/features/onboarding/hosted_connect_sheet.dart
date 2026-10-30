@@ -90,11 +90,12 @@ class HostedConnectSheet extends HookConsumerWidget {
             ? 'Your Buzz identity is how communities recognize you. Create a new one, or import your existing identity if you already use Buzz.'
             : 'Your identity hasn’t been backed up yet. Bring it from your other device to keep using the same Buzz account.',
       HostedFlowStage.confirmBackup =>
-        'Continuing uploads an encrypted copy of your secret key (nsec) to '
-            '${HostedEnvironment.origin.host}. Builderlab’s recovery service can '
-            'restore this key through your account. Anyone who obtains the key can '
-            'use your identity, including on self-hosted relays. '
-            'You can cancel and keep using your self-hosted communities without uploading it.',
+        'Continuing links this identity to your Builderlab account and uploads '
+            'an encrypted copy of your secret key (nsec) to '
+            '${HostedEnvironment.origin.host}. Builderlab can decrypt this backup. '
+            'Anyone signed in to your Builderlab account can recover this key '
+            'and use your identity, including on self-hosted relays. '
+            'Cancel to stop setup and keep using your self-hosted communities.',
       HostedFlowStage.chooseCommunities => 'Select a community',
       HostedFlowStage.communityConflict =>
         '${flow.addingCommunityName} is already saved with a different identity. '

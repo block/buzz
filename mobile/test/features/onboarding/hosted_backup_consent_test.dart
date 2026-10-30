@@ -30,6 +30,8 @@ void main() {
           await f.storage.save(community);
           await f.storage.saveActiveId(community.id);
           await f.mount(tester);
+          expect(f.bound, isNull);
+          expect(f.sent('/verify'), isEmpty);
           expect(f.sent('/enrollment'), isEmpty);
           expect(f.sent('/nsec-backups'), isEmpty);
 
@@ -45,8 +47,13 @@ void main() {
             find.textContaining(HostedEnvironment.origin.host),
             findsOneWidget,
           );
-          expect(find.textContaining('recovery service'), findsOneWidget);
+          expect(
+            find.textContaining('Anyone signed in to your Builderlab account'),
+            findsOneWidget,
+          );
           expect(find.text(fullNpub(f.keys.public)!), findsOneWidget);
+          expect(f.bound, isNull);
+          expect(f.sent('/verify'), isEmpty);
           expect(f.sent('/enrollment'), isEmpty);
           expect(f.sent('/nsec-backups'), isEmpty);
           final staleConfirm = tester
@@ -65,15 +72,21 @@ void main() {
           staleConfirm();
           await f.settle(tester);
           expect(f.flow.stage, HostedFlowStage.confirmBackup);
+          expect(f.bound, isNull);
+          expect(f.sent('/verify'), isEmpty);
           expect(f.sent('/enrollment'), isEmpty);
           expect(f.sent('/nsec-backups'), isEmpty);
           await f.restart(tester);
+          expect(f.bound, isNull);
+          expect(f.sent('/verify'), isEmpty);
           expect(f.sent('/enrollment'), isEmpty);
           await f.flow.signInAccount();
           await f.settle(tester);
           expect(find.text('Back up your secret key?'), findsOneWidget);
           staleConfirm();
           await f.settle(tester);
+          expect(f.bound, isNull);
+          expect(f.sent('/verify'), isEmpty);
           expect(f.sent('/enrollment'), isEmpty);
           expect(f.sent('/nsec-backups'), isEmpty);
           // Android/system Back cancels just as the explicit local-only action does.

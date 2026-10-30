@@ -567,6 +567,30 @@ class HostedFlow extends ChangeNotifier {
             return;
           }
         }
+        if (resolved.state == HostedIdentityState.needsBinding ||
+            resolved.state == HostedIdentityState.needsBackup) {
+          final pubkey = resolved.pubkey;
+          if (pubkey == null) throw AccountIdentityFailure.absent;
+          final saved = await store.read();
+          if (_disposed || generation != _generation) return;
+          if (account.account?.subject != session.subject) {
+            throw AccountFailure.differentAccount;
+          }
+          final backup = (subject: session.subject, pubkey: pubkey);
+          // A saved relay, account binding or pending ciphertext is not consent.
+          // Ask before permanent binding as well as export. Reconcile again
+          // after confirmation; never authorize another key.
+          if (!(saved?.hasBackupFor(
+                    backend: HostedEnvironment.origin.origin,
+                    subject: session.subject,
+                  ) ??
+                  false) &&
+              approvedBackup != backup) {
+            _pendingBackup = backup;
+            _set(HostedFlowStage.confirmBackup);
+            return;
+          }
+        }
         if (resolved.state == HostedIdentityState.needsBinding &&
             resolved.pubkey != null) {
           final response = await account.post(
@@ -610,16 +634,6 @@ class HostedFlow extends ChangeNotifier {
             isCurrent: _isCurrent(generation),
           );
         } else if (resolved.state == HostedIdentityState.needsBackup) {
-          final pubkey = resolved.pubkey;
-          if (pubkey == null) throw AccountIdentityFailure.absent;
-          final backup = (subject: session.subject, pubkey: pubkey);
-          // A saved relay, account binding or pending ciphertext is not consent.
-          // Reconcile again after confirmation; never authorize another key.
-          if (approvedBackup != backup) {
-            _pendingBackup = backup;
-            _set(HostedFlowStage.confirmBackup);
-            return;
-          }
           await HostedBackupService(
             account,
             store,

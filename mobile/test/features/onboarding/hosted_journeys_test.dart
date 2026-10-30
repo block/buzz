@@ -125,7 +125,7 @@ void main() {
           release.complete();
           f.beforeStatusReturn = null;
           await f.settle(tester);
-          expect(f.bound, f.keys.public);
+          expect(f.bound, isNull);
         } else {
           await f.tap(tester, 'Create my Buzz identity');
         }
