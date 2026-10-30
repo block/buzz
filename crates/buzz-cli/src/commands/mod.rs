@@ -1,3 +1,4 @@
+pub mod agent_activity;
 pub mod agents;
 pub mod channel_templates;
 pub mod channels;
