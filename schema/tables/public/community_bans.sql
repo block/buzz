@@ -18,5 +18,6 @@ CREATE TABLE community_bans (
     actor_pubkey    BYTEA NOT NULL CHECK (length(actor_pubkey) = 32),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    access_generation UUID,
     PRIMARY KEY (community_id, pubkey)
 );

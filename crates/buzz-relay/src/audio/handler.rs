@@ -782,6 +782,10 @@ async fn run_active_audio_connection(
         return;
     }
 
+    let profile_epoch =
+        crate::verified_profiles::capture(&state, tenant.community(), nip_fi_assertion.as_ref())
+            .await;
+
     // Gate and expiry task are already armed (before auth). Perform a
     // synchronous already-expired check at the pairing point too: this catches
     // any remaining time that slipped past the pre-auth fast path after the
@@ -2012,6 +2016,14 @@ async fn run_active_audio_connection(
             return;
         }
     }
+
+    crate::verified_profiles::admitted(
+        &state,
+        tenant.community(),
+        nip_fi_assertion.as_ref(),
+        profile_epoch,
+        &control,
+    );
 
     // Commit-won. Take guard fields into the live runtime — any remaining
     // fields in guard at this point would be double-released on drop, but all

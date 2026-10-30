@@ -509,6 +509,7 @@ pub(crate) mod tests {
             pubkey_bytes: key.to_bytes().to_vec(),
             until_unix: (Utc::now() + Duration::minutes(5)).timestamp(),
             until_unix_nanos: 0,
+            profile_triggered_at: None,
         };
         match crate::api::nip_fi::apply_nip_fi_disconnect(state, &msg, Utc::now()) {
             crate::api::nip_fi::NipFiDisconnectApplyResult::Applied(merged) => merged,

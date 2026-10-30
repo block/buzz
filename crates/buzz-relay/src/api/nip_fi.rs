@@ -133,18 +133,22 @@ pub async fn disconnect(
 
     match result {
         Ok(cmd) => {
+            let triggered_at = chrono::Utc::now().timestamp();
             // ── Deny entry inserted; close sessions synchronously ─────────
             let pubkey_bytes = cmd.target_pubkey.to_bytes();
             // Issuer-scoped: the deny entry is keyed by (caller_iss, k), so only
             // sessions admitted under caller_iss are closed. [FI-TRACE-DENY-SET]
             // Shadow keeps the deny entry but closes nothing.
             let closed = if !state.config.nip_fi.mode.observes_only() {
-                state
-                    .conn_manager
-                    .disconnect_nip_fi(&cmd.caller_iss, &pubkey_bytes)
-                    + state
-                        .community_connections
-                        .disconnect_nip_fi(&cmd.caller_iss, &pubkey_bytes)
+                state.conn_manager.disconnect_nip_fi_at(
+                    &cmd.caller_iss,
+                    &pubkey_bytes,
+                    triggered_at,
+                ) + state.community_connections.disconnect_nip_fi_at(
+                    &cmd.caller_iss,
+                    &pubkey_bytes,
+                    triggered_at,
+                )
             } else {
                 state
                     .nip_fi_shadow_sessions
@@ -171,7 +175,7 @@ pub async fn disconnect(
             // Asynchronous: HTTP response does not wait on remote delivery.
             {
                 let pubsub = Arc::clone(&state.pubsub);
-                let msg = nip_fi_disconnect_message(&cmd);
+                let msg = nip_fi_disconnect_message(&cmd, triggered_at);
                 let channel = disconnect_publish_channel(state.config.nip_fi.mode);
                 state.nip_fi_publish_tasks.spawn(async move {
                     if let Err(e) = pubsub.publish_nip_fi_disconnect(channel, &msg).await {
@@ -188,6 +192,14 @@ pub async fn disconnect(
                 });
             }
 
+            if !mode.observes_only() {
+                crate::verified_profiles::disconnected(
+                    &state,
+                    &cmd.caller_iss,
+                    &cmd.target_pubkey.to_hex(),
+                    triggered_at,
+                );
+            }
             disconnected_response()
         }
         Err(err) => {
@@ -308,12 +320,16 @@ pub enum NipFiDisconnectApplyResult {
 /// This is the single publisher mapping — the HTTP success path calls this
 /// function to ensure the nanos precision is always captured correctly.
 /// Reverting either the seconds or the nanos field must red the round-trip oracle.
-pub fn nip_fi_disconnect_message(cmd: &buzz_auth::CommandResult) -> buzz_pubsub::NipFiDisconnect {
+pub fn nip_fi_disconnect_message(
+    cmd: &buzz_auth::CommandResult,
+    triggered_at: i64,
+) -> buzz_pubsub::NipFiDisconnect {
     buzz_pubsub::NipFiDisconnect {
         issuer: cmd.caller_iss.clone(),
         pubkey_bytes: cmd.target_pubkey.to_bytes().to_vec(),
         until_unix: cmd.until.timestamp(),
         until_unix_nanos: cmd.until.timestamp_subsec_nanos(),
+        profile_triggered_at: Some(triggered_at),
     }
 }
 
@@ -399,12 +415,19 @@ pub fn apply_nip_fi_disconnect(
             let sessions = &state.nip_fi_shadow_sessions;
             return sessions.would_close(&message.issuer, &message.pubkey_bytes);
         }
-        let closed = state
-            .conn_manager
-            .disconnect_nip_fi(&message.issuer, &message.pubkey_bytes)
-            + state
-                .community_connections
-                .disconnect_nip_fi(&message.issuer, &message.pubkey_bytes);
+        let closed = state.conn_manager.disconnect_nip_fi_at(
+            &message.issuer,
+            &message.pubkey_bytes,
+            message
+                .profile_triggered_at
+                .unwrap_or_else(|| now.timestamp()),
+        ) + state.community_connections.disconnect_nip_fi_at(
+            &message.issuer,
+            &message.pubkey_bytes,
+            message
+                .profile_triggered_at
+                .unwrap_or_else(|| now.timestamp()),
+        );
         if closed > 0 {
             tracing::debug!(closed, reason = reason, "nip-fi cross-pod: closed sessions");
         }
@@ -760,7 +783,7 @@ mod route_integration_tests {
 
     // ES256 key pair — same material as command.rs tests, known-good.
     const TEST_PRIVATE_KEY_PEM: &str =
-        "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\nWZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\nzhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n-----END PRIVATE KEY-----\n";
+        "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\nWZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\nzhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n-----END PRIVATE KEY-----\n"; // sadscan:disable np.pem.1 kingfisher.privkey.2 -- unchanged public ES256 test fixture
 
     const TEST_ISS: &str = "https://idp.test.example.com";
     const TEST_AUD: &str = "https://relay.test.example.com";
@@ -1285,6 +1308,7 @@ mod route_integration_tests {
             pubkey_bytes: k_a.to_bytes().to_vec(),
             until_unix,
             until_unix_nanos: 0,
+            profile_triggered_at: None,
         };
         let result_a = apply_nip_fi_disconnect(&state, &msg_a, now);
         assert_eq!(
@@ -1319,6 +1343,7 @@ mod route_integration_tests {
             pubkey_bytes: k_b.to_bytes().to_vec(),
             until_unix,
             until_unix_nanos: 0,
+            profile_triggered_at: None,
         };
         let result_b = apply_nip_fi_disconnect(&state, &msg_b, now);
         assert_eq!(
@@ -1518,6 +1543,7 @@ mod route_integration_tests {
             pubkey_bytes: target.to_bytes().to_vec(),
             until_unix,
             until_unix_nanos: 0,
+            profile_triggered_at: None,
         };
         let result = apply_nip_fi_disconnect(&state, &msg, now);
         assert_eq!(
@@ -1573,6 +1599,7 @@ mod route_integration_tests {
             pubkey_bytes: filler.to_bytes().to_vec(),
             until_unix,
             until_unix_nanos: 0,
+            profile_triggered_at: None,
         };
         let fill_result = apply_nip_fi_disconnect(&state, &msg_fill, now);
         assert_eq!(
@@ -1587,6 +1614,7 @@ mod route_integration_tests {
             pubkey_bytes: target2.to_bytes().to_vec(),
             until_unix,
             until_unix_nanos: 0,
+            profile_triggered_at: None,
         };
         let result2 = apply_nip_fi_disconnect(&state, &msg2, now);
         assert_eq!(
@@ -1688,7 +1716,7 @@ mod route_integration_tests {
         };
 
         // Publisher seam → encode → decode.
-        let msg = nip_fi_disconnect_message(&cmd);
+        let msg = nip_fi_disconnect_message(&cmd, chrono::Utc::now().timestamp());
         assert_eq!(
             msg.until_unix, 1_800_000_000,
             "publisher must capture whole-second"
@@ -1939,6 +1967,7 @@ mod route_integration_tests {
             },
         )];
         config.nip_fi = NipFiRelayConfig {
+            profile_policies: Vec::new(),
             source: Default::default(),
             mode: NipFiMode::Enforce,
             registry: registry.clone(),
@@ -2091,6 +2120,8 @@ mod route_integration_tests {
     /// Live root + audio sessions for one (issuer, key), with the tokens the
     /// close path cancels.  The guard keeps the audio socket registered.
     struct IssuerSessions {
+        root_control: crate::state::CommunityConnectionControl,
+        audio_control: crate::state::CommunityConnectionControl,
         root: tokio_util::sync::CancellationToken,
         audio: tokio_util::sync::CancellationToken,
         _audio_guard: crate::state::CommunityConnectionGuard,
@@ -2104,6 +2135,7 @@ mod route_integration_tests {
             let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil());
             let root = CancellationToken::new();
             let conn_id = uuid::Uuid::new_v4();
+            let root_control = CommunityConnectionControl::new(root.clone());
             state.conn_manager.register(
                 conn_id,
                 mpsc::channel(8).0,
@@ -2115,7 +2147,7 @@ mod route_integration_tests {
                 Arc::new(std::sync::atomic::AtomicU8::new(0)),
                 Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
                 3,
-                CommunityConnectionControl::new(root.clone()),
+                root_control.clone(),
             );
             state.conn_manager.set_authenticated_identity(
                 conn_id,
@@ -2132,8 +2164,10 @@ mod route_integration_tests {
             let _audio_guard =
                 state
                     .community_connections
-                    .register(uuid::Uuid::new_v4(), community, ctrl);
+                    .register(uuid::Uuid::new_v4(), community, ctrl.clone());
             Self {
+                root_control,
+                audio_control: ctrl,
                 root,
                 audio,
                 _audio_guard,
@@ -2164,6 +2198,7 @@ mod route_integration_tests {
         let under_a = IssuerSessions::register(&state, TEST_ISS, &key);
         let under_b = IssuerSessions::register(&state, OTHER_ISS, &key);
 
+        let before = chrono::Utc::now().timestamp();
         let token = mint_token(&key.to_hex(), 300, serde_json::json!({}));
         let resp = do_request(
             Arc::clone(&state),
@@ -2179,6 +2214,14 @@ mod route_integration_tests {
 
         under_a.assert_closed("issuer A");
         under_b.assert_open("issuer B");
+        let trigger = under_a.root_control.profile_disconnected_at().unwrap();
+        assert!((before..=chrono::Utc::now().timestamp()).contains(&trigger));
+        assert_eq!(
+            under_a.audio_control.profile_disconnected_at(),
+            Some(trigger)
+        );
+        assert_eq!(under_b.root_control.profile_disconnected_at(), None);
+        assert_eq!(under_b.audio_control.profile_disconnected_at(), None);
     }
 
     /// State whose registry and deny map know only issuer A (`TEST_ISS`).
@@ -2231,6 +2274,7 @@ mod route_integration_tests {
             pubkey_bytes: key.to_bytes().to_vec(),
             until_unix: (chrono::Utc::now() + chrono::Duration::seconds(300)).timestamp(),
             until_unix_nanos: 0,
+            profile_triggered_at: Some(1_700_000_000),
         }
     }
 
@@ -2249,6 +2293,16 @@ mod route_integration_tests {
         assert_eq!(result, NipFiDisconnectApplyResult::Applied(expected));
         under_a.assert_closed("issuer A");
         under_b.assert_open("issuer B");
+        assert_eq!(
+            under_a.root_control.profile_disconnected_at(),
+            Some(1_700_000_000)
+        );
+        assert_eq!(
+            under_a.audio_control.profile_disconnected_at(),
+            Some(1_700_000_000)
+        );
+        assert_eq!(under_b.root_control.profile_disconnected_at(), None);
+        assert_eq!(under_b.audio_control.profile_disconnected_at(), None);
     }
 
     #[tokio::test]
@@ -3565,6 +3619,7 @@ mod route_integration_tests {
                 },
             )];
             config.nip_fi = NipFiRelayConfig {
+                profile_policies: Vec::new(),
                 source: Default::default(),
                 mode: NipFiMode::Shadow,
                 registry: registry.clone(),

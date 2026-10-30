@@ -563,6 +563,8 @@ mod postgres_tests {
             "storage_accounting_snapshots",
             "operator_listener_pubkeys",
             "operator_listener_outbox",
+            "nip_fi_profile_policies",
+            "nip_fi_profile_config",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -776,7 +778,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 78);
+        assert_eq!(migrations.len(), 79);
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }

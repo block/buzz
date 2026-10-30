@@ -309,7 +309,10 @@ pub async fn remove_relay_member(
     )
     .await?;
     if delete_member_with_acceptances(&mut tx, pubkey, None).await? {
-        return commit_membership_write(tx, RemoveResult::Removed, true, relay_keypair).await;
+        let result =
+            commit_membership_write(tx, RemoveResult::Removed, true, relay_keypair).await?;
+        crate::verified_profiles::schedule_access_cleanup(pool, community, Some(pubkey), None);
+        return Ok(result);
     }
 
     // Nothing was locked: either not found or is owner. One cheap read to
@@ -354,7 +357,10 @@ pub async fn remove_relay_member_if_role(
     )
     .await?;
     if delete_member_with_acceptances(&mut tx, pubkey, Some(expected_role)).await? {
-        return commit_membership_write(tx, RemoveResult::Removed, true, relay_keypair).await;
+        let result =
+            commit_membership_write(tx, RemoveResult::Removed, true, relay_keypair).await?;
+        crate::verified_profiles::schedule_access_cleanup(pool, community, Some(pubkey), None);
+        return Ok(result);
     }
 
     // Nothing was locked: either not found or role changed. One cheap read to

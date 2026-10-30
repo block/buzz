@@ -399,6 +399,11 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
         info.artifacts["incremental"] = crate::api::artifact_sync::capability();
     }
     if let Ok(tenant) = crate::tenant::bind_community(&state.db, raw_host).await {
+        if let Some(profile) = crate::verified_profiles::discovery(state, &tenant).await {
+            if let Some(fi) = info.federated_identity.as_mut() {
+                fi["public_profile"] = profile;
+            }
+        }
         if state.config.buzz_v1_enabled {
             use buzz_db::personal_read::{ELIGIBLE_KINDS, MAX_CHANNELS, MAX_INTENTS};
             info.buzz_v1 = Some(BuzzV1Descriptor {

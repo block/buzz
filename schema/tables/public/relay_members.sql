@@ -9,6 +9,7 @@ CREATE TABLE relay_members (
     added_by    TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    access_generation UUID DEFAULT gen_random_uuid(),
     PRIMARY KEY (community_id, pubkey)
 );
 

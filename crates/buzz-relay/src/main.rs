@@ -936,6 +936,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         app_state.nip_fi_resolver = Some(resolver);
     }
     let state = Arc::new(app_state);
+    buzz_relay::verified_profiles::start(Arc::clone(&state));
     if let Some(tenant) = &deployment_community {
         buzz_relay::handlers::side_effects::fan_out_nip43_membership_list(
             tenant,

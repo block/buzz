@@ -136,6 +136,13 @@ pub(super) struct IssuerEnvConfig {
     /// [`crate::api::nip_fi::DEFAULT_DENY_SET_CAPACITY`] when absent.
     #[serde(default)]
     pub deny_set_capacity: Option<usize>,
+    /// Operator opt-in for output-only verified profiles.
+    #[serde(default)]
+    pub public_profile: bool,
+    /// Public display label, never an issuer URI.
+    pub public_issuer_label: Option<String>,
+    /// Seconds between unchanged-name refreshes (default one hour).
+    pub verified_at_refresh_seconds: Option<u32>,
 }
 
 /// Token-class discriminant in the issuer config JSON.
@@ -286,6 +293,8 @@ pub struct NipFiRelayConfig {
     /// Per-issuer S4 command entries: `(issuer_uri, CommandIssuerEnvConfig)`.
     /// Empty when mode is Off/DenyProtected.
     pub command_configs: Vec<(String, crate::api::nip_fi::CommandIssuerEnvConfig)>,
+    /// Output-only publication policies; independent of authorization capabilities.
+    pub profile_policies: Vec<buzz_db::verified_profiles::ProfilePolicy>,
 }
 
 impl NipFiRelayConfig {
@@ -321,6 +330,7 @@ impl NipFiRelayConfig {
                 jwks_configs: Vec::new(),
                 max_connection_lifetime_secs: 0,
                 command_configs: Vec::new(),
+                profile_policies: Vec::new(),
             });
         }
 
@@ -381,6 +391,7 @@ impl NipFiRelayConfig {
         let mut policies = Vec::with_capacity(issuer_entries.len());
         let mut jwks_configs = Vec::with_capacity(issuer_entries.len());
         let mut command_configs = Vec::new();
+        let mut profile_policies = Vec::new();
 
         for (issuer_idx, entry) in issuer_entries.iter().enumerate() {
             let (policy, jwks_config) = build_issuer(entry).map_err(|e| {
@@ -390,6 +401,28 @@ impl NipFiRelayConfig {
                     "BUZZ_NIP_FI_ISSUERS: issuer at index {issuer_idx}: {e}"
                 ))
             })?;
+            let refresh = entry.verified_at_refresh_seconds.unwrap_or(3600);
+            if refresh > 86400 {
+                return Err(ConfigError::InvalidValue(
+                    "verified_at_refresh_seconds must be in [0, 86400]".into(),
+                ));
+            }
+            let label = entry
+                .public_issuer_label
+                .as_ref()
+                .filter(|label| {
+                    entry.public_profile
+                        && buzz_auth::nip_fi::public_profile::valid_display_name(label)
+                        && !label.contains("://")
+                        && *label != &entry.issuer
+                })
+                .cloned();
+            profile_policies.push(buzz_db::verified_profiles::ProfilePolicy {
+                issuer: entry.issuer.clone(),
+                label,
+                refresh_seconds: i64::from(refresh),
+                community_hosts: None,
+            });
             policies.push(policy);
             jwks_configs.push(jwks_config);
 
@@ -492,6 +525,18 @@ impl NipFiRelayConfig {
             // authorization still needs a per-community binding.
             CommunitySource::Database => NipFiCommunities::default(),
         };
+        // Retain the association itself so removed communities can initiate
+        // scoped cleanup while generation changes fence queued publication.
+        for policy in &mut profile_policies {
+            policy.community_hosts = (source == CommunitySource::Env).then(|| {
+                communities
+                    .by_host
+                    .iter()
+                    .filter(|(_, binding)| binding.authorizes(&policy.issuer))
+                    .map(|(host, _)| host.clone())
+                    .collect()
+            });
+        }
         for policy in policies {
             registry.insert(policy);
         }
@@ -515,6 +560,7 @@ impl NipFiRelayConfig {
             jwks_configs,
             max_connection_lifetime_secs,
             command_configs,
+            profile_policies,
         })
     }
 }
@@ -703,7 +749,8 @@ fn build_issuer(entry: &IssuerEnvConfig) -> Result<(IssuerPolicy, IssuerJwksConf
         None, // offline-jwt: no status age
         jwks_contract.clone(),
     )
-    .map_err(|e: IssuerPolicyError| e.to_string())?;
+    .map_err(|e: IssuerPolicyError| e.to_string())?
+    .with_public_profile(entry.public_profile, entry.public_issuer_label.clone());
 
     let jwks_config = IssuerJwksConfig {
         issuer: entry.issuer.clone(),

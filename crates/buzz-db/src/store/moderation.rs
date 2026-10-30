@@ -364,10 +364,11 @@ pub async fn ban_member(
     sqlx::query(
         r#"
         INSERT INTO community_bans (
-            community_id, pubkey, banned, ban_expires_at, ban_reason, actor_pubkey
-        ) VALUES ($1, $2, true, $3, $4, $5)
+            community_id, pubkey, banned, ban_expires_at, ban_reason, actor_pubkey, access_generation
+        ) VALUES ($1, $2, true, $3, $4, $5, gen_random_uuid())
         ON CONFLICT (community_id, pubkey) DO UPDATE SET
             banned = true,
+            access_generation = gen_random_uuid(),
             ban_expires_at = EXCLUDED.ban_expires_at,
             ban_reason = EXCLUDED.ban_reason,
             actor_pubkey = EXCLUDED.actor_pubkey,
@@ -383,6 +384,12 @@ pub async fn ban_member(
     .await?;
     crate::relay_invite::revoke_banned_issuer_invites(tx.conn(), community, pubkey).await?;
     tx.commit().await?;
+    crate::verified_profiles::schedule_access_cleanup(
+        pool,
+        community,
+        Some(&hex::encode(pubkey)),
+        None,
+    );
     Ok(())
 }
 
