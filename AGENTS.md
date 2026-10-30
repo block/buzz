@@ -325,6 +325,17 @@ system channels out of these reads unless the filter asks for them (see
 
 **Agent-facing operations go in `buzz-cli`**: New agent-facing features belong in `buzz-cli` — add a subcommand there first, then wire the REST/WebSocket call in `client.rs`. `buzz-dev-mcp` (shell + file tools for `buzz-agent`) is separate.
 
+**Desktop agents run sandboxed**: on macOS and Linux, every local agent
+launches as `nono wrap --profile <nest>-agent-local -- buzz-acp`
+(`desktop/src-tauri/src/managed_agents/sandbox.rs`), and the agent, its MCP
+servers, and its shell commands inherit that sandbox. A path every agent needs
+(a new runtime's state or cache folder) goes in
+`managed_agents/sandbox_profile.json`; a path that depends on one launch goes in
+`spawn_grants`. Build spawn commands with `agent_command` and
+`finish_sandboxed_command`, never `Command::new(buzz-acp)`: a sandboxed spawn
+must fail closed, not fall back to unsandboxed. `NONO_*` env is reserved. User
+guide: [docs/agent-sandbox.md](docs/agent-sandbox.md).
+
 **Workflow conditions**: `buzz-workflow` uses
 [evalexpr](https://docs.rs/evalexpr) for condition evaluation. Keep expressions
 simple and testable.

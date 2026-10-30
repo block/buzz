@@ -901,6 +901,32 @@ pub fn codex_network_env(agent_command: &str, relay_url: &str) -> Option<(String
     ))
 }
 
+/// Set by Buzz Desktop when it launched this harness inside an outer OS
+/// sandbox. The only recognized value is `nono`.
+pub(crate) const OUTER_SANDBOX_ENV: &str = "BUZZ_ACP_OUTER_SANDBOX";
+
+/// Adapter env that must be forced when the harness itself runs inside an
+/// outer sandbox, or `None` when nothing needs to change.
+///
+/// macOS refuses to apply a Seatbelt profile inside another one, so an agent
+/// that sandboxes its own tool calls with Seatbelt fails under nono. The Codex
+/// adapter (`codex-acp` 1.10+) picks its per-turn sandbox from its session
+/// mode; starting in `agent-full-access` makes Codex skip its own sandbox and
+/// leaves nono as the boundary. Linux is unaffected: Landlock domains stack.
+pub(crate) fn outer_sandbox_agent_env(
+    command: &str,
+    outer_sandbox: Option<&str>,
+    macos: bool,
+) -> Option<(&'static str, &'static str)> {
+    if !macos || outer_sandbox != Some("nono") {
+        return None;
+    }
+    match normalize_agent_command_identity(command).as_str() {
+        "codex" | "codex-acp" => Some(("INITIAL_AGENT_MODE", "agent-full-access")),
+        _ => None,
+    }
+}
+
 pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<String> {
     let normalized = agent_args
         .into_iter()
@@ -1892,6 +1918,35 @@ mod tests {
         assert!(codex_network_env("goose", "wss://relay.example.com").is_none());
         assert!(codex_network_env("claude-agent-acp", "wss://relay.example.com").is_none());
         assert!(codex_network_env("buzz-agent", "wss://relay.example.com").is_none());
+    }
+
+    #[test]
+    fn outer_nono_sandbox_starts_codex_without_its_own_sandbox_on_macos() {
+        for command in ["codex-acp", "/opt/homebrew/bin/codex-acp", "codex"] {
+            assert_eq!(
+                outer_sandbox_agent_env(command, Some("nono"), true),
+                Some(("INITIAL_AGENT_MODE", "agent-full-access")),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn outer_sandbox_env_is_scoped_to_nono_codex_on_macos() {
+        assert_eq!(
+            outer_sandbox_agent_env("codex-acp", Some("nono"), false),
+            None
+        );
+        assert_eq!(outer_sandbox_agent_env("codex-acp", None, true), None);
+        assert_eq!(
+            outer_sandbox_agent_env("codex-acp", Some("other"), true),
+            None
+        );
+        assert_eq!(
+            outer_sandbox_agent_env("claude-agent-acp", Some("nono"), true),
+            None
+        );
+        assert_eq!(outer_sandbox_agent_env("goose", Some("nono"), true), None);
     }
 
     #[test]

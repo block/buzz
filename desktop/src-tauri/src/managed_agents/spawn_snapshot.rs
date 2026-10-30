@@ -80,6 +80,8 @@ pub(crate) struct SpawnConfigInputs<'a> {
     /// boundary; captured here so editing the definition while an agent runs
     /// drives the existing restart-required path.
     pub session_policy: AcpSessionPolicy,
+    /// Whether the launch runs inside the nono agent sandbox.
+    pub sandboxed: bool,
 }
 
 /// The effective spawn configuration of one managed-agent process.
@@ -151,6 +153,10 @@ pub(crate) struct SpawnConfigSnapshot {
     /// via layered env), so it must be captured explicitly rather than read back
     /// out of `env`.
     pub session_policy: String,
+    /// Whether the process runs inside the nono agent sandbox. Toggling the
+    /// global setting raises the restart badge: the sandbox is applied at
+    /// launch and cannot change for a running process.
+    pub sandboxed: bool,
 }
 
 /// The startup effort a spawn actually applied, read from the single effort key
@@ -190,6 +196,7 @@ impl SpawnConfigSnapshot {
             provider,
             enforced_owner_only,
             session_policy,
+            sandboxed,
         } = inputs;
         let (respond_to, respond_to_allowlist) =
             super::projected_access_with_policy(record, enforced_owner_only);
@@ -257,6 +264,7 @@ impl SpawnConfigSnapshot {
             // what launched regardless of which tier supplied the value.
             effort_level: effective_effort(descriptor),
             session_policy: session_policy.as_str().to_string(),
+            sandboxed,
         }
     }
 
@@ -348,6 +356,7 @@ pub(crate) fn prospective_spawn_config_snapshot(
         provider: provider.as_deref(),
         enforced_owner_only,
         session_policy: record.session_policy,
+        sandboxed: super::sandbox::sandbox_requested(global),
     })
 }
 
