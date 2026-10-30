@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:buzz/shared/hosted/browser_auth.dart';
@@ -328,6 +329,48 @@ void main() {
     },
   );
 
+  test(
+    'a restored owner consuming its callback is never failed by a peer',
+    () async {
+      late Uri organizationLogin;
+      final first = BrowserAuth(
+        origin: organization,
+        openBrowser: (uri) async {
+          organizationLogin = uri;
+          return null;
+        },
+      );
+      await first.start({'purpose': 'organization'});
+      await first.dispose();
+      // After a restart neither owner has the attempt in memory.
+      final gated = _PausedReadStorage();
+      final org = BrowserAuth(origin: organization, storage: gated);
+      final hosted = BrowserAuth(openBrowser: (_) async => null);
+      final hostedFailures = <BrowserAuthFailure>[];
+      final orgCodes = <BrowserAuthCode>[];
+      hosted.failures.listen(hostedFailures.add);
+      org.codes.listen(orgCodes.add);
+      final callback = Uri.parse(BrowserAuth.callback).replace(
+        queryParameters: {
+          'state': organizationLogin.queryParameters['state']!,
+          'code': 'org-code',
+        },
+      );
+      // The hosted owner's ownership check reads the peer attempt, which
+      // the organization owner consumes before that read returns.
+      final hostedReceive = hosted.receive(callback);
+      await gated.paused.future;
+      await org.receive(callback);
+      gated.resume.complete();
+      await hostedReceive;
+      await pumpEventQueue();
+      expect(orgCodes.single.code, 'org-code');
+      expect(hostedFailures, isEmpty);
+      await hosted.dispose();
+      await org.dispose();
+    },
+  );
+
   test('completed sign-in stores the session and reconnects once', () async {
     late Uri login;
     var reconnects = 0;
@@ -432,4 +475,27 @@ void main() {
       signIn.dispose();
     },
   );
+}
+
+/// Pauses the first read, then serves reads after the peer's changes.
+class _PausedReadStorage extends FlutterSecureStorage {
+  final paused = Completer<void>();
+  final resume = Completer<void>();
+
+  @override
+  Future<String?> read({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    if (!paused.isCompleted) {
+      paused.complete();
+      await resume.future;
+    }
+    return super.read(key: key);
+  }
 }
