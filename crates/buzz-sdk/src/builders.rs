@@ -2108,7 +2108,8 @@ pub enum ReportTarget<'a> {
 /// A message report carries `["p", author]` and `["e", event_id, type]`; a
 /// user report carries `["p", pubkey, type]`. No `h` tag is added: the relay
 /// reads the channel from the stored event. `note` is trimmed and becomes the
-/// content; blank means empty content.
+/// content; blank means empty content. Self-tagging is allowed so reporting
+/// your own message or key keeps the `p` tag the relay requires.
 pub fn build_report(
     target: ReportTarget<'_>,
     report_type: &str,
@@ -2136,7 +2137,9 @@ pub fn build_report(
     };
     let note = note.map(str::trim).unwrap_or("");
     check_content(note, 64 * 1024)?;
-    Ok(EventBuilder::new(Kind::Custom(KIND_REPORT as u16), note).tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(KIND_REPORT as u16), note)
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 // ---------------------------------------------------------------------------
@@ -5325,6 +5328,27 @@ mod tests {
                 vec!["e".to_string(), eid, "spam".to_string()],
             ]
         );
+    }
+
+    #[test]
+    fn report_keeps_p_tag_when_signer_is_the_reported_user() {
+        let keys = nostr::Keys::generate();
+        let me = keys.public_key().to_hex();
+        let eid = event_id().to_hex();
+        let user = build_report(ReportTarget::Pubkey(&me), "spam", None).unwrap();
+        let msg = build_report(
+            ReportTarget::Event {
+                author_pubkey: &me,
+                event_id: &eid,
+            },
+            "spam",
+            None,
+        )
+        .unwrap();
+        for builder in [user, msg] {
+            let ev = builder.sign_with_keys(&keys).unwrap();
+            assert!(tag_vecs(&ev).iter().any(|t| t[0] == "p" && t[1] == me));
+        }
     }
 
     #[test]

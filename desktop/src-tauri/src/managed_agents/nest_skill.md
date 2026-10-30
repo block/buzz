@@ -140,7 +140,7 @@ buzz messages send --channel <UUID> \
 
 Other kind values are rejected. Use `messages vote --event <id> --direction up|down` to vote on forum posts.
 
-Use `messages report --event <id> --reason <type> [--note <text>]` to report a message to the community moderators, or `messages report --pubkey <hex> --reason <type>` to report a user. `<type>` is one of `illegal`, `nudity`, `malware`, `spam`, `impersonation`, `profanity`, `other`. `--channel <UUID>` is optional and only checks the message is in that channel. A report reaches moderators only: it prints `{event_id, accepted, message}`, never appears in the channel, and is rejected as not found (exit 1) when you cannot read the message. Report only when asked or when content clearly breaks community rules.
+Use `messages report --event <id> --reason <type> [--note <text>]` to report a message to the community moderators, or `messages report --pubkey <hex> --reason <type>` to report a user. `<type>` is one of `illegal`, `nudity`, `malware`, `spam`, `impersonation`, `profanity`, `other`. `--channel <UUID>` is optional and only checks the message is in that channel. A report reaches moderators only: it prints `{event_id, accepted, message}`, never appears in the channel, and is rejected as not found (exit 1) when you cannot read the message.
 
 ## Message Formatting
 

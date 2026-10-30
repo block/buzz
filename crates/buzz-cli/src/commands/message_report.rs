@@ -30,7 +30,9 @@ pub struct ReportParams<'a> {
 /// missing one, so both surface as not-found rather than a relay failure.
 fn interpret_submit_error(e: CliError) -> CliError {
     match e {
-        CliError::Relay { status: 400, body } if body.contains("report target") => {
+        CliError::Relay { status: 400, body }
+            if body.starts_with("invalid: report target ") && body.ends_with(" not found") =>
+        {
             CliError::NotFound(body)
         }
         other => other,
@@ -42,7 +44,9 @@ pub async fn cmd_report_message(
     client: &BuzzClient,
     params: ReportParams<'_>,
 ) -> Result<(), CliError> {
-    let builder = match (params.event, params.pubkey) {
+    let event = params.event.map(str::to_ascii_lowercase);
+    let pubkey = params.pubkey.map(str::to_ascii_lowercase);
+    let builder = match (event.as_deref(), pubkey.as_deref()) {
         (Some(event_id), None) => {
             validate_hex64(event_id)?;
             let event = fetch_event(client, event_id).await?;
@@ -127,11 +131,16 @@ mod tests {
         let app = Router::new()
             .route(
                 "/query",
-                post(|State(s): State<Relay>| async move {
+                post(|State(s): State<Relay>, body: String| async move {
+                    let matches = serde_json::from_str::<serde_json::Value>(&s.query)
+                        .ok()
+                        .and_then(|events| events[0]["id"].as_str().map(|id| body.contains(id)))
+                        .unwrap_or(true);
+                    let reply = if matches { s.query } else { "[]".to_string() };
                     (
                         StatusCode::OK,
                         [("content-type", "application/json")],
-                        s.query,
+                        reply,
                     )
                 }),
             )
@@ -157,8 +166,12 @@ mod tests {
     }
 
     fn message_in_channel() -> serde_json::Value {
+        message_by(AUTHOR)
+    }
+
+    fn message_by(author: &str) -> serde_json::Value {
         serde_json::json!([{
-            "id": EVENT, "pubkey": AUTHOR, "kind": 9, "content": "hi",
+            "id": EVENT, "pubkey": author, "kind": 9, "content": "hi",
             "created_at": 1, "tags": [["h", CHANNEL]], "sig": "00"
         }])
     }
@@ -238,6 +251,78 @@ mod tests {
                 vec!["e".to_string(), EVENT.to_string(), "spam".to_string()],
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn self_reports_keep_the_p_tag() {
+        let keys = Keys::generate();
+        let me = keys.public_key().to_hex();
+        let ok = r#"{"event_id":"e1","accepted":true,"message":""}"#;
+
+        let (url, captured) = fake_relay(message_by(&me), StatusCode::OK, ok).await;
+        let client = BuzzClient::new(url, keys.clone(), None, None).unwrap();
+        cmd_report_message(
+            &client,
+            ReportParams {
+                channel: None,
+                event: Some(EVENT),
+                pubkey: None,
+                reason: "spam",
+                note: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            tags(&captured.lock().unwrap()[0]),
+            vec![
+                vec!["p".to_string(), me.clone()],
+                vec!["e".to_string(), EVENT.to_string(), "spam".to_string()],
+            ]
+        );
+
+        let (url, captured) = fake_relay(serde_json::json!([]), StatusCode::OK, ok).await;
+        let client = BuzzClient::new(url, keys, None, None).unwrap();
+        cmd_report_message(
+            &client,
+            ReportParams {
+                channel: None,
+                event: None,
+                pubkey: Some(&me),
+                reason: "spam",
+                note: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            tags(&captured.lock().unwrap()[0]),
+            vec![vec!["p".to_string(), me, "spam".to_string()]]
+        );
+    }
+
+    #[tokio::test]
+    async fn uppercase_ids_are_normalized_before_lookup_and_signing() {
+        let (url, captured) = fake_relay(
+            message_in_channel(),
+            StatusCode::OK,
+            r#"{"event_id":"e1","accepted":true,"message":""}"#,
+        )
+        .await;
+        let upper = EVENT.to_uppercase();
+        cmd_report_message(
+            &client(url),
+            ReportParams {
+                channel: None,
+                event: Some(&upper),
+                pubkey: None,
+                reason: "spam",
+                note: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(tags(&captured.lock().unwrap()[0])[1][1], EVENT);
     }
 
     #[tokio::test]
@@ -357,6 +442,21 @@ mod tests {
         .await;
         assert!(matches!(err, CliError::NotFound(_)), "{err}");
         assert_eq!(code, 1);
+
+        let (err, code) = rejected_exit_code(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":"invalid: report target blob not found"}"#,
+        )
+        .await;
+        assert!(matches!(err, CliError::NotFound(_)), "{err}");
+        assert_eq!(code, 1);
+
+        let (_, code) = rejected_exit_code(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":"invalid: report must include a p tag"}"#,
+        )
+        .await;
+        assert_eq!(code, 2);
 
         let (_, code) = rejected_exit_code(
             StatusCode::BAD_REQUEST,
