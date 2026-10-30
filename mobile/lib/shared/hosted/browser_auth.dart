@@ -25,23 +25,33 @@ class BrowserAuthCode {
   final Map<String, String> intent;
 }
 
-/// One app-scoped owner. Subscribe to [codes] and [failures] before [initialize].
-/// Callbacks bypass the community deep-link FIFO. A consumed code is never
-/// replayed automatically: exchange failure requires a fresh browser login.
+/// One app-scoped owner per account origin. Subscribe to [codes] and
+/// [failures] before [initialize]. Callbacks bypass the community deep-link
+/// FIFO. A consumed code is never replayed automatically: exchange failure
+/// requires a fresh browser login.
+///
+/// Every origin shares the one registered [callback], so an owner leaves a
+/// callback whose state belongs to another live owner's attempt to that owner.
 class BrowserAuth {
   BrowserAuth({
     FlutterSecureStorage? storage,
     Future<String?> Function(Uri)? openBrowser,
     DateTime Function()? now,
+    Uri? origin,
   }) : _storage = storage ?? accountSecureStorage,
        _openBrowser = openBrowser ?? _openPlatformBrowser,
-       _now = now ?? DateTime.now;
+       _now = now ?? DateTime.now,
+       origin = origin ?? HostedEnvironment.origin {
+    _owners.add(this);
+  }
 
   static const callback = 'xyz.block.buzz.mobile:/auth/callback';
-  static final _attemptKey =
-      'buzz_browser_auth_attempt_v1_${HostedEnvironment.origin.host}';
-  static final _intentKey =
-      'buzz_browser_auth_intent_v1_${HostedEnvironment.origin.host}';
+  static final _owners = <BrowserAuth>{};
+
+  /// The account origin this owner signs in to.
+  final Uri origin;
+  late final _attemptKey = 'buzz_browser_auth_attempt_v1_${origin.host}';
+  late final _intentKey = 'buzz_browser_auth_intent_v1_${origin.host}';
   static const _channel = MethodChannel('buzz/browser_auth');
   final FlutterSecureStorage _storage;
   final Future<String?> Function(Uri) _openBrowser;
@@ -57,6 +67,7 @@ class BrowserAuth {
   int _generation = 0;
   String? _activeState;
   String? _consumedCallbackHash;
+  String? _consumedState;
 
   Future<T> _serial<T>(Future<T> Function() task) {
     final result = _queue.run(() {
@@ -133,11 +144,13 @@ class BrowserAuth {
       } catch (_) {
         throw BrowserAuthFailure.storage;
       }
-      return HostedEnvironment.origin.replace(
-        path: '/api/goose/v1/auth/login',
+      // Public accounts must finish web setup before native code issuance.
+      // Organization accounts retain their existing direct CLI login.
+      final publicAccount = origin == HostedEnvironment.origin;
+      return origin.replace(
+        path: publicAccount ? '/auth/native' : '/api/goose/v1/auth/login',
         queryParameters: {
-          'type': 'cli',
-          'product': 'buzz',
+          if (!publicAccount) ...{'type': 'cli', 'product': 'buzz'},
           'returnTo': callback,
           'state': state,
           'code_challenge': base64UrlEncode(
@@ -191,7 +204,9 @@ class BrowserAuth {
       try {
         final saved = await _storage.read(key: _attemptKey);
         if (saved == null) {
-          fail(BrowserAuthFailure.restartLogin);
+          if (!await _peerOwns(query['state']?.single)) {
+            fail(BrowserAuthFailure.restartLogin);
+          }
           return;
         }
         final record = jsonDecode(saved) as Map<String, dynamic>;
@@ -200,16 +215,18 @@ class BrowserAuth {
             !RegExp(r'^[A-Za-z0-9_-]{43}$').hasMatch(expectedState)) {
           throw BrowserAuthFailure.storage;
         }
+        // Another owner's callback never expires this owner's attempt.
+        if (query['state']?.single != expectedState) {
+          if (_activeState != expectedState &&
+              !await _peerOwns(query['state']?.single)) {
+            fail(BrowserAuthFailure.restartLogin);
+          }
+          return;
+        }
         final age =
             _now().toUtc().millisecondsSinceEpoch - (record['created'] as int);
         if (age < 0 || age > const Duration(minutes: 10).inMilliseconds) {
           fail(BrowserAuthFailure.restartLogin);
-          return;
-        }
-        if (query['state']?.single != expectedState) {
-          if (_activeState != expectedState) {
-            fail(BrowserAuthFailure.restartLogin);
-          }
           return;
         }
         if (generation != _generation) return;
@@ -226,6 +243,9 @@ class BrowserAuth {
           throw BrowserAuthFailure.storage;
         }
         final intent = Map<String, String>.from(record['intent'] as Map);
+        // Claimed before the saved attempt disappears, so a peer checking
+        // ownership concurrently never sees neither.
+        _consumedState = expectedState;
         await _storage.delete(key: _attemptKey);
         if (await _storage.read(key: _attemptKey) != null) {
           throw BrowserAuthFailure.storage;
@@ -257,12 +277,36 @@ class BrowserAuth {
   /// Call only after completing or explicitly abandoning the retained intent.
   Future<void> clearIntent() => _serial(() => _storage.delete(key: _intentKey));
 
+  /// Whether another live owner has a saved attempt with this state.
+  Future<bool> _peerOwns(String? state) async {
+    if (state == null) return false;
+    for (final peer in _owners.toList()) {
+      if (identical(peer, this) || peer._disposed) continue;
+      if (peer._activeState == state || peer._consumedState == state) {
+        return true;
+      }
+      try {
+        final saved = await peer._storage.read(key: peer._attemptKey);
+        if (saved != null &&
+            (jsonDecode(saved) as Map<String, dynamic>)['state'] == state) {
+          return true;
+        }
+        // The peer may have consumed its attempt during the read.
+        if (peer._consumedState == state) return true;
+      } catch (_) {
+        // An unreadable peer attempt is that owner's failure to report.
+      }
+    }
+    return false;
+  }
+
   void _fail(BrowserAuthFailure failure) {
     if (!_disposed) _failures.add(failure);
   }
 
   Future<void> dispose() async {
     _disposed = true;
+    _owners.remove(this);
     ++_generation;
     await _links?.cancel();
     await _codes.close();

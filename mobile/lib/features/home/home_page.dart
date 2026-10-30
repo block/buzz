@@ -177,10 +177,7 @@ class HomePage extends HookConsumerWidget {
         communitySurfaceProgress.value = progress;
       },
     );
-    final bottom =
-        MediaQuery.viewPaddingOf(context).bottom > mobileTabBarBottomGap
-        ? MediaQuery.viewPaddingOf(context).bottom
-        : mobileTabBarBottomGap;
+    final bottom = mobileTabBarBottom(context);
     return Scaffold(
       resizeToAvoidBottomInset: false,
       body: Stack(

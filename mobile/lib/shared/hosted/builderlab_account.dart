@@ -52,17 +52,22 @@ class BuilderlabAccount {
 /// subject is refused until the caller clears the session and every fact it
 /// holds for the previous subject.
 class BuilderlabAccountClient {
+  /// [accountOrigin] defaults to the hosted account environment. An
+  /// organization client uses its own trusted origin and session record.
   BuilderlabAccountClient({
     http.Client? httpClient,
     FlutterSecureStorage? storage,
+    Uri? accountOrigin,
   }) : _http = httpClient ?? http.Client(),
-       _storage = storage ?? defaultStorage;
+       _storage = storage ?? defaultStorage,
+       accountOrigin = accountOrigin ?? origin;
 
   /// Device-only: the session never syncs or restores onto another device.
   @visibleForTesting
   static const defaultStorage = accountSecureStorage;
 
   static final origin = HostedEnvironment.origin;
+  final Uri accountOrigin;
   static const _prefix = '/api/goose';
 
   /// Remote-agent registry routes, shared with desktop.
@@ -79,8 +84,8 @@ class BuilderlabAccountClient {
   };
 
   /// Sessions are scoped per origin so staging never reads production state.
-  static final _storageKey =
-      'buzz_hosted_session_${origin.host.replaceAll('.', '_')}_v1';
+  late final _storageKey =
+      'buzz_hosted_session_${accountOrigin.host.replaceAll('.', '_')}_v1';
   final http.Client _http;
   final FlutterSecureStorage _storage;
   String? _credential;
@@ -155,7 +160,7 @@ class BuilderlabAccountClient {
     }
     if (_disposed) throw AccountFailure.unavailable;
     final record = jsonEncode({
-      'origin': origin.toString(),
+      'origin': accountOrigin.toString(),
       'credential': credential,
       'subject': verified.subject,
       'expires_at': verified.expiresAt.toIso8601String(),
@@ -184,7 +189,7 @@ class BuilderlabAccountClient {
     try {
       final value = jsonDecode(saved);
       if (value is Map<String, dynamic> &&
-          value['origin'] == origin.toString() &&
+          value['origin'] == accountOrigin.toString() &&
           value['credential'] is String &&
           value['subject'] is String) {
         return (
@@ -201,8 +206,10 @@ class BuilderlabAccountClient {
   BuilderlabAccount _adopt(String credential, BuilderlabAccount verified) {
     if (_disposed) throw AccountFailure.unavailable;
     _credential = credential;
+    // Assigned before notifying, so subject listeners see the new account.
+    _account = verified;
     _subject.value = verified.subject;
-    return _account = verified;
+    return verified;
   }
 
   Future<BuilderlabAccount> _verify(String credential) async {
@@ -337,7 +344,7 @@ class BuilderlabAccountClient {
       final request =
           http.Request(
               body == null ? 'GET' : 'POST',
-              origin.replace(path: '$_prefix$path'),
+              accountOrigin.replace(path: '$_prefix$path'),
             )
             ..followRedirects = false
             ..headers['Accept'] = 'application/json';
@@ -346,7 +353,7 @@ class BuilderlabAccountClient {
       }
       if (body != null) {
         request.headers['Content-Type'] = 'application/json';
-        request.headers['Origin'] = origin.toString();
+        request.headers['Origin'] = accountOrigin.toString();
         request.body = jsonEncode(body);
         if (signingKey != null) {
           request.headers['Authorization'] = buildNip98AuthHeader(
@@ -360,7 +367,7 @@ class BuilderlabAccountClient {
       final response = await boundedHttpResponse(_http, request);
       if (kDebugMode && response.statusCode >= 400) {
         debugPrint(
-          'Builderlab ${origin.host} ${request.method} $path: HTTP ${response.statusCode} contentType=${response.headers['content-type']?.split(';').first}',
+          'Builderlab ${accountOrigin.host} ${request.method} $path: HTTP ${response.statusCode} contentType=${response.headers['content-type']?.split(';').first}',
         );
       }
       if (response.statusCode == 401) throw AccountFailure.signedOut;
