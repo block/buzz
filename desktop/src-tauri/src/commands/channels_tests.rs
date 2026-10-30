@@ -448,18 +448,18 @@ fn starter_match_requires_open_unarchived_stream_by_normalized_name() {
         ttl_deadline: None,
     };
 
-    assert!(is_matching_starter_channel(&channel, spec));
+    assert!(is_matching_starter_channel(&channel, spec.name));
 
     channel.visibility = "private".to_string();
-    assert!(!is_matching_starter_channel(&channel, spec));
+    assert!(!is_matching_starter_channel(&channel, spec.name));
 
     channel.visibility = "open".to_string();
     channel.channel_type = "forum".to_string();
-    assert!(!is_matching_starter_channel(&channel, spec));
+    assert!(!is_matching_starter_channel(&channel, spec.name));
 
     channel.channel_type = "stream".to_string();
     channel.archived_at = Some("2026-07-16T00:00:00Z".to_string());
-    assert!(!is_matching_starter_channel(&channel, spec));
+    assert!(!is_matching_starter_channel(&channel, spec.name));
 }
 
 #[test]
