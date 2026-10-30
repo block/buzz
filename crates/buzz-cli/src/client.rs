@@ -67,6 +67,7 @@ const ALLOWED_MIMES: &[&str] = &[
     "image/gif",
     "image/webp",
     "video/mp4",
+    "text/html",
 ];
 
 /// Maximum file size for image uploads (50 MB).
@@ -2315,6 +2316,129 @@ mod retry_policy_tests {
             auths.iter().all(|a| a.contains("Nostr ")),
             "each attempt must carry Nostr auth"
         );
+    }
+
+    /// Canonical HTML (same shape as the relay fixture) sniffs as `text/html`, passes
+    /// the `upload_file` allowlist, and is sent with `Content-Type: text/html`.
+    #[tokio::test]
+    async fn upload_file_allows_canonical_html() {
+        use std::io::Write;
+        use tokio::io::AsyncReadExt;
+        use tokio::io::AsyncWriteExt;
+
+        let html: &[u8] = b"<!DOCTYPE html><html><body><script>alert(1)</script></body></html>";
+        assert_eq!(
+            infer::get(html).map(|t| t.mime_type()),
+            Some("text/html"),
+            "fixture must sniff as text/html"
+        );
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(html).unwrap();
+        let file_path = tmp.path().to_str().unwrap().to_string();
+
+        let content_types: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let content_types2 = content_types.clone();
+        let request_lines: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let request_lines2 = request_lines.clone();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            // Read until the end of the request headers.
+            let mut buf: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 4096];
+            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    stream.read(&mut chunk),
+                )
+                .await
+                {
+                    Ok(Ok(n)) if n > 0 => buf.extend_from_slice(&chunk[..n]),
+                    _ => break,
+                }
+            }
+            let req_str = String::from_utf8_lossy(&buf);
+            if let Some(line) = req_str.lines().next() {
+                request_lines2.lock().unwrap().push(line.to_string());
+            }
+            let content_type = req_str
+                .lines()
+                .find(|l| l.to_lowercase().starts_with("content-type:"))
+                .map(|l| l["content-type:".len()..].trim().to_string())
+                .unwrap_or_default();
+            content_types2.lock().unwrap().push(content_type);
+
+            let ok_body = r#"{"url":"https://relay.test/media/aabbcc.html","sha256":"aabbcc","size":65,"type":"text/html","uploaded":0}"#;
+            let ok = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                ok_body.len(),
+                ok_body
+            );
+            let _ = stream.write_all(ok.as_bytes()).await;
+        });
+
+        let client = test_client(&format!("http://{addr}"));
+        let result = client.upload_file(&file_path).await;
+        let desc = result.unwrap();
+        assert_eq!(desc.mime_type, "text/html");
+
+        let lines = request_lines.lock().unwrap();
+        assert_eq!(lines.len(), 1, "expected exactly one request");
+        assert!(
+            lines[0].starts_with("PUT "),
+            "expected a PUT request, got {:?}",
+            lines[0]
+        );
+        let types = content_types.lock().unwrap();
+        assert_eq!(
+            types.as_slice(),
+            ["text/html"],
+            "request Content-Type must be text/html"
+        );
+    }
+
+    /// Write `bytes` to a temp file and assert `upload_file` rejects it with
+    /// `Usage("unsupported file type: ...")` before contacting the server.
+    async fn assert_upload_rejected_as_unsupported(bytes: &[u8]) {
+        use std::io::Write;
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(bytes).unwrap();
+        let file_path = tmp.path().to_str().unwrap().to_string();
+
+        // Nothing listens on port 1; the allowlist must reject before any connection.
+        let client = test_client("http://127.0.0.1:1");
+        let err = client.upload_file(&file_path).await.unwrap_err();
+        match err {
+            CliError::Usage(msg) => {
+                assert!(
+                    msg.starts_with("unsupported file type:"),
+                    "expected unsupported file type error, got {msg:?}"
+                );
+                assert_ne!(msg, "unsupported file type: text/html");
+            }
+            other => panic!("expected CliError::Usage, got {other:?}"),
+        }
+    }
+
+    /// SVG is not sniffed by `infer` and must stay rejected.
+    #[tokio::test]
+    async fn upload_file_rejects_svg() {
+        assert_upload_rejected_as_unsupported(br#"<svg xmlns="http://www.w3.org/2000/svg"></svg>"#)
+            .await;
+    }
+
+    /// Plain JavaScript is not sniffed by `infer` and must stay rejected.
+    #[tokio::test]
+    async fn upload_file_rejects_javascript() {
+        assert_upload_rejected_as_unsupported(b"console.log(\"blocked\");\n").await;
     }
 
     /// When all retry attempts for a stored event end with a partial body (200
