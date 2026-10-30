@@ -15,6 +15,8 @@ Future<bool> executeSlashCommand(
   try {
     await command.run(ctx);
     return true;
+  } on SlashCommandCancelled {
+    return false;
   } on SlashUsageError catch (error) {
     final reason = error.reason;
     final usage = 'Usage: ${command.usage}';
