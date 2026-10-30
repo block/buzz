@@ -575,6 +575,12 @@ export function useWelcomeKickoff(
       focusedWelcomeChannelRef.current !== channelId;
     void (async () => {
       try {
+        // A finished kickoff must not re-provision the team: the owner may have
+        // deleted starters or removed them from Welcome, and another device
+        // may have run the kickoff with its own agents.
+        if (await markerExists(channelId, closerMarker)) {
+          return;
+        }
         const welcomeTeam = await ensureWelcomeTeam(
           channelId,
           activeCommunity?.relayUrl,
@@ -587,9 +593,6 @@ export function useWelcomeKickoff(
           teammates: [welcomeTeam[1], welcomeTeam[2]],
         };
 
-        if (await markerExists(channelId, closerMarker)) {
-          return;
-        }
         if (!readiness.ready) {
           await sendManagedAgentChannelMessage({
             agentPubkey: resolvedAgentSet.lead.pubkey,
