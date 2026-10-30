@@ -27,11 +27,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../shared/community/community_storage_test.dart'
     show FakeSecureStorage;
 
-final _pushSwitch = find.descendant(
-  of: find.byKey(const ValueKey('push-notifications-setting')),
-  matching: find.byType(Switch),
-);
-
 void main() {
   setUp(() {
     PackageInfo.setMockInitialValues(
@@ -575,4 +570,9 @@ const _pushDescriptor = BuzzPushLeaseDescriptor(
   maxPlaintextLength: 4096,
   maxEndpointLength: 2048,
   maxStringLength: 512,
+);
+
+final _pushSwitch = find.descendant(
+  of: find.byKey(const ValueKey('push-notifications-setting')),
+  matching: find.byType(Switch),
 );
