@@ -1341,7 +1341,7 @@ async fn store_group_members_event(
     // relay's moderation-DM key participates in the {relay, recipient} DM used
     // for moderation notices) MUST retain the relay's own `p` tag. nostr's
     // default `build_with_ctx` strips any `p` tag matching the signer, which
-    // would drop the relay from the snapshot and fail migration 0032's roster
+    // would drop the relay from the snapshot and fail the roster
     // fence against the canonical two-member DM. `allow_self_tagging` keeps the
     // snapshot faithful to `channel_members`.
     let event = EventBuilder::new(Kind::Custom(KIND_NIP29_GROUP_MEMBERS as u16), "")
