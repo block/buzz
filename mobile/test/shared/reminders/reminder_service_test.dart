@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:buzz/features/activity/reminders_provider.dart'
+    show parseReminderContent;
 import 'package:buzz/shared/reminders/reminder_service.dart';
 import 'package:buzz/shared/reminders/reminder_time_presets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -35,6 +37,20 @@ void main() {
                 as Map<String, dynamic>;
         expect(decoded.containsKey('note'), isFalse);
         expect(decoded['status'], 'pending');
+      }
+    });
+  });
+
+  group('note-only reminders', () {
+    test('omit the target and round-trip through the reminder decoder', () {
+      final plaintext = buildReminderPlaintext(note: 'stretch');
+      expect(plaintext, '{"note":"stretch","status":"pending"}');
+      expect(parseReminderContent(plaintext)?.target, isNull);
+    });
+
+    test('need a note', () {
+      for (final note in [null, '']) {
+        expect(() => buildReminderPlaintext(note: note), throwsArgumentError);
       }
     });
   });

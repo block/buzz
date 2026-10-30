@@ -284,6 +284,8 @@ type MockBridgeOptions = {
   ensureStarterChannelsErrors?: string[];
   /** Reject successive mock `join_channel` calls, then resume. */
   joinChannelErrors?: string[];
+  /** Reject successive mock `update_channel` calls, then resume. */
+  updateChannelErrors?: string[];
   channelsReadDelayMs?: number;
   /**
    * Hold the first `get_channels` read until
