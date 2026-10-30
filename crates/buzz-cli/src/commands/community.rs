@@ -285,13 +285,16 @@ pub(crate) fn plan_set(head: Option<&Head>, patch: &ThemePatch) -> Result<Option
     Ok((!unchanged).then_some(next))
 }
 
-async fn fetch_head(client: &BuzzClient) -> Result<Option<Head>, CliError> {
-    let filter = serde_json::json!({
+async fn fetch_head(client: &BuzzClient, writer_pinned: bool) -> Result<Option<Head>, CliError> {
+    let mut filter = serde_json::json!({
         "kinds": [buzz_sdk::kind::KIND_READ_STATE],
         "authors": [client.keys().public_key().to_hex()],
         "#d": [D_TAG],
         "limit": HEAD_QUERY_LIMIT,
     });
+    if writer_pinned {
+        filter["consistency"] = serde_json::json!("strong");
+    }
     let raw = client.query(&filter).await?;
     let events: Vec<Value> = serde_json::from_str(&raw)
         .map_err(|e| CliError::Other(format!("failed to parse community theme query: {e}")))?;
@@ -299,7 +302,7 @@ async fn fetch_head(client: &BuzzClient) -> Result<Option<Head>, CliError> {
 }
 
 async fn cmd_get(client: &BuzzClient) -> Result<(), CliError> {
-    let output = match fetch_head(client).await? {
+    let output = match fetch_head(client, false).await? {
         None => Value::Null,
         Some(Head {
             theme: Some(theme), ..
@@ -316,7 +319,7 @@ async fn cmd_get(client: &BuzzClient) -> Result<(), CliError> {
 }
 
 async fn cmd_set(client: &BuzzClient, patch: ThemePatch) -> Result<(), CliError> {
-    let head = fetch_head(client).await?;
+    let head = fetch_head(client, true).await?;
     let Some(next) = plan_set(head.as_ref(), &patch)? else {
         let event_id = head.map(|h| h.id).unwrap_or_default();
         println!(
@@ -653,5 +656,54 @@ mod tests {
         );
         let plain = nip44::decrypt(keys.secret_key(), &keys.public_key(), &event.content).unwrap();
         assert!(plain.contains("\"followSystem\":true"));
+    }
+
+    async fn recording_relay() -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
+        use axum::{body::Bytes, extract::State, routing::post, Router};
+        use std::sync::{Arc, Mutex};
+
+        let filters: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let app = Router::new()
+            .route(
+                "/query",
+                post(
+                    |State(seen): State<Arc<Mutex<Vec<Value>>>>, body: Bytes| async move {
+                        let batch: Vec<Value> = serde_json::from_slice(&body).unwrap_or_default();
+                        seen.lock().unwrap().extend(batch);
+                        "[]".to_string()
+                    },
+                ),
+            )
+            .route(
+                "/events",
+                post(|| async { r#"{"event_id":"deadbeef","accepted":true,"message":""}"# }),
+            )
+            .with_state(filters.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), filters)
+    }
+
+    #[tokio::test]
+    async fn only_the_set_head_read_is_pinned_to_the_writer() {
+        let (url, filters) = recording_relay().await;
+        let client = BuzzClient::new(url, keys(), None, None).unwrap();
+
+        cmd_set(&client, ThemePatch::parse(None, None, Some(false)).unwrap())
+            .await
+            .expect("set succeeds");
+        let set_reads = std::mem::take(&mut *filters.lock().unwrap());
+        assert!(!set_reads.is_empty(), "set reads the head");
+        for f in &set_reads {
+            assert_eq!(f["consistency"], "strong", "set head read: {f}");
+        }
+
+        cmd_get(&client).await.expect("get succeeds");
+        let get_reads = filters.lock().unwrap().clone();
+        assert!(!get_reads.is_empty(), "get reads the head");
+        for f in &get_reads {
+            assert!(f.get("consistency").is_none(), "get head read: {f}");
+        }
     }
 }
