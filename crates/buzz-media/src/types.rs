@@ -25,7 +25,7 @@ pub struct BlobDescriptor {
     /// Thumbnail URL.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thumb: Option<String>,
-    /// Video duration in seconds. `None` for non-video blobs.
+    /// Video or audio duration in seconds. `None` for other blobs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<f64>,
 }
