@@ -553,6 +553,21 @@ impl BuzzClient {
         })
     }
 
+    /// Open a NIP-42 authenticated connection for streaming reads.
+    pub async fn connect_stream(&self) -> Result<buzz_ws_client::NostrWsConnection, CliError> {
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            buzz_ws_client::NostrWsConnection::connect_authenticated(
+                &to_ws_url(&self.relay_url),
+                &self.keys,
+                self.auth_tag.as_ref(),
+            ),
+        )
+        .await
+        .map_err(|_| CliError::Other("stream connection timed out".into()))?
+        .map_err(|e| CliError::Other(format!("stream connection: {e}")))
+    }
+
     /// Get the keypair.
     pub fn keys(&self) -> &Keys {
         &self.keys

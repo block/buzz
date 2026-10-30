@@ -229,3 +229,14 @@ The signer must be a current channel member and a repository manager, directly
 or through an unrestricted, valid NIP-OA owner attestation; permission to push is
 not permission to change the default. See the
 [protocol and authorization contract](../../docs/git-on-object-storage.md#default-branch-management).
+
+## Stream task reports
+
+`buzz messages watch --channel UUID --author PUBKEY --since UNIX_SECONDS`
+streams verified, signed message events as JSON lines using NIP-42 WebSocket
+authentication. Authors are explicit and repeatable. The stream contains
+`event` records and a `ready` record after stored history. Connection failures
+exit nonzero; callers own replay and deduplication.
+
+For routing reports into existing Codex chats, see the
+[local bridge](../../scripts/buzz-codex-bridge/README.md).
