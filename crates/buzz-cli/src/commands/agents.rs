@@ -164,7 +164,146 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
         }
 
         AgentsCmd::Archived => cmd_archived(client).await,
+
+        AgentsCmd::Attest {
+            agent_pubkey,
+            conditions,
+        } => {
+            validate_hex64(&agent_pubkey)?;
+            let agent = PublicKey::parse(&agent_pubkey)
+                .map_err(|e| CliError::Usage(format!("invalid agent pubkey: {e}")))?;
+            // Purely local: signs `nostr:agent-auth:<agent>:<conditions>` with the
+            // owner key. No relay round-trip, nothing persisted.
+            let tag = buzz_sdk::nip_oa::compute_auth_tag(client.keys(), &agent, &conditions)
+                .map_err(|e| CliError::Usage(format!("cannot attest: {e}")))?;
+            println!("{tag}");
+            Ok(())
+        }
+
+        AgentsCmd::Register {
+            agent_pubkey,
+            name,
+            respond_to,
+            parallelism,
+            force,
+        } => {
+            cmd_register(
+                client,
+                &agent_pubkey,
+                &name,
+                respond_to,
+                parallelism,
+                force,
+                &mut std::io::stderr(),
+            )
+            .await
+        }
     }
+}
+
+/// Publish the owner-signed kind:30177 managed-agent policy record for an
+/// agent that runs outside Buzz Desktop.
+///
+/// Desktop publishes this record for the agents it manages; a headless
+/// `buzz-acp` deployment has no equivalent, so clients that build their agent
+/// directory from `(kind:0 NIP-OA attestation, membership, kind:30177)` never
+/// list the agent and mention autocomplete cannot tag it. The signer of this
+/// command is the owner; the preflight verifies the agent's kind:0 attests to
+/// that same key so a policy record is never published for an identity that
+/// has not delegated to the caller.
+async fn cmd_register(
+    client: &BuzzClient,
+    agent_hex: &str,
+    name: &str,
+    respond_to: RespondToArg,
+    parallelism: u32,
+    force: bool,
+    warn_sink: &mut dyn std::io::Write,
+) -> Result<(), CliError> {
+    validate_hex64(agent_hex)?;
+    let agent_hex = agent_hex.to_ascii_lowercase();
+    let signer_hex = client.keys().public_key().to_hex();
+    if agent_hex.eq_ignore_ascii_case(&signer_hex) {
+        return Err(CliError::Usage(
+            "agent pubkey equals the signing key — run `agents register` as the OWNER \
+             (BUZZ_PRIVATE_KEY = your identity key), not as the agent"
+                .into(),
+        ));
+    }
+    if name.trim().is_empty() {
+        return Err(CliError::Usage("--name must not be empty".into()));
+    }
+    if parallelism == 0 {
+        return Err(CliError::Usage("--parallelism must be at least 1".into()));
+    }
+
+    // Preflight: the agent's latest kind:0 must carry exactly one NIP-OA auth
+    // tag naming this signer. Reuses the archive path's classifier so the
+    // diagnostics match `agents archive`.
+    let profile = fetch_kind0(client, &agent_hex).await?;
+    match extract_auth(profile.as_ref(), &agent_hex, &signer_hex) {
+        Ok(_) => {}
+        Err(failure) => {
+            let detail = failure.message();
+            if force {
+                let _ = writeln!(
+                    warn_sink,
+                    "{}",
+                    json!({ "warning": format!("{detail}; publishing anyway (--force)") })
+                );
+            } else {
+                return Err(CliError::Usage(format!(
+                    "{detail}; the agent must first publish its kind:0 with your attestation \
+                     attached (run `buzz users set-profile` as the agent with BUZZ_AUTH_TAG \
+                     set to an auth tag you signed), or pass --force to publish anyway"
+                )));
+            }
+        }
+    }
+
+    let builder = build_register_event(&agent_hex, name, respond_to, parallelism)?;
+    // Never inject an ambient BUZZ_AUTH_TAG here: the record is authored by
+    // the owner in their own right, not under delegation.
+    let event = client.sign_event_unchecked(builder)?;
+    let event_id = event.id.to_hex();
+    client.submit_event(event).await?;
+    println!(
+        "{}",
+        json!({
+            "ok": true,
+            "event_id": event_id,
+            "action": "register",
+            "agent": agent_hex,
+            "owner": signer_hex,
+            "name": name,
+            "respond_to": respond_to.to_wire(),
+            "parallelism": parallelism,
+        })
+    );
+    Ok(())
+}
+
+/// Build the kind:30177 event: parameterized-replaceable on `d = <agent pubkey>`
+/// with the same content projection Buzz Desktop writes
+/// (`ManagedAgentEventContent`: `name`, `parallelism`, `respond_to`).
+fn build_register_event(
+    agent_hex: &str,
+    name: &str,
+    respond_to: RespondToArg,
+    parallelism: u32,
+) -> Result<nostr::EventBuilder, CliError> {
+    use buzz_core::kind::KIND_MANAGED_AGENT;
+    use nostr::{EventBuilder, Kind, Tag};
+
+    let content = json!({
+        "name": name.trim(),
+        "parallelism": parallelism,
+        "respond_to": respond_to.to_wire(),
+    })
+    .to_string();
+    let d_tag =
+        Tag::parse(["d", agent_hex]).map_err(|e| CliError::Other(format!("invalid d-tag: {e}")))?;
+    Ok(EventBuilder::new(Kind::Custom(KIND_MANAGED_AGENT as u16), content).tags([d_tag]))
 }
 
 /// Require `BUZZ_AUTH_TAG` and parse the owner pubkey from it. Used only by
@@ -1273,5 +1412,67 @@ mod tests {
             .expect("sign");
         let result = verify_archived_event(&event, &self_hex).expect("should pass");
         assert!(result.is_empty());
+    }
+
+    // --- agents register: kind:30177 policy record ---
+
+    #[test]
+    fn register_event_is_parameterized_replaceable_on_agent_pubkey() {
+        let agent = hex64('c');
+        let owner = Keys::generate();
+        let event = build_register_event(&agent, "Scout", RespondToArg::Anyone, 2)
+            .expect("builder")
+            .sign_with_keys(&owner)
+            .expect("sign");
+        assert_eq!(event.kind, Kind::Custom(30177));
+        assert_eq!(event.pubkey, owner.public_key());
+        let d = event
+            .tags
+            .iter()
+            .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("d"))
+            .expect("d tag");
+        assert_eq!(
+            d.as_slice().get(1).map(|s| s.as_str()),
+            Some(agent.as_str())
+        );
+        // No ambient auth tag: the owner authors this record in their own right.
+        assert!(!event
+            .tags
+            .iter()
+            .any(|t| t.as_slice().first().map(|s| s.as_str()) == Some("auth")));
+        assert!(event.verify().is_ok());
+    }
+
+    #[test]
+    fn register_event_content_matches_desktop_projection() {
+        let agent = hex64('c');
+        let event = build_register_event(&agent, "  Scout ", RespondToArg::OwnerOnly, 1)
+            .expect("builder")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign");
+        let content: serde_json::Value = serde_json::from_str(&event.content).expect("json");
+        assert_eq!(content["name"], "Scout");
+        assert_eq!(content["parallelism"], 1);
+        assert_eq!(content["respond_to"], "owner-only");
+        // Only the three fields Desktop's `ManagedAgentEventContent` requires;
+        // optional persona/model/prompt fields stay absent, not null.
+        assert_eq!(content.as_object().map(|o| o.len()), Some(3));
+    }
+
+    #[test]
+    fn register_preflight_accepts_only_attestation_naming_signer() {
+        let owner = hex64('a');
+        let agent = hex64('c');
+        let attested = json!({"tags": [["auth", owner, "", hex128('b')]]});
+        assert!(extract_auth(Some(&attested), &agent, &owner).is_ok());
+        let other = json!({"tags": [["auth", hex64('d'), "", hex128('b')]]});
+        assert_eq!(
+            extract_auth(Some(&other), &agent, &owner),
+            Err(AuthFailure::OwnerMismatch(hex64('d')))
+        );
+        assert_eq!(
+            extract_auth(None, &agent, &owner),
+            Err(AuthFailure::NoProfile(agent.clone()))
+        );
     }
 }
