@@ -1111,6 +1111,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "buzz-core",
+ "buzz-media",
  "buzz-persona",
  "buzz-sdk",
  "buzz-ws-client",
