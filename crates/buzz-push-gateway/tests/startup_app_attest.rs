@@ -10,6 +10,7 @@ fn parsed_configuration_reaches_executable_verifier() {
     for setting in [None, Some("production"), Some("development")] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_buzz-push-gateway"));
         command.env_clear().envs([
+            ("BUZZ_PUSH_GATEWAY_ORIGIN", "https://push.buzz.xyz".into()),
             (
                 "BUZZ_PUSH_TOKEN_KEYS",
                 format!("token:{}", STANDARD.encode([2; 32])),

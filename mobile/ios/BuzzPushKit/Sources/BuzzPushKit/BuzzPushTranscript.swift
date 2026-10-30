@@ -29,19 +29,18 @@ public enum BuzzPushTranscriptError: Error, Equatable {
 /// generated and asserted by the gateway's own encoder. The tests in this
 /// package replay those vectors byte-for-byte.
 ///
-/// The `audience` member uses the fixed origin and route registered by NIP-PL
-/// v1. A configurable gateway origin changes transport routing, not these
-/// protocol bytes.
+/// Enrollment uses v1. Management uses v2 and additionally binds the configured
+/// gateway origin and a short request expiry.
 public enum BuzzPushTranscript {
     // MARK: Domains
 
     public static let enrollDomain = "buzz.push.enroll.v1"
-    public static let delegateDomain = "buzz.push.delegate.v1"
-    public static let rotateEndpointDomain = "buzz.push.rotate-endpoint.v1"
-    public static let revokeDelegationDomain = "buzz.push.revoke-delegation.v1"
-    public static let revokeInstallationDomain = "buzz.push.revoke-installation.v1"
+    public static let delegateDomain = "buzz.push.delegate.v2"
+    public static let rotateEndpointDomain = "buzz.push.rotate-endpoint.v2"
+    public static let revokeDelegationDomain = "buzz.push.revoke-delegation.v2"
+    public static let revokeInstallationDomain = "buzz.push.revoke-installation.v2"
 
-    /// Wire version for buzz-push-v1. Every transcript carries `"v":1`.
+    /// Enrollment wire version; management transcripts carry `"v":2`.
     public static let wireVersion: Int64 = 1
 
     /// Origin registered by NIP-PL v1 for every App Attest transcript audience.
@@ -72,26 +71,26 @@ public enum BuzzPushTranscript {
         return encode(domain: enrollDomain, object: o)
     }
 
-    /// `buzz.push.delegate.v1` — `SHA-256(bytes)` is the assertion
+    /// `buzz.push.delegate.v2` — `SHA-256(bytes)` is the assertion
     /// `clientDataHash`.
     public static func delegate(
         gatewayOrigin: URL,
-        challengeId: UUID,
-        challenge: String,
+        requestExpiresAt: Int64,
         installationHandle: UUID,
         endpointEpoch: Int64,
+        expectedGeneration: Int64,
         generation: Int64,
         relayPubkey: String,
         notBefore: Int64,
         expiresAt: Int64
     ) throws -> Data {
-        var o = CanonicalObject()
-        o.int("v", wireVersion)
-        try o.string("audience", audience(gatewayOrigin, route: "v1/delegations"))
-        o.uuid("challenge_id", challengeId)
-        try o.string("challenge", challenge, field: "challenge")
+        var o = try managementObject(
+            gatewayOrigin: gatewayOrigin, route: "v1/delegations",
+            requestExpiresAt: requestExpiresAt
+        )
         o.uuid("installation_handle", installationHandle)
         o.int("endpoint_epoch", endpointEpoch)
+        o.int("expected_generation", expectedGeneration)
         o.int("generation", generation)
         try o.string("relay_pubkey", relayPubkey, field: "relay_pubkey")
         o.int("not_before", notBefore)
@@ -99,25 +98,20 @@ public enum BuzzPushTranscript {
         return encode(domain: delegateDomain, object: o)
     }
 
-    /// `buzz.push.rotate-endpoint.v1` — `SHA-256(bytes)` is the assertion
+    /// `buzz.push.rotate-endpoint.v2` — `SHA-256(bytes)` is the assertion
     /// `clientDataHash`.
     public static func rotateEndpoint(
         gatewayOrigin: URL,
-        challengeId: UUID,
-        challenge: String,
+        requestExpiresAt: Int64,
         installationHandle: UUID,
         endpointEpoch: Int64,
         newEndpointEpoch: Int64,
         endpoint: String
     ) throws -> Data {
-        var o = CanonicalObject()
-        o.int("v", wireVersion)
-        try o.string(
-            "audience",
-            audience(gatewayOrigin, route: "v1/installations/endpoint")
+        var o = try managementObject(
+            gatewayOrigin: gatewayOrigin, route: "v1/installations/endpoint",
+            requestExpiresAt: requestExpiresAt
         )
-        o.uuid("challenge_id", challengeId)
-        try o.string("challenge", challenge, field: "challenge")
         o.uuid("installation_handle", installationHandle)
         o.int("endpoint_epoch", endpointEpoch)
         o.int("new_endpoint_epoch", newEndpointEpoch)
@@ -125,52 +119,53 @@ public enum BuzzPushTranscript {
         return encode(domain: rotateEndpointDomain, object: o)
     }
 
-    /// `buzz.push.revoke-delegation.v1` — `SHA-256(bytes)` is the assertion
+    /// `buzz.push.revoke-delegation.v2` — `SHA-256(bytes)` is the assertion
     /// `clientDataHash`.
     public static func revokeDelegation(
         gatewayOrigin: URL,
-        challengeId: UUID,
-        challenge: String,
+        requestExpiresAt: Int64,
         installationHandle: UUID,
         relayPubkey: String,
         generation: Int64
     ) throws -> Data {
-        var o = CanonicalObject()
-        o.int("v", wireVersion)
-        try o.string(
-            "audience",
-            audience(gatewayOrigin, route: "v1/delegations/revoke")
+        var o = try managementObject(
+            gatewayOrigin: gatewayOrigin, route: "v1/delegations/revoke",
+            requestExpiresAt: requestExpiresAt
         )
-        o.uuid("challenge_id", challengeId)
-        try o.string("challenge", challenge, field: "challenge")
         o.uuid("installation_handle", installationHandle)
         try o.string("relay_pubkey", relayPubkey, field: "relay_pubkey")
         o.int("generation", generation)
         return encode(domain: revokeDelegationDomain, object: o)
     }
 
-    /// `buzz.push.revoke-installation.v1` — `SHA-256(bytes)` is the assertion
+    /// `buzz.push.revoke-installation.v2` — `SHA-256(bytes)` is the assertion
     /// `clientDataHash`.
     public static func revokeInstallation(
         gatewayOrigin: URL,
-        challengeId: UUID,
-        challenge: String,
+        requestExpiresAt: Int64,
         installationHandle: UUID,
         endpointEpoch: Int64,
         newEndpointEpoch: Int64
     ) throws -> Data {
-        var o = CanonicalObject()
-        o.int("v", wireVersion)
-        try o.string(
-            "audience",
-            audience(gatewayOrigin, route: "v1/installations/revoke")
+        var o = try managementObject(
+            gatewayOrigin: gatewayOrigin, route: "v1/installations/revoke",
+            requestExpiresAt: requestExpiresAt
         )
-        o.uuid("challenge_id", challengeId)
-        try o.string("challenge", challenge, field: "challenge")
         o.uuid("installation_handle", installationHandle)
         o.int("endpoint_epoch", endpointEpoch)
         o.int("new_endpoint_epoch", newEndpointEpoch)
         return encode(domain: revokeInstallationDomain, object: o)
+    }
+
+    private static func managementObject(
+        gatewayOrigin: URL, route: String, requestExpiresAt: Int64
+    ) throws -> CanonicalObject {
+        var o = CanonicalObject()
+        o.int("v", 2)
+        try o.string("audience", audience(gatewayOrigin, route: route))
+        try o.string("gateway_origin", canonicalGatewayOrigin(gatewayOrigin).text)
+        o.int("request_expires_at", requestExpiresAt)
+        return o
     }
 
     // MARK: Internals
@@ -195,7 +190,7 @@ public enum BuzzPushTranscript {
         var components = URLComponents()
         components.scheme = scheme
         components.host = host
-        components.port = value.port
+        components.port = value.port == (scheme == "https" ? 443 : 80) ? nil : value.port
         guard let url = components.url, let text = components.string else {
             throw BuzzPushTranscriptError.invalidGatewayOrigin
         }

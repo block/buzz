@@ -84,6 +84,43 @@ fn bytes32(v: Vec<u8>) -> Result<[u8; 32], AuthorityError> {
     v.try_into().map_err(|_| AuthorityError::Unavailable)
 }
 
+async fn counter(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: Uuid,
+    a: AssertionCounter,
+) -> Result<(), AuthorityError> {
+    let (current, expires_at): (i64, DateTime<Utc>) = sqlx::query_as(
+        "SELECT assertion_counter, expires_at FROM push_gateway_installations WHERE id=$1 FOR UPDATE",
+    ).bind(id).fetch_optional(&mut **tx).await.map_err(db)?.ok_or(AuthorityError::Rejected)?;
+    let now = a.now.max(Utc::now().timestamp());
+    if a.next <= a.previous
+        || current != i64::from(a.previous)
+        || expires_at < at(now)?
+        || a.request_expires_at <= now
+    {
+        return Err(AuthorityError::Rejected);
+    }
+    sqlx::query(
+        "UPDATE push_gateway_installations SET assertion_counter=$2,updated_at=now() WHERE id=$1",
+    )
+    .bind(id)
+    .bind(i64::from(a.next))
+    .execute(&mut **tx)
+    .await
+    .map_err(db)?;
+    Ok(())
+}
+
+async fn commit_management(
+    tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    a: AssertionCounter,
+) -> Result<(), AuthorityError> {
+    if a.request_expires_at <= a.now.max(Utc::now().timestamp()) {
+        return Err(AuthorityError::Rejected);
+    }
+    tx.commit().await.map_err(db)
+}
+
 #[async_trait]
 impl AuthorityStore for PostgresAuthorityStore {
     async fn ready(&self) -> Result<(), AuthorityError> {
@@ -317,25 +354,14 @@ impl AuthorityStore for PostgresAuthorityStore {
         })
         .transpose()
     }
-    async fn advance_assertion_counter(
+    async fn upsert_delegation(
         &self,
-        id: Uuid,
-        previous: u32,
-        next: u32,
+        d: Delegation,
+        assertion: AssertionCounter,
     ) -> Result<(), AuthorityError> {
-        if next <= previous {
-            return Err(AuthorityError::Rejected);
-        }
-        let result=sqlx::query("UPDATE push_gateway_installations SET assertion_counter=$3,updated_at=now() WHERE id=$1 AND assertion_counter=$2")
-            .bind(id).bind(i64::from(previous)).bind(i64::from(next)).execute(&self.pool).await.map_err(db)?;
-        if result.rows_affected() != 1 {
-            return Err(AuthorityError::Rejected);
-        }
-        Ok(())
-    }
-    async fn upsert_delegation(&self, d: Delegation) -> Result<(), AuthorityError> {
         let mut tx = self.pool.begin().await.map_err(db)?;
-        let i=sqlx::query("SELECT endpoint_epoch,expires_at,revoked_at FROM push_gateway_installations WHERE id=$1 FOR UPDATE").bind(d.installation_id).fetch_optional(&mut *tx).await.map_err(db)?.ok_or(AuthorityError::Rejected)?;
+        counter(&mut tx, d.installation_id, assertion).await?;
+        let i=sqlx::query("SELECT endpoint_epoch,expires_at,revoked_at,token_fingerprint FROM push_gateway_installations WHERE id=$1 FOR UPDATE").bind(d.installation_id).fetch_optional(&mut *tx).await.map_err(db)?.ok_or(AuthorityError::Rejected)?;
         if i.try_get::<Option<DateTime<Utc>>, _>("revoked_at")
             .map_err(db)?
             .is_some()
@@ -344,7 +370,22 @@ impl AuthorityStore for PostgresAuthorityStore {
             return Err(AuthorityError::Rejected);
         }
         let relay = hex::decode(&d.relay_pubkey).map_err(|_| AuthorityError::Rejected)?;
-        let result=sqlx::query("INSERT INTO push_gateway_delegations(id,installation_id,relay_pubkey,endpoint_epoch,generation,not_before,expires_at,revoked_at,grant_hash) VALUES($1,$2,$3,$4,$5,$6,$7,NULL,$8) ON CONFLICT(installation_id,relay_pubkey) DO UPDATE SET id=EXCLUDED.id,endpoint_epoch=EXCLUDED.endpoint_epoch,generation=EXCLUDED.generation,not_before=EXCLUDED.not_before,expires_at=EXCLUDED.expires_at,revoked_at=NULL,grant_hash=EXCLUDED.grant_hash,updated_at=now() WHERE EXCLUDED.generation > push_gateway_delegations.generation")
+        let old = sqlx::query("SELECT generation,revoked_at FROM push_gateway_delegations WHERE installation_id=$1 AND relay_pubkey=$2 FOR UPDATE")
+            .bind(d.installation_id).bind(&relay).fetch_optional(&mut *tx).await.map_err(db)?;
+        let current = old
+            .as_ref()
+            .map(|r| r.try_get::<i64, _>("generation").map_err(db))
+            .transpose()?
+            .unwrap_or(0);
+        {
+            let expected = assertion
+                .expected_generation
+                .ok_or(AuthorityError::Rejected)?;
+            if expected != current || d.generation <= expected {
+                return Err(AuthorityError::StaleGeneration(current));
+            }
+        }
+        let result=sqlx::query("INSERT INTO push_gateway_delegations(id,installation_id,relay_pubkey,endpoint_epoch,generation,not_before,expires_at,revoked_at,grant_hash) VALUES($1,$2,$3,$4,$5,$6,$7,NULL,$8) ON CONFLICT(installation_id,relay_pubkey) DO UPDATE SET id=EXCLUDED.id,grant_hash=EXCLUDED.grant_hash,endpoint_epoch=EXCLUDED.endpoint_epoch,generation=EXCLUDED.generation,not_before=EXCLUDED.not_before,expires_at=EXCLUDED.expires_at,revoked_at=NULL,updated_at=now() WHERE EXCLUDED.generation > push_gateway_delegations.generation")
             .bind(d.id).bind(d.installation_id).bind(relay).bind(d.endpoint_epoch).bind(d.generation).bind(at(d.not_before)?).bind(at(d.expires_at)?).bind(d.grant_hash.to_vec()).execute(&mut *tx).await.map_err(db)?;
         if result.rows_affected() != 1 {
             return Err(AuthorityError::Rejected);
@@ -355,7 +396,7 @@ impl AuthorityStore for PostgresAuthorityStore {
             .execute(&mut *tx)
             .await
             .map_err(db)?;
-        tx.commit().await.map_err(db)?;
+        commit_management(tx, assertion).await?;
         Ok(())
     }
     async fn rotate_endpoint(
@@ -365,49 +406,62 @@ impl AuthorityStore for PostgresAuthorityStore {
         new: i64,
         ciphertext: Vec<u8>,
         fingerprint: [u8; 32],
+        assertion: AssertionCounter,
     ) -> Result<(), AuthorityError> {
         if new != expected.checked_add(1).ok_or(AuthorityError::Rejected)? {
             return Err(AuthorityError::Rejected);
         }
-        let result=sqlx::query("UPDATE push_gateway_installations SET endpoint_epoch=$3,token_ciphertext=$4,token_fingerprint=$5,updated_at=now() WHERE id=$1 AND endpoint_epoch=$2 AND revoked_at IS NULL").bind(id).bind(expected).bind(new).bind(ciphertext).bind(fingerprint.to_vec()).execute(&self.pool).await.map_err(db)?;
+        let mut tx = self.pool.begin().await.map_err(db)?;
+        counter(&mut tx, id, assertion).await?;
+        let result=sqlx::query("UPDATE push_gateway_installations SET endpoint_epoch=$3,token_ciphertext=$4,token_fingerprint=$5,updated_at=now() WHERE id=$1 AND endpoint_epoch=$2 AND revoked_at IS NULL").bind(id).bind(expected).bind(new).bind(ciphertext).bind(fingerprint.to_vec()).execute(&mut *tx).await.map_err(db)?;
         if result.rows_affected() != 1 {
-            return Err(AuthorityError::Rejected);
+            let exact_retry: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM push_gateway_installations WHERE id=$1 AND endpoint_epoch=$2 AND token_fingerprint=$3 AND revoked_at IS NULL)")
+                .bind(id).bind(new).bind(fingerprint.to_vec()).fetch_one(&mut *tx).await.map_err(db)?;
+            if !exact_retry {
+                return Err(AuthorityError::Rejected);
+            }
         }
-        Ok(())
+        commit_management(tx, assertion).await
     }
     async fn revoke_delegation(
         &self,
         id: Uuid,
         relay: &str,
         expected_generation: i64,
+        assertion: AssertionCounter,
     ) -> Result<(), AuthorityError> {
         let relay = hex::decode(relay).map_err(|_| AuthorityError::Rejected)?;
-        let result=sqlx::query("UPDATE push_gateway_delegations SET revoked_at=now(),updated_at=now() WHERE installation_id=$1 AND relay_pubkey=$2 AND generation=$3 AND revoked_at IS NULL").bind(id).bind(&relay).bind(expected_generation).execute(&self.pool).await.map_err(db)?;
+        let mut tx = self.pool.begin().await.map_err(db)?;
+        counter(&mut tx, id, assertion).await?;
+        let result=sqlx::query("UPDATE push_gateway_delegations SET revoked_at=now(),generation=CASE WHEN generation < 9223372036854775807 THEN generation+1 ELSE generation END,updated_at=now() WHERE installation_id=$1 AND relay_pubkey=$2 AND generation=$3 AND revoked_at IS NULL").bind(id).bind(&relay).bind(expected_generation).execute(&mut *tx).await.map_err(db)?;
         if result.rows_affected() != 1 {
-            let already_revoked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM push_gateway_delegations WHERE installation_id=$1 AND relay_pubkey=$2 AND generation=$3 AND revoked_at IS NOT NULL)").bind(id).bind(&relay).bind(expected_generation).fetch_one(&self.pool).await.map_err(db)?;
+            let already_revoked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM push_gateway_delegations WHERE installation_id=$1 AND relay_pubkey=$2 AND (generation=$3 OR generation-1=$3) AND revoked_at IS NOT NULL)").bind(id).bind(&relay).bind(expected_generation).fetch_one(&mut *tx).await.map_err(db)?;
             if !already_revoked {
                 return Err(AuthorityError::Rejected);
             }
         }
-        Ok(())
+        commit_management(tx, assertion).await
     }
     async fn revoke_installation(
         &self,
         id: Uuid,
         expected: i64,
         new: i64,
+        assertion: AssertionCounter,
     ) -> Result<(), AuthorityError> {
         if new != expected.checked_add(1).ok_or(AuthorityError::Rejected)? {
             return Err(AuthorityError::Rejected);
         }
-        let result=sqlx::query("UPDATE push_gateway_installations SET endpoint_epoch=$3,revoked_at=now(),updated_at=now() WHERE id=$1 AND endpoint_epoch=$2 AND revoked_at IS NULL").bind(id).bind(expected).bind(new).execute(&self.pool).await.map_err(db)?;
+        let mut tx = self.pool.begin().await.map_err(db)?;
+        counter(&mut tx, id, assertion).await?;
+        let result=sqlx::query("UPDATE push_gateway_installations SET endpoint_epoch=$3,revoked_at=now(),updated_at=now() WHERE id=$1 AND endpoint_epoch=$2 AND revoked_at IS NULL").bind(id).bind(expected).bind(new).execute(&mut *tx).await.map_err(db)?;
         if result.rows_affected() != 1 {
-            let already_revoked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM push_gateway_installations WHERE id=$1 AND endpoint_epoch=$2 AND revoked_at IS NOT NULL)").bind(id).bind(new).fetch_one(&self.pool).await.map_err(db)?;
+            let already_revoked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM push_gateway_installations WHERE id=$1 AND endpoint_epoch=$2 AND revoked_at IS NOT NULL)").bind(id).bind(new).fetch_one(&mut *tx).await.map_err(db)?;
             if !already_revoked {
                 return Err(AuthorityError::Rejected);
             }
         }
-        Ok(())
+        commit_management(tx, assertion).await
     }
     async fn authorize_delivery(
         &self,
@@ -571,6 +625,7 @@ mod postgres_tests {
     use super::*;
 
     include!("postgres/grants_tests.rs");
+    include!("postgres/management_tests.rs");
     use sqlx::{postgres::PgPoolOptions, AssertSqlSafe};
 
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1 -- fixed localhost-only test credential
@@ -966,17 +1021,20 @@ mod postgres_tests {
             .await
             .expect("create initial installation");
         store
-            .upsert_delegation(Delegation {
-                id: Uuid::from_u128(2),
-                grant_hash: crate::grant::test_hash(Uuid::from_u128(2)),
-                installation_id: Uuid::from_u128(1),
-                relay_pubkey: RELAY_HEX.to_owned(),
-                endpoint_epoch: 1,
-                generation: 1,
-                not_before: now,
-                expires_at: now + 1_000,
-                revoked: false,
-            })
+            .upsert_delegation(
+                Delegation {
+                    id: Uuid::from_u128(2),
+                    grant_hash: crate::grant::test_hash(Uuid::from_u128(2)),
+                    installation_id: Uuid::from_u128(1),
+                    relay_pubkey: RELAY_HEX.to_owned(),
+                    endpoint_epoch: 1,
+                    generation: 1,
+                    not_before: now,
+                    expires_at: now + 1_000,
+                    revoked: false,
+                },
+                crate::authority::test_assertion(&store, Uuid::from_u128(1), Some(1 - 1)).await,
+            )
             .await
             .expect("authenticated delegation renews installation");
         assert!(store
@@ -1034,7 +1092,12 @@ mod postgres_tests {
             .await
             .expect("create original installation");
         store
-            .revoke_installation(original_id, 1, 2)
+            .revoke_installation(
+                original_id,
+                1,
+                2,
+                crate::authority::test_assertion(&store, original_id, None).await,
+            )
             .await
             .expect("revoke original installation");
         store
@@ -1333,33 +1396,44 @@ mod postgres_tests {
 
         install_authority(&pool).await;
         let id = Uuid::from_u128(1);
+        let assertion = |previous, next| AssertionCounter {
+            previous,
+            next,
+            request_expires_at: now + 300,
+            now,
+            expected_generation: None,
+        };
         let (a, b) = tokio::join!(
-            store.advance_assertion_counter(id, 0, 1),
-            store.advance_assertion_counter(id, 0, 2)
+            store.revoke_installation(id, 1, 2, assertion(0, 1)),
+            store.revoke_installation(id, 1, 2, assertion(0, 2)),
         );
         assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
-        let previous = store.installation(id, now).await.unwrap().assertion_counter;
+        let previous = store
+            .installation_for_revocation(id, now)
+            .await
+            .unwrap()
+            .assertion_counter;
         assert!(previous == 1 || previous == 2);
         store
-            .advance_assertion_counter(id, previous, u32::MAX)
+            .revoke_installation(id, 1, 2, assertion(previous, u32::MAX))
             .await
             .unwrap();
-        assert_eq!(
-            store.advance_assertion_counter(id, u32::MAX, 0).await,
-            Err(AuthorityError::Rejected)
-        );
+        for next in [0, u32::MAX] {
+            assert_eq!(
+                store
+                    .revoke_installation(id, 1, 2, assertion(u32::MAX, next))
+                    .await,
+                Err(AuthorityError::Rejected)
+            );
+        }
         assert_eq!(
             store
-                .advance_assertion_counter(id, u32::MAX, u32::MAX)
-                .await,
-            Err(AuthorityError::Rejected)
-        );
-        assert_eq!(
-            store.installation(id, now).await.unwrap().assertion_counter,
+                .installation_for_revocation(id, now)
+                .await
+                .unwrap()
+                .assertion_counter,
             u32::MAX
         );
-        assert!(store.installation(id, now + 31 * 86400).await.is_err());
-        store.revoke_installation(id, 1, 2).await.unwrap();
         assert!(store.installation(id, now).await.is_err());
         pool.close().await;
         drop_schema(&schema).await;

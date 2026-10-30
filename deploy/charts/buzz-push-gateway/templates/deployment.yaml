@@ -44,6 +44,7 @@ spec:
             - { name: public, containerPort: 8080 }
             - { name: health, containerPort: 8081 }
           env:
+            - { name: BUZZ_PUSH_GATEWAY_ORIGIN, value: {{ .Values.gatewayOrigin | quote }} }
             - { name: BUZZ_PUSH_BIND_ADDR, value: "0.0.0.0:8080" }
             - { name: BUZZ_PUSH_HEALTH_ADDR, value: "0.0.0.0:8081" }
             {{/* Schema bounds this integer; normalize YAML numbers before quote can emit scientific notation. */}}
