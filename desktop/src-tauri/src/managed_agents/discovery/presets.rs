@@ -31,11 +31,17 @@ pub(super) fn preset_catalog_entry(
         .underlying_cli
         .and_then(&resolve)
         .map(|path| path.display().to_string());
-    let (availability, command, binary_path) = super::classify_runtime(
+    let (mut availability, command, binary_path) = super::classify_runtime(
         resolve(def.command).map(|path| (def.command, path)),
         def.underlying_cli,
         underlying_cli_path.is_some(),
     );
+    if def.id == "hermes"
+        && availability == AcpAvailabilityStatus::Available
+        && resolve("buzz-dev-mcp").is_none()
+    {
+        availability = AcpAvailabilityStatus::CliMissing;
+    }
 
     let cli_install_hint = def.underlying_cli.map(|cli| {
         def.underlying_cli_install_hint
@@ -48,6 +54,9 @@ pub(super) fn preset_catalog_entry(
             })
     });
     let install_hint = match availability {
+        AcpAvailabilityStatus::CliMissing if def.id == "hermes" => {
+            "Hermes ACP is installed, but required `buzz-dev-mcp` is missing. Install Buzz with its bundled `buzz-dev-mcp` binary or build it from source, make sure it is on PATH, then restart Buzz.".to_string()
+        }
         AcpAvailabilityStatus::Available if def.underlying_cli.is_some() => String::new(),
         AcpAvailabilityStatus::CliMissing => cli_install_hint.unwrap_or_default(),
         AcpAvailabilityStatus::NotInstalled if def.underlying_cli.is_some() => {
@@ -78,7 +87,8 @@ pub(super) fn preset_catalog_entry(
             def.command,
             def.args.iter().map(|arg| arg.to_string()).collect(),
         ),
-        mcp_command: None,
+        mcp_command: (!super::super::runtime::mcp_command_for_agent(def.command).is_empty())
+            .then(|| super::super::runtime::mcp_command_for_agent(def.command).to_string()),
         model_env_var: None,
         provider_env_var: None,
         thinking_env_var: None,
@@ -343,6 +353,47 @@ mod tests {
         underlying_cli_install_hint: Some("Install the Amp Test CLI."),
         underlying_cli_install_instructions_url: Some("https://example.com/amp"),
     };
+
+    #[test]
+    fn hermes_preset_advertises_buzz_mcp_bridge() {
+        let preset = PRESET_HARNESSES
+            .iter()
+            .find(|preset| preset.id == "hermes")
+            .expect("Hermes preset");
+        let entry = preset_catalog_entry(preset, |_| None);
+        assert_eq!(entry.mcp_command.as_deref(), Some("buzz-dev-mcp"));
+    }
+
+    #[test]
+    fn hermes_requires_buzz_dev_mcp_to_be_available() {
+        let preset = PRESET_HARNESSES
+            .iter()
+            .find(|preset| preset.id == "hermes")
+            .expect("Hermes preset");
+        let missing_mcp = preset_catalog_entry(preset, |command| {
+            (command == "hermes-acp").then(|| PathBuf::from("/usr/local/bin/hermes-acp"))
+        });
+        assert_eq!(missing_mcp.availability, AcpAvailabilityStatus::CliMissing);
+        assert_eq!(missing_mcp.command.as_deref(), Some("hermes-acp"));
+        assert!(missing_mcp.install_hint.contains("buzz-dev-mcp"));
+        assert!(missing_mcp.install_hint.contains("PATH"));
+
+        let available = preset_catalog_entry(preset, |command| match command {
+            "hermes-acp" | "buzz-dev-mcp" => {
+                Some(PathBuf::from(format!("/usr/local/bin/{command}")))
+            }
+            _ => None,
+        });
+        assert_eq!(available.availability, AcpAvailabilityStatus::Available);
+
+        let missing_hermes = preset_catalog_entry(preset, |command| {
+            (command == "buzz-dev-mcp").then(|| PathBuf::from("/usr/local/bin/buzz-dev-mcp"))
+        });
+        assert_eq!(
+            missing_hermes.availability,
+            AcpAvailabilityStatus::NotInstalled
+        );
+    }
 
     #[test]
     fn devin_preset_uses_official_native_acp_invocation() {

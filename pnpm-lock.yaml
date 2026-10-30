@@ -7,6 +7,7 @@ settings:
 overrides:
   '@radix-ui/react-dismissable-layer': 1.1.19
   linkify-it: ^5.0.2
+  seroval: ^1.6.2
 
 patchedDependencies:
   isomorphic-git: e9b414a60d4cf1d8aa18f7a779483984e821989967c235662566e94ef0238d3f
@@ -3341,11 +3342,11 @@ packages:
     resolution: {integrity: sha512-S0xQPhUTefAhNvNWFg0c1J8qJArHt5KdtJ/cFAofo06KD1MVSeFWyl4iiu+ApDIuw0WhjpOfCdgConOfAnLgkw==}
     engines: {node: '>=10'}
     peerDependencies:
-      seroval: ^1.0
+      seroval: ^1.6.2
 
-  seroval@1.5.4:
-    resolution: {integrity: sha512-46uFvgrXTVxZcUorgSSRZ4y+ieqLLQRMlG4bnCZKW3qI6BZm7Rg4ntMW4p1mILEEBZWrFlcpp0AyIIlM6jD9iw==}
-    engines: {node: '>=10'}
+  seroval@1.7.2:
+    resolution: {integrity: sha512-NPOYrDVbvtuTo5m9InqKE7O6wBASON46OabjyqLUGPvoXNDYp0pReuFYkqOQwGsoj1OpZVj6mIdnRRgt5O1/gQ==}
+    engines: {node: '>=20'}
 
   set-blocking@2.0.0:
     resolution: {integrity: sha512-KiKBS8AnWGEyLzofFfmvKwpdPzqiy16LvQfK3yv/fVH7Bj13/wl3JSR1J+rfgRE9q7xUJK4qvgS8raSOeLUehw==}
@@ -4992,8 +4993,8 @@ snapshots:
     dependencies:
       '@tanstack/history': 1.162.0
       cookie-es: 3.1.1
-      seroval: 1.5.4
-      seroval-plugins: 1.5.4(seroval@1.5.4)
+      seroval: 1.7.2
+      seroval-plugins: 1.5.4(seroval@1.7.2)
 
   '@tanstack/router-generator@1.167.9':
     dependencies:
@@ -6804,11 +6805,11 @@ snapshots:
 
   semver@6.3.1: {}
 
-  seroval-plugins@1.5.4(seroval@1.5.4):
+  seroval-plugins@1.5.4(seroval@1.7.2):
     dependencies:
-      seroval: 1.5.4
+      seroval: 1.7.2
 
-  seroval@1.5.4: {}
+  seroval@1.7.2: {}
 
   set-blocking@2.0.0: {}
 

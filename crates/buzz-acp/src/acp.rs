@@ -130,6 +130,45 @@ fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
     AcpError::AgentError { code, message }
 }
 
+/// Redact sensitive MCP credentials from a JSON value before logging or observing.
+/// Currently redacts `BUZZ_PRIVATE_KEY` and `BUZZ_AUTH_TAG` from MCP server env arrays.
+fn redact_mcp_env(value: &serde_json::Value) -> serde_json::Value {
+    let mut redacted = value.clone();
+    if let Some(obj) = redacted.as_object_mut() {
+        // Redact in MCP server env arrays (session/new params)
+        if let Some(params) = obj.get_mut("params").and_then(|p| p.as_object_mut()) {
+            if let Some(mcp_servers) = params.get_mut("mcpServers").and_then(|s| s.as_array_mut()) {
+                for server in mcp_servers {
+                    if let Some(env) = server.get_mut("env").and_then(|e| e.as_array_mut()) {
+                        for var in env {
+                            if let Some(name) = var.get("name").and_then(|n| n.as_str()) {
+                                if name == "BUZZ_PRIVATE_KEY" || name == "BUZZ_AUTH_TAG" {
+                                    if let Some(val) = var.get_mut("value") {
+                                        *val = serde_json::Value::String("[REDACTED]".into());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Redact in top-level env arrays (if any)
+        if let Some(env) = obj.get_mut("env").and_then(|e| e.as_array_mut()) {
+            for var in env {
+                if let Some(name) = var.get("name").and_then(|n| n.as_str()) {
+                    if name == "BUZZ_PRIVATE_KEY" || name == "BUZZ_AUTH_TAG" {
+                        if let Some(val) = var.get_mut("value") {
+                            *val = serde_json::Value::String("[REDACTED]".into());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    redacted
+}
+
 fn build_initialize_params() -> serde_json::Value {
     serde_json::json!({
         "protocolVersion": 2,
@@ -1157,7 +1196,7 @@ impl AcpClient {
         .await
         .map_err(|_| AcpError::WriteTimeout(WRITE_TIMEOUT))?
         .map_err(AcpError::Io)?;
-        self.observe("acp_write", value.clone());
+        self.observe("acp_write", redact_mcp_env(value));
         Ok(())
     }
 
@@ -1188,7 +1227,7 @@ impl AcpClient {
             "params": params,
         });
 
-        tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
+        tracing::debug!(target: "acp::wire", "→ {}", redact_mcp_env(&msg));
 
         // Wrap write + read in a single timeout so a hung agent can't block forever.
         // We cannot use an async block that borrows `self` mutably across two awaits
@@ -3678,6 +3717,81 @@ mod tests {
             matches!(result, Err(AcpError::IdleTimeout(_))),
             "expected IdleTimeout after silence, got {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn session_new_does_not_log_mcp_credentials() {
+        use std::sync::{Arc, Mutex};
+
+        struct LogWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for LogWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .without_time()
+            .with_ansi(false)
+            .with_writer({
+                let output = Arc::clone(&output);
+                move || LogWriter(Arc::clone(&output))
+            })
+            .finish();
+        let script = r#"
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":0,"result":{"sessionId":"ses_test"}}'
+        "#;
+        let mut client = spawn_script(script).await;
+        let observer = ObserverHandle::in_process();
+        client.set_observer(Some(observer.clone()), 0);
+        let server = McpServer {
+            name: "test-mcp".into(),
+            command: "test-mcp".into(),
+            args: vec![],
+            env: vec![
+                EnvVar {
+                    name: "BUZZ_PRIVATE_KEY".into(),
+                    value: "sentinel-private-key".into(),
+                },
+                EnvVar {
+                    name: "BUZZ_AUTH_TAG".into(),
+                    value: "sentinel-auth-tag".into(),
+                },
+            ],
+        };
+        use tracing::instrument::WithSubscriber;
+        let result = async {
+            client
+                .session_new_full("/tmp", vec![server], None, None)
+                .await
+        }
+        .with_subscriber(subscriber)
+        .await;
+        assert!(result.is_ok(), "session/new should succeed");
+        let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        let writes: Vec<_> = observer
+            .snapshot()
+            .into_iter()
+            .filter(|e| e.kind == "acp_write")
+            .collect();
+        assert_eq!(writes.len(), 1);
+        for secret in ["sentinel-private-key", "sentinel-auth-tag"] {
+            assert!(
+                !logs.contains(secret),
+                "ACP debug log leaked MCP credential"
+            );
+            assert!(
+                !writes[0].payload.to_string().contains(secret),
+                "observer leaked MCP credential"
+            );
+        }
     }
 
     #[tokio::test]

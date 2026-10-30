@@ -14,6 +14,7 @@ assuming a capability doesn't exist, check `buzz --help`.
 Auth env vars: `BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`. Exit codes:
 0 ok, 1 user error, 2 network, 3 auth, 4 other, 5 write conflict. Output is
 structured JSON. `--format compact` is global — it goes before the subcommand.
+When a Buzz MCP shell tool is available, run `buzz` through it; other terminals may lack the agent's signing key.
 
 Run `buzz --help` or `buzz <group> --help` for full usage. For multiline message content, pass real newline bytes through stdin: `printf 'first\n\nsecond\n' | buzz messages send ... --content -`. Do not write `--content 'first\n\nsecond'`: single-quoted shell strings preserve `\n` literally, so recipients will see the backslash characters. `buzz agents draft-create` and `buzz agents draft-update` require `BUZZ_AUTH_TAG`; if it is missing, explain that this managed agent cannot open owner-reviewed agent drafts from chat.
 
