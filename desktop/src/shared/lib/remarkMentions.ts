@@ -8,7 +8,7 @@
  */
 
 import { createRemarkPrefixPlugin } from "./createRemarkPrefixPlugin";
-import { buildMentionPattern } from "./mentionPattern";
+import { buildMentionPattern, PREFIX_LEAD_GROUP } from "./mentionPattern";
 
 type RemarkMentionsOptions = {
   mentionNames?: string[];
@@ -17,12 +17,16 @@ type RemarkMentionsOptions = {
 export default function remarkMentions(options?: RemarkMentionsOptions) {
   const mentionPattern = buildMentionPattern(options?.mentionNames ?? []);
 
-  return createRemarkPrefixPlugin(mentionPattern, (matchText) => ({
-    type: "mention",
-    value: matchText,
-    data: {
-      hName: "mention",
-      hChildren: [{ type: "text", value: matchText }],
-    },
-  }));
+  return createRemarkPrefixPlugin(
+    mentionPattern,
+    (matchText) => ({
+      type: "mention",
+      value: matchText,
+      data: {
+        hName: "mention",
+        hChildren: [{ type: "text", value: matchText }],
+      },
+    }),
+    { leadGroup: PREFIX_LEAD_GROUP },
+  );
 }
