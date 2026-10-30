@@ -589,12 +589,32 @@ pub mod relay_members {
             None => write_agent_owner(state, tenant, agent, owner).await,
         };
         if link == OwnerLink::Linked {
-            state
-                .author_type_cache
-                .insert((tenant.community(), agent.to_bytes().to_vec()), true);
-            state.observer_owner_cache.insert(owner_key, true);
+            remember_agent_owner(state, tenant, agent, owner);
         }
         link
+    }
+
+    /// Record a stored agent→owner link in this relay's owner caches. Owner
+    /// checks cache a miss as `false`, so every path that records an owner
+    /// calls this; otherwise those checks keep saying "not owner" until the
+    /// entry expires.
+    pub fn remember_agent_owner(
+        state: &AppState,
+        tenant: &TenantContext,
+        agent: &nostr::PublicKey,
+        owner: &nostr::PublicKey,
+    ) {
+        state
+            .author_type_cache
+            .insert((tenant.community(), agent.to_bytes().to_vec()), true);
+        state.observer_owner_cache.insert(
+            (
+                tenant.community(),
+                agent.to_bytes().to_vec(),
+                owner.to_bytes().to_vec(),
+            ),
+            true,
+        );
     }
 
     /// Record `owner` for an agent that had none when read. The write is
@@ -640,6 +660,15 @@ pub mod relay_members {
                 // without it would only be found by an owner-to-agent lookup
                 // at revoke time; make them reconnect with the owner attached.
                 state.disconnect_unowned_agent_clusterwide(tenant, &agent.to_bytes());
+                // Rosters show `bot` for an owned agent, so the agent's
+                // rosters now show the wrong label. Republish them in the
+                // background so a contended roster lock cannot hold first
+                // AUTH past its deadline.
+                crate::handlers::side_effects::spawn_agent_roster_republish(
+                    tenant,
+                    std::sync::Arc::new(state.clone()),
+                    agent.to_bytes().to_vec(),
+                );
                 OwnerLink::Linked
             }
             // Another writer stored an owner first.

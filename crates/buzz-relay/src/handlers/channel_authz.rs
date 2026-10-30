@@ -530,6 +530,37 @@ mod tests {
                 Some(MemberRole::Bot),
                 Ok(CheckAddPolicy),
             ),
+            // `member` and `bot` are one role: asking for the other one is not
+            // a role change, so an unprivileged actor's re-add stays allowed.
+            (
+                "open",
+                &[(1, "owner"), (2, "bot")],
+                9,
+                None,
+                2,
+                Some(Member),
+                Ok(CheckAddPolicy),
+            ),
+            (
+                "private",
+                &[(1, "owner"), (2, "member"), (3, "member")],
+                3,
+                Some(Member),
+                2,
+                Some(Bot),
+                Ok(CheckAddPolicy),
+            ),
+            // A guest is a different role, so promoting one to `bot` is still
+            // a privileged role change.
+            (
+                "open",
+                &[(1, "owner"), (2, "guest")],
+                9,
+                None,
+                2,
+                Some(Bot),
+                Err(E::RoleChangeDenied),
+            ),
             // An absent role tag requests no change, so the role-change gate
             // never fires even for an unprivileged actor.
             (

@@ -7,17 +7,11 @@
 //! 2. Resolves kind:30617 → protection rules
 //! 3. Grants owner authority to the repo key or its verified managed-agent owner
 //! 4. Otherwise resolves the pusher's channel role via buzz-channel binding
-//! 5. Promotes Bot → Member (bots in a channel push as members)
-//! 6. Calls `buzz_core::git_perms::evaluate_push()`
-//! 7. Returns 200 (allow) or 403 (deny with reasons)
+//! 5. Calls `buzz_core::git_perms::evaluate_push()`
+//! 6. Returns 200 (allow) or 403 (deny with reasons)
 //!
-//! # Bot Role Model
-//!
-//! Bots are intentionally added to channels by members/admins. For git push,
-//! they're promoted to Member — protection rules still apply. Bot is a
-//! designation (what it is), not a permission tier (what it can do). The
-//! promotion is scoped to this module; the core `MemberRole::Bot` hierarchy
-//! is unchanged.
+//! A `bot` channel role pushes as a member: [`MemberRole::Bot`] has the
+//! member permission level, and protection rules still apply.
 //!
 //! # Security invariants
 //!
@@ -400,15 +394,7 @@ pub async fn hook_policy_check(
         }
     };
 
-    // 8. Effective git role: bots intentionally added to a channel push as members.
-    // Protection rules (push:admin, no-force-push, require-patch, etc.) still apply.
-    // Bot is a designation (what it is), not a permission tier (what it can do).
-    let git_role = match role {
-        MemberRole::Bot => MemberRole::Member,
-        other => other,
-    };
-
-    // 9. Classify ref updates and evaluate policy.
+    // 8. Classify ref updates and evaluate policy.
     let updates: Vec<RefUpdate> = req
         .ref_updates
         .iter()
@@ -420,7 +406,7 @@ pub async fn hook_policy_check(
         })
         .collect();
 
-    match evaluate_push(&updates, git_role, &rules) {
+    match evaluate_push(&updates, role, &rules) {
         Ok(()) => Json(HookCallbackResponse {
             allowed: true,
             denials: vec![],
