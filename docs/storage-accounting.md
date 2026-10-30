@@ -62,7 +62,8 @@ to an operator endpoint. kgoose's `POST {prefix}/v1/buzz/storage-usage/record`
 receives them and bills sponsored communities in Orb. Unset, nothing is sent.
 Every five minutes, one relay pod (elected by a PostgreSQL session advisory
 lock) compares the stored snapshot's `completed_at` with the last one it
-handled and, when it is new, POSTs it in batches of at most 500 communities:
+handled and, when it is new, POSTs every community in consecutive batches of
+at most 50:
 
 ```json
 {

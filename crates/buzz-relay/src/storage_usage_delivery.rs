@@ -30,8 +30,9 @@ use crate::{nip98::nip98_header, state::AppState};
 const STORAGE_USAGE_DELIVERY_LOCK_KEY: i64 = 0x4255_5A5A_5553_4744;
 const CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-/// Communities per POST, bounding each request body (kgoose accepts 1000).
-const BATCH_SIZE: usize = 500;
+/// Communities per POST. One run sends every batch in order, so this bounds
+/// each request body, not how many communities a snapshot reports.
+const BATCH_SIZE: usize = 50;
 
 /// Parse `BUZZ_STORAGE_USAGE_URL`: an HTTP(S) URL without credentials, query,
 /// or fragment, the same shape operator-listener endpoints must have.
