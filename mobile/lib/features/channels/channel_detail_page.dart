@@ -1,5 +1,4 @@
 import 'message_swipe_reply.dart';
-import 'agent_reply_handoff.dart';
 import 'huddle_timeline.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
@@ -57,8 +56,8 @@ import 'channel_management_provider.dart';
 import 'channel_sections/channel_sections_provider.dart';
 import 'channel_messages_provider.dart';
 import 'channel_typing_provider.dart';
-import 'inline_agent_typing.dart';
-import 'typing_motion_preview.dart';
+import 'conversation_activity.dart';
+import 'conversation_activity_state.dart';
 import 'channel_ids_by_name_provider.dart';
 import 'channels_provider.dart';
 import 'unread_badge/observed_unread_event.dart';
@@ -102,6 +101,7 @@ part 'channel_detail_page/empty_messages.dart';
 part 'channel_detail_page/oldest_navigation.dart';
 part 'channel_detail_page/system_rows.dart';
 part 'channel_detail_page/thread_working.dart';
+part 'channel_detail_page/composer_activity.dart';
 part 'channel_detail_page/activity_members_sheet.dart';
 part 'channel_detail_page/huddle_sheet.dart';
 part 'channel_detail_page/huddle_call_avatar.dart';
@@ -444,12 +444,11 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       channelBotPubkeys:
           channelBotPubkeysState.asData?.value ?? const <String>{},
     );
-    // Ordinary channels show the user's agents working in a thread on its
-    // root message and in the typing row. Me and DMs already show that typing
-    // inline.
+    // As on desktop, the user's agents working in a thread show on its root
+    // message. Me counts thread typing as its own conversation's.
     final threadWorking = _threadWorkingAgents(
       ref,
-      personalChat || resolvedChannel.isDm
+      personalChat
           ? ''
           : ref.watch(
               channelTypingProvider(
@@ -457,26 +456,6 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
               ).select((all) => _threadTypingKey(all, currentPubkey)),
             ),
     );
-    final ownedThreadTypers = {
-      for (final agents in threadWorking.values) ...agents,
-    };
-    // Agent work is visible in every DM, even when its response is threaded.
-    // Ordinary channels keep other thread activity inside the thread view,
-    // but, as on desktop, show the user's own agents working in any thread.
-    final typingEntries = ref
-        .watch(
-          visibleTypingProvider(
-            channel.id,
-            selfPubkey: currentPubkey,
-            include: (e) =>
-                personalChat ||
-                e.threadHeadId == null ||
-                ownedThreadTypers.contains(e.pubkey.toLowerCase()) ||
-                (resolvedChannel.isDm &&
-                    agentPubkeys.contains(e.pubkey.toLowerCase())),
-          ),
-        )
-        .entries;
     useEffect(() {
       if (sessionStatus != SessionStatus.connected ||
           identitySubscriptionPubkeys.isEmpty) {
@@ -841,7 +820,6 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                           data: (events) {
                             return _MessageList(
                               notifier: ref.watch(messagesProvider.notifier),
-                              inlineTyping: typingEntries,
                               threadWorking: threadWorking,
                               stickyDateHeaderState: stickyDateHeaderState,
                               entries: timelineEntries,
@@ -910,6 +888,16 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      _ComposerActivity(
+                        scope: ActivityScope(
+                          channelId: channel.id,
+                          selfPubkey: currentPubkey,
+                          allThreads: personalChat,
+                        ),
+                        messages: timelineMessages,
+                        isMember: resolvedChannel.isMember,
+                        isArchived: resolvedChannel.isArchived,
+                      ),
                       ?assistant.pendingNotice,
                       ComposeBar(
                         channelId: channel.id,

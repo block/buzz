@@ -33,8 +33,8 @@ import 'channel_management_provider.dart' show currentPubkeyProvider;
 import 'channel_identity_names_provider.dart';
 import 'channel_link_navigation.dart';
 import 'channel_messages_provider.dart';
-import 'channel_typing_provider.dart';
-import 'channel_typing_indicator.dart';
+import 'conversation_activity.dart';
+import 'conversation_activity_state.dart';
 import 'thread_replies_provider.dart';
 import 'channel_ids_by_name_provider.dart';
 import 'channels_provider.dart';
@@ -783,16 +783,12 @@ class ThreadDetailPage extends HookConsumerWidget {
       keys: [threadHead.id, readingContentKey(allMsgs), navigationBottomInset],
     );
 
-    // Thread-scoped typing indicators (exclude self).
-    final threadTyping = ref
-        .watch(
-          visibleTypingProvider(
-            channelId,
-            selfPubkey: currentPubkey,
-            include: (e) => e.threadHeadId == threadHead.id,
-          ),
-        )
-        .entries;
+    // Desktop's activity for this thread, other than the user's own typing.
+    final activityScope = ActivityScope(
+      channelId: channelId,
+      selfPubkey: currentPubkey,
+      threadRootId: threadHead.id,
+    );
 
     // The root of the entire thread chain. If the current thread head is
     // itself a root message its rootId is null, so fall back to its own id.
@@ -988,11 +984,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                 ),
               ),
               if (!isMember || isArchived)
-                _ThreadTypingIndicator(
-                  channelId: channelId,
-                  entries: threadTyping,
-                  animated: false,
-                ),
+                _ThreadTypingIndicator(scope: activityScope, animated: false),
             ],
           ),
           if (isMember && !isArchived)
@@ -1005,10 +997,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      _ThreadTypingIndicator(
-                        channelId: channelId,
-                        entries: threadTyping,
-                      ),
+                      _ThreadTypingIndicator(scope: activityScope),
                       ComposeBar(
                         channelId: channelId,
                         focusNode: composerFocusNode,
