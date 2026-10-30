@@ -1075,6 +1075,9 @@ mod fault_probe {
         None,
         /// Every racer PUT.
         All(u16),
+        /// Every racer PUT once the winner has created the object, leaving
+        /// the winner as the only classified observer.
+        AllButWinner(u16),
         /// The first PUT of each burst. Phase-3 racers send identical bytes,
         /// so the fake can't single one out. rust-s3 retries every non-2xx
         /// once after 1s, so the faulted slot recurs in the retry burst, and
@@ -1129,6 +1132,7 @@ mod fault_probe {
                 return match self.faults.inm {
                     InmFault::None => None,
                     InmFault::All(code) => Some(code),
+                    InmFault::AllButWinner(code) => st.objects.contains_key(key).then_some(code),
                     InmFault::FirstOfBurst(code) => new_burst.then_some(code),
                 };
             }
@@ -1275,6 +1279,15 @@ mod fault_probe {
         assert_probe_failure(
             run(one_observer).await,
             "if_match_race",
+            "race not observed",
+        );
+        let winner_only = Faults {
+            inm: InmFault::AllButWinner(500),
+            ..clean()
+        };
+        assert_probe_failure(
+            run(winner_only).await,
+            "if_none_match_race",
             "race not observed",
         );
         let all_5xx = Faults {
