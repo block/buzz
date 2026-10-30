@@ -300,7 +300,8 @@ void main() {
 
     relay.rejectNext(
       'blocked: not allowed here',
-      match: (e) => e.kind == EventKind.streamMessage,
+      match: (e) =>
+          e.kind == EventKind.streamMessage && e.getTagValue('h') == _dmId,
     );
     await _send(tester);
     expect(opened, [
