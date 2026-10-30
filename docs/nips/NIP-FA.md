@@ -185,7 +185,7 @@ Adapter responses are private login state. Two distinct opt-ins govern public na
 - **Managed public profiles** permit clients to copy explicitly publishable `profile_projection` fields into a self-signed kind `0` profile. Clients MUST NOT do so without an explicit operator policy authorizing that publication to the destination community. These names remain self-declared; they do not confer verification.
 - **Relay-signed verified profiles** use the NIP-FI issuer policy's `public_profile` setting and the destination community's issuer authorization. The adapter supplies an explicitly publishable `nostr_public_profile` claim, and the relay signs the kind `30382` projection. This opt-in does not authorize client publication into kind `0`, and the managed-public-profile opt-in does not enable relay projections.
 
-When a community's NIP-11 discovery advertises `public_profile`, clients SHOULD use the relay's verified projection for names. Discovery neither grants nor revokes the separate permission to publish kind `0`. Clients MUST NOT infer that permission from the presence or absence of `public_profile`.
+When a community's NIP-11 discovery advertises `public_profile`, clients SHOULD use the relay's verified projection for names, subject to NIP-FI's discovery and issuer-attribution display rules. A successful discovery response omitting `public_profile` hides verification marks without deleting historical profiles. Discovery neither grants nor revokes the separate permission to publish kind `0`. Clients MUST NOT infer that permission from the presence or absence of `public_profile`.
 
 Raw upstream claims, legal names, emails, issuer identifiers, subjects, and assertion contents MUST NOT be written to public Nostr events implicitly.
 
