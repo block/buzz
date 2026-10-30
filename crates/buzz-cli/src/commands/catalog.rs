@@ -110,6 +110,27 @@ pub(crate) fn safe_avatar(value: Option<&str>) -> Option<String> {
 /// validation error, or `null` for an adoptable entry.
 pub(crate) const VALIDATION_ERROR_KEY: &str = "validation_error";
 
+const MAX_VALIDATION_ERROR_CHARS: usize = 200;
+
+/// A validation error safe to print to an agent: core errors can echo
+/// publisher text (serde value echoes, member keys), so non-ASCII and control
+/// characters are escaped and the length is capped.
+pub(crate) fn sanitize_validation_error(error: &str) -> String {
+    let mut out = String::new();
+    for (count, character) in error.chars().enumerate() {
+        if count == MAX_VALIDATION_ERROR_CHARS {
+            out.push_str("...");
+            break;
+        }
+        if character.is_ascii() && !character.is_ascii_control() {
+            out.push(character);
+        } else {
+            out.extend(character.escape_unicode());
+        }
+    }
+    out
+}
+
 /// Report catalog entries skipped for malformed content, so a bad head is
 /// never mistaken for an absent one.
 pub(crate) fn warn_skipped(what: &str, skipped: &[String]) {
@@ -119,6 +140,23 @@ pub(crate) fn warn_skipped(what: &str, skipped: &[String]) {
             skipped.len(),
             skipped.join(", ")
         );
+    }
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    use super::*;
+
+    #[test]
+    fn validation_errors_are_escaped_and_capped() {
+        assert_eq!(sanitize_validation_error("plain: 'k'"), "plain: 'k'");
+        assert_eq!(
+            sanitize_validation_error("key 'k\u{202E}x\n'"),
+            "key 'k\\u{202e}x\\u{a}'"
+        );
+        let long = sanitize_validation_error(&"A".repeat(50_000));
+        assert_eq!(long.chars().count(), MAX_VALIDATION_ERROR_CHARS + 3);
+        assert!(long.ends_with("..."));
     }
 }
 

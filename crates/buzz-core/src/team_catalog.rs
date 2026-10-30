@@ -363,10 +363,9 @@ pub fn validate_member(member: &TeamCatalogMember) -> Result<(), String> {
         MAX_NAME_BYTES,
         "a member display name",
     )?;
-    // Concealment gate on the executable-definition fields, matching the
-    // invariant the persona catalog enforces at its own parse boundary
-    // (`persona_catalog::parse_agent`): a member display name and prompt are
-    // copied verbatim into a local persona and delivered to the ACP harness
+    // Concealment gate on the executable-definition fields: a member display
+    // name and prompt are copied verbatim into a local persona and delivered
+    // to the ACP harness
     // (`BUZZ_ACP_SYSTEM_PROMPT`), so invisible/bidi controls could make what
     // executes differ from the reviewed text. `validate_agent_definition_text`
     // applies the display-name rule (no layout controls) and the prompt rule
@@ -431,8 +430,8 @@ pub fn validate_member(member: &TeamCatalogMember) -> Result<(), String> {
     if let Some(mode) = &member.respond_to {
         validate_respond_to_wire(mode)?;
     }
-    // Mirrors the 1..=32 range `mint_behavioral_defaults` enforces, so a team
-    // whose members could never launch is refused at add time.
+    // Instances launch with 1..=32 parallelism, so a team whose members could
+    // never launch is refused at add time.
     if let Some(parallelism) = member.parallelism {
         if !(1..=32).contains(&parallelism) {
             return Err(format!(

@@ -203,7 +203,9 @@ name; a newer unshared or unreadable head hides older versions. Both commands
 apply the validators Desktop uses when it adopts an entry (`buzz-core`). An
 entry Desktop would reject is still listed, with `validation_error` set to the
 reason and only its identity fields (`event_id`, `owner_pubkey`, `persona_id` or
-`team_id`, `created_at`) present; rejected entries sort last, and adoptable
+`team_id`, `created_at`) present (this includes a team with an unknown schema
+version or an unparseable member, which older CLIs skipped); the reason has
+non-ASCII characters escaped and is capped at 200 characters; rejected entries sort last, and adoptable
 entries carry `validation_error: null`. `teams list`
 prints `persona_ids: null` when the publisher never recorded membership.
 `agents metrics` prints `{event_id, agent, created_at, metric}` with the

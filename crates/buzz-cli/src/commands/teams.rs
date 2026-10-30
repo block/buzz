@@ -7,7 +7,8 @@ use buzz_core::team_catalog::parse_team_catalog_content;
 use serde_json::{json, Value};
 
 use super::catalog::{
-    fetch_heads, optional_string, safe_avatar, warn_skipped, Head, VALIDATION_ERROR_KEY,
+    fetch_heads, optional_string, safe_avatar, sanitize_validation_error, warn_skipped, Head,
+    VALIDATION_ERROR_KEY,
 };
 use crate::client::BuzzClient;
 use crate::error::CliError;
@@ -61,7 +62,7 @@ fn project_catalog_team(head: &Head) -> Option<Value> {
     let content = match parse_team_catalog_content(&head.event.content) {
         Ok(content) => content,
         Err(error) => {
-            team[VALIDATION_ERROR_KEY] = Value::String(error);
+            team[VALIDATION_ERROR_KEY] = Value::String(sanitize_validation_error(&error));
             return Some(team);
         }
     };
@@ -326,6 +327,29 @@ mod tests {
                 10,
             ),
         );
+        let long_v =
+            json!({"v": format!("{}\u{202E}", "A".repeat(50_000)), "name": "T", "members": []});
+        seed(
+            &relay,
+            event(
+                &alice,
+                30178,
+                &long_v.to_string(),
+                &[&["d", "longv"], &shared],
+                10,
+            ),
+        );
+        let dup = json!({"member_key": "k\u{202E}x", "display_name": "D"});
+        seed(
+            &relay,
+            event(
+                &alice,
+                30178,
+                &body(1, vec![dup.clone(), dup]),
+                &[&["d", "dupkey"], &shared],
+                10,
+            ),
+        );
         seed(
             &relay,
             event(&alice, 30178, "not json", &[&["d", "broken"], &shared], 10),
@@ -333,7 +357,7 @@ mod tests {
 
         let teams = catalog(&client).await.unwrap();
         let teams = teams.as_array().unwrap();
-        assert_eq!(teams.len(), 5, "{teams:?}");
+        assert_eq!(teams.len(), 7, "{teams:?}");
         let rejected: Vec<(&str, &str)> = teams[1..]
             .iter()
             .map(|t| {
@@ -343,12 +367,17 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(rejected.len(), 4);
+        assert_eq!(rejected.len(), 6);
+        for (_, error) in &rejected {
+            assert!(error.is_ascii() && error.chars().count() <= 203, "{error}");
+        }
         for (id, fragment) in [
             ("badmember", "a member key is empty"),
             ("big", "65 members"),
             ("concealed", "prohibited invisible"),
             ("future", "unsupported team catalog schema version 2"),
+            ("longv", "failed to parse"),
+            ("dupkey", "repeats the member key 'k\\u{202e}x'"),
         ] {
             assert!(
                 rejected

@@ -7,7 +7,8 @@ use buzz_core::kind::{event_is_shared, KIND_PERSONA};
 use serde_json::{json, Value};
 
 use super::catalog::{
-    fetch_heads, optional_string, safe_avatar, warn_skipped, Head, VALIDATION_ERROR_KEY,
+    fetch_heads, optional_string, safe_avatar, sanitize_validation_error, warn_skipped, Head,
+    VALIDATION_ERROR_KEY,
 };
 use crate::client::BuzzClient;
 use crate::error::CliError;
@@ -31,7 +32,7 @@ fn project(head: &Head) -> Option<Value> {
     let display_name = object.get("display_name")?.as_str()?;
     let mut persona = identity(head);
     if let Err(error) = validate_persona_object(object) {
-        persona[VALIDATION_ERROR_KEY] = Value::String(error);
+        persona[VALIDATION_ERROR_KEY] = Value::String(sanitize_validation_error(&error));
         return Some(persona);
     }
     let respond_to = match object.get("respond_to").and_then(Value::as_str) {
