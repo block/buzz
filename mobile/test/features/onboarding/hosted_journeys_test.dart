@@ -528,6 +528,92 @@ void main() {
   );
 
   journey(
+    'a refused organization account changes to another without the hosted one',
+    (tester, f) async {
+      f.relayAuthEnabled = true;
+      f.organizationEnabled = true;
+      await f.initialize();
+      // Signed in to the organization as an account bound to another key.
+      f.organizationSubject = 'other-member';
+      f.organizationBound = f.secondKeys.public;
+      await f.signInOrganization();
+      final community = Community.create(
+        name: 'Block',
+        relayUrl: 'wss://${HostedJourneyFixture.organizationRelayHost}',
+        pubkey: f.keys.public,
+        nsec: f.keys.nsec,
+      );
+      await f.storage.save(community);
+      await f.storage.saveActiveId(community.id);
+      await f.mount(tester, openEntry: false);
+      final sessionSubscription = f.container.listen(
+        relaySessionProvider,
+        (_, _) {},
+      );
+      addTearDown(sessionSubscription.close);
+      await f.settle(tester);
+      const refused =
+          'Your organization account cannot use this community with this key.';
+      expect(find.text(refused), findsOneWidget);
+      expect(f.sent('/identity/assertions'), isEmpty);
+
+      // Retry keeps the refused account and fails the same way.
+      await f.tap(tester, 'Retry');
+      expect(find.text(refused), findsOneWidget);
+      expect(f.organizationBrowserStarts, 0);
+
+      f.organizationSubject = 'journey-owner';
+      f.organizationBound = f.keys.public;
+      final hosted = f.container.read(builderlabAccountProvider);
+      final hostedCredential = await const FlutterSecureStorage().read(
+        key:
+            'buzz_hosted_session_'
+            '${hosted.accountOrigin.host.replaceAll('.', '_')}_v1',
+      );
+      expect(hostedCredential, isNotNull);
+      final connects = f.socketHeaders.length;
+      await f.tap(tester, 'Use a different account');
+      await f.settle(tester);
+      expect(f.organizationBrowserStarts, 1);
+      expect(
+        f.container.read(organizationAccountProvider)!.account!.subject,
+        'journey-owner',
+      );
+      expect(find.text(refused), findsNothing);
+      expect(find.text('Use a different account'), findsNothing);
+      // The real relay session reconnects with the new account's assertion.
+      expect(f.socketHeaders.length, greaterThan(connects));
+      expect(
+        f.socketHeaders.last['Nostr-Federated-Identity'],
+        'Bearer organization-assertion',
+      );
+      expect(
+        f.container.read(relaySessionProvider).status,
+        SessionStatus.connected,
+      );
+      // Only the organization session changed.
+      expect(
+        await const FlutterSecureStorage().read(
+          key:
+              'buzz_hosted_session_'
+              '${hosted.accountOrigin.host.replaceAll('.', '_')}_v1',
+        ),
+        hostedCredential,
+      );
+      expect(
+        f.requests.where(
+          (r) =>
+              r.url.origin != HostedJourneyFixture.organizationOrigin.origin &&
+              r.url.path.endsWith('/identity/assertions'),
+        ),
+        isEmpty,
+      );
+      expect((await f.storage.loadAll()).single.nsec, community.nsec);
+    },
+    requiresBuilderlab: false,
+  );
+
+  journey(
     'saved community signs in again without changing identity or onboarding',
     (tester, f) async {
       f.relayAuthEnabled = true;
