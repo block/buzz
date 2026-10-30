@@ -1,4 +1,3 @@
-import 'package:buzz/shared/me/default_agent.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/features/channels/send_message_provider.dart';
 import 'package:buzz/features/channels/agent_reply_handoff.dart';
@@ -242,7 +241,6 @@ Widget _buildTestable({
   bool darkTheme = false,
   String? chatColor,
   bool personalChat = false,
-  String? defaultAgent,
   required List<NostrEvent> messages,
   PresenceCacheNotifier? presenceCache,
   List<TypingEntry> typing = const [],
@@ -306,7 +304,6 @@ Widget _buildTestable({
   return ProviderScope(
     retry: providerRetry ?? (disableRetries ? (_, _) => null : null),
     overrides: [
-      defaultAgentProvider.overrideWith((ref) => Stream.value(defaultAgent)),
       if (sender != null) sendMessageProvider.overrideWithValue(sender),
       if (soloSender != null) ...[
         meSendMessageProvider.overrideWithValue(soloSender),
@@ -11124,17 +11121,11 @@ void main() {
     });
 
     for (final scenario in [
-      (personal: true, dm: false, agent: 'alice', group: false, visible: true),
-      (
-        personal: false,
-        dm: false,
-        agent: 'alice',
-        group: false,
-        visible: false,
-      ),
-      (personal: false, dm: true, agent: 'alice', group: false, visible: true),
-      (personal: false, dm: true, agent: 'bob', group: false, visible: false),
-      (personal: false, dm: true, agent: 'alice', group: true, visible: false),
+      (personal: true, dm: false, agent: true, group: false, visible: true),
+      (personal: false, dm: false, agent: true, group: false, visible: false),
+      (personal: false, dm: true, agent: true, group: false, visible: true),
+      (personal: false, dm: true, agent: false, group: false, visible: false),
+      (personal: false, dm: true, agent: true, group: true, visible: true),
     ]) {
       testWidgets('reply-scoped typing follows conversation scope: $scenario', (
         tester,
@@ -11143,7 +11134,7 @@ void main() {
         await tester.pumpWidget(
           _buildTestable(
             personalChat: scenario.personal,
-            defaultAgent: scenario.agent,
+            knownAgentPubkeys: scenario.agent ? {'alice'} : <String>{},
             channel: scenario.dm
                 ? Channel(
                     id: _channelId,

@@ -20,7 +20,6 @@ import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../../shared/emoji/emoji_burst.dart';
 import '../../shared/me/me_sync.dart';
-import '../../shared/me/default_agent.dart';
 import '../../shared/me/me_search_placement.dart';
 import 'me/me_assistant_picker.dart';
 import 'me/me_chat_assistant.dart';
@@ -372,33 +371,6 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
         .toSet()
         .length;
     final isOneToOneDm = resolvedChannel.isDm && participantCount == 2;
-    // Bestie's direct conversation surfaces its work even when the reply
-    // is threaded. Other ordinary channels keep thread activity in the thread.
-    final defaultAgent = ref.watch(defaultAgentProvider);
-    final defaultAgentKey = defaultAgent.isLoading || defaultAgent.hasError
-        ? null
-        : defaultAgent.value;
-    final showsDefaultAgentThreads =
-        defaultAgentKey != null &&
-        isActiveDirectConversation(
-          resolvedChannel,
-          null,
-          currentPubkey,
-          defaultAgentKey,
-        );
-    final typingEntries = ref
-        .watch(
-          visibleTypingProvider(
-            channel.id,
-            selfPubkey: currentPubkey,
-            include: (e) =>
-                personalChat ||
-                e.threadHeadId == null ||
-                (showsDefaultAgentThreads &&
-                    e.pubkey.toLowerCase() == defaultAgentKey.toLowerCase()),
-          ),
-        )
-        .entries;
     final memberProfilesPreload = useMemoized(
       () => _preloadMembers(
         ref,
@@ -470,6 +442,21 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       channelBotPubkeys:
           channelBotPubkeysState.asData?.value ?? const <String>{},
     );
+    // Agent work is visible in every DM, even when its response is threaded.
+    // Ordinary channels keep thread activity inside the thread view.
+    final typingEntries = ref
+        .watch(
+          visibleTypingProvider(
+            channel.id,
+            selfPubkey: currentPubkey,
+            include: (e) =>
+                personalChat ||
+                e.threadHeadId == null ||
+                (resolvedChannel.isDm &&
+                    agentPubkeys.contains(e.pubkey.toLowerCase())),
+          ),
+        )
+        .entries;
     useEffect(() {
       if (sessionStatus != SessionStatus.connected ||
           identitySubscriptionPubkeys.isEmpty) {
