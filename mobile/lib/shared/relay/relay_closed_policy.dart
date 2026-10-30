@@ -80,6 +80,26 @@ RelayClosedClass classifyRelayClosed(String message) {
   return RelayClosedClass.retryable;
 }
 
+final _relayErrorPrefixPattern = RegExp(
+  r'^(?:exception:\s*)?(?:(?:invalid|blocked|restricted|duplicate|pow|unsupported):\s*)?',
+  caseSensitive: false,
+);
+
+/// User-facing text for a failed relay publish or request.
+///
+/// Drops the Dart `Exception: ` wrapper and a leading NIP-01 machine prefix
+/// (`invalid: `, `blocked: `, ...) so a relay refusal such as
+/// `invalid: an open channel named "Launch" already exists` reads as
+/// `An open channel named "Launch" already exists`.
+String relayErrorMessage(Object error) {
+  final text = error.toString().trim().replaceFirst(
+    _relayErrorPrefixPattern,
+    '',
+  );
+  if (text.isEmpty) return error.toString().trim();
+  return text[0].toUpperCase() + text.substring(1);
+}
+
 final _rateLimitRetryPattern = RegExp(r'retry in (\d+)s', caseSensitive: false);
 
 /// Parses the relay's canonical `retry in Ns` hint, when present.
