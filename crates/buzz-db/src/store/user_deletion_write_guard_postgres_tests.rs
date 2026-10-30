@@ -166,6 +166,10 @@ async fn message_writers_enforce_global_and_scoped_fences_even_without_profiles(
             .unwrap();
     }
     f.fence(&user, None).await;
+    // The stored owner's restriction is not the agent's restriction.
+    f.db.insert_event(f.community, &message(&agent, 9), None)
+        .await
+        .unwrap();
     f.fence(&agent, Some(&user)).await;
     for kind in [
         9, 40002, 45001, 45003, 7, 40003, 45002, 9007, 9000, 9002, 40100, 5, 45010, 1234,
@@ -363,80 +367,5 @@ async fn ownership_change_while_waiting_rejects_and_retry_uses_current_owner() {
     );
 }
 
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn first_owner_assignment_waits_for_messages_and_rejects_restricted_owners() {
-    let f = Fixture::new().await;
-    let agent = Keys::generate();
-    let owner = Keys::generate();
-    f.db.ensure_user(f.community, owner.public_key().as_bytes())
-        .await
-        .unwrap();
-    f.db.ensure_user(f.community, agent.public_key().as_bytes())
-        .await
-        .unwrap();
-    let mut tx = crate::begin_community_event_write_transaction(
-        &f.pool,
-        f.community,
-        crate::observability::WriterOperation::EventWrite,
-    )
-    .await
-    .unwrap();
-    event::insert_event_in_transaction(&mut tx, &message(&agent, 9), None)
-        .await
-        .unwrap();
-    // A dedicated single-connection pool exposes the actual setter's backend.
-    let assign_pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&crate::test_support::database_url())
-        .await
-        .unwrap();
-    let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&assign_pool)
-        .await
-        .unwrap();
-    let assignment = tokio::spawn({
-        let (agent, owner, community) = (agent.public_key(), owner.public_key(), f.community);
-        async move {
-            super::user::set_agent_owner(
-                &assign_pool,
-                community,
-                agent.as_bytes(),
-                owner.as_bytes(),
-            )
-            .await
-        }
-    });
-    wait_for_waiter(&f.pool, pid).await;
-    tx.commit().await.unwrap();
-    assert!(assignment.await.unwrap().unwrap());
-    f.fence(&owner, None).await;
-    let another = Keys::generate();
-    f.db.ensure_user(f.community, another.public_key().as_bytes())
-        .await
-        .unwrap();
-    assert!(matches!(
-        f.db.set_agent_owner(
-            f.community,
-            another.public_key().as_bytes(),
-            owner.public_key().as_bytes()
-        )
-        .await,
-        Err(DbError::UserDeletionRestricted)
-    ));
-    let saved: Option<Vec<u8>> = sqlx::query_scalar(
-        "SELECT agent_owner_pubkey FROM users WHERE community_id = $1 AND pubkey = $2",
-    )
-    .bind(f.community.as_uuid())
-    .bind(another.public_key().to_bytes().as_slice())
-    .fetch_one(&f.pool)
-    .await
-    .unwrap();
-    assert!(saved.is_none());
-}
-
 #[path = "user_deletion_lock_order_postgres_tests.rs"]
 mod lock_order_postgres_tests;
-
-#[path = "user_deletion_actor_lease_postgres_tests.rs"]
-mod actor_lease_postgres_tests;

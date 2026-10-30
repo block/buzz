@@ -1,6 +1,5 @@
-//! Operator-global restriction storage and identity locks. Shared persistent-event
-//! insertion paths and agent-owner assignment consult these through the write guard.
-//! Actor leases also protect external effects; the real fencing worker is not integrated yet.
+//! Operator-global restriction storage and identity locks. Shared event insertion
+//! paths consult these restrictions; the real user-deletion worker is not integrated.
 //!
 //! Callers use a writer-pool READ COMMITTED transaction. Acquire existing
 //! community guards first, then `lock_request` for the worker, then all human
@@ -151,20 +150,20 @@ async fn lock(
 /// For multiple identities, acquire the full shared set first. The caller must
 /// refuse a restricted operation and retain this transaction through any write.
 /// An agent lookup is scoped; it does not resolve or check the human owner.
-/// The message-write path locks the verified owner and agent together, then
-/// reads the signer's restrictions, not the owner's. This requires the gate to install the
+/// The planned agent-write path locks the verified owner and agent together,
+/// then reads the agent restriction only. This requires the gate to install the
 /// human and all owned-agent restrictions atomically, and creation/assignment
-/// paths to reject restricted owners. The real gate is not wired in yet.
+/// paths to reject restricted owners. These callers are not wired in yet.
 pub async fn find(
     tx: &mut Transaction<'_, Postgres>,
     identity: FenceIdentity,
 ) -> Result<Option<UserDeletionFence>> {
     lock_shared(tx, &[identity]).await?;
-    read_locked(tx, identity).await
+    read(tx, identity).await
 }
 
-/// Read one exact restriction after the caller has locked its identity.
-pub(super) async fn read_locked(
+/// Read one restriction after the caller has acquired its identity lock.
+pub(super) async fn read(
     tx: &mut Transaction<'_, Postgres>,
     identity: FenceIdentity,
 ) -> Result<Option<UserDeletionFence>> {
@@ -221,23 +220,6 @@ pub async fn insert(
     lock_request(tx, lease).await?;
     let request_id = lease.request_id;
     lock_exclusive(tx, &[identity]).await?;
-    // Actor leases are registered under these same shared identity locks.
-    // Refuse completion while admitted external or multi-transaction work runs;
-    // the executor retries after it finishes, rather than holding locks to poll.
-    let active: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM community_serving_write_leases
-         WHERE actor_pubkey = $1 AND ($2::uuid IS NULL OR community_id = $2)
-           AND lease_until >= clock_timestamp())",
-    )
-    .bind(identity.pubkey.to_hex())
-    .bind(identity.scope_id())
-    .fetch_one(&mut **tx)
-    .await?;
-    if active {
-        return Err(DbError::AccessDenied(
-            "identity writes are still in flight; retry fencing".into(),
-        ));
-    }
     let owner = source_owner.map(|key| key.to_hex());
     sqlx::query(
         "INSERT INTO user_deletion_fences (pubkey, scope_community_id, request_id, source_owner_pubkey)
@@ -245,7 +227,7 @@ pub async fn insert(
     )
     .bind(identity.pubkey.to_hex()).bind(identity.scope_id()).bind(request_id).bind(&owner)
     .execute(&mut **tx).await?;
-    let saved = read_locked(tx, identity)
+    let saved = read(tx, identity)
         .await?
         .ok_or_else(|| DbError::DeletionSafety("fence insertion returned no row".into()))?;
     if saved.request_id != request_id || saved.source_owner_pubkey != owner {

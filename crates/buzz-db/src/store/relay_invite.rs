@@ -578,7 +578,7 @@ pub async fn claim_relay_invite_with_owner(
             .await?;
         }
         let owner =
-            claim_owner::persist_claim_owner(&mut tx, community, claimer_pubkey, verified_owner)
+            claim_owner::persist_claim_owner(tx.conn(), community, claimer_pubkey, verified_owner)
                 .await?;
         tx.commit().await?;
         log_claim_outcome(
@@ -636,7 +636,7 @@ pub async fn claim_relay_invite_with_owner(
 
     if !inserted {
         let owner =
-            claim_owner::persist_claim_owner(&mut tx, community, claimer_pubkey, verified_owner)
+            claim_owner::persist_claim_owner(tx.conn(), community, claimer_pubkey, verified_owner)
                 .await?;
         tx.commit().await?;
         log_claim_outcome(
@@ -665,7 +665,7 @@ pub async fn claim_relay_invite_with_owner(
         .await?;
 
     let owner =
-        claim_owner::persist_claim_owner(&mut tx, community, claimer_pubkey, verified_owner)
+        claim_owner::persist_claim_owner(tx.conn(), community, claimer_pubkey, verified_owner)
             .await?;
     let snapshot = write_nip43_membership_snapshot(&mut tx, relay_keypair).await?;
     tx.commit().await?;

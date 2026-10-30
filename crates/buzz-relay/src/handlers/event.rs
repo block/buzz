@@ -736,36 +736,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                 return;
             }
         };
-        match super::identity_write::run(
-            &state,
-            &conn.tenant,
-            auth_pubkey,
-            "observer_event",
-            async {
-                Ok(handle_agent_observer_event(
-                    event,
-                    conn_id,
-                    &event_id_hex,
-                    Arc::clone(&conn),
-                    Arc::clone(&state),
-                )
-                .await)
-            },
-        )
-        .await
-        {
-            Ok(true) => {
-                conn.send(RelayMessage::ok(&event_id_hex, true, ""));
-            }
-            Ok(false) => {}
-            Err(error) => {
-                let message = match error {
-                    IngestError::Rejected(message) => message,
-                    _ => "error: identity write lease unavailable".into(),
-                };
-                conn.send(RelayMessage::ok(&event_id_hex, false, &message));
-            }
-        }
+        handle_agent_observer_event(event, conn_id, &event_id_hex, conn, state).await;
         return;
     }
 
@@ -829,19 +800,13 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                 return;
             }
         };
-        match super::identity_write::run(
-            &state,
-            &conn.tenant,
+        match handle_ephemeral_event(
+            event,
+            conn_id,
+            pubkey_bytes,
             auth_pubkey,
-            "ephemeral_event",
-            handle_ephemeral_event(
-                event,
-                conn_id,
-                pubkey_bytes,
-                auth_pubkey,
-                Arc::clone(&conn),
-                Arc::clone(&state),
-            ),
+            Arc::clone(&conn),
+            state,
         )
         .await
         {
@@ -1253,14 +1218,7 @@ pub(crate) async fn publish_http_typing(
     super::ingest::map_serving_fence_state(
         state.is_serving_active_cached(tenant.community()).await,
     )?;
-    super::identity_write::run(
-        state,
-        tenant,
-        auth_pubkey,
-        "http_typing",
-        publish_channel_ephemeral(state, tenant, event, ch_id, auth_pubkey.as_bytes()),
-    )
-    .await
+    publish_channel_ephemeral(state, tenant, event, ch_id, auth_pubkey.as_bytes()).await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1313,7 +1271,7 @@ async fn handle_agent_observer_event(
     event_id_hex: &str,
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
-) -> bool {
+) {
     let event_clone = event.clone();
     let verify_result = tokio::task::spawn_blocking(move || verify_event(&event_clone)).await;
     match verify_result {
@@ -1324,7 +1282,7 @@ async fn handle_agent_observer_event(
                 false,
                 &format!("invalid: {e}"),
             ));
-            return false;
+            return;
         }
         Err(_) => {
             conn.send(RelayMessage::ok(
@@ -1332,7 +1290,7 @@ async fn handle_agent_observer_event(
                 false,
                 "error: internal error",
             ));
-            return false;
+            return;
         }
     }
 
@@ -1345,19 +1303,20 @@ async fn handle_agent_observer_event(
             false,
             "invalid: observer frame timestamp outside ±5 minute freshness window",
         ));
-        return false;
+        return;
     }
 
     let route = match agent_observer_route(&event) {
         Ok(Some(route)) => route,
         Ok(None) => {
             // Unknown frame value — silently drop, no error to publisher.
-            return true;
+            conn.send(RelayMessage::ok(event_id_hex, true, ""));
+            return;
         }
         Err(message) => {
             reject("invalid");
             conn.send(RelayMessage::ok(event_id_hex, false, &message));
-            return false;
+            return;
         }
     };
 
@@ -1400,7 +1359,7 @@ async fn handle_agent_observer_event(
                             false,
                             "error: internal server error",
                         ));
-                        return false;
+                        return;
                     }
                 }
             }
@@ -1413,7 +1372,7 @@ async fn handle_agent_observer_event(
             false,
             "restricted: observer frame is not authorized for this agent owner",
         ));
-        return false;
+        return;
     }
 
     // Rate limit telemetry frames only (100/sec per agent).
@@ -1427,7 +1386,7 @@ async fn handle_agent_observer_event(
                 false,
                 "rate-limited: observer frame rate exceeded (100/sec per agent)",
             ));
-            return false;
+            return;
         }
     }
 
@@ -1453,7 +1412,7 @@ async fn handle_agent_observer_event(
     );
     fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
 
-    true
+    conn.send(RelayMessage::ok(event_id_hex, true, ""));
 }
 
 fn agent_observer_route(event: &Event) -> Result<Option<AgentObserverRoute>, String> {

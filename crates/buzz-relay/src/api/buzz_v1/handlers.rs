@@ -205,7 +205,6 @@ pub(super) async fn write_intent(
         .await
     {
         Ok(outcome) => json!(outcome),
-        Err(buzz_db::DbError::UserDeletionRestricted) => json!({"status":"blocked"}),
         Err(_) => json!({"status":"unknown","retryable":true}),
     }
 }

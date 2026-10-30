@@ -2701,30 +2701,6 @@ async fn ingest_event_inner(
     // (commands, feedback, reports, moderation) so no write returns ahead of it.
     enforce_write_restriction(state, tenant, kind_u32, auth.pubkey()).await?;
 
-    super::identity_write::run(
-        state,
-        tenant,
-        *auth.pubkey(),
-        "event_ingest",
-        Box::pin(ingest_verified_event(
-            state, tracer, tenant, event, auth, now,
-        )),
-    )
-    .await
-}
-
-async fn ingest_verified_event(
-    state: &Arc<AppState>,
-    tracer: &Arc<dyn buzz_conformance::Tracer>,
-    tenant: &TenantContext,
-    event: Event,
-    auth: IngestAuth,
-    now: i64,
-) -> Result<IngestResult, IngestError> {
-    let event_id_hex = event.id.to_hex();
-    let kind_u32 = event_kind_u32(&event);
-    let is_gift_wrap = kind_u32 == KIND_GIFT_WRAP;
-
     // Command kinds are routed AFTER signature verification, timestamp check,
     // pubkey/auth match, and scope validation — never before.
     if buzz_core::kind::is_command_kind(kind_u32) {
@@ -3678,7 +3654,7 @@ async fn ingest_verified_event(
             .db
             .replace_addressable_event(tenant.community(), &event, channel_id)
             .await
-            .map_err(event_write_error)?
+            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
     } else if is_parameterized_replaceable(kind_u32) {
         // NIP-33 parameterized replaceable — keyed by (kind, pubkey, d_tag).
         let d_tag = buzz_db::event::extract_d_tag(&event).unwrap_or_default();
@@ -3693,7 +3669,7 @@ async fn ingest_verified_event(
             .db
             .replace_parameterized_event(tenant.community(), &event, &d_tag, channel_id)
             .await
-            .map_err(event_write_error)?
+            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
     } else if let Some(spec) = canvas_revision_spec.as_ref() {
         // Canvas write carrying an optimistic-concurrency precondition. Plain
         // canvas writes (no `expected-revision` tag) fall through to the generic

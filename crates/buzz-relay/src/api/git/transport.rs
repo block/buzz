@@ -248,22 +248,6 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
                     (StatusCode::FORBIDDEN, "restricted: not a relay member").into_response(),
                 ));
             }
-            Ok(crate::api::relay_members::MembershipDecision::ViaOwner(owner)) => {
-                if token_owner.is_none()
-                    && !crate::api::relay_members::materialize_nip_oa_owner(
-                        state, &tenant, &pubkey, &owner,
-                    )
-                    .await
-                {
-                    return Err(unavailable(
-                        (
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            crate::handlers::auth::OWNER_LINK_ERROR,
-                        )
-                            .into_response(),
-                    ));
-                }
-            }
             Ok(_) => {}
             Err(e) => {
                 warn!(pubkey = %pubkey.to_hex(), error = %e, "git: relay membership lookup failed");
@@ -2031,26 +2015,15 @@ async fn finalize_push_inner(
     // An already-running receive-pack may cross the durable fence after
     // request admission. Revalidate immediately before object-store CAS; DB
     // trigger fencing alone cannot roll back an S3 pointer mutation.
-    let serving_write = match buzz_deletion::acquire_actor_serving_write(
+    let serving_write = match buzz_deletion::acquire_serving_write(
         &state.db,
         ctx.tenant.community(),
         "git_publish",
-        ctx.pusher,
     )
     .await
     {
         Ok(guard) => guard,
         Err(error) => {
-            if matches!(
-                error.downcast_ref::<buzz_db::DbError>(),
-                Some(buzz_db::DbError::UserDeletionRestricted)
-            ) {
-                return (
-                    StatusCode::FORBIDDEN,
-                    "identity is restricted for user deletion",
-                )
-                    .into_response();
-            }
             warn!(owner = %ctx.owner, repo = %ctx.repo, %error, "push rejected by community deletion fence");
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -2848,101 +2821,6 @@ mod track_c_tests {
     }
 
     mod external_infra_minio_tests {
-        use super::*;
-        use uuid::Uuid;
-
-        #[tokio::test]
-        #[ignore = "requires Postgres and MinIO"]
-        async fn user_fence_blocks_git_publication_without_object_pointer_or_events() {
-            use buzz_db::user_deletion_fences::{self as fences, FenceIdentity};
-            let (state, pool) = finalize_test_state().await;
-            let host = format!("user-git-{}.test", Uuid::new_v4());
-            let community = state
-                .db
-                .ensure_configured_community(&host)
-                .await
-                .unwrap()
-                .id;
-            let user = Keys::generate();
-            let peer = Keys::generate();
-            for phase in 0..2 {
-                if phase == 1 {
-                    let request = state
-                        .db
-                        .user_deletion_store()
-                        .submit(&format!("demo:{}", Uuid::new_v4()), "operator", None)
-                        .await
-                        .unwrap();
-                    let store = state.db.entity_deletion_store();
-                    store
-                        .approve(
-                            request.id,
-                            "reviewer",
-                            request.inventory_digest.as_deref().unwrap(),
-                        )
-                        .await
-                        .unwrap();
-                    let lease = store
-                        .claim(request.id, "worker", std::time::Duration::from_secs(60))
-                        .await
-                        .unwrap()
-                        .unwrap();
-                    let mut tx = pool.begin().await.unwrap();
-                    fences::insert(
-                        &mut tx,
-                        FenceIdentity::user(user.public_key()),
-                        &lease,
-                        None,
-                    )
-                    .await
-                    .unwrap();
-                    tx.commit().await.unwrap();
-                }
-                for (index, key) in [&user, &peer].iter().enumerate() {
-                    let repo = format!("repo-{}", Uuid::new_v4());
-                    let owner = key.public_key().to_hex();
-                    let scratch = TempDir::new().unwrap();
-                    let ctx = pushed_context(
-                        &state,
-                        community,
-                        &host,
-                        owner.clone(),
-                        repo.clone(),
-                        key.public_key(),
-                        scratch.path(),
-                    )
-                    .await;
-                    let response = finalize_push(&state, ctx).await;
-                    let allowed = phase == 0 || index == 1;
-                    assert_eq!(
-                        response.status(),
-                        if allowed {
-                            StatusCode::OK
-                        } else {
-                            StatusCode::FORBIDDEN
-                        }
-                    );
-                    let pointer = crate::api::git::manifest::pointer_key(community, &owner, &repo);
-                    assert_eq!(
-                        state
-                            .git_store
-                            .get_pointer(&pointer)
-                            .await
-                            .unwrap()
-                            .is_some(),
-                        allowed
-                    );
-                    let mut query = buzz_db::event::EventQuery::for_community(community);
-                    query.kinds = Some(vec![30618]);
-                    query.d_tag = Some(repo);
-                    assert_eq!(
-                        state.db.query_events(&query).await.unwrap().len(),
-                        usize::from(allowed)
-                    );
-                }
-            }
-        }
-
         #[tokio::test]
         #[ignore = "requires Postgres and MinIO"]
         async fn repo_announcement_holds_serving_lease_until_pointer_is_seeded() {

@@ -46,7 +46,10 @@ pub(crate) async fn accept(
             &state.relay_keypair,
         )
         .await
-        .map_err(super::ingest::event_write_error)?;
+        .map_err(|e| match e {
+            buzz_db::DbError::UserDeletionRestricted => super::ingest::event_write_error(e),
+            _ => IngestError::Internal(format!("artifact storage: {e}")),
+        })?;
     match outcome {
         ArtifactOutcome::Accepted(events) => {
             for stored in &events {

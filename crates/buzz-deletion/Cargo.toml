@@ -8,7 +8,6 @@ repository.workspace = true
 description = "Durable whole-community deletion engine for Buzz"
 
 [dependencies]
-nostr = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 buzz-core = { workspace = true }
@@ -26,4 +25,5 @@ tokio-util = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+nostr = { workspace = true }
 sqlx = { workspace = true }

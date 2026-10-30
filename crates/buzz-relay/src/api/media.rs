@@ -286,12 +286,7 @@ async fn upload_attribution(
 }
 
 fn serving_write_error(error: anyhow::Error) -> MediaError {
-    if matches!(
-        error.downcast_ref::<buzz_db::DbError>(),
-        Some(buzz_db::DbError::UserDeletionRestricted)
-    ) {
-        MediaError::IdentityWriteFenced
-    } else if buzz_deletion::ServingWriteGuard::acquisition_is_fenced(&error) {
+    if buzz_deletion::ServingWriteGuard::acquisition_is_fenced(&error) {
         MediaError::CommunityWriteFenced
     } else {
         MediaError::ServiceUnavailable
@@ -389,7 +384,7 @@ pub(crate) async fn upload_blob(
 
     // Post-admission: relay membership gate (NIP-43).
     let auth_tag = crate::api::relay_members::extract_auth_tag_header(&headers);
-    let delegated_owner = match crate::api::relay_members::enforce_relay_membership(
+    if let Err(e) = crate::api::relay_members::enforce_relay_membership(
         &state,
         &ctx.tenant,
         auth_event.pubkey.as_bytes(),
@@ -398,21 +393,10 @@ pub(crate) async fn upload_blob(
         token_owner,
     )
     .await
+    .map(|_| ())
+    .map_err(|e| membership_denial(e, strictness))
     {
-        Ok(owner) => owner,
-        Err(error) => return membership_denial(error, strictness).into_response(),
-    };
-    if let Some(owner) = delegated_owner {
-        if !crate::api::relay_members::materialize_nip_oa_owner(
-            &state,
-            &ctx.tenant,
-            &auth_event.pubkey,
-            &owner,
-        )
-        .await
-        {
-            return media_denial(MediaError::AuthorizationUnavailable, strictness).into_response();
-        }
+        return e.into_response();
     }
 
     // Post-admission: rate limit and concurrency permit.
@@ -465,15 +449,11 @@ async fn upload_blob_result(
     let strictness = auth.strictness;
     let attribution = upload_attribution(&state, &auth, &headers).await;
 
-    let serving_write = buzz_deletion::acquire_actor_serving_write(
-        &state.db,
-        auth.tenant.community(),
-        "media_upload",
-        auth.auth_event.pubkey,
-    )
-    .await
-    .map_err(serving_write_error)
-    .map_err(|e| media_denial(e, strictness))?;
+    let serving_write =
+        buzz_deletion::acquire_serving_write(&state.db, auth.tenant.community(), "media_upload")
+            .await
+            .map_err(serving_write_error)
+            .map_err(|e| media_denial(e, strictness))?;
 
     if auth.route_mode == UploadRouteMode::LegacyMedia {
         metrics::counter!("buzz_media_legacy_upload_route_total").increment(1);

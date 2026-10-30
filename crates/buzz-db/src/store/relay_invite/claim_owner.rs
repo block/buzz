@@ -57,7 +57,7 @@ pub(super) struct OwnerPersistence {
 
 /// Called only on an admitted claim, while the admission lock is still held.
 pub(super) async fn persist_claim_owner(
-    tx: &mut crate::AdmittedTx,
+    tx: &mut sqlx::PgConnection,
     community: CommunityId,
     claimant: &str,
     verified_owner: Option<&str>,
@@ -69,8 +69,6 @@ pub(super) async fn persist_claim_owner(
         hex::decode(owner).map_err(|_| DbError::InvalidData("invalid invitation owner".into()))?;
     let claimant_bytes = hex::decode(claimant)
         .map_err(|_| DbError::InvalidData("invalid invitation principal".into()))?;
-    tx.guard_agent_owner_assignment(&claimant_bytes, &owner_bytes)
-        .await?;
     let mut users_created = 0;
     for key in [&owner_bytes, &claimant_bytes] {
         users_created += sqlx::query(
@@ -78,17 +76,17 @@ pub(super) async fn persist_claim_owner(
         )
         .bind(community.as_uuid())
         .bind(key)
-        .execute(tx.conn())
+        .execute(&mut *tx)
         .await?
         .rows_affected();
     }
     let link_created = sqlx::query("UPDATE users SET agent_owner_pubkey=$3 WHERE community_id=$1 AND pubkey=$2 AND agent_owner_pubkey IS NULL")
-        .bind(community.as_uuid()).bind(&claimant_bytes).bind(&owner_bytes).execute(tx.conn()).await?.rows_affected() > 0;
+        .bind(community.as_uuid()).bind(&claimant_bytes).bind(&owner_bytes).execute(&mut *tx).await?.rows_affected() > 0;
     // Defense in depth: `claimant_restricted` already refused a banned owner
     // under the same admission lock, so this finds nothing today. It keeps
     // parity with every other owner writer if that check ever moves.
     if link_created {
-        super::revoke_restricted_agent_invites(tx.conn(), community, &claimant_bytes, &owner_bytes)
+        super::revoke_restricted_agent_invites(tx, community, &claimant_bytes, &owner_bytes)
             .await?;
     }
     Ok(OwnerPersistence {
@@ -142,7 +140,7 @@ pub async fn claim_relay_membership_with_owner(
         .await?;
     }
 
-    let owner = persist_claim_owner(&mut tx, community, pubkey, verified_owner).await?;
+    let owner = persist_claim_owner(tx.conn(), community, pubkey, verified_owner).await?;
     let snapshot = if inserted {
         Some(super::write_nip43_membership_snapshot(&mut tx, relay_keypair).await?)
     } else {

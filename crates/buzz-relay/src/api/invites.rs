@@ -337,13 +337,7 @@ async fn mint_invite_checked(
         }
     }
 
-    match crate::handlers::identity_write::run_http(&state, &tenant, pubkey, "mint_invite", async {
-        mint_invite_inner(&state, body, tenant.clone(), pubkey)
-            .await
-            .map_err(|error| error.into_response())
-    })
-    .await
-    {
+    match mint_invite_inner(&state, body, tenant, pubkey).await {
         Ok(json) => json.into_response(),
         Err(e) => e.into_response(),
     }
@@ -429,30 +423,11 @@ pub async fn claim_invite(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: axum::body::Bytes,
-) -> axum::response::Response {
-    use axum::response::IntoResponse;
-    let (tenant, pubkey, verified_owner) =
-        match authenticate(&state, &headers, "/api/invites/claim", &body).await {
-            Ok(identity) => identity,
-            Err(error) => return error.into_response(),
-        };
-    crate::handlers::identity_write::run_http(&state, &tenant, pubkey, "claim_invite", async {
-        claim_invite_inner(&state, &tenant, pubkey, verified_owner, body)
-            .await
-            .map_err(|error| error.into_response())
-    })
-    .await
-    .into_response()
-}
-
-async fn claim_invite_inner(
-    state: &Arc<AppState>,
-    tenant: &buzz_core::TenantContext,
-    pubkey: nostr::PublicKey,
-    verified_owner: Option<nostr::PublicKey>,
-    body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if claim_rate_limited(state, tenant.community(), &pubkey) {
+    let (tenant, pubkey, verified_owner) =
+        authenticate(&state, &headers, "/api/invites/claim", &body).await?;
+
+    if claim_rate_limited(&state, tenant.community(), &pubkey) {
         return Err(api_error(
             StatusCode::TOO_MANY_REQUESTS,
             "too many invite claim attempts, slow down",
@@ -505,9 +480,9 @@ async fn claim_invite_inner(
         metrics::counter!("buzz_users_created_total", "community" => tenant.host().to_owned())
             .increment(write.outcome.users_created);
         if write.outcome.owner_link_created {
-            state.disconnect_unowned_agent_clusterwide(tenant, pubkey.as_bytes());
+            state.disconnect_unowned_agent_clusterwide(&tenant, pubkey.as_bytes());
         }
-        fan_out_nip43_membership_list(tenant, state, write.snapshot).await;
+        fan_out_nip43_membership_list(&tenant, &state, write.snapshot).await;
         return match write.outcome.outcome {
             buzz_db::relay_invite::ClaimOutcome::Joined { .. } => {
                 tracing::info!(
@@ -516,7 +491,7 @@ async fn claim_invite_inner(
                     "relay member added via v2 invite"
                 );
                 // NIP-43 side effects only on Joined, never on other outcomes.
-                if let Err(e) = publish_nip43_member_added(tenant, state, &claimer_hex).await {
+                if let Err(e) = publish_nip43_member_added(&tenant, &state, &claimer_hex).await {
                     tracing::warn!(
                         "failed to publish NIP-43 member-added delta after v2 claim: {e}"
                     );
@@ -600,10 +575,10 @@ async fn claim_invite_inner(
     metrics::counter!("buzz_users_created_total", "community" => tenant.host().to_owned())
         .increment(write.outcome.users_created);
     if write.outcome.owner_link_created {
-        state.disconnect_unowned_agent_clusterwide(tenant, pubkey.as_bytes());
+        state.disconnect_unowned_agent_clusterwide(&tenant, pubkey.as_bytes());
     }
     let was_inserted = write.outcome.inserted;
-    fan_out_nip43_membership_list(tenant, state, write.snapshot).await;
+    fan_out_nip43_membership_list(&tenant, &state, write.snapshot).await;
 
     if was_inserted {
         tracing::info!(
@@ -611,7 +586,7 @@ async fn claim_invite_inner(
             member = %claimer_hex,
             "relay member added via invite"
         );
-        if let Err(e) = publish_nip43_member_added(tenant, state, &claimer_hex).await {
+        if let Err(e) = publish_nip43_member_added(&tenant, &state, &claimer_hex).await {
             tracing::warn!("failed to publish NIP-43 member-added delta after claim: {e}");
         }
     }

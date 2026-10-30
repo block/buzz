@@ -1,47 +1,5 @@
-//! Expanded insertion coverage and owner-delegated HTTP regression tests.
+//! Persistent insertion coverage through HTTP and WebSocket event handling.
 use super::*;
-use base64::Engine;
-use sha2::{Digest, Sha256};
-
-async fn signed_http(f: &Fixture, key: &Keys, event: &Event, owner: Option<&Keys>) -> (u16, Value) {
-    let body = serde_json::to_vec(event).unwrap();
-    let url = format!("https://{}/events", f.tenant.host());
-    let auth = EventBuilder::new(Kind::Custom(27235), "")
-        .tags([
-            Tag::parse(["u", &url]).unwrap(),
-            Tag::parse(["method", "POST"]).unwrap(),
-            Tag::parse(["payload", &hex::encode(Sha256::digest(&body))]).unwrap(),
-        ])
-        .sign_with_keys(key)
-        .unwrap();
-    let mut request = reqwest::Client::new()
-        .post(format!("{}/events", f.url))
-        .header("host", f.tenant.host())
-        .header("content-type", "application/json")
-        .header(
-            "authorization",
-            format!(
-                "Nostr {}",
-                base64::engine::general_purpose::STANDARD
-                    .encode(serde_json::to_vec(&auth).unwrap())
-            ),
-        )
-        .body(body);
-    if let Some(owner) = owner {
-        request = request.header(
-            "x-auth-tag",
-            buzz_sdk::nip_oa::compute_auth_tag(owner, &key.public_key(), "").unwrap(),
-        );
-    }
-    let response = request.send().await.unwrap();
-    (response.status().as_u16(), response.json().await.unwrap())
-}
-
-async fn direct_member(f: &Fixture, key: &Keys) {
-    sqlx::query("INSERT INTO relay_members (community_id, pubkey, role) VALUES ($1, $2, 'member') ON CONFLICT DO NOTHING")
-        .bind(f.tenant.community().as_uuid()).bind(key.public_key().to_hex())
-        .execute(&f.pool).await.unwrap();
-}
 
 fn action(key: &Keys, channel: Uuid, kind: u16, content: &str, extra: Vec<Vec<String>>) -> Event {
     let mut tags = vec![Tag::parse(["h", &channel.to_string()]).unwrap()];
@@ -241,76 +199,6 @@ async fn expanded_actions_reject_fenced_humans_and_agents_without_partial_writes
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn delegated_http_refuses_failed_owner_link_but_preserves_independent_members() {
-    let f = Fixture::configured(true).await;
-    direct_member(&f, &f.user).await;
-    direct_member(&f, &f.peer).await;
-    // All have channel membership, but only the last has independent relay membership.
-    let fresh = Keys::generate();
-    let allowed = Keys::generate();
-    let independent = Keys::generate();
-    let channel = create_channel(
-        &f.state,
-        &f.tenant,
-        &f.peer,
-        &[
-            &["p", &fresh.public_key().to_hex()],
-            &["p", &allowed.public_key().to_hex()],
-            &["p", &independent.public_key().to_hex()],
-        ],
-    )
-    .await;
-    direct_member(&f, &independent).await;
-    f.fence().await;
-    for (key, owner, accepted) in [
-        (&fresh, &f.user, false),
-        (&allowed, &f.peer, true),
-        (&independent, &f.user, true),
-    ] {
-        let event = EventBuilder::new(Kind::Custom(9), Uuid::new_v4().to_string())
-            .tags([Tag::parse(["h", &channel.to_string()]).unwrap()])
-            .sign_with_keys(key)
-            .unwrap();
-        let (status, body) = signed_http(&f, key, &event, Some(owner)).await;
-        assert_eq!(
-            status < 300 && body["accepted"] == true,
-            accepted,
-            "{status}: {body}"
-        );
-        assert_eq!(
-            f.state
-                .db
-                .get_event_by_id(f.tenant.community(), event.id.as_bytes())
-                .await
-                .unwrap()
-                .is_some(),
-            accepted
-        );
-        let stored: Option<Vec<u8>> = sqlx::query_scalar(
-            "SELECT agent_owner_pubkey FROM users WHERE community_id=$1 AND pubkey=$2",
-        )
-        .bind(f.tenant.community().as_uuid())
-        .bind(key.public_key().as_bytes())
-        .fetch_optional(&f.pool)
-        .await
-        .unwrap()
-        .flatten();
-        if key.public_key() == allowed.public_key() {
-            assert_eq!(
-                stored.as_deref(),
-                Some(f.peer.public_key().as_bytes().as_slice())
-            );
-        } else {
-            assert!(
-                stored.is_none(),
-                "refused/independent identity must not be reassigned"
-            );
-        }
-    }
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
 async fn concurrent_expanded_writes_wait_for_fencing_commit_or_rollback() {
     for commit in [false, true] {
         let f = Arc::new(Fixture::new().await);
@@ -387,6 +275,3 @@ async fn concurrent_expanded_writes_wait_for_fencing_commit_or_rollback() {
         );
     }
 }
-
-#[path = "user_deletion_remaining_postgres_tests.rs"]
-mod remaining_postgres_tests;

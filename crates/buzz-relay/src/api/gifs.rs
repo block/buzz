@@ -308,19 +308,8 @@ async fn share_inner(
 ) -> Result<StatusCode, Response> {
     // Admission first: NIP-98 + NIP-FI must fire before provider availability
     // check. [FI-TRACE-HTTP-INGRESS]
-    let (tenant, actor) =
-        bridge::authenticate_member_post(&state, &headers, SHARE_PATH, &body).await?;
-    crate::handlers::identity_write::run_http(&state, &tenant, actor, "gif_share", async {
-        share_authenticated(&state, body).await
-    })
-    .await
-}
+    bridge::authenticate_member_post(&state, &headers, SHARE_PATH, &body).await?;
 
-#[allow(clippy::result_large_err)]
-async fn share_authenticated(
-    state: &AppState,
-    body: axum::body::Bytes,
-) -> Result<StatusCode, Response> {
     let Some(config) = state.config.klipy.as_ref() else {
         return Err(
             api_error(StatusCode::NOT_FOUND, "GIF search is not configured").into_response(),

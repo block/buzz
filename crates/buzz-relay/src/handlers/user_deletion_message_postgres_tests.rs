@@ -25,20 +25,9 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
-        Self::configured(false).await
-    }
-
-    async fn configured(strict: bool) -> Self {
-        let mut state = crate::api::bridge::postgres_tests::bridge_handler_test_state()
+        let state = crate::api::bridge::postgres_tests::bridge_handler_test_state()
             .await
             .expect("Postgres and Redis");
-        if strict {
-            let state = Arc::make_mut(&mut state);
-            let config = Arc::make_mut(&mut state.config);
-            config.require_auth_token = true;
-            config.require_relay_membership = true;
-            config.allow_nip_oa_auth = true;
-        }
         let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
             .await
             .unwrap();

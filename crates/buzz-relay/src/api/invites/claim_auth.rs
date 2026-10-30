@@ -49,10 +49,6 @@ pub(super) async fn authenticate(
 
 pub(super) fn map_claim_error(error: buzz_db::DbError) -> (StatusCode, Json<Value>) {
     match error {
-        buzz_db::DbError::UserDeletionRestricted => api_error(
-            StatusCode::FORBIDDEN,
-            "restricted: identity is restricted for user deletion",
-        ),
         buzz_db::DbError::InviteRestricted => api_error(StatusCode::FORBIDDEN, "invite_restricted"),
         buzz_db::DbError::InviteOwnerMismatch => {
             api_error(StatusCode::FORBIDDEN, "invite_owner_mismatch")

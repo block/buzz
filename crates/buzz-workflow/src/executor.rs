@@ -550,30 +550,14 @@ pub async fn dispatch_action(
     // Revalidate the durable community fence immediately before every external
     // side effect (message publish, webhook, delay/resume). A storage failure is
     // a denial, never permission to continue.
-    let owner_run = engine
-        .db
-        .get_workflow_run(community_id, run_id)
-        .await
-        .map_err(|e| WorkflowError::WebhookError(format!("workflow run lookup failed: {e}")))?;
-    let owner_workflow = engine
-        .db
-        .get_workflow(community_id, owner_run.workflow_id)
-        .await
-        .map_err(|e| WorkflowError::WebhookError(format!("workflow owner lookup failed: {e}")))?;
-    let owner = nostr::PublicKey::from_slice(&owner_workflow.owner_pubkey)
-        .map_err(|e| WorkflowError::Unauthorized(format!("invalid workflow owner: {e}")))?;
-    let serving_write = buzz_deletion::acquire_actor_serving_write(
-        &engine.db,
-        community_id,
-        "workflow_action",
-        owner,
-    )
-    .await
-    .map_err(|error| {
-        WorkflowError::WebhookError(format!(
-            "community write fence rejected workflow side effect: {error}"
-        ))
-    })?;
+    let serving_write =
+        buzz_deletion::acquire_serving_write(&engine.db, community_id, "workflow_action")
+            .await
+            .map_err(|error| {
+                WorkflowError::WebhookError(format!(
+                    "community write fence rejected workflow side effect: {error}"
+                ))
+            })?;
 
     serving_write.verify().await.map_err(|error| {
         WorkflowError::WebhookError(format!("community write lease lost: {error}"))

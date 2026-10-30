@@ -209,7 +209,7 @@ async fn authenticate(
         .await
         .map_err(IntoResponse::into_response)?;
     let tag = relay_members::extract_auth_tag_header(headers);
-    let delegated_owner = relay_members::enforce_relay_membership(
+    relay_members::enforce_relay_membership(
         state,
         &tenant,
         pubkey.as_bytes(),
@@ -219,14 +219,6 @@ async fn authenticate(
     )
     .await
     .map_err(IntoResponse::into_response)?;
-    if let Some(owner) = delegated_owner {
-        if !relay_members::materialize_nip_oa_owner(state, &tenant, &pubkey, &owner).await {
-            return Err(error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                crate::handlers::auth::OWNER_LINK_ERROR,
-            ));
-        }
-    }
     #[cfg(test)]
     crate::nip_fi_test_hooks::before_http_ban_recheck(tenant.community()).await;
     deny_banned_git_principal(
@@ -384,28 +376,17 @@ async fn set_default_branch(
     })?;
     let snapshot =
         DefaultBranchSnapshot::load(&state.git_store, &auth.tenant, &owner, repo_name).await?;
-    let serving_write = buzz_deletion::acquire_actor_serving_write(
+    let serving_write = buzz_deletion::acquire_serving_write(
         &state.db,
         auth.tenant.community(),
         "git_default_branch",
-        auth.caller,
     )
     .await
-    .map_err(|cause| {
-        if matches!(
-            cause.downcast_ref::<buzz_db::DbError>(),
-            Some(buzz_db::DbError::UserDeletionRestricted)
-        ) {
-            error(
-                StatusCode::FORBIDDEN,
-                "identity is restricted for user deletion",
-            )
-        } else {
-            error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "community writes are fenced",
-            )
-        }
+    .map_err(|_| {
+        error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "community writes are fenced",
+        )
     })?;
     serving_write.verify().await.map_err(backend)?;
     let (snapshot, changed) = serving_write

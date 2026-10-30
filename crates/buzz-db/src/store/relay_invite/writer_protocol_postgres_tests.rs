@@ -13,14 +13,8 @@ async fn authorization_owner_writer_waits_before_claim_owner_row_and_links_once(
             .await
             .unwrap();
     }
-    let mut claim = crate::begin_community_write_transaction(
-        &pool,
-        community,
-        crate::observability::WriterOperation::Authorization,
-    )
-    .await
-    .unwrap();
-    lock_admission(claim.conn(), community).await.unwrap();
+    let mut claim = pool.begin().await.unwrap();
+    lock_admission(&mut claim, community).await.unwrap();
     let (writer_pool, name) = named_pool().await;
     let setter = tokio::spawn(async move {
         Db::from_pool(writer_pool)

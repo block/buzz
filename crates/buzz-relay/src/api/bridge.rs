@@ -1230,9 +1230,6 @@ async fn submit_event_authed(
         )
         .await
     };
-    // A delegated member must establish its verified owner before any write.
-    // Open-relay backfill remains optional; direct members need no owner link.
-    let owner_link_required = matches!(&membership, Ok(Some(_)));
     let nip_oa_owner = match membership {
         Ok(owner) => owner.or_else(|| {
             if !state.config.require_relay_membership {
@@ -1253,18 +1250,7 @@ async fn submit_event_authed(
         }
     };
     if let Some(owner) = nip_oa_owner {
-        let linked =
-            super::relay_members::materialize_nip_oa_owner(state, tenant, &pubkey, &owner).await;
-        if owner_link_required && !linked {
-            return SubmitOutcome::Err {
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                response: api_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    crate::handlers::auth::OWNER_LINK_ERROR,
-                )
-                .into(),
-            };
-        }
+        super::relay_members::materialize_nip_oa_owner(state, tenant, &pubkey, &owner).await;
     }
 
     let auth = IngestAuth::Http {

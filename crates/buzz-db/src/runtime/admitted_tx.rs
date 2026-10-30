@@ -145,30 +145,11 @@ impl AdmittedTx {
         &mut self.tx
     }
 
-    pub(crate) async fn guard_identity(&mut self, actor: nostr::PublicKey) -> Result<()> {
-        crate::store::user_deletion_write_guard::guard_identity(&mut self.tx, self.community, actor)
-            .await
-    }
-
     pub(crate) async fn guard_event_author(&mut self, event: &nostr::Event) -> Result<()> {
         crate::store::user_deletion_write_guard::guard_event_author(
             &mut self.tx,
             self.community,
             event,
-        )
-        .await
-    }
-
-    pub(crate) async fn guard_agent_owner_assignment(
-        &mut self,
-        agent: &[u8],
-        owner: &[u8],
-    ) -> Result<()> {
-        crate::store::user_deletion_write_guard::guard_owner_assignment(
-            &mut self.tx,
-            self.community,
-            agent,
-            owner,
         )
         .await
     }

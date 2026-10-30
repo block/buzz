@@ -720,8 +720,6 @@ pub struct ServingWriteLease {
     pub community_id: CommunityId,
     /// Operation category for diagnostics.
     pub operation: String,
-    /// Authenticated actor for user-deletion exclusion, if this is a user write.
-    pub actor_pubkey: Option<nostr::PublicKey>,
     /// Process/executor identity.
     pub owner: String,
     /// Monotonic lease generation.
@@ -3036,9 +3034,6 @@ impl DeletionStore {
         lease: &ServingWriteLease,
     ) -> Result<()> {
         lock_community_deletion_shared(tx, lease.community_id).await?;
-        if let Some(actor) = lease.actor_pubkey {
-            super::user_deletion_write_guard::guard_identity(tx, lease.community_id, actor).await?;
-        }
         let valid: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM community_serving_write_leases lease \
              JOIN communities community ON community.id = lease.community_id \
@@ -3121,44 +3116,6 @@ impl DeletionStore {
         owner: &str,
         lease_duration: Duration,
     ) -> Result<ServingWriteLease> {
-        self.acquire_serving_write_lease_for_actor(
-            community,
-            operation,
-            owner,
-            lease_duration,
-            None,
-        )
-        .await
-    }
-
-    /// Acquire an external-effect lease under the actor's shared identity locks.
-    /// A user fence cannot commit while this exact actor's lease remains live.
-    pub async fn acquire_actor_serving_write_lease(
-        &self,
-        community: CommunityId,
-        operation: &str,
-        owner: &str,
-        lease_duration: Duration,
-        actor: nostr::PublicKey,
-    ) -> Result<ServingWriteLease> {
-        self.acquire_serving_write_lease_for_actor(
-            community,
-            operation,
-            owner,
-            lease_duration,
-            Some(actor),
-        )
-        .await
-    }
-
-    async fn acquire_serving_write_lease_for_actor(
-        &self,
-        community: CommunityId,
-        operation: &str,
-        owner: &str,
-        lease_duration: Duration,
-        actor: Option<nostr::PublicKey>,
-    ) -> Result<ServingWriteLease> {
         let lease_seconds = i64::try_from(lease_duration.as_secs()).unwrap_or(i64::MAX);
         self.bounded_serving_lease_sql(SERVING_WRITE_LEASE_SQL_TIMEOUT, async |connection| {
             let mut tx = serving_lease_transaction(connection).await?;
@@ -3166,14 +3123,11 @@ impl DeletionStore {
             // The lease INSERT remains in this transaction and rechecks active
             // state after admission, so a fence cannot interleave.
             guard_community_write(&mut tx, community).await?;
-            if let Some(actor) = actor {
-                super::user_deletion_write_guard::guard_identity(&mut tx, community, actor).await?;
-            }
             let row = sqlx::query(
                 "INSERT INTO community_serving_write_leases \
-             (community_id, operation, owner, fence_generation, lease_until, actor_pubkey) \
+             (community_id, operation, owner, fence_generation, lease_until) \
              SELECT id, $2, $3, deletion_fence_generation, \
-                    now() + make_interval(secs => $4), $5 \
+                    now() + make_interval(secs => $4) \
              FROM communities WHERE id = $1 AND deletion_state = 'active' \
                AND deleted_at IS NULL \
              RETURNING id, generation, fence_generation, lease_until",
@@ -3182,7 +3136,6 @@ impl DeletionStore {
             .bind(operation)
             .bind(owner)
             .bind(lease_seconds)
-            .bind(actor.map(|key| key.to_hex()))
             .fetch_optional(&mut *tx)
             .await?
             .ok_or_else(|| {
@@ -3192,7 +3145,6 @@ impl DeletionStore {
                 id: row.try_get("id")?,
                 community_id: community,
                 operation: operation.to_owned(),
-                actor_pubkey: actor,
                 owner: owner.to_owned(),
                 generation: row.try_get("generation")?,
                 fence_generation: row.try_get("fence_generation")?,
@@ -3225,10 +3177,6 @@ impl DeletionStore {
         .await?;
         let mut tx = sqlx::Transaction::begin(connection, None).await?;
         lock_community_deletion_shared(&mut tx, lease.community_id).await?;
-        if let Some(actor) = lease.actor_pubkey {
-            super::user_deletion_write_guard::guard_identity(&mut tx, lease.community_id, actor)
-                .await?;
-        }
         let lease_until: Option<DateTime<Utc>> = sqlx::query_scalar(
             "UPDATE community_serving_write_leases lease \
              SET lease_until = now() + make_interval(secs => $6), heartbeat_at = now() \
@@ -3290,14 +3238,6 @@ impl DeletionStore {
         self.bounded_serving_lease_sql(SERVING_WRITE_LEASE_SQL_TIMEOUT, async |connection| {
             let mut tx = serving_lease_transaction(connection).await?;
             lock_community_deletion_shared(&mut tx, lease.community_id).await?;
-            if let Some(actor) = lease.actor_pubkey {
-                super::user_deletion_write_guard::guard_identity(
-                    &mut tx,
-                    lease.community_id,
-                    actor,
-                )
-                .await?;
-            }
             let valid: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM community_serving_write_leases lease \
              JOIN communities community ON community.id = lease.community_id \
@@ -4647,17 +4587,6 @@ mod postgres_tests {
         crate::migration::run_migrations_through(&db.pool, 66)
             .await
             .expect("migrate with fence objects present");
-        // Keep the historical universal fences for this retirement test, but
-        // include the additive serving-lease shape required by current writers.
-        let mut schema_tx = db.pool.begin().await.unwrap();
-        sqlx::raw_sql(include_str!(
-            "../../../../migrations/0076_serving_write_actor.sql"
-        ))
-        .execute(&mut *schema_tx)
-        .await
-        .unwrap();
-        schema_tx.commit().await.unwrap();
-
         let store = db.deletion_store();
         let community = db
             .ensure_configured_community("optional-fences.example")
@@ -7550,7 +7479,6 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             id: Uuid::new_v4(),
             community_id: community,
             operation: "isolation-probe".to_owned(),
-            actor_pubkey: None,
             owner: "isolation-probe".to_owned(),
             generation: 0,
             fence_generation: 0,

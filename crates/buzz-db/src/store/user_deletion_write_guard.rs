@@ -1,4 +1,4 @@
-//! Guard shared persistent-event insertion paths and agent ownership.
+//! Guard shared persistent-event insertion paths.
 //! Other writes are not fenced here; real deletion must remain disabled until
 //! every serving path and external-work drain has been integrated.
 
@@ -6,7 +6,7 @@ use buzz_core::CommunityId;
 use nostr::{Event, PublicKey};
 use sqlx::{Postgres, Transaction};
 
-use super::user_deletion_fences::{lock_exclusive, lock_shared, read_locked, FenceIdentity};
+use super::user_deletion_fences::{lock_shared, read as read_locked, FenceIdentity};
 use crate::{DbError, Result};
 
 pub(crate) async fn guard_event_author(
@@ -14,14 +14,7 @@ pub(crate) async fn guard_event_author(
     community: CommunityId,
     event: &Event,
 ) -> Result<()> {
-    guard_identity(tx, community, event.pubkey).await
-}
-
-pub(crate) async fn guard_identity(
-    tx: &mut Transaction<'_, Postgres>,
-    community: CommunityId,
-    signer: PublicKey,
-) -> Result<()> {
+    let signer = event.pubkey;
     let owner = owner(tx, community, signer).await?;
     let mut identities = vec![
         FenceIdentity::user(signer),
@@ -30,7 +23,6 @@ pub(crate) async fn guard_identity(
     if let Some(owner) = owner {
         identities.push(FenceIdentity::user(owner));
     }
-    // Global signer lock also coordinates the first assignment of an owner.
     // Never derive the owner from a cached session or an event tag.
     lock_shared(tx, &identities).await?;
     if owner != self::owner(tx, community, signer).await? {
@@ -41,27 +33,6 @@ pub(crate) async fn guard_identity(
         ));
     }
     check_signer(tx, community, signer).await
-}
-
-pub(crate) async fn guard_owner_assignment(
-    tx: &mut Transaction<'_, Postgres>,
-    community: CommunityId,
-    agent: &[u8],
-    owner: &[u8],
-) -> Result<()> {
-    let agent = parse_key(agent)?;
-    let owner = parse_key(owner)?;
-    lock_shared(
-        tx,
-        &[FenceIdentity::user(agent), FenceIdentity::user(owner)],
-    )
-    .await?;
-    // Ownership must not change while a message holds the scoped shared lock.
-    lock_exclusive(tx, &[FenceIdentity::agent(community, agent)]).await?;
-    if read_locked(tx, FenceIdentity::user(owner)).await?.is_some() {
-        return Err(DbError::UserDeletionRestricted);
-    }
-    check_signer(tx, community, agent).await
 }
 
 async fn owner(

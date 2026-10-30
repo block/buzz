@@ -24,7 +24,6 @@ pub mod event;
 pub(crate) mod group_state_postgres_tests;
 /// NIP-IA identity archive request handler (kinds 9035–9036).
 pub mod identity_archive;
-pub(crate) mod identity_write;
 /// imeta tag validation helpers.
 pub mod imeta;
 /// Transport-neutral event ingestion pipeline.
