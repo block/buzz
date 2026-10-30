@@ -290,7 +290,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byType(SelfHostedEntrySheet), findsOneWidget);
     expect(find.byType(NsecImportSheet), findsNothing);
-    expect(find.text('Join community'), findsOneWidget);
+    expect(find.text('You already have a saved identity'), findsOneWidget);
     expect(
       tester.getSize(find.byType(SelfHostedEntrySheet)).height,
       joinHeight,
@@ -315,7 +315,7 @@ void main() {
     // Completion races the outgoing route animation.
     pendingProbe.complete();
     await tester.pumpAndSettle();
-    expect(find.text('Join community'), findsOneWidget);
+    expect(find.text('You already have a saved identity'), findsOneWidget);
     expect(await container.read(communityStorageProvider).loadAll(), isEmpty);
     pendingProbe = null;
     await tester.tap(find.text('Import a Nostr key').hitTestable());

@@ -31,26 +31,19 @@ class HostedConnectPage extends HookConsumerWidget {
       final stepsNavigator = GlobalKey<NavigatorState>();
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!active || !context.mounted) return;
-        route = PageRouteBuilder<void>(
+        route = MaterialPageRoute<void>(
           settings: const RouteSettings(name: 'hosted-setup'),
-          transitionDuration: Duration.zero,
-          reverseTransitionDuration: Duration.zero,
-          pageBuilder: (_, _, _) => PopScope(
+          builder: (_) => PopScope(
             canPop: false,
             onPopInvokedWithResult: (didPop, _) {
               if (!didPop) stepsNavigator.currentState?.maybePop();
             },
-            child: Navigator(
-              key: stepsNavigator,
-              onGenerateRoute: (_) => MaterialPageRoute<void>(
-                builder: (_) => _HostedSteps(
-                  flow: flow,
-                  onAddCommunity: onAddCommunity,
-                  onClose: () => latest.value.onClose(),
-                  profileBuilder: (context) =>
-                      latest.value.profileBuilder(context),
-                ),
-              ),
+            child: _HostedSteps(
+              navigatorKey: stepsNavigator,
+              flow: flow,
+              onAddCommunity: onAddCommunity,
+              onClose: () => latest.value.onClose(),
+              profileBuilder: (context) => latest.value.profileBuilder(context),
             ),
           ),
         );
@@ -80,11 +73,13 @@ class HostedConnectPage extends HookConsumerWidget {
 
 class _HostedSteps extends HookWidget {
   const _HostedSteps({
+    required this.navigatorKey,
     required this.flow,
     this.onAddCommunity,
     required this.onClose,
     required this.profileBuilder,
   });
+  final GlobalKey<NavigatorState> navigatorKey;
   final HostedFlow flow;
   final VoidCallback? onAddCommunity;
   final VoidCallback onClose;
@@ -93,63 +88,50 @@ class _HostedSteps extends HookWidget {
   @override
   Widget build(BuildContext context) {
     useListenable(flow);
-    final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final presentedStage = flow.stage;
     final presentation = Object();
     final activePresentation = useRef<Object?>(null)..value = presentation;
-    // Keep an opaque surface behind the native profile presentation and its
-    // dismissal. Completion retires the route only after the flow settles.
-    if (flow.stage == HostedFlowStage.profile) {
-      return ColoredBox(
-        color: context.colors.surface,
-        child: profileBuilder(context),
-      );
+    // Native profile owns its entry animation; keep its underlying page stable.
+    final pageStage = useRef(flow.stage);
+    if (flow.stage != HostedFlowStage.profile) pageStage.value = flow.stage;
+    void goBack() {
+      if (activePresentation.value != presentation ||
+          flow.stage != presentedStage) {
+        return;
+      }
+      if (flow.canChangeCommunities) {
+        flow.backToCommunityChoices();
+      } else {
+        onClose();
+      }
     }
-    return ColoredBox(
-      color: context.colors.surface,
-      child: AnimatedSwitcher(
-        duration: reducedMotion
-            ? Duration.zero
-            : const Duration(milliseconds: 250),
-        switchInCurve: Curves.easeOutCubic,
-        switchOutCurve: Curves.easeInCubic,
-        layoutBuilder: (current, previous) => Stack(
-          fit: StackFit.expand,
-          children: [
-            for (final child in previous)
-              ExcludeFocus(
-                child: ExcludeSemantics(child: IgnorePointer(child: child)),
-              ),
-            ?current,
-          ],
+
+    return Navigator(
+      key: navigatorKey,
+      onDidRemovePage: (_) {},
+      pages: [
+        MaterialPage<void>(
+          key: ValueKey(pageStage.value),
+          child: PopScope(
+            canPop: false,
+            onPopInvokedWithResult: (didPop, _) {
+              if (!didPop) goBack();
+            },
+            child: flow.stage == HostedFlowStage.profile
+                ? ColoredBox(
+                    color: context.colors.surface,
+                    child: profileBuilder(context),
+                  )
+                : HostedConnectSheet(
+                    flow: flow,
+                    onAddCommunity: onAddCommunity,
+                    presentedStage: presentedStage,
+                    fullScreen: true,
+                    onBack: goBack,
+                  ),
+          ),
         ),
-        transitionBuilder: (child, animation) => SlideTransition(
-          position: Tween(
-            begin: const Offset(1, 0),
-            end: Offset.zero,
-          ).animate(animation),
-          child: child,
-        ),
-        child: HostedConnectSheet(
-          key: ValueKey(flow.stage),
-          flow: flow,
-          onAddCommunity: onAddCommunity,
-          presentedStage: flow.stage,
-          fullScreen: true,
-          onBack: () {
-            // Outgoing pages remain mounted until their transition finishes.
-            if (activePresentation.value != presentation ||
-                flow.stage != presentedStage) {
-              return;
-            }
-            if (flow.canChangeCommunities) {
-              flow.backToCommunityChoices();
-            } else {
-              onClose();
-            }
-          },
-        ),
-      ),
+      ],
     );
   }
 }

@@ -88,6 +88,7 @@ final class ProfileSetupRecoveryTests: XCTestCase {
     let avatar = try XCTUnwrap(descendants(profile.view).compactMap { $0 as? UIButton }
       .first { $0.accessibilityLabel == "Add profile photo" })
     XCTAssertEqual(nav.modalPresentationStyle, .overFullScreen)
+    XCTAssertTrue(nav.transitioningDelegate === coordinator)
     XCTAssertNil(profile.navigationItem.rightBarButtonItem)
     let name = try XCTUnwrap(descendants(profile.view).compactMap { $0 as? UITextField }.first)
     let submit = try XCTUnwrap(descendants(profile.view).compactMap { $0 as? UIButton }

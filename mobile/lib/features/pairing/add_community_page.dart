@@ -80,27 +80,20 @@ class AddCommunityPage extends StatelessWidget {
             errorMessage: errorMessage,
             onInputChanged: onInputChanged,
           );
-    return AnimatedSwitcher(
-      duration: MediaQuery.disableAnimationsOf(context)
-          ? Duration.zero
-          : const Duration(milliseconds: 250),
-      layoutBuilder: (current, previous) => Stack(
-        fit: StackFit.expand,
-        children: [
-          for (final child in previous)
-            ExcludeFocus(
-              child: ExcludeSemantics(child: IgnorePointer(child: child)),
-            ),
-          ?current,
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) onBack();
+      },
+      child: Navigator(
+        onDidRemovePage: (_) {},
+        pages: [
+          MaterialPage<void>(
+            key: ValueKey(step == 'pair' ? 'pair' : 'connection'),
+            child: page,
+          ),
         ],
       ),
-      transitionBuilder: (child, animation) => SlideTransition(
-        position: Tween(begin: const Offset(1, 0), end: Offset.zero).animate(
-          CurvedAnimation(parent: animation, curve: Curves.easeOutCubic),
-        ),
-        child: child,
-      ),
-      child: page,
     );
   }
 }

@@ -33,17 +33,24 @@ class OnboardingStepPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = utilitySurfaceThemeData(Theme.of(context));
+    final theme = Theme.of(context);
     final ios = defaultTargetPlatform == TargetPlatform.iOS;
     final buttonStyle = FilledButton.styleFrom(
+      backgroundColor: theme.colorScheme.primary,
+      foregroundColor: theme.colorScheme.onPrimary,
       minimumSize: const Size.fromHeight(52),
       shape: const StadiumBorder(),
     );
     return Theme(
       data: theme.copyWith(
         filledButtonTheme: FilledButtonThemeData(style: buttonStyle),
-        outlinedButtonTheme: OutlinedButtonThemeData(style: buttonStyle),
-        textButtonTheme: TextButtonThemeData(style: buttonStyle),
+        textButtonTheme: TextButtonThemeData(
+          style: TextButton.styleFrom(
+            foregroundColor: theme.colorScheme.onSurface,
+            minimumSize: const Size.fromHeight(52),
+            shape: const StadiumBorder(),
+          ),
+        ),
       ),
       child: PopScope(
         canPop: false,

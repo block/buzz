@@ -14,6 +14,7 @@ import '../../shared/theme/theme.dart';
 // ignore: unused_import
 import 'profile_avatar_sheet_app.dart';
 import '../../shared/widgets/modal_presentation.dart';
+import '../../shared/widgets/onboarding_step_page.dart';
 import 'profile_avatar_draft.dart';
 import '../../shared/widgets/playing_avatar_image.dart';
 import 'profile_setup_avatar_editor.dart';
@@ -27,7 +28,7 @@ class ProfileSetupPage extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final theme = utilitySurfaceThemeData(Theme.of(context));
+    final theme = Theme.of(context);
     final appearance = <String, Object>{
       'dark': theme.brightness == Brightness.dark,
       'pageBackgroundArgb': theme.colorScheme.surface.toARGB32(),
@@ -88,25 +89,23 @@ class ProfileSetupPage extends HookConsumerWidget {
 
       Future<void> fallback() async {
         if (!current()) return;
-        await showBuzzModalBottomSheet<void>(
-          context: context,
-          title: 'Set up your profile',
-          isDismissible: false,
-          enableDrag: false,
-          showCloseButton: false,
-          useRootNavigator: true,
-          isScrollControlled: true,
-          useSafeArea: true,
-          builder: (sheetContext) {
-            profileRoute = ModalRoute.of(sheetContext);
-            return _ProfileSetupForm(
-              avatar: avatar,
-              onName: (value) => name = value,
-              editAvatar: editAvatar,
-              save: save,
-              notNow: flow.finishProfile,
-            );
-          },
+        await Navigator.of(context, rootNavigator: true).push<void>(
+          MaterialPageRoute(
+            builder: (sheetContext) {
+              profileRoute = ModalRoute.of(sheetContext);
+              return OnboardingStepPage(
+                title: 'Set up your profile',
+                onBack: flow.finishProfile,
+                content: _ProfileSetupForm(
+                  avatar: avatar,
+                  onName: (value) => name = value,
+                  editAvatar: editAvatar,
+                  save: save,
+                  notNow: flow.finishProfile,
+                ),
+              );
+            },
+          ),
         );
         if (!current()) return;
         profileRoute = null;
