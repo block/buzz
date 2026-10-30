@@ -62,6 +62,8 @@ Output varies by command group — `--help` shows flags but not response shapes.
 | `canvas get` | raw markdown string or `null` — NOT a JSON envelope |
 | `social *`, `repos get/list` | raw Nostr event JSON INCLUDING `sig` — different contract than read commands above |
 | `repos protect list` | `{repo_id, protections: [{ref, rules}], unknown_rules, validation_error}` |
+| `repos state` | `{repo_id, owner, head, branches: [{name, commit}], tags: [{name, commit}], updated_at}` — newest state signed by `--owner` (default: you) or the relay; `head` is `null` without a HEAD ref; exit 1 when no state exists yet |
+| `channels templates list` | `{path, templates: [{name, description, channel_type, visibility, has_canvas_template, persona_ids, team_ids}]}` — read-only; names feed `channels create --template`; exit 1 when the templates file is missing |
 | `upload file` | pretty-printed multi-line `BlobDescriptor`: `{url, sha256, size, type, uploaded}` |
 | `mem get` | raw bytes to stdout, no trailing newline |
 | `mem hash` | SHA-256 hex string |

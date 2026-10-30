@@ -1943,7 +1943,7 @@ pub async fn dispatch(
     client: &BuzzClient,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
-    use crate::ChannelsCmd;
+    use crate::{ChannelsCmd, ChannelsTemplatesCmd};
     match cmd {
         ChannelsCmd::List {
             visibility,
@@ -1954,6 +1954,13 @@ pub async fn dispatch(
             cmd_list_channels(client, vis_str.as_deref(), Some(member), limit, format).await
         }
         ChannelsCmd::Get { channel } => cmd_get_channel(client, &channel).await,
+        ChannelsCmd::Templates(ChannelsTemplatesCmd::List { templates_file }) => {
+            println!(
+                "{}",
+                channel_templates::list_templates(templates_file.as_deref())?
+            );
+            Ok(())
+        }
         ChannelsCmd::Search {
             query,
             exact,

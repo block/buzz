@@ -18,6 +18,7 @@ pub mod project_channel;
 pub mod projects;
 pub mod reactions;
 mod repo_default_branch;
+mod repo_state;
 pub mod repos;
 pub mod social;
 pub mod upload;
