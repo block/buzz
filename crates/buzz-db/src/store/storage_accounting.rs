@@ -3,6 +3,7 @@
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgConnection;
+use uuid::Uuid;
 
 use crate::{observability, Db, Result};
 
@@ -12,6 +13,17 @@ pub const STORAGE_ACCOUNTING_LOCK_KEY: i64 = 0x4255_5a5a_5354_4f52;
 /// Owns the detached PostgreSQL session that excludes overlapping workers.
 pub struct StorageAccountingLeader {
     connection: PgConnection,
+}
+
+/// A community that storage-usage delivery reports on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageUsageCommunity {
+    /// The community UUID used by the snapshot's per-community map.
+    pub id: Uuid,
+    /// The canonical host stored on the community row.
+    pub host: String,
+    /// Whether the community is serving: not archived and not being deleted.
+    pub active: bool,
 }
 
 /// The newest complete snapshot stored by the worker.
@@ -99,6 +111,39 @@ impl Db {
                 code_sha,
             },
         ))
+    }
+
+    /// Load only the newest snapshot's commit time, so a poller can detect a
+    /// new snapshot without decoding the full per-community payload.
+    #[datastore_span(name = "load_storage_accounting_completed_at", system = "postgresql")]
+    pub async fn load_storage_accounting_completed_at(&self) -> Result<Option<DateTime<Utc>>> {
+        let mut connection =
+            observability::acquire_writer(&self.pool, observability::WriterOperation::Maintenance)
+                .await?;
+        Ok(sqlx::query_scalar::<_, DateTime<Utc>>(
+            "SELECT completed_at FROM storage_accounting_snapshots WHERE singleton = TRUE",
+        )
+        .fetch_optional(&mut *connection)
+        .await?)
+    }
+
+    /// List every community with its host and whether it is still serving.
+    #[datastore_span(name = "storage_usage_communities", system = "postgresql")]
+    pub async fn storage_usage_communities(&self) -> Result<Vec<StorageUsageCommunity>> {
+        let mut connection =
+            observability::acquire_writer(&self.pool, observability::WriterOperation::Maintenance)
+                .await?;
+        let rows = sqlx::query_as::<_, (Uuid, String, bool)>(
+            "SELECT id, host, \
+               (archived_at IS NULL AND deleted_at IS NULL AND deletion_state = 'active') \
+             FROM communities",
+        )
+        .fetch_all(&mut *connection)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, host, active)| StorageUsageCommunity { id, host, active })
+            .collect())
     }
 }
 
@@ -247,6 +292,86 @@ mod postgres_tests {
         drop(fresh_leader);
         drop(first);
         drop(second);
+        pool.close().await;
+        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
+        )))
+        .execute(&admin)
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn usage_delivery_reads_snapshot_time_and_community_states() {
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&crate::test_support::database_url())
+            .await
+            .expect("connect admin");
+        let (pool, name) = create_scratch_db(&admin).await;
+        let db = Db::from_pool(pool.clone());
+
+        assert_eq!(
+            db.load_storage_accounting_completed_at()
+                .await
+                .expect("load absent completed_at"),
+            None
+        );
+        let mut leader = db
+            .try_lock_storage_accounting()
+            .await
+            .expect("lock")
+            .expect("worker owns lock");
+        leader
+            .save_snapshot(&serde_json::json!({"version": 1}), 10, 100, "a")
+            .await
+            .expect("save snapshot");
+        let stored = db
+            .load_storage_accounting_snapshot()
+            .await
+            .expect("load snapshot")
+            .expect("snapshot exists");
+        assert_eq!(
+            db.load_storage_accounting_completed_at()
+                .await
+                .expect("load completed_at"),
+            Some(stored.completed_at)
+        );
+
+        let mut expected = Vec::new();
+        for (host, archived, state, active) in [
+            ("active.example", false, "active", true),
+            ("archived.example", true, "active", false),
+            ("quiescing.example", false, "quiescing", false),
+            ("tombstone.example", false, "tombstone", false),
+        ] {
+            let id = sqlx::query_scalar::<_, Uuid>(
+                "INSERT INTO communities (host, archived_at, deletion_state) \
+                 VALUES ($1, CASE WHEN $2 THEN now() END, $3) RETURNING id",
+            )
+            .bind(host)
+            .bind(archived)
+            .bind(state)
+            .fetch_one(&pool)
+            .await
+            .expect("insert community");
+            expected.push(StorageUsageCommunity {
+                id,
+                host: host.to_string(),
+                active,
+            });
+        }
+        let mut communities = db
+            .storage_usage_communities()
+            .await
+            .expect("list communities");
+        communities.retain(|community| expected.iter().any(|e| e.id == community.id));
+        communities.sort_by(|a, b| a.host.cmp(&b.host));
+        expected.sort_by(|a, b| a.host.cmp(&b.host));
+        assert_eq!(communities, expected);
+
+        drop(leader);
+        drop(db);
         pool.close().await;
         let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
             "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
