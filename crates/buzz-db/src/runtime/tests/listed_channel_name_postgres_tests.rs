@@ -442,7 +442,9 @@ async fn script_renames_each_planned_channel_once_whatever_its_name() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn script_stops_at_the_first_auth_refusal() {
-    let (pool, scratch) = ScratchDb::migrated(&admin_url().await, "listed_name_script_auth").await;
+    let (pool, scratch) =
+        ScratchDb::migrated_through(&admin_url().await, "listed_name_script_auth", BEFORE_INDEX)
+            .await;
     let seed = Seed::new(&pool).await;
     for (group, age) in [("first", 30), ("first", 10), ("second", 30), ("second", 10)] {
         seed.open(&pool, Uuid::new_v4(), group, age).await;
@@ -463,7 +465,9 @@ async fn script_stops_at_the_first_auth_refusal() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn script_stops_for_a_community_the_relay_does_not_serve() {
-    let (pool, scratch) = ScratchDb::migrated(&admin_url().await, "listed_name_script_state").await;
+    let (pool, scratch) =
+        ScratchDb::migrated_through(&admin_url().await, "listed_name_script_state", BEFORE_INDEX)
+            .await;
     let archived = Seed::new(&pool).await;
     let deleting = Seed::new(&pool).await;
     for seed in [&archived, &deleting] {
@@ -607,9 +611,18 @@ async fn migration_schema_listed_name_index_validates_a_prebuild() {
 
     crate::test_support::prebuild_listed_channel_name_index(&pool).await;
     let oid = index_oid(&pool).await;
+    // A channel writer holds its lock through the migration. Over a prebuild,
+    // 0081 must not request the ShareLock a CREATE INDEX takes, even with
+    // IF NOT EXISTS: that waits behind writers and queues new ones.
+    let mut writer = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE channels IN ROW EXCLUSIVE MODE")
+        .execute(&mut *writer)
+        .await
+        .unwrap();
     migration::run_migrations(&pool)
         .await
-        .expect("accept the prebuild");
+        .expect("accept the prebuild without waiting for channel writers");
+    writer.rollback().await.unwrap();
     assert_eq!(ledger_version(&pool).await, BEFORE_INDEX + 1);
     assert_eq!(index_oid(&pool).await, oid, "the prebuild is not replaced");
 }
