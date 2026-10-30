@@ -68,6 +68,41 @@ class RouteScannerFixtures(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, message):
             self.scan(router, admin)
 
+    def test_nested_builder_merge_is_rejected(self):
+        self.assert_rejected(
+            r"\.merge registration is not classified",
+            build_router(),
+            ADMIN.replace('get(probe))', 'get(probe)).merge(crate::api::profiles::router(state))'),
+        )
+
+    def test_unclassified_root_merge_is_rejected(self):
+        self.assert_rejected(
+            r"\.merge registration is not classified",
+            build_router(".merge(api::admin::router(state.clone()))"),
+        )
+
+    def test_existing_root_merge_alias_is_allowed_once(self):
+        self.scan(build_router(".merge(media_router)"))
+        self.assert_rejected(
+            r"allow-listed \.merge registration appears more than once",
+            build_router(".merge(media_router).merge(media_router)"),
+        )
+
+    def test_root_merge_alias_moved_inside_nest_is_rejected(self):
+        self.assert_rejected(
+            r"root \.merge registration inside a \.nest target is not classified",
+            build_router().replace(
+                'api::admin::router(state.clone()))',
+                'api::admin::router(state.clone()).merge(git_policy_router))',
+            ),
+        )
+
+    def test_merge_outside_router_builder_is_rejected(self):
+        self.assert_rejected(
+            r"\.merge registration is not classified",
+            build_router() + "\nfn hidden() { opaque.merge(private_router); }",
+        )
+
     def test_same_named_constants_resolve_per_module(self):
         routes = self.scan(build_router())
         self.assertEqual(

@@ -2,8 +2,8 @@
 //!
 //! The route inventory is shared with `scripts/check-community-ban-route-inventory.py`.
 //! This ignored test uses a disposable local relay/PostgreSQL/MinIO stack and
-//! fresh tenant hosts and identities. GIF requests stop at malformed local
-//! input before any provider request; Git and workflow requests use absent
+//! fresh tenant hosts and identities. Run without BUZZ_KLIPY_API_KEY so GIF
+//! controls assert the disabled-provider response; Git and workflow requests use absent
 //! resources and must stop before subprocess or durable work.
 //!
 //! ```text
@@ -252,7 +252,7 @@ fn route_path(row: &RouteRow, case: &str, actor: &Principal) -> String {
 
 fn request_body(case: &str, actor: &Principal) -> Vec<u8> {
     match case {
-        "events" => EventBuilder::new(Kind::TextNote, "community-ban route matrix")
+        "events" => EventBuilder::new(Kind::Metadata, "{}")
             .sign_with_keys(&actor.keys)
             .expect("sign test message")
             .as_json()
@@ -274,7 +274,9 @@ fn request_body(case: &str, actor: &Principal) -> Vec<u8> {
         "gif_search" | "gif_share" | "profile_search" | "invite_mint" | "buzz_read_state" => {
             b"{".to_vec()
         }
-        "media_upload" => b"not an image file".to_vec(),
+        "media_upload" => vec![
+            0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0,
+        ],
         "git_upload_pack" | "git_receive_pack" => Vec::new(),
         "git_default_post" => serde_json::to_vec(&serde_json::json!({
             "branch": "main",
@@ -444,28 +446,78 @@ fn assert_ban_denial(
 }
 
 fn assert_allowed_control(response_status: StatusCode, body: &str, route: &RouteRow, case: &str) {
-    assert!(
-        matches!(response_status.as_u16(), 200..=299 | 400 | 404 | 409 | 415 | 422),
-        "{} {} case {case}: unbanned control must pass authentication and authorization, then reach the fixture's expected success or input/resource result; got {}: {body}",
-        route.method,
-        route.path,
-        response_status
-    );
-    let denial_message = if route.id.starts_with("git_default_branch") {
-        BANNED_MESSAGE
-    } else if route.id.starts_with("git_") {
-        "blocked: banned from this community"
-    } else if route.id.starts_with("media_") {
-        "relay membership required"
-    } else {
-        BANNED_MESSAGE
+    let expected_status = match case {
+        "events"
+        | "moderation_command"
+        | "query"
+        | "count"
+        | "buzz_sidebar"
+        | "moderation_reports"
+        | "moderation_owner_ban"
+        | "moderation_audit"
+        | "moderation_restricted" => StatusCode::OK,
+        "profile_search" | "invite_mint" | "buzz_read_state" => StatusCode::BAD_REQUEST,
+        // This isolated fixture runs without a GIF provider key.
+        "gif_search" | "gif_share" | "workflow_runs" | "workflow_approvals" | "media_get"
+        | "media_head" | "git_info_refs" | "git_upload_pack" | "git_receive_pack"
+        | "git_default_get" | "git_default_post" => StatusCode::NOT_FOUND,
+        "media_upload" => StatusCode::UNPROCESSABLE_ENTITY,
+        _ => panic!("no positive-control contract for {case}"),
     };
-    assert!(
-        !body.contains(denial_message),
-        "{} {} case {case}: allowed control must not receive a ban denial; body: {body}",
-        route.method,
-        route.path
+    assert_eq!(
+        response_status, expected_status,
+        "{} {} case {case}: positive control reached an unexpected result: {body}",
+        route.method, route.path
     );
+
+    if case == "media_head" {
+        assert!(body.is_empty(), "HEAD must suppress the missing-blob body");
+        return;
+    }
+    if matches!(
+        case,
+        "git_info_refs" | "git_upload_pack" | "git_receive_pack"
+    ) {
+        assert_eq!(body, "repository not found");
+        return;
+    }
+    let value: serde_json::Value = serde_json::from_str(body)
+        .unwrap_or_else(|error| panic!("case {case}: expected JSON, got {body}: {error}"));
+    match case {
+        "events" | "moderation_command" => {
+            assert_eq!(value["accepted"], true, "case {case}: {body}");
+            assert!(value["event_id"].as_str().is_some_and(|id| id.len() == 64));
+        }
+        "query"
+        | "moderation_reports"
+        | "moderation_owner_ban"
+        | "moderation_audit"
+        | "moderation_restricted" => assert!(value.is_array(), "case {case}: {body}"),
+        "count" => assert!(value["count"].as_u64().is_some(), "count response: {body}"),
+        "buzz_sidebar" => {
+            assert!(value["channels"].is_array(), "sidebar response: {body}");
+            assert!(value.get("next_cursor").is_some());
+        }
+        "buzz_read_state" => {
+            assert_eq!(value["error"]["code"], "invalid_request");
+            assert!(value["error"]["request_id"].as_str().is_some());
+        }
+        _ => {
+            let expected_error = match case {
+                "profile_search" => "invalid profile search JSON",
+                "invite_mint" => {
+                    "invalid invite JSON: EOF while parsing an object at line 1 column 1"
+                }
+                "gif_search" | "gif_share" => "GIF search is not configured",
+                "workflow_runs" | "workflow_approvals" => "workflow not found",
+                "media_get" => "not found",
+                "media_upload" => "invalid image data",
+                "git_default_get" | "git_default_post" => "repository not found",
+                _ => unreachable!(),
+            };
+            assert_eq!(value["error"], expected_error, "case {case}: {body}");
+        }
+    }
 }
 
 fn principal<'a>(name: &str, principals: &[&'a Principal]) -> &'a Principal {
@@ -538,6 +590,19 @@ async fn community_http_ban_matrix() {
         keys: Keys::generate(),
         nip_oa_tag: None,
     };
+    let clear_member_agent_keys = Keys::generate();
+    let clear_member_agent = Principal {
+        name: "clear-member-agent",
+        nip_oa_tag: Some(
+            buzz_sdk::nip_oa::compute_auth_tag(
+                &clear_member.keys,
+                &clear_member_agent_keys.public_key(),
+                "",
+            )
+            .expect("sign clear ordinary-owner agent proof"),
+        ),
+        keys: clear_member_agent_keys,
+    };
     let clear_admin = Principal {
         name: "admin",
         keys: Keys::generate(),
@@ -574,6 +639,7 @@ async fn community_http_ban_matrix() {
     let banned = [&banned_member, &banned_admin, &banned_agent];
     let controls = [
         &clear_member,
+        &clear_member_agent,
         &clear_admin,
         &clear_owner,
         &clear_moderator_agent,
@@ -600,11 +666,18 @@ async fn community_http_ban_matrix() {
                 "moderation_owner_ban" => "clear-moderator-agent",
                 _ => route.control.as_str(),
             };
-            let control = principal(control_name, &controls);
-            let response = send_route_request(&client, &route, case, control, &host).await;
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            assert_allowed_control(status, &body, &route, case);
+            let control_names = if control_name == "member" {
+                vec!["member", "clear-member-agent"]
+            } else {
+                vec![control_name]
+            };
+            for name in control_names {
+                let control = principal(name, &controls);
+                let response = send_route_request(&client, &route, case, control, &host).await;
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                assert_allowed_control(status, &body, &route, case);
+            }
         }
     }
 }

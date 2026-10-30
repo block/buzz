@@ -348,10 +348,17 @@ def builder_prefixes(builders) -> dict[str, str]:
     return prefixes
 
 
-# Service and fallback registrations bypass the per-route method
-# classification, so each one is a hard error unless this list names its
-# builder, call, and exact (whitespace-normalized) argument, once.
+# Service, fallback, and merge registrations bypass per-route classification.
+# Pin the existing composition seams by builder and exact normalized argument;
+# reject new or repeated compositions until their routes can be classified.
 ALLOWED_UNROUTED_REGISTRATIONS = {
+    # These root aliases are constructed in build_router at the root prefix.
+    ("router::build_router", "merge", "media_router"),
+    ("router::build_router", "merge", "git_router"),
+    ("router::build_router", "merge", "git_policy_router"),
+    ("router::build_router", "merge", "optional"),
+    # Git settings already carry their complete /git paths; no nest prefix.
+    ("api::git::transport::git_router", "merge", "super::settings::router()"),
     # SPA static bundles; it only serves files, never a community API.
     ("router::build_router", "fallback_service", "spa_fallback"),
     # Unknown accessory paths answer 404 instead of SPA HTML.
@@ -381,6 +388,11 @@ def collect_registered_routes() -> Counter:
         mask = mask_comments_and_strings(source)
         test_ranges = test_module_ranges(mask)
         path_builders = [builder for builder in builders if builder[2] == path]
+        # Root aliases have root paths only when merged outside a nest target.
+        nest_arguments = []
+        for nest in re.finditer(r"\.\s*nest\s*\(", mask):
+            opening = mask.find("(", nest.start(), nest.end())
+            nest_arguments.append((opening, matching_delimiter(mask, opening)))
 
         def enclosing_builder(position: int) -> str | None:
             for builder in path_builders:
@@ -389,7 +401,7 @@ def collect_registered_routes() -> Counter:
             return None
 
         for match in re.finditer(
-            r"\.\s*(route|nest|route_service|nest_service|fallback_service|fallback)\s*\(",
+            r"\.\s*(route|nest|route_service|nest_service|fallback_service|fallback|merge)\s*\(",
             mask,
         ):
             if in_ranges(match.start(), test_ranges):
@@ -398,13 +410,22 @@ def collect_registered_routes() -> Counter:
             builder = enclosing_builder(match.start())
             line = source.count("\n", 0, match.start()) + 1
             location = f"{path.relative_to(ROOT)}:{line}"
-            if call.endswith("_service") or call == "fallback":
+            if call.endswith("_service") or call in {"fallback", "merge"}:
                 opening = mask.find("(", match.start(), match.end())
                 argument = " ".join(
                     source[opening + 1 : matching_delimiter(mask, opening)].split()
                 )
                 registration = (builder, call, argument)
-                if registration not in ALLOWED_UNROUTED_REGISTRATIONS:
+                if (
+                    call == "merge"
+                    and builder == "router::build_router"
+                    and in_ranges(match.start(), nest_arguments)
+                ):
+                    errors.append(
+                        f"{location}: root .merge registration inside a .nest target "
+                        "is not classified"
+                    )
+                elif registration not in ALLOWED_UNROUTED_REGISTRATIONS:
                     errors.append(
                         f"{location}: production .{call} registration is not classified; "
                         "use .route with an HTTP method or allow-list it"
@@ -551,7 +572,6 @@ def check_route_inventory() -> tuple[int, int, int]:
                 found = any(
                     test_function_exists(path, test_name)
                     for path in RELAY_SRC.rglob("*.rs")
-                    if "tests" not in path.parts and not path.name.endswith("_tests.rs")
                 )
                 if not found:
                     raise ValueError(f"{route_id}: missing PostgreSQL regression {test_name!r}")
@@ -573,10 +593,8 @@ def check_route_inventory() -> tuple[int, int, int]:
             details.append("inventory rows without registered routes: " + ", ".join(map(str, stale)))
         raise ValueError("; ".join(details))
 
-    if set(pending) != {("invite_claim", "pending:BUZZ-268"), ("workflow_webhook", "pending:BUZZ-272")}:
-        raise ValueError(
-            "pending coverage must explicitly track BUZZ-268 invitations and BUZZ-272 webhook owner bans"
-        )
+    if pending:
+        raise ValueError(f"integrated ban coverage cannot retain pending sibling cases: {pending}")
     claim = next((row for row in routes if row["id"] == "invite_claim"), None)
     if claim is None or claim["membership"] != "exempt" or claim["restriction"] != "enforce":
         raise ValueError("invite claim must remain membership-exempt and restriction-enforced")
