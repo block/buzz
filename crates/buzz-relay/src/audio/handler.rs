@@ -997,7 +997,7 @@ async fn run_active_audio_connection(
     }
 
     // Bind, then take the final ban/membership decision the root socket
-    // applies (see `final_admission_denial`), before any huddle lease. A ban
+    // applies (see `final_admission_check`), before any huddle lease. A ban
     // or removal whose disconnect ran before the bind is seen by these fresh
     // reads; one that runs after it cancels this socket (`check_cancel!`).
     // Same order as root AUTH: a proven owner before the pubkey; otherwise
@@ -1007,27 +1007,40 @@ async fn run_active_audio_connection(
         control.bind_owner(owner.to_bytes());
     }
     control.bind_pubkey(pubkey.to_bytes());
-    let owner =
+    let admitted_owner =
         crate::handlers::auth::admitted_owner(&state, tenant.community(), pubkey, nip_oa_owner)
             .await;
-    if let Ok(Some(owner)) = owner {
-        control.bind_owner(owner);
-    }
-    let denial = match owner {
-        Err(denial) => Some(denial),
-        Ok(_) => {
-            crate::handlers::auth::final_admission_denial(
-                &state,
-                tenant.community(),
-                pubkey,
-                auth_tag_json.as_deref(),
-                Some(signed_auth_created_at),
-                token_owner,
+    let admitted_owner = match admitted_owner {
+        Ok(owner) => owner,
+        Err(denial) => {
+            shadow_attempt.refused();
+            exit_authorization_refusal(
+                &mut ws_send,
+                &control,
+                &mut terminal_ctrl_rx,
+                nip_fi_assertion.is_some(),
+                denial.class,
+                serde_json::json!({"type": "error", "message": denial.reason}),
             )
-            .await
+            .await;
+            return;
         }
     };
-    if let Some(denial) = denial {
+    if let Some(owner) = admitted_owner {
+        control.bind_owner(owner);
+    }
+    let final_check_started_at = tokio::time::Instant::now();
+    let final_check = crate::handlers::auth::final_admission_check(
+        &state,
+        tenant.community(),
+        pubkey,
+        auth_tag_json.as_deref(),
+        Some(signed_auth_created_at),
+        token_owner,
+        admitted_owner,
+    )
+    .await;
+    if let Some(denial) = final_check.denial {
         shadow_attempt.refused();
         let (class, message) = (denial.class, denial.reason);
         warn!(channel_id = %channel_id, pubkey = %pubkey_hex, reason = message, "audio: denied at final admission check");
@@ -1043,6 +1056,15 @@ async fn run_active_audio_connection(
         return;
     }
     check_cancel!(cancel, terminal_ctrl_rx, disconnect_reason, ws_send);
+    control.mark_live_authorized(
+        pubkey.to_bytes(),
+        admitted_owner,
+        final_check.owner_was_relay_member_at_admission,
+        final_check.membership_via_owner,
+        token_owner.is_some(),
+        crate::nip_fi_session::NipFiWsRoute::Audio,
+        final_check_started_at,
+    );
 
     // Huddle cross-pod routing (mesh) OR single-pod guardrail.
     //
@@ -4188,7 +4210,7 @@ mod tests {
         // Fix 5: use Config::for_test() which holds NIP_FI_ENV_LOCK internally. [FI-TRACE-ENV-RACE]
         let mut config = crate::config::Config::for_test();
         config.require_relay_membership = require_relay_membership;
-        config.database_url = "postgres://buzz:buzz_dev@127.0.0.1:1/buzz".to_string(); // sadscan:disable np.postgres.1 -- unreachable test-only URL
+        config.database_url = "postgres://127.0.0.1:1/buzz".to_string();
         config.redis_url = "redis://127.0.0.1:1".to_string();
         let mut pool_options = sqlx::postgres::PgPoolOptions::new();
         if let Some(timeout) = acquire_timeout {
@@ -15426,6 +15448,37 @@ mod tests {
             assert_eq!(closed, 1, "the ban must close the live audio socket");
             expect_policy_close(&mut client).await;
             server.abort();
+        }
+
+        /// Binds durable revocation to the real audio AUTH enrollment call.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn durable_ban_revalidates_real_audio_admission_without_delivery() {
+            let state = audio_test_state_real_db()
+                .await
+                .expect("isolated PostgreSQL");
+            let (tenant, channel_id, member) = seed_audio_fixture(state.db.pool()).await;
+            let (mut client, server) =
+                open_admitted_audio_socket(&state, tenant.clone(), channel_id, &member, None).await;
+            state
+                .db
+                .ban_community_member(
+                    tenant.community(),
+                    member.public_key().as_bytes(),
+                    member.public_key().as_bytes(),
+                    None,
+                    None,
+                )
+                .await
+                .expect("commit ban only");
+            assert_eq!(
+                state.revalidate_live_authorizations().await,
+                1,
+                "real audio admission must enroll the socket in durable scans"
+            );
+            expect_policy_close(&mut client).await;
+            server.abort();
+            let _ = server.await;
         }
 
         /// Every frame up to and including the server's close.
