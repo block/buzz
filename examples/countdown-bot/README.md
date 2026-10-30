@@ -16,7 +16,9 @@ profile, subscribe to events, and publish kind `9` channel messages can be a bot
 On startup it publishes a profile named **Countdown Bot** with a small embedded
 SVG clock icon, then best-effort publishes a NIP-29 `kind:9000` self-add with
 `role=bot`. That channel membership is what makes the bot show up in the
-members list and in Buzz's mention autocomplete.
+members list and in Buzz's mention autocomplete. The relay decides the role it
+shows: `bot` when the key has a recorded agent owner (the owner-attested path
+below), otherwise `member`. Both roles have the same permissions.
 
 ## Auth paths
 
@@ -76,7 +78,8 @@ Relay requirements for this path:
 
 Relay access and channel access are separate. Owner-attested auth can admit the
 bot to the relay, but the bot still publishes as its own pubkey. The bot tries to
-self-add to open channels as a `bot` member on startup. For private channels,
+self-add to open channels on startup; with a recorded owner the relay shows it
+as a `bot` member. For private channels,
 an owner/admin must add the bot pubkey to the channel membership before expecting
 it to appear in members, resolve in mention autocomplete, or read/write messages.
 

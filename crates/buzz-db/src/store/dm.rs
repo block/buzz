@@ -36,7 +36,8 @@ pub struct DmParticipant {
     pub pubkey: Vec<u8>,
     /// Optional display name from the users table.
     pub display_name: Option<String>,
-    /// Member role string (always "member" for DMs).
+    /// Member role string: `"member"`, or `"bot"` for a key with a recorded
+    /// agent owner.
     pub role: String,
 }
 
@@ -313,9 +314,11 @@ pub async fn list_dms_for_user(
         let updated_at: DateTime<Utc> = row.try_get("updated_at")?;
 
         // Fetch participants for this DM.
-        let member_rows = sqlx::query(
+        let member_rows = sqlx::query(concat!(
+            "SELECT cm.pubkey, ",
+            crate::channel_members::member_role_label!(),
+            " AS role, u.display_name",
             r#"
-            SELECT cm.pubkey, cm.role::text AS role, u.display_name
             FROM channel_members cm
             LEFT JOIN users u
               ON u.community_id = cm.community_id
@@ -324,8 +327,8 @@ pub async fn list_dms_for_user(
               AND cm.channel_id = $2
               AND cm.removed_at IS NULL
             ORDER BY cm.joined_at ASC
-            "#,
-        )
+            "#
+        ))
         .bind(community_id.as_uuid())
         .bind(channel_id)
         .fetch_all(pool)

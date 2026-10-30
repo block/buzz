@@ -1223,6 +1223,10 @@ pub const THREAD_SUMMARY_REFRESH_INTERVAL: std::time::Duration = std::time::Dura
 /// local fan-out). A hung refresh is abandoned so its root keeps emitting.
 pub const THREAD_SUMMARY_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Background roster republishes that may run at once. See
+/// [`AppState::roster_republish_semaphore`].
+pub const ROSTER_REPUBLISH_CONCURRENCY: usize = 2;
+
 /// Shared application state, cloned cheaply via inner `Arc` fields.
 #[derive(Clone)]
 pub struct AppState {
@@ -1265,6 +1269,11 @@ pub struct AppState {
     pub git_semaphore: Arc<Semaphore>,
     /// Semaphore limiting concurrent media upload parsing/transcoding work.
     pub media_upload_semaphore: Arc<Semaphore>,
+    /// Semaphore limiting background roster republishes across the relay.
+    /// Each one holds a writer connection while it waits for a channel's
+    /// membership lock, so a burst of first agent sign-ins sharing channels
+    /// must not take more than a few pool connections.
+    pub roster_republish_semaphore: Arc<Semaphore>,
 
     /// Workflow engine for background processing.
     pub workflow_engine: Arc<WorkflowEngine>,
@@ -1590,6 +1599,7 @@ impl AppState {
             handler_semaphore: Arc::new(Semaphore::new(max_concurrent_handlers)),
             git_semaphore: Arc::new(Semaphore::new(git_max_concurrent_ops)),
             media_upload_semaphore: Arc::new(Semaphore::new(media_max_concurrent_uploads)),
+            roster_republish_semaphore: Arc::new(Semaphore::new(ROSTER_REPUBLISH_CONCURRENCY)),
             workflow_engine,
             relay_keypair,
             huddle_liveness_generation: Uuid::new_v4(),

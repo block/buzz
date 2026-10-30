@@ -345,8 +345,9 @@ pub fn parse_protection_tag_with_warnings(
                 .parse()
                 .map_err(|_| RuleParseError::InvalidRole(role_str.to_string()))?;
             // Reject push:bot and push:guest — nonsensical rules.
-            // Bot is promoted to Member at the policy layer; push:bot is meaningless.
-            // Guest cannot push regardless; push:guest would be confusing.
+            // Bot has the member permission level, so push:bot would mean
+            // push:member. Guest cannot push regardless; push:guest would be
+            // confusing.
             if matches!(role, MemberRole::Bot | MemberRole::Guest) {
                 return Err(RuleParseError::InvalidRole(role_str.to_string()));
             }
@@ -931,19 +932,25 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_bot_cannot_push_without_explicit_grant() {
+    fn evaluate_bot_pushes_like_a_member() {
         let rules = vec![];
-        let update = RefUpdate {
-            ref_name: "refs/heads/feature".to_string(),
-            kind: UpdateKind::FastForward,
-            old_oid: "a".repeat(40),
-            new_oid: "b".repeat(40),
-        };
-        // Bot has permission_level 0 at the core evaluator level.
-        // NOTE: The policy layer (policy.rs) promotes Bot → Member before calling
-        // evaluate_push, so bots in a channel CAN push in practice. This test
-        // verifies the raw evaluator behavior; the promotion is tested in policy.
-        assert!(evaluate_ref_update(&update, MemberRole::Bot, &rules).is_err());
+        for (ref_name, kind) in [
+            ("refs/heads/feature", UpdateKind::FastForward),
+            ("refs/heads/feature", UpdateKind::NonFastForward),
+            ("refs/heads/main", UpdateKind::FastForward),
+        ] {
+            let update = RefUpdate {
+                ref_name: ref_name.to_string(),
+                kind,
+                old_oid: "a".repeat(40),
+                new_oid: "b".repeat(40),
+            };
+            assert_eq!(
+                evaluate_ref_update(&update, MemberRole::Bot, &rules).is_ok(),
+                evaluate_ref_update(&update, MemberRole::Member, &rules).is_ok(),
+                "{ref_name} {kind:?}"
+            );
+        }
     }
 
     #[test]

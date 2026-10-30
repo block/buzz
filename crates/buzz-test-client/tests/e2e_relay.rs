@@ -2824,10 +2824,17 @@ async fn test_private_channel_any_member_can_invite() {
                 accepted,
                 "private-channel {actor_role} should add {target_role}, got: {msg}"
             );
+            // The target has no recorded agent owner, so the relay shows
+            // `member` when `bot` is asked for.
+            let stored_role = if target_role == "bot" {
+                "member"
+            } else {
+                target_role
+            };
             assert_eq!(
                 member_role(&url, &owner_keys, &channel_id, &target_pubkey_hex).await,
-                Some(target_role.to_string()),
-                "private-channel {actor_role} add must persist the {target_role} role"
+                Some(stored_role.to_string()),
+                "private-channel {actor_role} add of {target_role} must show {stored_role}"
             );
         }
 
@@ -4043,11 +4050,12 @@ async fn test_nip29_member_raises_guest_agent() {
     .await;
     assert!(accepted, "a member raises a guest agent: {msg}");
     member_client.disconnect().await.ok();
+    // The agent has a recorded owner, so the relay shows its member role as `bot`.
     assert_eq!(
         member_role(&url, &owner, &channel_id, &agent_hex)
             .await
             .as_deref(),
-        Some("member")
+        Some("bot")
     );
     let (accepted, msg) = post_ws(&url, &channel_id, &agent, "agent post").await;
     assert!(accepted, "raised agent post: {msg}");
