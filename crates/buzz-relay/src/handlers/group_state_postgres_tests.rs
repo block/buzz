@@ -8,7 +8,7 @@ use buzz_db::event::EventQuery;
 use nostr::{EventBuilder, Keys, Kind, Tag};
 use uuid::Uuid;
 
-use crate::handlers::ingest::{ingest_event, HttpAuthMethod, IngestAuth};
+use crate::handlers::ingest::{ingest_event, HttpAuthMethod, IngestAuth, IngestError};
 use crate::state::AppState;
 use buzz_auth::Scope;
 
@@ -885,79 +885,49 @@ async fn system_channel_defaults_private_and_hidden() {
     assert!(!has_marker(&tags, "hidden"), "{tags:?}");
 }
 
-/// A kind:9007 without an `h` tag is created by the side-effect handler, not
-/// by the ingest pre-create. That path must give a system channel the same
-/// private default, so strangers can neither read nor write it.
-/// Mutation: default visibility to open in `handle_create_group` → RED.
+/// A kind:9007 without an `h` tag is refused before it is stored. Its channel
+/// would be created only after the event committed, so a refused create (a
+/// taken name, for example) would still answer accepted.
+/// Mutation: drop the `h`-tag refusal in `ingest_event` → RED.
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn system_channel_without_h_tag_defaults_private() {
+async fn create_without_h_tag_is_refused_before_it_is_stored() {
     let state = state().await;
-    let tenant = community(&state, "group-state-system-no-h").await;
+    let tenant = community(&state, "group-state-create-no-h").await;
     let creator = Keys::generate();
-    let stranger = Keys::generate();
 
-    let name = format!("system-no-h-{}", Uuid::new_v4().simple());
+    let name = format!("no-h-{}", Uuid::new_v4().simple());
     let create = EventBuilder::new(Kind::Custom(9007), "")
-        .tags([
-            Tag::parse(["name", &name]).unwrap(),
-            Tag::parse(["channel_type", "system"]).unwrap(),
-        ])
+        .tags([Tag::parse(["name", &name]).unwrap()])
         .sign_with_keys(&creator)
         .expect("sign 9007");
-    let result = ingest_event(&state, &tenant, create, http_auth(&creator))
-        .await
-        .unwrap_or_else(|error| panic!("create channel: {error:?}"));
-    assert!(result.accepted, "{}", result.message);
-
-    let (channel_id, visibility): (Uuid, String) = sqlx::query_as(
-        "SELECT id, visibility::text FROM channels WHERE community_id = $1 AND name = $2",
-    )
-    .bind(*tenant.community().as_uuid())
-    .bind(&name)
-    .fetch_one(state.db.pool())
-    .await
-    .expect("created channel");
-    assert_eq!(visibility, "private");
-
-    let tags = group_state_tags(&state, &tenant, channel_id, 39000).await;
-    assert!(has_marker(&tags, "private"), "{tags:?}");
-    assert!(has_marker(&tags, "hidden"), "{tags:?}");
-    assert!(!has_marker(&tags, "public"), "{tags:?}");
-
-    let stranger_bytes = stranger.public_key().to_bytes().to_vec();
-    assert!(
-        crate::handlers::ingest::check_channel_membership(
-            tenant.community(),
-            &state,
-            channel_id,
-            &stranger_bytes,
-            None,
-            crate::handlers::ingest::ChannelWrite::Membership,
-        )
-        .await
-        .is_err(),
-        "a stranger must not pass the channel access check"
-    );
-    let readable = state
-        .db
-        .get_accessible_channel_ids(tenant.community(), &stranger_bytes)
-        .await
-        .expect("accessible channels");
-    assert!(!readable.contains(&channel_id), "stranger can read it");
-
-    let message = EventBuilder::new(Kind::Custom(9), "hello")
-        .tags([Tag::parse(["h", &channel_id.to_string()]).unwrap()])
-        .sign_with_keys(&stranger)
-        .unwrap();
-    match ingest_event(&state, &tenant, message, http_auth(&stranger)).await {
-        Ok(result) => assert!(
-            !result.accepted,
-            "stranger wrote to a private system channel: {}",
-            result.message
+    let event_id = create.id;
+    match ingest_event(&state, &tenant, create, http_auth(&creator)).await {
+        Err(IngestError::Rejected(message)) => assert_eq!(
+            message,
+            "invalid: create-group must include an h tag with the new channel id"
         ),
-        Err(error) => assert!(format!("{error:?}").contains("restricted"), "{error:?}"),
+        Err(other) => panic!("expected a refusal, got {other:?}"),
+        Ok(result) => panic!("expected a refusal, got {:?}", result.message),
     }
+
+    let channels: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM channels WHERE community_id = $1 AND name = $2")
+            .bind(*tenant.community().as_uuid())
+            .bind(&name)
+            .fetch_one(state.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(channels, 0, "no channel is created");
+    assert!(
+        state
+            .db
+            .get_event_by_id(tenant.community(), event_id.as_bytes())
+            .await
+            .unwrap()
+            .is_none(),
+        "the refused create is not stored"
+    );
 }
 
 /// A removed creator's kind:9021 that passes the open-channel check while the
@@ -1082,8 +1052,6 @@ async fn removed_creator_join_racing_a_private_switch_is_refused() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn a_taken_open_name_is_refused_as_a_client_error() {
-    use crate::handlers::ingest::IngestError;
-
     let state = state().await;
     let tenant = community(&state, "group-state-name-taken").await;
     let owner = Keys::generate();
@@ -1167,4 +1135,87 @@ async fn a_taken_open_name_is_refused_as_a_client_error() {
     .await
     .expect("look up the 9002");
     assert!(!stored, "the refused 9002 is not stored");
+}
+
+/// A relay operator who is not a channel member may rename the channel, and
+/// the relay publishes the new name in kind:39000. The operator may change
+/// nothing else, and a relay moderator may not rename it.
+/// Mutation: drop the operator branch in `validate_admin_event`, or drop its
+/// `is_rename_only` or operator-role condition → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_relay_operator_may_only_rename_a_channel() {
+    let state = state().await;
+    let tenant = community(&state, "group-state-operator-rename").await;
+    let owner = Keys::generate();
+    let channel = create_channel(&state, &tenant, &owner, &[]).await;
+    let operator = Keys::generate();
+    let moderator = Keys::generate();
+    for (keys, role) in [(&operator, "operator"), (&moderator, "moderator")] {
+        state
+            .db
+            .upsert_relay_operator(
+                &keys.public_key().to_bytes(),
+                role,
+                &owner.public_key().to_bytes(),
+                true,
+            )
+            .await
+            .expect("grant relay role");
+    }
+    let edit = |keys: &Keys, tags: &[&[&str]]| {
+        let mut all = vec![Tag::parse(["h", &channel.to_string()]).unwrap()];
+        all.extend(
+            tags.iter()
+                .map(|tag| Tag::parse(tag.iter().copied()).unwrap()),
+        );
+        EventBuilder::new(Kind::Custom(9002), "")
+            .tags(all)
+            .sign_with_keys(keys)
+            .expect("sign 9002")
+    };
+    let community_id = tenant.community();
+    let name = |state: Arc<AppState>| async move {
+        state
+            .db
+            .get_channel(community_id, channel)
+            .await
+            .expect("channel")
+            .name
+    };
+    let before = name(state.clone()).await;
+
+    for (keys, tags) in [
+        (&moderator, &[&["name", "by-moderator"][..]][..]),
+        (
+            &operator,
+            &[&["name", "by-operator"][..], &["about", "changed"][..]][..],
+        ),
+    ] {
+        match ingest_event(&state, &tenant, edit(keys, tags), http_auth(keys)).await {
+            Err(IngestError::Rejected(message)) => {
+                assert!(message.contains("not authorized"), "{message}")
+            }
+            Err(other) => panic!("expected a refusal, got {other:?}"),
+            Ok(result) => panic!("expected a refusal, got {:?}", result.message),
+        }
+        assert_eq!(name(state.clone()).await, before);
+    }
+
+    let renamed = ingest_event(
+        &state,
+        &tenant,
+        edit(&operator, &[&["name", "renamed-by-operator"]]),
+        http_auth(&operator),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("operator rename: {error:?}"));
+    assert!(renamed.accepted, "{}", renamed.message);
+    assert_eq!(name(state.clone()).await, "renamed-by-operator");
+    let tags = group_state_tags(&state, &tenant, channel, 39000).await;
+    assert!(
+        tags.iter()
+            .any(|tag| tag.len() >= 2 && tag[0] == "name" && tag[1] == "renamed-by-operator"),
+        "{tags:?}"
+    );
 }
