@@ -196,7 +196,7 @@ fn validate_reaction_emoji(event: &Event, emoji: &str) -> Result<(), IngestError
 /// The tag value is either the literal `none` (expect no canvas head yet) or a
 /// 64-hex event ID (expect the live head to match it).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CanvasRevisionSpec {
+pub(crate) enum RevisionSpec {
     /// Literal `none` — the writer expects no canvas head to exist.
     NoHead,
     /// A 32-byte event ID the live canvas head must equal.
@@ -211,9 +211,7 @@ pub(crate) enum CanvasRevisionSpec {
 /// malformed and rejects `invalid:` — it is never treated as absent. At most
 /// one `expected-revision` tag may be present. A single well-formed tag yields
 /// `Some(spec)`.
-pub(crate) fn parse_canvas_expected_revision(
-    event: &Event,
-) -> Result<Option<CanvasRevisionSpec>, IngestError> {
+pub(crate) fn parse_expected_revision(event: &Event) -> Result<Option<RevisionSpec>, IngestError> {
     let mut tags = event
         .tags
         .iter()
@@ -236,13 +234,52 @@ pub(crate) fn parse_canvas_expected_revision(
     let value = tag[1].as_str();
 
     if value == "none" {
-        return Ok(Some(CanvasRevisionSpec::NoHead));
+        return Ok(Some(RevisionSpec::NoHead));
     }
     let bytes = hex::decode(value)
         .ok()
         .filter(|bytes| bytes.len() == 32)
-        .ok_or_else(|| IngestError::Rejected("invalid: bad expected canvas revision".into()))?;
-    Ok(Some(CanvasRevisionSpec::Head(bytes)))
+        .ok_or_else(|| IngestError::Rejected("invalid: bad expected revision".into()))?;
+    Ok(Some(RevisionSpec::Head(bytes)))
+}
+
+/// Map a parsed `expected-revision` tag to the replacement precondition.
+fn replace_precondition(
+    spec: Option<&RevisionSpec>,
+) -> buzz_db::replaceable::ParameterizedReplacePrecondition<'_> {
+    use buzz_db::replaceable::ParameterizedReplacePrecondition as Precondition;
+    match spec {
+        None => Precondition::Unconditional,
+        Some(RevisionSpec::NoHead) => Precondition::ExpectNoHead,
+        Some(RevisionSpec::Head(id)) => Precondition::ExpectedRevision(id),
+    }
+}
+
+/// Turn a replacement status into the stored event and its inserted flag, or a
+/// `conflict:` rejection when a tagged write did not apply.
+fn replace_outcome(
+    stored: buzz_core::StoredEvent,
+    status: buzz_db::replaceable::ParameterizedReplaceStatus,
+    tagged: bool,
+) -> Result<(buzz_core::StoredEvent, bool), IngestError> {
+    use buzz_db::replaceable::ParameterizedReplaceStatus as Status;
+    match status {
+        Status::Inserted => Ok((stored, true)),
+        Status::Duplicate => Ok((stored, false)),
+        Status::RevisionMissing => Err(IngestError::Conflict(
+            "conflict: expected revision does not exist".into(),
+        )),
+        Status::RevisionMismatch => Err(IngestError::Conflict(
+            "conflict: event changed since it was loaded".into(),
+        )),
+        Status::Superseded if tagged => Err(IngestError::Conflict(
+            "conflict: write does not supersede the current head".into(),
+        )),
+        Status::Superseded => Ok((stored, false)),
+        Status::ReplayOnlyMiss => Err(IngestError::Internal(
+            "error: replay-only replacement was not requested".into(),
+        )),
+    }
 }
 
 /// How the HTTP caller authenticated (for [`IngestAuth::Http`]).
@@ -439,14 +476,14 @@ pub struct IngestResult {
 pub enum IngestError {
     /// Client error (bad event) — WS: OK false, HTTP: 400.
     Rejected(String),
-    /// Canvas CAS precondition failure — WS: OK false, HTTP: 409.
+    /// CAS precondition failure — WS: OK false, HTTP: 409.
     ///
-    /// Emitted when a canvas write's `expected-revision` tag no longer matches
+    /// Emitted when a write's `expected-revision` tag no longer matches
     /// the relay's canonical head: the revision is missing, has changed, or the
     /// new event does not supersede the current one.  Kept separate from
     /// [`IngestError::Rejected`] so the HTTP bridge can map it to
     /// `409 CONFLICT` while generic client mistakes remain `400 BAD_REQUEST`.
-    CanvasConflict(String),
+    Conflict(String),
     /// Auth/scope error — WS: OK false, HTTP: 401/403.
     AuthFailed(String),
     /// Server error — WS: OK false, HTTP: 500.
@@ -3530,11 +3567,15 @@ async fn ingest_event_inner(
         });
     }
 
-    // Parse a canvas `expected-revision` precondition once, ahead of the write
+    // Parse an `expected-revision` precondition once, ahead of the write
     // dispatch. Malformed or duplicate tags reject here (never reaching the DB);
-    // an absent tag yields `None`, routing canvas writes to the generic append.
-    let canvas_revision_spec = if kind_u32 == KIND_CANVAS {
-        parse_canvas_expected_revision(&event)?
+    // an absent tag yields `None`, routing canvas writes to the generic append
+    // and replaceable writes to the unconditional replacement.
+    let revision_spec = if kind_u32 == KIND_CANVAS
+        || buzz_core::kind::is_replaceable(kind_u32)
+        || is_parameterized_replaceable(kind_u32)
+    {
+        parse_expected_revision(&event)?
     } else {
         None
     };
@@ -3629,11 +3670,17 @@ async fn ingest_event_inner(
     } else if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
         // channel_id is None for global kinds (0, 1, 3) due to step 5b above.
-        state
+        let (stored, status) = state
             .db
-            .replace_addressable_event(tenant.community(), &event, channel_id)
+            .replace_addressable_event_checked(
+                tenant.community(),
+                &event,
+                channel_id,
+                replace_precondition(revision_spec.as_ref()),
+            )
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+            .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
+        replace_outcome(stored, status, revision_spec.is_some())?
     } else if is_parameterized_replaceable(kind_u32) {
         // NIP-33 parameterized replaceable — keyed by (kind, pubkey, d_tag).
         let d_tag = buzz_db::event::extract_d_tag(&event).unwrap_or_default();
@@ -3644,12 +3691,19 @@ async fn ingest_event_inner(
                 buzz_db::event::D_TAG_MAX_LEN,
             )));
         }
-        state
+        let (stored, status) = state
             .db
-            .replace_parameterized_event(tenant.community(), &event, &d_tag, channel_id)
+            .replace_parameterized_event_checked(
+                tenant.community(),
+                &event,
+                &d_tag,
+                channel_id,
+                replace_precondition(revision_spec.as_ref()),
+            )
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
-    } else if let Some(spec) = canvas_revision_spec.as_ref() {
+            .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
+        replace_outcome(stored, status, revision_spec.is_some())?
+    } else if let Some(spec) = revision_spec.as_ref() {
         // Canvas write carrying an optimistic-concurrency precondition. Plain
         // canvas writes (no `expected-revision` tag) fall through to the generic
         // append path below, preserving unconditional behavior. The channel is
@@ -3658,8 +3712,8 @@ async fn ingest_event_inner(
         let channel = channel_id
             .ok_or_else(|| IngestError::Rejected("invalid: canvas event missing channel".into()))?;
         let precondition = match spec {
-            CanvasRevisionSpec::NoHead => buzz_db::ChannelHeadPrecondition::ExpectNoHead,
-            CanvasRevisionSpec::Head(id) => buzz_db::ChannelHeadPrecondition::ExpectedHead(id),
+            RevisionSpec::NoHead => buzz_db::ChannelHeadPrecondition::ExpectNoHead,
+            RevisionSpec::Head(id) => buzz_db::ChannelHeadPrecondition::ExpectedHead(id),
         };
         let (stored_event, status) = state
             .db
@@ -3668,17 +3722,17 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
         match status {
             buzz_db::ChannelHeadWriteStatus::RevisionMissing => {
-                return Err(IngestError::CanvasConflict(
+                return Err(IngestError::Conflict(
                     "conflict: canvas revision does not exist".into(),
                 ));
             }
             buzz_db::ChannelHeadWriteStatus::RevisionMismatch => {
-                return Err(IngestError::CanvasConflict(
+                return Err(IngestError::Conflict(
                     "conflict: canvas changed since it was loaded".into(),
                 ));
             }
             buzz_db::ChannelHeadWriteStatus::SupersedeFailed => {
-                return Err(IngestError::CanvasConflict(
+                return Err(IngestError::Conflict(
                     "conflict: canvas write does not supersede the current head".into(),
                 ));
             }
@@ -6335,7 +6389,7 @@ mod postgres_tests {
         );
     }
 
-    // ── parse_canvas_expected_revision unit tests ─────────────────────────
+    // ── parse_expected_revision unit tests ─────────────────────────
     //
     // These cover every branch in the parser without requiring Postgres or
     // Redis.  A helper builds a signed kind-40100 event from a tag-list so the
@@ -6358,7 +6412,7 @@ mod postgres_tests {
     #[test]
     fn parse_canvas_revision_absent_returns_none() {
         let event = canvas_event_with_tags([nostr::Tag::parse(["h", "chan-uuid"]).unwrap()]);
-        let result = parse_canvas_expected_revision(&event);
+        let result = parse_expected_revision(&event);
         assert_eq!(result.unwrap(), None);
     }
 
@@ -6370,8 +6424,8 @@ mod postgres_tests {
         let event =
             canvas_event_with_tags([nostr::Tag::parse(["expected-revision", "none"]).unwrap()]);
         assert_eq!(
-            parse_canvas_expected_revision(&event).unwrap(),
-            Some(CanvasRevisionSpec::NoHead),
+            parse_expected_revision(&event).unwrap(),
+            Some(RevisionSpec::NoHead),
         );
     }
 
@@ -6383,10 +6437,10 @@ mod postgres_tests {
         let hex_id = "a".repeat(64);
         let event =
             canvas_event_with_tags([nostr::Tag::parse(["expected-revision", &hex_id]).unwrap()]);
-        let spec = parse_canvas_expected_revision(&event)
+        let spec = parse_expected_revision(&event)
             .expect("valid hex must parse")
             .expect("must be Some");
-        assert_eq!(spec, CanvasRevisionSpec::Head(vec![0xaa; 32]));
+        assert_eq!(spec, RevisionSpec::Head(vec![0xaa; 32]));
     }
 
     /// Two `expected-revision` tags → `Rejected("invalid: duplicate …")`.
@@ -6401,7 +6455,7 @@ mod postgres_tests {
         ]);
         assert!(
             matches!(
-                parse_canvas_expected_revision(&event),
+                parse_expected_revision(&event),
                 Err(IngestError::Rejected(msg)) if msg.contains("duplicate expected-revision tag")
             ),
             "duplicate tags must be rejected",
@@ -6418,7 +6472,7 @@ mod postgres_tests {
         let event = canvas_event_with_tags([nostr::Tag::parse(["expected-revision"]).unwrap()]);
         assert!(
             matches!(
-                parse_canvas_expected_revision(&event),
+                parse_expected_revision(&event),
                 Err(IngestError::Rejected(msg)) if msg.contains("expected-revision tag must have exactly one value")
             ),
             "tag with no value must be rejected",
@@ -6437,7 +6491,7 @@ mod postgres_tests {
             ]);
         assert!(
             matches!(
-                parse_canvas_expected_revision(&event),
+                parse_expected_revision(&event),
                 Err(IngestError::Rejected(msg)) if msg.contains("expected-revision tag must have exactly one value")
             ),
             "tag with extra value must be rejected",
@@ -6454,14 +6508,14 @@ mod postgres_tests {
             canvas_event_with_tags([nostr::Tag::parse(["expected-revision", &short_hex]).unwrap()]);
         assert!(
             matches!(
-                parse_canvas_expected_revision(&event),
-                Err(IngestError::Rejected(msg)) if msg.contains("bad expected canvas revision")
+                parse_expected_revision(&event),
+                Err(IngestError::Rejected(msg)) if msg.contains("bad expected revision")
             ),
             "too-short hex must be rejected",
         );
     }
 
-    /// A non-hex value → `Rejected("invalid: bad expected canvas revision")`.
+    /// A non-hex value → `Rejected("invalid: bad expected revision")`.
     /// Mutation: removing `hex::decode(value).ok()` makes this panic instead.
     #[test]
     fn parse_canvas_revision_non_hex_rejects() {
@@ -6470,8 +6524,8 @@ mod postgres_tests {
             canvas_event_with_tags([nostr::Tag::parse(["expected-revision", &not_hex]).unwrap()]);
         assert!(
             matches!(
-                parse_canvas_expected_revision(&event),
-                Err(IngestError::Rejected(msg)) if msg.contains("bad expected canvas revision")
+                parse_expected_revision(&event),
+                Err(IngestError::Rejected(msg)) if msg.contains("bad expected revision")
             ),
             "non-hex value must be rejected",
         );
@@ -6482,10 +6536,10 @@ mod postgres_tests {
     // Proves that the `expected-revision` parser → dispatch → DB transaction
     // round-trip is wired end-to-end through `ingest_event_inner`. Deletng or
     // bypassing the CAS dispatch block (the `} else if let Some(spec) =
-    // canvas_revision_spec.as_ref() {` branch) must turn this test red.
+    // revision_spec.as_ref() {` branch) must turn this test red.
     //
     // Mutation oracle for the dispatch:
-    //   - Removing the `canvas_revision_spec` branch makes tagged writes fall
+    //   - Removing the `revision_spec` branch makes tagged writes fall
     //     through to the generic append; the stale-head step no longer returns
     //     a conflict: rejection, causing the assert! below to fail.
     //   - Replacing `insert_canvas_head_checked` with `insert_event_with_thread_metadata`
@@ -6925,7 +6979,7 @@ mod postgres_tests {
 
         // ── Step 3: stale competitor — same first-id precondition → conflict ──
         // The head is now the second event, so expected-revision=<first_id> is stale.
-        // Mutation oracle: deleting the `canvas_revision_spec` dispatch block makes
+        // Mutation oracle: deleting the `revision_spec` dispatch block makes
         // this return Ok instead of the conflict: rejection below.
         let stale = nostr::EventBuilder::new(Kind::Custom(KIND_CANVAS as u16), "# stale")
             .custom_created_at(Timestamp::from(now + 2))
@@ -6943,7 +6997,7 @@ mod postgres_tests {
                 Err(e) => e,
             };
         assert!(
-            matches!(&err, IngestError::CanvasConflict(msg) if msg.starts_with("conflict:")),
+            matches!(&err, IngestError::Conflict(msg) if msg.starts_with("conflict:")),
             "stale write must return a canvas conflict: rejection; got {:?}",
             err,
         );
@@ -6972,6 +7026,182 @@ mod postgres_tests {
         ingest_event_inner(&state, &tracer, &tenant, untagged, make_auth(&author))
             .await
             .expect("untagged canvas write must append unconditionally");
+    }
+
+    /// `expected-revision` compare-and-set on replaceable (10002) and addressable
+    /// (30078) kinds, through `ingest_event_inner`: a matching head and `none` on
+    /// an empty coordinate are accepted, stale or wrong expectations return a
+    /// `conflict:` rejection that stores nothing, a tagged write that does not
+    /// supersede the head conflicts, an untagged write keeps its unconditional
+    /// behavior, and two racing writers that read the same head have one winner.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn expected_revision_cas_on_replaceable_and_addressable_kinds() {
+        use nostr::{Keys, Kind, Tag, Timestamp};
+
+        let db_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
+        let pool = sqlx::PgPool::connect(&db_url).await.expect(
+            "connect test Postgres — start local Postgres before running ignored ingest tests",
+        );
+        let state = build_canvas_ingest_state(&db_url, &pool).await;
+        let host = format!("replace-cas-{}.test", Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community")
+            .id;
+        let tenant = TenantContext::resolved(community, &host);
+        let tracer: Arc<dyn buzz_conformance::Tracer> = Arc::new(VecTracer::default());
+        let now = chrono::Utc::now().timestamp() as u64;
+
+        for (kind, d_tag) in [(10002u16, None), (30078u16, Some("channel-sections"))] {
+            let author = Keys::generate();
+            let auth = || IngestAuth::Http {
+                pubkey: author.public_key(),
+                scopes: vec![Scope::UsersWrite],
+                auth_method: HttpAuthMethod::Nip98,
+            };
+            let write = |content: &str, at: u64, expected: Option<&str>| {
+                let mut tags = Vec::new();
+                if let Some(d_tag) = d_tag {
+                    tags.push(Tag::parse(["d", d_tag]).unwrap());
+                }
+                if let Some(expected) = expected {
+                    tags.push(Tag::parse(["expected-revision", expected]).unwrap());
+                }
+                nostr::EventBuilder::new(Kind::Custom(kind), content)
+                    .custom_created_at(Timestamp::from(at))
+                    .tags(tags)
+                    .sign_with_keys(&author)
+                    .expect("sign event")
+            };
+            let ingest = |event: nostr::Event| {
+                let (state, tracer, tenant) = (&state, &tracer, &tenant);
+                let auth = auth();
+                async move { ingest_event_inner(state, tracer, tenant, event, auth).await }
+            };
+            let stored = |event: &nostr::Event| {
+                let id = event.id.as_bytes().to_vec();
+                let pool = pool.clone();
+                async move {
+                    sqlx::query_scalar::<_, i64>(
+                        "SELECT count(*) FROM events WHERE community_id = $1 AND id = $2 \
+                         AND deleted_at IS NULL",
+                    )
+                    .bind(community.as_uuid())
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("count live rows")
+                }
+            };
+            let is_conflict = |result: Result<IngestResult, IngestError>| matches!(&result, Err(IngestError::Conflict(msg)) if msg.starts_with("conflict:"));
+
+            // An empty coordinate accepts `none` only.
+            let wrong_id = "ab".repeat(32);
+            assert!(
+                is_conflict(ingest(write("missing", now, Some(&wrong_id))).await),
+                "kind {kind}: an id expectation on an empty coordinate must conflict"
+            );
+            let v1 = write("v1", now, Some("none"));
+            assert!(ingest(v1.clone()).await.expect("none on empty").accepted);
+            assert_eq!(stored(&v1).await, 1);
+
+            // `none` conflicts once a head exists.
+            let again = write("again", now + 1, Some("none"));
+            assert!(
+                is_conflict(ingest(again.clone()).await),
+                "kind {kind}: none vs head"
+            );
+            assert_eq!(stored(&again).await, 0);
+
+            // A matching head is accepted and becomes the head.
+            let v2 = write("v2", now + 1, Some(&v1.id.to_hex()));
+            assert!(ingest(v2.clone()).await.expect("matching head").accepted);
+            assert_eq!((stored(&v1).await, stored(&v2).await), (0, 1));
+
+            // A stale head conflicts and stores nothing; the head is unchanged.
+            let stale = write("stale", now + 2, Some(&v1.id.to_hex()));
+            assert!(
+                is_conflict(ingest(stale.clone()).await),
+                "kind {kind}: stale head"
+            );
+            assert_eq!((stored(&stale).await, stored(&v2).await), (0, 1));
+
+            // A matching head that the new event does not supersede conflicts.
+            let behind = write("behind", now, Some(&v2.id.to_hex()));
+            assert!(
+                is_conflict(ingest(behind.clone()).await),
+                "kind {kind}: behind head"
+            );
+            assert_eq!((stored(&behind).await, stored(&v2).await), (0, 1));
+
+            // Replaying the accepted head is a duplicate, not a conflict.
+            let replay = ingest(v2.clone()).await.expect("replay of head");
+            assert_eq!(replay.message, "duplicate:");
+
+            // Untagged writes keep today's behavior: a newer one replaces, an
+            // older one is a silent duplicate.
+            let v3 = write("v3", now + 3, None);
+            assert!(ingest(v3.clone()).await.expect("untagged newer").accepted);
+            assert_eq!((stored(&v2).await, stored(&v3).await), (0, 1));
+            let old = write("old", now, None);
+            let old_result = ingest(old.clone()).await.expect("untagged older");
+            assert_eq!(old_result.message, "duplicate:");
+            assert_eq!((stored(&old).await, stored(&v3).await), (0, 1));
+
+            // Writers that read the same head race, round after round: exactly
+            // one wins each round, and one live head remains.
+            let mut head = v3;
+            for round in 0..20u64 {
+                let at = now + 4 + round;
+                let racers = [("a", at), ("b", at)].map(|(name, at)| {
+                    let event = write(
+                        &format!("racer-{name}-{round}"),
+                        at,
+                        Some(&head.id.to_hex()),
+                    );
+                    let (state, tracer, tenant) = (state.clone(), tracer.clone(), tenant.clone());
+                    let auth = auth();
+                    let task_event = event.clone();
+                    let task = tokio::spawn(async move {
+                        ingest_event_inner(&state, &tracer, &tenant, task_event, auth).await
+                    });
+                    (event, task)
+                });
+                let mut winners = Vec::new();
+                for (event, task) in racers {
+                    match task.await.expect("racer task") {
+                        Ok(_) => winners.push(event),
+                        Err(error) => assert!(
+                            matches!(&error, IngestError::Conflict(msg) if msg.starts_with("conflict:")),
+                            "kind {kind}: the loser gets conflict:, got {error:?}"
+                        ),
+                    }
+                }
+                assert_eq!(
+                    winners.len(),
+                    1,
+                    "kind {kind}: round {round}: one racing writer wins"
+                );
+                head = winners.remove(0);
+                let live: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM events WHERE community_id = $1 AND kind = $2 \
+                     AND pubkey = $3 AND deleted_at IS NULL",
+                )
+                .bind(community.as_uuid())
+                .bind(i32::from(kind))
+                .bind(author.public_key().to_bytes().as_slice())
+                .fetch_one(&pool)
+                .await
+                .expect("count live heads");
+                assert_eq!(live, 1, "kind {kind}: round {round}: one live head");
+                assert_eq!(stored(&head).await, 1);
+            }
+        }
     }
 
     /// A channel-scoped token gets the same kind 5 rejection for a target it

@@ -1123,7 +1123,7 @@ enum SubmitOutcome {
         column: usize,
         response: (StatusCode, Json<Value>),
     },
-    /// IngestError::Rejected or IngestError::CanvasConflict — log kind + truncated reason.
+    /// IngestError::Rejected or IngestError::Conflict — log kind + truncated reason.
     ///
     /// Generic rejections yield HTTP 400; canvas CAS conflicts yield HTTP 409.
     /// The logged `status` reflects the actual response status carried in `response`.
@@ -1325,7 +1325,7 @@ async fn submit_event_authed(
                 response: api_error(StatusCode::BAD_REQUEST, &msg),
             }
         }
-        Err(IngestError::CanvasConflict(msg)) => {
+        Err(IngestError::Conflict(msg)) => {
             // Canvas CAS precondition failures are a distinct HTTP 409 so the
             // CLI's reconciliation branch (which gates on `status == 409`) is
             // reachable against the live relay.  The message body is unchanged;
@@ -5001,7 +5001,7 @@ pub(crate) mod postgres_tests {
     /// Wire-pinning test: a canvas CAS conflict must reach the HTTP client as
     /// **409 CONFLICT**, not 400.
     ///
-    /// The relay's `IngestError::CanvasConflict` variant maps to `409` via the
+    /// The relay's `IngestError::Conflict` variant maps to `409` via the
     /// `bridge.rs` HTTP handler.  The CLI reconciliation branch gates on
     /// `status == 409`; if the bridge emits `400` instead the reconciliation
     /// path is dead code against the live relay.
@@ -5012,7 +5012,7 @@ pub(crate) mod postgres_tests {
     /// 3. POST canvas event C with `expected-revision: <A-id>` (stale, A ≠ B)
     ///    → 409 with a body containing `"canvas changed since it was loaded"`.
     ///
-    /// Mutation oracle: mapping `IngestError::CanvasConflict` to
+    /// Mutation oracle: mapping `IngestError::Conflict` to
     /// `StatusCode::BAD_REQUEST` (reverting the fix) makes step 3 return 400
     /// and fails the status assertion. The body assertion separately pins the
     /// exact `error` envelope value.
@@ -5109,7 +5109,7 @@ pub(crate) mod postgres_tests {
 
         // Step 3: stale write C with the same `expected-revision: A` — A is no
         // longer the head (B is), so this must be a CAS conflict → HTTP 409.
-        // Mutation oracle: reverting IngestError::CanvasConflict → BAD_REQUEST
+        // Mutation oracle: reverting IngestError::Conflict → BAD_REQUEST
         // in bridge.rs makes this return 400 and fails the status assertion.
         let event_c = EventBuilder::new(
             Kind::Custom(KIND_CANVAS as u16),

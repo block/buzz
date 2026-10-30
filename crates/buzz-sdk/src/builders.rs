@@ -574,6 +574,56 @@ pub fn build_custom_emoji_set(emojis: &[CustomEmoji]) -> Result<EventBuilder, Sd
     Ok(EventBuilder::new(Kind::Custom(KIND_EMOJI_SET as u16), "").tags(tags))
 }
 
+/// Build the `["expected-revision", …]` tag.
+///
+/// `expected_revision` is a 64-hex event ID (the live head must match it) or
+/// the literal `none` (no live head may exist).
+fn expected_revision_tag(expected_revision: &str) -> Result<Tag, SdkError> {
+    if expected_revision != "none"
+        && (expected_revision.len() != 64
+            || !expected_revision.chars().all(|c| c.is_ascii_hexdigit()))
+    {
+        return Err(SdkError::InvalidInput(format!(
+            "expected_revision must be the literal \"none\" or a 64-character hex event id (got {expected_revision:?})"
+        )));
+    }
+    tag(&["expected-revision", expected_revision])
+}
+
+/// Add an `expected-revision` compare-and-set tag to a replaceable or
+/// addressable event (kinds 0, 3, 10000–19999, 30000–39999).
+///
+/// The relay accepts the write only if the live head of the event's coordinate
+/// has the ID `expected_revision`. The literal `none` accepts the write only if
+/// no live head exists. Otherwise the relay rejects it with an `OK false`
+/// message that starts with `conflict:`. The tag is signed with the event.
+///
+/// This helper does not touch `created_at`. A tagged write that does not sort
+/// ahead of the head is also rejected, so use
+/// [`with_expected_revision_after_head`] when the head's timestamp is known.
+pub fn with_expected_revision(
+    builder: EventBuilder,
+    expected_revision: &str,
+) -> Result<EventBuilder, SdkError> {
+    Ok(builder.tag(expected_revision_tag(expected_revision)?))
+}
+
+/// Add an `expected-revision` tag that names `head_id`, and stamp
+/// `created_at = max(now, head_created_at + 1)`.
+///
+/// The stamp makes the write sort strictly ahead of the head it replaces, so a
+/// same-second write cannot lose the lowest-ID tie-break. Returns an error if
+/// `head_created_at` is more than [`CANVAS_MAX_FUTURE_SKEW_SECS`] beyond `now`.
+pub fn with_expected_revision_after_head(
+    builder: EventBuilder,
+    head_id: &str,
+    head_created_at: u64,
+) -> Result<EventBuilder, SdkError> {
+    let created_at = canvas_write_created_at(head_created_at)?;
+    Ok(with_expected_revision(builder, head_id)?
+        .custom_created_at(nostr::Timestamp::from(created_at)))
+}
+
 /// Build a canvas update event (kind 40100).
 ///
 /// When `expected_revision` is set, an `["expected-revision", …]` tag is
@@ -589,15 +639,7 @@ pub fn build_set_canvas(
 ) -> Result<EventBuilder, SdkError> {
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     if let Some(expected_revision) = expected_revision {
-        if expected_revision != "none"
-            && (expected_revision.len() != 64
-                || !expected_revision.chars().all(|c| c.is_ascii_hexdigit()))
-        {
-            return Err(SdkError::InvalidInput(format!(
-                "expected_revision must be the literal \"none\" or a 64-character hex event id (got {expected_revision:?})"
-            )));
-        }
-        tags.push(tag(&["expected-revision", expected_revision])?);
+        tags.push(expected_revision_tag(expected_revision)?);
     }
     Ok(EventBuilder::new(Kind::Custom(40100), content).tags(tags))
 }
@@ -3367,6 +3409,45 @@ mod tests {
 
         let create = sign(build_set_canvas(cid, "# New", Some("none")).unwrap());
         assert!(has_tag(&create, "expected-revision", "none"));
+    }
+
+    #[test]
+    fn with_expected_revision_tags_any_builder_and_rejects_bad_values() {
+        let head = event_id().to_hex();
+        let build = || EventBuilder::new(Kind::Custom(30078), "{}").tag(tag(&["d", "x"]).unwrap());
+
+        let ev = sign(with_expected_revision(build(), &head).unwrap());
+        assert!(has_tag(&ev, "expected-revision", &head));
+        assert!(has_tag(&ev, "d", "x"));
+        let first = sign(with_expected_revision(build(), "none").unwrap());
+        assert!(has_tag(&first, "expected-revision", "none"));
+
+        for bad in ["", "NONE", "abc", &head[..63], &"z".repeat(64)] {
+            assert!(
+                matches!(
+                    with_expected_revision(build(), bad),
+                    Err(SdkError::InvalidInput(_))
+                ),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn with_expected_revision_after_head_stamps_ahead_of_head() {
+        let head = event_id().to_hex();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let head_at = now + CANVAS_MAX_FUTURE_SKEW_SECS;
+        let builder = EventBuilder::new(Kind::Custom(30078), "{}");
+        let ev = sign(with_expected_revision_after_head(builder, &head, head_at).unwrap());
+        assert!(has_tag(&ev, "expected-revision", &head));
+        assert!(ev.created_at.as_secs() > head_at);
+
+        let builder = EventBuilder::new(Kind::Custom(30078), "{}");
+        assert!(with_expected_revision_after_head(builder, &head, u64::MAX).is_err());
     }
 
     #[test]
