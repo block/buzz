@@ -1250,3 +1250,70 @@ async fn a_relay_operator_may_only_rename_a_channel() {
         "{tags:?}"
     );
 }
+
+/// The operator rename covers only listed channels: open, not unlisted, a
+/// stream or forum. A relay operator may not rename a private channel, an
+/// unlisted channel or a DM.
+/// Mutation: drop the listed check in `operator_may_rename` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_relay_operator_may_not_rename_an_unlisted_channel() {
+    let state = state().await;
+    let tenant = community(&state, "group-state-operator-unlisted").await;
+    let owner = Keys::generate();
+    let other = Keys::generate();
+    let operator = Keys::generate();
+    state
+        .db
+        .upsert_relay_operator(
+            &operator.public_key().to_bytes(),
+            "operator",
+            &owner.public_key().to_bytes(),
+            true,
+        )
+        .await
+        .expect("grant relay role");
+    let private = create_channel(&state, &tenant, &owner, &[&["visibility", "private"]]).await;
+    let unlisted = create_channel(&state, &tenant, &owner, &[&["unlisted", "true"]]).await;
+    let (dm, _) = state
+        .db
+        .open_dm(
+            tenant.community(),
+            &[
+                &owner.public_key().to_bytes(),
+                &other.public_key().to_bytes(),
+            ],
+            &owner.public_key().to_bytes(),
+        )
+        .await
+        .expect("open dm");
+
+    for (label, channel) in [("private", private), ("unlisted", unlisted), ("dm", dm.id)] {
+        let before = state
+            .db
+            .get_channel(tenant.community(), channel)
+            .await
+            .expect("channel");
+        if label == "unlisted" {
+            assert!(before.unlisted, "the channel is unlisted");
+        }
+        let event = EventBuilder::new(Kind::Custom(9002), "")
+            .tags([
+                Tag::parse(["h", &channel.to_string()]).unwrap(),
+                Tag::parse(["name", "by-operator"]).unwrap(),
+            ])
+            .sign_with_keys(&operator)
+            .expect("sign 9002");
+        match ingest_event(&state, &tenant, event, http_auth(&operator)).await {
+            Err(IngestError::Rejected(_)) => {}
+            Err(other) => panic!("{label}: expected a refusal, got {other:?}"),
+            Ok(result) => panic!("{label}: expected a refusal, got {:?}", result.message),
+        }
+        let after = state
+            .db
+            .get_channel(tenant.community(), channel)
+            .await
+            .expect("channel");
+        assert_eq!(after.name, before.name, "{label}");
+    }
+}

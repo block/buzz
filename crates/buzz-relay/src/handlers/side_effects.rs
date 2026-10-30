@@ -647,22 +647,10 @@ pub async fn validate_admin_event(
         }
         9002 => {
             // EDIT_METADATA: require at least one recognized metadata tag.
-            const RECOGNIZED_TAGS: &[&str] = &[
-                "name",
-                "about",
-                "archived",
-                "topic",
-                "purpose",
-                "visibility",
-                "ttl",
-                "t",
-                "join_role",
-                "unlisted",
-            ];
             let has_recognized = event
                 .tags
                 .iter()
-                .any(|t| RECOGNIZED_TAGS.contains(&t.kind().to_string().as_str()));
+                .any(|t| is_metadata_tag(&t.kind().to_string()));
             if !has_recognized {
                 return Err(anyhow::anyhow!(
                     "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl, t, join_role, unlisted)"
@@ -773,17 +761,10 @@ pub async fn validate_admin_event(
             // name/about/archived/visibility/ttl/labels/join_role/unlisted
             // require owner/admin;
             // topic/purpose allow any member who may post.
-            let has_privileged_tag = event.tags.iter().any(|t| {
-                let k = t.kind().to_string();
-                k == "name"
-                    || k == "about"
-                    || k == "archived"
-                    || k == "visibility"
-                    || k == "ttl"
-                    || k == "t"
-                    || k == "join_role"
-                    || k == "unlisted"
-            });
+            let has_privileged_tag = event
+                .tags
+                .iter()
+                .any(|t| PRIVILEGED_METADATA_TAGS.contains(&t.kind().to_string().as_str()));
             if has_privileged_tag {
                 let members = state.db.get_members(tenant.community(), channel_id).await?;
                 let actor_member = members.iter().find(|m| m.pubkey == actor_bytes);
@@ -803,14 +784,12 @@ pub async fn validate_admin_event(
                         {
                             return Ok(());
                         }
-                        // A relay operator may rename any channel, so that
+                        // A relay operator may rename a listed channel, so that
                         // duplicate names can be repaired through this path
                         // (scripts/maintenance/rename_duplicate_listed_channel_names.sh).
                         // Every other privileged change still needs a channel
                         // owner or admin.
-                        if is_rename_only(event)
-                            && actor_is_relay_operator(state, event.pubkey.to_bytes()).await?
-                        {
+                        if operator_may_rename(state, event, &channel).await? {
                             return Ok(());
                         }
                         Err(anyhow::anyhow!(
@@ -1243,25 +1222,51 @@ async fn emit_typed_membership_notification(
     Ok(())
 }
 
+/// kind:9002 tags that only a channel owner or admin may change.
+const PRIVILEGED_METADATA_TAGS: &[&str] = &[
+    "name",
+    "about",
+    "archived",
+    "visibility",
+    "ttl",
+    "t",
+    "join_role",
+    "unlisted",
+];
+
+/// kind:9002 tags that any member who may post may change.
+const MEMBER_METADATA_TAGS: &[&str] = &["topic", "purpose"];
+
+/// True when `kind` is a kind:9002 tag that changes channel metadata.
+fn is_metadata_tag(kind: &str) -> bool {
+    PRIVILEGED_METADATA_TAGS.contains(&kind) || MEMBER_METADATA_TAGS.contains(&kind)
+}
+
+/// True when a relay operator sends `event` and it only renames `channel`, a
+/// listed channel: open, not unlisted, a stream or forum, and not deleted.
+/// Those are the channels whose names must be unique, so this is the repair
+/// path for a duplicate name and grants nothing else.
+async fn operator_may_rename(
+    state: &crate::state::AppState,
+    event: &Event,
+    channel: &buzz_db::channel::ChannelRecord,
+) -> anyhow::Result<bool> {
+    let listed = channel.visibility == "open"
+        && !channel.unlisted
+        && matches!(channel.channel_type.as_str(), "stream" | "forum")
+        && channel.deleted_at.is_none();
+    Ok(listed
+        && is_rename_only(event)
+        && actor_is_relay_operator(state, event.pubkey.to_bytes()).await?)
+}
+
 /// True when the only metadata a kind:9002 changes is the channel name.
 fn is_rename_only(event: &Event) -> bool {
-    const METADATA_TAGS: &[&str] = &[
-        "name",
-        "about",
-        "archived",
-        "topic",
-        "purpose",
-        "visibility",
-        "ttl",
-        "t",
-        "join_role",
-        "unlisted",
-    ];
     let mut changes = event
         .tags
         .iter()
         .map(|t| t.kind().to_string())
-        .filter(|kind| METADATA_TAGS.contains(&kind.as_str()));
+        .filter(|kind| is_metadata_tag(kind));
     changes.all(|kind| kind == "name") && event.tags.iter().any(|t| t.kind().to_string() == "name")
 }
 
@@ -2145,9 +2150,16 @@ pub(crate) async fn persist_edit_metadata(
         edit.columns.labels = Some(labels.map_err(|e| anyhow::anyhow!("{e}"))?);
     }
     // An operator's rename may repair an archived duplicate name, so it
-    // applies to an archived channel and leaves it archived.
-    edit.keep_archived =
-        is_rename_only(event) && actor_is_relay_operator(state, event.pubkey.to_bytes()).await?;
+    // applies to an archived channel and leaves it archived. Look up the
+    // operator only for a rename of an archived channel.
+    if is_rename_only(event) {
+        let channel = state
+            .db
+            .get_channel_for_event_write(tenant.community(), channel_id)
+            .await?;
+        edit.keep_archived =
+            channel.archived_at.is_some() && operator_may_rename(state, event, &channel).await?;
+    }
 
     let now = chrono::Utc::now();
     let mut notices = Vec::new();
