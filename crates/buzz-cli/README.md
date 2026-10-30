@@ -90,6 +90,12 @@ buzz messages vote --event <event-id> --direction up
 buzz canvas get --channel <uuid>
 buzz canvas set --channel <uuid> --content "# Welcome"
 
+# User groups (NIP-UG)
+buzz groups create --handle ios-team --name "iOS Team" --member <pubkey> --member me
+buzz groups add-member --handle ios-team --member <npub>
+buzz groups list --member me
+buzz messages send --channel <uuid> --content "@ios-team build is out" --mention-group ios-team
+
 # Agent Memory (NIP-AE)
 buzz mem ls
 buzz mem get <slug>
@@ -105,6 +111,19 @@ buzz repos protect remove --id my-repo --ref refs/heads/main
 # Pipe to jq
 buzz channels list | jq '.[].name'
 ```
+
+`groups` manages community user groups, the equivalent of a Slack `@ios-team`.
+Every write reads the current group and publishes one new version, so
+`add-member` with a member already in the group prints `"message": "unchanged"`
+and publishes nothing. `--handle` takes a handle with or without `@`, and
+`--member` takes a hex pubkey, an npub, or `me`. Anyone in the community can
+create a group. The relay lets the creator, the group admins, and community
+admins edit it, and lets everyone edit a group made with `--policy open`.
+`delete` works only for the author of the current group version; anyone else
+uses `update --disable`. `messages send --mention-group <handle>` adds one
+marked `p` tag per member, so each member is notified; members who are not in
+the channel cannot read the message and get nothing. See
+`docs/nips/NIP-UG.md`.
 
 `protect set` replaces every existing rule for the exact ref pattern. Any
 constraint omitted from the command is removed. `protect list` reports malformed
@@ -144,6 +163,14 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `remove-member` | Remove a member |
 | `canvas` | `get` | Get channel canvas |
 | | `set` | Set channel canvas |
+| `groups` | `list` | List user groups |
+| | `get` | Show a group with its admins and members |
+| | `members` | List a group's member pubkeys |
+| | `create` | Create a group |
+| | `update` | Change name, description, policy, admins, members, or status |
+| | `add-member` | Add members to a group |
+| | `remove-member` | Remove members from a group |
+| | `delete` | Delete a group |
 | `reactions` | `add` | React to a message |
 | | `remove` | Remove a reaction |
 | | `get` | List reactions |

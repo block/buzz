@@ -272,6 +272,9 @@ enum Cmd {
     /// Get and set channel canvas documents
     #[command(subcommand)]
     Canvas(CanvasCmd),
+    /// Create and manage user groups (mentionable sets of members, like Slack's @ios-team)
+    #[command(subcommand)]
+    Groups(GroupsCmd),
     /// Add, remove, and list emoji reactions
     #[command(subcommand)]
     Reactions(ReactionsCmd),
@@ -484,6 +487,9 @@ pub enum MessagesCmd {
         /// Pubkey to mention (hex or npub; repeatable). Supplying any explicit identity permits unresolved or ambiguous @Name text as presentation-only; uniquely resolved member names still notify.
         #[arg(long = "mention")]
         mentions: Vec<String>,
+        /// User group handle to mention (repeatable, at most 5). Notifies every current member; see 'buzz groups list'.
+        #[arg(long = "mention-group")]
+        mention_groups: Vec<String>,
     },
     /// Send a code diff / patch to a channel
     SendDiff {
@@ -891,6 +897,127 @@ pub enum ReactionsCmd {
         /// Event ID (64-char hex)
         #[arg(long)]
         event: String,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum GroupPolicy {
+    /// Only the creator, group admins, and community admins can edit
+    #[value(name = "admins")]
+    Admins,
+    /// Any community member can change the name, description, and members
+    #[value(name = "open")]
+    Open,
+}
+
+/// `--handle` takes a group handle with or without a leading `@`.
+/// `--member` and `--admin` take a hex pubkey, an npub, or `me`.
+#[derive(Subcommand)]
+pub enum GroupsCmd {
+    /// List user groups (without member lists)
+    #[command(
+        after_help = "Examples:\n  buzz groups list\n  buzz groups list --member me\n  buzz groups list --include-disabled | jq '.[].handle'"
+    )]
+    List {
+        /// Only groups that include this pubkey (hex, npub, or `me`)
+        #[arg(long)]
+        member: Option<String>,
+        /// Also list disabled groups
+        #[arg(long, default_value_t = false)]
+        include_disabled: bool,
+    },
+    /// Show one group with its admins and members
+    Get {
+        /// Group handle
+        #[arg(long)]
+        handle: String,
+    },
+    /// List the member pubkeys of a group
+    Members {
+        /// Group handle
+        #[arg(long)]
+        handle: String,
+    },
+    /// Create a group; you become its creator
+    #[command(
+        after_help = "Examples:\n  buzz groups create --handle ios-team --name \"iOS Team\" --member <pubkey> --member <npub>\n  buzz groups create --handle oncall --name Oncall --policy open"
+    )]
+    Create {
+        /// Handle people mention (letters, digits, `.`, `-`, `_`; up to 64)
+        #[arg(long)]
+        handle: String,
+        /// Display name
+        #[arg(long)]
+        name: String,
+        /// Description
+        #[arg(long)]
+        description: Option<String>,
+        /// Member pubkey (repeatable)
+        #[arg(long = "member")]
+        members: Vec<String>,
+        /// Group admin pubkey (repeatable)
+        #[arg(long = "admin")]
+        admins: Vec<String>,
+        /// Who may edit the group
+        #[arg(long, value_enum, default_value = "admins")]
+        policy: GroupPolicy,
+    },
+    /// Change a group's name, description, policy, admins, members, or status
+    Update {
+        /// Group handle
+        #[arg(long)]
+        handle: String,
+        /// New display name
+        #[arg(long)]
+        name: Option<String>,
+        /// New description
+        #[arg(long)]
+        description: Option<String>,
+        /// New edit policy
+        #[arg(long, value_enum)]
+        policy: Option<GroupPolicy>,
+        /// Add a group admin (repeatable)
+        #[arg(long = "add-admin")]
+        add_admins: Vec<String>,
+        /// Remove a group admin (repeatable)
+        #[arg(long = "remove-admin")]
+        remove_admins: Vec<String>,
+        /// Replace the whole member list (repeatable)
+        #[arg(long = "set-member", conflicts_with = "clear_members")]
+        set_members: Vec<String>,
+        /// Remove every member
+        #[arg(long, default_value_t = false)]
+        clear_members: bool,
+        /// Stop the group notifying anyone; the handle stays reserved
+        #[arg(long, default_value_t = false, conflicts_with = "enable")]
+        disable: bool,
+        /// Turn a disabled group back on
+        #[arg(long, default_value_t = false)]
+        enable: bool,
+    },
+    /// Add members to a group
+    AddMember {
+        /// Group handle
+        #[arg(long)]
+        handle: String,
+        /// Member pubkey (repeatable)
+        #[arg(long = "member", required = true)]
+        members: Vec<String>,
+    },
+    /// Remove members from a group
+    RemoveMember {
+        /// Group handle
+        #[arg(long)]
+        handle: String,
+        /// Member pubkey (repeatable)
+        #[arg(long = "member", required = true)]
+        members: Vec<String>,
+    },
+    /// Delete a group (only the author of its current head can; others use `update --disable`)
+    Delete {
+        /// Group handle
+        #[arg(long)]
+        handle: String,
     },
 }
 
@@ -2265,6 +2392,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
+        Cmd::Groups(sub) => commands::groups::dispatch(sub, &client).await,
         Cmd::Reactions(sub) => commands::reactions::dispatch(sub, &client).await,
         Cmd::Emoji(sub) => commands::emoji::dispatch(sub, &client).await,
         Cmd::Gifs(sub) => commands::gifs::dispatch(sub, &client).await,
@@ -2459,6 +2587,7 @@ mod tests {
             "emoji",
             "feed",
             "gifs",
+            "groups",
             "issues",
             "media",
             "mem",
@@ -2563,6 +2692,19 @@ mod tests {
         assert_eq!(
             names(&cmd, "canvas"),
             vec!["get", "history", "restore", "set"]
+        );
+        assert_eq!(
+            names(&cmd, "groups"),
+            vec![
+                "add-member",
+                "create",
+                "delete",
+                "get",
+                "list",
+                "members",
+                "remove-member",
+                "update"
+            ]
         );
         assert_eq!(names(&cmd, "reactions"), vec!["add", "get", "remove"]);
         assert_eq!(
