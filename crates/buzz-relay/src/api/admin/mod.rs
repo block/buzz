@@ -40,6 +40,7 @@ pub(crate) fn is_admin_host(state: &crate::state::AppState, headers: &HeaderMap)
 /// [`auth::admin_api_origin`]). Re-exported so the NIP-11 builder can derive
 /// the advertised origin without reaching into the private `auth` module.
 pub(crate) use auth::admin_api_origin;
+pub(crate) use auth::is_relay_operator;
 
 /// Build the deployment-admin routes.
 ///
