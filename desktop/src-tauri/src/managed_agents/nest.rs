@@ -89,8 +89,19 @@ thread_local! {
 /// `is_dev` should be `true` when the running binary is a dev build — i.e.
 /// when the Tauri app-data directory name starts with `"xyz.block.buzz.app.dev"`.
 /// Pass `false` for production (signed DMG) builds.
+///
+/// Unit tests panic here unless [`pin_nest_dir_for_test`] ran first, in which
+/// case the call is a no-op. A thread pin is not enough: this sets the nest for
+/// the whole test process.
 pub fn init_nest_dir(is_dev: bool) {
     let suffix = crate::build_identity::nest_name(is_dev);
+    #[cfg(test)]
+    assert!(
+        NEST_DIR.get().is_some(),
+        "init_nest_dir() would point the whole test process at the real ~/{suffix}. \
+         Pin it to a temp dir first with `pin_nest_dir_for_test(path)` in a \
+         child-process test (see commands/agents_tests.rs)"
+    );
     let path = dirs::home_dir().map(|h| h.join(suffix.as_ref()));
     // set() is a no-op when already initialized, which is correct: only the
     // first call (at boot, before any filesystem work) should win.
@@ -98,7 +109,7 @@ pub fn init_nest_dir(is_dev: bool) {
 }
 
 /// Pin the nest root for a child-process test so background nest work cannot
-/// reach the user's real nest.
+/// reach the user's real nest. Later [`init_nest_dir`] calls are no-ops.
 #[cfg(test)]
 pub(crate) fn pin_nest_dir_for_test(path: PathBuf) {
     NEST_DIR

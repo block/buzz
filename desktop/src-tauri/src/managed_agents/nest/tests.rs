@@ -6,6 +6,43 @@ fn unpinned_nest_dir_panics_instead_of_using_the_real_nest() {
     nest_dir();
 }
 
+/// Runs in a child process: without the guard, init_nest_dir() would set the
+/// real nest for every later test in this process.
+#[test]
+fn init_nest_dir_panics_unless_the_nest_is_pinned() {
+    const CHILD: &str = "BUZZ_INIT_NEST_DIR_TEST_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let panic = std::panic::catch_unwind(|| init_nest_dir(false))
+            .expect_err("unpinned init_nest_dir() must panic");
+        let message = panic.downcast_ref::<String>().map(String::as_str);
+        assert!(
+            message.is_some_and(|m| m.contains("init_nest_dir() would point")),
+            "unexpected panic: {message:?}"
+        );
+
+        let nest = tempfile::tempdir().unwrap();
+        pin_nest_dir_for_test(nest.path().to_path_buf());
+        init_nest_dir(false);
+        assert_eq!(nest_dir(), Some(nest.path().to_path_buf()));
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "managed_agents::nest::tests::init_nest_dir_panics_unless_the_nest_is_pinned",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "child failed: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn thread_nest_pin_is_removed_with_its_temp_dir() {
     let nest = pin_temp_nest_dir_for_thread();
