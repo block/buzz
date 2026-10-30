@@ -73,7 +73,7 @@ void main() {
         expect(
           relay.queries,
           hasLength(2),
-          reason: 'read the channel window, then its membership notices',
+          reason: 'read the channel window, then its system notices',
         );
         expect(
           relay.reqs.where((req) => (req[1] as String).startsWith('h-')),

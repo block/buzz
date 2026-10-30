@@ -45,8 +45,11 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   int _initVersion = 0;
   ChannelWindowStore _windowStore = const ChannelWindowStore.empty();
 
-  /// Membership notices read apart from the window pages (see `_fillNotices`).
+  /// System notices read apart from the window pages (see `_fillNotices`).
   final Map<String, NostrEvent> _notices = {};
+
+  /// Reactions to [_notices] and deletions of those reactions.
+  final Map<String, NostrEvent> _noticeAux = {};
 
   /// Where the next older notice read starts: null before the first read.
   ChannelPageCursor? _noticeCursor;
@@ -54,6 +57,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
 
   /// The init a notice read is running for, so only one runs per window.
   int? _noticeFillVersion;
+
+  /// Whether a page loaded while a notice read ran, so the read runs again.
+  bool _noticeFillAgain = false;
   final Set<String> _liveSummaryRootsDuringInitialWindowQuery = {};
   final Map<String, NostrEvent> _deepLinkEvents = {};
   final Set<String> _retainedDeepLinkEventIds = {};
@@ -182,8 +188,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     _reachedOldest = false;
     _windowStore = const ChannelWindowStore.empty();
     _notices.clear();
+    _noticeAux.clear();
     _noticeCursor = null;
     _noticesReachedStart = false;
+    _noticeFillAgain = false;
     // A reconnect window can lag a confirmed thread query and contains only
     // top-level rows. Keep known replies as summary evidence, including their
     // deletion markers so a reset cannot resurrect a deleted reply.
@@ -911,8 +919,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
 
   bool _isCurrentInit(int initVersion) => initVersion == _initVersion;
 
-  List<NostrEvent> _windowEvents() =>
-      flattenChannelWindowEvents(_windowStore, notices: _notices.values);
+  List<NostrEvent> _windowEvents() => flattenChannelWindowEvents(
+    _windowStore,
+    notices: _notices.values.followedBy(_noticeAux.values),
+  );
 
   /// Stops live work for a chat that stayed hidden; resume catches it up.
   void _detachLive() {

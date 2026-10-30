@@ -513,6 +513,101 @@ void main() {
     expect(shown(), contains(id('n000')));
   });
 
+  test('notices read apart keep their reactions', () async {
+    NostrEvent aux(String id, int kind, String target, {String content = ''}) =>
+        NostrEvent(
+          id: id,
+          pubkey: 'bob',
+          createdAt: 30,
+          kind: kind,
+          tags: [
+            ['h', _channelId],
+            ['e', target],
+          ],
+          content: content,
+          sig: 'sig',
+        );
+    final relaySession = _RecordingRelaySessionNotifier(
+      queryResults: [
+        [_event(id: 'message', createdAt: 10), _bounds()],
+      ],
+    );
+    relaySession.noticeResults.add([_joinNotice('joined', 20)]);
+    relaySession.auxEvents.addAll([
+      aux('kept', EventKind.reaction, 'joined', content: '👍'),
+      aux('removed', EventKind.reaction, 'joined', content: '🎉'),
+      aux('removal', EventKind.deletion, 'removed'),
+    ]);
+    final container = _buildContainer(relaySession);
+    addTearDown(container.dispose);
+
+    container.read(channelMessagesProvider(_channelId));
+    await relaySession.subscribed;
+    await _pumpEventQueue();
+
+    // The reactions the page would have carried, then their deletions.
+    expect(relaySession.auxFilters, hasLength(2));
+    expect(relaySession.auxFilters[0].tags['#e'], ['joined']);
+    expect(relaySession.auxFilters[1].tags['#e'], ['kept', 'removed']);
+    expect(relaySession.auxFilters[1].kinds, [
+      EventKind.deletion,
+      EventKind.nip29DeleteEvent,
+    ]);
+    final joined = formatTimeline(
+      container.read(channelMessagesProvider(_channelId)).value!,
+    ).singleWhere((message) => message.id == 'joined');
+    expect(joined.reactions.map((reaction) => reaction.emoji), ['👍']);
+  });
+
+  test(
+    'a page that loads during a failed notice read gets its notices',
+    () async {
+      const id = _paddedId;
+      final relaySession = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [
+            _event(id: id('a100'), createdAt: 100),
+            _bounds(hasMore: true, cursorCreatedAt: 100, cursorId: id('a100')),
+          ],
+          [
+            _event(id: id('a10'), createdAt: 10),
+            _bounds(dTag: '${_channelId.toLowerCase()}:100:${id('a100')}'),
+          ],
+        ],
+      );
+      final firstRead = Completer<List<NostrEvent>>();
+      relaySession.noticeResults.addAll([
+        firstRead.future,
+        [_joinNotice(id('n50'), 50)],
+      ]);
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+
+      container.read(channelMessagesProvider(_channelId));
+      await relaySession.subscribed;
+      await _pumpEventQueue();
+      expect(relaySession.noticeFilters, hasLength(1));
+
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      expect(await notifier.fetchOlder(), isTrue);
+      await _pumpEventQueue();
+      expect(relaySession.noticeFilters, hasLength(1));
+
+      firstRead.completeError(Exception('notices unavailable'));
+      await _pumpEventQueue();
+      expect(relaySession.noticeFilters, hasLength(2));
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value!
+            .map((event) => event.id),
+        [id('a10'), id('n50'), id('a100')],
+      );
+    },
+  );
+
   test('the notice descent stops at its cap', () async {
     const id = _paddedId;
     const pages = 5;
@@ -5876,10 +5971,16 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
   final List<NostrFilter> historyFilters = [];
   final List<NostrFilter> queryFilters = [];
 
-  /// Membership notice reads, kept apart from [queryFilters]. They answer
+  /// System notice reads, kept apart from [queryFilters]. They answer
   /// from [noticeResults] in order, or empty once it runs out.
   final List<NostrFilter> noticeFilters = [];
   final Queue<Object> noticeResults = Queue();
+
+  /// Notice reaction and deletion reads ([NostrFilters.channelAux]), kept
+  /// apart from [queryFilters].
+  /// They answer from [auxEvents] the way the relay does.
+  final List<NostrFilter> auxFilters = [];
+  final List<NostrEvent> auxEvents = [];
   final List<void Function(NostrEvent)> _listeners = [];
   final Completer<void> _subscribed = Completer<void>();
   final Completer<List<NostrEvent>> _history = Completer<List<NostrEvent>>();
@@ -5917,6 +6018,29 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
       if (result is Exception) throw result;
       if (result is Future<List<NostrEvent>>) return await result;
       return (result as List<NostrEvent>).toList();
+    }
+    final targets = filters.length == 1 ? filters.single.tags['#e'] : null;
+    if (targets != null &&
+        filters.single.limit == NostrFilters.channelAuxLimit &&
+        filters.single.kinds.every(
+          const {
+            EventKind.deletion,
+            EventKind.reaction,
+            EventKind.nip29DeleteEvent,
+          }.contains,
+        )) {
+      auxFilters.add(filters.single);
+      return [
+        for (final event in auxEvents)
+          if (filters.single.kinds.contains(event.kind) &&
+              event.tags.any(
+                (tag) =>
+                    tag.length >= 2 &&
+                    tag[0] == 'e' &&
+                    targets.contains(tag[1]),
+              ))
+            event,
+      ];
     }
     operations.add('query');
     queryFilters.addAll(filters);

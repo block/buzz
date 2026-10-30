@@ -83,7 +83,7 @@ abstract final class EventKind {
     streamMessageEdit,
   ];
 
-  /// Row kinds a NIP-CW channel-window page reads. Membership notices (40099)
+  /// Row kinds a NIP-CW channel-window page reads. System notices (40099)
   /// are read apart by [NostrFilters.channelNotices]: a page counts every row
   /// kind against its limit, so a burst of joins would otherwise fill the
   /// first page and hold the messages back.

@@ -360,7 +360,7 @@ ChannelWindowStore mergeLiveChannelWindowEvent(
   );
 }
 
-/// Flattens a window into timeline order. [notices] are membership notices
+/// Flattens a window into timeline order. [notices] are system notices
 /// read apart from the pages (see [channelWindowVisibleNotices]).
 List<NostrEvent> flattenChannelWindowEvents(
   ChannelWindowStore store, {

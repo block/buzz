@@ -58,7 +58,7 @@ abstract final class NostrFilters {
     extensions: {'before_id': ?beforeId},
   );
 
-  /// A channel's membership notices (kind:40099), newest first, below the
+  /// A channel's system notices (kind:40099), newest first, below the
   /// `until` + `before_id` cursor the channel-window pages use.
   static NostrFilter channelNotices(
     String channelId, {
@@ -76,6 +76,23 @@ abstract final class NostrFilters {
 
   /// Notices one [channelNotices] read asks for.
   static const channelNoticePageSize = 500;
+
+  /// Reactions and deletions that target [eventIds]: the auxiliary events a
+  /// channel-window page returns with its rows (`include_aux`). Call again
+  /// with the reaction ids, asking only for [EventKind.deletion] and
+  /// [EventKind.nip29DeleteEvent], to read removed reactions.
+  static NostrFilter channelAux(
+    List<String> eventIds, {
+    List<int> kinds = const [
+      EventKind.deletion,
+      EventKind.reaction,
+      EventKind.nip29DeleteEvent,
+    ],
+  }) =>
+      NostrFilter(kinds: kinds, tags: {'#e': eventIds}, limit: channelAuxLimit);
+
+  /// The most auxiliary events one [channelAux] read returns.
+  static const channelAuxLimit = 1000;
 
   /// Huddle lifecycle state for one parent channel, independent of timeline paging.
   static NostrFilter huddleLifecycle(String channelId) => NostrFilter(
