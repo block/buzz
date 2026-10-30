@@ -179,8 +179,11 @@ flutter build apk --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
 ```
 
 The iOS and Android build gates validate any supplied define, rejecting empty or
-malformed values. Release/profile builds require an HTTPS origin without an
-explicit port. An absent define disables permission requests, APNs registration,
+malformed values. Release/profile builds require an HTTPS origin; explicit ports
+from 1 through 65535 are supported, for example `https://push.example:8444` for a
+private gateway. Credentials, paths other than `/`, query strings, and fragments
+are rejected. The configured gateway must still present a valid TLS certificate
+for its hostname. An absent define disables permission requests, APNs registration,
 gateway enrollment, and lease publication; Settings shows push as unavailable.
 No production gateway is selected implicitly. Enrollment
 grants and crash-recovery journals are scoped to this origin. Push has not
@@ -188,6 +191,11 @@ shipped to existing users, so there is no legacy-state or cross-gateway
 migration. Changing gateways requires fresh enrollment; old installations
 expire under their original gateway's lease policy. Current-gateway response
 loss is still retried from the exact journaled request.
+
+To exercise the Android gateway build gate without an Android SDK or signing
+credentials, run `python3 scripts/test-android-push-gateway-origin.py` from the
+repository root with Java configured. This uses the Gradle wrapper and runs the
+production validation hook on empty compile tasks; it does not build an APK.
 
 Relay rollout remains an explicit deployment opt-in. Only deployments with
 `BUZZ_PUSH_ENABLED=true` advertise the descriptor and process push. See
