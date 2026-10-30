@@ -915,6 +915,9 @@ pub enum EmojiCmd {
         #[arg(required = true)]
         names: Vec<String>,
     },
+    /// Bulk-migrate a Slack emoji catalog into kind 30180 entries (plan, run, verify, rollback)
+    #[command(subcommand)]
+    Migrate(commands::emoji::migrate::MigrateCmd),
     /// Add or update a custom emoji in your own set
     Set {
         /// Emoji shortcode, without surrounding colons
@@ -2584,7 +2587,7 @@ mod tests {
         assert_eq!(names(&cmd, "reactions"), vec!["add", "get", "remove"]);
         assert_eq!(
             names(&cmd, "emoji"),
-            vec!["export", "import", "list", "resolve", "rm", "search", "set"]
+            vec!["export", "import", "list", "migrate", "resolve", "rm", "search", "set"]
         );
         assert_eq!(
             names(&cmd, "dms"),
@@ -2687,7 +2690,7 @@ mod tests {
             ("canvas", 4),
             ("channels", 16),
             ("dms", 4),
-            ("emoji", 7),
+            ("emoji", 8),
             ("feed", 1),
             ("issues", 6),
             ("media", 1),
