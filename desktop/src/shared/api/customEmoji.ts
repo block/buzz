@@ -106,6 +106,27 @@ export function customEmojiFromEvent(event: RelayEvent | null): CustomEmoji[] {
   return customEmojiFromTags(event.tags);
 }
 
+/** Most 30030 sets one catalog fetch asks the relay for. */
+export const COMMUNITY_EMOJI_SET_LIMIT = 500;
+
+/**
+ * Most entries the union keeps. At about 160 UTF-16 code units per entry
+ * (shortcode, Blossom URL, JSON framing) this is roughly 1.3 MB, under the
+ * 2 MiB pure-cache budget in `localStorageQuota.ts`, and it keeps the composer
+ * regex and the picker list small.
+ */
+export const COMMUNITY_EMOJI_ENTRY_CAP = 4000;
+
+export type CommunityEmojiCatalog = {
+  emoji: CustomEmoji[];
+  /** Number of 30030 sets the union read. */
+  setCount: number;
+  /** True when the relay returned exactly the requested limit, so sets may be missing. */
+  setLimitReached: boolean;
+  /** Entries left out because the union passed `COMMUNITY_EMOJI_ENTRY_CAP`. */
+  droppedEntries: number;
+};
+
 /**
  * Union every member's kind:30030 set into the community palette, collapsed to
  * one entry per shortcode. When members disagree on a shortcode's URL, the
@@ -113,11 +134,12 @@ export function customEmojiFromEvent(event: RelayEvent | null): CustomEmoji[] {
  * is as deterministic and fetch-order-independent as any pure function of the
  * events); equal timestamps tie-break to the lexicographically-smallest URL so
  * the same set of events always yields the same palette. Output is sorted by
- * shortcode.
+ * shortcode. Past `COMMUNITY_EMOJI_ENTRY_CAP` entries, the first entries in that
+ * shortcode order are kept and the rest are counted in `droppedEntries`.
  */
-export function unionCustomEmoji(
+export function buildCommunityEmojiCatalog(
   events: ReadonlyArray<RelayEvent>,
-): CustomEmoji[] {
+): CommunityEmojiCatalog {
   const byShortcode = new Map<string, { url: string; createdAt: number }>();
   for (const event of events) {
     for (const { shortcode, url } of customEmojiFromTags(event.tags)) {
@@ -131,9 +153,35 @@ export function unionCustomEmoji(
       }
     }
   }
-  return [...byShortcode]
+  const sorted = [...byShortcode]
     .map(([shortcode, { url }]) => ({ shortcode, url }))
     .sort((a, b) => a.shortcode.localeCompare(b.shortcode));
+  const droppedEntries = Math.max(0, sorted.length - COMMUNITY_EMOJI_ENTRY_CAP);
+  if (droppedEntries > 0) {
+    console.warn(
+      `Custom emoji catalog has ${sorted.length} entries; dropped ${droppedEntries} past the ${COMMUNITY_EMOJI_ENTRY_CAP} cap.`,
+    );
+  }
+  const setLimitReached = events.length >= COMMUNITY_EMOJI_SET_LIMIT;
+  if (setLimitReached) {
+    console.warn(
+      `Custom emoji fetch returned ${events.length} sets, the request limit; some sets may be missing.`,
+    );
+  }
+  return {
+    emoji:
+      droppedEntries > 0 ? sorted.slice(0, COMMUNITY_EMOJI_ENTRY_CAP) : sorted,
+    setCount: events.length,
+    setLimitReached,
+    droppedEntries,
+  };
+}
+
+/** Union of member sets as a plain list; see `buildCommunityEmojiCatalog`. */
+export function unionCustomEmoji(
+  events: ReadonlyArray<RelayEvent>,
+): CustomEmoji[] {
+  return buildCommunityEmojiCatalog(events).emoji;
 }
 
 /** Fetch every member's 30030 set (catch-up). */
@@ -141,17 +189,19 @@ export async function fetchCommunityEmojiEvents(): Promise<RelayEvent[]> {
   return relayClient.fetchEvents({
     kinds: [KIND_EMOJI_SET],
     "#d": [CUSTOM_EMOJI_SET_D_TAG],
-    // One 30030 per member; a community has far fewer than this. The relay
-    // already keeps only the latest per (pubkey, d_tag), so this is the member
-    // count, not history depth.
-    limit: 500,
+    // The relay keeps only the latest per (pubkey, d_tag), so this counts members.
+    limit: COMMUNITY_EMOJI_SET_LIMIT,
   });
+}
+
+/** Fetch the community catalog. A failed fetch rejects; it never yields an empty catalog. */
+export async function fetchCommunityEmojiCatalog(): Promise<CommunityEmojiCatalog> {
+  return buildCommunityEmojiCatalog(await fetchCommunityEmojiEvents());
 }
 
 /** Fetch the community custom emoji palette (union). Empty when none. */
 export async function listCustomEmoji(): Promise<CustomEmoji[]> {
-  const events = await fetchCommunityEmojiEvents();
-  return unionCustomEmoji(events);
+  return (await fetchCommunityEmojiCatalog()).emoji;
 }
 
 /** Fetch the caller's OWN current set (latest 30030 under the d-tag). */

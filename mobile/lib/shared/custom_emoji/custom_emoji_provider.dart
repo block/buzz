@@ -10,42 +10,96 @@ import 'custom_emoji.dart';
 /// reconnects. The palette is the single source of truth consumed by the
 /// renderer, picker, autocomplete, and reaction/send tag plumbing.
 class CustomEmojiPaletteNotifier extends AsyncNotifier<List<CustomEmoji>> {
+  List<CustomEmoji>? _lastGood;
+  String? _lastGoodRelayUrl;
+  int _generation = 0;
+
   @override
-  Future<List<CustomEmoji>> build() {
+  Future<List<CustomEmoji>> build() async {
     ref.watch(relayClientProvider);
     ref.watch(relaySessionProvider);
-    return _fetch();
-  }
-
-  Future<List<CustomEmoji>> _fetch() async {
-    final sessionState = ref.read(relaySessionProvider);
-    if (sessionState.status != SessionStatus.connected) return [];
-
+    final relayUrl = ref.watch(relayConfigProvider.select((c) => c.baseUrl));
+    if (relayUrl != _lastGoodRelayUrl) {
+      final switched = _lastGoodRelayUrl != null;
+      _lastGood = null;
+      _lastGoodRelayUrl = relayUrl;
+      if (switched) {
+        state = const AsyncData([]);
+        Future.microtask(() => _setRefreshFailed(false));
+      }
+    }
+    final generation = ++_generation;
+    if (ref.read(relaySessionProvider).status != SessionStatus.connected) {
+      return _lastGood ?? const [];
+    }
     try {
-      final session = ref.read(relaySessionProvider.notifier);
-      final events = await session.fetchHistory(
-        const NostrFilter(
-          kinds: [kindEmojiSet],
-          tags: {
-            '#d': [customEmojiSetDTag],
-          },
-          // One 30030 per member; the relay keeps only the latest per
-          // (pubkey, d_tag), so this bounds member count, not history.
-          limit: 500,
-        ),
-      );
-      return unionCustomEmoji(events);
+      final palette = await _query();
+      if (generation != _generation) return _lastGood ?? palette;
+      _lastGood = palette;
+      _setRefreshFailed(false);
+      return palette;
     } catch (_) {
-      return [];
+      final lastGood = _lastGood;
+      if (lastGood == null) rethrow;
+      if (generation == _generation) _setRefreshFailed(true);
+      return lastGood;
     }
   }
 
-  /// Force a re-fetch of the community palette.
+  Future<List<CustomEmoji>> _query() async {
+    final session = ref.read(relaySessionProvider.notifier);
+    final events = await session.fetchHistory(
+      const NostrFilter(
+        kinds: [kindEmojiSet],
+        tags: {
+          '#d': [customEmojiSetDTag],
+        },
+        // One 30030 per member; the relay keeps only the latest per
+        // (pubkey, d_tag), so this bounds member count, not history.
+        limit: 500,
+      ),
+    );
+    return unionCustomEmoji(events);
+  }
+
+  void _setRefreshFailed(bool failed) =>
+      ref.read(customEmojiRefreshFailedProvider.notifier).set(failed);
+
+  /// Re-fetch the community palette. The current palette stays visible while
+  /// the fetch runs, and a failed fetch keeps the last good palette and raises
+  /// [customEmojiRefreshFailedProvider].
   Future<void> refresh() async {
-    state = const AsyncValue.loading();
-    state = await AsyncValue.guard(_fetch);
+    final generation = ++_generation;
+    try {
+      final palette = await _query();
+      if (generation != _generation) return;
+      _lastGood = palette;
+      _setRefreshFailed(false);
+      state = AsyncData(palette);
+    } catch (error, stackTrace) {
+      if (generation != _generation) return;
+      if (_lastGood == null) {
+        state = AsyncError(error, stackTrace);
+      } else {
+        _setRefreshFailed(true);
+      }
+    }
   }
 }
+
+/// Whether the latest palette fetch failed while an older palette is still
+/// being shown.
+class CustomEmojiRefreshFailedNotifier extends Notifier<bool> {
+  @override
+  bool build() => false;
+
+  void set(bool failed) => state = failed;
+}
+
+final customEmojiRefreshFailedProvider =
+    NotifierProvider<CustomEmojiRefreshFailedNotifier, bool>(
+      CustomEmojiRefreshFailedNotifier.new,
+    );
 
 final customEmojiPaletteProvider =
     AsyncNotifierProvider<CustomEmojiPaletteNotifier, List<CustomEmoji>>(
