@@ -58,6 +58,25 @@ abstract final class NostrFilters {
     extensions: {'before_id': ?beforeId},
   );
 
+  /// A channel's membership notices (kind:40099), newest first, below the
+  /// `until` + `before_id` cursor the channel-window pages use.
+  static NostrFilter channelNotices(
+    String channelId, {
+    int? until,
+    String? beforeId,
+  }) => NostrFilter(
+    kinds: const [EventKind.systemMessage],
+    tags: {
+      '#h': [channelId],
+    },
+    limit: channelNoticePageSize,
+    until: until,
+    extensions: {'before_id': ?beforeId},
+  );
+
+  /// Notices one [channelNotices] read asks for.
+  static const channelNoticePageSize = 500;
+
   /// Huddle lifecycle state for one parent channel, independent of timeline paging.
   static NostrFilter huddleLifecycle(String channelId) => NostrFilter(
     kinds: [EventKind.huddleStarted, EventKind.huddleEnded],

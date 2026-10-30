@@ -240,7 +240,7 @@ void main() {
       expect(relaySession.liveFilters.single.limit, 200);
       expect(
         relaySession.queryFilters.first.kinds,
-        EventKind.channelTimelineContentKinds,
+        EventKind.channelWindowPageKinds,
       );
       expect(relaySession.queryFilters.first.tags['#h'], [_channelId]);
       expect(relaySession.queryFilters.first.extensions['top_level'], isTrue);
@@ -353,6 +353,114 @@ void main() {
       );
     },
   );
+
+  test('a burst of joins does not hold channel messages back', () async {
+    String id(String label) => label.padLeft(64, '0');
+    NostrEvent notice(String eventId, int createdAt) => NostrEvent(
+      id: eventId,
+      pubkey: 'relay',
+      createdAt: createdAt,
+      kind: EventKind.systemMessage,
+      tags: const [
+        ['h', _channelId],
+      ],
+      content: jsonEncode({
+        'type': 'member_joined',
+        'actor': 'alice',
+        'target': eventId,
+      }),
+      sig: 'sig',
+    );
+    String cursorKey(int createdAt, String eventId) =>
+        '${_channelId.toLowerCase()}:$createdAt:$eventId';
+    // A full notice page, all newer than every message.
+    final burst = [
+      for (var i = 0; i < NostrFilters.channelNoticePageSize; i++)
+        notice(id('b${i.toString().padLeft(3, '0')}'), 600 - i),
+    ];
+    final relaySession = _RecordingRelaySessionNotifier(
+      queryResults: [
+        [
+          _event(id: id('a100'), createdAt: 100),
+          _event(id: id('a50'), createdAt: 50),
+          _bounds(hasMore: true, cursorCreatedAt: 50, cursorId: id('a50')),
+        ],
+        [
+          _event(id: id('a30'), createdAt: 30),
+          _bounds(
+            hasMore: true,
+            cursorCreatedAt: 30,
+            cursorId: id('a30'),
+            dTag: cursorKey(50, id('a50')),
+          ),
+        ],
+        [
+          _event(id: id('a10'), createdAt: 10),
+          _bounds(dTag: cursorKey(30, id('a30'))),
+        ],
+      ],
+    );
+    relaySession.noticeResults.addAll([
+      Exception('notices unavailable'),
+      burst,
+      // Also full: it ends below the oldest loaded message.
+      [
+        notice(id('n70'), 70),
+        for (var i = 0; i < NostrFilters.channelNoticePageSize - 2; i++)
+          notice(id('c${i.toString().padLeft(3, '0')}'), 25),
+        notice(id('n20'), 20),
+      ],
+    ]);
+    final container = _buildContainer(relaySession);
+    addTearDown(container.dispose);
+    List<String> shown() => container
+        .read(channelMessagesProvider(_channelId))
+        .value!
+        .map((event) => event.id)
+        .toList();
+
+    container.read(channelMessagesProvider(_channelId));
+    await relaySession.subscribed;
+    await _pumpEventQueue();
+
+    // The page leaves notices to their own read, so it is all messages.
+    final page = relaySession.queryFilters.single;
+    expect(page.kinds, isNot(contains(EventKind.systemMessage)));
+    expect(page.limit, 50);
+    // A failed notice read leaves the messages showing.
+    expect(relaySession.noticeFilters, hasLength(1));
+    expect(container.read(channelMessagesProvider(_channelId)).hasError, false);
+    expect(shown(), [id('a50'), id('a100')]);
+
+    // The next page read retries the notices from the newest, and reads
+    // them down to the oldest loaded message.
+    final notifier = container.read(
+      channelMessagesProvider(_channelId).notifier,
+    );
+    expect(await notifier.fetchOlder(), isTrue);
+    await _pumpEventQueue();
+    expect(relaySession.noticeFilters, hasLength(3));
+    expect(relaySession.noticeFilters[1].until, isNull);
+    expect(relaySession.noticeFilters[2].until, 101);
+    expect(relaySession.noticeFilters[2].extensions['before_id'], id('b499'));
+    expect(relaySession.noticeFilters[2].tags['#h'], [_channelId]);
+    // Notices below the oldest loaded message wait for its page.
+    expect(shown(), [
+      id('a30'),
+      id('a50'),
+      id('n70'),
+      id('a100'),
+      ...burst.reversed.map((event) => event.id),
+    ]);
+
+    // The last page shows the rest, and the descent reads on to the start.
+    expect(await notifier.fetchOlder(), isTrue);
+    await _pumpEventQueue();
+    expect(relaySession.noticeFilters, hasLength(4));
+    expect(relaySession.noticeFilters[3].until, 20);
+    expect(shown().take(2), [id('a10'), id('n20')]);
+    expect(shown(), hasLength(4 + 2 * NostrFilters.channelNoticePageSize));
+  });
 
   test('retains historical and live Huddle end events in the window', () async {
     final relaySession = _RecordingRelaySessionNotifier(
@@ -5666,6 +5774,11 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
   final List<NostrFilter> liveFilters = [];
   final List<NostrFilter> historyFilters = [];
   final List<NostrFilter> queryFilters = [];
+
+  /// Membership notice reads, kept apart from [queryFilters]. They answer
+  /// from [noticeResults] in order, or empty once it runs out.
+  final List<NostrFilter> noticeFilters = [];
+  final Queue<Object> noticeResults = Queue();
   final List<void Function(NostrEvent)> _listeners = [];
   final Completer<void> _subscribed = Completer<void>();
   final Completer<List<NostrEvent>> _history = Completer<List<NostrEvent>>();
@@ -5694,6 +5807,16 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
     List<NostrFilter> filters, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
+    if (filters.length == 1 &&
+        filters.single.kinds.length == 1 &&
+        filters.single.kinds.single == EventKind.systemMessage) {
+      noticeFilters.add(filters.single);
+      if (noticeResults.isEmpty) return const [];
+      final result = noticeResults.removeFirst();
+      if (result is Exception) throw result;
+      if (result is Future<List<NostrEvent>>) return await result;
+      return (result as List<NostrEvent>).toList();
+    }
     operations.add('query');
     queryFilters.addAll(filters);
     if (_queryResults.isEmpty) throw Exception('unsupported');

@@ -14,6 +14,7 @@ import 'timeline_message.dart';
 
 part 'channel_messages_provider/thread_summaries.dart';
 part 'channel_messages_provider/pagination.dart';
+part 'channel_messages_provider/notices.dart';
 
 // Channel history keeps partial reply evidence; full threads stay route-scoped.
 const _maxCachedRepliesPerRoot = 256;
@@ -43,6 +44,16 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   bool _initialWindowQueryInFlight = false;
   int _initVersion = 0;
   ChannelWindowStore _windowStore = const ChannelWindowStore.empty();
+
+  /// Membership notices read apart from the window pages (see `_fillNotices`).
+  final Map<String, NostrEvent> _notices = {};
+
+  /// Where the next older notice read starts: null before the first read.
+  ChannelPageCursor? _noticeCursor;
+  bool _noticesReachedStart = false;
+
+  /// The init a notice read is running for, so only one runs per window.
+  int? _noticeFillVersion;
   final Set<String> _liveSummaryRootsDuringInitialWindowQuery = {};
   final Map<String, NostrEvent> _deepLinkEvents = {};
   final Set<String> _retainedDeepLinkEventIds = {};
@@ -170,6 +181,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
 
     _reachedOldest = false;
     _windowStore = const ChannelWindowStore.empty();
+    _notices.clear();
+    _noticeCursor = null;
+    _noticesReachedStart = false;
     // A reconnect window can lag a confirmed thread query and contains only
     // top-level rows. Keep known replies as summary evidence, including their
     // deletion markers so a reset cannot resurrect a deleted reply.
@@ -238,6 +252,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       _reconcileRetainedAggregates(historyVersion);
       state = AsyncData(merged);
       _summaryRefreshes.resume();
+      unawaited(_fillNotices());
     } catch (e, st) {
       if (!_isCurrentInit(initVersion)) return;
       final fallbackMessages = state.value ?? _lastKnownMessages;
@@ -283,7 +298,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       _usingChannelWindow = true;
       _reconcilePageSummaries(page, pageVersion);
       _reachedOldest = !channelWindowHasMore(_windowStore);
-      return flattenChannelWindowEvents(_windowStore);
+      return _windowEvents();
     } catch (error) {
       _initialWindowQueryInFlight = false;
       _liveSummaryRootsDuringInitialWindowQuery.clear();
@@ -310,7 +325,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   }
 
   NostrFilter _channelWindowFilter(ChannelPageCursor? cursor) => NostrFilter(
-    kinds: EventKind.channelTimelineContentKinds,
+    kinds: EventKind.channelWindowPageKinds,
     tags: {
       '#h': [channelId],
     },
@@ -404,7 +419,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     if (!_mergeWindowEventIntoStore(event, summaryVersion: summaryVersion)) {
       return;
     }
-    final windowEvents = flattenChannelWindowEvents(_windowStore);
+    final windowEvents = _windowEvents();
     // Flattening already orders the window. Only merge and sort again when
     // there are retained deep-link events to include.
     final flattened = _deepLinkEvents.isEmpty
@@ -783,7 +798,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       }
     }
     if (_usingChannelWindow) {
-      events = _withDeepLinkEvents(flattenChannelWindowEvents(_windowStore));
+      events = _withDeepLinkEvents(_windowEvents());
     }
     events = _boundEventReplies(events);
     _lastKnownMessages = events;
@@ -895,6 +910,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   }
 
   bool _isCurrentInit(int initVersion) => initVersion == _initVersion;
+
+  List<NostrEvent> _windowEvents() =>
+      flattenChannelWindowEvents(_windowStore, notices: _notices.values);
 
   /// Stops live work for a chat that stayed hidden; resume catches it up.
   void _detachLive() {
