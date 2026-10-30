@@ -6,7 +6,10 @@
 
 use super::tests::{sample_persona, sample_record};
 use crate::managed_agents::persona_events::apply_persona_snapshot;
-use crate::managed_agents::types::AgentDefinition;
+use crate::managed_agents::types::{AgentDefinition, ManagedAgentRecord};
+use crate::managed_agents::{
+    create_time_agent_command_override, effective_agent_command, record_agent_command,
+};
 
 // ── Stale-pin drop: OpenClaw↔Goose (preset↔builtin) ─────────────────────────
 
@@ -148,4 +151,78 @@ fn apply_persona_snapshot_goose_to_custom_harness_drops_stale_goose_pin() {
 
     // Clean up the registry so parallel tests start from a known state.
     update_loaded_harness_registry(vec![]);
+}
+
+// ── Deliberate create-time pin: create → storage → persona edit → spawn ──────
+
+const PINNED_ARGS: [&str; 2] = ["--profile", "work"];
+
+/// A record created with a deliberate pin, as read back from storage.
+fn stored_record_pinned_to(pin: &str, persona: &AgentDefinition) -> ManagedAgentRecord {
+    let mut record = sample_record();
+    record.persona_id = Some(persona.id.clone());
+    record.agent_command_override = create_time_agent_command_override(
+        Some(persona.id.as_str()),
+        std::slice::from_ref(persona),
+        Some(pin),
+        true,
+    );
+    record.agent_args = PINNED_ARGS.map(str::to_string).to_vec();
+    let stored = serde_json::to_string(&record).expect("record serializes");
+    serde_json::from_str(&stored).expect("record deserializes")
+}
+
+/// An edit that stays on the same harness keeps launching the exact pin with
+/// the args configured for it, for both a full path and an alias.
+#[test]
+fn deliberate_pin_keeps_command_and_args_through_a_same_harness_persona_edit() {
+    for (runtime, pin) in [
+        ("goose", "/opt/homebrew/bin/goose"),
+        ("claude", "claude-code-acp"),
+    ] {
+        let persona = AgentDefinition {
+            runtime: Some(runtime.to_string()),
+            ..sample_persona()
+        };
+        let mut record = stored_record_pinned_to(pin, &persona);
+        let edited = AgentDefinition {
+            display_name: "Renamed".to_string(),
+            ..persona
+        };
+
+        apply_persona_snapshot(&mut record, &edited);
+
+        assert_eq!(record_agent_command(&record, &[edited]), pin);
+        assert_eq!(record.agent_args, PINNED_ARGS);
+    }
+}
+
+/// A switch to a different known harness drops the pin, so the agent follows
+/// the persona. The args configured for the old harness must not follow it.
+#[test]
+fn deliberate_pin_drops_with_its_args_when_the_persona_switches_harness() {
+    for (runtime, pin) in [
+        ("goose", "/opt/homebrew/bin/goose"),
+        ("claude", "claude-code-acp"),
+    ] {
+        let persona = AgentDefinition {
+            runtime: Some(runtime.to_string()),
+            ..sample_persona()
+        };
+        let mut record = stored_record_pinned_to(pin, &persona);
+        let switched = AgentDefinition {
+            runtime: Some("openclaw".to_string()),
+            ..persona
+        };
+
+        apply_persona_snapshot(&mut record, &switched);
+
+        assert_eq!(record.agent_command_override, None);
+        assert!(record.agent_args.is_empty());
+        let personas = [switched];
+        assert_eq!(
+            record_agent_command(&record, &personas),
+            effective_agent_command(Some(personas[0].id.as_str()), &personas, None)
+        );
+    }
 }

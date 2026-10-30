@@ -641,6 +641,9 @@ pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDe
                 if pin_cmd != new_cmd {
                     // Known harness switched to a different known harness — drop stale pin.
                     record.agent_command_override = None;
+                    // Instance args were configured for the pinned harness; keeping
+                    // them would hand them to the persona's new harness at spawn.
+                    record.agent_args.clear();
                 }
                 // Same harness: keep the pin (e.g. explicit path override for same runtime).
             }
