@@ -94,6 +94,10 @@ buzz messages send --channel <UUID> \
   --content "@Alice check this" --mention <alice-pubkey>
 ```
 
+**Thread replies in the timeline:** `messages send --reply-to <event-id> --broadcast` posts a thread reply that is also shown in the channel timeline (it adds `["broadcast","1"]`). It does not publish anywhere else. `--broadcast` is rejected without `--reply-to`.
+
+**Scoped search:** `messages search --channel <UUID> --since <unix> --until <unix>` limits results to one channel and a time window (`--until` must not be earlier than `--since`). Give at least one of `--query`, `--author`, or `--channel`. Without `--query`, results are plain history, newest first, not relevance ranked.
+
 ## DM Management
 
 `dms hide --channel <UUID>` hides a DM from the agent's DM list. Restore by re-opening with `dms open --pubkey <hex>`.
@@ -122,13 +126,12 @@ buzz messages send --channel <UUID> \
 ## Gotchas
 
 1. **`feed get` sorts newest-first** — every other list command sorts oldest-first. Don't assume consistent sort order.
-2. **`users set-presence` is broken** — sends ephemeral kind:20001 via HTTP POST; relay accepts presence only over WebSocket (typing, kind:20002, is the one ephemeral kind HTTP accepts). Will fail until WebSocket support is added.
-3. **`workflow runs` always returns `[]`** — run history lives in the relay's database, not as Nostr events.
-4. **`dms open` returns `dm_id`** — use this value as `--channel` for subsequent `messages send/get` commands on that DM.
-5. **Content max 65,536 bytes** (exit 1 if exceeded). Diffs auto-truncate at 61,440 bytes at a hunk boundary.
-6. **`users get` always returns an array** — even for a single pubkey lookup. Never expect a bare object.
-7. **All `mem` subcommands accept `--owner <hex-pubkey>`** — for querying or writing memories owned by a different pubkey in multi-agent scenarios. Defaults to the owner from `BUZZ_AUTH_TAG`.
-8. **`mem rm` cannot delete `core`** — use `mem set core ''` instead.
+2. **`workflow runs` always returns `[]`** — run history lives in the relay's database, not as Nostr events.
+3. **`dms open` returns `dm_id`** — use this value as `--channel` for subsequent `messages send/get` commands on that DM.
+4. **Content max 65,536 bytes** (exit 1 if exceeded). Diffs auto-truncate at 61,440 bytes at a hunk boundary.
+5. **`users get` always returns an array** — even for a single pubkey lookup. Never expect a bare object.
+6. **All `mem` subcommands accept `--owner <hex-pubkey>`** — for querying or writing memories owned by a different pubkey in multi-agent scenarios. Defaults to the owner from `BUZZ_AUTH_TAG`.
+7. **`mem rm` cannot delete `core`** — use `mem set core ''` instead.
 
 ## Forum Posts
 

@@ -475,8 +475,8 @@ pub enum MessagesCmd {
         /// Event ID to reply to (creates a thread)
         #[arg(long)]
         reply_to: Option<String>,
-        /// Also publish to the Nostr network
-        #[arg(long, default_value_t = false)]
+        /// Also show this thread reply in the channel timeline (requires --reply-to)
+        #[arg(long, default_value_t = false, requires = "reply_to")]
         broadcast: bool,
         /// Attach file(s) — uploads and includes as imeta tags
         #[arg(long = "file")]
@@ -592,18 +592,24 @@ pub enum MessagesCmd {
     },
     /// Full-text search across messages
     #[command(
-        after_help = "Examples:\n  buzz messages search --query checkout\n  buzz messages search --author npub1... --since 1783497600\n  buzz messages search --author Aaron --query checkout --limit 20"
+        after_help = "Examples:\n  buzz messages search --query checkout\n  buzz messages search --query checkout --channel <UUID> --since 1783497600 --until 1783584000\n  buzz messages search --author npub1... --since 1783497600\n  buzz messages search --author Aaron --query checkout --limit 20"
     )]
     Search {
-        /// Search query string (optional when --author is given)
+        /// Search query string (optional when --author or --channel is given)
         #[arg(long)]
         query: Option<String>,
         /// Filter by author: 64-char hex pubkey, npub, or display name
         #[arg(long)]
         author: Option<String>,
-        /// Unix timestamp — return messages after this time
+        /// Only search this channel (UUID from 'buzz channels list')
+        #[arg(long)]
+        channel: Option<String>,
+        /// Unix timestamp — return messages at or after this time
         #[arg(long)]
         since: Option<i64>,
+        /// Unix timestamp — return messages at or before this time (must not be earlier than --since)
+        #[arg(long)]
+        until: Option<i64>,
         /// Maximum number of results to return
         #[arg(long)]
         limit: Option<u32>,
@@ -2447,6 +2453,23 @@ mod tests {
             "--emoji alone must not imply a status"
         );
         assert!(Cli::try_parse_from(["buzz", "users", "set-status", "--clear"]).is_ok());
+    }
+
+    #[test]
+    fn broadcast_requires_reply_to() {
+        let send = [
+            "buzz",
+            "messages",
+            "send",
+            "--channel",
+            "c",
+            "--content",
+            "x",
+        ];
+        assert!(Cli::try_parse_from(send.into_iter().chain(["--broadcast"])).is_err());
+        assert!(
+            Cli::try_parse_from(send.into_iter().chain(["--reply-to", "e", "--broadcast"])).is_ok()
+        );
     }
 
     #[test]

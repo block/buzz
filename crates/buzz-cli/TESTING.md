@@ -225,6 +225,7 @@ buzz messages thread \
 # messages search
 buzz messages search --query "Hello" | jq .
 buzz messages search --query "CLI test" --limit 5 | jq .
+buzz messages search --query "CLI test" --channel <channel-uuid> --since 0 --until 4102444800 | jq .
 
 # messages edit
 buzz messages edit --event "$EVENT_ID" --content "Edited by CLI test" | jq .
@@ -333,7 +334,7 @@ buzz users presence --pubkeys "$MY_PUBKEY" | jq .
 buzz users set-presence --status online | jq .
 buzz users set-presence --status away | jq .
 buzz users set-presence --status offline | jq .
-# Note: set-presence may fail — the HTTP bridge rejects kind:20001; presence is WebSocket-only
+# set-presence publishes kind:20001 over WebSocket (NIP-42 auth); the HTTP bridge does not accept it
 
 # users set-status — NIP-38 kind:30315 on the d:general coordinate
 buzz users set-status --text "reviewing PRs" --emoji "🔍" | jq .
