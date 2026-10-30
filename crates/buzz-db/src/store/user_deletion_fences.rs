@@ -162,8 +162,7 @@ pub async fn find(
     read(tx, identity).await
 }
 
-/// Read one restriction after the caller has acquired its identity lock.
-pub(super) async fn read(
+async fn read(
     tx: &mut Transaction<'_, Postgres>,
     identity: FenceIdentity,
 ) -> Result<Option<UserDeletionFence>> {

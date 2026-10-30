@@ -6,7 +6,7 @@ use buzz_core::CommunityId;
 use nostr::{Event, PublicKey};
 use sqlx::{Postgres, Transaction};
 
-use super::user_deletion_fences::{lock_shared, read as read_locked, FenceIdentity};
+use super::user_deletion_fences::{lock_shared, FenceIdentity};
 use crate::{DbError, Result};
 
 pub(crate) async fn guard_event_author(
@@ -63,13 +63,15 @@ async fn check_signer(
     // Read the signer's restrictions, not the owner's. Check both possible
     // scopes even if the profile/ownership row is absent: those mutable rows
     // must not determine whether a permanent restriction still applies.
-    if read_locked(tx, FenceIdentity::user(signer))
-        .await?
-        .is_some()
-        || read_locked(tx, FenceIdentity::agent(community, signer))
-            .await?
-            .is_some()
-    {
+    let restricted: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM user_deletion_fences
+         WHERE pubkey = $1 AND (scope_community_id IS NULL OR scope_community_id = $2))",
+    )
+    .bind(signer.to_hex())
+    .bind(community.as_uuid())
+    .fetch_one(&mut **tx)
+    .await?;
+    if restricted {
         return Err(DbError::UserDeletionRestricted);
     }
     Ok(())

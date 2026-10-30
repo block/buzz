@@ -217,6 +217,15 @@ async fn message_writers_enforce_global_and_scoped_fences_even_without_profiles(
         f.db.insert_event_with_thread_metadata(f.community, &message(&agent, 9), None, None)
             .await,
     );
+    // Both scopes may match the same signer. The existence lookup must still
+    // refuse, and the global restriction must also cover another community.
+    f.fence(&agent, None).await;
+    for community in [f.community, other_community] {
+        restricted(
+            f.db.insert_event(community, &message(&agent, 9), None)
+                .await,
+        );
+    }
 }
 
 #[tokio::test]
