@@ -16,6 +16,8 @@ use super::stats::{Op, Snapshot, Stats};
 
 /// Content prefix of seeded thread roots; `run` finds roots by it.
 pub const ROOT_PREFIX: &str = "lg-root";
+/// Content prefix of the seeded hot-thread root; `run` finds it by this.
+pub const HOT_ROOT_PREFIX: &str = "lg-hot";
 
 /// Seeds every community. Idempotent for communities this run's fixture
 /// owner owns, and for channels; history and threads are appended on every
@@ -215,12 +217,20 @@ enum PostKind {
     History,
     Root,
     Reply { root: usize },
+    HotRoot,
+    HotReply,
+}
+
+/// Key of the hot root in [`RootIds`]: the root after channel 0's seeded ones.
+fn hot_key(scenario: &Scenario) -> (usize, usize, usize) {
+    (0, 0, scenario.shape.thread_roots_per_channel)
 }
 
 /// Thread roots, then history and replies (posted once root ids are known).
 /// A root's `seq` is its index within its channel. Each thread's replies form
 /// one chain, so reply `k` sits at depth `k + 1`; threads and history posts
-/// are independent of each other.
+/// are independent of each other. The hot thread's replies all answer its
+/// root directly, so they post concurrently.
 fn plan_posts(scenario: &Scenario) -> (Vec<Chain>, Vec<Chain>) {
     let shape = &scenario.shape;
     let mut roots = Vec::new();
@@ -255,6 +265,23 @@ fn plan_posts(scenario: &Scenario) -> (Vec<Chain>, Vec<Chain>) {
                 }
             }
         }
+    }
+    if scenario.hot_thread.enabled() {
+        let (community, channel, seq) = hot_key(scenario);
+        roots.push(vec![Post {
+            community,
+            channel,
+            kind: PostKind::HotRoot,
+            seq,
+        }]);
+        rest.extend((0..scenario.hot_thread.seed_replies).map(|seq| {
+            vec![Post {
+                community,
+                channel,
+                kind: PostKind::HotReply,
+                seq,
+            }]
+        }));
     }
     (roots, rest)
 }
@@ -293,6 +320,15 @@ impl Post {
                 tags.extend(reply_tags(root_id, parent));
                 (author, format!("lg-reply {}", self.seq))
             }
+            PostKind::HotRoot => (
+                identity::keys(&scenario.run_id, Role::Owner, self.community),
+                HOT_ROOT_PREFIX.to_string(),
+            ),
+            PostKind::HotReply => {
+                let root_id = roots.get(&hot_key(scenario))?;
+                tags.extend(reply_tags(root_id, root_id));
+                (author, format!("lg-hot-reply {}", self.seq))
+            }
         };
         let event = EventBuilder::new(Kind::Custom(9), content)
             .tags(tags)
@@ -305,21 +341,23 @@ impl Post {
 /// NIP-10 markers for a reply. `root` always names the thread root, since the
 /// relay rejects a reply whose root differs from its parent's, and `reply`
 /// names the parent, from which the relay derives depth (parent depth + 1).
-fn reply_tags(root: &str, parent: &str) -> [Tag; 2] {
+pub fn reply_tags(root: &str, parent: &str) -> [Tag; 2] {
     [
         tag(["e", root, "", "root"]),
         tag(["e", parent, "", "reply"]),
     ]
 }
 
-/// Up to the 100 newest seeded thread-root ids in `channel`, oldest first.
-/// `run` replies into these; a sample of roots is enough load.
+/// Ids of `owner`'s seeded roots in `channel` whose content starts with
+/// `prefix`, oldest first, among its 100 newest posts there. `run` replies
+/// into these; a sample of roots is enough load.
 pub async fn find_roots(
     net: &Net,
     community: &Community,
     reader: &Keys,
     owner: &Keys,
     channel: &str,
+    prefix: &str,
 ) -> anyhow::Result<Vec<String>> {
     let filter = json!([{
         "kinds": [9],
@@ -343,7 +381,7 @@ pub async fn find_roots(
     let mut roots: Vec<(u64, String)> = events
         .into_iter()
         .filter(|e| {
-            e.content.starts_with(ROOT_PREFIX) && !e.tags.iter().any(|t| t.kind().as_str() == "e")
+            e.content.starts_with(prefix) && !e.tags.iter().any(|t| t.kind().as_str() == "e")
         })
         .map(|e| (e.created_at.as_secs(), e.id.to_hex()))
         .collect();
@@ -356,13 +394,13 @@ fn tag<const N: usize>(parts: [&str; N]) -> Tag {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
     /// Serves HTTP/1.1 on loopback. `handler(method, target, body)` returns
     /// the status and JSON body of each response.
-    async fn fake_http<F>(handler: F) -> String
+    pub(in crate::loadgen) async fn fake_http<F>(handler: F) -> String
     where
         F: Fn(&str, &str, &[u8]) -> (u16, String) + Send + Sync + 'static,
     {
@@ -453,6 +491,12 @@ mod tests {
     }
 
     async fn seed_against(reject: &str) -> (anyhow::Result<()>, Arc<Stats>, Accepted) {
+        seed_with(reject, "").await
+    }
+
+    /// Seeds two history posts and two chains of three replies, plus `extra`
+    /// scenario TOML, against a relay that rejects content `reject`.
+    async fn seed_with(reject: &str, extra: &str) -> (anyhow::Result<()>, Arc<Stats>, Accepted) {
         let (addr, accepted) = fake_relay(reject.into()).await;
         let scenario = Scenario::parse(&format!(
             r#"
@@ -473,6 +517,7 @@ channels_per_member = 1
 [[ramp]]
 users = 1.0
 hold_secs = 1
+{extra}
 "#
         ))
         .unwrap();
@@ -517,6 +562,39 @@ hold_secs = 1
             .collect();
         depths.sort();
         assert_eq!(depths, [1, 1, 2, 2, 3, 3]);
+    }
+
+    #[tokio::test]
+    async fn the_hot_thread_seeds_direct_replies_under_its_own_root() {
+        let hot = "[hot_thread]\nseed_replies = 4";
+        let (outcome, stats, accepted) = seed_with("none", hot).await;
+        outcome.expect("every post accepted");
+        // The base 10 posts plus the hot root and its 4 replies.
+        assert_eq!(seeded(&stats.snapshot(), &Snapshot::default()), 15);
+        let hot_depths: Vec<usize> = {
+            let accepted = accepted.lock().unwrap();
+            let roots: Vec<&String> = accepted
+                .iter()
+                .filter(|(_, (_, depth))| *depth == 0)
+                .map(|(id, _)| id)
+                .collect();
+            // Every reply under the most-replied root sits directly on it.
+            let hot_root = roots
+                .iter()
+                .max_by_key(|root| accepted.values().filter(|(r, _)| r == **root).count())
+                .unwrap();
+            accepted
+                .iter()
+                .filter(|(id, (root, _))| root == *hot_root && id != hot_root)
+                .map(|(_, (_, depth))| *depth)
+                .collect()
+        };
+        assert_eq!(hot_depths, [1, 1, 1, 1]);
+
+        // A rejected hot root leaves its replies unpostable.
+        let (outcome, _, _) = seed_with(HOT_ROOT_PREFIX, hot).await;
+        let err = outcome.expect_err("a rejected hot root fails the seed");
+        assert!(err.to_string().contains("seeded 10 of 15"), "{err}");
     }
 
     #[test]

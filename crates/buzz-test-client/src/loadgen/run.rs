@@ -19,7 +19,7 @@ use tokio::sync::{watch, Mutex};
 use super::identity::{self, Role};
 use super::net::{http_reason, Net};
 use super::scenario::{Community, Scenario};
-use super::seed::find_roots;
+use super::seed::{find_roots, reply_tags, HOT_ROOT_PREFIX, ROOT_PREFIX};
 use super::stats::{abort_reason, ops_json, Op, Stats};
 
 /// Content prefix of timed messages: `lg:<send unix micros>`.
@@ -95,7 +95,7 @@ async fn run_with(
     let connect_gap = Duration::from_secs_f64(1.0 / pop.connect_rate_per_sec);
 
     let mut tasks = Vec::new();
-    let (mut humans, mut agents) = (0usize, 0usize);
+    let (mut humans, mut agents, mut authors) = (0usize, 0usize, 0usize);
     let mut steps = Vec::new();
     let mut aborted = false;
     // End of the last reported window and start of the last judged one.
@@ -105,6 +105,7 @@ async fn run_with(
     for (n, step) in scenario.ramp.iter().enumerate() {
         let want_humans = (pop.humans as f64 * step.users).ceil() as usize;
         let want_agents = (pop.agents as f64 * step.users).ceil() as usize;
+        let want_authors = (scenario.hot_thread.authors as f64 * step.users).ceil() as usize;
         // The window covers the ramp too, so connect/auth and history
         // failures from new clients count toward the abort check.
         let before = stats.snapshot();
@@ -132,6 +133,14 @@ async fn run_with(
                 humans += 1;
             }
         }
+        // Hot-thread authors hold no socket, so they start without pacing.
+        while authors < want_authors {
+            if shard.owns(authors) {
+                let (shared, index) = (shared.clone(), authors);
+                tasks.push(tokio::spawn(hot_author(shared, index)));
+            }
+            authors += 1;
+        }
         let ramp_secs = ramp_start.elapsed().as_secs_f64();
 
         let hold_start = Instant::now();
@@ -156,6 +165,7 @@ async fn run_with(
             "users": step.users,
             "humans": want_humans,
             "agents": want_agents,
+            "hot_authors": want_authors,
             "shard": format!("{}/{}", shard.index, shard.count),
             "ramp_secs": (ramp_secs * 10.0).round() / 10.0,
             "hold_secs": (hold_secs * 10.0).round() / 10.0,
@@ -467,7 +477,8 @@ async fn roots(
     }
     let owner = identity::keys(&shared.scenario.run_id, Role::Owner, community.index);
     let pending = shared.stats.begin(Op::HttpQuery);
-    let found = match find_roots(&shared.net, community, reader, &owner, channel).await {
+    let found = match find_roots(&shared.net, community, reader, &owner, channel, ROOT_PREFIX).await
+    {
         Ok(found) => {
             pending.ok();
             found
@@ -914,7 +925,7 @@ async fn agent(shared: Arc<Shared>, global: usize) {
                     community,
                     "/query",
                     &filters,
-                    &auth,
+                    Some(&auth),
                 )
                 .await;
             } else if next_post.is_some_and(|t| t <= now) {
@@ -985,6 +996,98 @@ async fn agent(shared: Arc<Shared>, global: usize) {
     }
 }
 
+/// A hot-thread author: replies to the hot root through HTTP `/events` and
+/// reads the thread's newest replies through HTTP `/query`. Replies carry
+/// their send time, so humans in the hot channel record their delivery.
+async fn hot_author(shared: Arc<Shared>, index: usize) {
+    let scenario = &shared.scenario;
+    let profile = &scenario.hot_thread;
+    let community = &shared.communities[0];
+    let keys = identity::keys(&scenario.run_id, Role::HotAuthor, index);
+    let owner = identity::keys(&scenario.run_id, Role::Owner, 0);
+    let channel = identity::channel_id(&scenario.run_id, 0, 0);
+    let me = keys.public_key().to_hex();
+    let mut rng = Rng::new(u64::MAX / 2 - index as u64);
+    let mut backoff = Backoff::new();
+    // A missing root is an error every attempt, so a run without the seeded
+    // hot thread fails its steps instead of measuring nothing.
+    let root = loop {
+        if stopped(&shared) {
+            return;
+        }
+        let pending = shared.stats.begin(Op::ThreadFetch);
+        let newest = find_roots(
+            &shared.net,
+            community,
+            &keys,
+            &owner,
+            &channel,
+            HOT_ROOT_PREFIX,
+        )
+        .await
+        .map(|roots| roots.last().cloned());
+        match newest {
+            Ok(Some(root)) => {
+                pending.ok();
+                break root;
+            }
+            Ok(None) => pending.err("hot thread root not seeded"),
+            Err(e) => pending.err(&e.to_string()),
+        }
+        backoff.wait(&shared, &mut rng).await;
+    };
+    let read = json!([{
+        "kinds": [KIND_STREAM_MESSAGE],
+        "#h": [channel],
+        "#e": [root],
+        "limit": 100,
+    }]);
+    let mut next_reply = rng.after(profile.replies_per_hour);
+    let mut next_fetch = rng.after(profile.fetches_per_hour);
+    loop {
+        let Some(due) = [next_reply, next_fetch].into_iter().flatten().min() else {
+            return stopping(&shared).await;
+        };
+        tokio::select! {
+            _ = tokio::time::sleep_until(due.into()) => {}
+            _ = stopping(&shared) => return,
+        }
+        if next_reply == Some(due) {
+            next_reply = rng.after(profile.replies_per_hour);
+            let event = EventBuilder::new(
+                kind(KIND_STREAM_MESSAGE),
+                format!("{TIMED_PREFIX}{} {me}", now_micros()),
+            )
+            .tags(
+                [tag(["h", &channel])]
+                    .into_iter()
+                    .chain(reply_tags(&root, &root)),
+            )
+            .sign_with_keys(&keys);
+            let pending = shared.stats.begin(Op::HotReply);
+            match event {
+                Ok(event) => match shared.net.submit(&keys, community, &event, None).await {
+                    Ok(()) => pending.ok(),
+                    Err(e) => pending.err(&e.to_string()),
+                },
+                Err(e) => pending.err(&format!("sign: {e}")),
+            }
+        } else {
+            next_fetch = rng.after(profile.fetches_per_hour);
+            http(
+                &shared,
+                Op::ThreadFetch,
+                &keys,
+                community,
+                "/query",
+                &read,
+                None,
+            )
+            .await;
+        }
+    }
+}
+
 async fn http(
     shared: &Shared,
     op: Op,
@@ -992,13 +1095,13 @@ async fn http(
     community: &Community,
     path: &str,
     body: &Value,
-    auth: &Tag,
+    auth: Option<&Tag>,
 ) {
     let pending = shared.stats.begin(op);
     let body = serde_json::to_vec(body).expect("serialize JSON body");
     match shared
         .net
-        .post(keys, &community.http_url, path, body, Some(auth))
+        .post(keys, &community.http_url, path, body, auth)
         .await
     {
         Ok((status, _)) if status.is_success() => pending.ok(),
@@ -1650,5 +1753,89 @@ hold_secs = 2
             "{report}"
         );
         assert!(closing["p99_ms"].as_f64().unwrap() > 1000.0, "{report}");
+    }
+
+    /// Runs two hot-thread authors for a second against a relay whose
+    /// `/query` returns the hot root only when `seeded`. Returns the run's
+    /// outcome and the events it accepted.
+    async fn hot_thread_run(seeded: bool) -> (Result<Value, Value>, Vec<Event>, String, String) {
+        let owner = identity::keys("t", Role::Owner, 0);
+        let channel = identity::channel_id("t", 0, 0);
+        let root = EventBuilder::new(kind(KIND_STREAM_MESSAGE), HOT_ROOT_PREFIX)
+            .tags([tag(["h", &channel])])
+            .sign_with_keys(&owner)
+            .unwrap();
+        let root_id = root.id.to_hex();
+        let posted = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = posted.clone();
+        let addr = super::super::seed::tests::fake_http(move |_, target, body| {
+            if target == "/events" {
+                let event: Event = serde_json::from_slice(body).unwrap();
+                log.lock().unwrap().push(event);
+                return (200, json!({"accepted": true, "message": ""}).to_string());
+            }
+            let found = if seeded { json!([root]) } else { json!([]) };
+            (200, found.to_string())
+        })
+        .await;
+        let scenario = Scenario::parse(&format!(
+            r#"
+run_id = "t"
+[target]
+ws_url = "ws://{addr}"
+http_url = "http://{addr}"
+[shape]
+communities = 1
+channels_per_community = 1
+[population]
+humans = 0
+agents = 0
+channels_per_member = 1
+[hot_thread]
+authors = 2
+replies_per_hour = 36000.0
+fetches_per_hour = 36000.0
+[[ramp]]
+users = 1.0
+hold_secs = 1
+"#
+        ))
+        .unwrap();
+        let net = Net::new(&scenario).await.unwrap();
+        let shard = Shard::parse("0/1").unwrap();
+        let outcome = run_with(scenario, net, shard, Duration::from_secs(5)).await;
+        let posted = posted.lock().unwrap().clone();
+        (outcome, posted, root_id, channel)
+    }
+
+    #[tokio::test]
+    async fn hot_thread_authors_reply_to_the_hot_root_and_fail_without_it() {
+        let (outcome, posted, root_id, channel) = hot_thread_run(true).await;
+        let report = outcome.expect("hot-thread run passes");
+        assert_eq!(report["steps"][0]["hot_authors"], 2, "{report}");
+        assert!(!posted.is_empty(), "{report}");
+        for event in &posted {
+            let markers = buzz_core::nip10::parse_thread_markers(&event.tags);
+            assert_eq!(markers.root.as_deref(), Some(root_id.as_str()));
+            assert_eq!(markers.reply.as_deref(), Some(root_id.as_str()));
+            let h = event
+                .tags
+                .iter()
+                .find(|t| t.kind().as_str() == "h")
+                .unwrap();
+            assert_eq!(h.content(), Some(channel.as_str()));
+        }
+        let ops = &report["steps"][0]["ops"];
+        assert!(ops["hot_reply"]["count"].as_u64() > Some(0), "{report}");
+        assert!(ops["thread_fetch"]["count"].as_u64() > Some(0), "{report}");
+
+        // Without a seeded hot root the authors post nothing and the step aborts.
+        let (outcome, posted, _, _) = hot_thread_run(false).await;
+        let report = outcome.expect_err("a missing hot root fails the run");
+        assert!(posted.is_empty());
+        let reason = report["steps"][0]["abort_reason"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(reason.starts_with("thread_fetch"), "{report}");
     }
 }

@@ -18,6 +18,7 @@ cargo run --release -p buzz-test-client --bin buzz-loadgen -- run perf/scenarios
 | Channels | `shape.channels_per_community`, `population.channels_per_member` |
 | History depth | `shape.history_messages_per_channel`, `human.history_limit` |
 | Deep threads | `shape.thread_roots_per_channel`, `shape.thread_depth`, `human.thread_reply_fraction` |
+| One hot thread | `[hot_thread]`: `seed_replies`, `authors`, `replies_per_hour`, `fetches_per_hour` |
 | Humans / agents | `population.humans`, `population.agents`, multiplied by each `[[ramp]]` step's `users` |
 | Throughput per client | `[human]` and `[agent]` rates |
 | Reconnect churn | `human.mean_session_secs`, `population.connect_rate_per_sec` |
@@ -32,6 +33,14 @@ example `seed_concurrency` of 0, `human.presence_interval_secs` below 1, or a
 `community_host_template` with a port while `target.connect_addr` is set (the
 override maps hostnames, so HTTP would ignore it).
 
+`[hot_thread]` models one thread that keeps growing, such as a conversation
+between busy agents. `seed` posts its root in community 0, channel 0 and
+then `seed_replies` replies directly under it, concurrently. During `run`,
+`authors` clients (multiplied by each ramp step's `users`, like humans and
+agents) reply to that root and read its newest 100 replies over HTTP. Their
+replies are timed, so humans subscribed to that channel record delivery.
+Leave `seed_replies` and `authors` at 0 to disable it.
+
 ## What each client does
 
 - **Human**: authenticates over WebSocket and subscribes to its channels'
@@ -42,6 +51,10 @@ override maps hostnames, so HTTP would ignore it).
 - **Agent**: authenticates with a NIP-OA tag from its owner, polls HTTP
   `/query` (channel window plus mentions), posts messages through HTTP
   `/events`, and sends encrypted kind:24200 observer frames to its owner.
+- **Hot-thread author**: finds the seeded hot root, then posts replies to it
+  through HTTP `/events` (`hot_reply`) and reads the thread through HTTP
+  `/query` (`thread_fetch`). Until the root is found every attempt counts as
+  a `thread_fetch` error, so a run without the seeded thread fails.
 
 Messages carry their send time, so every subscriber records publish→delivery
 latency (`deliver`). Across machines this depends on clock sync.

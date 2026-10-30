@@ -12,6 +12,7 @@ pub enum Role {
     Owner,
     Human,
     Agent,
+    HotAuthor,
 }
 
 impl Role {
@@ -20,6 +21,7 @@ impl Role {
             Role::Owner => "owner",
             Role::Human => "human",
             Role::Agent => "agent",
+            Role::HotAuthor => "hot-author",
         }
     }
 }
