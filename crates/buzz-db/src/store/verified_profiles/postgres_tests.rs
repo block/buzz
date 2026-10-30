@@ -54,7 +54,7 @@ async fn admit(
     policy: &ProfilePolicy,
     epoch: ProfileEpoch,
     iat: DateTime<Utc>,
-    profile: Option<(&str, &str)>,
+    profile: Option<(&str, &str, Option<&str>)>,
 ) {
     db.apply_profile_admission(
         ProfileAdmission {
@@ -102,12 +102,13 @@ async fn lifecycle() {
         &policy,
         epoch,
         first_iat,
-        Some(("Alice", "alice")),
+        Some(("Alice", "alice", Some("Alice Example"))),
     )
     .await;
     let first = current(&db, community, &key).await.unwrap();
     assert_eq!(first.pubkey, keys.public_key());
-    assert_eq!(first.tags.len(), 7);
+    assert_eq!(first.tags.len(), 8);
+    assert_eq!(tag(&first, "full_name"), Some("Alice Example"));
     assert_eq!(tag(&first, "display_name"), Some("Alice"));
     assert!(first.verify().is_ok());
     admit(
@@ -118,7 +119,7 @@ async fn lifecycle() {
         &policy,
         epoch,
         first_iat + Duration::nanoseconds(2),
-        Some(("Alice", "alice")),
+        Some(("Alice", "alice", Some("Alice Example"))),
     )
     .await;
     assert_eq!(
@@ -126,6 +127,38 @@ async fn lifecycle() {
         first.id,
         "unchanged admission does not refresh early"
     );
+    admit(
+        &db,
+        community,
+        &keys,
+        &key,
+        &policy,
+        epoch,
+        first_iat + Duration::nanoseconds(3),
+        Some(("Alice", "alice", Some("Alice Renamed"))),
+    )
+    .await;
+    let renamed = current(&db, community, &key).await.unwrap();
+    assert_ne!(
+        renamed.id, first.id,
+        "full-name changes publish immediately"
+    );
+    assert_eq!(tag(&renamed, "full_name"), Some("Alice Renamed"));
+    admit(
+        &db,
+        community,
+        &keys,
+        &key,
+        &policy,
+        epoch,
+        first_iat + Duration::nanoseconds(4),
+        Some(("Alice", "alice", None)),
+    )
+    .await;
+    let without_full_name = current(&db, community, &key).await.unwrap();
+    assert_ne!(without_full_name.id, renamed.id);
+    assert_eq!(tag(&without_full_name, "full_name"), None);
+    assert_eq!(without_full_name.tags.len(), 7);
     admit(
         &db,
         community,
@@ -166,7 +199,7 @@ async fn lifecycle() {
         &policy,
         epoch,
         first_iat,
-        Some(("Old", "old")),
+        Some(("Old", "old", None)),
     )
     .await;
     assert_eq!(
@@ -213,7 +246,7 @@ async fn affected_scope_and_configuration_epochs_fence_restored_state() {
         &policy,
         epoch,
         Utc::now(),
-        Some(("Alice", "alice")),
+        Some(("Alice", "alice", None)),
     )
     .await;
     assert!(
@@ -249,7 +282,7 @@ async fn affected_scope_and_configuration_epochs_fence_restored_state() {
         &policy,
         epoch,
         Utc::now(),
-        Some(("Stale", "stale")),
+        Some(("Stale", "stale", None)),
     )
     .await;
     assert_eq!(
@@ -280,7 +313,7 @@ async fn affected_scope_and_configuration_epochs_fence_restored_state() {
         &policy,
         epoch,
         Utc::now(),
-        Some(("Stale", "stale")),
+        Some(("Stale", "stale", None)),
     )
     .await;
     assert_eq!(
@@ -303,7 +336,7 @@ async fn ordering_and_access_races() {
         pubkey: &key,
         issued_at: now,
         admitted_at,
-        profile: Some(("Alice", "alice")),
+        profile: Some(("Alice", "alice", None)),
         epoch,
         database_binding: false,
     };
@@ -407,7 +440,7 @@ async fn ordering_and_access_races() {
         .unwrap();
     db.apply_profile_admission(
         ProfileAdmission {
-            profile: Some(("Restored Alice", "alice")),
+            profile: Some(("Restored Alice", "alice", None)),
             ..input(later + Duration::seconds(3), restored)
         },
         &keys,
@@ -467,7 +500,7 @@ async fn ordering_and_access_races() {
         .unwrap();
     db.apply_profile_admission(
         ProfileAdmission {
-            profile: Some(("Restored again", "alice")),
+            profile: Some(("Restored again", "alice", None)),
             ..input(later + Duration::seconds(6), restored)
         },
         &keys,
@@ -562,7 +595,7 @@ async fn environment_removal_cleanup() {
             &policy,
             epoch,
             Utc::now(),
-            Some(("Alice", "alice")),
+            Some(("Alice", "alice", None)),
         )
         .await;
     }

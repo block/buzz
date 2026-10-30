@@ -81,10 +81,13 @@ pub(crate) fn admitted(
                         pubkey: &pubkey,
                         issued_at: evidence.issued_at,
                         admitted_at,
-                        profile: evidence
-                            .profile
-                            .as_ref()
-                            .map(|p| (p.display_name.as_str(), p.username.as_str())),
+                        profile: evidence.profile.as_ref().map(|p| {
+                            (
+                                p.display_name.as_str(),
+                                p.username.as_str(),
+                                p.full_name.as_deref(),
+                            )
+                        }),
                         epoch,
                         database_binding: state.config.nip_fi.source == CommunitySource::Database,
                     },

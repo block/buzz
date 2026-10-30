@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
-/// The two fields an issuer explicitly authorizes the relay to publish.
+/// The names an issuer explicitly authorizes the relay to publish.
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublicProfile {
@@ -11,6 +11,19 @@ pub struct PublicProfile {
     pub display_name: String,
     /// Lowercase ASCII handle.
     pub username: String,
+    /// Optional full name, with the same Unicode and length bounds as display text.
+    #[serde(
+        default,
+        deserialize_with = "optional_full_name",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub full_name: Option<String>,
+}
+
+fn optional_full_name<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
 }
 
 impl std::fmt::Debug for PublicProfile {
@@ -23,8 +36,10 @@ impl PublicProfile {
     /// Malformed optional claims are absent, never an admission error.
     pub fn from_json(value: &str) -> Option<Self> {
         let profile: Self = serde_json::from_str(value).ok()?;
-        (valid_display_name(&profile.display_name) && valid_username(&profile.username))
-            .then_some(profile)
+        (valid_display_name(&profile.display_name)
+            && valid_username(&profile.username)
+            && profile.full_name.as_deref().is_none_or(valid_display_name))
+        .then_some(profile)
     }
 }
 
@@ -77,6 +92,24 @@ impl std::fmt::Debug for ProfileAssertion {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_full_name_is_validated_without_requiring_it_for_older_issuers() {
+        let profile = PublicProfile::from_json(
+            r#"{"display_name":"alice","username":"alice","full_name":"Alice Example"}"#,
+        )
+        .unwrap();
+        assert_eq!(profile.full_name.as_deref(), Some("Alice Example"));
+        for full_name in [
+            serde_json::json!(null),
+            serde_json::json!(42),
+            serde_json::json!(""),
+            serde_json::json!(" A"),
+            serde_json::json!("A\nB"),
+        ] {
+            assert!(PublicProfile::from_json(&serde_json::json!({"display_name":"alice","username":"alice","full_name":full_name}).to_string()).is_none());
+        }
+    }
 
     #[test]
     fn claim_is_closed_and_unicode_rules_are_exact() {

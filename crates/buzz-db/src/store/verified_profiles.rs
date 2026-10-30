@@ -46,7 +46,7 @@ pub struct ProfileAdmission<'a> {
     /// Actual successful admission time.
     pub admitted_at: DateTime<Utc>,
     /// Validated public name/username, or None for retraction-only inputs.
-    pub profile: Option<(&'a str, &'a str)>,
+    pub profile: Option<(&'a str, &'a str, Option<&'a str>)>,
     /// Epoch captured during this admission.
     pub epoch: ProfileEpoch,
     /// Database community bindings, as opposed to operator environment bindings.
@@ -386,11 +386,12 @@ impl Db {
             .transpose()?;
         let should_write = match input.profile {
             None => active,
-            Some((name, username)) => {
+            Some((name, username, full_name)) => {
                 !active
                     || old.as_ref().is_none_or(|event| {
                         tag(event, "display_name") != Some(name)
                             || tag(event, "username") != Some(username)
+                            || tag(event, "full_name") != full_name
                             || tag(event, "issuer_label") != Some(label.as_str())
                             || tag(event, "verified_at")
                                 .and_then(|v| v.parse::<i64>().ok())
@@ -408,7 +409,7 @@ impl Db {
                 input.pubkey,
                 input
                     .profile
-                    .map(|(name, username)| (name, username, label.as_str())),
+                    .map(|(name, username, full_name)| (name, username, label.as_str(), full_name)),
                 input.admitted_at,
                 old.as_ref(),
             )?;
@@ -614,7 +615,7 @@ fn tag<'a>(event: &'a Event, name: &str) -> Option<&'a str> {
 fn profile_event(
     keys: &Keys,
     subject: &str,
-    profile: Option<(&str, &str, &str)>,
+    profile: Option<(&str, &str, &str, Option<&str>)>,
     now: DateTime<Utc>,
     previous: Option<&Event>,
 ) -> Result<Event> {
@@ -626,13 +627,16 @@ fn profile_event(
         ("p", subject.to_owned()),
         ("active", profile.is_some().to_string()),
     ];
-    if let Some((name, username, issuer)) = profile {
+    if let Some((name, username, issuer, full_name)) = profile {
         values.extend([
             ("display_name", name.to_owned()),
             ("username", username.to_owned()),
             ("issuer_label", issuer.to_owned()),
             ("verified_at", now.timestamp().to_string()),
         ]);
+        if let Some(full_name) = full_name {
+            values.push(("full_name", full_name.to_owned()));
+        }
     }
     let tags = values
         .into_iter()
@@ -673,12 +677,17 @@ mod tests {
         let event = profile_event(
             &keys,
             &subject,
-            Some(("Alice", "alice", "Example")),
+            Some(("alice", "alice", "Example", Some("Alice Example"))),
             Utc::now(),
             None,
         )
         .unwrap();
-        assert!(profile_event(&keys, &subject, None, Utc::now(), Some(&event)).is_ok());
+        assert_eq!(tag(&event, "display_name"), Some("alice"));
+        assert_eq!(tag(&event, "full_name"), Some("Alice Example"));
+        assert!(event.verify().is_ok());
+        let retracted = profile_event(&keys, &subject, None, Utc::now(), Some(&event)).unwrap();
+        assert_eq!(tag(&retracted, "full_name"), None);
+        assert_eq!(retracted.tags.len(), 3);
         assert!(
             profile_event(&Keys::generate(), &subject, None, Utc::now(), Some(&event),).is_err()
         );
