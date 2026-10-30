@@ -176,6 +176,7 @@ void main() {
         false,
         'Pick one\nUsage: /rename',
       ),
+      ('a cancelled confirmation', _cancelled, false, null),
       ('an expected failure', _failure, false, 'Not allowed'),
       ('an unexpected error', _unexpected, false, 'boom'),
       ('a community switch', _stale, false, '/rename not run'),
@@ -257,6 +258,7 @@ void main() {
 Object? _ok() => null;
 Object? _usage() => const SlashUsageError();
 Object? _usageReason() => const SlashUsageError('Pick one');
+Object? _cancelled() => const SlashCommandCancelled();
 Object? _failure() => const SlashCommandFailure('Not allowed');
 Object? _unexpected() => Exception('boom');
 Object? _stale() => StateError('switched');
