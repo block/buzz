@@ -143,7 +143,9 @@ class _EmojiPickerContent extends HookConsumerWidget {
     useEffect(() {
       final notifier = ref.read(emojiCatalogSearchProvider.notifier);
       if (catalogText == null) {
-        notifier.clear();
+        scheduleMicrotask(() {
+          if (context.mounted) notifier.clear();
+        });
         return null;
       }
       final timer = Timer(

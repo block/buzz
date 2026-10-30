@@ -82,7 +82,7 @@ void main() {
         d: 'parrot',
         url: 'https://cdn.test/other.png',
       ),
-      _event(id: 'solo', d: 'solo'),
+      _event(id: 'solo', d: 'solo', url: 'https://cdn.test/solo.png'),
     ]);
     expect(resolution.emoji.map((e) => '${e.shortcode} ${e.url}'), [
       'parrot https://cdn.test/new.png',

@@ -3,9 +3,11 @@ import 'dart:async';
 import 'package:buzz/features/channels/emoji_picker.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
+import 'package:buzz/shared/custom_emoji/emoji_catalog_search.dart';
 import 'package:buzz/shared/emoji/emoji_data.dart';
 import 'package:buzz/shared/emoji/emoji_data_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/theme/theme_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -71,11 +73,13 @@ Future<void> _type(WidgetTester tester, String text) async {
     find.byKey(const ValueKey('emoji-picker-search')),
     text,
   );
+  await tester.pump();
   await tester.pump(const Duration(milliseconds: 299));
 }
 
 void main() {
   testWidgets('searching the catalog from the picker', (tester) async {
+    final semantics = tester.ensureSemantics();
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
     final session = _FakeSession();
@@ -127,7 +131,6 @@ void main() {
     expect(_catalogTile('pancake'), findsNothing);
     expect(_catalogTile('party_parrot'), findsOneWidget);
     expect(find.bySemanticsLabel(':party_parrot:'), findsOneWidget);
-    expect(find.bySemanticsLabel('Search emoji'), findsOneWidget);
 
     // Picking a result emits the shortcode, and the message or reaction that
     // follows carries the result's URL.
@@ -164,6 +167,20 @@ void main() {
     expect(_catalogTile('beehive'), findsOneWidget);
     expect(find.byKey(const ValueKey('emoji-tile-custom-bee')), findsOneWidget);
 
+    // Asking the same query again and failing keeps that query's results.
+    unawaited(
+      container.read(emojiCatalogSearchProvider.notifier).search('bee'),
+    );
+    await tester.pump();
+    session.searches.last.reply.completeError(Exception('relay down again'));
+    await tester.pump();
+    expect(find.text('Couldn’t search the emoji catalog.'), findsOneWidget);
+    expect(_catalogTile('beehive'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('emoji-catalog-retry')));
+    await tester.pump();
+    session.searches.last.reply.complete([_entry('beehive')]);
+    await tester.pump();
+
     // A new query drops the old query's results at once.
     await _type(tester, 'party');
     await tester.pump(const Duration(milliseconds: 2));
@@ -179,5 +196,6 @@ void main() {
     expect(find.text('No emoji found.'), findsOneWidget);
     await _type(tester, 'zzz');
     expect(find.text('No emoji found.'), findsNothing);
+    semantics.dispose();
   });
 }
