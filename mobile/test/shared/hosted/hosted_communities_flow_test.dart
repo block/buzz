@@ -28,6 +28,10 @@ void main() {
         if (failure == 'binding') f.bound = '2' * 64;
         final before = await const FlutterSecureStorage().readAll();
         await f.flow.signInAccount();
+        if (failure == 'backup') {
+          expect(f.flow.stage, HostedFlowStage.confirmBackup);
+          await f.flow.confirmBackup!();
+        }
         expect(f.flow.stage, HostedFlowStage.blocked);
         if (failure == 'binding') {
           expect(f.flow.problem, HostedFlowProblem.identityMismatch);

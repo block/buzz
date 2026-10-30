@@ -26,6 +26,7 @@ enum HostedFlowStage {
   signIn,
   chooseIdentity,
   setupIdentity,
+  confirmBackup,
   chooseCommunities,
   communityConflict,
   acceptPolicy,
@@ -103,6 +104,8 @@ class HostedFlow extends ChangeNotifier {
   bool canCreateIdentity = false;
   String? requiredIdentityPubkey;
   String? _pairedPubkey;
+  ({String subject, String pubkey})? _pendingBackup;
+  String? get backupPubkey => _pendingBackup?.pubkey;
   SensitiveActionPolicy? pairedSensitiveActionPolicy;
   List<AddCommunityDeepLink> communities = const [];
   Set<String> selectedRelays = const {};
@@ -133,6 +136,7 @@ class HostedFlow extends ChangeNotifier {
   int _generation = 0;
 
   int _nextGeneration() {
+    _pendingBackup = null;
     _failedRelay = null;
     _cancelPolicy();
     _cancelProfile();
@@ -465,6 +469,24 @@ class HostedFlow extends ChangeNotifier {
     return _enqueue(() => _continue(generation, selectedPubkey: pubkey));
   }
 
+  /// Consent applies only to the displayed identity and account in this attempt.
+  Future<void> Function()? get confirmBackup {
+    final approved = _pendingBackup;
+    final presentedGeneration = _generation;
+    if (stage != HostedFlowStage.confirmBackup || approved == null) return null;
+    return () {
+      if (_disposed ||
+          presentedGeneration != _generation ||
+          stage != HostedFlowStage.confirmBackup ||
+          _pendingBackup != approved) {
+        return Future.value();
+      }
+      final generation = _nextGeneration();
+      _set(HostedFlowStage.working);
+      return _enqueue(() => _continue(generation, approvedBackup: approved));
+    };
+  }
+
   /// A new identity is offered only after authoritative absence was established.
   Future<void> createIdentity() {
     if (stage != HostedFlowStage.setupIdentity || !canCreateIdentity) {
@@ -497,6 +519,7 @@ class HostedFlow extends ChangeNotifier {
     int generation, {
     String? selectedPubkey,
     bool createNew = false,
+    ({String subject, String pubkey})? approvedBackup,
   }) async {
     final target = _target;
     final session = account.account;
@@ -541,6 +564,30 @@ class HostedFlow extends ChangeNotifier {
               HostedFlowStage.blocked,
               HostedFlowProblem.unsupportedPlatform,
             );
+            return;
+          }
+        }
+        if (resolved.state == HostedIdentityState.needsBinding ||
+            resolved.state == HostedIdentityState.needsBackup) {
+          final pubkey = resolved.pubkey;
+          if (pubkey == null) throw AccountIdentityFailure.absent;
+          final saved = await store.read();
+          if (_disposed || generation != _generation) return;
+          if (account.account?.subject != session.subject) {
+            throw AccountFailure.differentAccount;
+          }
+          final backup = (subject: session.subject, pubkey: pubkey);
+          // A saved relay, account binding or pending ciphertext is not consent.
+          // Ask before permanent binding as well as export. Reconcile again
+          // after confirmation; never authorize another key.
+          if (!(saved?.hasBackupFor(
+                    backend: HostedEnvironment.origin.origin,
+                    subject: session.subject,
+                  ) ??
+                  false) &&
+              approvedBackup != backup) {
+            _pendingBackup = backup;
+            _set(HostedFlowStage.confirmBackup);
             return;
           }
         }
