@@ -20,12 +20,15 @@ use image::ImageDecoder;
 use nostr::{EventBuilder, Kind, Tag};
 use std::io::Cursor;
 
+#[cfg(test)]
+pub(crate) use buzz_core_pkg::team_catalog::{
+    is_safe_catalog_avatar_url, validate_member, MAX_IDENTIFIER_BYTES, MAX_INSTRUCTIONS_BYTES,
+    MAX_MEMBERS, MAX_MEMBER_KEY_BYTES, MAX_NAME_BYTES, MAX_NAME_POOL_ENTRIES,
+    MAX_SYSTEM_PROMPT_BYTES, MAX_TEXT_BYTES, MAX_TOTAL_BYTES, PROJECTION_HASH_HEX_LEN,
+};
 pub use buzz_core_pkg::team_catalog::{
-    is_safe_catalog_avatar_url, member_projection_hash, team_catalog_content_json, validate_member,
-    validate_team_catalog_content, TeamCatalogContent, TeamCatalogMember, MAX_AVATAR_URL_BYTES,
-    MAX_BUILTIN_SLUG_BYTES, MAX_IDENTIFIER_BYTES, MAX_INSTRUCTIONS_BYTES, MAX_MEMBERS,
-    MAX_MEMBER_KEY_BYTES, MAX_NAME_BYTES, MAX_NAME_POOL_ENTRIES, MAX_SYSTEM_PROMPT_BYTES,
-    MAX_TEXT_BYTES, MAX_TOTAL_BYTES, PROJECTION_HASH_HEX_LEN, TEAM_CATALOG_SCHEMA_VERSION,
+    member_projection_hash, team_catalog_content_json, validate_team_catalog_content,
+    TeamCatalogContent, TeamCatalogMember, MAX_AVATAR_URL_BYTES, TEAM_CATALOG_SCHEMA_VERSION,
 };
 
 use super::{AgentDefinition, RespondTo, TeamRecord};
