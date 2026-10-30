@@ -1276,9 +1276,118 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
         ),
         setup_mode: false,
         adapter_availability: None,
+        dial_relay_url: "wss://relay.example".to_string(),
         start_nonce: "test-nonce".to_string(),
         #[cfg(windows)]
         job: None,
     };
     crate::managed_agents::ManagedAgentPairRuntime::starting(process)
+}
+
+// ── spawn relay env: production seam ────────────────────────────────────
+
+/// Regression: `spawn_agent_child` must hand the harness the workspace relay's
+/// configured spelling. Runtime-pair keys canonicalize `localhost` to
+/// `127.0.0.1`, but the relay binds communities to the literal authority, so
+/// dialing the canonical host lands the harness in a different (empty) tenant
+/// — `discovered 0 channel(s)`, mentions ignored. This spawns a fake ACP
+/// harness and reads the env it actually received, so reverting the
+/// `BUZZ_RELAY_URL` write to `runtime_key.relay_url` fails here.
+#[cfg(unix)]
+#[test]
+fn spawn_hands_the_harness_the_configured_relay_spelling() {
+    use std::io::Write as _;
+    use tauri::Manager as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dump = dir.path().join("relay-url.txt");
+    let harness = dir.path().join("fake-acp");
+    {
+        let mut file = std::fs::File::create(&harness).expect("fake harness");
+        writeln!(file, "#!/bin/sh").expect("shebang");
+        writeln!(
+            file,
+            "printf '%s' \"$BUZZ_RELAY_URL\" > \"$BUZZ_TEST_DUMP\""
+        )
+        .expect("body");
+    }
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake harness");
+    }
+
+    let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+    context.config_mut().identifier = dir.path().to_str().expect("utf-8 tempdir").to_owned();
+    let state = crate::app_state::build_app_state();
+    *state.relay_url_override.lock().expect("relay override") = Some("ws://localhost:3000".into());
+    let app = tauri::test::mock_builder()
+        .manage(state)
+        .build(context)
+        .expect("mock app");
+
+    let mut record =
+        super::test_fixtures::fixture(crate::managed_agents::RespondTo::Anyone, Vec::new(), None);
+    record.pubkey = nostr::Keys::generate().public_key().to_hex();
+    record.private_key_nsec = nostr::Keys::generate().secret_key().to_secret_hex();
+    record.acp_command = harness.to_string_lossy().into_owned();
+    record
+        .env_vars
+        .insert("BUZZ_TEST_DUMP".into(), dump.to_string_lossy().into_owned());
+
+    let state = app.state::<crate::app_state::AppState>();
+    let admission = crate::managed_agents::AdmissionSnapshot::capture(&state);
+    let transition = state
+        .managed_agent_runtime_transition
+        .lock()
+        .expect("transition lock");
+    let admitted = transition
+        .admit(&admission, "ws://localhost:3000")
+        .expect("relay admitted");
+
+    let runtime_key = crate::managed_agents::ManagedAgentRuntimeKey::new(
+        record.pubkey.clone(),
+        "ws://localhost:3000",
+    )
+    .expect("pair key");
+    assert_eq!(runtime_key.relay_url, "ws://127.0.0.1:3000");
+    let mut process = super::spawn_agent_child(
+        app.handle(),
+        &record,
+        super::SpawnRelay {
+            key: &runtime_key,
+            dial_url: "ws://localhost:3000",
+        },
+        &admitted,
+        false,
+        None,
+        None,
+    )
+    .expect("spawn fake harness");
+
+    let _ = process.child.wait();
+    let dialed = std::fs::read_to_string(&dump).expect("harness recorded its relay URL");
+    assert_eq!(
+        dialed, "ws://localhost:3000",
+        "spawn must preserve the configured host spelling; dialing the canonical \
+         pair-key host (127.0.0.1) joins a different community"
+    );
+}
+
+/// Regression: restart flows must reuse the URL a pair was actually dialed
+/// with, not its canonical pair-key spelling. `localhost:3000` and
+/// `127.0.0.1:3000` are distinct communities at the relay, so reading the
+/// canonical key here would restart the harness in the wrong tenant.
+#[test]
+fn restart_targets_the_dialed_spelling_not_the_canonical_key() {
+    let pubkey = "cc".repeat(32);
+    let pair = make_pair_runtime_placeholder();
+    let key = crate::managed_agents::ManagedAgentRuntimeKey::new(&pubkey, "ws://localhost:3000")
+        .expect("pair key");
+    assert_eq!(key.relay_url, "ws://127.0.0.1:3000");
+    let runtimes = std::collections::HashMap::from([(key, pair)]);
+    assert_eq!(
+        super::managed_agent_runtime_dial_urls(&runtimes, &pubkey),
+        vec!["wss://relay.example".to_string()]
+    );
 }
