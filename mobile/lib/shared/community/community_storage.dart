@@ -83,7 +83,7 @@ class CommunityStorage {
           scheme: ['https', 'wss'].contains(uri.scheme) ? 'https' : 'http',
         )
         .origin;
-    return '${_pendingInvitePrefix}${sha256.convert(utf8.encode(jsonEncode([origin, code])))}';
+    return '$_pendingInvitePrefix${sha256.convert(utf8.encode(jsonEncode([origin, code])))}';
   }
 
   /// Retain the claim identity before sending a request with uncertain outcomes.

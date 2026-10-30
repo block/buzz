@@ -779,7 +779,14 @@ void main() {
       'new device recovers and preserves existing/unreadable profile ($unreadableProfile)',
       (tester, f) async {
         await f.initialize(localIdentity: false);
-        f.cloudKeys.addAll([f.secondKeys, f.keys]);
+        // Exercise both an already-bound recovery and recovery that must bind
+        // its confirmed backup, without requiring native sealing in either case.
+        if (unreadableProfile) {
+          f.bound = null;
+          f.cloudKeys.add(f.keys);
+        } else {
+          f.cloudKeys.addAll([f.secondKeys, f.keys]);
+        }
         f.rows.addAll([f.row('one'), f.row('two')]);
         f.offerProfile = false;
         f.profileUnavailable = unreadableProfile;
@@ -826,7 +833,7 @@ void main() {
         expect(saved.pubkey, f.keys.public);
         expect((await f.store.read())!.pubkey, f.keys.public);
         expect(f.sent('/recovery'), hasLength(1));
-        expect(f.sent('/challenge'), isEmpty);
+        expect(f.sent('/challenge'), hasLength(unreadableProfile ? 1 : 0));
         expect(f.sent('/nsec-backups'), isEmpty);
         expect(f.sent('/enrollment'), isEmpty);
         expect(await f.storage.loadActiveId(), saved.id);

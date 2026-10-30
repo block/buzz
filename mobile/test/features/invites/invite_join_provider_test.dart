@@ -13,7 +13,6 @@ import 'package:buzz/app.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/invites/invite_join_provider.dart';
 import 'package:buzz/shared/auth/auth.dart';
-import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
 
 import '../../shared/community/community_storage_test.dart';
