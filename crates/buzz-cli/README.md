@@ -120,6 +120,7 @@ The table below mirrors that tree for readers who are not at a terminal.
 
 | Group | Subcommand | Description |
 |-------|-----------|-------------|
+| `auth` | `nip98-request` | Sign and send a bounded NIP-98 HTTPS POST request |
 | `messages` | `send` | Send a message to a channel |
 | | `send-diff` | Send a code diff with metadata |
 | | `edit` | Edit a message you sent |
