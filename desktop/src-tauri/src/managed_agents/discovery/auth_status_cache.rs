@@ -54,12 +54,19 @@ pub(crate) fn len() -> usize {
 pub(super) fn resolve_auth_statuses(partials: &mut [super::PartialEntry], force: bool) {
     use crate::managed_agents::AcpAvailabilityStatus;
 
+    // Token evidence describes the spawned runtime; settle it before any probe.
+    super::auth_token::apply_token_auth_evidence(partials);
+
     if force {
         let probe_handles: Vec<(usize, std::thread::JoinHandle<AuthStatus>)> = partials
             .iter()
             .enumerate()
             .filter_map(|(idx, partial)| {
                 if partial.entry.availability != AcpAvailabilityStatus::Available {
+                    return None;
+                }
+                // Already settled by a token — do not spend a probe.
+                if partial.entry.auth_status == AuthStatus::LoggedIn {
                     return None;
                 }
                 let probe_args = partial.runtime.auth_probe_args?;
@@ -85,6 +92,7 @@ pub(super) fn resolve_auth_statuses(partials: &mut [super::PartialEntry], force:
         for partial in partials.iter_mut() {
             if partial.entry.availability != AcpAvailabilityStatus::Available
                 || partial.runtime.auth_probe_args.is_none()
+                || partial.entry.auth_status == AuthStatus::LoggedIn
             {
                 continue;
             }
