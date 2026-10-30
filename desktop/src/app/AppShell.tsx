@@ -90,7 +90,6 @@ import {
   TOGGLE_CHANNEL_MUTE_UI,
   type ToggleChannelMutePayload,
 } from "@/features/slash-commands/lib/channelAdminCommands";
-import { useSlashCommandUiHandler } from "@/features/slash-commands/lib/slashCommandUiRequests";
 import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
 import { useCommunities } from "@/features/communities/useCommunities";
 import {
