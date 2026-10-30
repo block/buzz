@@ -86,6 +86,20 @@ class OrganizationSignIn extends ChangeNotifier {
     }
   }
 
+  /// Drops only the organization session and signs in again, for an account
+  /// the relay refuses for this key. The hosted account is untouched.
+  Future<void> changeAccount() async {
+    if (_disposed || status == OrganizationSessionStatus.signingIn) return;
+    try {
+      await account.clearLocalSession();
+    } on AccountFailure catch (error) {
+      failure = error;
+      _set(_currentStatus());
+      return;
+    }
+    await signIn();
+  }
+
   Future<void> cancel() async {
     await browser.cancel();
     _set(_currentStatus());

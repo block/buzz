@@ -71,6 +71,12 @@ class OrganizationSignInBanner extends HookConsumerWidget {
                 unawaited(ref.read(relaySessionProvider.notifier).reconnect()),
             child: const Text('Retry'),
           ),
+          // Retrying the same refused account fails the same way.
+          if (relayFailure == AccountFailure.denied)
+            TextButton(
+              onPressed: () => unawaited(signIn.changeAccount()),
+              child: const Text('Use a different account'),
+            ),
         ];
     }
     return Positioned(

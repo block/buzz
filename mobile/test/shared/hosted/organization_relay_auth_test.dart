@@ -180,6 +180,16 @@ void main() {
       expect(await auth.headers(relay), contains('Nostr-Federated-Identity'));
     });
 
+    test('an issued assertion serves cached reads for the relay', () async {
+      await saveSession();
+      final auth = relayAuth(organizationClient());
+      expect(auth.cachedHeaders(relay), isNull);
+      await auth.headers(relay);
+      expect(auth.cachedHeaders(relay), {
+        'Nostr-Federated-Identity': 'Bearer org-token',
+      });
+    });
+
     test('a different bound key is refused before issuance', () async {
       await saveSession();
       boundIdentity = {'pubkey_hex': 'f' * 64};

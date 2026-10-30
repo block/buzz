@@ -1,5 +1,6 @@
 import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
+import 'dart:async';
 import 'dart:io';
 import 'dart:convert';
 import 'package:flutter/services.dart';
@@ -19,6 +20,8 @@ import 'package:buzz/shared/hosted/browser_auth.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_flow.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
+import 'package:buzz/shared/hosted/organization_sign_in.dart';
+import 'package:buzz/shared/relay/relay_provider.dart';
 import 'package:buzz/shared/relay/relay_session.dart';
 import 'package:buzz/shared/relay/relay_socket.dart';
 import 'package:buzz/shared/hosted/self_hosted_entry.dart';
@@ -69,6 +72,15 @@ class HostedJourneyFixture {
   bool denyAssertion = false;
   bool refuseUpgrade = false;
   String subject = 'journey-owner';
+
+  /// A separate organization realm, as BUZZ_ORGANIZATION_URL and
+  /// BUZZ_ORGANIZATION_RELAYS configure. Enable before [mount].
+  static final organizationOrigin = Uri.parse('https://block.example.com');
+  static const organizationRelayHost = 'buzz.block.example.com';
+  bool organizationEnabled = false;
+  String organizationSubject = 'journey-owner';
+  String? organizationBound;
+  int organizationBrowserStarts = 0;
   Future<void> Function()? beforeAssertionReturn;
   final socketHeaders = <Map<String, String>>[];
   bool offerProfile = true;
@@ -310,6 +322,60 @@ class HostedJourneyFixture {
     );
   });
 
+  http.Client organizationClient() => MockClient((request) async {
+    requests.add(request);
+    expect(request.url.origin, organizationOrigin.origin);
+    final path = request.url.path;
+    Object result;
+    if (path.endsWith('/exchange')) {
+      result = {
+        'session_credential': 'organization-session',
+        'expires_at': expiry,
+      };
+    } else if (path.endsWith('/me')) {
+      result = {'subject': organizationSubject, 'expires_at': expiry};
+    } else if (path.endsWith('/current')) {
+      result = {
+        'identity': organizationBound == null
+            ? null
+            : {'pubkey_hex': organizationBound},
+      };
+    } else if (path.endsWith('/identity/assertions')) {
+      final body = jsonDecode(request.body) as Map;
+      if (organizationBound != null &&
+          body['nostr_pubkey'] != organizationBound) {
+        return http.Response('{}', 403);
+      }
+      organizationBound ??= body['nostr_pubkey'] as String;
+      result = {
+        'assertion': 'organization-assertion',
+        'nostr_pubkey': organizationBound,
+        'expires_at':
+            assertionNow
+                .add(const Duration(minutes: 5))
+                .millisecondsSinceEpoch ~/
+            1000,
+      };
+    } else {
+      return http.Response('{}', 404);
+    }
+    return http.Response(
+      jsonEncode(result),
+      200,
+      headers: {'content-type': 'application/json'},
+    );
+  });
+
+  /// Stores an organization session as a completed sign-in would.
+  Future<void> signInOrganization() async {
+    final account = BuilderlabAccountClient(
+      accountOrigin: organizationOrigin,
+      httpClient: organizationClient(),
+    );
+    await account.exchange(code: 'synthetic-code', verifier: 'v' * 43);
+    account.dispose();
+  }
+
   HostedFlow createFlow(Ref ref) => activeFlow = createHostedFlow(
     ref,
     browserAuth: _Browser((uri) async {
@@ -350,10 +416,44 @@ class HostedJourneyFixture {
             pairingProvider.overrideWith(
               () => PairingNotifier(credentialValidator: pairingValidator),
             ),
+          if (organizationEnabled) ...[
+            organizationAccountProvider.overrideWith((ref) {
+              final account = BuilderlabAccountClient(
+                accountOrigin: organizationOrigin,
+                httpClient: organizationClient(),
+              );
+              ref.onDispose(account.dispose);
+              return account;
+            }),
+            organizationSignInProvider.overrideWith((ref) {
+              final signIn = OrganizationSignIn(
+                account: ref.watch(organizationAccountProvider)!,
+                browser: _Browser(
+                  (_) async => organizationBrowserStarts++,
+                  origin: organizationOrigin,
+                ),
+                // As in production: only the organization's relay reconnects.
+                reconnect: () async {
+                  final config = ref.read(relayConfigProvider);
+                  if (ref
+                      .read(hostedRelayAuthProvider)
+                      .organizationProtects(config)) {
+                    await ref.read(relaySessionProvider.notifier).reconnect();
+                  }
+                },
+              );
+              ref.onDispose(signIn.dispose);
+              unawaited(signIn.initialize());
+              return signIn;
+            }),
+          ],
           if (relayAuthEnabled) ...[
             hostedRelayAuthProvider.overrideWith((ref) {
               final auth = HostedRelayAuth(
                 ref.watch(builderlabAccountProvider),
+                organization: ref.watch(organizationAccountProvider),
+                organizationRelay: (relay) =>
+                    organizationEnabled && relay.host == organizationRelayHost,
                 enabled: true,
                 now: () => assertionNow,
               );
@@ -553,7 +653,7 @@ class _Recovery implements InviteJoinRecovery {
 }
 
 class _Browser extends BrowserAuth {
-  _Browser(Future<void> Function(Uri) onStart)
+  _Browser(Future<void> Function(Uri) onStart, {super.origin})
     : super(
         openBrowser: (uri) async {
           await onStart(uri);
@@ -589,9 +689,14 @@ class _RelaySocket extends RelaySocket {
   @override
   Future<void> connect() async {
     fixture.socketHeaders.add(Map.of(headers));
+    final host = Uri.parse(url).host;
     expect(
       headers['Nostr-Federated-Identity'],
-      HostedEnvironment.requiresAuth(Uri.parse(url).host)
+      fixture.organizationEnabled &&
+              host == HostedJourneyFixture.organizationRelayHost
+          // Signed out connects without one and lets the relay decide.
+          ? anyOf(isNull, 'Bearer organization-assertion')
+          : HostedEnvironment.requiresAuth(host)
           ? 'Bearer synthetic-assertion'
           : isNull,
     );
