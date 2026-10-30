@@ -6,7 +6,7 @@ use crate::client::{normalize_events, normalize_write_response, BuzzClient};
 use crate::commands::event_output::{format_events, thread_markers};
 use crate::error::CliError;
 use crate::validate::{
-    infer_language, parse_event_id, parse_uuid, read_or_stdin, truncate_diff,
+    infer_language, parse_event_id, parse_uuid, read_or_stdin, sanitize_filename, truncate_diff,
     validate_content_size, validate_hex64, validate_uuid, MAX_DIFF_BYTES,
 };
 use buzz_sdk::mentions::{
@@ -622,7 +622,14 @@ pub async fn cmd_send_message(
             .upload_file(file_path)
             .await
             .map_err(|e| CliError::Other(format!("upload failed for {file_path}: {e}")))?;
-        media_tags.push(crate::client::build_imeta_tag(&desc));
+        // The relay is content-addressed, so the original filename is only a
+        // client-side label. Carry it in the imeta `filename` field so a
+        // receiver can tell what the attachment IS — the desktop renders a
+        // voice note as an audio bubble only when the filename starts with
+        // `voice-note-` (desktop/src/features/messages/lib/audioAttachment.ts).
+        // Without it a packaged voice note renders as a video player.
+        let filename = sanitize_filename(file_path);
+        media_tags.push(crate::client::build_imeta_tag(&desc, Some(&filename)));
         if desc.mime_type.starts_with("video/") {
             media_content.push_str("\n![video](");
         } else {
@@ -1827,5 +1834,125 @@ mod tests {
             emoji_tags.is_empty(),
             "palette-error fallback must produce no emoji tags, got: {emoji_tags:?}"
         );
+    }
+
+    /// A packaged voice note must reach the receiver with the `filename` imeta
+    /// tag, because the Buzz desktop renders an audio bubble ONLY when the
+    /// filename starts with `voice-note-`
+    /// (desktop/src/features/messages/lib/audioAttachment.ts). Without the tag
+    /// a voice note renders as a video player instead.
+    ///
+    /// This drives the REAL production path: `cmd_send_message` -> `upload_file`
+    /// (PUT /upload) -> `build_imeta_tag` -> signed event (POST /events).
+    #[tokio::test]
+    async fn cmd_send_message_labels_a_voice_note_attachment_with_its_filename() {
+        use axum::routing::put as axum_put;
+
+        // A minimal but REAL MP4 header: a `ftyp` box with the `isom` major
+        // brand. `infer` sniffs `video/mp4` from the magic bytes, which is what
+        // `upload_file` gates the upload on — the same detection production
+        // uses. (The relay's deeper container validation is the relay's job and
+        // is not what this test is about.)
+        let mut envelope: Vec<u8> = Vec::new();
+        envelope.extend_from_slice(&24u32.to_be_bytes()); // box size (24 = the whole ftyp box)
+        envelope.extend_from_slice(b"ftyp");
+        envelope.extend_from_slice(b"isom"); // major brand
+        envelope.extend_from_slice(&512u32.to_be_bytes()); // minor version
+        envelope.extend_from_slice(b"isom"); // compatible brand
+        envelope.extend_from_slice(b"mp41"); // compatible brand
+        assert_eq!(envelope.len(), 24);
+
+        let captured_event: StdArc<std::sync::Mutex<Option<CapturedEvent>>> =
+            StdArc::new(std::sync::Mutex::new(None));
+        let cap = captured_event.clone();
+        let upload_body = envelope.clone();
+        let app = AxumRouter::new()
+            .route(
+                "/upload",
+                axum_put(move |_headers: AxumHeaderMap, _body: AxumBytes| {
+                    let upload_body = upload_body.clone();
+                    async move {
+                        let sha = {
+                            use sha2::{Digest, Sha256};
+                            hex::encode(Sha256::digest(&upload_body))
+                        };
+                        (
+                            AxumStatusCode::OK,
+                            [("content-type", "application/json")],
+                            format!(
+                                r#"{{"url":"http://127.0.0.1:1/media/{sha}.mp4","sha256":"{sha}","size":{},"type":"video/mp4","uploaded":1,"dim":"16x16"}}"#,
+                                upload_body.len()
+                            ),
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/events",
+                axum_post(move |_headers: AxumHeaderMap, body: AxumBytes| {
+                    let cap = cap.clone();
+                    async move {
+                        let body_str = String::from_utf8_lossy(&body).to_string();
+                        *cap.lock().unwrap() = Some(CapturedEvent { body: body_str });
+                        (
+                            AxumStatusCode::OK,
+                            [("content-type", "application/json")],
+                            r#"{"event_id":"fake0002","accepted":true}"#,
+                        )
+                    }
+                }),
+            );
+
+        let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: StdSocketAddr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let url = format!("http://{addr}");
+        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+
+        // Write the attachment under a voice-note filename, the way the Hermes
+        // adapter packages it (`voice-note-<id>.mp4`).
+        let dir =
+            std::env::temp_dir().join(format!("buzz-cli-filename-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let attachment = dir.join("voice-note-1792.mp4");
+        std::fs::write(&attachment, &envelope).unwrap();
+
+        let mut params = send_params("voice note");
+        params.files = vec![attachment.to_string_lossy().to_string()];
+        cmd_send_message(&client, params)
+            .await
+            .expect("send with a voice-note attachment must succeed");
+
+        let raw = captured_event.lock().unwrap();
+        let raw = raw.as_ref().expect("event must have been submitted");
+        let event: serde_json::Value = serde_json::from_str(&raw.body).unwrap();
+        let tags: Vec<Vec<String>> = event["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                t.as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap_or("").to_string())
+                    .collect()
+            })
+            .collect();
+        let imeta_tags: Vec<&Vec<String>> = tags
+            .iter()
+            .filter(|t| t.first().map(|s| s.as_str()) == Some("imeta"))
+            .collect();
+        assert_eq!(
+            imeta_tags.len(),
+            1,
+            "exactly one imeta tag for one attachment, got: {imeta_tags:?}"
+        );
+        assert!(
+            imeta_tags[0]
+                .iter()
+                .any(|p| p == "filename voice-note-1792.mp4"),
+            "the imeta filename must carry the voice-note name the desktop keys on, got: {imeta_tags:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
