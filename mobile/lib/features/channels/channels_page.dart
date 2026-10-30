@@ -116,7 +116,6 @@ class ChannelsPage extends HookConsumerWidget {
     this.newDmAction,
     this.communityAction,
     this.onInbox,
-    this.hasUnreadInbox = false,
     this.communityInvitePageBuilder,
     this.communityAppearancePageBuilder,
     required this.onSettingsTransitionProgress,
@@ -140,9 +139,6 @@ class ChannelsPage extends HookConsumerWidget {
 
   /// Opens the conversation inbox above the channel sections.
   final VoidCallback? onInbox;
-
-  /// Whether the inbox contains unread conversations.
-  final bool hasUnreadInbox;
 
   /// Builds the invite destination opened from the community sheet.
   final WidgetBuilder? communityInvitePageBuilder;
@@ -675,7 +671,6 @@ class ChannelsPage extends HookConsumerWidget {
         showTeam: showTeam,
         showTeamHeading: showTeamHeading,
         onInbox: onInbox,
-        hasUnreadInbox: hasUnreadInbox,
         onReadyChanged: (ready) => bodyReady.value = ready,
         channels: channels,
         channelsAsync: channelsAsync,

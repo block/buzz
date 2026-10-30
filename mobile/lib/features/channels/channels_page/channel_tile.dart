@@ -95,7 +95,7 @@ class _ChannelTile extends ConsumerWidget {
                               context,
                               unread: isUnread,
                             ),
-                      fontWeight: isUnread ? FontWeight.w700 : FontWeight.w500,
+                      fontWeight: isUnread ? FontWeight.w600 : FontWeight.w400,
                     ),
                   ),
                 ],

@@ -20,7 +20,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   Future<Widget> buildHome({
-    int unreadInboxCount = 0,
     bool longSolo = false,
     bool disableAnimations = false,
     Gradient? topSectionGradient,
@@ -62,7 +61,6 @@ void main() {
             );
           },
           settingsPageBuilder: _buildSettingsPage,
-          hasUnreadInbox: unreadInboxCount > 0,
         ),
       ),
     );

@@ -103,20 +103,24 @@ LinearGradient? buzzTopSectionGradient(
 
 /// Desktop navigation ink distinguishes read destinations from unread labels.
 Color channelNavigationForeground(BuildContext context, {bool unread = false}) {
-  if (unread || Theme.of(context).brightness != Brightness.dark) {
-    return navigationPrimaryForeground(context);
-  }
-  return Theme.of(context).colorScheme.onSurfaceVariant;
+  final dark = Theme.of(context).brightness == Brightness.dark;
+  return unread
+      ? (dark ? const Color(0xFFFFFFFF) : const Color(0xFF262626))
+      : (dark ? const Color(0xFFC7C7C7) : const Color(0xFF404040));
 }
 
-/// Metadata ink used by Home section headings and muted destinations.
+/// Shared desktop section-heading ink.
+Color navigationHeadingForeground(BuildContext context) =>
+    Theme.of(context).brightness == Brightness.dark
+    ? const Color(0xFFC7C7C7)
+    : const Color(0xFF525252);
+
+/// Section disclosure controls share the heading's foreground role.
+Color navigationAccessoryForeground(BuildContext context) =>
+    navigationHeadingForeground(context);
+
+/// Muted destinations remain quieter than ordinary rows and section headings.
 Color navigationMetadataForeground(BuildContext context) =>
     Theme.of(context).brightness == Brightness.dark
     ? const Color(0xFFA4A4A4)
     : const Color(0xFF5F5F5F);
-
-/// Quieter ink for section disclosure and overflow controls.
-Color navigationAccessoryForeground(BuildContext context) =>
-    navigationMetadataForeground(
-      context,
-    ).withValues(alpha: MediaQuery.highContrastOf(context) ? 1 : 0.8);

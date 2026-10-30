@@ -141,7 +141,6 @@ void main() {
                   onChooseAgent: () => showAgents(context),
                 ),
                 settingsPageBuilder: _buildSettingsPage,
-                hasUnreadInbox: false,
               )
             : Stack(
                 children: [
@@ -511,10 +510,7 @@ void main() {
       final text = tester.widget<Text>(find.text(label));
       expect(text.style?.fontSize, navigationChatTitleTextStyle.fontSize);
       expect(text.style?.height, navigationChatTitleTextStyle.height);
-      expect(
-        text.style?.color,
-        Theme.of(tester.element(find.text(label))).colorScheme.onSurface,
-      );
+      expect(text.style?.color, const Color(0xFF404040));
     }
     expect(find.byKey(const ValueKey('channel-icon-1')), findsOneWidget);
     final sectionTitle = tester.widget<Text>(find.text('Channels'));
@@ -2421,7 +2417,7 @@ void main() {
           await tester.pump();
           expect(
             tester.widget<Text>(find.text('general')).style!.fontWeight,
-            FontWeight.w700,
+            FontWeight.w600,
           );
           expect(find.text('Alice ready'), findsOneWidget);
           expect(progress.last, 0);
@@ -3435,25 +3431,22 @@ void main() {
 
     expect(
       tester.widget<Text>(find.text('general')).style?.fontWeight,
-      FontWeight.w700,
+      FontWeight.w600,
     );
     expect(
       tester.widget<Text>(find.text('general')).style?.color,
-      Theme.of(tester.element(find.text('general'))).colorScheme.onSurface,
+      const Color(0xFFFFFFFF),
     );
 
     expect(
       tester.widget<Text>(find.text('Channels')).style?.color,
-      const Color(0xFFA4A4A4),
+      const Color(0xFFC7C7C7),
     );
     final options = find.descendant(
       of: find.byTooltip('Channels options'),
       matching: find.byIcon(BuzzIcons.ellipsis),
     );
-    expect(
-      tester.widget<Icon>(options).color,
-      const Color(0xFFA4A4A4).withValues(alpha: 0.8),
-    );
+    expect(tester.widget<Icon>(options).color, const Color(0xFFC7C7C7));
     expect(
       tester.widget<Icon>(find.byKey(const ValueKey('channel-icon-1'))).color,
       const Color(0xFFC7C7C7),
@@ -3463,7 +3456,7 @@ void main() {
 
     expect(
       tester.widget<Text>(find.text('general')).style?.fontWeight,
-      FontWeight.w500,
+      FontWeight.w400,
     );
     expect(
       tester.widget<Text>(find.text('general')).style?.color,
@@ -3532,7 +3525,7 @@ void main() {
 
     expect(
       tester.widget<Text>(find.text('general')).style?.fontWeight,
-      FontWeight.w700,
+      FontWeight.w600,
     );
   });
 
@@ -3604,7 +3597,7 @@ void main() {
 
       expect(
         tester.widget<Text>(find.text('general')).style?.fontWeight,
-        bold ? FontWeight.w700 : FontWeight.w500,
+        bold ? FontWeight.w600 : FontWeight.w400,
       );
     });
   }

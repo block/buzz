@@ -28,8 +28,6 @@ class HomePage extends HookConsumerWidget {
     this.mePageBuilder,
     this.profilePageBuilder,
     this.communityAppearancePageBuilder,
-    required this.hasUnreadInbox,
-    this.hasUnreadSolo = false,
     super.key,
   });
 
@@ -47,8 +45,6 @@ class HomePage extends HookConsumerWidget {
   mePageBuilder;
   final WidgetBuilder? communityInvitePageBuilder;
   final WidgetBuilder? communityAppearancePageBuilder;
-  final bool hasUnreadInbox;
-  final bool hasUnreadSolo;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -92,7 +88,6 @@ class HomePage extends HookConsumerWidget {
     final solo = mePageBuilder?.call(context, newChat, newWorkspace);
     final messages = ChannelsPage(
       settingsPageBuilder: settingsPageBuilder,
-      hasUnreadInbox: hasUnreadInbox,
       onInbox: () => Navigator.of(context).push(
         BottomUpPageRoute<void>(
           builder: (_) => const ActivityPage(),
@@ -156,7 +151,6 @@ class HomePage extends HookConsumerWidget {
         ];
       },
       messagesFilters: MessagesFilters(
-        hasUnreadSolo: hasUnreadSolo,
         selected: filter.value,
         onSelected: (value) {
           filter.value = value;
