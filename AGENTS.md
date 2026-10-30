@@ -774,6 +774,16 @@ removes stale worktree-suffixed installs from simulators/emulators. See
 [mobile/README.md](mobile/README.md) for direct Xcode / Android Studio
 usage.
 
+### Windows (no hermit)
+
+hermit publishes no Windows build — `bin/flutter` 404s fetching
+`hermit-mingw64_nt-10.0-<build>-amd64.gz`, and `source bin/activate-hermit`
+leaves you with `flutter: command not found`. On Windows run `pwsh -File
+scripts/bootstrap-windows.ps1` instead: it installs the pinned SDK and prints
+the `PATH` / `PUB_CACHE` lines to set. `flutter test`, `flutter analyze`, and
+`dart format` all work from there; iOS simulator work stays macOS-only. See
+[docs/windows-dev-setup.md](docs/windows-dev-setup.md).
+
 ### Testing Conventions
 
 Favor a few functional tests over many small ones. Every test is code we
