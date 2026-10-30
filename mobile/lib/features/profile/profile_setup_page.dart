@@ -15,6 +15,7 @@ import '../../shared/theme/theme.dart';
 import 'profile_avatar_sheet_app.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/onboarding_step_page.dart';
+import '../../shared/widgets/onboarding_route.dart';
 import 'profile_avatar_draft.dart';
 import '../../shared/widgets/playing_avatar_image.dart';
 import 'profile_setup_avatar_editor.dart';
@@ -91,7 +92,8 @@ class ProfileSetupPage extends HookConsumerWidget {
       Future<void> fallback() async {
         if (!current()) return;
         await Navigator.of(context, rootNavigator: true).push<void>(
-          MaterialPageRoute(
+          onboardingRoute<void>(
+            context,
             builder: (sheetContext) {
               profileRoute = ModalRoute.of(sheetContext);
               return OnboardingStepPage(

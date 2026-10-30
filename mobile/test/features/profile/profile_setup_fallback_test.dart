@@ -24,9 +24,17 @@ void main() {
       throw StateError('Relay unavailable');
     });
     await tester.pumpWidget(
-      WidgetHelpers.testable(child: ProfileSetupPage(flow: fixture.flow)),
+      WidgetHelpers.testable(
+        disableAnimations: true,
+        child: ProfileSetupPage(flow: fixture.flow),
+      ),
     );
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump();
+    final route = ModalRoute.of(tester.element(find.byType(TextField)))!;
+    expect(route.transitionDuration, Duration.zero);
+    expect(route.reverseTransitionDuration, Duration.zero);
+    expect(route.animation!.isCompleted, isTrue);
     expect(find.text('Not now'), findsNothing);
     expect(find.byTooltip('Back'), findsNothing);
     await tester.binding.handlePopRoute();
