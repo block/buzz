@@ -199,7 +199,9 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `rm` | Publish a tombstone to delete memory |
 
 `personas list` and `teams catalog` print one entry per shared head, sorted by
-name; a newer unshared or unreadable head hides older versions. `teams list`
+name; a newer unshared or unreadable head hides older versions. A listing is
+not an adoptability check: the CLI checks only that the name is present, and
+Desktop can still reject an entry the CLI lists. `teams list`
 prints `persona_ids: null` when the publisher never recorded membership.
 `agents metrics` prints `{event_id, agent, created_at, metric}` with the
 decrypted NIP-AM payload in `metric`; it needs the owner's own key (exit 3 under an agent

@@ -133,7 +133,7 @@ buzz messages send --channel <UUID> \
 6. **`users get` always returns an array** — even for a single pubkey lookup. Never expect a bare object.
 7. **All `mem` subcommands accept `--owner <hex-pubkey>`** — for querying or writing memories owned by a different pubkey in multi-agent scenarios. Defaults to the owner from `BUZZ_AUTH_TAG`.
 8. **`mem rm` cannot delete `core`** — use `mem set core ''` instead.
-9. **`personas list`, `teams list`, and `teams catalog` are read-only and fetch the whole catalog** (up to 20,000 events, otherwise exit 4). A newer unshared or unreadable head hides older versions of the same persona or team, so entries can be missing on purpose. Unreadable entries are named on stderr.
+9. **`personas list`, `teams list`, and `teams catalog` are read-only and fetch the whole catalog** (up to 20,000 events, otherwise exit 4). A newer unshared or unreadable head hides older versions of the same persona or team, so entries can be missing on purpose. Unreadable entries are named on stderr. A listing is not an adoptability check: Desktop can still reject a persona or team that the CLI lists.
 10. **`agents metrics` only works with the owner's key.** The relay returns metrics only to the owner, and the payload is encrypted to that key, so a managed agent running under `BUZZ_AUTH_TAG` is refused with exit 3, and exit 4 means no returned event could be read. `--limit` defaults to 50 and is capped at 200; `--agent` takes a 64-hex pubkey or the unique name of one of your managed agents. Token and cost fields are `null` when the harness did not report them — never treat `null` as zero.
 
 ## Forum Posts
