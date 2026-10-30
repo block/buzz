@@ -1,0 +1,80 @@
+{
+  "nostr": {
+    "workspace": [
+      "0.44.7",
+      "0.45.1"
+    ],
+    "normal_harness": [
+      "0.44.7"
+    ],
+    "research_harness": [
+      "0.44.7"
+    ]
+  },
+  "uuid": {
+    "workspace": [
+      "1.23.1"
+    ],
+    "normal_harness": [
+      "1.28.0"
+    ],
+    "research_harness": [
+      "1.28.0"
+    ]
+  },
+  "chrono": {
+    "workspace": [
+      "0.4.45"
+    ],
+    "normal_harness": [
+      "0.4.45"
+    ],
+    "research_harness": [
+      "0.4.45"
+    ]
+  },
+  "dashmap": {
+    "workspace": [
+      "6.2.1"
+    ],
+    "normal_harness": [
+      "6.2.1"
+    ],
+    "research_harness": [
+      "6.2.1"
+    ]
+  },
+  "metrics": {
+    "workspace": [
+      "0.24.6"
+    ],
+    "normal_harness": [
+      "0.24.6"
+    ],
+    "research_harness": [
+      "0.24.6"
+    ]
+  },
+  "tracing": {
+    "workspace": [
+      "0.1.44"
+    ],
+    "normal_harness": [
+      "0.1.44"
+    ],
+    "research_harness": [
+      "0.1.44"
+    ]
+  },
+  "serde_json": {
+    "workspace": [
+      "1.0.150"
+    ],
+    "normal_harness": [
+      "1.0.154"
+    ],
+    "research_harness": [
+      "1.0.154"
+    ]
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "cycle": 3,
+  "job": "20261015-005020-opt3-codex",
+  "verdict": "not faster (-0.2%, needed 3.0%)",
+  "ns": 7576494.69,
+  "elapsed_secs": 136
+}

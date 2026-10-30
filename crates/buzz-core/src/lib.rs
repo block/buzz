@@ -32,6 +32,8 @@ pub mod nip10;
 pub mod observer;
 /// NIP-AB device pairing — crypto primitives, message types, and errors.
 pub mod pairing;
+/// Prepared complete structural matching for live subscription fanout.
+pub mod prepared_filter;
 /// Presence status types shared across crates.
 pub mod presence;
 /// NIP-PMA owner-encrypted private managed-agent wire codec.
