@@ -99,6 +99,24 @@ pub enum StoreError {
     Probe(ProbeFailure),
 }
 
+/// Whether a probe racer's outcome is unknown rather than evidence about A3:
+/// it never got a classified response (`Reqwest`/`Http`/`Io` — socket or send
+/// failure), or the backend answered 5xx, which S3 documents as a retryable
+/// server fault that classifies neither a win nor a precondition loss. The
+/// race phases drop these from the observer set; a backend that fails every
+/// racer this way still fails closed on the two-observer floor.
+fn racer_outcome_unknown(err: &StoreError) -> bool {
+    matches!(
+        err,
+        StoreError::Backend(
+            S3Error::Reqwest(_)
+                | S3Error::Http(_)
+                | S3Error::Io(_)
+                | S3Error::HttpFailWithBody(500..=599, _)
+        )
+    )
+}
+
 /// Configuration for `GitStore::run_conformance_probe`.
 ///
 /// Defaults: 32-way concurrency, 3 rounds. The probe is a deployment gate —
@@ -131,9 +149,9 @@ pub struct ProbeReport {
     /// Total number of *transport-unknown* per-racer outcomes across all
     /// race rounds (sum of both `if_match_race` and `if_none_match_race`
     /// phases). A "transport-unknown" is a pre-classification failure —
-    /// `S3Error::{Reqwest, Http, Io}` — that means the racer never got a
-    /// classified response from the backend, so its outcome is neither
-    /// evidence for nor against A3 linearizability. Such racers are
+    /// `S3Error::{Reqwest, Http, Io}` — or a 5xx response, meaning the racer
+    /// never got a classified response from the backend, so its outcome is
+    /// neither evidence for nor against A3 linearizability. Such racers are
     /// dropped from the observer set (see the race phases for the
     /// invariant: `classified >= 2` and `winners == 1` *among classified
     /// observers*).
@@ -649,16 +667,17 @@ impl GitStore {
             let outcomes = futures_util::future::join_all(tasks).await;
             // Drop-and-floor classification. A `Reqwest`/`Http`/`Io` error
             // means the racer never got a classified response from the
-            // backend (couldn't open a socket, send flaked, etc.); its
-            // outcome is *unknown*, not negative. A3 is a claim about
+            // backend (couldn't open a socket, send flaked, etc.), and a 5xx
+            // is the backend declining to classify it; its outcome is
+            // *unknown*, not negative (`racer_outcome_unknown`). A3 is a claim about
             // **observers**: dropping unknowns from the observer set
             // sharpens the assertion ("exactly one winner among observers")
             // and avoids smuggling a network-stack test into the
             // conformance probe. Parse/decode errors (`Utf8`,
-            // `ReqwestHeaderToStr`, `SerdeXml`, ...) and `HttpFailWithBody`
-            // stay in the catch-all — those mean the backend *did* answer
-            // but not in the contract shape, which is a real conformance
-            // signal.
+            // `ReqwestHeaderToStr`, `SerdeXml`, ...) and non-5xx
+            // `HttpFailWithBody` stay in the catch-all — those
+            // mean the backend *did* answer but not in the contract shape,
+            // which is a real conformance signal.
             let mut classified = 0usize;
             let mut winners = 0usize;
             let mut new_etag: Option<ETag> = None;
@@ -672,15 +691,14 @@ impl GitStore {
                     Ok(CasOutcome::LostRace) => {
                         classified += 1;
                     }
-                    Err(StoreError::Backend(
-                        S3Error::Reqwest(_) | S3Error::Http(_) | S3Error::Io(_),
-                    )) => {
+                    Err(e) if racer_outcome_unknown(&e) => {
                         transport_drops += 1;
                         tracing::warn!(
                             phase = "if_match_race",
                             round,
                             racer = i,
-                            "transport drop (pre-classification: socket/send failure)"
+                            error = %e,
+                            "transport drop (outcome unknown: socket/send failure or 5xx)"
                         );
                     }
                     Err(e) => {
@@ -741,8 +759,8 @@ impl GitStore {
             }
             let results = futures_util::future::join_all(tasks).await;
             // Drop-and-floor: same classification rule as Phase 2. Drop
-            // `Reqwest`/`Http`/`Io` (pre-classification — socket/send
-            // failure); count 2xx + 412 as the classified observers. Any
+            // unknown outcomes (socket/send failure or 5xx); count 2xx + 412
+            // as the classified observers. Any
             // other status or any non-transport `StoreError` is a real
             // conformance signal and fails closed.
             let mut classified = 0usize;
@@ -767,15 +785,14 @@ impl GitStore {
                         }
                         .into())
                     }
-                    Err(StoreError::Backend(
-                        S3Error::Reqwest(_) | S3Error::Http(_) | S3Error::Io(_),
-                    )) => {
+                    Err(e) if racer_outcome_unknown(&e) => {
                         transport_drops += 1;
                         tracing::warn!(
                             phase = "if_none_match_race",
                             round,
                             racer = i,
-                            "transport drop (pre-classification: socket/send failure)"
+                            error = %e,
+                            "transport drop (outcome unknown: socket/send failure or 5xx)"
                         );
                     }
                     Err(e) => {
@@ -936,6 +953,23 @@ mod tests {
     fn classify_cas_412_is_lost_race() {
         let r = Err(S3Error::HttpFailWithBody(412, "PreconditionFailed".into()));
         assert_eq!(GitStore::classify_cas(r).unwrap(), CasOutcome::LostRace);
+    }
+
+    /// Regression: an S3 `500 InternalError` on one probe racer killed relay
+    /// startup. A 5xx is an unknown outcome (dropped from the observer set);
+    /// every answer in the contract's shape — 412 or another 4xx — still
+    /// counts as evidence.
+    #[test]
+    fn probe_drops_5xx_racers_but_keeps_4xx_as_evidence() {
+        let http = |code: u16| StoreError::Backend(S3Error::HttpFailWithBody(code, String::new()));
+        for code in [500, 503, 599] {
+            assert!(racer_outcome_unknown(&http(code)), "{code} is unknown");
+        }
+        for code in [400, 403, 412, 499] {
+            assert!(!racer_outcome_unknown(&http(code)), "{code} is evidence");
+        }
+        let io = StoreError::Backend(S3Error::Io(std::io::Error::other("reset")));
+        assert!(racer_outcome_unknown(&io));
     }
 
     #[test]

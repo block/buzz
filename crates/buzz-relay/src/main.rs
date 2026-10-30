@@ -1048,41 +1048,12 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         None
     };
 
-    // Inter-relay mesh (BUZZ_MESH seam). `boot_mesh` returns None when the
-    // kill switch is off — nothing is bound, published, or spawned, so the
-    // relay behaves byte-identically to a build without the mesh. When
-    // enabled, a misconfigured mesh is fatal here (bind/Redis failure): an
-    // operator who asked for the mesh gets it or gets told why not.
-    let step = StepTimer::start(StartupStep::MeshBoot);
-    if let Some(handle) = buzz_relay::mesh_boot::boot_mesh(
-        &state.config,
-        state.redis_pool.clone(),
-        state.db.clone(),
-        &state.relay_keypair,
-        Arc::clone(&state.shutting_down),
-    )
-    .await?
-    {
-        let runtime_id = handle.local_runtime_id;
-        // Register the per-profile inbound consumers (huddle datagram fan-in,
-        // HuddleControl accept loop, reliable-stream accept + optional
-        // BUZZ_MESH_DEMO_ECHO) before peers can route traffic here.
-        handle.wire_consumers(
-            Arc::clone(&state.audio_rooms),
-            state.config.mesh_demo_echo,
-            Arc::clone(&state.shutting_down),
-        );
-        if state.mesh.set(handle).is_err() {
-            unreachable!("mesh handle is set exactly once, right here");
-        }
-        info!(runtime_id = %runtime_id, "Inter-relay mesh started");
-    }
-    step.finish();
-
     // Git-on-object-storage: admit the configured S3/MinIO backend against the
     // linearizable conditional-write axiom (A3) before serving git traffic.
     // Failure is fatal: a backend that cannot satisfy pointer CAS invalidates
     // the manifest-pointer protocol. This is a deployment gate, not a proof.
+    // It runs before the mesh boots so a pod that fails it never publishes a
+    // mesh ready record for peers to dial.
     if std::env::var("BUZZ_GIT_CONFORMANCE_PROBE")
         .map(|v| v != "false")
         .unwrap_or(true)
@@ -1118,6 +1089,37 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             "git object-store backend admitted: A3 conformance probe passed"
         );
     }
+
+    // Inter-relay mesh (BUZZ_MESH seam). `boot_mesh` returns None when the
+    // kill switch is off — nothing is bound, published, or spawned, so the
+    // relay behaves byte-identically to a build without the mesh. When
+    // enabled, a misconfigured mesh is fatal here (bind/Redis failure): an
+    // operator who asked for the mesh gets it or gets told why not.
+    let step = StepTimer::start(StartupStep::MeshBoot);
+    if let Some(handle) = buzz_relay::mesh_boot::boot_mesh(
+        &state.config,
+        state.redis_pool.clone(),
+        state.db.clone(),
+        &state.relay_keypair,
+        Arc::clone(&state.shutting_down),
+    )
+    .await?
+    {
+        let runtime_id = handle.local_runtime_id;
+        // Register the per-profile inbound consumers (huddle datagram fan-in,
+        // HuddleControl accept loop, reliable-stream accept + optional
+        // BUZZ_MESH_DEMO_ECHO) before peers can route traffic here.
+        handle.wire_consumers(
+            Arc::clone(&state.audio_rooms),
+            state.config.mesh_demo_echo,
+            Arc::clone(&state.shutting_down),
+        );
+        if state.mesh.set(handle).is_err() {
+            unreachable!("mesh handle is set exactly once, right here");
+        }
+        info!(runtime_id = %runtime_id, "Inter-relay mesh started");
+    }
+    step.finish();
 
     // Repair legacy NIP-29 channel rosters that were persisted while the
     // canonical member query still truncated at 1,000 rows.
