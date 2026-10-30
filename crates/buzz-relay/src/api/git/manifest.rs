@@ -135,7 +135,15 @@ pub enum ManifestError {
 ///
 /// Refuses traversal (`..`), null/newline/control chars, non-`refs/` prefixes,
 /// and leading/trailing/double slashes. Allowed alphabet:
-/// `[a-zA-Z0-9_./-]`.
+/// `[a-zA-Z0-9_./+@-]` — note `+` immediately before `@` to avoid reading as
+/// a character-class range (`+-@` would include `: ; < = > ?`).
+///
+/// `+` and `@` are legal git ref characters (`git check-ref-format`) with no
+/// meaning to the object-store key scheme or path traversal — they were
+/// excluded historically for paranoia, not safety. Real-world branches like
+/// `refs/heads/test/842+841-devnet` (seen in `OriginTrail/dkg`) were rejected
+/// outright. Widening the predicate is symmetric: `validate` gates write,
+/// hydration gates read, and both share this function.
 ///
 /// Sharing one predicate is load-bearing: any divergence creates the
 /// "valid CAS, un-clone-able output" hazard.
@@ -147,7 +155,7 @@ pub fn is_safe_refname(s: &str) -> bool {
         return false;
     }
     s.chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '.' | '-'))
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '.' | '-' | '+' | '@'))
 }
 
 /// Hex-OID predicate. Accepts both SHA-1 (40 chars) and SHA-256 (64 chars) —
@@ -332,17 +340,32 @@ mod tests {
     }
 
     #[test]
-    fn safe_refnames_predicate() {
+    fn safe_refnames() {
         assert!(is_safe_refname("refs/heads/main"));
         assert!(is_safe_refname("refs/tags/v1.0.0"));
         assert!(is_safe_refname("refs/heads/feat/cas-publish"));
+        // Git-legal alphabet — `+` and `@` have no meaning to CAS keys or
+        // path traversal. (`OriginTrail/dkg`'s `test/842+841-devnet` was
+        // the motivating case; `@` joins it for symmetry and because `@{`
+        // reflog syntax never reaches manifest paths.)
+        assert!(is_safe_refname("refs/heads/test/842+841-devnet"));
+        assert!(is_safe_refname("refs/tags/release@v1"));
         assert!(!is_safe_refname("refs/heads/../escape"));
         assert!(!is_safe_refname("HEAD"));
+        // The empty-string reject is load-bearing: `ManifestError::EmptyHead`'s
+        // doc relies on the read side never accepting `""` as a head, so a
+        // missing `head` field is distinguishable from `""` (which is invalid).
         assert!(!is_safe_refname(""));
         assert!(!is_safe_refname("refs/heads/"));
         assert!(!is_safe_refname("/refs/heads/main"));
         assert!(!is_safe_refname("refs/heads/main\nrefs/heads/evil"));
         assert!(!is_safe_refname("refs/heads/main\0"));
+        // Other git-legal-but-unneeded chars stay out: `=`, `,`, `!`, `]`
+        // were never observed failing upstream and reduce the attack surface.
+        assert!(!is_safe_refname("refs/heads/feat=v2"));
+        assert!(!is_safe_refname("refs/heads/feat,name"));
+        assert!(!is_safe_refname("refs/heads/feat!hot"));
+        assert!(!is_safe_refname("refs/heads/feat]branch"));
     }
 
     #[test]
