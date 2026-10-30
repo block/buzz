@@ -918,6 +918,7 @@ pub struct PromptContext {
     pub max_turns_per_session: u32,
     /// Permission mode to apply after session creation. `Default` = skip.
     pub permission_mode: PermissionMode,
+    pub permission_mode_timeout: Duration,
     /// Agent identity — used to derive the NIP-AE conversation key at
     /// session creation for core injection.
     pub agent_keys: nostr::Keys,
@@ -1514,9 +1515,6 @@ const MODEL_SWITCH_TIMEOUT: Duration = Duration::from_secs(5);
 /// [`classify_control_cancel_failure`].
 const CONTROL_CANCEL_GRACE: Duration = Duration::from_secs(5);
 
-/// Timeout for permission-mode requests (`session/set_config_option` with `configId: "mode"`).
-const PERMISSION_MODE_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// Bounded window a `Thread` batch waits for its busy session-owner before we
 /// stop holding and fork a fresh session on an idle worker. Kept below the 30s
 /// maintenance tick so even a silent system re-evaluates a held batch shortly
@@ -1839,7 +1837,13 @@ async fn create_session_and_apply_model(
     if !ctx.permission_mode.is_default()
         && agent_supports_mode(&resp.raw, ctx.permission_mode.as_wire_str())
     {
-        apply_permission_mode(&mut agent.acp, &resp.session_id, &ctx.permission_mode).await?;
+        apply_permission_mode(
+            &mut agent.acp,
+            &resp.session_id,
+            &ctx.permission_mode,
+            ctx.permission_mode_timeout,
+        )
+        .await?;
     }
 
     Ok(resp.session_id)
@@ -2175,9 +2179,10 @@ async fn apply_permission_mode(
     acp: &mut AcpClient,
     session_id: &str,
     mode: &PermissionMode,
+    timeout: Duration,
 ) -> Result<(), AcpError> {
     let wire = mode.as_wire_str();
-    let result = tokio::time::timeout(PERMISSION_MODE_TIMEOUT, async {
+    let result = tokio::time::timeout(timeout, async {
         acp.session_set_config_option(session_id, "mode", wire)
             .await
     })
@@ -2214,12 +2219,45 @@ async fn apply_permission_mode(
             // Outer timeout fired — stream may be in unknown state.
             tracing::error!(
                 target: "pool::permission",
-                "permission mode set timed out ({PERMISSION_MODE_TIMEOUT:?}) — treating as fatal"
+                "permission mode set timed out ({timeout:?}) — treating as fatal"
             );
-            return Err(AcpError::Timeout(PERMISSION_MODE_TIMEOUT));
+            return Err(AcpError::Timeout(timeout));
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod permission_mode_timeout_wiring_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn permission_mode_call_obeys_configured_short_deadline() {
+        let mut acp = AcpClient::spawn(
+            "bash",
+            &[
+                "-c".into(),
+                "while IFS= read -r line; do sleep 1; done".into(),
+            ],
+            &[],
+            false,
+        )
+        .await
+        .unwrap();
+        let configured = Duration::from_millis(25);
+        let result = tokio::time::timeout(
+            Duration::from_millis(300),
+            apply_permission_mode(
+                &mut acp,
+                "test-session",
+                &PermissionMode::BypassPermissions,
+                configured,
+            ),
+        )
+        .await
+        .expect("configured deadline must finish before the outer guard");
+        assert!(matches!(result, Err(AcpError::Timeout(value)) if value == configured));
+    }
 }
 
 /// Prepend a legacy agent's standing context to a user-message body.
@@ -10478,6 +10516,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             context_message_limit: 0,
             max_turns_per_session: 0,
             permission_mode: PermissionMode::Default,
+            permission_mode_timeout: Duration::from_secs(5),
             agent_keys: agent_keys.clone(),
             agent_owner_pubkey: owner_pubkey,
             memory_enabled: false,
@@ -11584,6 +11623,46 @@ done"#
             effort_current_value(&opts).as_deref(),
             Some("high"),
             "applied effort must overwrite the pre-set currentValue in the capture"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_creation_passes_configured_permission_deadline() {
+        let script = r#"count=0
+while IFS= read -r line; do
+  count=$((count + 1))
+  if [ "$count" -eq 1 ]; then
+    printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"sessionId":"sess-1","modes":{"availableModes":[{"id":"bypassPermissions"}]}}}'
+  else
+    sleep 1
+  fi
+done"#;
+        let acp = AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
+            .await
+            .unwrap();
+        let mut agent = effort_agent(acp, None);
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.permission_mode = PermissionMode::BypassPermissions;
+        ctx.permission_mode_timeout = Duration::from_millis(25);
+        let result = tokio::time::timeout(
+            Duration::from_millis(400),
+            create_session_and_apply_model(
+                &mut agent,
+                &ctx,
+                None,
+                NewSessionChannelContext {
+                    huddle_instructions: None,
+                    canvas: None,
+                    name: None,
+                    scope: None,
+                    channel_type: None,
+                },
+            ),
+        )
+        .await
+        .expect("configured deadline must finish session creation");
+        assert!(
+            matches!(result, Err(AcpError::Timeout(value)) if value == ctx.permission_mode_timeout)
         );
     }
 
