@@ -15,16 +15,16 @@ const CHANNEL = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 test("buildProjectAnnouncementTemplate emits a channel-first NIP-MP project", () => {
   const templates = buildProjectAnnouncementTemplate({
     description: "A workspace that starts as a conversation",
-    name: "Sprout",
+    name: "Buzz",
     ownerPubkey: OWNER,
     projectChannelId: CHANNEL,
   });
 
-  assert.equal(templates.dtag, "sprout");
+  assert.equal(templates.dtag, "buzz");
   assert.equal(templates.project.kind, 30621);
   assert.deepEqual(templates.project.tags, [
-    ["d", "sprout"],
-    ["name", "Sprout"],
+    ["d", "buzz"],
+    ["name", "Buzz"],
     ["buzz-channel", CHANNEL],
     ["description", "A workspace that starts as a conversation"],
   ]);
@@ -36,9 +36,9 @@ test("buildProjectAnnouncementTemplate emits a channel-first NIP-MP project", ()
 });
 
 test("buildProjectAnnouncementTemplate records unlisted visibility and members", () => {
-  const address = `30617:${OWNER}:sprout`;
+  const address = `30617:${OWNER}:buzz`;
   const templates = buildProjectAnnouncementTemplate({
-    name: "Sprout",
+    name: "Buzz",
     ownerPubkey: OWNER,
     projectChannelId: CHANNEL,
     projectVisibility: "unlisted",
@@ -46,8 +46,8 @@ test("buildProjectAnnouncementTemplate records unlisted visibility and members",
   });
 
   assert.deepEqual(templates.project.tags, [
-    ["d", "sprout"],
-    ["name", "Sprout"],
+    ["d", "buzz"],
+    ["name", "Buzz"],
     ["buzz-channel", CHANNEL],
     ["buzz-visibility", "unlisted"],
     ["a", address],
@@ -57,26 +57,26 @@ test("buildProjectAnnouncementTemplate records unlisted visibility and members",
 test("buildProjectBootstrapTemplates binds a default repository to the home channel", () => {
   const templates = buildProjectBootstrapTemplates({
     description: "A workspace that starts as a conversation",
-    name: "Sprout",
+    name: "Buzz",
     ownerPubkey: OWNER,
     projectChannelId: CHANNEL,
   });
-  const repositoryAddress = `30617:${OWNER}:sprout`;
+  const repositoryAddress = `30617:${OWNER}:buzz`;
 
-  assert.equal(templates.dtag, "sprout");
+  assert.equal(templates.dtag, "buzz");
   assert.equal(templates.repositoryAddress, repositoryAddress);
   assert.equal(templates.project.kind, 30621);
   assert.equal(templates.repository.kind, 30617);
   assert.deepEqual(templates.project.tags, [
-    ["d", "sprout"],
-    ["name", "Sprout"],
+    ["d", "buzz"],
+    ["name", "Buzz"],
     ["buzz-channel", CHANNEL],
     ["description", "A workspace that starts as a conversation"],
     ["a", repositoryAddress],
   ]);
   assert.deepEqual(templates.repository.tags, [
-    ["d", "sprout"],
-    ["name", "Sprout"],
+    ["d", "buzz"],
+    ["name", "Buzz"],
     ["buzz-channel", CHANNEL],
     ["description", "A workspace that starts as a conversation"],
   ]);
@@ -109,7 +109,7 @@ test("buildProjectAnnouncementTemplate enforces the description tag byte limit",
   assert.doesNotThrow(() =>
     buildProjectAnnouncementTemplate({
       description: "🙂".repeat(512),
-      name: "Sprout",
+      name: "Buzz",
       ownerPubkey: OWNER,
       projectChannelId: CHANNEL,
     }),
@@ -118,7 +118,7 @@ test("buildProjectAnnouncementTemplate enforces the description tag byte limit",
     () =>
       buildProjectAnnouncementTemplate({
         description: "🙂".repeat(513),
-        name: "Sprout",
+        name: "Buzz",
         ownerPubkey: OWNER,
         projectChannelId: CHANNEL,
       }),
@@ -130,7 +130,7 @@ test("buildProjectAnnouncementTemplate rejects an invalid project channel", () =
   assert.throws(
     () =>
       buildProjectAnnouncementTemplate({
-        name: "Sprout",
+        name: "Buzz",
         ownerPubkey: OWNER,
         projectChannelId: "not-a-channel",
       }),
@@ -143,13 +143,13 @@ test("conflictingListedProject ignores the caller's own slug and legacy cards", 
     conflictingListedProject(
       [
         {
-          dtag: "sprout",
+          dtag: "buzz",
           legacy: false,
-          name: "Sprout",
+          name: "Buzz",
           owner: OWNER,
         },
       ],
-      { dtag: "sprout", name: "Sprout", ownerPubkey: OWNER },
+      { dtag: "buzz", name: "Buzz", ownerPubkey: OWNER },
     ),
     null,
   );
@@ -157,13 +157,13 @@ test("conflictingListedProject ignores the caller's own slug and legacy cards", 
     conflictingListedProject(
       [
         {
-          dtag: "sprout",
+          dtag: "buzz",
           legacy: true,
-          name: "Sprout",
+          name: "Buzz",
           owner: "b".repeat(64),
         },
       ],
-      { dtag: "sprout", name: "Sprout", ownerPubkey: OWNER },
+      { dtag: "buzz", name: "Buzz", ownerPubkey: OWNER },
     ),
     null,
   );
