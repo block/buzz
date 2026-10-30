@@ -44,6 +44,13 @@ database can build the indexes under the migration's short budgets.
 Migration `0076` also verifies the exact definition and all three flags.
 Remove an invalid index with `DROP INDEX CONCURRENTLY` before a new build.
 
+Relay startup migration and `buzz-admin migrate` build any of these indexes
+that are missing before applying `0076` and `0078`. They use the migrations'
+one-second lock and five-second statement budgets, which is enough for a small
+database. A database too large for that budget fails closed with an error that
+points here and records neither migration. Prebuild concurrently as above, then
+retry.
+
 After all index builds succeed, run `buzz-admin migrate` with the target
 `DATABASE_URL`. It verifies and records `0076`, reapplies the idempotent `0077`,
 then verifies and records `0078`. Direct SQL application does not record the
