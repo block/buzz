@@ -8254,6 +8254,7 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
     #[ignore = "requires Postgres"]
     async fn manifest_key_chunks_bind_freeze_execution_and_cleanup() {
         let (db, store) = store().await;
+        crate::test_support::retire_foreign_key_delete_actions(&db.pool).await;
         let (request, inventory) = inventoried_request(&db, &store).await;
         store
             .approve(request.id, "approver", None)
@@ -8405,6 +8406,157 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
                 .expect("progress after terminal cleanup"),
             (0, 0)
         );
+    }
+
+    /// The whole-community purge is the only supported hard delete of channels,
+    /// personal-read accounts, and users. With every FK action retired, each
+    /// child must still be deleted explicitly (the quiesce barrier itself is
+    /// pinned by `begin_quiescing_waits_for_open_admitted_writer_note_update`).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn purge_removes_fk_children_explicitly_without_fk_actions() {
+        let (db, store) = store().await;
+        crate::test_support::retire_foreign_key_delete_actions(&db.pool).await;
+        let (request, inventory) = inventoried_request(&db, &store).await;
+        let community = request.community_id;
+        let owner = vec![7_u8; 32];
+        let agent = vec![8_u8; 32];
+        let channel = Uuid::new_v4();
+        let feedback_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO users (community_id, pubkey) VALUES ($1, $2)")
+            .bind(community.as_uuid())
+            .bind(&owner)
+            .execute(&db.pool)
+            .await
+            .expect("seed owner");
+        sqlx::query(
+            "INSERT INTO users (community_id, pubkey, agent_owner_pubkey) VALUES ($1, $2, $3)",
+        )
+        .bind(community.as_uuid())
+        .bind(&agent)
+        .bind(&owner)
+        .execute(&db.pool)
+        .await
+        .expect("seed agent owned by user");
+        sqlx::query(
+            "INSERT INTO channels (community_id, id, name, created_by) VALUES ($1, $2, 'purge', $3)",
+        )
+        .bind(community.as_uuid())
+        .bind(channel)
+        .bind(&owner)
+        .execute(&db.pool)
+        .await
+        .expect("seed channel");
+        sqlx::query("INSERT INTO personal_read_accounts (community_id, actor) VALUES ($1, $2)")
+            .bind(community.as_uuid())
+            .bind(&owner)
+            .execute(&db.pool)
+            .await
+            .expect("seed read account");
+        sqlx::query(
+            "INSERT INTO product_feedback \
+             (id, community_id, event_id, submitter_pubkey, body, event_created_at) \
+             VALUES ($1, $2, $3, $4, 'feedback survives', now())",
+        )
+        .bind(feedback_id)
+        .bind(community.as_uuid())
+        .bind(vec![9_u8; 32])
+        .bind(&owner)
+        .execute(&db.pool)
+        .await
+        .expect("seed operator feedback");
+        let executor_id = format!("purge-test-{}", Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO community_deletion_executor_heartbeats \
+             (executor_id, mode, request_id) VALUES ($1, 'worker', $2)",
+        )
+        .bind(&executor_id)
+        .bind(request.id)
+        .execute(&db.pool)
+        .await
+        .expect("seed request heartbeat");
+
+        store
+            .approve(request.id, "approver", None)
+            .await
+            .expect("approve");
+        let claim = store
+            .claim_specific(request.id, "executor", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim")
+            .expect("won claim");
+        let mut writer = db
+            .begin_event_write_transaction(community)
+            .await
+            .expect("admit child seed");
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey) VALUES ($1, $2, $3)",
+        )
+        .bind(community.as_uuid())
+        .bind(channel)
+        .bind(&owner)
+        .execute(writer.conn())
+        .await
+        .expect("seed channel member");
+        sqlx::query(
+            "INSERT INTO personal_read_frontiers \
+             (community_id, actor, channel_id, through_timestamp) VALUES ($1, $2, $3, now())",
+        )
+        .bind(community.as_uuid())
+        .bind(&owner)
+        .bind(channel)
+        .execute(writer.conn())
+        .await
+        .expect("seed read frontier");
+        writer.commit().await.expect("commit seeded children");
+        store.begin_quiescing(&claim.lease).await.expect("quiesce");
+
+        let generation = store.fence(&claim.lease).await.expect("fence");
+        let token = LeaseToken {
+            fence_generation: Some(generation),
+            ..claim.lease
+        };
+        store
+            .freeze_destructive_storage_manifest(&token, &inventory.storage)
+            .await
+            .expect("freeze destructive storage");
+        store.mark_drained(&token).await.expect("drain");
+        store
+            .mark_bindings_removed(&token, serde_json::json!({"keys": 0}))
+            .await
+            .expect("bindings removed");
+        let deleted = store
+            .purge_postgres(&token)
+            .await
+            .expect("purge without FK actions");
+        for table in [
+            "channel_members",
+            "personal_read_frontiers",
+            "personal_read_accounts",
+            "channels",
+        ] {
+            assert_eq!(deleted.get(table), Some(&1), "{table} explicitly removed");
+        }
+        assert_eq!(deleted.get("users"), Some(&2), "owner and agent removed");
+        let provenance: Option<Uuid> =
+            sqlx::query_scalar("SELECT community_id FROM product_feedback WHERE id = $1")
+                .bind(feedback_id)
+                .fetch_one(&db.pool)
+                .await
+                .expect("feedback remains");
+        assert_eq!(
+            provenance, None,
+            "operator feedback loses tenant provenance"
+        );
+        let heartbeat_request: Option<Uuid> = sqlx::query_scalar(
+            "SELECT request_id FROM community_deletion_executor_heartbeats \
+             WHERE executor_id = $1",
+        )
+        .bind(&executor_id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("heartbeat survives with retained request");
+        assert_eq!(heartbeat_request, Some(request.id));
     }
 
     #[tokio::test]
