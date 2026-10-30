@@ -11240,6 +11240,10 @@ void main() {
               widget.painter.runtimeType.toString() == '_ReplyConnector',
         ),
       );
+      // The channel's typing row, by its spoken status.
+      Finder typingRow(String label) => find.byWidgetPredicate(
+        (widget) => widget is Semantics && widget.properties.label == label,
+      );
       expect(row, findsNothing);
 
       // As on desktop, people and agents outside the user's inventory typing
@@ -11254,6 +11258,7 @@ void main() {
       ]);
       await tester.pumpAndSettle();
       expect(row, findsNothing);
+      expect(find.byKey(const ValueKey('agent-typing-bubble')), findsNothing);
 
       // As on desktop, at most two working avatars show, then a count.
       typing.setEntries([
@@ -11269,6 +11274,8 @@ void main() {
         find.bySemanticsLabel('View thread: 3 agents are working'),
         findsOneWidget,
       );
+      // As on desktop, the channel's typing row shows them too.
+      expect(typingRow('Morty and 2 others are typing'), findsOneWidget);
       expect(rowAvatars(), ['morty', 'summer']);
       // Working avatars use the agent shape, though no profile names an owner.
       for (final avatar
@@ -11312,7 +11319,7 @@ void main() {
         ),
         findsOneWidget,
       );
-      expect(find.byKey(const ValueKey('agent-typing-bubble')), findsNothing);
+      expect(typingRow('Morty is typing'), findsOneWidget);
       expect(
         find.bySemanticsLabel('View thread: Morty is working'),
         findsOneWidget,
@@ -11382,6 +11389,7 @@ void main() {
         find.bySemanticsLabel('View thread: 1 reply. Summer working'),
         findsOneWidget,
       );
+      expect(typingRow('Summer is typing'), findsOneWidget);
     });
 
     testWidgets('shows single typer', (tester) async {

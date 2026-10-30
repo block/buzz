@@ -444,23 +444,9 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       channelBotPubkeys:
           channelBotPubkeysState.asData?.value ?? const <String>{},
     );
-    // Agent work is visible in every DM, even when its response is threaded.
-    // Ordinary channels keep thread activity inside the thread view.
-    final typingEntries = ref
-        .watch(
-          visibleTypingProvider(
-            channel.id,
-            selfPubkey: currentPubkey,
-            include: (e) =>
-                personalChat ||
-                e.threadHeadId == null ||
-                (resolvedChannel.isDm &&
-                    agentPubkeys.contains(e.pubkey.toLowerCase())),
-          ),
-        )
-        .entries;
     // Ordinary channels show the user's agents working in a thread on its
-    // root message. Me and DMs already show that typing inline.
+    // root message and in the typing row. Me and DMs already show that typing
+    // inline.
     final threadWorking = _threadWorkingAgents(
       ref,
       personalChat || resolvedChannel.isDm
@@ -471,6 +457,26 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
               ).select((all) => _threadTypingKey(all, currentPubkey)),
             ),
     );
+    final ownedThreadTypers = {
+      for (final agents in threadWorking.values) ...agents,
+    };
+    // Agent work is visible in every DM, even when its response is threaded.
+    // Ordinary channels keep other thread activity inside the thread view,
+    // but, as on desktop, show the user's own agents working in any thread.
+    final typingEntries = ref
+        .watch(
+          visibleTypingProvider(
+            channel.id,
+            selfPubkey: currentPubkey,
+            include: (e) =>
+                personalChat ||
+                e.threadHeadId == null ||
+                ownedThreadTypers.contains(e.pubkey.toLowerCase()) ||
+                (resolvedChannel.isDm &&
+                    agentPubkeys.contains(e.pubkey.toLowerCase())),
+          ),
+        )
+        .entries;
     useEffect(() {
       if (sessionStatus != SessionStatus.connected ||
           identitySubscriptionPubkeys.isEmpty) {
