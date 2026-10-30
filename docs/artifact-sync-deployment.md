@@ -47,9 +47,10 @@ Remove an invalid index with `DROP INDEX CONCURRENTLY` before a new build.
 Relay startup migration and `buzz-admin migrate` build any of these indexes
 that are missing before applying `0076` and `0078`. They use the migrations'
 one-second lock and five-second statement budgets, which is enough for a small
-database. A database too large for that budget fails closed with an error that
-points here and records neither migration. Prebuild concurrently as above, then
-retry.
+database. Each index builds in its own transaction. A database too large for that
+budget fails closed with an error that points here. The migration whose index
+failed is not recorded, while earlier migrations and indexes stay committed.
+Prebuild the rest concurrently as above, then retry.
 
 After all index builds succeed, run `buzz-admin migrate` with the target
 `DATABASE_URL`. It verifies and records `0076`, reapplies the idempotent `0077`,
