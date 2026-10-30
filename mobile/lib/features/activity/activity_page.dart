@@ -299,14 +299,7 @@ class ActivityPage extends HookConsumerWidget {
 
     void openReminder(Reminder reminder) {
       final target = reminder.target;
-      if (target == null) {
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          const SnackBar(
-            content: Text("This reminder isn't linked to a message."),
-          ),
-        );
-        return;
-      }
+      if (target == null) return;
       final channel = channelById[target.channelId];
       if (channel == null) {
         ScaffoldMessenger.maybeOf(context)?.showSnackBar(
