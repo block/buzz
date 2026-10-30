@@ -883,3 +883,62 @@ fn linked_record_with_legacy_bytes_inherits_global_not_mesh() {
     assert_eq!(cfg.model.value.as_deref(), Some("gpt-5"));
     assert_eq!(cfg.relay_mesh_model_id(), None);
 }
+
+// ── ACP command: one owner for every start path ──
+
+fn resolved_acp_command(rec: &ManagedAgentRecord, defs: &[AgentDefinition]) -> String {
+    match resolve_effective_config(rec, defs, &global(None, None)) {
+        EffectiveConfigResult::Resolved(cfg) => cfg.acp_command,
+        other => panic!("expected Resolved, got {:?}", other),
+    }
+}
+
+#[test]
+fn linked_acp_command_comes_from_definition_not_record_mirror() {
+    let mut def = definition("p1", None, None, "prompt");
+    def.acp_command = Some("buzz-janet-acp".to_string());
+    // The record mirror still says stock (for example before a re-pin).
+    let rec = record(Some("p1"), None, None, None);
+    assert_eq!(resolved_acp_command(&rec, &[def]), "buzz-janet-acp");
+}
+
+#[test]
+fn linked_stock_definition_ignores_stale_custom_record_command() {
+    // The definition was reset to stock; an older custom mirror must not
+    // resurrect the wrapper on a start path that skips the re-pin.
+    let def = definition("p1", None, None, "prompt");
+    let mut rec = record(Some("p1"), None, None, None);
+    rec.acp_command = "buzz-janet-acp".to_string();
+    assert_eq!(
+        resolved_acp_command(&rec, &[def]),
+        crate::managed_agents::DEFAULT_ACP_COMMAND
+    );
+}
+
+#[test]
+fn linked_blank_definition_command_is_stock() {
+    let mut def = definition("p1", None, None, "prompt");
+    def.acp_command = Some("  ".to_string());
+    let rec = record(Some("p1"), None, None, None);
+    assert_eq!(
+        resolved_acp_command(&rec, &[def]),
+        crate::managed_agents::DEFAULT_ACP_COMMAND
+    );
+}
+
+#[test]
+fn definition_less_acp_command_is_the_record_own() {
+    let mut rec = record(None, None, None, None);
+    rec.acp_command = " my-wrapper-acp ".to_string();
+    assert_eq!(resolved_acp_command(&rec, &[]), "my-wrapper-acp");
+    assert_eq!(
+        resolve_effective_acp_command(&rec, &[]).as_deref(),
+        Some("my-wrapper-acp")
+    );
+}
+
+#[test]
+fn orphaned_instance_has_no_effective_acp_command() {
+    let rec = record(Some("missing"), None, None, None);
+    assert_eq!(resolve_effective_acp_command(&rec, &[]), None);
+}
