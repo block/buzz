@@ -88,7 +88,15 @@ async fn select_window(
     // Retain tombstones: deleting a root must not make its readable replies
     // disappear. Never follow a root belonging to another channel/community.
     let root_in_channel: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM events WHERE community_id = $1 AND channel_id = $2 AND id = $3 AND kind = ANY($4))")
+        "SELECT EXISTS(SELECT 1 FROM events WHERE community_id = $1 AND channel_id = $2 AND id = $3 AND kind = ANY($4))
+         OR EXISTS(SELECT 1 FROM thread_metadata root WHERE root.community_id = $1
+           AND root.channel_id = $2 AND root.event_id = $3 AND root.depth = 0
+           AND root.parent_event_id IS NULL
+           AND NOT EXISTS (SELECT 1 FROM events e WHERE e.community_id=$1 AND e.id=$3)
+           AND EXISTS (SELECT 1 FROM thread_metadata reply JOIN events e
+             ON e.community_id=reply.community_id AND e.id=reply.event_id AND e.created_at=reply.event_created_at
+             WHERE reply.community_id=$1 AND reply.channel_id=$2 AND reply.root_event_id=$3
+               AND e.channel_id=$2 AND e.kind=ANY($4) AND e.deleted_at IS NULL))")
         .bind(community.as_uuid()).bind(request.channel).bind(&root)
         .bind(ROW_KINDS.map(|k| k as i32).to_vec())
         .fetch_one(&mut *conn).await?;

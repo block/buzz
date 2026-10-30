@@ -152,6 +152,8 @@ pub async fn run(command: Command) -> Result<i32> {
 
 mod handlers;
 mod inventory;
+/// Standalone message cleanup; not dispatched by the dummy workflow.
+pub mod messages;
 /// Standalone delegation of an owned community to community deletion.
 pub mod owned_community;
 /// Read-only summaries of locally saved request progress and external waits.
@@ -159,3 +161,6 @@ pub mod summary;
 mod transition;
 mod worker;
 mod workflow;
+
+/// Standalone owned-agent database cleanup with per-agent progress.
+pub mod agents;
