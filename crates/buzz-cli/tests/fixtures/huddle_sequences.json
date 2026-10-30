@@ -1,0 +1,949 @@
+[
+ {
+  "name": "rejoin_with_late_stale_leave",
+  "relay_self": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "huddle": "11111111-1111-4111-8111-111111111111",
+  "events": [
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000005",
+    "kind": 48102,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 104,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"roster_revision\": 2, \"admission_id\": \"a1\", \"generation\": \"1\"}",
+    "sig": ""
+   },
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000004",
+    "kind": 48101,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 103,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"roster_revision\": 3, \"admission_id\": \"a2\", \"generation\": \"1\"}",
+    "sig": ""
+   },
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000003",
+    "kind": 48102,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 102,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"roster_revision\": 2, \"admission_id\": \"a1\", \"generation\": \"1\"}",
+    "sig": ""
+   },
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000002",
+    "kind": 48101,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 101,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"roster_revision\": 1, \"admission_id\": \"a1\", \"generation\": \"1\"}",
+    "sig": ""
+   },
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000001",
+    "kind": 48100,
+    "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": 100,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\"}",
+    "sig": ""
+   }
+  ],
+  "expected_participants": [
+   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  ],
+  "expected_ended": false
+ },
+ {
+  "name": "rejoin_on_second_device",
+  "relay_self": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "huddle": "11111111-1111-4111-8111-111111111111",
+  "events": [
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000009",
+    "kind": 48102,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 103,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"roster_revision\": 3, \"admission_id\": \"a1\", \"generation\": \"1\"}",
+    "sig": ""
+   },
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000008",
+    "kind": 48101,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 102,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"roster_revision\": 2, \"admission_id\": \"a2\", \"generation\": \"1\"}",
+    "sig": ""
+   },
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000007",
+    "kind": 48101,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 101,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"roster_revision\": 1, \"admission_id\": \"a1\", \"generation\": \"1\"}",
+    "sig": ""
+   },
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000006",
+    "kind": 48100,
+    "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": 100,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\"}",
+    "sig": ""
+   }
+  ],
+  "expected_participants": [
+   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  ],
+  "expected_ended": false
+ },
+ {
+  "name": "leave_without_join",
+  "relay_self": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "huddle": "11111111-1111-4111-8111-111111111111",
+  "events": [
+   {
+    "id": "000000000000000000000000000000000000000000000000000000000000000c",
+    "kind": 48101,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 102,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"roster_revision\": 2, \"admission_id\": \"a2\", \"generation\": \"1\"}",
+    "sig": ""
+   },
+   {
+    "id": "000000000000000000000000000000000000000000000000000000000000000b",
+    "kind": 48102,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 101,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"roster_revision\": 1, \"admission_id\": \"a1\", \"generation\": \"1\"}",
+    "sig": ""
+   },
+   {
+    "id": "000000000000000000000000000000000000000000000000000000000000000a",
+    "kind": 48100,
+    "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": 100,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\"}",
+    "sig": ""
+   }
+  ],
+  "expected_participants": [
+   "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  ],
+  "expected_ended": false
+ },
+ {
+  "name": "join_older_than_recorded_leave",
+  "relay_self": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "huddle": "11111111-1111-4111-8111-111111111111",
+  "events": [
+   {
+    "id": "000000000000000000000000000000000000000000000000000000000000000f",
+    "kind": 48101,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 102,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"roster_revision\": 1, \"admission_id\": \"a1\", \"generation\": \"1\"}",
+    "sig": ""
+   },
+   {
+    "id": "000000000000000000000000000000000000000000000000000000000000000e",
+    "kind": 48102,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 101,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"roster_revision\": 2, \"admission_id\": \"a1\", \"generation\": \"1\"}",
+    "sig": ""
+   },
+   {
+    "id": "000000000000000000000000000000000000000000000000000000000000000d",
+    "kind": 48100,
+    "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": 100,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\"}",
+    "sig": ""
+   }
+  ],
+  "expected_participants": [],
+  "expected_ended": false
+ },
+ {
+  "name": "ended_by_relay",
+  "relay_self": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "huddle": "11111111-1111-4111-8111-111111111111",
+  "events": [
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000013",
+    "kind": 48101,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 120,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"roster_revision\": 2, \"admission_id\": \"a2\", \"generation\": \"1\"}",
+    "sig": ""
+   },
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000012",
+    "kind": 48103,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 110,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\"}",
+    "sig": ""
+   },
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000011",
+    "kind": 48101,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 101,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"roster_revision\": 1, \"admission_id\": \"a1\", \"generation\": \"1\"}",
+    "sig": ""
+   },
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000010",
+    "kind": 48100,
+    "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": 100,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\"}",
+    "sig": ""
+   }
+  ],
+  "expected_participants": [],
+  "expected_ended": true
+ },
+ {
+  "name": "ended_by_creator",
+  "relay_self": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "huddle": "11111111-1111-4111-8111-111111111111",
+  "events": [
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000016",
+    "kind": 48103,
+    "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": 110,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\"}",
+    "sig": ""
+   },
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000015",
+    "kind": 48101,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 101,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"roster_revision\": 1, \"admission_id\": \"a1\", \"generation\": \"1\"}",
+    "sig": ""
+   },
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000014",
+    "kind": 48100,
+    "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": 100,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\"}",
+    "sig": ""
+   }
+  ],
+  "expected_participants": [],
+  "expected_ended": true
+ },
+ {
+  "name": "end_from_stranger_ignored",
+  "relay_self": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "huddle": "11111111-1111-4111-8111-111111111111",
+  "events": [
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000019",
+    "kind": 48103,
+    "pubkey": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "created_at": 110,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\"}",
+    "sig": ""
+   },
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000018",
+    "kind": 48101,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 101,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"roster_revision\": 1, \"admission_id\": \"a1\", \"generation\": \"1\"}",
+    "sig": ""
+   },
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000017",
+    "kind": 48100,
+    "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": 100,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\"}",
+    "sig": ""
+   }
+  ],
+  "expected_participants": [
+   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  ],
+  "expected_ended": false
+ },
+ {
+  "name": "forged_join_ignored",
+  "relay_self": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "huddle": "11111111-1111-4111-8111-111111111111",
+  "events": [
+   {
+    "id": "000000000000000000000000000000000000000000000000000000000000001b",
+    "kind": 48101,
+    "pubkey": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "created_at": 101,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"admission_id\": \"x\"}",
+    "sig": ""
+   },
+   {
+    "id": "000000000000000000000000000000000000000000000000000000000000001a",
+    "kind": 48100,
+    "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": 100,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\"}",
+    "sig": ""
+   }
+  ],
+  "expected_participants": [],
+  "expected_ended": false
+ },
+ {
+  "name": "same_second_revision_order",
+  "relay_self": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "huddle": "11111111-1111-4111-8111-111111111111",
+  "events": [
+   {
+    "id": "000000000000000000000000000000000000000000000000000000000000001e",
+    "kind": 48102,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 101,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"roster_revision\": 2, \"admission_id\": \"a1\", \"generation\": \"1\"}",
+    "sig": ""
+   },
+   {
+    "id": "000000000000000000000000000000000000000000000000000000000000001d",
+    "kind": 48101,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 101,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"roster_revision\": 1, \"admission_id\": \"a1\", \"generation\": \"1\"}",
+    "sig": ""
+   },
+   {
+    "id": "000000000000000000000000000000000000000000000000000000000000001c",
+    "kind": 48100,
+    "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": 100,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\"}",
+    "sig": ""
+   }
+  ],
+  "expected_participants": [],
+  "expected_ended": false
+ },
+ {
+  "name": "stale_generation_cleared_by_newer_join",
+  "relay_self": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "huddle": "11111111-1111-4111-8111-111111111111",
+  "events": [
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000022",
+    "kind": 48102,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 103,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"roster_revision\": 6, \"admission_id\": \"a1\", \"generation\": \"1\"}",
+    "sig": ""
+   },
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000021",
+    "kind": 48101,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 102,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"roster_revision\": 1, \"admission_id\": \"a2\", \"generation\": \"2\"}",
+    "sig": ""
+   },
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000020",
+    "kind": 48101,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 101,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"roster_revision\": 5, \"admission_id\": \"a1\", \"generation\": \"1\"}",
+    "sig": ""
+   },
+   {
+    "id": "000000000000000000000000000000000000000000000000000000000000001f",
+    "kind": 48100,
+    "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": 100,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\"}",
+    "sig": ""
+   }
+  ],
+  "expected_participants": [
+   "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  ],
+  "expected_ended": false
+ },
+ {
+  "name": "stale_generation_end_ignored",
+  "relay_self": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "huddle": "11111111-1111-4111-8111-111111111111",
+  "events": [
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000025",
+    "kind": 48103,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 110,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"generation\": \"1\"}",
+    "sig": ""
+   },
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000024",
+    "kind": 48101,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 101,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"roster_revision\": 1, \"admission_id\": \"a1\", \"generation\": \"2\"}",
+    "sig": ""
+   },
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000023",
+    "kind": 48100,
+    "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": 100,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\"}",
+    "sig": ""
+   }
+  ],
+  "expected_participants": [
+   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  ],
+  "expected_ended": false
+ },
+ {
+  "name": "relay_restart_lower_revision_clears",
+  "relay_self": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "huddle": "11111111-1111-4111-8111-111111111111",
+  "events": [
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000028",
+    "kind": 48101,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 102,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"roster_revision\": 1, \"admission_id\": \"a2\", \"generation\": \"1\"}",
+    "sig": ""
+   },
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000027",
+    "kind": 48101,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 101,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"roster_revision\": 7, \"admission_id\": \"a1\", \"generation\": \"1\"}",
+    "sig": ""
+   },
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000026",
+    "kind": 48100,
+    "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": 100,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\"}",
+    "sig": ""
+   }
+  ],
+  "expected_participants": [
+   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  ],
+  "expected_ended": false
+ },
+ {
+  "name": "legacy_events_without_admission",
+  "relay_self": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "huddle": "11111111-1111-4111-8111-111111111111",
+  "events": [
+   {
+    "id": "000000000000000000000000000000000000000000000000000000000000002c",
+    "kind": 48102,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 103,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\"}",
+    "sig": ""
+   },
+   {
+    "id": "000000000000000000000000000000000000000000000000000000000000002b",
+    "kind": 48101,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 102,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\"}",
+    "sig": ""
+   },
+   {
+    "id": "000000000000000000000000000000000000000000000000000000000000002a",
+    "kind": 48101,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 101,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"generation\": \"1\"}",
+    "sig": ""
+   },
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000029",
+    "kind": 48100,
+    "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": 100,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\"}",
+    "sig": ""
+   }
+  ],
+  "expected_participants": [
+   "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  ],
+  "expected_ended": false
+ },
+ {
+  "name": "restart_with_new_start",
+  "relay_self": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "huddle": "11111111-1111-4111-8111-111111111111",
+  "events": [
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000031",
+    "kind": 48101,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 121,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"roster_revision\": 1, \"admission_id\": \"a2\", \"generation\": \"1\"}",
+    "sig": ""
+   },
+   {
+    "id": "0000000000000000000000000000000000000000000000000000000000000030",
+    "kind": 48100,
+    "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": 120,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\"}",
+    "sig": ""
+   },
+   {
+    "id": "000000000000000000000000000000000000000000000000000000000000002f",
+    "kind": 48103,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 110,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\"}",
+    "sig": ""
+   },
+   {
+    "id": "000000000000000000000000000000000000000000000000000000000000002e",
+    "kind": 48101,
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "created_at": 101,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ],
+     [
+      "p",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\", \"roster_revision\": 1, \"admission_id\": \"a1\", \"generation\": \"1\"}",
+    "sig": ""
+   },
+   {
+    "id": "000000000000000000000000000000000000000000000000000000000000002d",
+    "kind": 48100,
+    "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": 100,
+    "tags": [
+     [
+      "h",
+      "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
+     ]
+    ],
+    "content": "{\"ephemeral_channel_id\": \"11111111-1111-4111-8111-111111111111\"}",
+    "sig": ""
+   }
+  ],
+  "expected_participants": [
+   "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  ],
+  "expected_ended": false
+ }
+]

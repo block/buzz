@@ -53,6 +53,10 @@ buzz channels topic --channel <uuid> --topic "New topic"
 buzz reactions add --event <event-id> --emoji "👍"
 buzz reactions get --event <event-id>
 
+# Huddles (read-only)
+buzz huddles list --channel <uuid> --active   # huddles with state and start/end times
+buzz huddles participants --channel <uuid> --huddle <huddle-id>
+
 # GIFs (requires relay to advertise buzz-gif / KLIPY)
 buzz gifs search                              # trending GIFs
 buzz gifs search --query "celebration"        # search GIFs
@@ -147,6 +151,8 @@ The table below mirrors that tree for readers who are not at a terminal.
 | `reactions` | `add` | React to a message |
 | | `remove` | Remove a reaction |
 | | `get` | List reactions |
+| `huddles` | `list` | List a channel's huddles (read-only) |
+| | `participants` | Show who is in a huddle (read-only) |
 | `gifs` | `search` | Search or browse trending GIFs (requires relay buzz-gif support) |
 | | `share` | Report a selected GIF to the provider's Recents |
 | `dms` | `list` | List DM conversations |
@@ -187,6 +193,15 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `set` | Write a memory value (use `-` for stdin) |
 | | `patch` | Apply unified diff to memory value |
 | | `rm` | Publish a tombstone to delete memory |
+
+## Huddles
+
+`huddles list` and `huddles participants` rebuild huddle state from the relay-signed lifecycle
+events (kinds 48100–48103) with the same rules as the desktop app. They never join, start, or end
+a huddle. Each scans at most 5000 newest events of the channel. If older events may be missing,
+`complete` is `false` and `truncated` is `true`. A huddle with no end event is `active`, then
+`stale` once its start is over an hour old; desktop shows `stale` as ended. The relay's liveness
+snapshots are not served over HTTP, so `liveness_checked` is always `false`.
 
 ## Architecture
 
