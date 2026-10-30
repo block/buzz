@@ -67,8 +67,9 @@ PostgreSQL database. Start the relay with `BUZZ_V1_ENABLED=true` so the
 accessory-route cases exercise their production handlers. The matrix creates
 unique tenant hosts and identities. Unset `BUZZ_KLIPY_API_KEY`: GIF controls
 assert the exact provider-disabled response without contacting a provider.
-The malformed JPEG control asserts its validation response; Git, workflow and
-media-read controls assert exact missing-resource responses. Successful reads
+The malformed JPEG and invalid Git-push repository-name controls assert their
+validation responses; Git reads, workflow and media-read controls assert exact
+missing-resource responses. Successful reads
 and writes must return their expected JSON shape, not merely avoid a ban.
 Ordinary-member routes also run a clear delegated-agent control.
 Do not point these tests at a shared, development, or hosted database or relay.
