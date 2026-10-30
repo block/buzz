@@ -185,6 +185,16 @@ test("inserts template variables with keyboard control and restores the caret", 
       ),
     )
     .toBe("Hello {{trigger.text}}".length);
+  // The browser already put the caret at the end, so the poll can pass before
+  // the insert's queued frame restores it. Let that frame run first: landing
+  // between fill()'s select-all and its typing, it would collapse the
+  // selection and append.
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
 
   await textarea.fill("Keep {{auth");
   await expect(listbox).toBeVisible();
