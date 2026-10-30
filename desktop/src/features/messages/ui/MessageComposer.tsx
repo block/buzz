@@ -582,12 +582,22 @@ function MessageComposerImpl({
     if (pendingGifCommand === null || gifCapability.loading) return;
     setPendingGifCommand(null);
     // Without GIF support the text stays put; the next send posts it as text.
-    if (gifCapability.available) openGifCommand(pendingGifCommand);
+    // Open only if the composer still holds this command: the user may have
+    // edited, sent, or switched to editing a message while discovery ran.
+    if (
+      gifCapability.available &&
+      editTargetRef.current == null &&
+      parseGiphyCommand(syncComposerContentFromEditor().trim()) ===
+        pendingGifCommand
+    ) {
+      openGifCommand(pendingGifCommand);
+    }
   }, [
     gifCapability.available,
     gifCapability.loading,
     openGifCommand,
     pendingGifCommand,
+    syncComposerContentFromEditor,
   ]);
   const submitMessage = React.useCallback(async () => {
     const trimmed = syncComposerContentFromEditor().trim();

@@ -2202,6 +2202,34 @@ test("/giphy waits for GIF capability discovery instead of sending", async ({
   ).toHaveValue("party parrot");
 });
 
+test("/giphy drops a pending command the user replaced before discovery", async ({
+  page,
+}) => {
+  await routeGifMocks(page);
+  let releaseInfo = () => {};
+  const infoReleased = new Promise<void>((resolve) => {
+    releaseInfo = resolve;
+  });
+  await page.route("http://localhost:3000/info", async (route) => {
+    await infoReleased;
+    return route.fallback();
+  });
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const input = page.getByTestId("message-input");
+  await input.fill("/giphy party parrot");
+  await input.press("Enter");
+  await input.fill("never mind");
+
+  releaseInfo();
+  await expect(page.getByTestId("composer-emoji-button")).toHaveAccessibleName(
+    "Insert emoji or GIF",
+  );
+  await expect(page.getByRole("tab", { name: "GIFs" })).toHaveCount(0);
+  await expect(input).toHaveText("never mind");
+});
+
 async function routeGifMocks(page: import("@playwright/test").Page) {
   const gifs = [
     {
