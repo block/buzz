@@ -296,6 +296,9 @@ enum Cmd {
     /// Publish notes and manage the social graph (NIP-01/02)
     #[command(subcommand)]
     Social(SocialCmd),
+    /// Set and manage your own private reminders (NIP-ER)
+    #[command(subcommand)]
+    Reminders(RemindersCmd),
     /// Publish and edit long-form NIP-23 notes — team knowledge base
     #[command(subcommand)]
     Notes(NotesCmd),
@@ -1142,6 +1145,58 @@ pub enum FeedCmd {
         /// Comma-separated feed types to include: mentions, needs_action, activity, agent_activity
         #[arg(long)]
         types: Option<String>,
+    },
+}
+
+/// Which reminder states `reminders list` shows.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ReminderStatusFilter {
+    Pending,
+    Done,
+    Cancelled,
+    All,
+}
+
+#[derive(Subcommand)]
+pub enum RemindersCmd {
+    /// List your reminders, soonest due first
+    List {
+        /// Which reminders to show
+        #[arg(long, value_enum, default_value = "pending")]
+        status: ReminderStatusFilter,
+    },
+    /// Create a reminder about a message, a note, or both
+    Add {
+        /// Message event ID (64-char hex) to remind about
+        #[arg(long)]
+        event: Option<String>,
+        /// When it is due: unix seconds, ISO-8601 with offset, or 30m / 2h / 1d / 1w
+        #[arg(long)]
+        at: String,
+        /// Private note; required when --event is not given
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Mark a pending reminder done
+    Done {
+        /// Reminder id from `reminders list`
+        #[arg(long)]
+        reminder: String,
+    },
+    /// Move a pending reminder to a later time
+    Snooze {
+        /// Reminder id from `reminders list`
+        #[arg(long)]
+        reminder: String,
+        /// New due time: unix seconds, ISO-8601 with offset, or 30m / 2h / 1d / 1w
+        #[arg(long)]
+        at: String,
+    },
+    /// Cancel a pending reminder
+    Cancel {
+        /// Reminder id from `reminders list`
+        #[arg(long)]
+        reminder: String,
     },
 }
 
@@ -2273,6 +2328,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Workflows(sub) => commands::workflows::dispatch(sub, &client).await,
         Cmd::Feed(sub) => commands::feed::dispatch(sub, &client, &cli.format).await,
         Cmd::Social(sub) => commands::social::dispatch(sub, &client).await,
+        Cmd::Reminders(sub) => commands::reminders::dispatch(sub, &client).await,
         Cmd::Notes(sub) => commands::notes::dispatch(sub, &client).await,
         Cmd::Repos(sub) => commands::repos::dispatch(sub, &client).await,
         Cmd::Projects(sub) => commands::projects::dispatch(sub, &client).await,
@@ -2470,6 +2526,7 @@ mod tests {
             "pr",
             "projects",
             "reactions",
+            "reminders",
             "repos",
             "social",
             "upload",
@@ -2568,6 +2625,10 @@ mod tests {
         assert_eq!(
             names(&cmd, "emoji"),
             vec!["export", "import", "list", "rm", "set"]
+        );
+        assert_eq!(
+            names(&cmd, "reminders"),
+            vec!["add", "cancel", "done", "list", "snooze"]
         );
         assert_eq!(
             names(&cmd, "dms"),
@@ -2680,6 +2741,7 @@ mod tests {
             ("pr", 5),
             ("projects", 8),
             ("reactions", 3),
+            ("reminders", 5),
             ("repos", 6),
             ("social", 7),
             ("upload", 1),
