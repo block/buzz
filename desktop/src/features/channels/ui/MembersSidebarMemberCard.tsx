@@ -17,7 +17,7 @@ import {
 
 import {
   getManagedAgentPrimaryActionLabel,
-  isManagedAgentActive,
+  isManagedAgentLive,
 } from "@/features/agents/lib/managedAgentControlActions";
 import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
@@ -227,14 +227,22 @@ export function MembersSidebarMemberCard({
                   ? agentCommunityAvailability(managedAgentRuntime) === "Here"
                     ? "default"
                     : "secondary"
-                  : managedAgent && isManagedAgentActive(managedAgent)
+                  : managedAgent &&
+                      isManagedAgentLive(
+                        managedAgent,
+                        presenceStatus ?? undefined,
+                      )
                     ? "default"
                     : "secondary"
               }
             >
               {managedAgentRuntime
                 ? agentCommunityAvailability(managedAgentRuntime)
-                : managedAgent && isManagedAgentActive(managedAgent)
+                : managedAgent &&
+                    isManagedAgentLive(
+                      managedAgent,
+                      presenceStatus ?? undefined,
+                    )
                   ? "Running"
                   : "Stopped"}
             </Badge>
@@ -353,7 +361,9 @@ function MemberActionsMenu({
 
   const startBlockReason = managedAgent
     ? agentPresenceStartBlockReason(
-        pairAction ? pairAction === "stop" : isManagedAgentActive(managedAgent),
+        pairAction
+          ? pairAction === "stop"
+          : isManagedAgentLive(managedAgent, availability),
         availability,
       )
     : undefined;
@@ -395,10 +405,10 @@ function MemberActionsMenu({
             >
               {pairAction
                 ? getPairActionIcon(pairAction)
-                : getManagedAgentActionIcon(managedAgent)}
+                : getManagedAgentActionIcon(managedAgent, availability)}
               {pairAction
                 ? MANAGED_AGENT_PAIR_ACTION_LABELS[pairAction]
-                : getManagedAgentPrimaryActionLabel(managedAgent)}
+                : getManagedAgentPrimaryActionLabel(managedAgent, availability)}
             </DropdownMenuItem>
             {onEditRespondTo ? (
               <DropdownMenuItem
@@ -529,8 +539,11 @@ function getPairActionIcon(action: ManagedAgentPairAction) {
   return <Play className="h-4 w-4" />;
 }
 
-function getManagedAgentActionIcon(agent: ManagedAgent) {
-  if (isManagedAgentActive(agent)) {
+function getManagedAgentActionIcon(
+  agent: ManagedAgent,
+  availability: PresenceStatus | undefined,
+) {
+  if (isManagedAgentLive(agent, availability)) {
     return <Square className="h-4 w-4" />;
   }
 
