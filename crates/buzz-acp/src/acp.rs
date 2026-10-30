@@ -148,6 +148,9 @@ fn build_initialize_params() -> serde_json::Value {
 pub struct AcpClient {
     /// The agent child process (kept alive to prevent zombie).
     child: Child,
+    /// OS PID of the spawned agent child, retained for PGID-level reaping even
+    /// after `child.wait()` or child exit causes `child.id()` to return `None`.
+    child_pid: Option<u32>,
     /// Sole stdin writer; None after an interrupted/failed frame closes it.
     stdin: Option<ChildStdin>,
     /// Framed reader over the agent's stdout pipe (line-oriented, bounded).
@@ -437,8 +440,9 @@ impl AcpClient {
         // rather than orphaned to init.
         //
         // Falls back to start_kill() (direct child only) on non-Unix or if
-        // the child has been polled to completion (id() returns None).
-        match self.child.id() {
+        // the child has been polled to completion (id() returns None) and
+        // child_pid was not captured.
+        match self.child.id().or(self.child_pid) {
             Some(pid) if kill_process_group(pid) => {}
             _ => {
                 let _ = self.child.start_kill();
@@ -606,6 +610,7 @@ impl AcpClient {
             )
         })?;
 
+        let child_pid = child.id();
         let stdin = child
             .stdin
             .take()
@@ -617,6 +622,7 @@ impl AcpClient {
 
         Ok(Self {
             child,
+            child_pid,
             stdin: Some(stdin),
             reader: FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_LINE_SIZE)),
             next_id: 0,
@@ -2381,7 +2387,7 @@ impl Drop for AcpClient {
         // Best-effort SIGKILL + reap. We cannot `await` in Drop (sync context).
         // Kill the process group when possible so subprocesses don't leak.
         // Callers SHOULD still call `shutdown().await` for guaranteed reaping.
-        match self.child.id() {
+        match self.child.id().or(self.child_pid) {
             Some(pid) if kill_process_group(pid) => {}
             _ => {
                 let _ = self.child.start_kill();
