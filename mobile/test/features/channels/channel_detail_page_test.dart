@@ -11617,6 +11617,11 @@ void main() {
         // Desktop's strings.
         expect(activityStatus(text), findsOneWidget);
         expect(find.text(text), findsOneWidget);
+        // Readable on the pill's fill in every theme.
+        expect(
+          tester.widget<Text>(find.text(text)).style?.color,
+          Theme.of(tester.element(find.text(text))).colorScheme.onSurface,
+        );
         expect(
           find.byKey(const ValueKey('agent-typing-dot-2')),
           findsOneWidget,

@@ -128,8 +128,10 @@ class _Typers extends StatelessWidget {
                 text,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
+                // The theme's muted ink is too faint on this fill in dark
+                // themes, so the names use the full foreground.
                 style: context.textTheme.labelSmall?.copyWith(
-                  color: context.colors.onSurfaceVariant,
+                  color: context.colors.onSurface,
                 ),
               ),
             ),
