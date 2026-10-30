@@ -23,7 +23,10 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-final _pushSwitch = find.byKey(const ValueKey('push-notifications-switch'));
+final _pushSwitch = find.descendant(
+  of: find.byKey(const ValueKey('push-notifications-setting')),
+  matching: find.byType(Switch),
+);
 
 void main() {
   setUp(() {

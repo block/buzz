@@ -20,7 +20,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../shared/community/community_storage_test.dart';
 
-final _pushSwitch = find.byKey(const ValueKey('push-notifications-switch'));
+final _pushSwitch = find.descendant(
+  of: find.byKey(const ValueKey('push-notifications-setting')),
+  matching: find.byType(Switch),
+);
 
 void main() {
   for (final outcome in ['loading', 'absent', 'error']) {
