@@ -192,6 +192,60 @@ async fn plan_picks_a_free_name_when_the_short_one_is_taken() {
     drop_scratch_db(&admin, pool, &name).await;
 }
 
+/// Runs the real script for `host` against database `db`, with `cli_body` as
+/// the stand-in CLI. Returns the script's output and each CLI call's
+/// arguments.
+#[cfg(unix)]
+async fn run_rename_script(
+    host: &str,
+    db: &str,
+    cli_body: &str,
+) -> (std::process::Output, Vec<Vec<Vec<u8>>>) {
+    let dir = std::env::temp_dir().join(format!("listed-name-script-{}", Uuid::new_v4().simple()));
+    std::fs::create_dir(&dir).unwrap();
+    let (cli, log) = (dir.join("buzz"), dir.join("calls"));
+    std::fs::write(
+        &cli,
+        format!(
+            "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\0' \"$@\" '' >>\"$STUB_LOG\"\n{cli_body}"
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let base = admin_url().await;
+    let database_url = format!("{}/{}", &base[..base.rfind('/').unwrap()], db);
+    let mut path = std::env::var("PATH").unwrap_or_default();
+    if let Ok(bin) = std::env::var("PG_BIN_DIR") {
+        path = format!("{bin}:{path}");
+    }
+    let output = std::process::Command::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../scripts/maintenance/rename_duplicate_listed_channel_names.sh"
+    ))
+    .arg(host)
+    .env("PATH", path)
+    .env("DATABASE_URL", &database_url)
+    .env("BUZZ_PRIVATE_KEY", "unused")
+    .env("BUZZ_CLI", &cli)
+    .env("STUB_LOG", &log)
+    .output()
+    .expect("run the rename script");
+
+    // Each call ends with an empty field, so "\0\0" splits the calls.
+    let calls = std::fs::read(&log).unwrap_or_default();
+    let calls = calls
+        .split(|b| *b == 0)
+        .collect::<Vec<_>>()
+        .split(|field| field.is_empty())
+        .filter(|call| !call.is_empty())
+        .map(|call| call.iter().map(|field| field.to_vec()).collect())
+        .collect();
+    std::fs::remove_dir_all(&dir).unwrap();
+    (output, calls)
+}
+
 /// The real script, with a stand-in CLI that logs each call and applies the
 /// rename. A name may hold any character but NUL, so a name holding control
 /// characters must still yield exactly one rename, of its own channel. Like
@@ -209,38 +263,14 @@ async fn script_renames_each_planned_channel_once_whatever_its_name() {
     seed.open(&pool, duplicate, &tricky, 10).await;
     seed.open(&pool, other, "other", 20).await;
 
-    let dir = std::env::temp_dir().join(format!("listed-name-script-{}", Uuid::new_v4().simple()));
-    std::fs::create_dir(&dir).unwrap();
-    let (cli, log) = (dir.join("buzz"), dir.join("calls"));
-    std::fs::write(
-        &cli,
-        "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\0' \"$@\" >>\"$STUB_LOG\"\n\
-         [[ $3 == --channel=* && $4 == --name=* ]] || exit 2\n\
+    let (output, calls) = run_rename_script(
+        &seed.host,
+        &name,
+        "[[ $3 == --channel=* && $4 == --name=* ]] || exit 2\n\
          psql \"$DATABASE_URL\" -X -q -v ON_ERROR_STOP=1 -v id=\"${3#*=}\" -v name=\"${4#*=}\" <<'SQL'\n\
          UPDATE channels SET name = :'name' WHERE id = :'id';\nSQL\n",
     )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-    let base = admin_url().await;
-    let database_url = format!("{}/{}", &base[..base.rfind('/').unwrap()], name);
-    let mut path = std::env::var("PATH").unwrap_or_default();
-    if let Ok(bin) = std::env::var("PG_BIN_DIR") {
-        path = format!("{bin}:{path}");
-    }
-    let output = std::process::Command::new(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../scripts/maintenance/rename_duplicate_listed_channel_names.sh"
-    ))
-    .arg(&seed.host)
-    .env("PATH", path)
-    .env("DATABASE_URL", &database_url)
-    .env("BUZZ_PRIVATE_KEY", "unused")
-    .env("BUZZ_CLI", &cli)
-    .env("STUB_LOG", &log)
-    .output()
-    .expect("run the rename script");
+    .await;
     assert!(
         output.status.success(),
         "script failed: {}",
@@ -248,18 +278,13 @@ async fn script_renames_each_planned_channel_once_whatever_its_name() {
     );
 
     let new_name = renamed(duplicate, &tricky).1;
-    let calls = std::fs::read(&log).unwrap();
-    let args: Vec<&[u8]> = calls.split(|b| *b == 0).collect();
-    let channel = format!("--channel={duplicate}");
-    let name_arg = format!("--name={new_name}");
-    let expected: Vec<&[u8]> = vec![
-        b"channels",
-        b"update",
-        channel.as_bytes(),
-        name_arg.as_bytes(),
-        b"",
-    ];
-    assert_eq!(args, expected, "one call, for the duplicate only");
+    let expected: Vec<Vec<Vec<u8>>> = vec![vec![
+        b"channels".to_vec(),
+        b"update".to_vec(),
+        format!("--channel={duplicate}").into_bytes(),
+        format!("--name={new_name}").into_bytes(),
+    ]];
+    assert_eq!(calls, expected, "one call, for the duplicate only");
     let mut names = vec![
         (kept, tricky.clone()),
         (duplicate, new_name.clone()),
@@ -267,6 +292,69 @@ async fn script_renames_each_planned_channel_once_whatever_its_name() {
     ];
     names.sort();
     assert_eq!(seed.names(&pool).await, names);
-    std::fs::remove_dir_all(&dir).unwrap();
+    drop_scratch_db(&admin, pool, &name).await;
+}
+
+/// An auth refusal (CLI exit code 3, for example 403 relay_membership_required)
+/// stops the script at the first rename, with a message that names the
+/// membership precondition.
+/// Mutation: drop the exit-code-3 branch in the script → RED.
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn script_stops_at_the_first_auth_refusal() {
+    let admin = PgPool::connect(&admin_url().await).await.unwrap();
+    let (pool, name) = create_scratch_db(&admin, "listed_name_script_auth").await;
+    let seed = Seed::new(&pool).await;
+    for (group, age) in [("first", 30), ("first", 10), ("second", 30), ("second", 10)] {
+        seed.open(&pool, Uuid::new_v4(), group, age).await;
+    }
+
+    let (output, calls) = run_rename_script(&seed.host, &name, "exit 3\n").await;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert_eq!(calls.len(), 1, "it stops after the first refusal");
+    assert!(stderr.contains("a member of"), "{stderr}");
+    drop_scratch_db(&admin, pool, &name).await;
+}
+
+/// The relay serves only an active, unarchived community, so the script stops
+/// before any rename for an archived community, one being deleted, or a host
+/// no community has, and says why.
+/// Mutation: drop the community check in the script → RED.
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn script_stops_for_a_community_the_relay_does_not_serve() {
+    let admin = PgPool::connect(&admin_url().await).await.unwrap();
+    let (pool, name) = create_scratch_db(&admin, "listed_name_script_state").await;
+    let archived = Seed::new(&pool).await;
+    let deleting = Seed::new(&pool).await;
+    for seed in [&archived, &deleting] {
+        seed.open(&pool, Uuid::new_v4(), "ops", 30).await;
+        seed.open(&pool, Uuid::new_v4(), "ops", 10).await;
+    }
+    sqlx::query("UPDATE communities SET archived_at = now() WHERE id = $1")
+        .bind(archived.community)
+        .execute(&pool)
+        .await
+        .unwrap();
+    crate::test_support::quiesce_community_for_tests(
+        &pool,
+        buzz_core::CommunityId::from_uuid(deleting.community),
+    )
+    .await;
+
+    for (host, message) in [
+        (archived.host.as_str(), "Unarchive it"),
+        (deleting.host.as_str(), "being deleted"),
+        ("missing.example", "no community has host"),
+    ] {
+        let (output, calls) = run_rename_script(host, &name, "exit 0\n").await;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{host}: {stderr}");
+        assert!(calls.is_empty(), "{host}: no rename");
+        assert!(stderr.contains(message), "{host}: {stderr}");
+    }
     drop_scratch_db(&admin, pool, &name).await;
 }
