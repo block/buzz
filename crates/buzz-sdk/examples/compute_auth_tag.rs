@@ -4,6 +4,13 @@
 //!   cargo run --release --example compute_auth_tag -- <owner_secret_hex> <agent_pubkey_hex> [conditions]
 //!
 //! Prints the JSON auth tag to stdout.
+//!
+//! This form needs a source checkout and takes the owner secret on argv,
+//! where `ps` and shell history can read it. Operators bootstrapping an agent
+//! should prefer the shipped binary, which reads the secret from the
+//! environment or stdin:
+//!
+//!   buzz-admin compute-auth-tag --agent <agent_pubkey> --conditions kind=9
 
 use buzz_sdk::nip_oa;
 use nostr::{Keys, PublicKey};
