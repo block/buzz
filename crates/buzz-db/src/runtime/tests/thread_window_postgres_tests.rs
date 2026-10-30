@@ -291,6 +291,10 @@ async fn migration_schema_thread_window_prebuild_does_not_queue_behind_writer() 
 
     // Also bind the public migrator: the advisory schema/destruction lock,
     // ledger write and post-migration catalog checks must work with ingestion.
+    // Migration 0079 refuses this populated `channels` table until the
+    // operator prebuilds its index, which does not wait for the writer.
+    let refused = migration::run_migrations(&pool).await;
+    crate::test_support::prebuild_listed_channel_name_index(&pool).await;
     let production_result = migration::run_migrations(&pool).await;
     sqlx::query(insert)
         .bind(community)
@@ -325,6 +329,12 @@ async fn migration_schema_thread_window_prebuild_does_not_queue_behind_writer() 
     assert!(
         concurrent_insert.is_ok(),
         "migration must allow metadata inserts: {concurrent_insert:?}"
+    );
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|e| e.to_string().contains("prebuild idx_channels_listed_name")),
+        "0079 must ask for the prebuild: {refused:?}"
     );
     assert!(
         production_result.is_ok(),

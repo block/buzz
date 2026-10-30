@@ -157,7 +157,6 @@ pub async fn create_channel(
     .execute(tx.conn())
     .await
     .map_err(|e| listed_name_taken(e, Some(name)))?;
-    ensure_listed_channel_name_unique(&mut tx, id).await?;
 
     sqlx::query(
         r#"
@@ -401,7 +400,6 @@ async fn insert_channel_rows(
     let was_created = rows_affected > 0;
 
     if was_created {
-        ensure_listed_channel_name_unique(tx, channel_id).await?;
         // Bootstrap the creator as owner.
         sqlx::query(
             r#"
@@ -450,67 +448,14 @@ async fn insert_channel_rows(
     Ok(was_created)
 }
 
-/// SQL that is true for a channel the channel directory lists: an open,
-/// listed stream or forum that is not deleted. An archived channel is still
-/// listed, so it keeps its name. Within a community, no two of these share a
-/// name, ignoring case ([`ensure_listed_channel_name_unique`]).
-pub(crate) const LISTED_CHANNEL_SQL: &str =
-    "visibility = 'open' AND NOT unlisted AND channel_type IN ('stream', 'forum') \
-     AND deleted_at IS NULL";
-
-/// Refuses, with [`DbError::ChannelNameTaken`], a write on `tx` that left
-/// `channel_id` listed ([`LISTED_CHANNEL_SQL`]) under a name another listed
-/// channel in the community already has, ignoring case. Private channels,
-/// DMs and the other types may repeat names: nobody browses them side by
-/// side, and refusing a name that a private channel holds would tell anyone
-/// that the channel exists.
-///
-/// Call it after the write that creates the channel or changes its name,
-/// visibility or unlisted flag. It first takes a transaction advisory lock
-/// on the name, so two writers that claim one name take turns and the second
-/// sees the first's committed row. A writer takes this lock last, after the
-/// locks of [`lock_channel_for_settings_write`], and holds at most one.
-async fn ensure_listed_channel_name_unique(
-    tx: &mut crate::AdmittedTx,
-    channel_id: Uuid,
-) -> Result<()> {
-    let community_id = tx.community();
-    let name: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT name FROM channels WHERE community_id = $1 AND id = $2 AND {LISTED_CHANNEL_SQL}"
-    )))
-    .bind(community_id.as_uuid())
-    .bind(channel_id)
-    .fetch_optional(tx.conn())
-    .await?;
-    let Some(name) = name else {
-        return Ok(());
-    };
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1 || lower($2), 0))")
-        .bind(format!("buzz_channel_name:{}:", community_id.as_uuid()))
-        .bind(&name)
-        .execute(tx.conn())
-        .await?;
-    let taken: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT EXISTS (SELECT 1 FROM channels WHERE community_id = $1 AND id <> $2 \
-         AND lower(name) = lower($3) AND {LISTED_CHANNEL_SQL})"
-    )))
-    .bind(community_id.as_uuid())
-    .bind(channel_id)
-    .bind(&name)
-    .fetch_one(tx.conn())
-    .await?;
-    if taken {
-        return Err(DbError::ChannelNameTaken(name));
-    }
-    Ok(())
-}
-
-/// The unique index on `(community_id, lower(name))` over
-/// [`LISTED_CHANNEL_SQL`] channels that migration 0079 adds. It refuses a
-/// duplicate at the write itself, before
-/// [`ensure_listed_channel_name_unique`] runs, so this release maps the
-/// refusal too: it can run beside that index during the rollout of 0079 and
-/// after a rollback.
+/// The unique index (migration 0079) that keeps two channels the channel
+/// directory lists from sharing a name in a community, ignoring case. It
+/// covers open, not unlisted streams and forums that are not deleted; an
+/// archived channel keeps its name. Private channels, DMs and the other
+/// types may repeat names: nobody browses them side by side, and refusing a
+/// name that a private channel holds would tell anyone that the channel
+/// exists. A write that claims a taken name waits for a concurrent writer of
+/// that name to finish, then fails if it committed.
 const LISTED_NAME_INDEX: &str = "idx_channels_listed_name";
 
 /// Reports a channel write that [`LISTED_NAME_INDEX`] refused as
@@ -1189,9 +1134,6 @@ async fn update_channel_on(
         .map_err(|e| listed_name_taken(e, updates.name.as_deref().or(current_name.as_deref())))?;
     if result.rows_affected() == 0 {
         return Err(DbError::ChannelNotFound(channel_id));
-    }
-    if updates.name.is_some() || updates.visibility.is_some() || updates.unlisted.is_some() {
-        ensure_listed_channel_name_unique(tx, channel_id).await?;
     }
     if policy_changed {
         sqlx::query(
