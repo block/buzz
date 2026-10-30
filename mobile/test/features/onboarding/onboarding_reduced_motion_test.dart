@@ -64,11 +64,12 @@ void main() {
     addTearDown(f.dispose);
     f.rows = [f.row('one'), f.row('two')];
     final observer = _Routes();
+    var closes = 0;
     await tester.pumpWidget(
       app(
         HostedConnectPage(
           flow: f.flow,
-          onClose: () {},
+          onClose: () => closes++,
           profileBuilder: (_) => const Text('Profile content'),
         ),
         observers: [observer],
@@ -81,6 +82,9 @@ void main() {
             as TransitionRoute;
     expect(outer.transitionDuration, Duration.zero);
     expect(outer.animation!.isCompleted, isTrue);
+    await tester.binding.handlePopRoute();
+    await tester.pump();
+    expect(closes, 1);
     await f.flow.signInAccount();
     await tester.pump();
     await tester.pump();

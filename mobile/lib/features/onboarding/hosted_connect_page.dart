@@ -101,6 +101,9 @@ class _HostedSteps extends HookWidget {
           flow.stage != presentedStage) {
         return;
       }
+      // Nested PopScopes can observe the same rejected system pop. Retire
+      // this presentation before dispatching its one back/close action.
+      activePresentation.value = null;
       if (flow.canChangeCommunities) {
         flow.backToCommunityChoices();
       } else {
