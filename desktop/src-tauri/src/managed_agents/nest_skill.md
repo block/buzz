@@ -51,9 +51,9 @@ Manage your repository's enforced branch and tag rules with `repos protect list|
 
 Output varies by command group — `--help` shows flags but not response shapes.
 
-**Read commands** return JSON arrays. Event reads (`messages get/thread/search`, `feed get`) return `{id, pubkey, kind, created_at, content, tags}` plus `reply_to` (the parent event ID) on replies and `thread_root` on nested replies, whose NIP-10 `root`/`reply` tags are folded into them: the harness sets `BUZZ_OUTPUT_FORMAT=agent`, which drops `sig` and trims the NIP-OA `auth` tag to `["auth", <owner pubkey>]` (present on agent-authored messages). Pass `--format json` for complete signed Nostr events with `{id, pubkey, kind, content, created_at, tags, sig}`. Other reads use command-specific shapes for channels (`{channel_id, name, description, created_at}`), users (kind:0 profile JSON with `pubkey` injected), and workflows (`{workflow_id, content, created_at, pubkey}`).
+**Read commands** return JSON arrays. Event reads (`messages get/thread/search`, `feed get`) return `{id, pubkey, kind, created_at, content, tags}` plus `reply_to` (the parent event ID) on replies and `thread_root` on nested replies, whose NIP-10 `root`/`reply` tags are folded into them: the harness sets `BUZZ_OUTPUT_FORMAT=agent`, which drops `sig` and trims the NIP-OA `auth` tag to `["auth", <owner pubkey>]` (present on agent-authored messages). Pass `--format json` for complete signed Nostr events with `{id, pubkey, kind, content, created_at, tags, sig}`. Other reads use command-specific shapes for channels (`{channel_id, name, description, created_at}`), users (kind:0 profile JSON with `pubkey` injected), and workflows (`{workflow_id, content, created_at, pubkey}`). `workflows runs` returns `{runs, next}` (`runs[]`: `{id, workflow_id, status, current_step, execution_trace, started_at, completed_at, error_code, error_message, created_at}`; `next` is `null` or `{before, before_id}`). `workflows approvals` returns `{approvals}` (`approvals[]`: `{approval_ref, workflow_id, run_id, step_id, step_index, approver_spec, status, approver_pubkey, note, expires_at, created_at}`).
 
-**Write commands**: all return `{event_id, accepted, message}`. Create commands add the generated entity ID: `channels create` → `channel_id`, `dms open` → `dm_id`, `workflows create` → `workflow_id`. Agent draft commands add `{request_id, action, saved: false}` because they only open an owner-reviewed Desktop draft.
+**Write commands**: all return `{event_id, accepted, message}`. Create commands add the generated entity ID: `channels create` → `channel_id`, `dms open` → `dm_id`, `workflows create` → `workflow_id`, plus `webhook_secret` for an accepted webhook-triggered workflow (a secret: shown once, never log or post it). Agent draft commands add `{request_id, action, saved: false}` because they only open an owner-reviewed Desktop draft.
 
 **Exceptions to the above patterns:**
 
@@ -123,7 +123,7 @@ buzz messages send --channel <UUID> \
 
 1. **`feed get` sorts newest-first** — every other list command sorts oldest-first. Don't assume consistent sort order.
 2. **`users set-presence` is broken** — sends ephemeral kind:20001 via HTTP POST; relay accepts presence only over WebSocket (typing, kind:20002, is the one ephemeral kind HTTP accepts). Will fail until WebSocket support is added.
-3. **`workflow runs` always returns `[]`** — run history lives in the relay's database, not as Nostr events.
+3. **`workflows approvals` shows `approval_ref`, not a token** — the ref is opaque and cannot be passed to `workflows approve --token`; that needs the token UUID from the approval request.
 4. **`dms open` returns `dm_id`** — use this value as `--channel` for subsequent `messages send/get` commands on that DM.
 5. **Content max 65,536 bytes** (exit 1 if exceeded). Diffs auto-truncate at 61,440 bytes at a hunk boundary.
 6. **`users get` always returns an array** — even for a single pubkey lookup. Never expect a bare object.

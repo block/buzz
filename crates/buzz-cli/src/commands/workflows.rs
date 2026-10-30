@@ -1,8 +1,8 @@
 use sha2::{Digest, Sha256};
 
 use crate::client::{
-    extract_d_tag, extract_relay_response_field, normalize_write_response, print_create_response,
-    BuzzClient,
+    create_response_with_id_if_accepted, extract_d_tag, extract_relay_response_field,
+    normalize_write_response, BuzzClient,
 };
 use crate::error::CliError;
 use crate::validate::{parse_uuid, read_or_stdin, sdk_err, validate_uuid};
@@ -57,49 +57,80 @@ pub async fn cmd_get_workflow(client: &BuzzClient, workflow_id: &str) -> Result<
     Ok(())
 }
 
-/// Get workflow run history — query kinds [46001, 46002, 46003].
+/// Fetch one page of workflow run history from `GET /workflows/{id}/runs`.
 ///
-/// NOTE: The relay does not currently emit workflow execution events (46001-46003).
-/// Run history is stored in the workflow_runs DB table, not as Nostr events.
-/// This command will return an empty array until the relay adds event emission
-/// or a dedicated REST endpoint for run history.
+/// Returns the relay's `{runs, next}` body. Relay failures and malformed
+/// bodies are errors, never an empty list.
+async fn fetch_workflow_runs(
+    client: &BuzzClient,
+    workflow_id: &str,
+    limit: Option<u32>,
+) -> Result<String, CliError> {
+    validate_uuid(workflow_id)?;
+    let limit = limit.unwrap_or(20).clamp(1, 100);
+    let body = client
+        .get_authed(&format!("/workflows/{workflow_id}/runs?limit={limit}"))
+        .await?;
+    require_array_field(&body, "runs")
+}
+
+/// Fetch the approvals of one run from `GET /workflows/{id}/runs/{run}/approvals`.
+async fn fetch_run_approvals(
+    client: &BuzzClient,
+    workflow_id: &str,
+    run_id: &str,
+) -> Result<String, CliError> {
+    validate_uuid(workflow_id)?;
+    validate_uuid(run_id)?;
+    let body = client
+        .get_authed(&format!("/workflows/{workflow_id}/runs/{run_id}/approvals"))
+        .await?;
+    require_array_field(&body, "approvals")
+}
+
+fn require_array_field(body: &str, field: &str) -> Result<String, CliError> {
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| CliError::Other(format!("relay returned invalid JSON: {e}")))?;
+    if !value.get(field).is_some_and(|v| v.is_array()) {
+        return Err(CliError::Other(format!(
+            "relay response is missing the `{field}` array"
+        )));
+    }
+    Ok(value.to_string())
+}
+
+/// Get workflow run history.
 pub async fn cmd_get_workflow_runs(
     client: &BuzzClient,
     workflow_id: &str,
     limit: Option<u32>,
 ) -> Result<(), CliError> {
-    validate_uuid(workflow_id)?;
-    let limit = limit.unwrap_or(20).min(100);
-    let filter = serde_json::json!({
-        "kinds": [46001, 46002, 46003],
-        "#d": [workflow_id],
-        "limit": limit
-    });
-    let resp = client.query(&filter).await?;
-    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
-    let normalized: Vec<serde_json::Value> = events
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "event_id": e.get("id").and_then(|v| v.as_str()).unwrap_or(""),
-                "kind": e.get("kind").and_then(|v| v.as_u64()).unwrap_or(0),
-                "content": e.get("content").and_then(|v| v.as_str()).unwrap_or(""),
-                "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
-                "tags": e.get("tags").cloned().unwrap_or(serde_json::json!([])),
-            })
-        })
-        .collect();
-    let output = serde_json::to_string(&normalized).unwrap_or_default();
-    println!("{output}");
+    println!("{}", fetch_workflow_runs(client, workflow_id, limit).await?);
     Ok(())
 }
 
-/// Create a workflow — sign and submit a kind:30620 event.
-pub async fn cmd_create_workflow(
+/// List the approvals of a workflow run.
+pub async fn cmd_get_run_approvals(
+    client: &BuzzClient,
+    workflow_id: &str,
+    run_id: &str,
+) -> Result<(), CliError> {
+    println!(
+        "{}",
+        fetch_run_approvals(client, workflow_id, run_id).await?
+    );
+    Ok(())
+}
+
+/// Sign and submit a new workflow, returning the CLI output JSON.
+///
+/// When the relay accepts a webhook-triggered workflow, its one-time
+/// `webhook_secret` is surfaced as a top-level field.
+async fn create_workflow_output(
     client: &BuzzClient,
     channel_id: &str,
     yaml: &str,
-) -> Result<(), CliError> {
+) -> Result<String, CliError> {
     let channel_uuid = parse_uuid(channel_id)?;
     let yaml_definition = read_or_stdin(yaml)?;
 
@@ -111,7 +142,30 @@ pub async fn cmd_create_workflow(
     let resp = client.submit_event(event).await?;
     let final_workflow_id = extract_relay_response_field(&resp, "workflow_id")
         .unwrap_or_else(|| workflow_id.to_string());
-    print_create_response(&resp, "workflow_id", &final_workflow_id);
+    let mut out: serde_json::Value = serde_json::from_str(&create_response_with_id_if_accepted(
+        &resp,
+        "workflow_id",
+        &final_workflow_id,
+    ))
+    .map_err(|e| CliError::Other(format!("relay returned invalid JSON: {e}")))?;
+    if out.get("accepted").and_then(|a| a.as_bool()) == Some(true) {
+        if let Some(secret) = extract_relay_response_field(&resp, "webhook_secret") {
+            out["webhook_secret"] = serde_json::json!(secret);
+        }
+    }
+    Ok(out.to_string())
+}
+
+/// Create a workflow — sign and submit a kind:30620 event.
+pub async fn cmd_create_workflow(
+    client: &BuzzClient,
+    channel_id: &str,
+    yaml: &str,
+) -> Result<(), CliError> {
+    println!(
+        "{}",
+        create_workflow_output(client, channel_id, yaml).await?
+    );
     Ok(())
 }
 
@@ -244,6 +298,9 @@ pub async fn dispatch(cmd: crate::WorkflowsCmd, client: &BuzzClient) -> Result<(
         WorkflowsCmd::Runs { workflow, limit } => {
             cmd_get_workflow_runs(client, &workflow, limit).await
         }
+        WorkflowsCmd::Approvals { workflow, run } => {
+            cmd_get_run_approvals(client, &workflow, &run).await
+        }
         WorkflowsCmd::Approve {
             token,
             approved,
@@ -252,5 +309,219 @@ pub async fn dispatch(cmd: crate::WorkflowsCmd, client: &BuzzClient) -> Result<(
             // approved is already a bool — no parse_bool_flag needed
             cmd_approve_step(client, &token, approved, note.as_deref()).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use axum::{
+        extract::{Path, RawQuery, State},
+        http::StatusCode,
+        routing::{get, post},
+        Json, Router,
+    };
+    use nostr::Keys;
+    use serde_json::{json, Value};
+
+    use super::*;
+
+    const WF: &str = "11111111-1111-4111-8111-111111111111";
+    const RUN: &str = "22222222-2222-4222-8222-222222222222";
+
+    type Seen = Arc<Mutex<Vec<String>>>;
+
+    #[derive(Clone)]
+    struct Relay {
+        seen: Seen,
+        runs: (StatusCode, String),
+        approvals: (StatusCode, String),
+        submit: String,
+    }
+
+    async fn fake_relay(relay: Relay) -> BuzzClient {
+        let app = Router::new()
+            .route(
+                "/workflows/{wf}/runs",
+                get(
+                    |State(r): State<Relay>, Path(wf): Path<String>, RawQuery(q): RawQuery| async move {
+                        r.seen.lock().unwrap().push(format!(
+                            "GET /workflows/{wf}/runs?{}",
+                            q.unwrap_or_default()
+                        ));
+                        r.runs
+                    },
+                ),
+            )
+            .route(
+                "/workflows/{wf}/runs/{run}/approvals",
+                get(
+                    |State(r): State<Relay>, Path((wf, run)): Path<(String, String)>| async move {
+                        r.seen
+                            .lock()
+                            .unwrap()
+                            .push(format!("GET /workflows/{wf}/runs/{run}/approvals"));
+                        r.approvals
+                    },
+                ),
+            )
+            .route(
+                "/events",
+                post(|State(r): State<Relay>| async move {
+                    ([("content-type", "application/json")], Json(json!(
+                        serde_json::from_str::<Value>(&r.submit).unwrap()
+                    )))
+                }),
+            )
+            .with_state(relay);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        BuzzClient::new(format!("http://{addr}"), Keys::generate(), None, None).unwrap()
+    }
+
+    fn relay() -> Relay {
+        Relay {
+            seen: Seen::default(),
+            runs: (
+                StatusCode::OK,
+                json!({"runs": [], "next": null}).to_string(),
+            ),
+            approvals: (StatusCode::OK, json!({"approvals": []}).to_string()),
+            submit: json!({"event_id": "ab", "accepted": true, "message": ""}).to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn runs_reads_the_relay_endpoint_and_never_hides_failures() {
+        let mut r = relay();
+        let body = json!({
+            "runs": [{"id": RUN, "workflow_id": WF, "status": "completed", "created_at": 5}],
+            "next": {"before": 5, "before_id": RUN},
+        });
+        r.runs = (StatusCode::OK, body.to_string());
+        let seen = r.seen.clone();
+        let client = fake_relay(r).await;
+
+        let out = fetch_workflow_runs(&client, WF, Some(500)).await.unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), body);
+        fetch_workflow_runs(&client, WF, None).await.unwrap();
+        fetch_workflow_runs(&client, WF, Some(0)).await.unwrap();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                format!("GET /workflows/{WF}/runs?limit=100"),
+                format!("GET /workflows/{WF}/runs?limit=20"),
+                format!("GET /workflows/{WF}/runs?limit=1"),
+            ]
+        );
+
+        assert!(matches!(
+            fetch_workflow_runs(&client, "not-a-uuid", None).await,
+            Err(CliError::Usage(_))
+        ));
+
+        for (status, body, want_relay) in [
+            (
+                StatusCode::NOT_FOUND,
+                json!({"error": "workflow not found"}).to_string(),
+                true,
+            ),
+            (
+                StatusCode::UNAUTHORIZED,
+                json!({"error": "auth"}).to_string(),
+                true,
+            ),
+            (StatusCode::OK, "not json".to_string(), false),
+            (StatusCode::OK, "[]".to_string(), false),
+        ] {
+            let mut r = relay();
+            r.runs = (status, body);
+            let client = fake_relay(r).await;
+            let err = fetch_workflow_runs(&client, WF, None).await.unwrap_err();
+            assert_eq!(matches!(err, CliError::Relay { .. }), want_relay, "{err:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn approvals_reads_the_run_endpoint_and_passes_refs_through() {
+        let mut r = relay();
+        let body =
+            json!({"approvals": [{"approval_ref": "ab12", "run_id": RUN, "status": "pending"}]});
+        r.approvals = (StatusCode::OK, body.to_string());
+        let seen = r.seen.clone();
+        let client = fake_relay(r).await;
+
+        let out = fetch_run_approvals(&client, WF, RUN).await.unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), body);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![format!("GET /workflows/{WF}/runs/{RUN}/approvals")]
+        );
+
+        assert!(matches!(
+            fetch_run_approvals(&client, WF, "nope").await,
+            Err(CliError::Usage(_))
+        ));
+
+        let mut r = relay();
+        r.approvals = (
+            StatusCode::NOT_FOUND,
+            json!({"error": "workflow run not found"}).to_string(),
+        );
+        let client = fake_relay(r).await;
+        assert!(matches!(
+            fetch_run_approvals(&client, WF, RUN).await,
+            Err(CliError::Relay { status: 404, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn create_surfaces_the_webhook_secret_only_when_accepted() {
+        let mut r = relay();
+        r.submit = json!({
+            "event_id": "ab", "accepted": true,
+            "message": "response:{\"workflow_id\":\"33333333-3333-4333-8333-333333333333\",\"webhook_secret\":\"s3cret\"}",
+        })
+        .to_string();
+        let client = fake_relay(r).await;
+        let out: Value = serde_json::from_str(
+            &create_workflow_output(&client, WF, "name: x")
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(out["webhook_secret"], "s3cret");
+        assert_eq!(out["workflow_id"], "33333333-3333-4333-8333-333333333333");
+        assert_eq!(out["event_id"], "ab");
+        assert_eq!(out["accepted"], true);
+        assert!(out["message"].as_str().unwrap().starts_with("response:"));
+
+        let client = fake_relay(relay()).await;
+        let out: Value = serde_json::from_str(
+            &create_workflow_output(&client, WF, "name: x")
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(out.get("webhook_secret").is_none());
+        assert!(out["workflow_id"].is_string());
+
+        let mut r = relay();
+        r.submit = json!({
+            "event_id": "ab", "accepted": false,
+            "message": "response:{\"webhook_secret\":\"s3cret\"}",
+        })
+        .to_string();
+        let client = fake_relay(r).await;
+        let out: Value = serde_json::from_str(
+            &create_workflow_output(&client, WF, "name: x")
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(out.get("webhook_secret").is_none());
+        assert!(out.get("workflow_id").is_none());
     }
 }
