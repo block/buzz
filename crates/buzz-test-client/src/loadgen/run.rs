@@ -1774,11 +1774,37 @@ hold_secs = 2
         channel: String,
     }
 
-    /// Runs `[hot_thread]` section `hot` for a second against a relay whose
-    /// root lookup returns a newer reply-shaped decoy by the root's author,
-    /// plus the hot root itself when `seeded`, and which holds every event
-    /// it receives until `held` after the run starts.
-    async fn hot_thread_run(seeded: bool, hot: &str, held: Duration) -> HotRun {
+    type Log<T> = Arc<std::sync::Mutex<Vec<T>>>;
+
+    /// A fake relay for the hot thread: the events it received, the `/query`
+    /// filters it answered, and the hot root's id and channel.
+    struct HotRelay {
+        addr: String,
+        posted: Log<Event>,
+        queries: Log<Value>,
+        root_id: String,
+        channel: String,
+    }
+
+    /// Holds `/events` responses until opened, counting the requests held.
+    #[derive(Default)]
+    struct Gate {
+        arrived: AtomicUsize,
+        open: std::sync::Mutex<bool>,
+        opened: std::sync::Condvar,
+    }
+
+    impl Gate {
+        fn release(&self) {
+            *self.open.lock().unwrap() = true;
+            self.opened.notify_all();
+        }
+    }
+
+    /// Serves a relay whose root lookup returns a newer reply-shaped decoy by
+    /// the root's author, plus the hot root itself when `seeded`. With a
+    /// `gate`, every event waits for it to open before it is accepted.
+    async fn hot_relay(seeded: bool, gate: Option<Arc<Gate>>) -> HotRelay {
         let author = hot_root_keys("t");
         let channel = identity::channel_id("t", 0, 0);
         let root = EventBuilder::new(kind(KIND_STREAM_MESSAGE), HOT_ROOT_PREFIX)
@@ -1795,17 +1821,19 @@ hold_secs = 2
             .custom_created_at(Timestamp::from(root.created_at.as_secs() + 1))
             .sign_with_keys(&author)
             .unwrap();
-        let posted = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let queries = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let posted: Log<Event> = Default::default();
+        let queries: Log<Value> = Default::default();
         let (post_log, query_log) = (posted.clone(), queries.clone());
-        let release = Instant::now() + held;
         let addr = super::super::seed::tests::fake_http(move |_, target, body| {
             if target == "/events" {
                 let event: Event = serde_json::from_slice(body).unwrap();
                 post_log.lock().unwrap().push(event);
-                let wait = release.saturating_duration_since(Instant::now());
-                if !wait.is_zero() {
-                    tokio::task::block_in_place(|| std::thread::sleep(wait));
+                if let Some(gate) = &gate {
+                    gate.arrived.fetch_add(1, Ordering::SeqCst);
+                    tokio::task::block_in_place(|| {
+                        let open = gate.open.lock().unwrap();
+                        drop(gate.opened.wait_while(open, |open| !*open).unwrap());
+                    });
                 }
                 return (200, json!({"accepted": true, "message": ""}).to_string());
             }
@@ -1820,7 +1848,18 @@ hold_secs = 2
             (200, found.to_string())
         })
         .await;
-        let scenario = Scenario::parse(&format!(
+        HotRelay {
+            addr,
+            posted,
+            queries,
+            root_id,
+            channel,
+        }
+    }
+
+    /// A one-second scenario with `[hot_thread]` section `hot` against `addr`.
+    fn hot_scenario(addr: &str, hot: &str) -> Scenario {
+        Scenario::parse(&format!(
             r#"
 run_id = "t"
 [target]
@@ -1840,18 +1879,24 @@ users = 1.0
 hold_secs = 1
 "#
         ))
-        .unwrap();
+        .unwrap()
+    }
+
+    /// Runs `[hot_thread]` section `hot` for a second against `hot_relay`.
+    async fn hot_thread_run(seeded: bool, hot: &str) -> HotRun {
+        let relay = hot_relay(seeded, None).await;
+        let scenario = hot_scenario(&relay.addr, hot);
         let net = Net::new(&scenario).await.unwrap();
         let shard = Shard::parse("0/1").unwrap();
         let outcome = run_with(scenario, net, shard, Duration::from_secs(5)).await;
-        let posted = posted.lock().unwrap().clone();
-        let queries = queries.lock().unwrap().clone();
+        let posted = relay.posted.lock().unwrap().clone();
+        let queries = relay.queries.lock().unwrap().clone();
         HotRun {
             outcome,
             posted,
             queries,
-            root_id,
-            channel,
+            root_id: relay.root_id,
+            channel: relay.channel,
         }
     }
 
@@ -1859,7 +1904,7 @@ hold_secs = 1
 
     #[tokio::test]
     async fn hot_thread_authors_reply_to_the_hot_root_and_fail_without_it() {
-        let run = hot_thread_run(true, TWO_AUTHORS, Duration::ZERO).await;
+        let run = hot_thread_run(true, TWO_AUTHORS).await;
         let report = run.outcome.expect("hot-thread run passes");
         assert_eq!(report["steps"][0]["hot_authors"], 2, "{report}");
         assert!(!run.posted.is_empty(), "{report}");
@@ -1896,7 +1941,7 @@ hold_secs = 1
         assert!(ops["hot_reply"]["count"].as_u64() > Some(0), "{report}");
 
         // Without a seeded hot root the authors post nothing and the step aborts.
-        let run = hot_thread_run(false, TWO_AUTHORS, Duration::ZERO).await;
+        let run = hot_thread_run(false, TWO_AUTHORS).await;
         let report = run.outcome.expect_err("a missing hot root fails the run");
         assert!(run.posted.is_empty());
         let reason = report["steps"][0]["abort_reason"]
@@ -1905,18 +1950,49 @@ hold_secs = 1
         assert!(reason.starts_with("thread_fetch"), "{report}");
     }
 
-    /// The relay holds every reply until a second after the one-second hold
-    /// ends, so each author is mid-reply at the stop and its next reply is
-    /// due when that one settles. Each must finish the reply it started and
-    /// start no other: exactly one reply per author settles during shutdown,
+    /// Every author is mid-reply at the stop, held there by the relay, with
+    /// its next reply already due. Each must finish the reply it started and
+    /// start no other: exactly one reply per author settles after the stop,
     /// and the relay receives no more.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn hot_thread_authors_start_nothing_once_the_run_stops() {
-        let busy = "authors = 8\nreplies_per_hour = 36000000.0";
-        let run = hot_thread_run(true, busy, Duration::from_secs(2)).await;
-        let report = run.outcome.expect("in-flight replies settle in the grace");
-        let settled = &report["shutdown"]["ops"]["hot_reply"]["count"];
-        assert_eq!(settled.as_u64(), Some(8), "{report}");
-        assert_eq!(run.posted.len(), 8, "{report}");
+        let gate = Arc::new(Gate::default());
+        let relay = hot_relay(true, Some(gate.clone())).await;
+        let scenario = hot_scenario(&relay.addr, "authors = 8\nreplies_per_hour = 36000000.0");
+        let net = Net::new(&scenario).await.unwrap();
+        let stats = Arc::new(Stats::default());
+        let (stop_tx, stop) = watch::channel(false);
+        let shared = Arc::new(Shared {
+            communities: scenario.communities(),
+            scenario,
+            net,
+            stats: stats.clone(),
+            stop,
+            roots: Mutex::new(HashMap::new()),
+        });
+        let authors: Vec<_> = (0..8)
+            .map(|i| tokio::spawn(hot_author(shared.clone(), i)))
+            .collect();
+        let deadline = Duration::from_secs(10);
+        tokio::time::timeout(deadline, async {
+            while gate.arrived.load(Ordering::SeqCst) < 8 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("every author starts a reply");
+
+        stop_tx.send(true).unwrap();
+        let at_stop = stats.snapshot();
+        gate.release();
+        for author in authors {
+            tokio::time::timeout(deadline, author)
+                .await
+                .expect("authors return once stopped")
+                .unwrap();
+        }
+        let settled = ops_json(&stats.snapshot().since(&at_stop), 1.0);
+        assert_eq!(settled["hot_reply"]["count"], 8, "{settled}");
+        assert_eq!(relay.posted.lock().unwrap().len(), 8, "{settled}");
     }
 }
