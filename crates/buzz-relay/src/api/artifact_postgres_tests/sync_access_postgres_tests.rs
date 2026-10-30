@@ -129,7 +129,9 @@ async fn sync_rejoin_replays_old_heads_without_resetting_on_task_edits() {
 async fn sync_ignores_unchanged_visibility_and_resets_on_ttl_changes() {
     let _guard = SERIAL.lock().await;
     let f = fixture().await;
-    accept(&f, &f.revision(Uuid::new_v4(), "create", None)).await;
+    let permanent_id = Uuid::new_v4();
+    let permanent = f.revision(permanent_id, "create", None);
+    accept(&f, &permanent).await;
     let first = sync(&f, None).await;
     buzz_db::channel::update_channel(
         &f.pool,
@@ -166,19 +168,58 @@ async fn sync_ignores_unchanged_visibility_and_resets_on_ttl_changes() {
     assert_eq!(reset["reason"], "policy_changed");
     let next = sync(&f, None).await;
     assert!(next["checkpoint"].is_string());
-    accept(
-        &f,
-        &f.revision_as(&f.owner, f.private, Uuid::new_v4(), "create", None),
-    )
-    .await;
-    let (status, body) = f
+    let expiring_id = Uuid::new_v4();
+    let expiring = f.revision_as(&f.owner, f.private, expiring_id, "create", None);
+    accept(&f, &expiring).await;
+    for checkpoint in [None, Some(&next["checkpoint"])] {
+        let page = sync(&f, checkpoint).await;
+        assert_eq!(page["changes"].as_array().unwrap().len(), 1);
+        assert_eq!(page["changes"][0]["artifactId"], permanent_id.to_string());
+        assert_eq!(page["changes"][0]["type"], "upsert");
+        assert!(page["checkpoint"].is_string());
+    }
+    let (status, current) = f
         .request(
             "/query",
-            json!([{"artifact":"incremental","query":query()}]),
+            json!([{
+                "artifact":"incremental","action":"current","query":query(),
+                "artifactIds":[permanent_id,expiring_id]
+            }]),
         )
         .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(body["code"], "incremental_unsupported_scope");
+    assert!(status.is_success(), "{status}: {current}");
+    assert_eq!(current["changes"][0]["type"], "upsert");
+    assert_eq!(
+        current["changes"][1],
+        json!({"type":"remove","artifactId":expiring_id})
+    );
+    let (status, named) = f
+        .request(
+            "/query",
+            json!([{
+                "artifact":"incremental","query":{"artifact":"current","#h":[f.private]}
+            }]),
+        )
+        .await;
+    assert!(status.is_success(), "{status}: {named}");
+    assert_eq!(named["changes"], json!([]));
+    let moved = f.revision_as(&f.owner, f.private, permanent_id, "move", Some(&permanent));
+    accept(&f, &moved).await;
+    let delta = sync(&f, Some(&next["checkpoint"])).await;
+    assert_eq!(
+        delta["changes"],
+        json!([{"type":"remove","artifactId":permanent_id}])
+    );
+    let (status, scoped) = f
+        .request(
+            "/query",
+            json!([{
+                "artifact":"incremental","query":{"artifact":"current","#h":[f.home]},
+            }]),
+        )
+        .await;
+    assert!(status.is_success(), "{status}: {scoped}");
+    assert_eq!(scoped["changes"], json!([]));
 }
 
 #[tokio::test]

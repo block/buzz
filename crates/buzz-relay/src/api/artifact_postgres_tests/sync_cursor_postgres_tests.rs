@@ -100,3 +100,132 @@ async fn sync_move_cursor_hides_private_and_redacted_revision_ids() {
         }
     }
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn sync_channel_scope_limits_candidates_and_keeps_source_removals() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    buzz_db::channel::update_channel(
+        &f.pool,
+        f.community,
+        f.home,
+        buzz_db::channel::ChannelUpdate {
+            visibility: Some("private".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    for _ in 0..101 {
+        accept(
+            &f,
+            &f.revision_as(&f.owner, f.private, Uuid::new_v4(), "create", None),
+        )
+        .await;
+    }
+    let deleted_id = Uuid::new_v4();
+    let deleted = f.revision(deleted_id, "create", None);
+    accept(&f, &deleted).await;
+    accept(&f, &f.revision(deleted_id, "delete", Some(&deleted))).await;
+    let id = Uuid::new_v4();
+    let created = f.revision(id, "create", None);
+    accept(&f, &created).await;
+    let scoped_query = json!({"artifact":"current","#type":["buzz.task"],"#h":[f.home]});
+    let (status, initial) = f
+        .request(
+            "/query",
+            json!([{
+                "artifact":"incremental","query":scoped_query
+            }]),
+        )
+        .await;
+    assert!(status.is_success(), "{status}: {initial}");
+    assert_eq!(initial["changes"].as_array().unwrap().len(), 1);
+    assert_eq!(initial["changes"][0]["event"]["id"], created.id.to_hex());
+    assert!(initial["nextCursor"].is_null());
+    assert!(initial["checkpoint"].is_string());
+    let moved = f.revision_as(&f.owner, f.private, id, "move", Some(&created));
+    accept(&f, &moved).await;
+    let (status, delta) = f
+        .request(
+            "/query",
+            json!([{
+                "artifact":"incremental","query":scoped_query,"checkpoint":initial["checkpoint"]
+            }]),
+        )
+        .await;
+    assert!(status.is_success(), "{status}: {delta}");
+    assert!(delta["changes"]
+        .as_array()
+        .unwrap()
+        .contains(&json!({"type":"remove","artifactId":id})));
+    assert!(!delta.to_string().contains(&f.private.to_string()));
+    let restored = f.revision(id, "move", Some(&moved));
+    accept(&f, &restored).await;
+    for channel in [f.home, f.private] {
+        sqlx::query("INSERT INTO channel_members(community_id,channel_id,pubkey,role) VALUES($1,$2,$3,'owner')")
+            .bind(f.community.as_uuid()).bind(channel).bind(f.peer.public_key().as_bytes().as_slice())
+            .execute(&f.pool).await.unwrap();
+    }
+    buzz_db::channel_members::remove_member(
+        &f.pool,
+        f.community,
+        f.private,
+        f.owner.public_key().as_bytes(),
+        f.owner.public_key().as_bytes(),
+    )
+    .await
+    .unwrap();
+    let (status, returned) = f
+        .request(
+            "/query",
+            json!([{
+                "artifact":"incremental","query":scoped_query,"checkpoint":delta["checkpoint"]
+            }]),
+        )
+        .await;
+    assert!(status.is_success(), "{status}: {returned}");
+    assert!(returned["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c["event"]["id"] == restored.id.to_hex()));
+    assert!(returned["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|c| c["type"] != "removeChannel"));
+    buzz_db::channel_members::remove_member(
+        &f.pool,
+        f.community,
+        f.home,
+        f.owner.public_key().as_bytes(),
+        f.owner.public_key().as_bytes(),
+    )
+    .await
+    .unwrap();
+    let (status, removed) = f
+        .request(
+            "/query",
+            json!([{
+                "artifact":"incremental","query":scoped_query,"checkpoint":returned["checkpoint"]
+            }]),
+        )
+        .await;
+    assert!(status.is_success(), "{status}: {removed}");
+    assert_eq!(
+        removed["changes"],
+        json!([{"type":"removeChannel","channelId":f.home}])
+    );
+    let (status, invalid_scope) = f
+        .request(
+            "/query",
+            json!([{
+                "artifact":"incremental","query":{"artifact":"current","#h":["not-a-uuid"]}
+            }]),
+        )
+        .await;
+    assert!(status.is_success(), "{status}: {invalid_scope}");
+    assert_eq!(invalid_scope["changes"], json!([]));
+}

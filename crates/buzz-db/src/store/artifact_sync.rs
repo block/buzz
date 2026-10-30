@@ -85,6 +85,7 @@ impl Db {
             .bind(named)
             .bind((PAGE_ROWS + 1) as i64)
             .bind(buzz_core::channel::LEGACY_CHANNEL_TYPES.to_vec())
+            .bind(query.tags.iter().any(|(name, _)| name == "h"))
             .fetch_all(&mut *tx)
             .await?;
         let candidates = rows
@@ -135,6 +136,7 @@ impl Db {
         let mut qb = QueryBuilder::new("SELECT e.id,e.pubkey,e.created_at,e.kind,e.tags,e.content,e.sig,e.received_at,e.channel_id FROM events e ");
         super::artifact_query::predicates(&mut qb, community, reader, query);
         qb.push(" AND a.artifact_id=ANY(").push_bind(ids).push(")");
+        qb.push(" AND EXISTS (SELECT 1 FROM channels c WHERE c.community_id=e.community_id AND c.id=e.channel_id AND c.ttl_seconds IS NULL)");
         qb.push(" LIMIT ").push_bind(PAGE_ROWS as i64);
         let mut events = Vec::new();
         let mut bytes = 0;
@@ -153,15 +155,6 @@ impl Db {
                 }
             }
         }
-        let homes = events
-            .iter()
-            .filter_map(|e| e.channel_id)
-            .collect::<Vec<_>>();
-        let ttl:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM channels WHERE community_id=$1 AND id=ANY($2) AND ttl_seconds IS NOT NULL)")
-            .bind(community.as_uuid()).bind(homes).fetch_one(&mut *tx).await?;
-        if ttl {
-            return Err(DbError::ArtifactSyncUnsupportedScope);
-        }
         tx.commit().await?;
         Ok(events)
     }
@@ -172,7 +165,8 @@ impl Db {
 const CANDIDATES: &str = r#"
 WITH readable AS NOT MATERIALIZED (
     SELECT c.id FROM channels c
-    WHERE c.community_id=$1 AND c.deleted_at IS NULL
+    WHERE c.community_id=$1 AND c.deleted_at IS NULL AND c.ttl_seconds IS NULL
+      AND (NOT $12::boolean OR c.id=ANY($9))
       AND (c.channel_type::text=ANY($11) OR c.id=ANY($9))
       AND ((c.visibility='open' AND (NOT c.unlisted OR c.id=ANY($9))) OR EXISTS (
         SELECT 1 FROM channel_members m WHERE m.community_id=c.community_id
@@ -183,12 +177,14 @@ WITH readable AS NOT MATERIALIZED (
     FROM artifact_heads a
     WHERE a.community_id=$1 AND a.modified_at >= COALESCE($3::timestamptz,'epoch'::timestamptz)
       AND a.modified_at <= $4 AND a.channel_id IN (SELECT id FROM readable)
+      AND ($3::timestamptz IS NOT NULL OR NOT a.deleted)
       AND (cardinality($8::text[])=0 OR a.artifact_type=ANY($8))
     UNION ALL
     SELECT m.sync_modified_at,0,m.channel_id::text,NULL::uuid,m.channel_id
     FROM channel_members m WHERE m.community_id=$1 AND m.pubkey=$2
       AND $3::timestamptz IS NOT NULL AND m.sync_modified_at >= $3
       AND m.sync_modified_at <= $4 AND m.removed_at IS NOT NULL
+      AND (NOT $12::boolean OR m.channel_id=ANY($9))
       AND NOT EXISTS (SELECT 1 FROM readable r WHERE r.id=m.channel_id)
     UNION ALL
     SELECT m.sync_modified_at,2,a.artifact_id::text,a.artifact_id,NULL::uuid

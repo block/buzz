@@ -231,9 +231,13 @@ server permits four concurrent operations per process, a two-second SQL
 statement budget, and an eight-second operation budget. There is no
 identity-wide membership count limit on this path.
 
-Only matching readable artifacts in permanent channels are supported.
-A matching TTL artifact returns HTTP 422 `incremental_unsupported_scope`. An
-unrelated TTL channel does not block incremental task reads. HTTP 400 `incremental_invalid`
+Incremental reads include only matching readable artifacts in permanent channels.
+TTL channels do not contribute discovery candidates. A known-ID read returns
+`remove` for an artifact in a TTL channel. Moves into a TTL channel return
+removals for the permanent source. An explicit `#h` scope limits candidates
+to those channels, including retained move sources and membership removals.
+Initial reads omit deleted heads. Later reads retain deletion removals.
+HTTP 400 `incremental_invalid`
 rejects invalid requests or tokens. HTTP 503 `incremental_unavailable` reports a
 service or work-budget failure. These failures do not advance progress.
 

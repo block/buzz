@@ -70,10 +70,6 @@ fn reset(reason: &str) -> (StatusCode, Json<Value>) {
 fn db_error(e: buzz_db::DbError) -> (StatusCode, Json<Value>) {
     match e {
         buzz_db::DbError::ArtifactSyncLimit => limit(),
-        buzz_db::DbError::ArtifactSyncUnsupportedScope => error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "incremental_unsupported_scope",
-        ),
         error => {
             tracing::warn!(%error,"incremental artifact read failed");
             unavailable()

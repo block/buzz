@@ -81,10 +81,6 @@ pub enum DbError {
     #[error("artifact sync limit exceeded")]
     ArtifactSyncLimit,
 
-    /// Sync scope contains a channel with expiring content.
-    #[error("artifact sync scope requires permanent channels")]
-    ArtifactSyncUnsupportedScope,
-
     /// A complete read-state snapshot exceeds its bounded resource budget.
     #[error("read-state snapshot exceeds event or byte limit")]
     ReadStateSnapshotTooLarge,
