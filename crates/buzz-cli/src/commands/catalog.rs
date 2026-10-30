@@ -95,8 +95,8 @@ pub(crate) fn optional_string(value: Option<&Value>) -> Option<String> {
 }
 
 /// Only plain http(s) avatar URLs survive; inline `data:` images are dropped.
-pub(crate) fn safe_avatar(value: Option<&Value>) -> Option<String> {
-    let value = value.and_then(Value::as_str)?;
+pub(crate) fn safe_avatar(value: Option<&str>) -> Option<String> {
+    let value = value?;
     let safe = value.len() <= MAX_HTTP_AVATAR_LENGTH
         && !value.chars().any(char::is_whitespace)
         && !value.contains(['(', ')'])
@@ -105,6 +105,10 @@ pub(crate) fn safe_avatar(value: Option<&Value>) -> Option<String> {
             .is_some_and(|url| matches!(url.scheme(), "http" | "https"));
     safe.then(|| value.to_owned())
 }
+
+/// The listing key for entries Desktop would refuse to adopt: the first
+/// validation error, or `null` for an adoptable entry.
+pub(crate) const VALIDATION_ERROR_KEY: &str = "validation_error";
 
 /// Report catalog entries skipped for malformed content, so a bad head is
 /// never mistaken for an absent one.

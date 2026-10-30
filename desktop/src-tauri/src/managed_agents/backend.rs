@@ -622,39 +622,13 @@ fn strip_windows_command_extension(name: &str) -> &str {
         .unwrap_or(name)
 }
 
-/// Whether a transport is a portable stock or conventional wrapper alias.
-/// Shared artifacts carry aliases only, never machine paths or command lines.
-/// Owner-controlled native commands and owner-device sync retain legacy values.
-pub(crate) fn is_portable_acp_command(command: &str) -> bool {
-    if command == super::DEFAULT_ACP_COMMAND {
-        return true;
-    }
-    command.len() <= 255
-        && command
-            .strip_prefix("buzz-")
-            .and_then(|name| name.strip_suffix("-acp"))
-            .is_some_and(|name| {
-                !name.is_empty()
-                    && name
-                        .bytes()
-                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
-            })
-}
-
-/// Reject nonportable commands at foreign catalog and snapshot boundaries.
-pub(crate) fn validate_portable_acp_command(command: Option<&str>) -> Result<(), String> {
-    if command.is_some_and(|command| !is_portable_acp_command(command)) {
-        return Err("ACP command must be buzz-acp or a portable buzz-*-acp alias".to_string());
-    }
-    Ok(())
-}
-
 fn acp_command_from_filename(name: &str, require_windows_extension: bool) -> Option<&str> {
     let command = strip_windows_command_extension(name);
     if require_windows_extension && command == name {
         return None;
     }
-    (command != super::DEFAULT_ACP_COMMAND && is_portable_acp_command(command)).then_some(command)
+    (command != super::DEFAULT_ACP_COMMAND && super::is_portable_acp_command(command))
+        .then_some(command)
 }
 
 /// Enumerate PATH for buzz-backend-* executables. Returns (id, path) pairs.

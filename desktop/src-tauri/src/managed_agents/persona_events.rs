@@ -196,9 +196,7 @@ pub fn build_persona_event(record: &AgentDefinition) -> Result<EventBuilder, Str
         // distinguishes a reset from an omitted machine-local owner override.
         content.acp_command = match record.acp_command.as_deref() {
             None => Some(super::DEFAULT_ACP_COMMAND.to_string()),
-            Some(command) if super::backend::is_portable_acp_command(command) => {
-                Some(command.to_string())
-            }
+            Some(command) if super::is_portable_acp_command(command) => Some(command.to_string()),
             Some(_) => None,
         };
     }

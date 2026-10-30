@@ -3,15 +3,15 @@
 //! team projections with embedded members).
 
 use buzz_core::kind::{event_is_shared, KIND_TEAM, KIND_TEAM_CATALOG};
+use buzz_core::team_catalog::parse_team_catalog_content;
 use serde_json::{json, Value};
 
-use super::catalog::{fetch_heads, optional_string, safe_avatar, warn_skipped, Head};
+use super::catalog::{
+    fetch_heads, optional_string, safe_avatar, warn_skipped, Head, VALIDATION_ERROR_KEY,
+};
 use crate::client::BuzzClient;
 use crate::error::CliError;
 use crate::TeamsCmd;
-
-const TEAM_CATALOG_SCHEMA_VERSION: u64 = 1;
-const MAX_CATALOG_MEMBERS: usize = 64;
 
 /// A team event's `persona_ids`: `None` when the publisher predates
 /// always-publish (membership unknown), otherwise the string entries.
@@ -41,53 +41,57 @@ fn project_team(head: &Head) -> Option<Value> {
     }))
 }
 
-fn project_member(member: &Value) -> Option<Value> {
-    let display_name = member.get("display_name")?.as_str()?;
-    let member_key = member.get("member_key")?.as_str()?;
-    if display_name.trim().is_empty() || member_key.is_empty() {
-        return None;
-    }
-    Some(json!({
-        "member_key": member_key,
-        "display_name": display_name,
-        "system_prompt": member.get("system_prompt").and_then(Value::as_str).unwrap_or_default(),
-        "avatar_url": safe_avatar(member.get("avatar_url")),
-        "runtime": optional_string(member.get("runtime")),
-        "model": optional_string(member.get("model")),
-        "provider": optional_string(member.get("provider")),
-    }))
+fn non_blank(value: &Option<String>) -> Option<&str> {
+    value.as_deref().filter(|value| !value.trim().is_empty())
 }
 
-/// All-or-nothing, like desktop: one invalid member rejects the whole team.
+/// `None` only when the content is not a JSON object. A team Desktop would
+/// refuse to adopt (one invalid member rejects the whole team) is listed with
+/// its `validation_error` and no content, so rejected text never reaches an
+/// agent.
 fn project_catalog_team(head: &Head) -> Option<Value> {
-    let content: Value = serde_json::from_str(&head.event.content).ok()?;
-    if content.get("v")?.as_u64()? != TEAM_CATALOG_SCHEMA_VERSION {
-        return None;
-    }
-    let name = content.get("name")?.as_str()?;
-    let members = content.get("members")?.as_array()?;
-    if name.trim().is_empty() || members.len() > MAX_CATALOG_MEMBERS {
-        return None;
-    }
-    let members = members
-        .iter()
-        .map(project_member)
-        .collect::<Option<Vec<_>>>()?;
-    Some(json!({
+    let raw: Value = serde_json::from_str(&head.event.content).ok()?;
+    raw.as_object()?;
+    let mut team = json!({
         "event_id": head.event.id.to_hex(),
         "owner_pubkey": head.event.pubkey.to_hex(),
         "team_id": head.d_tag,
         "created_at": head.event.created_at.as_secs(),
-        "name": name,
-        "description": optional_string(content.get("description")),
-        "instructions": optional_string(content.get("instructions")),
-        "members": members,
-    }))
+    });
+    let content = match parse_team_catalog_content(&head.event.content) {
+        Ok(content) => content,
+        Err(error) => {
+            team[VALIDATION_ERROR_KEY] = Value::String(error);
+            return Some(team);
+        }
+    };
+    let members: Vec<Value> = content
+        .members
+        .iter()
+        .map(|member| {
+            json!({
+                "member_key": member.member_key,
+                "display_name": member.display_name,
+                "system_prompt": member.system_prompt.as_deref().unwrap_or_default(),
+                "avatar_url": safe_avatar(member.avatar_url.as_deref()),
+                "runtime": non_blank(&member.runtime),
+                "model": non_blank(&member.model),
+                "provider": non_blank(&member.provider),
+            })
+        })
+        .collect();
+    team["name"] = json!(content.name);
+    team["description"] = json!(non_blank(&content.description));
+    team["instructions"] = json!(non_blank(&content.instructions));
+    team["members"] = json!(members);
+    team[VALIDATION_ERROR_KEY] = Value::Null;
+    Some(team)
 }
 
 fn sort_by_name(teams: &mut [Value]) {
     teams.sort_by_cached_key(|team| {
         (
+            !team[VALIDATION_ERROR_KEY].is_null(),
             team["name"].as_str().unwrap_or("").to_lowercase(),
             team["owner_pubkey"].as_str().unwrap_or("").to_owned(),
             team["team_id"].as_str().unwrap_or("").to_owned(),
@@ -311,9 +315,54 @@ mod tests {
             ),
         );
 
+        let concealed = json!({"member_key": "k9", "display_name": "Re\u{200B}v"});
+        seed(
+            &relay,
+            event(
+                &alice,
+                30178,
+                &body(1, vec![concealed]),
+                &[&["d", "concealed"], &shared],
+                10,
+            ),
+        );
+        seed(
+            &relay,
+            event(&alice, 30178, "not json", &[&["d", "broken"], &shared], 10),
+        );
+
         let teams = catalog(&client).await.unwrap();
         let teams = teams.as_array().unwrap();
-        assert_eq!(teams.len(), 1, "{teams:?}");
+        assert_eq!(teams.len(), 5, "{teams:?}");
+        let rejected: Vec<(&str, &str)> = teams[1..]
+            .iter()
+            .map(|t| {
+                (
+                    t["team_id"].as_str().unwrap(),
+                    t["validation_error"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(rejected.len(), 4);
+        for (id, fragment) in [
+            ("badmember", "a member key is empty"),
+            ("big", "65 members"),
+            ("concealed", "prohibited invisible"),
+            ("future", "unsupported team catalog schema version 2"),
+        ] {
+            assert!(
+                rejected
+                    .iter()
+                    .any(|(t, e)| *t == id && e.contains(fragment)),
+                "{id}: {rejected:?}"
+            );
+        }
+        for team in &teams[1..] {
+            for key in ["name", "description", "instructions", "members"] {
+                assert!(team.get(key).is_none(), "{key} leaked: {team}");
+            }
+        }
+        assert_eq!(teams[0]["validation_error"], Value::Null);
         assert_eq!(teams[0]["team_id"], "ok");
         assert_eq!(teams[0]["owner_pubkey"], alice.public_key().to_hex());
         assert_eq!(teams[0]["instructions"], "ii");

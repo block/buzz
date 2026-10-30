@@ -2,31 +2,38 @@
 //! heads carrying `["shared","true"]`), projected the way desktop's catalog
 //! browser reads them.
 
+use buzz_core::definition_validation::validate_persona_object;
 use buzz_core::kind::{event_is_shared, KIND_PERSONA};
 use serde_json::{json, Value};
 
-use super::catalog::{fetch_heads, optional_string, safe_avatar, warn_skipped, Head};
+use super::catalog::{
+    fetch_heads, optional_string, safe_avatar, warn_skipped, Head, VALIDATION_ERROR_KEY,
+};
 use crate::client::BuzzClient;
 use crate::error::CliError;
 use crate::PersonasCmd;
 
+fn identity(head: &Head) -> Value {
+    json!({
+        "event_id": head.event.id.to_hex(),
+        "owner_pubkey": head.event.pubkey.to_hex(),
+        "persona_id": head.d_tag,
+        "created_at": head.event.created_at.as_secs(),
+    })
+}
+
+/// `None` only when the content is unreadable. Content Desktop would refuse to
+/// adopt is listed with its `validation_error` and no content, so rejected text
+/// never reaches an agent.
 fn project(head: &Head) -> Option<Value> {
     let content: Value = serde_json::from_str(&head.event.content).ok()?;
     let object = content.as_object()?;
     let display_name = object.get("display_name")?.as_str()?;
-    if display_name.trim().is_empty() {
-        return None;
+    let mut persona = identity(head);
+    if let Err(error) = validate_persona_object(object) {
+        persona[VALIDATION_ERROR_KEY] = Value::String(error);
+        return Some(persona);
     }
-    let description = match object.get("description") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(value)) => Some(value.clone()).filter(|v| !v.trim().is_empty()),
-        Some(_) => return None,
-    };
-    let acp_command = match object.get("acp_command") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(command)) => Some(command.clone()),
-        Some(_) => return None,
-    };
     let respond_to = match object.get("respond_to").and_then(Value::as_str) {
         Some("allowlist") => Some("owner-only"),
         Some(value @ ("owner-only" | "anyone")) => Some(value),
@@ -45,24 +52,25 @@ fn project(head: &Head) -> Option<Value> {
         .and_then(Value::as_array)
         .map(|values| values.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    Some(json!({
-        "event_id": head.event.id.to_hex(),
-        "owner_pubkey": head.event.pubkey.to_hex(),
-        "persona_id": head.d_tag,
-        "created_at": head.event.created_at.as_secs(),
-        "display_name": display_name,
-        "description": description,
-        "system_prompt": object.get("system_prompt").and_then(Value::as_str).unwrap_or_default(),
-        "avatar_url": safe_avatar(object.get("avatar_url")),
-        "runtime": optional_string(object.get("runtime")),
-        "acp_command": acp_command,
-        "model": optional_string(object.get("model")),
-        "provider": optional_string(object.get("provider")),
-        "name_pool": name_pool,
-        "respond_to": respond_to,
-        "parallelism": parallelism,
-        "session_policy": session_policy,
-    }))
+    persona["display_name"] = json!(display_name);
+    persona["description"] = json!(optional_string(object.get("description")));
+    persona["system_prompt"] = json!(object
+        .get("system_prompt")
+        .and_then(Value::as_str)
+        .unwrap_or_default());
+    persona["avatar_url"] = json!(safe_avatar(
+        object.get("avatar_url").and_then(Value::as_str)
+    ));
+    persona["runtime"] = json!(optional_string(object.get("runtime")));
+    persona["acp_command"] = json!(object.get("acp_command").and_then(Value::as_str));
+    persona["model"] = json!(optional_string(object.get("model")));
+    persona["provider"] = json!(optional_string(object.get("provider")));
+    persona["name_pool"] = json!(name_pool);
+    persona["respond_to"] = json!(respond_to);
+    persona["parallelism"] = json!(parallelism);
+    persona["session_policy"] = json!(session_policy);
+    persona[VALIDATION_ERROR_KEY] = Value::Null;
+    Some(persona)
 }
 
 pub(crate) fn project_heads(heads: &[Head]) -> Vec<Value> {
@@ -79,6 +87,7 @@ pub(crate) fn project_heads(heads: &[Head]) -> Vec<Value> {
     warn_skipped("personas", &skipped);
     personas.sort_by_cached_key(|persona| {
         (
+            !persona[VALIDATION_ERROR_KEY].is_null(),
             persona["display_name"]
                 .as_str()
                 .unwrap_or("")
@@ -199,6 +208,29 @@ mod tests {
         forged["content"] = json!(persona("Forged"));
         seed(&relay, forged);
 
+        // Desktop would refuse these: concealed text, a machine-path command,
+        // and a non-string description. They are listed with the reason and
+        // none of their content.
+        for (id, content) in [
+            ("concealed", json!({"display_name": "Re\u{200B}v"})),
+            (
+                "path",
+                json!({"display_name": "Path", "acp_command": "/bin/sh"}),
+            ),
+            ("typed", json!({"display_name": "Typed", "description": 5})),
+        ] {
+            seed(
+                &relay,
+                event(
+                    &bob,
+                    30175,
+                    &content.to_string(),
+                    &[&["d", id], &shared],
+                    70,
+                ),
+            );
+        }
+
         // Enough extra shared personas to need a second relay page.
         for i in 0..520 {
             let name = format!("Bulk {i:04}");
@@ -216,8 +248,32 @@ mod tests {
 
         let list = list(&client).await.unwrap();
         let list = list.as_array().unwrap();
-        assert_eq!(list.len(), 521, "{}", list.len());
-        let rich = list.last().unwrap();
+        assert_eq!(list.len(), 524, "{}", list.len());
+        let rejected = &list[521..];
+        for (id, fragment) in [
+            ("concealed", "prohibited invisible"),
+            ("path", "ACP command must be"),
+            ("typed", "description must be a string"),
+        ] {
+            let entry = rejected
+                .iter()
+                .find(|p| p["persona_id"] == id)
+                .unwrap_or_else(|| panic!("{id} missing"));
+            assert!(entry["validation_error"]
+                .as_str()
+                .unwrap()
+                .contains(fragment));
+            for key in ["display_name", "system_prompt", "acp_command"] {
+                assert!(entry.get(key).is_none(), "{key} leaked: {entry}");
+            }
+        }
+        assert!(list[..521]
+            .iter()
+            .all(|p| p["validation_error"] == Value::Null));
+        let rich = list[..521]
+            .iter()
+            .find(|p| p["persona_id"] == "rich")
+            .unwrap();
         assert_eq!(rich["display_name"], "Zed");
         assert_eq!(rich["persona_id"], "rich");
         assert_eq!(rich["owner_pubkey"], alice.public_key().to_hex());
