@@ -22,6 +22,7 @@ pub mod repos;
 pub mod sidebar;
 mod sidebar_doc;
 mod sidebar_flags;
+mod sidebar_sort;
 mod sidebar_sync;
 pub mod social;
 pub mod upload;

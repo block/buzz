@@ -9,6 +9,7 @@ use nostr::{EventBuilder, Kind, Tag, Timestamp};
 use serde_json::{json, Value};
 
 use super::parse_write_response;
+use super::sidebar_doc::{self, Codec, Edit, Stamp, Tree};
 use crate::client::BuzzClient;
 use crate::error::CliError;
 
@@ -156,6 +157,48 @@ pub(crate) async fn publish(
     )?;
     serde_json::from_str(&normalized)
         .map_err(|e| CliError::Other(format!("relay response is not JSON: {e}")))
+}
+
+/// The current register-tree document of `lane` and the `created_at` of its
+/// head; an absent head is an empty tree at `created_at` 0.
+pub(crate) async fn fetch_tree(
+    client: &BuzzClient,
+    lane: Lane,
+    codec: &Codec,
+) -> Result<(u64, Tree), CliError> {
+    let head = fetch_head(client, lane, |json, created_at| {
+        let legacy_v = i64::try_from(created_at.saturating_mul(1_000)).unwrap_or(i64::MAX);
+        sidebar_doc::decode(codec, json, legacy_v)
+    })
+    .await?;
+    Ok((head.created_at, head.doc.unwrap_or_default()))
+}
+
+/// Reads the head tree, applies `apply` (which sees the unedited head), and
+/// publishes the result once. `check` rejects an edited tree over the
+/// document's limits. Returns the write response, or an `unchanged` response
+/// without publishing.
+pub(crate) async fn edit_tree(
+    client: &BuzzClient,
+    lane: Lane,
+    codec: &Codec,
+    check: impl FnOnce(&Tree) -> Result<(), CliError>,
+    apply: impl FnOnce(&mut Edit, &Tree) -> Result<(), CliError>,
+) -> Result<Value, CliError> {
+    let (head_created_at, head) = fetch_tree(client, lane, codec).await?;
+    let mut tree = head.clone();
+    let stamp = Stamp {
+        now_ms: i64::try_from(now().as_millis()).unwrap_or(i64::MAX),
+        dev: format!("{:016x}", rand::random::<u64>()),
+    };
+    apply(&mut Edit::new(&mut tree, &stamp), &head)?;
+    if tree == head {
+        return Ok(unchanged());
+    }
+    check(&tree)?;
+    let plaintext = serde_json::to_string(&sidebar_doc::encode(codec, &tree))
+        .map_err(|e| CliError::Other(format!("failed to encode {}: {e}", lane.label)))?;
+    publish(client, lane, plaintext, head_created_at).await
 }
 
 /// The response of a command that changed nothing and published nothing.
