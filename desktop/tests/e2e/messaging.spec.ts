@@ -2173,6 +2173,35 @@ test("/giphy opens a pre-searched GIF picker instead of sending", async ({
   expect(await signedGiphyCommands()).toBe(0);
 });
 
+test("/giphy waits for GIF capability discovery instead of sending", async ({
+  page,
+}) => {
+  await routeGifMocks(page);
+  let releaseInfo = () => {};
+  const infoReleased = new Promise<void>((resolve) => {
+    releaseInfo = resolve;
+  });
+  await page.route("http://localhost:3000/info", async (route) => {
+    await infoReleased;
+    return route.fallback();
+  });
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("composer-emoji-button")).toHaveAccessibleName(
+    "Insert emoji",
+  );
+  const input = page.getByTestId("message-input");
+  await input.fill("/giphy party parrot");
+  await input.press("Enter");
+  await expect(input).toHaveText("/giphy party parrot");
+
+  releaseInfo();
+  await expect(
+    page.getByRole("searchbox", { name: "Search KLIPY" }),
+  ).toHaveValue("party parrot");
+});
+
 async function routeGifMocks(page: import("@playwright/test").Page) {
   const gifs = [
     {

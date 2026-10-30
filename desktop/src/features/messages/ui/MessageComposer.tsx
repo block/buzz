@@ -129,6 +129,10 @@ function MessageComposerImpl({
   const gifCapability = useRelayKlipyCapability();
   const gifCapabilityRef = React.useRef(gifCapability);
   gifCapabilityRef.current = gifCapability;
+  // A command submitted before capability discovery settles waits here.
+  const [pendingGifCommand, setPendingGifCommand] = React.useState<
+    string | null
+  >(null);
   const [isFormattingOpen, setIsFormattingOpen] = React.useState(false);
   const handleFormattingToggle = React.useCallback((pressed: boolean) => {
     if (pressed) setIsEmojiPickerOpen(false);
@@ -236,6 +240,7 @@ function MessageComposerImpl({
   React.useEffect(() => {
     media.setUploadState({ status: "idle" });
     setIsEmojiPickerOpen(false);
+    setPendingGifCommand(null);
     channelLinks.clearChannels();
     emojiAutocomplete.clearEmojis();
   }, [effectiveDraftKey]);
@@ -564,6 +569,26 @@ function MessageComposerImpl({
     onOpenPicker: mentionPicker.openMentionPicker,
     onToggle: toggleAlwaysAddressAgent,
   });
+  const openGifCommand = React.useCallback(
+    (query: string) => {
+      if (voiceNote.hasAttachmentRef.current) return;
+      setIsFormattingOpen(false);
+      setGifCommandQuery(query);
+      setIsEmojiPickerOpen(true);
+    },
+    [voiceNote.hasAttachmentRef],
+  );
+  React.useEffect(() => {
+    if (pendingGifCommand === null || gifCapability.loading) return;
+    setPendingGifCommand(null);
+    // Without GIF support the text stays put; the next send posts it as text.
+    if (gifCapability.available) openGifCommand(pendingGifCommand);
+  }, [
+    gifCapability.available,
+    gifCapability.loading,
+    openGifCommand,
+    pendingGifCommand,
+  ]);
   const submitMessage = React.useCallback(async () => {
     const trimmed = syncComposerContentFromEditor().trim();
     // Edit mode
@@ -640,11 +665,8 @@ function MessageComposerImpl({
     const giphyQuery = parseGiphyCommand(trimmed);
     const gifs = gifCapabilityRef.current;
     if (giphyQuery !== null && (gifs.available || gifs.loading)) {
-      if (gifs.available && !voiceNote.hasAttachmentRef.current) {
-        setIsFormattingOpen(false);
-        setGifCommandQuery(giphyQuery);
-        setIsEmojiPickerOpen(true);
-      }
+      if (gifs.loading) setPendingGifCommand(giphyQuery);
+      else openGifCommand(giphyQuery);
       return;
     }
     const capturedThreadContext = onCaptureSendContext?.() ?? null;
@@ -716,7 +738,7 @@ function MessageComposerImpl({
     mentions.restoreDraftMentionRefs,
     mentions.revalidateMentionPubkeys,
     mentions.settlePendingMentionBindings,
-    voiceNote.hasAttachmentRef,
+    openGifCommand,
     voiceNote.statusRef,
   ]);
   submitMessageRef.current = submitMessage;
