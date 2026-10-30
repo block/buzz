@@ -7,7 +7,7 @@
   padding: 100px 24px;
   background:
     radial-gradient(circle, #c9cac4 1px, transparent 1.1px) 0 0 / 32px 32px
-    #eeeeeb;
+    #d7d72e;
   overflow: hidden;
   color: #0f0f0f;
   font-size: 14px;
@@ -15,7 +15,7 @@
 }
 .invite-mark {
   position: absolute;
-  top: 18px;
+  top: 40px;
   left: 40px;
   width: 44px;
   height: 29px;

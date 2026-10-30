@@ -291,6 +291,14 @@ for (const architecture of ["unknown", "x64"]) {
         },
       });
     }, architecture);
+    await context.route(
+      "https://github.com/block/buzz-app/releases/download/**",
+      (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: "Installer destination",
+        }),
+    );
     const page = await context.newPage();
     await page.route("**/api/join-policy", async (route) => {
       await route.fulfill({
