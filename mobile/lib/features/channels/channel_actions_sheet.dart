@@ -25,6 +25,7 @@ import '../../shared/widgets/modal_presentation.dart';
 import 'channel.dart';
 import 'add_members_sheet.dart';
 import 'channel_identity_names_provider.dart';
+import 'channel_lifecycle.dart';
 import 'channel_management_provider.dart';
 import 'channel_mutes/channel_mutes_provider.dart';
 import 'channel_sections/channel_sections_provider.dart';
@@ -110,8 +111,11 @@ class ChannelActionsSheet extends HookConsumerWidget {
                       currentPubkey,
             ) ==
             true;
-    final canManageLifecycle =
-        currentMember?.isElevated == true || ownsOwnerAgent;
+    final canManageLifecycle = canManageChannelLifecycle(
+      members: membersAsync.value ?? const [],
+      agentOwners: agentOwnersAsync.value ?? const {},
+      currentPubkey: currentPubkey,
+    );
     final canArchive = !channel.isArchived && canManageLifecycle;
     final canUnarchive = channel.isArchived && canManageLifecycle;
     final canDelete =
@@ -480,24 +484,13 @@ Future<void> _confirmAndRun(
   required Future<void> Function() action,
 }) async {
   final pageContext = Navigator.of(sheetContext, rootNavigator: true).context;
-  final confirmed = await showBuzzDialog<bool>(
-    context: pageContext,
-    builder: (dialogContext) => AlertDialog(
-      title: Text(title),
-      content: Text(body),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(dialogContext).pop(false),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.of(dialogContext).pop(true),
-          child: Text(confirmLabel),
-        ),
-      ],
-    ),
+  final confirmed = await confirmChannelAction(
+    pageContext,
+    title: title,
+    body: body,
+    confirmLabel: confirmLabel,
   );
-  if (confirmed != true) return;
+  if (!confirmed) return;
   try {
     await action();
     if (pageContext.mounted) Navigator.of(pageContext).pop(true);
