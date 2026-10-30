@@ -776,7 +776,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 75);
+        assert_eq!(migrations.len(), 78);
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }
@@ -2918,6 +2918,10 @@ mod postgres_tests {
             "relay_operator_audit",
             "entity_deletion_approvals",
             "entity_deletion_requests",
+            "artifact_heads",
+            "artifact_revisions",
+            "channel_members",
+            "communities",
             "entity_deletion_stage_history",
             "user_deletion_fences",
         ] {

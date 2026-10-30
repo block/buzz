@@ -11120,14 +11120,39 @@ void main() {
       expect(findRichText('Here is the reply'), findsOneWidget);
     });
 
-    for (final personal in [true, false]) {
-      testWidgets('reply-scoped typing is visible only in flat Me: $personal', (
+    for (final scenario in [
+      (personal: true, dm: false, agent: true, group: false, visible: true),
+      (personal: false, dm: false, agent: true, group: false, visible: false),
+      (personal: false, dm: true, agent: true, group: false, visible: true),
+      (personal: false, dm: true, agent: false, group: false, visible: false),
+      (personal: false, dm: true, agent: true, group: true, visible: true),
+    ]) {
+      testWidgets('reply-scoped typing follows conversation scope: $scenario', (
         tester,
       ) async {
         final typing = _FakeTypingNotifier(const []);
         await tester.pumpWidget(
           _buildTestable(
-            personalChat: personal,
+            personalChat: scenario.personal,
+            knownAgentPubkeys: scenario.agent ? {'alice'} : <String>{},
+            channel: scenario.dm
+                ? Channel(
+                    id: _channelId,
+                    name: 'DM',
+                    channelType: 'dm',
+                    visibility: 'private',
+                    description: '',
+                    createdBy: 'self',
+                    createdAt: DateTime(2025),
+                    memberCount: scenario.group ? 3 : 2,
+                    participantPubkeys: [
+                      'self',
+                      'alice',
+                      if (scenario.group) 'bob',
+                    ],
+                    isMember: true,
+                  )
+                : null,
             messages: [
               _textMsg(id: 'prompt', pubkey: 'self', content: 'Hello'),
             ],
@@ -11149,7 +11174,7 @@ void main() {
         await tester.pumpAndSettle();
         expect(
           find.byKey(const ValueKey('inline-agent-typing-alice')),
-          personal ? findsOneWidget : findsNothing,
+          scenario.visible ? findsOneWidget : findsNothing,
         );
         expect(find.text('Alice is typing…'), findsNothing);
         typing.setEntries(const []);

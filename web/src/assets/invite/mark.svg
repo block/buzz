@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 466 309" width="32" height="32">
+  <!-- Buzz bee mark favicon — TRANSPARENT background so it floats on the
+       browser chrome. Color adapts to the browser's color scheme via the
+       embedded media query: ink (black) in light mode, chartreuse (the top
+       color of the site gradient) in dark mode. Geometry matches the chrome
+       bee logo in Chrome.tsx (two side circles + rounded body, with eyes and
+       slots knocked out by the mask). -->
+  <style>
+    .mark { fill: #231e1e; }
+    @media (prefers-color-scheme: dark) {
+      .mark { fill: #d7d72e; }
+    }
+  </style>
+  <defs>
+    <mask id="bee-mask">
+      <circle cx="91.7" cy="154.5" r="91.7" fill="white"/>
+      <circle cx="374.3" cy="154.5" r="91.7" fill="white"/>
+      <rect x="128" y="0" width="210" height="309" rx="34" fill="white"/>
+      <ellipse cx="193.3" cy="84.4" rx="27" ry="27" fill="black"/>
+      <ellipse cx="276" cy="84.4" rx="27" ry="27" fill="black"/>
+      <rect x="166.3" y="157.2" width="136.9" height="38.3" rx="5" fill="black"/>
+      <rect x="166.9" y="235.1" width="136.2" height="37.6" rx="5" fill="black"/>
+    </mask>
+  </defs>
+  <rect class="mark" x="0" y="0" width="466" height="309" mask="url(#bee-mask)"/>
+</svg>

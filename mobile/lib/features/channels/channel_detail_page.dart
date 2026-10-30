@@ -362,17 +362,6 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
         initialForcedUnreadMessageIdsRef.value;
     // Ownership comes from the signing identity, not reloadable profile metadata.
     final currentPubkey = ref.watch(currentPubkeyProvider);
-    // Me flattens replies into this timeline, so include their typing signals.
-    // Ordinary channels keep thread activity inside the thread view.
-    final typingEntries = ref
-        .watch(
-          visibleTypingProvider(
-            channel.id,
-            selfPubkey: currentPubkey,
-            include: (e) => personalChat || e.threadHeadId == null,
-          ),
-        )
-        .entries;
     final baseChannel = listedChannel ?? channel;
     final resolvedChannel =
         detailsAsync.whenData(baseChannel.mergeDetails).value ?? baseChannel;
@@ -453,6 +442,21 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       channelBotPubkeys:
           channelBotPubkeysState.asData?.value ?? const <String>{},
     );
+    // Agent work is visible in every DM, even when its response is threaded.
+    // Ordinary channels keep thread activity inside the thread view.
+    final typingEntries = ref
+        .watch(
+          visibleTypingProvider(
+            channel.id,
+            selfPubkey: currentPubkey,
+            include: (e) =>
+                personalChat ||
+                e.threadHeadId == null ||
+                (resolvedChannel.isDm &&
+                    agentPubkeys.contains(e.pubkey.toLowerCase())),
+          ),
+        )
+        .entries;
     useEffect(() {
       if (sessionStatus != SessionStatus.connected ||
           identitySubscriptionPubkeys.isEmpty) {

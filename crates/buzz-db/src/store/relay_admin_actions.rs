@@ -721,7 +721,7 @@ pub async fn execute_kick_with_marker(
     let kick = sqlx::query(
         r#"
         UPDATE channel_members
-        SET removed_at = NOW(), removed_by = $1
+        SET removed_at = clock_timestamp(), sync_modified_at = clock_timestamp(), removed_by = $1
         WHERE community_id = $2 AND channel_id = $3 AND pubkey = $4 AND removed_at IS NULL
         "#,
     )
@@ -1713,7 +1713,7 @@ pub async fn deploy_kick_member(
     let result = sqlx::query(
         r#"
         UPDATE channel_members
-        SET removed_at = NOW(), removed_by = $1
+        SET removed_at = clock_timestamp(), sync_modified_at = clock_timestamp(), removed_by = $1
         WHERE community_id = $2 AND channel_id = $3 AND pubkey = $4 AND removed_at IS NULL
         "#,
     )

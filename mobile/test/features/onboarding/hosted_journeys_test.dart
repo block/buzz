@@ -24,6 +24,8 @@ import 'package:buzz/shared/relay/relay_provider.dart';
 import 'package:buzz/shared/relay/media_image.dart';
 import 'package:buzz/shared/utils/string_utils.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 
@@ -68,6 +70,30 @@ void main() {
         f.bound = null;
         f.offerProfile = false;
         await f.mount(tester);
+        // iOS 16 stops before any identity generation, binding or admission.
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          const MethodChannel('buzz/hosted_hpke'),
+          (_) async => false,
+        );
+        try {
+          await f.flow.signInAccount();
+          expect(f.flow.problem, HostedFlowProblem.unsupportedPlatform);
+          expect(await f.store.read(), isNull);
+          expect(f.bound, isNull);
+          expect(f.probes, isEmpty);
+        } finally {
+          debugDefaultTargetPlatformOverride = null;
+        }
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          const MethodChannel('buzz/hosted_hpke'),
+          (call) async => call.method == 'isSupported'
+              ? true
+              : {
+                  'enc': Uint8List.fromList([4, ...List.filled(64, 2)]),
+                  'ciphertext': Uint8List(48),
+                },
+        );
         // Account restoration may resume independently of the Add choices.
         await f.flow.signInAccount();
         await f.settle(tester);
@@ -753,13 +779,36 @@ void main() {
       'new device recovers and preserves existing/unreadable profile ($unreadableProfile)',
       (tester, f) async {
         await f.initialize(localIdentity: false);
-        f.cloudKeys.addAll([f.secondKeys, f.keys]);
+        // Exercise both an already-bound recovery and recovery that must bind
+        // its confirmed backup, without requiring native sealing in either case.
+        if (unreadableProfile) {
+          f.bound = null;
+          f.cloudKeys.add(f.keys);
+        } else {
+          f.cloudKeys.addAll([f.secondKeys, f.keys]);
+        }
         f.rows.addAll([f.row('one'), f.row('two')]);
         f.offerProfile = false;
         f.profileUnavailable = unreadableProfile;
         await f.mount(tester);
         // Account restoration may resume independently of the Add choices.
-        await f.flow.signInAccount();
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          const MethodChannel('buzz/hosted_hpke'),
+          (call) async {
+            expect(
+              call.method,
+              'isSupported',
+              reason: 'Recovery must not seal a new backup',
+            );
+            return false;
+          },
+        );
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        try {
+          await f.flow.signInAccount();
+        } finally {
+          debugDefaultTargetPlatformOverride = null;
+        }
         await f.settle(tester);
         expect(f.flow.stage, HostedFlowStage.chooseCommunities);
         expect(f.probes, isEmpty);
@@ -784,7 +833,9 @@ void main() {
         expect(saved.pubkey, f.keys.public);
         expect((await f.store.read())!.pubkey, f.keys.public);
         expect(f.sent('/recovery'), hasLength(1));
-        expect(f.sent('/challenge'), isEmpty);
+        expect(f.sent('/challenge'), hasLength(unreadableProfile ? 1 : 0));
+        expect(f.sent('/nsec-backups'), isEmpty);
+        expect(f.sent('/enrollment'), isEmpty);
         expect(await f.storage.loadActiveId(), saved.id);
         expect(find.byType(OnboardingAppEntry), findsNothing);
       },
