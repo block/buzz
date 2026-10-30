@@ -559,6 +559,51 @@ void main() {
     expect(joined.reactions.map((reaction) => reaction.emoji), ['👍']);
   });
 
+  test('notice reactions are read past one page', () async {
+    final reactions = [
+      for (var i = 0; i <= NostrFilters.channelAuxLimit; i++)
+        NostrEvent(
+          id: _paddedId('r${i.toString().padLeft(4, '0')}'),
+          // The last one is the oldest, and it is mine.
+          pubkey: i == NostrFilters.channelAuxLimit ? 'me' : 'user-$i',
+          createdAt: 2000 - i,
+          kind: EventKind.reaction,
+          tags: const [
+            ['h', _channelId],
+            ['e', 'joined'],
+          ],
+          content: '👍',
+          sig: 'sig',
+        ),
+    ];
+    final relaySession = _RecordingRelaySessionNotifier(
+      queryResults: [
+        [_event(id: 'message', createdAt: 10), _bounds()],
+      ],
+    );
+    relaySession.noticeResults.add([_joinNotice('joined', 20)]);
+    relaySession.auxEvents.addAll(reactions);
+    final container = _buildContainer(relaySession);
+    addTearDown(container.dispose);
+
+    container.read(channelMessagesProvider(_channelId));
+    await relaySession.subscribed;
+    await _pumpEventQueue();
+
+    final reactionReads = relaySession.auxFilters
+        .where((filter) => filter.kinds.contains(EventKind.reaction))
+        .toList();
+    expect(reactionReads, hasLength(2));
+    expect(reactionReads[1].until, reactions[999].createdAt);
+    expect(reactionReads[1].extensions['before_id'], reactions[999].id);
+    final joined = formatTimeline(
+      container.read(channelMessagesProvider(_channelId)).value!,
+      currentPubkey: 'me',
+    ).singleWhere((message) => message.id == 'joined');
+    expect(joined.reactions.single.count, reactions.length);
+    expect(joined.reactions.single.currentUserReactionId, reactions.last.id);
+  });
+
   test(
     'a page that loads during a failed notice read gets its notices',
     () async {
@@ -6029,18 +6074,33 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
             EventKind.nip29DeleteEvent,
           }.contains,
         )) {
-      auxFilters.add(filters.single);
-      return [
-        for (final event in auxEvents)
-          if (filters.single.kinds.contains(event.kind) &&
-              event.tags.any(
-                (tag) =>
-                    tag.length >= 2 &&
-                    tag[0] == 'e' &&
-                    targets.contains(tag[1]),
-              ))
-            event,
-      ];
+      final filter = filters.single;
+      auxFilters.add(filter);
+      final until = filter.until;
+      final beforeId = filter.extensions['before_id'] as String?;
+      // Newest first, below the cursor, up to the limit, as the relay reads.
+      final matched =
+          [
+            for (final event in auxEvents)
+              if (filter.kinds.contains(event.kind) &&
+                  (until == null ||
+                      event.createdAt < until ||
+                      (event.createdAt == until &&
+                          beforeId != null &&
+                          event.id.compareTo(beforeId) > 0)) &&
+                  event.tags.any(
+                    (tag) =>
+                        tag.length >= 2 &&
+                        tag[0] == 'e' &&
+                        targets.contains(tag[1]),
+                  ))
+                event,
+          ]..sort(
+            (a, b) => b.createdAt != a.createdAt
+                ? b.createdAt.compareTo(a.createdAt)
+                : a.id.compareTo(b.id),
+          );
+      return matched.take(filter.limit).toList();
     }
     operations.add('query');
     queryFilters.addAll(filters);

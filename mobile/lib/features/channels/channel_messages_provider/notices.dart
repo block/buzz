@@ -4,6 +4,31 @@ part of '../channel_messages_provider.dart';
 /// show without their notices.
 const _maxNotices = 2000;
 
+/// Pages one auxiliary step reads before it stops, as the relay's own
+/// `include_aux` does.
+const _maxAuxPages = 64;
+
+/// Where the read after the full page [events] starts: its oldest event in
+/// relay order (by time, then the greatest id). Throws when the page did not
+/// move below [cursor].
+ChannelPageCursor _nextCursor(
+  List<NostrEvent> events,
+  ChannelPageCursor? cursor,
+  String what,
+) {
+  final last = events.reduce(
+    (a, b) =>
+        a.createdAt < b.createdAt ||
+            (a.createdAt == b.createdAt && a.id.compareTo(b.id) > 0)
+        ? a
+        : b,
+  );
+  if (cursor != null && !isOlderThanChannelCursor(last, cursor)) {
+    throw Exception('$what did not advance.');
+  }
+  return ChannelPageCursor(createdAt: last.createdAt, eventId: last.id);
+}
+
 extension _ChannelNotices on ChannelMessagesNotifier {
   /// Reads the window's system notices newest first, down to its oldest
   /// loaded row. Pages leave notices out (see
@@ -56,20 +81,7 @@ extension _ChannelNotices on ChannelMessagesNotifier {
         if (events.length < NostrFilters.channelNoticePageSize) {
           _noticesReachedStart = true;
         } else {
-          final last = events.reduce(
-            (a, b) =>
-                a.createdAt < b.createdAt ||
-                    (a.createdAt == b.createdAt && a.id.compareTo(b.id) > 0)
-                ? a
-                : b,
-          );
-          if (cursor != null && !isOlderThanChannelCursor(last, cursor)) {
-            throw Exception('System notices did not advance.');
-          }
-          _noticeCursor = ChannelPageCursor(
-            createdAt: last.createdAt,
-            eventId: last.id,
-          );
+          _noticeCursor = _nextCursor(events, cursor, 'System notices');
         }
         for (final event in events) {
           _notices[event.id] = event;
@@ -109,27 +121,49 @@ extension _ChannelNotices on ChannelMessagesNotifier {
   }
 
   /// The reactions to [notices] and the deletions of those reactions, in the
-  /// two steps a page's `include_aux` takes. Each step reads at most
-  /// [NostrFilters.channelAuxLimit] events.
+  /// two steps a page's `include_aux` takes.
   Future<List<NostrEvent>> _readNoticeAux(
     RelaySessionNotifier session,
     List<NostrEvent> notices,
   ) async {
     if (notices.isEmpty) return const [];
-    final aux = await session.queryRelay([
-      NostrFilters.channelAux([for (final event in notices) event.id]),
-    ]);
+    final aux = await _readAllAux(session, [
+      for (final event in notices) event.id,
+    ], NostrFilters.channelAuxKinds);
     final reactions = [
       for (final event in aux)
         if (event.kind == EventKind.reaction) event.id,
     ];
     if (reactions.isEmpty) return aux;
-    final removed = await session.queryRelay([
-      NostrFilters.channelAux(
-        reactions,
-        kinds: const [EventKind.deletion, EventKind.nip29DeleteEvent],
-      ),
+    final removed = await _readAllAux(session, reactions, const [
+      EventKind.deletion,
+      EventKind.nip29DeleteEvent,
     ]);
     return [...aux, ...removed];
+  }
+
+  /// Every [NostrFilters.channelAux] event of [kinds] for [eventIds], page
+  /// by page.
+  Future<List<NostrEvent>> _readAllAux(
+    RelaySessionNotifier session,
+    List<String> eventIds,
+    List<int> kinds,
+  ) async {
+    final events = <NostrEvent>[];
+    ChannelPageCursor? cursor;
+    for (var page = 0; page < _maxAuxPages; page++) {
+      final read = await session.queryRelay([
+        NostrFilters.channelAux(
+          eventIds,
+          kinds: kinds,
+          until: cursor?.createdAt,
+          beforeId: cursor?.eventId,
+        ),
+      ]);
+      events.addAll(read);
+      if (read.length < NostrFilters.channelAuxLimit) break;
+      cursor = _nextCursor(read, cursor, 'Reactions');
+    }
+    return events;
   }
 }
