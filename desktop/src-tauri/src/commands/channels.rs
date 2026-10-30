@@ -41,6 +41,12 @@ const STARTER_CHANNELS: &[StarterChannelSpec] = &[
     },
 ];
 
+/// Starter channels a new person joins only when the community already has
+/// them. They are never created: whether a community has one, and how it is
+/// configured (for example as an announce channel with `join_role = guest`),
+/// is its owners' call. A join takes the channel's `join_role`.
+const JOIN_ONLY_STARTER_CHANNEL_NAMES: &[&str] = &["announcements"];
+
 // ── Tauri commands ────────────────────────────────────────────────────────────
 
 /// Return the channels the active identity belongs to (plus its own
@@ -230,8 +236,8 @@ fn is_duplicate_channel_rejection(error: &str) -> bool {
     error.contains("relay rejected event:") && error.contains("duplicate: channel already exists")
 }
 
-fn is_matching_starter_channel(channel: &ChannelInfo, spec: &StarterChannelSpec) -> bool {
-    normalize_channel_name(&channel.name) == normalize_channel_name(spec.name)
+fn is_matching_starter_channel(channel: &ChannelInfo, name: &str) -> bool {
+    normalize_channel_name(&channel.name) == normalize_channel_name(name)
         && channel.channel_type == "stream"
         && channel.visibility == "open"
         && channel.archived_at.is_none()
@@ -241,7 +247,7 @@ fn has_all_starter_channels(channels: &[ChannelInfo]) -> bool {
     STARTER_CHANNELS.iter().all(|spec| {
         channels
             .iter()
-            .any(|channel| is_matching_starter_channel(channel, spec))
+            .any(|channel| is_matching_starter_channel(channel, spec.name))
     })
 }
 
@@ -251,10 +257,14 @@ async fn ensure_starter_channel_memberships(
     channels: &mut [ChannelInfo],
     changed_channel_ids: &mut Vec<String>,
 ) -> Result<(), String> {
-    for spec in STARTER_CHANNELS {
+    let names = STARTER_CHANNELS
+        .iter()
+        .map(|spec| spec.name)
+        .chain(JOIN_ONLY_STARTER_CHANNEL_NAMES.iter().copied());
+    for name in names {
         let Some(channel) = channels
             .iter_mut()
-            .find(|channel| is_matching_starter_channel(channel, spec))
+            .find(|channel| is_matching_starter_channel(channel, name))
         else {
             continue;
         };
@@ -417,7 +427,7 @@ async fn ensure_starter_channels_inner(
     for spec in STARTER_CHANNELS {
         if existing_channels
             .iter()
-            .any(|channel| is_matching_starter_channel(channel, spec))
+            .any(|channel| is_matching_starter_channel(channel, spec.name))
         {
             continue;
         }

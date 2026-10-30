@@ -56,6 +56,12 @@ const _starterChannels = [
   ),
 ];
 
+/// Starter channels a new person joins only when the community already has
+/// them. They are never created: whether a community has one, and how it is
+/// configured (for example as an announce channel), is its owners' call. A
+/// join takes the channel's `join_role`. Matches desktop.
+const _joinOnlyStarterChannelNames = ['announcements'];
+
 final _inviteRelayConnectedProvider = FutureProvider.family<void, String>((
   ref,
   expectedRelayUrl,
@@ -167,6 +173,15 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
       }
       if (starter.slug == 'welcome-everyone') {
         welcomeEveryoneId = channel.id;
+      }
+    }
+
+    for (final name in _joinOnlyStarterChannelNames) {
+      _ensureScopeCurrent();
+      final channel = _findStarterChannel(channels, name);
+      if (channel != null && !channel.isMember) {
+        await _joinChannel(channel.id);
+        _ensureScopeCurrent();
       }
     }
 
