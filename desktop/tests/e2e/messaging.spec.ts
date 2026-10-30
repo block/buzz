@@ -2126,6 +2126,8 @@ test("/giphy opens a pre-searched GIF picker instead of sending", async ({
     "Insert emoji or GIF",
   );
   const input = page.getByTestId("message-input");
+  // The expanded formatting toolbar hides the picker, so the command closes it.
+  await page.getByRole("button", { name: "Toggle formatting" }).click();
   await input.fill("/giphy party parrot");
   await input.press("Enter");
 

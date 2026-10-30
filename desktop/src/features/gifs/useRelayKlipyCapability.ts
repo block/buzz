@@ -18,6 +18,7 @@ export function useRelayKlipyCapability() {
   const sharePath = capabilityQuery.data?.sharePath ?? "";
   return {
     available: searchPath.length > 0 && sharePath.length > 0,
+    loading: capabilityQuery.isLoading,
     relayUrl,
     searchPath,
     sharePath,

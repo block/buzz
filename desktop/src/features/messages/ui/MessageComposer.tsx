@@ -126,8 +126,9 @@ function MessageComposerImpl({
   React.useEffect(() => {
     if (!isEmojiPickerOpen) setGifCommandQuery(null);
   }, [isEmojiPickerOpen]);
-  const gifsAvailableRef = React.useRef(false);
-  gifsAvailableRef.current = useRelayKlipyCapability().available;
+  const gifCapability = useRelayKlipyCapability();
+  const gifCapabilityRef = React.useRef(gifCapability);
+  gifCapabilityRef.current = gifCapability;
   const [isFormattingOpen, setIsFormattingOpen] = React.useState(false);
   const handleFormattingToggle = React.useCallback((pressed: boolean) => {
     if (pressed) setIsEmojiPickerOpen(false);
@@ -633,14 +634,17 @@ function MessageComposerImpl({
     ) {
       return;
     }
+    // Never let a recognized command post as text while GIFs might be
+    // reachable: capability still loading, or a voice note blocking the picker.
+    // Only a relay without GIF support sends `/giphy` as an ordinary message.
     const giphyQuery = parseGiphyCommand(trimmed);
-    if (
-      giphyQuery !== null &&
-      gifsAvailableRef.current &&
-      !voiceNote.hasAttachmentRef.current
-    ) {
-      setGifCommandQuery(giphyQuery);
-      setIsEmojiPickerOpen(true);
+    const gifs = gifCapabilityRef.current;
+    if (giphyQuery !== null && (gifs.available || gifs.loading)) {
+      if (gifs.available && !voiceNote.hasAttachmentRef.current) {
+        setIsFormattingOpen(false);
+        setGifCommandQuery(giphyQuery);
+        setIsEmojiPickerOpen(true);
+      }
       return;
     }
     const capturedThreadContext = onCaptureSendContext?.() ?? null;
@@ -719,7 +723,16 @@ function MessageComposerImpl({
   const handleGifCommandSelect = React.useCallback(() => {
     setComposerContent("");
     richText.clearContent();
-  }, [richText.clearContent, setComposerContent]);
+    mentions.clearMentions();
+    channelLinks.clearChannels();
+    emojiAutocomplete.clearEmojis();
+  }, [
+    channelLinks.clearChannels,
+    emojiAutocomplete.clearEmojis,
+    mentions.clearMentions,
+    richText.clearContent,
+    setComposerContent,
+  ]);
   // Draft auto-submit runs once after persisted editor state loads.
   const onAutoSubmitCompleteRef = React.useRef(onAutoSubmitComplete);
   onAutoSubmitCompleteRef.current = onAutoSubmitComplete;

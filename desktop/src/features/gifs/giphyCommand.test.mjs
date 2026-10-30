@@ -13,11 +13,8 @@ test("parseGiphyCommand treats a bare /giphy as a trending browse", () => {
   assert.equal(parseGiphyCommand("/giphy   "), "");
 });
 
-test("parseGiphyCommand undoes markdown escapes in the query", () => {
-  assert.equal(
-    parseGiphyCommand("/giphy ship\\_it \\*now\\*"),
-    "ship_it *now*",
-  );
+test("parseGiphyCommand keeps the user's backslashes", () => {
+  assert.equal(parseGiphyCommand("/giphy C:\\temp"), "C:\\temp");
 });
 
 test("parseGiphyCommand ignores text that is not the command", () => {
