@@ -156,6 +156,15 @@ pub(crate) fn resolve_effective_harness_descriptor(
             normalize_agent_args(&effective_command, record_args)
         } else if let Some(ref def) = harness_def {
             normalize_agent_args(&effective_command, def.args.clone())
+        } else if let Some(preset_args) =
+            crate::managed_agents::discovery::preset_args_for_command(&effective_command)
+        {
+            // No runtime id resolved a harness preset, but the command itself
+            // is a known ACP runtime (an override or a globally preferred
+            // runtime like `omp`). Launch its ACP/stdio mode instead of the
+            // bare command, which would start an interactive TUI and never
+            // answer ACP `initialize` under headless Buzz.
+            normalize_agent_args(&effective_command, preset_args)
         } else {
             normalize_agent_args(&effective_command, record_args)
         }
