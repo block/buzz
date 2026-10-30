@@ -16,6 +16,15 @@ enum NativeTabler {
   }()
 
   static func image(_ symbol: String, size: CGFloat = 20) -> UIImage? {
+    // The bundled Tabler font is outline-only. Match filled/circle.svg's
+    // 10-unit radius on its 24-unit canvas for every filled-circle consumer.
+    if symbol == "circle.fill" {
+      return UIGraphicsImageRenderer(size: CGSize(width: size, height: size)).image { _ in
+        UIColor.black.setFill()
+        UIBezierPath(ovalIn: CGRect(x: 0, y: 0, width: size, height: size)
+          .insetBy(dx: size / 12, dy: size / 12)).fill()
+      }.withRenderingMode(.alwaysTemplate)
+    }
     guard let code = glyphs[symbol], let scalar = UnicodeScalar(code),
       let name = fontName, let font = UIFont(name: name, size: size) else {
       assertionFailure("Missing Tabler icon: \(symbol)")
@@ -53,7 +62,6 @@ enum NativeTabler {
     "crop": 0xea85, // crop
     "arrow.triangle.2.circlepath.camera": 0xee22, // camera-rotate
     "circle": 0xea6b, // circle
-    "circle.fill": 0xea6b, // circle
     "sun.max": 0xeb30, // sun
     "moon": 0xeaf8, // moon
     "ellipsis": 0xea95, // dots
