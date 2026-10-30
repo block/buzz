@@ -835,6 +835,48 @@ void main() {
     expect(find.text('No reminders'), findsOneWidget);
   });
 
+  testWidgets('a note-only reminder is listed by its note and has no action', (
+    tester,
+  ) async {
+    final noteOnly = Reminder(
+      id: 'reminder-note',
+      notBefore: now + 3600,
+      status: 'pending',
+      target: null,
+      note: 'stretch',
+      createdAt: now - 60,
+      eventId: 'reminder-event-note',
+    );
+    final due = Reminder(
+      id: 'reminder-due',
+      notBefore: now - 1,
+      status: 'pending',
+      target: null,
+      note: 'water the plants',
+      createdAt: now - 120,
+      eventId: 'reminder-event-due',
+    );
+    await tester.pumpWidget(await buildTestable(reminders: [noteOnly, due]));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('activity-filter-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Reminders'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('stretch'), findsOneWidget);
+    expect(find.text('water the plants'), findsOneWidget);
+    expect(find.text('Due now'), findsOneWidget);
+    for (final id in ['reminder-note', 'reminder-due']) {
+      final row = find.byKey(ValueKey('reminder-row-$id'));
+      expect(tester.widget<ListTile>(row).onTap, isNull);
+    }
+    await tester.tap(find.text('stretch'));
+    await tester.pumpAndSettle();
+    expect(find.byType(SnackBar), findsNothing);
+    expect(find.byType(ActivityPage), findsOneWidget);
+  });
+
   testWidgets('drafts filter shows the drafts empty surface', (tester) async {
     await tester.pumpWidget(await buildTestable());
     await tester.pumpAndSettle();

@@ -156,6 +156,8 @@ void _expandComposer({
 }
 
 Widget _composerSuggestionPanel({
+  required List<SlashCommand> slashSuggestions,
+  required ValueChanged<SlashCommand> onSlashSelect,
   required List<Channel> channelSuggestions,
   required List<MentionCandidate> mentionSuggestions,
   required Set<String> unavailableMentions,
@@ -166,7 +168,15 @@ Widget _composerSuggestionPanel({
   required bool isDmChannel,
   required ValueChanged<Channel> onChannelSelect,
   required ValueChanged<MentionCandidate> onMentionSelect,
-}) => channelSuggestions.isNotEmpty
+}) => slashSuggestions.isNotEmpty
+    ? KeyedSubtree(
+        key: const ValueKey('slash-suggestions'),
+        child: _SlashSuggestions(
+          suggestions: slashSuggestions,
+          onSelect: onSlashSelect,
+        ),
+      )
+    : channelSuggestions.isNotEmpty
     ? KeyedSubtree(
         key: const ValueKey('channel-suggestions'),
         child: _ChannelSuggestions(

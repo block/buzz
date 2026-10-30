@@ -58,6 +58,11 @@ import {
   usePresenceSubscription,
 } from "@/features/presence/hooks";
 import {
+  SLASH_UI_SET_PRESENCE,
+  type SetPresenceRequest,
+} from "@/features/slash-commands/lib/presenceUiRequests";
+import { useSlashCommandUiHandler } from "@/features/slash-commands/lib/slashCommandUiRequests";
+import {
   useSetUserStatusMutation,
   useUserStatusQuery,
   visibleUserStatus,
@@ -251,6 +256,10 @@ export function AppShell() {
   useCommunityEmojiLiveUpdates();
   useMembershipNotifications(identityQuery.data?.pubkey);
   const presenceSession = usePresenceSession(deferredPubkey);
+  useSlashCommandUiHandler(SLASH_UI_SET_PRESENCE, (payload) => {
+    const request = payload as SetPresenceRequest;
+    request.result = presenceSession.setStatus(request.status);
+  });
   const selfStatusQuery = useUserStatusQuery(
     deferredPubkey ? [deferredPubkey] : [],
   );

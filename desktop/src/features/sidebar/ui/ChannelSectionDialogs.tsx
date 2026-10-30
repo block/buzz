@@ -31,6 +31,11 @@ import {
   useLeaveChannelMutation,
 } from "@/features/channels/hooks";
 import { ChannelDeleteConfirmationDialog } from "@/features/channels/ui/ChannelManagementModerationActions";
+import {
+  CONFIRM_LEAVE_CHANNEL_UI,
+  type ConfirmLeaveChannelRequest,
+} from "@/features/slash-commands/lib/membershipUi";
+import { useSlashCommandUiHandler } from "@/features/slash-commands/lib/slashCommandUiRequests";
 
 export type SectionDialogValue = {
   name: string;
@@ -318,18 +323,50 @@ export function LeaveChannelAlertDialog({
 // ---------------------------------------------------------------------------
 
 export function useLeaveChannelDialog() {
-  const [target, setTarget] = React.useState<Channel | null>(null);
+  const [target, setTarget] = React.useState<Pick<
+    Channel,
+    "id" | "name"
+  > | null>(null);
   const leaveChannel = useLeaveChannelMutation(target?.id ?? null);
+  const settleRef = React.useRef<ConfirmLeaveChannelRequest["settle"] | null>(
+    null,
+  );
+
+  const settle = React.useCallback((confirmed: boolean) => {
+    const pending = settleRef.current;
+    settleRef.current = null;
+    pending?.(confirmed);
+  }, []);
+
+  const requestLeaveChannel = React.useCallback(
+    (channel: Pick<Channel, "id" | "name">) => {
+      settle(false);
+      setTarget(channel);
+    },
+    [settle],
+  );
+
+  useSlashCommandUiHandler(CONFIRM_LEAVE_CHANNEL_UI, (payload) => {
+    const request = payload as ConfirmLeaveChannelRequest;
+    settle(false);
+    settleRef.current = request.settle;
+    setTarget(request.channel);
+  });
 
   const dialog = (
     <LeaveChannelAlertDialog
       open={target !== null}
       onOpenChange={(open) => {
-        if (!open) setTarget(null);
+        if (!open) {
+          settle(false);
+          setTarget(null);
+        }
       }}
       channelName={target?.name ?? ""}
       onConfirm={() => {
-        if (target) {
+        if (settleRef.current) {
+          settle(true);
+        } else if (target) {
           leaveChannel.mutate();
         }
         setTarget(null);
@@ -337,7 +374,7 @@ export function useLeaveChannelDialog() {
     />
   );
 
-  return { requestLeaveChannel: setTarget, dialog };
+  return { requestLeaveChannel, dialog };
 }
 
 export function useDeleteChannelDialog(onDeleted: (channel: Channel) => void) {

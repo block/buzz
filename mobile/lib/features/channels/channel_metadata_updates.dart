@@ -1,3 +1,7 @@
+/// Trims [name] and strips leading `#` characters.
+String canonicalChannelName(String name) =>
+    name.trim().replaceFirst(RegExp(r'^#+'), '').trim();
+
 /// Builds the kind:9002 tags used to update channel name and description.
 List<List<String>> buildUpdateChannelTags({
   required String channelId,
@@ -7,7 +11,7 @@ List<List<String>> buildUpdateChannelTags({
   if (name == null && description == null) {
     throw ArgumentError('At least one channel field must be provided');
   }
-  final canonicalName = name?.trim().replaceFirst(RegExp(r'^#+'), '').trim();
+  final canonicalName = name == null ? null : canonicalChannelName(name);
   if (canonicalName != null && canonicalName.isEmpty) {
     throw ArgumentError.value(name, 'name', 'must not be empty');
   }
