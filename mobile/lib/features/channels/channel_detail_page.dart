@@ -100,6 +100,7 @@ part 'channel_detail_page/placement_route.dart';
 part 'channel_detail_page/empty_messages.dart';
 part 'channel_detail_page/oldest_navigation.dart';
 part 'channel_detail_page/system_rows.dart';
+part 'channel_detail_page/thread_working.dart';
 part 'channel_detail_page/activity_members_sheet.dart';
 part 'channel_detail_page/huddle_sheet.dart';
 part 'channel_detail_page/huddle_call_avatar.dart';
@@ -457,6 +458,23 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
           ),
         )
         .entries;
+    // Ordinary channels show the user's agents working in a thread on its
+    // root message. Me and DMs already show that typing inline.
+    final threadWorking = _threadWorkingAgents(
+      ref,
+      currentPubkey,
+      personalChat || resolvedChannel.isDm
+          ? const []
+          : ref
+                .watch(
+                  visibleTypingProvider(
+                    channel.id,
+                    selfPubkey: currentPubkey,
+                    include: (e) => e.threadHeadId != null,
+                  ),
+                )
+                .entries,
+    );
     useEffect(() {
       if (sessionStatus != SessionStatus.connected ||
           identitySubscriptionPubkeys.isEmpty) {
@@ -822,6 +840,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                             return _MessageList(
                               notifier: ref.watch(messagesProvider.notifier),
                               inlineTyping: typingEntries,
+                              threadWorking: threadWorking,
                               stickyDateHeaderState: stickyDateHeaderState,
                               entries: timelineEntries,
                               allMessages: timelineMessages,

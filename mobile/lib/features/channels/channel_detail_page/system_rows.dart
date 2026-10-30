@@ -611,7 +611,10 @@ List<InlineSpan> _memberNameSpans(
 }
 
 class _ThreadSummaryRow extends ConsumerWidget {
-  final ThreadSummary summary;
+  final ThreadSummary? summary;
+
+  /// Agents typing in this message's thread.
+  final List<String> working;
   final TimelineMessage message;
   final List<TimelineMessage> allMessages;
   final String channelId;
@@ -621,6 +624,7 @@ class _ThreadSummaryRow extends ConsumerWidget {
 
   const _ThreadSummaryRow({
     required this.summary,
+    this.working = const [],
     required this.message,
     required this.allMessages,
     required this.channelId,
@@ -631,10 +635,21 @@ class _ThreadSummaryRow extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final labels = watchChannelIdentityLabels(ref, channelId, working.take(1));
+    final first = working.isEmpty
+        ? null
+        : labels[working.first.toLowerCase()] ?? 'An agent';
     return ReplySummaryLink(
       key: ValueKey('thread-summary-${message.id}'),
       mirrored: currentPubkey?.toLowerCase() == message.pubkey.toLowerCase(),
       summary: summary,
+      working: working,
+      workingLabel: switch (working.length) {
+        0 => null,
+        1 => '$first is working',
+        2 => '$first and 1 other are working',
+        final count => '$first and ${count - 1} others are working',
+      },
       hasReactions: message.reactions.isNotEmpty,
       onTap: () {
         Navigator.of(context).push(

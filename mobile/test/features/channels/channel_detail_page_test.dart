@@ -11186,6 +11186,103 @@ void main() {
       });
     }
 
+    testWidgets('an agent working in a thread shows on its root message', (
+      tester,
+    ) async {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final prompt = _textMsg(
+        id: threadIdRoot,
+        pubkey: 'self',
+        content: 'morty say hi',
+        createdAt: now - 3,
+      );
+      final typing = _FakeTypingNotifier(const []);
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [prompt],
+          typingNotifier: typing,
+          disableAnimations: true,
+          huddleCurrentPubkey: 'self',
+          knownAgentPubkeys: const {'morty', 'rick'},
+          users: const {
+            'morty': UserProfile(
+              pubkey: 'morty',
+              displayName: 'Morty',
+              ownerPubkey: 'self',
+            ),
+            'rick': UserProfile(
+              pubkey: 'rick',
+              displayName: 'Rick',
+              ownerPubkey: 'other',
+            ),
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      final row = find.byKey(ValueKey('thread-summary-$threadIdRoot'));
+      expect(row, findsNothing);
+
+      // As on desktop, people and other owners' agents typing in the thread
+      // stay inside the thread view.
+      typing.setEntries([
+        for (final pubkey in ['alice', 'rick'])
+          TypingEntry(
+            pubkey: pubkey,
+            threadHeadId: threadIdRoot,
+            expiresAtMs: (now + 8) * 1000,
+          ),
+      ]);
+      await tester.pumpAndSettle();
+      expect(row, findsNothing);
+
+      typing.setEntries([
+        TypingEntry(
+          pubkey: 'morty',
+          threadHeadId: threadIdRoot,
+          expiresAtMs: (now + 8) * 1000,
+        ),
+      ]);
+      await tester.pumpAndSettle();
+      expect(row, findsOneWidget);
+      expect(
+        find.descendant(
+          of: row,
+          matching: find.byKey(const ValueKey('thread-working-dots')),
+        ),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('agent-typing-bubble')), findsNothing);
+      expect(
+        find.bySemanticsLabel('View thread: Morty is working'),
+        findsOneWidget,
+      );
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ChannelDetailPage)),
+      );
+      final messages =
+          container.read(channelMessagesProvider(_channelId).notifier)
+              as _FakeMessagesNotifier;
+      messages.setMessages([
+        prompt,
+        _textMsg(
+          id: 'reply',
+          pubkey: 'morty',
+          content: 'hi',
+          createdAt: now,
+          extraTags: [
+            ['e', threadIdRoot, '', 'reply'],
+          ],
+        ),
+      ]);
+      typing.setEntries(const []);
+      await tester.pumpAndSettle();
+      expect(row, findsOneWidget);
+      expect(find.byKey(const ValueKey('thread-working-dots')), findsNothing);
+      expect(find.bySemanticsLabel('View thread: 1 reply'), findsOneWidget);
+    });
+
     testWidgets('shows single typer', (tester) async {
       await tester.pumpWidget(
         _buildTestable(

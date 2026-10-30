@@ -4,6 +4,9 @@ class _MessageList extends HookConsumerWidget {
   final ValueNotifier<StickyDateHeaderState> stickyDateHeaderState;
   final List<MainTimelineEntry> entries;
   final List<TypingEntry> inlineTyping;
+
+  /// Agents typing in each thread, by lowercase root message ID.
+  final Map<String, List<String>> threadWorking;
   final List<TimelineMessage> allMessages;
   final String? initialMessageId;
   final String? initialThreadRootId;
@@ -26,6 +29,7 @@ class _MessageList extends HookConsumerWidget {
   const _MessageList({
     required this.entries,
     this.inlineTyping = const [],
+    this.threadWorking = const {},
     required this.stickyDateHeaderState,
     required this.allMessages,
     required this.initialMessageId,
@@ -1006,10 +1010,18 @@ class _MessageList extends HookConsumerWidget {
                             ),
                             showAvatar: showAvatar,
                             hasReplies: entry.summary != null,
-                            replyFooter: entry.summary == null
+                            replyFooter:
+                                entry.summary == null &&
+                                    !threadWorking.containsKey(
+                                      message.id.toLowerCase(),
+                                    )
                                 ? null
                                 : _ThreadSummaryRow(
-                                    summary: entry.summary!,
+                                    summary: entry.summary,
+                                    working:
+                                        threadWorking[message.id
+                                            .toLowerCase()] ??
+                                        const [],
                                     message: message,
                                     allMessages: allMessages,
                                     channelId: channelId,

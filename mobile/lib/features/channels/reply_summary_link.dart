@@ -5,6 +5,7 @@ import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/theme/theme.dart';
 import 'small_avatar.dart';
 import 'timeline_message.dart';
+import 'typing_dots.dart';
 
 /// Desktop-style reply link with a curved branch below the message bubble.
 class ReplySummaryLink extends ConsumerWidget {
@@ -14,22 +15,39 @@ class ReplySummaryLink extends ConsumerWidget {
     required this.onTap,
     this.hasReactions = false,
     this.mirrored = false,
+    this.working = const [],
+    this.workingLabel,
   });
 
-  final ThreadSummary summary;
+  /// Null while agents work on a message that has no replies yet.
+  final ThreadSummary? summary;
   final VoidCallback onTap;
   final bool hasReactions;
+
+  /// Agents working in this thread, shown first with typing dots, as on desktop.
+  final List<String> working;
+
+  /// Spoken description of [working], such as "Morty is working".
+  final String? workingLabel;
 
   /// Places the connector on the outgoing edge without reversing its contents.
   final bool mirrored;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final participants = summary.participantPubkeys.take(3).toList();
+    final summary = this.summary;
+    final participants = {
+      for (final pubkey in working) pubkey.toLowerCase(),
+      for (final pubkey in summary?.participantPubkeys ?? const <String>[])
+        pubkey.toLowerCase(),
+    }.take(3).toList();
     final userCache = ref.watch(userCacheProvider);
-    final label = summary.isCountPending
+    final label = summary == null
+        ? null
+        : summary.isCountPending
         ? 'Replies'
         : '${summary.replyCount}${summary.isLowerBound ? '+' : ''} ${summary.replyCount == 1 ? 'reply' : 'replies'}';
+    final spoken = [?label, if (working.isNotEmpty) ?workingLabel].join(', ');
     final connectorTop = hasReactions ? -Grid.half : Grid.half;
     return Padding(
       padding: EdgeInsets.only(
@@ -58,7 +76,7 @@ class ReplySummaryLink extends ConsumerWidget {
             ),
             child: Semantics(
               button: true,
-              label: 'View thread: $label',
+              label: 'View thread: $spoken',
               onTap: onTap,
               excludeSemantics: true,
               child: InkWell(
@@ -92,16 +110,24 @@ class ReplySummaryLink extends ConsumerWidget {
                           ),
                           const SizedBox(width: Grid.half),
                         ],
-                        Flexible(
-                          child: Text(
-                            label,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: context.textTheme.labelMedium?.copyWith(
-                              color: context.colors.onSurfaceVariant,
+                        if (label != null)
+                          Flexible(
+                            child: Text(
+                              label,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: context.textTheme.labelMedium?.copyWith(
+                                color: context.colors.onSurfaceVariant,
+                              ),
                             ),
                           ),
-                        ),
+                        if (working.isNotEmpty) ...[
+                          if (label != null) const SizedBox(width: Grid.xs),
+                          const TypingDots(
+                            key: ValueKey('thread-working-dots'),
+                            dotSize: 5,
+                          ),
+                        ],
                       ],
                     ),
                   ),
