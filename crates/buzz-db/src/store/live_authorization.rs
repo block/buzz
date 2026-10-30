@@ -202,6 +202,7 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn batch_is_tenant_scoped_reads_owner_bans_ignores_timeouts_and_scales_to_10k() {
         let db = setup_db().await;
+        let relay_keypair = Keys::generate();
         let community_a = make_community(&db).await;
         let community_b = make_community(&db).await;
         let owner = pubkey();
@@ -237,16 +238,44 @@ mod postgres_tests {
         db.set_agent_owner_for_authorization(community_a, &agent, &current_owner)
             .await
             .expect("record agent owner");
-        db.add_relay_member(community_a, &hex::encode(owner), "member", None)
+        let _membership = db
+            .add_relay_member(
+                community_a,
+                &hex::encode(owner),
+                "member",
+                None,
+                &relay_keypair,
+            )
             .await
             .expect("add owner to community A");
-        db.add_relay_member(community_a, &hex::encode(current_owner), "member", None)
+        let _membership = db
+            .add_relay_member(
+                community_a,
+                &hex::encode(current_owner),
+                "member",
+                None,
+                &relay_keypair,
+            )
             .await
             .expect("add current owner to community A");
-        db.add_relay_member(community_b, &hex::encode(direct), "member", None)
+        let _membership = db
+            .add_relay_member(
+                community_b,
+                &hex::encode(direct),
+                "member",
+                None,
+                &relay_keypair,
+            )
             .await
             .expect("add principal to community B");
-        db.add_relay_member(community_b, &hex::encode(current_owner), "member", None)
+        let _membership = db
+            .add_relay_member(
+                community_b,
+                &hex::encode(current_owner),
+                "member",
+                None,
+                &relay_keypair,
+            )
             .await
             .expect("add current owner to community B");
         // Capture the session as ownerless, then commit its first owner link.
