@@ -7,6 +7,7 @@ import '../../shared/relay/relay.dart';
 import '../channels/channel.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/channels_provider.dart';
+import 'channel_search_score.dart';
 
 @immutable
 class SearchHit {
@@ -92,13 +93,33 @@ class SearchState {
   );
 }
 
+/// Most channel rows one query shows, ranked best first.
+const searchChannelResultLimit = 20;
+
 class SearchNotifier extends Notifier<SearchState> {
   Timer? _debounce;
+
+  // The relay lookups still running for the current query. The spinner shows
+  // only while one of them is pending, so the last lookup to finish settles it
+  // regardless of which results came back empty.
+  bool _messagesPending = false;
+  bool _usersPending = false;
+  bool _directoryPending = false;
 
   @override
   SearchState build() {
     // Watch relayConfig so search state resets on community switch.
     ref.watch(relayConfigProvider);
+    _messagesPending = false;
+    _usersPending = false;
+    _directoryPending = false;
+    // Channel rows come from the loaded channel list, which gains open
+    // channels when the directory arrives. Re-rank whenever either changes.
+    ref.listen(channelsProvider, (_, _) => _refreshChannels());
+    ref.listen(
+      channelDirectoryLoadStatusProvider,
+      (_, _) => _refreshChannels(),
+    );
     ref.onDispose(() {
       _debounce?.cancel();
     });
@@ -110,10 +131,12 @@ class SearchNotifier extends Notifier<SearchState> {
 
     final trimmed = query.trim();
     if (trimmed.isEmpty) {
-      state = const SearchState.initial();
+      clear();
       return;
     }
 
+    _messagesPending = false;
+    _usersPending = false;
     state = SearchState(query: trimmed, isLoading: true);
 
     _debounce = Timer(const Duration(milliseconds: 300), () {
@@ -125,10 +148,47 @@ class SearchNotifier extends Notifier<SearchState> {
     // If the query changed while debouncing, bail out.
     if (state.query != query) return;
 
-    // Fire all three lookups in parallel.
+    _messagesPending = true;
+    _usersPending = true;
+    _loadDirectory();
+    _refreshChannels();
     _searchMessages(query);
     _searchUsers(query);
-    _searchChannels(query);
+  }
+
+  bool get _isLoading =>
+      _messagesPending ||
+      _usersPending ||
+      _directoryPending ||
+      ref
+          .read(channelDirectoryLoadStatusProvider.notifier)
+          .isLoading(
+            channelDirectoryScope(
+              ref.read(relayConfigProvider).baseUrl,
+              ref.read(myPubkeyProvider),
+            ),
+          );
+
+  /// Loads the open-channel directory so search also finds open channels the
+  /// user has not joined, as desktop search does.
+  void _loadDirectory() {
+    if (_directoryPending) return;
+    _directoryPending = true;
+    unawaited(
+      ref
+          .read(channelsProvider.notifier)
+          .ensureDirectoryLoaded()
+          .catchError((Object error) {
+            debugPrint(
+              '[SearchNotifier] channel directory load failed: $error',
+            );
+          })
+          .whenComplete(() {
+            if (!ref.mounted) return;
+            _directoryPending = false;
+            _refreshChannels();
+          }),
+    );
   }
 
   Future<void> _searchMessages(String query) async {
@@ -167,48 +227,73 @@ class SearchNotifier extends Notifier<SearchState> {
           )
           .toList();
 
-      if (state.query != query) return;
-      state = state.copyWith(messageResults: hits, isLoading: false);
+      if (!ref.mounted || state.query != query) return;
+      _messagesPending = false;
+      state = state.copyWith(messageResults: hits, isLoading: _isLoading);
     } catch (e) {
-      if (state.query != query) return;
-      state = state.copyWith(isLoading: false, error: e.toString());
+      if (!ref.mounted || state.query != query) return;
+      _messagesPending = false;
+      state = state.copyWith(isLoading: _isLoading, error: e.toString());
     }
   }
 
   Future<void> _searchUsers(String query) async {
+    List<DirectoryUser>? users;
     try {
-      final users = await ref
+      users = await ref
           .read(channelActionsProvider)
           .searchUsers(query, limit: 8);
-
-      if (state.query != query) return;
-      state = state.copyWith(
-        userResults: users,
-        isLoading: state.messageResults.isEmpty && state.channelResults.isEmpty,
-      );
     } catch (_) {
       // User search failure is non-critical — keep existing results.
     }
+    if (!ref.mounted || state.query != query) return;
+    _usersPending = false;
+    state = state.copyWith(userResults: users, isLoading: _isLoading);
   }
 
-  void _searchChannels(String query) {
-    final channels = ref.read(channelsProvider).value ?? [];
+  /// Ranks the loaded channels against the current query with the same rules
+  /// as desktop search.
+  void _refreshChannels() {
+    final query = state.query;
+    if (query.isEmpty) return;
     final lowerQuery = query.toLowerCase();
-    final matches = channels.where((c) {
-      if (c.isDm) return false;
-      return c.name.toLowerCase().contains(lowerQuery) ||
-          c.description.toLowerCase().contains(lowerQuery);
-    }).toList();
-
-    if (state.query != query) return;
+    final channels = ref.read(channelsProvider).value ?? const <Channel>[];
+    final ranked = <({Channel channel, int score})>[];
+    for (final channel in channels) {
+      if (channel.isDm) continue;
+      // An archived channel stays findable only by its members.
+      final visible = channel.isArchived
+          ? channel.isMember
+          : channel.visibility == 'open' || channel.isMember;
+      if (!visible) continue;
+      final score = scoreChannelMatch(
+        name: channel.name,
+        description: channel.description,
+        lowerQuery: lowerQuery,
+      );
+      if (score == null) continue;
+      ranked.add((channel: channel, score: score));
+    }
+    ranked.sort((a, b) {
+      final byScore = a.score.compareTo(b.score);
+      if (byScore != 0) return byScore;
+      return a.channel.name.toLowerCase().compareTo(
+        b.channel.name.toLowerCase(),
+      );
+    });
     state = state.copyWith(
-      channelResults: matches,
-      isLoading: state.messageResults.isEmpty && state.userResults.isEmpty,
+      channelResults: [
+        for (final entry in ranked.take(searchChannelResultLimit))
+          entry.channel,
+      ],
+      isLoading: _isLoading,
     );
   }
 
   void clear() {
     _debounce?.cancel();
+    _messagesPending = false;
+    _usersPending = false;
     state = const SearchState.initial();
   }
 }
