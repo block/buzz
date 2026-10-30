@@ -40,6 +40,7 @@ void main() {
         final settled = Completer<void>();
         f.flow.addListener(() {
           if ((f.flow.stage == HostedFlowStage.complete ||
+                  f.flow.stage == HostedFlowStage.confirmBackup ||
                   f.flow.stage == HostedFlowStage.blocked) &&
               !settled.isCompleted) {
             settled.complete();
@@ -49,6 +50,10 @@ void main() {
         await settled.future.timeout(const Duration(seconds: 2));
         expect(legacyProbes, 0);
         expect(f.admitted, backup ? ['paired'] : isEmpty);
+        if (!backup) {
+          expect(f.flow.stage, HostedFlowStage.confirmBackup);
+          expect((await f.store.read())?.backup, isNull);
+        }
         expect((await f.store.read())?.pubkey, f.keys.public);
       },
     );

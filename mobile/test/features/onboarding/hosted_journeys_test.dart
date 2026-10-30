@@ -129,6 +129,7 @@ void main() {
         } else {
           await f.tap(tester, 'Create my Buzz identity');
         }
+        await f.tap(tester, 'Back up and continue');
         final saved = await f.store.read();
         expect(saved, isNotNull);
         expect(f.bound, saved!.pubkey);
@@ -172,6 +173,7 @@ void main() {
     await tester.enterText(find.byType(TextField).hitTestable(), f.keys.nsec);
     await f.tap(tester, 'Preview identity');
     await f.tap(tester, 'Import this identity');
+    await f.tap(tester, 'Back up and continue');
     expect((await f.store.read())!.pubkey, f.keys.public);
     expect((await f.store.read())!.backup, isNotNull);
     expect(f.requests.where((r) => r.url.path.endsWith('/recovery')), isEmpty);
@@ -544,7 +546,8 @@ void main() {
         browserReturn.complete();
       }
       await f.settle(tester);
-      await tester.tap(find.text('Create my Buzz identity'));
+      await f.tap(tester, 'Create my Buzz identity');
+      await tester.tap(find.text('Back up and continue'));
       await enrollmentReached.future.timeout(const Duration(seconds: 5));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
@@ -564,6 +567,7 @@ void main() {
       // still be durable; resuming must not replay an acknowledged backup.
       f.beforeUploadReturn = () => f.flow.leave();
       await f.link(tester, 'one');
+      await f.tap(tester, 'Back up and continue');
       expect((await f.store.read())!.backup, isNotNull);
       f.beforeUploadReturn = null;
       await f.link(tester, 'one');
@@ -660,6 +664,7 @@ void main() {
           expect(f.sent('/nsec-backups'), isEmpty);
           expect(await f.store.read(), isNull);
           await f.tap(tester, fullNpub(f.keys.public)!);
+          await f.tap(tester, 'Back up and continue');
         }
         final saved = (await f.store.read())!;
         expect(
