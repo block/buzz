@@ -102,7 +102,7 @@ class HostedRelayAuth extends ChangeNotifier {
     if (cached == null ||
         cached.relay != Uri.parse(config.wsUrl).replace(path: '').toString() ||
         cached.pubkey != pubkeyFromNsec(config.nsec) ||
-        !identical(cached.account, account.account) ||
+        !identical(cached.account, _accountFor(config)?.account) ||
         !cached.expiry.isAfter(_now())) {
       return null;
     }
