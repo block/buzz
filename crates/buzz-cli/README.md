@@ -77,6 +77,10 @@ buzz users set-status --clear                 # remove your status
 buzz agents activity --agent Scout                       # listen 10s, last 5 min
 buzz agents activity --agent <hex|npub> --since 1783497600 --limit 20 --wait 30
 
+# Agent control (owner key required; one frame per run, never retried)
+buzz agents cancel-turn --agent Scout --channel <UUID>
+buzz agents set-model --agent Scout --channel <UUID> --model <MODEL_ID> --wait 15
+
 # DMs
 buzz dms open --pubkey <hex>
 buzz dms list
@@ -125,6 +129,8 @@ The table below mirrors that tree for readers who are not at a terminal.
 | Group | Subcommand | Description |
 |-------|-----------|-------------|
 | `agents` | `activity` | Read an owned agent's recent observer frames (read-only) |
+| | `cancel-turn` | Cancel an owned agent's in-flight turn in one channel |
+| | `set-model` | Switch an owned agent's model in one channel |
 | `messages` | `send` | Send a message to a channel |
 | | `send-diff` | Send a code diff with metadata |
 | | `edit` | Edit a message you sent |
@@ -230,6 +236,34 @@ stderr: {"error": "category", "message": "detail"}
 exit:   0=ok  1=user  2=network  3=auth  4=other  5=write conflict
 ```
 
+
+
+### Agent control output
+
+`agents cancel-turn` and `agents set-model` send one NIP-44 encrypted control
+frame (kind:24200, `frame=control`) signed by your key and wait up to `--wait`
+seconds (1-30, default 8) for the harness `control_result` that carries the
+command's own `requestId`, channel, and type. Results for other requests are
+ignored. The relay stores nothing, so the command subscribes first and sends
+second. Only the agent's owner may send control frames; a non-owner key fails
+with exit 3 before anything is sent. Run them only on an explicit owner request.
+
+Output: `{request_id, agent, channel_id, status, confirmed}` (`set-model` adds
+`model_id`). `confirmed` is true only when the harness answered.
+
+| Command | `status` | Exit |
+|---------|----------|------|
+| `cancel-turn` | `sent` | 0 |
+| | `no_active_turn`, `ambiguous_target` | 1 |
+| | `unconfirmed` (no answer; the cancel may have happened) | 2 |
+| `set-model` | `switched` | 0 |
+| | `pending` (turn running; accepted, not confirmed; `confirmed: false`) | 0 |
+| | `unsupported_model`, `failure`, `turn_ending`, `no_active_turn`, `ambiguous_target` | 1 |
+| | `unconfirmed` | 2 |
+
+The command never retries: a timeout is an unknown outcome (`delivery unknown`,
+not retryable), not a success. Check with `buzz agents activity` before running
+a cancel again, because a replayed cancel inside five minutes cancels again.
 
 ### Default branch
 
