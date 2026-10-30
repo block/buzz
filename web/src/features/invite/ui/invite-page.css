@@ -9,7 +9,7 @@
   min-height: 100svh;
   display: grid;
   place-items: center;
-  padding: 100px 24px 150px;
+  padding: 100px 24px;
   background:
     radial-gradient(circle, #c9cac4 1px, transparent 1.1px) 0 0 / 32px 32px
     #eeeeeb;
@@ -25,16 +25,6 @@
   left: 40px;
   width: 44px;
   height: 29px;
-}
-.invite-art {
-  position: absolute;
-  z-index: -1;
-  top: max(calc(50% + 120px), calc(100% - 300px));
-  left: 50%;
-  transform: translateX(-50%);
-  width: 1336px;
-  max-width: none;
-  pointer-events: none;
 }
 .invite-stack {
   width: min(100%, 490px);
@@ -109,7 +99,7 @@
 @media (max-width: 560px) {
   .invite-page {
     display: block;
-    padding: 56px 20px 250px;
+    padding: 56px 20px;
   }
   .invite-mark {
     position: static;
@@ -128,11 +118,6 @@
   }
   .invite-actions {
     margin-top: 40px;
-  }
-  .invite-art {
-    top: auto;
-    bottom: -180px;
-    width: 640px;
   }
   .invite-download {
     font-size: 13px;

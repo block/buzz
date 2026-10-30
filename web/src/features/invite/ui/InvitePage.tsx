@@ -1,4 +1,3 @@
-import inviteCubes from "@/assets/invite/cubes.webp";
 import buzzMark from "@/assets/invite/mark.svg";
 import "./invite-page.css";
 import { InviteCommunity } from "./InviteCommunity";
@@ -196,7 +195,6 @@ export function InvitePage({ code }: { code: string }) {
   return (
     <div className="invite-page">
       <img className="invite-mark" src={buzzMark} alt="Buzz" />
-      <img className="invite-art" src={inviteCubes} alt="" />
       <div className="invite-stack">
         <div className="invite-card">
           <h1>You're invited</h1>
