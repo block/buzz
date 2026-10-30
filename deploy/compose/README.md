@@ -23,6 +23,55 @@ The bootstrap script should eventually replace manual `.env` editing for normal
 users. It is responsible for generating stable secrets and, optionally, an owner
 keypair.
 
+## Import the owner key into Buzz Desktop
+
+`buzz-admin generate-key` prints a hex `Public key` and `Secret key`. The
+server configuration and desktop import use different encodings:
+
+| Key | Where it belongs |
+|-----|------------------|
+| Owner **public** key (64-character hex) | `RELAY_OWNER_PUBKEY` in `.env` |
+| Owner **secret** key (`nsec1…`) | Desktop's **Use an existing key** flow |
+| Separate relay **secret** key (64-character hex) | `BUZZ_RELAY_PRIVATE_KEY` in `.env` |
+
+### Convert an existing hex secret key to nsec
+
+Use the owner secret key that corresponds to `RELAY_OWNER_PUBKEY`, **not**
+`BUZZ_RELAY_PRIVATE_KEY`. Hex and [NIP-19](https://github.com/nostr-protocol/nips/blob/master/19.md)
+`nsec` encode the same secret: conversion does not create a new identity or
+require changing the owner public key in `.env`. A public key cannot be
+converted into a secret key.
+
+1. Install [nak](https://github.com/fiatjaf/nak#installation), a standalone
+   Nostr CLI, on a trusted local machine and ensure `nak` is on your `PATH`.
+   Prebuilt binaries are available on its
+   [releases page](https://github.com/fiatjaf/nak/releases).
+2. Run this command in a private terminal. At the prompt, paste only the
+   owner's 64-character hex **secret** key and press Enter (input is hidden):
+
+   ```bash
+   bash -c '
+     set +x
+     IFS= read -r -s -p "Owner secret key (hex): " owner_secret || exit 1
+     printf "\n" >&2
+     printf "%s\n" "$owner_secret" | nak encode nsec
+   '
+   ```
+
+   The conversion runs locally, without contacting a relay. The secret is
+   passed on stdin rather than in command arguments or shell history, and the
+   temporary shell exits afterward.
+3. Copy the resulting `nsec1…` value into Buzz Desktop's **Use an existing key**
+   flow, then connect to your relay. Keep `RELAY_OWNER_PUBKEY` unchanged.
+
+Both the hex secret and its `nsec` form grant control of the owner identity;
+`nsec` is **not encryption**. Never paste either into an online converter,
+issue, chat, or screenshot. The output is visible in terminal scrollback (and
+invalid input may be echoed in an error), so avoid recorded/shared terminals
+and clear the clipboard and scrollback afterward. Keep a secure backup of the
+owner secret; do not put it in the relay's `.env` or reuse the relay signing key
+as your desktop identity.
+
 ## Production notes
 
 - Requires Docker Compose v2.24.4 or newer; the TLS override uses Compose's
