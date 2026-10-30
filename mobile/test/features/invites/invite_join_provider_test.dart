@@ -279,6 +279,37 @@ void main() {
   );
 
   test(
+    'invite recovery joins an existing announcements channel, never creates it',
+    () async {
+      final joined = <String>[];
+      final recovery = MobileInviteJoinRecovery(
+        loadChannels: () async => [
+          _channel(id: 'general-id', name: 'general', isMember: true),
+          _channel(id: 'welcome-id', name: 'welcome-everyone', isMember: true),
+          _channel(id: 'announcements-id', name: 'Announcements'),
+          _channel(id: 'random-id', name: 'random'),
+        ],
+        createChannel:
+            ({
+              required channelId,
+              required name,
+              required channelType,
+              required visibility,
+              description,
+              ttlSeconds,
+            }) async => throw StateError('nothing should be created'),
+        joinChannel: (channelId) async => joined.add(channelId),
+        relayHttpOrigin: 'https://relay.example.com',
+      );
+
+      final focusChannelId = await recovery.ensureStarterChannels();
+
+      expect(joined, ['announcements-id']);
+      expect(focusChannelId, 'welcome-id');
+    },
+  );
+
+  test(
     'invite recovery creates missing public starters with desktop ids',
     () async {
       final created = <String, Map<String, Object?>>{};
