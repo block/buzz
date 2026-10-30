@@ -3,7 +3,6 @@ part of '../channel_detail_page.dart';
 class _MessageBubble extends HookConsumerWidget {
   final TimelineMessage message;
   final bool showAuthor;
-  final bool typingHandoff;
   final bool showAvatar;
   final bool startsDay;
   final bool endsDay;
@@ -21,7 +20,6 @@ class _MessageBubble extends HookConsumerWidget {
   const _MessageBubble({
     required this.message,
     required this.showAuthor,
-    this.typingHandoff = false,
     this.showAvatar = true,
     this.startsDay = false,
     this.endsDay = false,
@@ -339,87 +337,77 @@ class _MessageBubble extends HookConsumerWidget {
                                         ],
                                       ),
                                     ),
-                                  AgentReplyHandoff(
-                                    key: ValueKey(
-                                      'reply-handoff-${message.id}',
+                                  MessageContent(
+                                    key: swipeContentKey,
+                                    content: message.content,
+                                    bubble: true,
+                                    hasReactions: message.reactions.isNotEmpty,
+                                    bubbleEnd: showAvatar,
+                                    bubbleStart: showAuthor,
+                                    ownMessage: ownMessage,
+                                    trimTrailingSpacing: endsDay,
+                                    mentionNames: resolvedMentionNames,
+                                    mentionLabels: mentionLabels,
+                                    agentMentionPubkeys: agentMentionPubkeys,
+                                    channelNames: channelNames,
+                                    tags: message.tags,
+                                    baseStyle: messageBodyTextStyle.copyWith(
+                                      color: context.colors.onSurface,
                                     ),
-                                    animate: typingHandoff,
-                                    child: MessageContent(
-                                      key: swipeContentKey,
-                                      content: message.content,
-                                      bubble: true,
-                                      hasReactions:
-                                          message.reactions.isNotEmpty ||
-                                          replyFooter != null,
-                                      bubbleEnd: showAvatar,
-                                      bubbleStart: showAuthor,
-                                      ownMessage: ownMessage,
-                                      trimTrailingSpacing: endsDay,
-                                      mentionNames: resolvedMentionNames,
-                                      mentionLabels: mentionLabels,
-                                      agentMentionPubkeys: agentMentionPubkeys,
-                                      channelNames: channelNames,
-                                      tags: message.tags,
-                                      baseStyle: messageBodyTextStyle.copyWith(
-                                        color: context.colors.onSurface,
-                                      ),
-                                      scaleEmojiOnly: true,
-                                      mediaCarouselTrailingOverflow:
-                                          Grid.gutter,
-                                      onMediaReply: allMessages == null
-                                          ? null
-                                          : () {
-                                              if (!context.mounted) return;
-                                              Navigator.of(context).push(
-                                                MaterialPageRoute<void>(
-                                                  builder: (_) =>
-                                                      ThreadDetailPage(
-                                                        threadHead: message,
-                                                        allMessages:
-                                                            allMessages!,
-                                                        channelId:
-                                                            currentChannelId,
-                                                        currentPubkey:
-                                                            currentPubkey,
-                                                        isMember: isMember,
-                                                        isArchived: isArchived,
-                                                      ),
-                                                ),
-                                              );
-                                            },
-                                      onMediaMore: (viewerContext, imageUrl) =>
-                                          showImageActions(
-                                            context: viewerContext,
-                                            ref: ref,
-                                            message: message,
-                                            channelId: currentChannelId,
-                                            imageUrl: imageUrl,
-                                            canManageMessage: canManageMessage,
-                                            onDeleted: () {
-                                              if (viewerContext.mounted) {
-                                                Navigator.of(
-                                                  viewerContext,
-                                                ).maybePop();
-                                              }
-                                            },
-                                          ),
-                                      onChannelTap: (channelId) {
-                                        openChannelLink(
-                                          context: context,
+                                    scaleEmojiOnly: true,
+                                    mediaCarouselTrailingOverflow: Grid.gutter,
+                                    onMediaReply: allMessages == null
+                                        ? null
+                                        : () {
+                                            if (!context.mounted) return;
+                                            Navigator.of(context).push(
+                                              MaterialPageRoute<void>(
+                                                builder: (_) =>
+                                                    ThreadDetailPage(
+                                                      threadHead: message,
+                                                      allMessages: allMessages!,
+                                                      channelId:
+                                                          currentChannelId,
+                                                      currentPubkey:
+                                                          currentPubkey,
+                                                      isMember: isMember,
+                                                      isArchived: isArchived,
+                                                    ),
+                                              ),
+                                            );
+                                          },
+                                    onMediaMore: (viewerContext, imageUrl) =>
+                                        showImageActions(
+                                          context: viewerContext,
                                           ref: ref,
-                                          channelId: channelId,
-                                          currentChannelId: currentChannelId,
-                                        );
-                                      },
-                                      onMentionTap: (pubkey) =>
-                                          showUserProfileSheet(
-                                            context,
-                                            pubkey,
-                                            names: channelIdentityNamesProvider(
-                                              currentChannelId,
-                                            ),
+                                          message: message,
+                                          channelId: currentChannelId,
+                                          imageUrl: imageUrl,
+                                          canManageMessage: canManageMessage,
+                                          onDeleted: () {
+                                            if (viewerContext.mounted) {
+                                              Navigator.of(
+                                                viewerContext,
+                                              ).maybePop();
+                                            }
+                                          },
+                                        ),
+                                    onChannelTap: (channelId) {
+                                      openChannelLink(
+                                        context: context,
+                                        ref: ref,
+                                        channelId: channelId,
+                                        currentChannelId: currentChannelId,
+                                      );
+                                    },
+                                    onMentionTap: (pubkey) =>
+                                        showUserProfileSheet(
+                                          context,
+                                          pubkey,
+                                          names: channelIdentityNamesProvider(
+                                            currentChannelId,
                                           ),
-                                    ),
+                                        ),
                                   ),
                                 ],
                               ),

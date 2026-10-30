@@ -1,3 +1,4 @@
+import 'features/activity/activity_provider.dart';
 import 'features/channels/default_agent_launcher.dart';
 import 'features/agents/agents_page.dart';
 import 'dart:async';
@@ -16,9 +17,6 @@ import 'package:uuid/uuid.dart';
 
 import 'features/age_gate/age_restriction_page.dart';
 import 'features/age_gate/age_signal_provider.dart';
-import 'features/activity/activity_provider.dart';
-import 'features/activity/inbox_local_state_provider.dart';
-import 'features/activity/inbox_read_state.dart';
 import 'features/channels/channel.dart';
 import 'features/channels/channel_management_provider.dart';
 import 'features/channels/channels_provider.dart';
@@ -45,7 +43,6 @@ import 'shared/auth/auth.dart';
 import 'shared/deeplink/pending_deep_link_provider.dart';
 import 'shared/emoji/emoji_burst.dart';
 import 'shared/relay/relay.dart';
-import 'shared/read_state/read_state_provider.dart';
 import 'shared/theme/theme.dart';
 import 'shared/widgets/buzz_loading_indicator.dart';
 
@@ -275,28 +272,6 @@ InviteJoinRecovery buildMobileInviteJoinRecovery(
   );
 }
 
-/// App-shell projection that joins Activity state for the Home navigation.
-///
-/// This belongs at the composition root because it deliberately aggregates
-/// Activity feature providers for a sibling navigation surface.
-final _unreadInboxItemCountProvider = Provider<int>((ref) {
-  final readState = ref.watch(readStateProvider);
-  if (!readState.isReady) return 0;
-
-  final localState = ref.watch(inboxLocalStateProvider);
-  final items = ref.watch(inboxItemsProvider);
-  return items
-      .where(
-        (item) => !isInboxItemDone(
-          item,
-          markerOf: readState.effectiveTimestamp,
-          localUnreadOverrides: localState.unreadIds,
-          localDoneSet: localState.doneIds,
-        ),
-      )
-      .length;
-});
-
 final _mobileRootNavigatorKey = GlobalKey<NavigatorState>();
 
 class App extends HookConsumerWidget {
@@ -326,8 +301,6 @@ class App extends HookConsumerWidget {
 
     // Eagerly initialize websocket session and lifecycle observer when
     // authenticated. These providers connect and manage the websocket.
-    var hasUnreadInbox = false;
-    var hasUnreadSolo = false;
     if (ageSignalState != AgeSignalState.restricted &&
         authState.value?.status == AuthStatus.authenticated) {
       ref.watch(relaySessionProvider);
@@ -336,10 +309,10 @@ class App extends HookConsumerWidget {
       ref.listen(observerRelayProvider, (_, _) {});
       ref.watch(appLifecycleProvider);
       ref.listen(userStatusCacheProvider, (_, _) {});
-      hasUnreadInbox = ref.watch(_unreadInboxItemCountProvider) > 0;
-      hasUnreadSolo = ref.watch(
-        meUnreadChannelIdsProvider.select((ids) => ids.isNotEmpty),
-      );
+      // Activity owns hidden-DM recovery even when Inbox is never opened.
+      ref.listen(activityProvider, (_, _) {});
+      // Preserve initial read seeding even while Solo is hidden.
+      ref.listen(meUnreadChannelIdsProvider, (_, _) {});
     }
 
     // Start listening for buzz:// links immediately (even pre-auth) so a
@@ -431,8 +404,6 @@ class App extends HookConsumerWidget {
                   const _SettingsPageContent(embedded: true),
               communityInvitePageBuilder: (_) => const CommunityInvitePage(),
               communityAppearancePageBuilder: (_) => const ThemePickerPage(),
-              hasUnreadInbox: hasUnreadInbox,
-              hasUnreadSolo: hasUnreadSolo,
             ),
           ),
           _ => const HostedAppGate(

@@ -154,8 +154,8 @@ class NsecImportSheet extends HookWidget {
           },
         ),
       const SizedBox(height: Grid.xs),
-      OutlinedButton(
-        style: OutlinedButton.styleFrom(
+      TextButton(
+        style: TextButton.styleFrom(
           minimumSize: const Size.fromHeight(52),
           shape: const StadiumBorder(),
         ),

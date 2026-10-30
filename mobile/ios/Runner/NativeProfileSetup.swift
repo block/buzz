@@ -3,7 +3,7 @@ import UIKit
 import CoreText
 
 /// Profile draft presentation; persistence and the existing avatar editor stay in Dart.
-final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationControllerDelegate {
+final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationControllerDelegate, UIViewControllerTransitioningDelegate {
   private let channel: FlutterMethodChannel
   private var navigation: UINavigationController?
   private var pending: FlutterResult?
@@ -81,6 +81,7 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
       }
       let nav = UINavigationController(rootViewController: controller)
       nav.modalPresentationStyle = .overFullScreen
+      nav.transitioningDelegate = self
       nav.overrideUserInterfaceStyle = args["dark"] as? Bool == true ? .dark : .light
       self.pending = result; self.session = session; self.navigation = nav
       controller.loadViewIfNeeded()
@@ -257,6 +258,50 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
     result?(action)
   }
   func presentationControllerDidDismiss(_ presentationController: UIPresentationController) { complete("skip") }
+
+  func animationController(forPresented presented: UIViewController, presenting: UIViewController,
+                           source: UIViewController) -> UIViewControllerAnimatedTransitioning? {
+    ProfileSetupPageTransition(presenting: true)
+  }
+
+  func animationController(forDismissed dismissed: UIViewController) -> UIViewControllerAnimatedTransitioning? {
+    ProfileSetupPageTransition(presenting: false)
+  }
+}
+
+/// Matches the horizontal forward/backward motion of the Flutter onboarding pages.
+private final class ProfileSetupPageTransition: NSObject, UIViewControllerAnimatedTransitioning {
+  let presenting: Bool
+  init(presenting: Bool) { self.presenting = presenting }
+
+  func transitionDuration(using context: UIViewControllerContextTransitioning?) -> TimeInterval { 0.25 }
+
+  func animateTransition(using context: UIViewControllerContextTransitioning) {
+    let key: UITransitionContextViewControllerKey = presenting ? .to : .from
+    guard let controller = context.viewController(forKey: key) else {
+      context.completeTransition(false)
+      return
+    }
+    guard let view = context.view(forKey: presenting ? .to : .from) ?? controller.view else {
+      context.completeTransition(false)
+      return
+    }
+    let distance = context.containerView.bounds.width
+    if presenting {
+      view.frame = context.finalFrame(for: controller)
+      context.containerView.addSubview(view)
+      view.transform = CGAffineTransform(translationX: distance, y: 0)
+    }
+    UIView.animate(withDuration: transitionDuration(using: context), delay: 0,
+                   options: [.curveEaseOut, .beginFromCurrentState]) {
+      view.transform = self.presenting ? .identity : CGAffineTransform(translationX: distance, y: 0)
+    } completion: { _ in
+      let completed = !context.transitionWasCancelled
+      if !self.presenting && completed { view.removeFromSuperview() }
+      view.transform = .identity
+      context.completeTransition(completed)
+    }
+  }
 }
 
 private final class NativeProfileSetupController: UIViewController, UITextFieldDelegate {

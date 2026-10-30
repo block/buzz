@@ -258,6 +258,7 @@ impl ChannelMembershipLocks<'_> {
             INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
             VALUES ($1, $2, $3, 'member'::member_role, $4)
             ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
+                sync_modified_at = CASE WHEN channel_members.removed_at IS NOT NULL THEN clock_timestamp() ELSE channel_members.sync_modified_at END,
                 removed_at = NULL,
                 removed_by = NULL,
                 role = EXCLUDED.role
@@ -964,6 +965,7 @@ async fn put_members_on(
             SELECT $1, $2, t.pubkey, t.role::member_role, $5
             FROM UNNEST($3::bytea[], $4::text[]) AS t(pubkey, role)
             ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
+                sync_modified_at = CASE WHEN channel_members.removed_at IS NOT NULL THEN clock_timestamp() ELSE channel_members.sync_modified_at END,
                 removed_at = NULL,
                 removed_by = NULL,
                 role = EXCLUDED.role
@@ -1097,7 +1099,7 @@ pub async fn remove_member(
     let result = sqlx::query(
         r#"
         UPDATE channel_members
-        SET removed_at = NOW(), removed_by = $1
+        SET removed_at = clock_timestamp(), sync_modified_at = clock_timestamp(), removed_by = $1
         WHERE community_id = $2 AND channel_id = $3 AND pubkey = $4 AND removed_at IS NULL
         "#,
     )

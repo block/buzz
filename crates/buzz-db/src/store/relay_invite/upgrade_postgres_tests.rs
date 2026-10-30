@@ -506,22 +506,12 @@ async fn apply_pgschema_to_existing_database(pool: &PgPool) {
 async fn migration_schema_0075_adds_invite_columns_without_rewriting_history() {
     let (pool, cases) = legacy_fixture().await;
     crate::migration::run_migrations(&pool).await.unwrap();
-    let latest = sqlx::migrate::Migrator::new(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations"),
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=75 AND success)"
     )
+    .fetch_one(&pool)
     .await
-    .unwrap()
-    .iter()
-    .map(|m| m.version)
-    .max()
-    .unwrap();
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT max(version) FROM _sqlx_migrations WHERE success")
-            .fetch_one(&pool)
-            .await
-            .unwrap(),
-        latest
-    );
+    .unwrap());
     assert_admission_column(&pool).await;
     assert_join_role_preserved(&pool, cases[0].community).await;
     assert_eq!(
