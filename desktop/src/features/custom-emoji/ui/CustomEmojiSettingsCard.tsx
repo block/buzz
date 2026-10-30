@@ -3,6 +3,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import {
+  useCustomEmojiCatalogStatus,
   useCustomEmojiQuery,
   useOwnCustomEmojiQuery,
   useRemoveCustomEmojiMutation,
@@ -32,6 +33,14 @@ export function CustomEmojiSettingsCard() {
   const { data: own = [], isLoading: ownLoading } = useOwnCustomEmojiQuery();
   const { data: community = [], isLoading: communityLoading } =
     useCustomEmojiQuery();
+  const catalogStatus = useCustomEmojiCatalogStatus();
+  const catalogNotice = catalogStatus.refreshFailed
+    ? "Could not refresh community emoji. Showing the last loaded list."
+    : catalogStatus.droppedEntries > 0
+      ? `Community emoji list is too large. ${catalogStatus.droppedEntries} emoji are hidden.`
+      : catalogStatus.setLimitReached
+        ? "Community emoji list may be incomplete."
+        : null;
   const setEmoji = useSetCustomEmojiMutation();
   const removeEmoji = useRemoveCustomEmojiMutation();
 
@@ -311,6 +320,16 @@ export function CustomEmojiSettingsCard() {
             </SettingsOptionGroup>
           )}
         </div>
+
+        {catalogNotice ? (
+          <p
+            className="text-sm text-muted-foreground"
+            data-testid="custom-emoji-catalog-notice"
+            role="status"
+          >
+            {catalogNotice}
+          </p>
+        ) : null}
 
         {!communityLoading && othersEmoji.length > 0 ? (
           <div data-testid="custom-emoji-community">

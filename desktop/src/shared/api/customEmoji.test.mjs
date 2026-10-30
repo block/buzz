@@ -166,3 +166,70 @@ test("unionCustomEmoji winner is independent of member order", () => {
   const b = ev([["emoji", "dup", "https://relay/zebra.gif"]]);
   assert.deepEqual(unionCustomEmoji([a, b]), unionCustomEmoji([b, a]));
 });
+
+import {
+  buildCommunityEmojiCatalog,
+  COMMUNITY_EMOJI_ENTRY_CAP,
+  COMMUNITY_EMOJI_SET_LIMIT,
+} from "./customEmoji.ts";
+
+function silenceWarn(t) {
+  const warnings = [];
+  t.mock.method(console, "warn", (...args) => warnings.push(args.join(" ")));
+  return warnings;
+}
+
+function bigSet(prefix, count, createdAt = 1) {
+  const tags = [["d", "buzz:custom-emoji"]];
+  for (let i = 0; i < count; i++) {
+    tags.push([
+      "emoji",
+      `${prefix}${String(i).padStart(6, "0")}`,
+      "https://r/x.png",
+    ]);
+  }
+  return ev(tags, createdAt);
+}
+
+test("union keeps the first entries in shortcode order past the entry cap and reports the rest", (t) => {
+  const warnings = silenceWarn(t);
+  const extra = 25;
+  const events = [bigSet("b", COMMUNITY_EMOJI_ENTRY_CAP), bigSet("a", extra)];
+  const catalog = buildCommunityEmojiCatalog(events);
+  assert.equal(catalog.emoji.length, COMMUNITY_EMOJI_ENTRY_CAP);
+  assert.equal(catalog.droppedEntries, extra);
+  assert.equal(catalog.emoji[0].shortcode, "a000000");
+  assert.equal(
+    catalog.emoji.at(-1).shortcode,
+    `b${String(COMMUNITY_EMOJI_ENTRY_CAP - extra - 1).padStart(6, "0")}`,
+  );
+  assert.deepEqual(
+    buildCommunityEmojiCatalog([...events].reverse()).emoji,
+    catalog.emoji,
+  );
+  assert.equal(unionCustomEmoji(events).length, COMMUNITY_EMOJI_ENTRY_CAP);
+  assert.ok(warnings.some((w) => w.includes("dropped 25")));
+});
+
+test("union under the cap reports no drops and does not warn", (t) => {
+  const warnings = silenceWarn(t);
+  const catalog = buildCommunityEmojiCatalog([bigSet("a", 3)]);
+  assert.equal(catalog.droppedEntries, 0);
+  assert.equal(catalog.setLimitReached, false);
+  assert.equal(warnings.length, 0);
+});
+
+test("union flags a fetch that returned exactly the set limit", (t) => {
+  const warnings = silenceWarn(t);
+  const events = Array.from({ length: COMMUNITY_EMOJI_SET_LIMIT }, (_, i) =>
+    ev([["emoji", `e${i}`, "https://r/x.png"]], i),
+  );
+  const catalog = buildCommunityEmojiCatalog(events);
+  assert.equal(catalog.setLimitReached, true);
+  assert.equal(catalog.setCount, COMMUNITY_EMOJI_SET_LIMIT);
+  assert.ok(warnings.some((w) => w.includes("request limit")));
+  assert.equal(
+    buildCommunityEmojiCatalog(events.slice(1)).setLimitReached,
+    false,
+  );
+});
