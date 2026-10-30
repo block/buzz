@@ -15,7 +15,8 @@ use uuid::Uuid;
 mod message_tags;
 
 use message_tags::{
-    append_client_tags, append_sent_from_thread_tag, emoji_tags, imeta_tags, mention_reference_tags,
+    append_client_tags, append_forwarded_from_tag, append_sent_from_thread_tag, emoji_tags,
+    imeta_tags, mention_reference_tags,
 };
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -259,6 +260,7 @@ pub fn build_message(
     mention_ref_tags: &[Vec<String>],
     link_preview_tags: &[Vec<String>],
     sent_from_thread_tag: Option<&[String]>,
+    forwarded_from_tag: Option<&[String]>,
     relay_base: &str,
 ) -> Result<EventBuilder, String> {
     build_message_with_client_tags(
@@ -271,6 +273,7 @@ pub fn build_message(
         mention_ref_tags,
         link_preview_tags,
         sent_from_thread_tag,
+        forwarded_from_tag,
         relay_base,
         &[],
     )
@@ -292,11 +295,20 @@ pub fn build_message_with_client_tags(
     mention_ref_tags: &[Vec<String>],
     link_preview_tags: &[Vec<String>],
     sent_from_thread_tag: Option<&[String]>,
+    forwarded_from_tag: Option<&[String]>,
     relay_base: &str,
     client_tags: &[Vec<String>],
 ) -> Result<EventBuilder, String> {
     if sent_from_thread_tag.is_some() && thread_ref.is_some() {
         return Err("sent-from-thread provenance requires a top-level message".into());
+    }
+    if forwarded_from_tag.is_some() {
+        if thread_ref.is_some() {
+            return Err("forward provenance requires a top-level message".into());
+        }
+        if sent_from_thread_tag.is_some() {
+            return Err("a message cannot carry both forward and thread provenance".into());
+        }
     }
     check_content(content)?;
     let mut tags = vec![tag(vec!["h", &channel_id.to_string()])?];
@@ -309,6 +321,7 @@ pub fn build_message_with_client_tags(
     mention_reference_tags(mention_ref_tags, &mut tags)?;
     crate::link_preview_tags::append(link_preview_tags, relay_base, &mut tags)?;
     append_sent_from_thread_tag(sent_from_thread_tag, &mut tags)?;
+    append_forwarded_from_tag(forwarded_from_tag, &mut tags)?;
     append_client_tags(client_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
 }
@@ -974,5 +987,71 @@ mod tests {
         );
         assert_eq!(p_tags[0], &vec!["p".to_string(), ALICE_HEX.to_string()]);
         assert_eq!(p_tags[1], &vec!["p".to_string(), BOB_HEX.to_string()]);
+    }
+
+    /// Forward provenance is only meaningful on a fresh top-level message, and
+    /// it must not be mixed with the thread-origin marker. Both guards live in
+    /// `build_message_with_client_tags`, so a forward that slipped a parent or
+    /// a competing provenance tag past the UI still fails before signing.
+    #[test]
+    fn forwarded_message_must_be_top_level_and_single_sourced() {
+        const SOURCE_HEX: &str = "4a1b2c3d4e5f60718293a4b5c6d7e8f901234567890abcdef1234567890abcde";
+        let channel = Uuid::parse_str(CH_ID).unwrap();
+        let forwarded_from: Vec<String> = vec![
+            "buzz:forwarded-from".into(),
+            SOURCE_HEX.into(),
+            CH_ID.into(),
+            ALICE_HEX.into(),
+        ];
+        let sent_from_thread: Vec<String> = vec!["buzz:sent-from-thread".into(), SOURCE_HEX.into()];
+        let build = |thread_ref: Option<&ThreadRef>, sent_from: Option<&[String]>| {
+            build_message(
+                channel,
+                "verbatim body",
+                thread_ref,
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                sent_from,
+                Some(&forwarded_from),
+                "ws://localhost:3000",
+            )
+        };
+
+        let event = build(None, None)
+            .expect("top-level forward builds")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let tags: Vec<Vec<String>> = event.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+        assert!(
+            tags.contains(&vec![
+                "buzz:forwarded-from".to_string(),
+                SOURCE_HEX.to_string(),
+                CH_ID.to_string(),
+                ALICE_HEX.to_string(),
+            ]),
+            "forward provenance must reach the signed event, got {tags:?}"
+        );
+        // The forward must not re-notify the source message's recipients: the
+        // only `p` tags are the ones this send explicitly asked for (none).
+        assert!(
+            !tags
+                .iter()
+                .any(|tag| tag.first().map(String::as_str) == Some("p")),
+            "forward must not carry inherited mention recipients, got {tags:?}"
+        );
+
+        let source_event = EventId::from_hex(SOURCE_HEX).unwrap();
+        assert!(build(
+            Some(&ThreadRef {
+                root_event_id: source_event,
+                parent_event_id: source_event,
+            }),
+            None,
+        )
+        .is_err());
+        assert!(build(None, Some(&sent_from_thread)).is_err());
     }
 }

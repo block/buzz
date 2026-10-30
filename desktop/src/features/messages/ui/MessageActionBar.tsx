@@ -4,6 +4,7 @@ import {
   Clock,
   Copy,
   CornerUpLeft,
+  CornerUpRight,
   EllipsisVertical,
   Flag,
   Link2,
@@ -20,6 +21,8 @@ import { buildMessageLink } from "@/features/messages/lib/messageLink";
 import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
 import { buildMentionClipboardHtml } from "@/features/messages/lib/mentionClipboard";
+import { canForwardMessage } from "@/features/messages/lib/forwardedMessage";
+import { useForwardMessage } from "@/features/messages/ui/ForwardMessageProvider";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { useMessageMentionIdentities } from "@/features/messages/lib/useMessageMentionIdentities";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -126,6 +129,11 @@ function MoreActionsMenu({
   // the menu, stealing keystrokes from an already-open composer. Merely
   // suppressing trigger restoration does not prevent that earlier race.
   const pendingEditRef = React.useRef<(() => void) | null>(null);
+  // Forwarding is routed through the shell-level provider rather than a prop,
+  // so every surface that renders this menu gets it without re-plumbing.
+  const { requestForward } = useForwardMessage();
+  const canForward =
+    requestForward !== null && canForwardMessage(message, channelId);
 
   const hasCopyActions =
     !message.pending && message.kind !== KIND_HUDDLE_STARTED;
@@ -277,6 +285,19 @@ function MoreActionsMenu({
                 data-testid="send-to-channel-icon"
               />
               Send to channel
+            </DropdownMenuItem>
+          ) : null}
+
+          {canForward && channelId ? (
+            <DropdownMenuItem
+              aria-label="Forward message"
+              data-testid={`forward-message-${message.id}`}
+              onClick={() => {
+                requestForward({ message, sourceChannelId: channelId });
+              }}
+            >
+              <CornerUpRight className="h-4 w-4" />
+              Forward
             </DropdownMenuItem>
           ) : null}
 

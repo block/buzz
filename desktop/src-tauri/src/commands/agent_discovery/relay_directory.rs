@@ -640,6 +640,7 @@ mod real_relay_tests {
             &[],
             &[],
             None,
+            None,
             &relay_ws_url(),
         )
         .unwrap()

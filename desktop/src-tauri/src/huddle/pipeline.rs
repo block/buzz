@@ -729,6 +729,7 @@ pub(crate) fn spawn_transcription_task(
                 &[],
                 &[],
                 None,
+                None,
                 &crate::relay::relay_api_base_url(),
             ) {
                 Ok(b) => b,

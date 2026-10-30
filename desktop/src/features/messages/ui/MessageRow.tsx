@@ -57,6 +57,7 @@ import {
 } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
 import { SentFromThreadLine } from "./SentFromThreadLine";
+import { ForwardedFromLine } from "./ForwardedFromLine";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { useMessageAgentAddressPrefix } from "./MessageAgentAddressPrefix";
@@ -686,6 +687,12 @@ export const MessageRow = React.memo(
     const messageBodyNode = (
       <>
         <SentFromThreadLine channelId={channelId} tags={message.tags} />
+        <ForwardedFromLine
+          currentPubkey={currentPubkey}
+          edited={message.edited}
+          profiles={profiles}
+          tags={message.tags}
+        />
         {renderBody()}
         {continuationMetadataNode}
         <MessageReactions

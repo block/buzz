@@ -47,8 +47,11 @@ export function useIsIdentityArchived(pubkey: string): boolean | undefined {
  * exact shadowban the NIP prevents, so the exemption lives here in the
  * predicate where no caller can forget it.
  */
-export function useIsArchivedPredicate(): (pubkey: string) => boolean {
-  const query = useArchivedIdentitiesQuery();
+export function useIsArchivedPredicate(
+  /** False for a surface that is mounted but idle, so it fetches nothing. */
+  enabled = true,
+): (pubkey: string) => boolean {
+  const query = useArchivedIdentitiesQuery(enabled);
   const identityQuery = useIdentityQuery();
   const selfPubkey = identityQuery.data?.pubkey;
   return React.useMemo(() => {

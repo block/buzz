@@ -773,3 +773,34 @@ test("verified agent owner may publish a suppression edit", () => {
     true,
   );
 });
+
+test("a forwarded copy's original author is collected for profile lookup", () => {
+  // The row renders that pubkey as a name ("Forwarded from …"), so it has to
+  // be in the batch the channel surface fetches profiles for; otherwise the
+  // attribution degrades to a truncated npub.
+  const forwarded = streamMessage({
+    id: HEX64_B,
+    pubkey: PUBKEY_B,
+    tags: [
+      ["h", CHANNEL_ID],
+      ["buzz:forwarded-from", HEX64_A, CHANNEL_ID, PUBKEY_A],
+    ],
+  });
+
+  assert.deepEqual(collectMessageAuthorPubkeys([forwarded]), [
+    PUBKEY_A,
+    PUBKEY_B,
+  ]);
+  // A malformed provenance tag contributes nothing rather than a junk pubkey.
+  assert.deepEqual(
+    collectMessageAuthorPubkeys([
+      streamMessage({
+        tags: [
+          ["h", CHANNEL_ID],
+          ["buzz:forwarded-from", HEX64_A, CHANNEL_ID, "not-a-pubkey"],
+        ],
+      }),
+    ]),
+    [PUBKEY_A],
+  );
+});

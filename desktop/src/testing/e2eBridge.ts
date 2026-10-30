@@ -33,6 +33,7 @@ import { switchManagedAgentModel } from "@/shared/api/agentControl";
 import { getAudioMediaLoadSchedulerSnapshot } from "@/features/messages/lib/audioMediaLoadScheduler";
 import { mockSearchHitMatches } from "./e2eBridgeSearch.ts";
 import { selectMockHistory } from "./e2eBridgeHistory.ts";
+import { mockSendMessageExtraTags } from "./e2eBridgeMessageTags.ts";
 import {
   createMockSubscription,
   hasMockSubscription,
@@ -10264,6 +10265,7 @@ async function handleSendChannelMessage(
     mentionTags?: string[][] | null;
     linkPreviewTags?: string[][] | null;
     sentFromThreadTag?: string[] | null;
+    forwardedFromTag?: string[] | null;
     suppressLinkPreviews?: boolean;
     expectedRelayUrl?: string | null;
     expectedSignerPubkey?: string | null;
@@ -10293,20 +10295,9 @@ async function handleSendChannelMessage(
     throw new Error(sendMessageError);
   }
 
-  // NIP-92 imeta attachments. The real relay echoes these back on the stored
-  // event; mirror that here so attachment renderers (FileCard, images, video)
-  // have the imeta tags they key on. `null`/empty → no extra tags.
-  const mediaTags = args.mediaTags ?? [];
-  // NIP-30 custom-emoji tags ride their own validated arg server-side; the
-  // relay echoes them back on the stored event too, so mirror that here so the
-  // emoji renderer keeps resolving `:shortcode:` after the round-trip.
-  const emojiTags = args.emojiTags ?? [];
-  // Reference-only mentions are already part of the outbound event. Preserve
-  // them in the mock event too so local echoes match the complete sent tag set.
-  const mentionTags = args.mentionTags ?? [];
   // Sender-authored link preview snapshots are independently validated by the
-  // real command and echoed on the stored event. Preserve them in the mock so
-  // E2E recipient rendering exercises the same authored-snapshot path.
+  // real command, so the mock rejects a malformed set the same way before
+  // echoing it on the stored event.
   const linkPreviewTags = args.linkPreviewTags ?? [];
   if (linkPreviewTags.length > 0) {
     const suppression = linkPreviewTags.some(
@@ -10335,14 +10326,7 @@ async function handleSendChannelMessage(
   }
   // All independently validated kinds end up on the stored event's tag set,
   // just like the real relay.
-  const extraTags = [
-    ...mediaTags,
-    ...emojiTags,
-    ...mentionTags,
-    ...linkPreviewTags,
-    ...(args.sentFromThreadTag ? [args.sentFromThreadTag] : []),
-    ...(args.suppressLinkPreviews ? [["link-preview", "none"]] : []),
-  ];
+  const extraTags = mockSendMessageExtraTags(args);
   const identity = getIdentity(config);
   if (!identity) {
     const createdAt = Math.floor(Date.now() / 1000);

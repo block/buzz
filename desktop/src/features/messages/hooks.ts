@@ -38,6 +38,10 @@ import {
 export { mergeMessages, mergeTimelineCacheMessages };
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { messageMentionPubkeys } from "@/features/messages/lib/messageMentionPubkeys";
+import {
+  buildForwardedFromTag,
+  type ForwardedFromReference,
+} from "@/features/messages/lib/forwardedMessage";
 import { buildSentFromThreadTag } from "@/features/messages/lib/sentFromThread";
 import {
   clearTimeoutState,
@@ -114,6 +118,7 @@ export function createOptimisticMessage(
   mediaTags: string[][] = [],
   sentFromThreadRootId: string | null = null,
   sentFromThreadRootExcerpt: string | null = null,
+  forwardedFrom: ForwardedFromReference | null = null,
 ): RelayEvent {
   const localKey = `optimistic-${crypto.randomUUID()}`;
   const tags: string[][] = [];
@@ -146,6 +151,12 @@ export function createOptimisticMessage(
     tags.push(
       buildSentFromThreadTag(sentFromThreadRootId, sentFromThreadRootExcerpt),
     );
+  }
+  // Carry the provenance on the optimistic row too, so the "Forwarded from"
+  // attribution is there the instant the copy appears instead of popping in
+  // when the signed event replaces it.
+  if (forwardedFrom) {
+    tags.push(buildForwardedFromTag(forwardedFrom));
   }
 
   return {
@@ -492,6 +503,8 @@ export function useSendMessageMutation(
       forceRest?: boolean;
       sentFromThreadRootId?: string | null;
       sentFromThreadRootExcerpt?: string | null;
+      /** Provenance stamped on a forwarded copy of another message. */
+      forwardedFrom?: ForwardedFromReference | null;
       transport?: "auto" | "http";
     },
     MessageQueryContext | undefined
@@ -506,6 +519,7 @@ export function useSendMessageMutation(
       forceRest,
       sentFromThreadRootId,
       sentFromThreadRootExcerpt,
+      forwardedFrom,
       transport = "auto",
     }) => {
       // Prefer a channel captured by the caller at compose time. Otherwise,
@@ -562,13 +576,29 @@ export function useSendMessageMutation(
           )
         : undefined;
 
+      // A forward is a fresh top-level message in the destination; it is not
+      // a reply, and it carries exactly one provenance marker. Both rules are
+      // re-checked in `build_message_with_client_tags` before signing.
+      if (forwardedFrom && (parentEventId || sentFromThreadRootId)) {
+        throw new Error(
+          "A forwarded message can only be sent as a top-level message.",
+        );
+      }
+
+      const forwardedFromTag = forwardedFrom
+        ? buildForwardedFromTag(forwardedFrom)
+        : undefined;
+
       // Messages carrying media OR custom-emoji tags MUST go through REST so
       // the relay's tag validation runs. The WebSocket path emits no extra
       // tags, so emoji-only messages would otherwise lose their emoji tag.
+      // A forward joins them: the WebSocket path signs the tag list verbatim
+      // in the renderer, so only REST runs the backend's provenance checks.
       if (
         forceRest ||
         transport === "http" ||
         parentEventId ||
+        forwardedFromTag ||
         imetaTags.length > 0 ||
         emojiTags.length > 0 ||
         linkPreviewTags.length > 0
@@ -602,6 +632,7 @@ export function useSendMessageMutation(
           undefined,
           undefined,
           suppliedRootEventId,
+          forwardedFromTag,
         );
 
         // Build tags matching relay-emitted shape: h, author p, mention ps, reply es, imeta, emoji.
@@ -641,6 +672,7 @@ export function useSendMessageMutation(
             ...mentionTags,
             ...linkPreviewTags,
             ...(sentFromThreadTag ? [sentFromThreadTag] : []),
+            ...(forwardedFromTag ? [forwardedFromTag] : []),
           ],
           content: content.trim(),
           sig: "",
@@ -663,6 +695,7 @@ export function useSendMessageMutation(
       mediaTags,
       sentFromThreadRootId,
       sentFromThreadRootExcerpt,
+      forwardedFrom,
     }) => {
       // Mirror mutationFn's target resolution so the optimistic message lands
       // in the cache for the same channel as the real send. A caller-supplied
@@ -706,6 +739,7 @@ export function useSendMessageMutation(
         mediaTags ?? [],
         sentFromThreadRootId ?? null,
         sentFromThreadRootExcerpt ?? null,
+        forwardedFrom ?? null,
       );
 
       const nextWindow = mergeLiveChannelWindowEvent(

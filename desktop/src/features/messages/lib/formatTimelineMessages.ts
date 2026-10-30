@@ -13,6 +13,7 @@ import {
   getThreadReference,
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
+import { getForwardedFromReference } from "@/features/messages/lib/forwardedMessage";
 import {
   formatOwnerLabel,
   resolveUserLabel,
@@ -610,6 +611,14 @@ export function collectMessageAuthorPubkeys(
   for (const event of events) {
     if (!isTimelineContentEvent(event)) {
       continue;
+    }
+
+    // A forwarded copy names the original author in its own row, so that
+    // pubkey needs a profile too; without it the attribution falls back to a
+    // truncated npub.
+    const forwardedFrom = getForwardedFromReference(event.tags);
+    if (forwardedFrom) {
+      pubkeys.add(forwardedFrom.authorPubkey);
     }
 
     if (event.kind === KIND_SYSTEM_MESSAGE) {

@@ -16,6 +16,7 @@ export async function sendChannelMessage(
   expectedRelayUrl?: string,
   expectedSignerPubkey?: string,
   rootEventId?: string | null,
+  forwardedFromTag?: string[],
 ): Promise<SendChannelMessageResult> {
   const response = await invokeTauri<RawSendChannelMessageResult>(
     "send_channel_message",
@@ -29,6 +30,10 @@ export async function sendChannelMessage(
       mentionTags: mentionTags ?? null,
       linkPreviewTags,
       sentFromThreadTag: sentFromThreadTag ?? null,
+      // Forward provenance. The backend re-parses every identifier in this
+      // tag before signing, so a malformed or forged shape fails the send
+      // rather than reaching the relay.
+      forwardedFromTag: forwardedFromTag ?? null,
       mentionPubkeys: mentionPubkeys ?? null,
       kind: kind ?? null,
       // Tenant scope captured by the caller before its first await; the

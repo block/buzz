@@ -8,6 +8,7 @@ import {
   useChannelsQuery,
   useOpenDmMutation,
 } from "@/features/channels/hooks";
+import { findCachedOneToOneDm } from "@/features/channels/lib/oneToOneDm";
 import { useHuddle } from "@/features/huddle";
 import { formatHuddleActionError } from "@/features/huddle/lib/huddleError";
 import {
@@ -19,9 +20,9 @@ import { buildWaveMessageContent } from "@/features/messages/lib/waveMessage";
 import { useProfileQuery } from "@/features/profile/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { sendChannelMessage } from "@/shared/api/tauri";
-import type { Channel, RelayEvent } from "@/shared/api/types";
+import type { RelayEvent } from "@/shared/api/types";
 import { KIND_STREAM_MESSAGE } from "@/shared/constants/kinds";
-import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
+import { truncateNpub } from "@/shared/lib/pubkey";
 
 export type ProfileInteractionAction = "huddle" | "message" | "wave";
 
@@ -30,43 +31,6 @@ type ProfileInteractionAvailability = {
   message: boolean;
   wave: boolean;
 };
-
-function findCachedOneToOneDm(
-  channels: Channel[] | undefined,
-  targetPubkey: string,
-  currentPubkey: string | undefined,
-) {
-  const normalizedTargetPubkey = normalizePubkey(targetPubkey);
-  const normalizedCurrentPubkey = currentPubkey
-    ? normalizePubkey(currentPubkey)
-    : null;
-
-  return (
-    channels?.find((channel) => {
-      if (channel.channelType !== "dm") {
-        return false;
-      }
-
-      const participantPubkeys =
-        channel.participantPubkeys.map(normalizePubkey);
-      if (!participantPubkeys.includes(normalizedTargetPubkey)) {
-        return false;
-      }
-
-      const otherParticipantPubkeys = normalizedCurrentPubkey
-        ? participantPubkeys.filter(
-            (participantPubkey) =>
-              participantPubkey !== normalizedCurrentPubkey,
-          )
-        : participantPubkeys;
-
-      return (
-        otherParticipantPubkeys.length === 1 &&
-        otherParticipantPubkeys[0] === normalizedTargetPubkey
-      );
-    }) ?? null
-  );
-}
 
 export function useProfileInteractionActions({
   availability,

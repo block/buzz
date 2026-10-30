@@ -416,6 +416,7 @@ pub async fn send_channel_message(
     mention_tags: Option<Vec<Vec<String>>>,
     link_preview_tags: Option<Vec<Vec<String>>>,
     sent_from_thread_tag: Option<Vec<String>>,
+    forwarded_from_tag: Option<Vec<String>>,
     mention_pubkeys: Option<Vec<String>>,
     kind: Option<u32>,
     expected_relay_url: Option<String>,
@@ -450,6 +451,9 @@ pub async fn send_channel_message(
     let kind_num = kind.unwrap_or(buzz_core_pkg::kind::KIND_STREAM_MESSAGE);
     if sent_from_thread_tag.is_some() && kind_num != buzz_core_pkg::kind::KIND_STREAM_MESSAGE {
         return Err("sent-from-thread provenance requires a stream message".into());
+    }
+    if forwarded_from_tag.is_some() && kind_num != buzz_core_pkg::kind::KIND_STREAM_MESSAGE {
+        return Err("forward provenance requires a stream message".into());
     }
     if root_event_id.is_some() && parent_event_id.is_none() {
         return Err("root_event_id requires parent_event_id".into());
@@ -513,6 +517,7 @@ pub async fn send_channel_message(
                 &mention_refs_only,
                 &link_previews,
                 sent_from_thread_tag.as_deref(),
+                forwarded_from_tag.as_deref(),
                 &relay_base,
             )?
         }
@@ -687,6 +692,7 @@ fn build_managed_agent_channel_message(
         &[],
         &[],
         &[],
+        None,
         None,
         &crate::relay::relay_api_base_url(),
         client_tags,
