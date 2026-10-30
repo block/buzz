@@ -557,6 +557,9 @@ pub struct Config {
     pub mcp_restart_base_ms: u64,
     pub mcp_restart_max_ms: u64,
     pub max_sessions: usize,
+    /// Idle time after which a session is dropped along with its MCP servers.
+    /// Zero disables eviction. Set via `BUZZ_AGENT_SESSION_IDLE_TIMEOUT_SECS`.
+    pub session_idle_timeout: Duration,
     pub max_line_bytes: usize,
     pub max_history_bytes: usize,
     /// Per-tool-result cap on text content. Oversized text is middle-elided
@@ -727,6 +730,10 @@ impl Config {
             mcp_restart_base_ms: parse_env("BUZZ_AGENT_MCP_RESTART_BASE_MS", 500u64)?,
             mcp_restart_max_ms: parse_env("BUZZ_AGENT_MCP_RESTART_MAX_MS", 30_000u64)?,
             max_sessions: parse_env("BUZZ_AGENT_MAX_SESSIONS", usize::MAX)?,
+            session_idle_timeout: Duration::from_secs(parse_env(
+                "BUZZ_AGENT_SESSION_IDLE_TIMEOUT_SECS",
+                1800u64,
+            )?),
             max_line_bytes: parse_env("BUZZ_AGENT_MAX_LINE_BYTES", 4 * 1024 * 1024)?,
             max_history_bytes: parse_env("BUZZ_AGENT_MAX_HISTORY_BYTES", 16 * 1024 * 1024)?,
             max_tool_result_text_bytes: parse_env(
@@ -789,6 +796,7 @@ impl Config {
             mcp_restart_base_ms: 0,
             mcp_restart_max_ms: 0,
             max_sessions: 1,
+            session_idle_timeout: Duration::ZERO,
             max_line_bytes: 4 * 1024 * 1024,
             max_history_bytes: 16 * 1024 * 1024,
             max_tool_result_text_bytes: 50 * 1024,
