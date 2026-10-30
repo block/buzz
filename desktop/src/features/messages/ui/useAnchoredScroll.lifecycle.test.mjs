@@ -93,6 +93,10 @@ function installDOMShim() {
         this === node || this.children.some((child) => child.contains(node))
       );
     }
+
+    closest() {
+      return null;
+    }
   }
 
   class DocumentShim extends EventTargetShim {
@@ -693,4 +697,268 @@ test("target arriving before the second mount frame supersedes the bottom pin", 
     globalThis.requestAnimationFrame = previousRaf;
     globalThis.cancelAnimationFrame = previousCancelRaf;
   }
+});
+
+function TargetHoldHarness({ fake, onState, ...props }) {
+  onState(
+    useAnchoredScroll({
+      channelId: "conversation",
+      contentRef: fake.content,
+      isLoading: false,
+      messages: fake.messages,
+      scrollContainerRef: fake.scroller,
+      virtualizerOwnsPrependAnchoring: true,
+      virtualScrollToBottom: fake.scrollToBottom,
+      virtualScrollToMessage: fake.scrollToMessage,
+      virtualSettleAtBottom: fake.settleAtBottom,
+      ...props,
+    }),
+  );
+  return null;
+}
+
+// Accepts a virtual route target, then replays the layout that carried it
+// away in CI: the route clears the target, the thread panel opens on it, and a
+// later layout pass reports the virtualizer at its floor. Each reflow
+// re-centres the held target rather than settling at the bottom.
+async function renderHeldTarget() {
+  const resizeObservers = [];
+  globalThis.ResizeObserver = class {
+    constructor(callback) {
+      this.callback = callback;
+      this.targets = [];
+      resizeObservers.push(this);
+    }
+    disconnect() {}
+    observe(target) {
+      this.targets.push(target);
+    }
+  };
+  const scroller = document.createElement("div");
+  scroller.querySelector = () => null;
+  const settles = [];
+  const targetScrolls = [];
+  const fake = {
+    content: { current: null },
+    messages: [{ id: "selected" }, { id: "latest" }],
+    scrollToBottom: () => settles.push("jump"),
+    scrollToMessage: (messageId) => {
+      targetScrolls.push(messageId);
+      return true;
+    },
+    scroller: { current: scroller },
+    settleAtBottom: () => settles.push("settle"),
+  };
+  let state = null;
+  let props = { splitPanelOpen: false, targetMessageId: "selected" };
+  const root = createRoot(document.createElement("div"));
+  const render = async (nextProps) => {
+    props = { ...props, ...nextProps };
+    await act(async () =>
+      root.render(
+        React.createElement(TargetHoldHarness, {
+          fake,
+          onState: (next) => {
+            state = next;
+          },
+          ...props,
+        }),
+      ),
+    );
+  };
+  const resizeViewport = async () => {
+    await act(async () => {
+      for (const observer of resizeObservers) {
+        if (observer.targets.includes(scroller)) observer.callback();
+      }
+    });
+  };
+
+  await render({});
+  assert.equal(state.isAtBottom, false, "the target is accepted");
+  assert.deepEqual(targetScrolls, ["selected"]);
+  await render({ splitPanelOpen: true, targetMessageId: null });
+  assert.equal(targetScrolls.length, 2, "the panel opening re-centres it");
+  await act(async () => state.onVirtualizerAtBottomStateChange(true));
+  await resizeViewport();
+  assert.deepEqual(settles, [], "layout cannot settle a held target");
+  assert.deepEqual(
+    targetScrolls,
+    ["selected", "selected", "selected"],
+    "viewport reflow re-centres the held target",
+  );
+  return {
+    fake,
+    render,
+    resizeViewport,
+    root,
+    scroller,
+    settles,
+    state: () => state,
+    targetScrolls,
+  };
+}
+
+test("an accepted virtual target holds through the thread panel opening and floor reports", async () => {
+  const {
+    fake,
+    render,
+    resizeViewport,
+    root,
+    scroller,
+    settles,
+    state,
+    targetScrolls,
+  } = await renderHeldTarget();
+
+  // The floor report still drives the affordances.
+  assert.equal(state().isAtBottom, true);
+  fake.messages = [...fake.messages, { id: "live" }];
+  await render({});
+  assert.deepEqual(settles, [], "a live append cannot settle a held target");
+  // The append lands below the held row without a scroll event, so the hook
+  // itself must bring back the Jump to latest / new-message pill.
+  assert.equal(state().isAtBottom, false, "the pill shows again");
+  assert.equal(state().newMessageCount, 1);
+  // The reader is no longer at the floor, so taking the viewport back must
+  // not snap past the new row on the next reflow.
+  await act(async () =>
+    scroller.dispatchEvent({ target: scroller, type: "pointerdown" }),
+  );
+  await resizeViewport();
+  assert.deepEqual(settles, [], "release after the append stays put");
+  assert.equal(targetScrolls.length, 3, "and is not re-centred");
+  await act(async () => root.unmount());
+});
+
+const RELEASES = [
+  ["wheel", ({ scroller }) => scroller.dispatchEvent({ type: "wheel" })],
+  [
+    "touch drag",
+    ({ scroller }) => scroller.dispatchEvent({ type: "touchmove" }),
+  ],
+  [
+    "scrollbar pointerdown",
+    ({ scroller }) =>
+      scroller.dispatchEvent({ target: scroller, type: "pointerdown" }),
+  ],
+  [
+    "scroll key",
+    ({ scroller }) =>
+      globalThis.dispatchEvent({
+        altKey: false,
+        ctrlKey: false,
+        key: "PageUp",
+        metaKey: false,
+        target: scroller,
+        type: "keydown",
+      }),
+  ],
+  ["Jump to latest", ({ state }) => state().scrollToBottom("auto")],
+  [
+    "own send",
+    async ({ fake, render, state }) => {
+      state().scrollToBottomOnNextUpdate();
+      fake.messages = [...fake.messages, { id: "sent" }];
+      await render({});
+    },
+  ],
+  [
+    "channel change",
+    ({ render }) => render({ channelId: "other", isLoading: true }),
+  ],
+  // Find-in-channel and the oldest-unread pill jump through the public
+  // scrollToMessage. Neither holds, so the next floor report follows again.
+  [
+    "find jump",
+    ({ state }) => {
+      state().scrollToMessage("selected", {
+        behavior: "smooth",
+        highlight: true,
+      });
+      state().onVirtualizerAtBottomStateChange(true);
+    },
+  ],
+];
+
+for (const [name, release] of RELEASES) {
+  test(`${name} releases a held virtual target`, async () => {
+    const held = await renderHeldTarget();
+    await act(async () => release(held));
+    const before = held.settles.filter((kind) => kind === "settle").length;
+    const targetScrollsBefore = held.targetScrolls.length;
+    await held.resizeViewport();
+
+    assert.equal(
+      held.settles.filter((kind) => kind === "settle").length,
+      before + 1,
+      "the floor follows viewport reflow again",
+    );
+    assert.equal(
+      held.targetScrolls.length,
+      targetScrollsBefore,
+      "a released target is not re-centred",
+    );
+    await act(async () => held.root.unmount());
+  });
+}
+
+test("a descendant pointerdown keeps a virtual target held", async () => {
+  const held = await renderHeldTarget();
+  const row = document.createElement("div");
+  held.scroller.appendChild(row);
+  await act(async () =>
+    held.scroller.dispatchEvent({ target: row, type: "pointerdown" }),
+  );
+  await held.resizeViewport();
+
+  assert.deepEqual(held.settles, []);
+  assert.equal(held.targetScrolls.length, 4, "the target is still re-centred");
+  await act(async () => held.root.unmount());
+});
+
+test("history filling the gap under a held target is not counted as new", async () => {
+  const held = await renderHeldTarget();
+  // A cold target sits older than the head window. The page that fills the
+  // gap between them keeps both ends of the list, so nothing arrived below.
+  held.fake.messages = [
+    { id: "selected" },
+    { id: "gap-2" },
+    { id: "gap-3" },
+    { id: "latest" },
+  ];
+  await held.render({});
+  assert.equal(held.state().isAtBottom, true, "the floor report stands");
+  assert.equal(held.state().newMessageCount, 0);
+
+  // Deleting the newest row changes the last id, but nothing is new.
+  held.fake.messages = held.fake.messages.slice(0, -1);
+  await held.render({});
+  assert.equal(held.state().isAtBottom, true, "a deletion raises no pill");
+  assert.equal(held.state().newMessageCount, 0);
+
+  // More history and a live row in one commit: only the live row is new.
+  held.fake.messages = [
+    { id: "selected" },
+    { id: "gap-1" },
+    { id: "gap-2" },
+    { id: "gap-3" },
+    { id: "live" },
+  ];
+  await held.render({});
+  assert.equal(held.state().isAtBottom, false);
+  assert.equal(held.state().newMessageCount, 1);
+  assert.deepEqual(held.settles, []);
+  await act(async () => held.root.unmount());
+});
+
+test("reader input at the floor resumes following live messages", async () => {
+  const held = await renderHeldTarget();
+  // A wheel at the floor moves nothing, so no new floor report follows it.
+  await act(async () => held.scroller.dispatchEvent({ type: "wheel" }));
+  held.fake.messages = [...held.fake.messages, { id: "live" }];
+  await held.render({});
+
+  assert.deepEqual(held.settles, ["settle"]);
+  await act(async () => held.root.unmount());
 });
