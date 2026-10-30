@@ -291,6 +291,22 @@ pub(crate) async fn named_pool(application_name: &str) -> sqlx::PgPool {
         .expect("connect named test pool")
 }
 
+/// Prebuild `idx_channels_listed_name` concurrently, as an operator does
+/// before migration 0079 on a populated `channels` table
+/// (docs/channel-name-uniqueness-deployment.md). Run it with no open
+/// transaction in the database: the build waits for every one.
+pub(crate) async fn prebuild_listed_channel_name_index(pool: &sqlx::PgPool) {
+    sqlx::query(
+        "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_channels_listed_name \
+         ON channels (community_id, lower(name)) \
+         WHERE visibility = 'open' AND NOT unlisted \
+           AND channel_type IN ('stream', 'forum') AND deleted_at IS NULL",
+    )
+    .execute(pool)
+    .await
+    .expect("prebuild idx_channels_listed_name");
+}
+
 /// Wait until the session named `application_name` in this test's database is
 /// blocked on a lock.
 pub(crate) async fn wait_for_lock_wait(pool: &sqlx::PgPool, application_name: &str) {

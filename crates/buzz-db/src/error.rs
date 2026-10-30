@@ -26,7 +26,7 @@ pub enum DbError {
     ChannelNotFound(uuid::Uuid),
 
     /// Another listed open channel in the community already has this name
-    /// (see `channel::ensure_listed_channel_name_unique`).
+    /// (the `idx_channels_listed_name` index, migration 0079).
     #[error("an open channel named \"{0}\" already exists")]
     ChannelNameTaken(String),
 

@@ -5353,7 +5353,7 @@ mod postgres_tests {
             // Kick needs a channel-scoped report.
             sqlx::query(
                 "WITH ch AS (INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by) \
-                 SELECT gen_random_uuid(), community_id, 'staff-guard', 'stream', 'open', $2 \
+                 SELECT gen_random_uuid(), community_id, 'staff-guard-' || $1::uuid::text, 'stream', 'open', $2 \
                  FROM moderation_reports WHERE id = $1 RETURNING id) \
                  UPDATE moderation_reports SET channel_id = (SELECT id FROM ch) WHERE id = $1",
             )
@@ -7125,7 +7125,7 @@ mod postgres_tests {
         let channel_id = uuid::Uuid::new_v4();
         sqlx::query(
             r#"INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by)
-               VALUES ($1, $2, 'event-report-ch', 'stream', 'open', $3)"#,
+               VALUES ($1, $2, 'event-report-ch-' || $1::uuid::text, 'stream', 'open', $3)"#,
         )
         .bind(channel_id)
         .bind(community_id)
@@ -11853,7 +11853,7 @@ mod postgres_tests {
             // Retarget to the staff-authored event, channel-scoped so kick is valid.
             sqlx::query(
                 "WITH ch AS (INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by) \
-                 VALUES (gen_random_uuid(), $2, 'staff-guard', 'stream', 'open', $3) RETURNING id) \
+                 VALUES (gen_random_uuid(), $2, 'staff-guard-' || $1::uuid::text, 'stream', 'open', $3) RETURNING id) \
                  UPDATE moderation_reports SET channel_id = (SELECT id FROM ch), target_kind = 'event', \
                  target_pubkey = NULL, target_event_id = $4 WHERE id = $1",
             )
