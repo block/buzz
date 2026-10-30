@@ -505,6 +505,7 @@ async fn apply_pgschema_to_existing_database(pool: &PgPool) {
 #[ignore = "requires Postgres"]
 async fn migration_schema_0075_adds_invite_columns_without_rewriting_history() {
     let (pool, cases) = legacy_fixture().await;
+    crate::test_support::prebuild_listed_channel_name_index(&pool).await;
     crate::migration::run_migrations(&pool).await.unwrap();
     assert!(sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=75 AND success)"
@@ -560,6 +561,7 @@ async fn migration_schema_0075_adds_invite_columns_without_rewriting_history() {
 async fn migration_schema_legacy_claim_lazily_revokes_history_after_a_fenced_community_reactivates()
 {
     let (pool, cases) = legacy_fixture().await;
+    crate::test_support::prebuild_listed_channel_name_index(&pool).await;
     crate::migration::run_migrations(&pool).await.unwrap();
 
     let community = cases[1].community;

@@ -2,8 +2,17 @@
 //! renames that leave no two listed channels in a community with one name,
 //! ignoring case. It keeps the name on the oldest unarchived channel and picks
 //! a new name that no other listed channel has.
+//!
+//! Migration 0081 then adds the unique index. It refuses to run over
+//! duplicates that were not renamed or, on a populated table, without a
+//! concurrent prebuild; it accepts a valid prebuild without replacing it and
+//! rejects an invalid one.
 
 use super::*;
+
+/// The last migration before 0081. Duplicates can exist, and the plan has
+/// work to do, only before the index does.
+const BEFORE_INDEX: i64 = 80;
 
 const PLAN_SQL: &str =
     include_str!("../../../../../scripts/maintenance/plan_duplicate_listed_channel_renames.sql");
@@ -64,7 +73,7 @@ fn renamed(id: Uuid, name: &str) -> (Uuid, String) {
 
 /// The plan for `host`: (channel, current name, new name), as the rename
 /// script reads it.
-pub(super) async fn rename_plan(pool: &PgPool, host: &str) -> Vec<(Uuid, String, String)> {
+async fn rename_plan(pool: &PgPool, host: &str) -> Vec<(Uuid, String, String)> {
     rename_plan_with_starters(pool, host, &[]).await
 }
 
@@ -92,7 +101,7 @@ async fn rename_plan_with_starters(
 
 /// Applies the plan the way the relay applies each rename the script sends,
 /// and returns how many channels it renamed.
-pub(super) async fn rename_duplicates(pool: &PgPool, host: &str) -> usize {
+async fn rename_duplicates(pool: &PgPool, host: &str) -> usize {
     let plan = rename_plan(pool, host).await;
     for (channel, _, new_name) in &plan {
         sqlx::query("UPDATE channels SET name = $2 WHERE id = $1")
@@ -108,7 +117,8 @@ pub(super) async fn rename_duplicates(pool: &PgPool, host: &str) -> usize {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn plan_keeps_each_listed_name_on_its_oldest_unarchived_channel() {
-    let (pool, _scratch) = ScratchDb::migrated(&admin_url().await, "listed_name_plan").await;
+    let (pool, _scratch) =
+        ScratchDb::migrated_through(&admin_url().await, "listed_name_plan", BEFORE_INDEX).await;
     let seed = Seed::new(&pool).await;
     let [kept, archived, newer, private, deleted] = [(); 5].map(|_| Uuid::new_v4());
     seed.open(&pool, kept, "square-ios", 30).await;
@@ -187,7 +197,8 @@ async fn plan_keeps_each_listed_name_on_its_oldest_unarchived_channel() {
 #[ignore = "requires Postgres"]
 async fn plan_frees_a_starter_name_that_only_archived_channels_hold() {
     let (pool, _scratch) =
-        ScratchDb::migrated(&admin_url().await, "listed_name_plan_starter").await;
+        ScratchDb::migrated_through(&admin_url().await, "listed_name_plan_starter", BEFORE_INDEX)
+            .await;
     let seed = Seed::new(&pool).await;
     let [general, welcome_old, welcome_new, random] = [(); 4].map(|_| Uuid::new_v4());
     seed.open(&pool, general, "General", 30).await;
@@ -299,7 +310,9 @@ async fn plan_frees_a_starter_name_that_only_archived_channels_hold() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn plan_picks_a_free_name_when_the_short_one_is_taken() {
-    let (pool, _scratch) = ScratchDb::migrated(&admin_url().await, "listed_name_plan_taken").await;
+    let (pool, _scratch) =
+        ScratchDb::migrated_through(&admin_url().await, "listed_name_plan_taken", BEFORE_INDEX)
+            .await;
     let seed = Seed::new(&pool).await;
     // The longest name the column holds, so the new name must truncate it.
     let long = "a".repeat(255);
@@ -381,7 +394,8 @@ async fn run_rename_script(
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn script_renames_each_planned_channel_once_whatever_its_name() {
-    let (pool, scratch) = ScratchDb::migrated(&admin_url().await, "listed_name_script").await;
+    let (pool, scratch) =
+        ScratchDb::migrated_through(&admin_url().await, "listed_name_script", BEFORE_INDEX).await;
     let seed = Seed::new(&pool).await;
     let [kept, duplicate, other] = [(); 3].map(|_| Uuid::new_v4());
     let tricky = format!("-ops\x1e{other}\x1fowned\x1f\n\t\"$(x)");
@@ -478,4 +492,124 @@ async fn script_stops_for_a_community_the_relay_does_not_serve() {
         assert!(calls.is_empty(), "{host}: no rename");
         assert!(stderr.contains(message), "{host}: {stderr}");
     }
+}
+
+async fn ledger_version(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
+        .fetch_one(pool)
+        .await
+        .expect("read migration ledger")
+}
+
+async fn index_oid(pool: &PgPool) -> Option<i64> {
+    sqlx::query_scalar("SELECT to_regclass('public.idx_channels_listed_name')::oid::bigint")
+        .fetch_one(pool)
+        .await
+        .expect("look up index")
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn migration_schema_listed_name_index_needs_the_renames_and_a_prebuild() {
+    let (pool, _scratch) =
+        ScratchDb::migrated_through(&admin_url().await, "listed_name_index", BEFORE_INDEX).await;
+    let seed = Seed::new(&pool).await;
+    let (kept, newer) = (Uuid::new_v4(), Uuid::new_v4());
+    seed.open(&pool, kept, "square-ios", 30).await;
+    seed.open(&pool, newer, "Square-iOS", 10).await;
+    let before = seed.names(&pool).await;
+
+    let error = migration::run_migrations(&pool).await.unwrap_err();
+    assert!(
+        error.to_string().contains("duplicate names remain"),
+        "must name the duplicate rows, not merely fail: {error}"
+    );
+    assert_eq!(ledger_version(&pool).await, BEFORE_INDEX);
+    assert_eq!(index_oid(&pool).await, None);
+    assert_eq!(seed.names(&pool).await, before, "no data changes");
+
+    assert_eq!(rename_duplicates(&pool, &seed.host).await, 1);
+    assert!(rename_plan(&pool, &seed.host).await.is_empty());
+    let error = migration::run_migrations(&pool).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("prebuild idx_channels_listed_name concurrently"),
+        "a populated table is not indexed under a write-blocking lock: {error}"
+    );
+    assert_eq!(ledger_version(&pool).await, BEFORE_INDEX);
+    assert_eq!(index_oid(&pool).await, None);
+
+    crate::test_support::prebuild_listed_channel_name_index(&pool).await;
+    migration::run_migrations(&pool)
+        .await
+        .expect("migrate after the renames and the prebuild");
+    assert_eq!(ledger_version(&pool).await, BEFORE_INDEX + 1);
+    let mut expected = vec![
+        (kept, "square-ios".to_owned()),
+        renamed(newer, "Square-iOS"),
+    ];
+    expected.sort();
+    assert_eq!(seed.names(&pool).await, expected);
+
+    // The database now refuses what an older relay could still write.
+    let duplicate = sqlx::query(
+        "INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by) \
+         VALUES ($1, $2, 'SQUARE-IOS', 'forum', 'open', $3)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(seed.community)
+    .bind(&seed.created_by)
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    assert_eq!(
+        duplicate
+            .as_database_error()
+            .and_then(|e| e.constraint())
+            .map(str::to_owned),
+        Some("idx_channels_listed_name".to_owned())
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn migration_schema_listed_name_index_validates_a_prebuild() {
+    let (pool, _scratch) =
+        ScratchDb::migrated_through(&admin_url().await, "listed_name_prebuild", BEFORE_INDEX).await;
+    for remnant in [
+        // A different predicate: archived channels left out.
+        "CREATE UNIQUE INDEX idx_channels_listed_name ON channels (community_id, lower(name)) \
+         WHERE visibility = 'open' AND NOT unlisted AND archived_at IS NULL",
+        // A failed concurrent build. Simulated only in this disposable
+        // superuser database.
+        "CREATE UNIQUE INDEX idx_channels_listed_name ON channels (community_id, lower(name)) \
+         WHERE visibility = 'open' AND NOT unlisted \
+           AND channel_type IN ('stream', 'forum') AND deleted_at IS NULL; \
+         UPDATE pg_index SET indisvalid = false \
+         WHERE indexrelid = 'idx_channels_listed_name'::regclass",
+    ] {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(remnant))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let error = migration::run_migrations(&pool).await.unwrap_err();
+        assert!(
+            error.to_string().contains("invalid or wrong definition"),
+            "must reject the catalog shape: {error}"
+        );
+        assert_eq!(ledger_version(&pool).await, BEFORE_INDEX);
+        sqlx::query("DROP INDEX CONCURRENTLY idx_channels_listed_name")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    crate::test_support::prebuild_listed_channel_name_index(&pool).await;
+    let oid = index_oid(&pool).await;
+    migration::run_migrations(&pool)
+        .await
+        .expect("accept the prebuild");
+    assert_eq!(ledger_version(&pool).await, BEFORE_INDEX + 1);
+    assert_eq!(index_oid(&pool).await, oid, "the prebuild is not replaced");
 }

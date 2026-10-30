@@ -778,7 +778,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 82);
+        assert_eq!(migrations.len(), 83);
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }
@@ -786,6 +786,18 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("ADD COLUMN auto_join BOOLEAN NOT NULL DEFAULT false"));
+        // Listed channel names (0081): a bounded contract index that refuses
+        // to build over unrepaired duplicates. The desired schema carries the
+        // same plain index.
+        assert_eq!(migrations[80].version, 81);
+        let listed_names = strip_sql_comments(migrations[80].sql.as_str());
+        assert!(listed_names.contains("SET LOCAL lock_timeout = '1s';"));
+        assert!(listed_names.contains("SET LOCAL statement_timeout = '5s';"));
+        assert!(listed_names.contains("CREATE UNIQUE INDEX idx_channels_listed_name"));
+        assert!(!listed_names.contains("CONCURRENTLY"));
+        assert!(crate::test_support::desired_state_schema_sql().contains(
+            "CREATE UNIQUE INDEX idx_channels_listed_name ON channels (community_id, lower(name))"
+        ));
         assert!(migrations[70]
             .sql
             .as_str()
@@ -2923,6 +2935,21 @@ mod postgres_tests {
             columns(&migrated, "channels").await,
             "column parity mismatch for channels: schema.sql desired state has drifted \
              from the migrations; update schema/tables/public/channels.sql to match"
+        );
+        // The listed-name index (0081) is compared on its own for that reason.
+        let listed_name = |shapes: Vec<(String, String, String)>| {
+            shapes
+                .into_iter()
+                .filter(|(name, _, _)| name == "idx_channels_listed_name")
+                .collect::<Vec<_>>()
+        };
+        let desired_listed_name = listed_name(index_shapes(&desired, "channels").await);
+        assert_eq!(desired_listed_name.len(), 1, "desired state has the index");
+        assert_eq!(
+            desired_listed_name,
+            listed_name(index_shapes(&migrated, "channels").await),
+            "idx_channels_listed_name parity mismatch: update \
+             schema/tables/public/channels.sql to match migration 0081"
         );
         assert_eq!(
             events_key_defs(&desired).await,
