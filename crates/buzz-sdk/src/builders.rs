@@ -12,7 +12,7 @@ use buzz_core::{
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
         KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_PROJECT,
-        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_REPORT, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -2076,6 +2076,67 @@ pub fn build_moderation_resolve_report(
         tags.push(tag(&["reason", r])?);
     }
     Ok(EventBuilder::new(Kind::Custom(KIND_MODERATION_RESOLVE_REPORT as u16), "").tags(tags))
+}
+
+/// NIP-56 report types the relay accepts at ingest (`report.rs` `REPORT_TYPES`).
+pub const REPORT_TYPES: &[&str] = &[
+    "illegal",
+    "nudity",
+    "malware",
+    "spam",
+    "impersonation",
+    "profanity",
+    "other",
+];
+
+/// What a NIP-56 report points at.
+#[derive(Debug, Clone, Copy)]
+pub enum ReportTarget<'a> {
+    /// A message: the reported author's pubkey and the event id.
+    Event {
+        /// Hex pubkey of the message author.
+        author_pubkey: &'a str,
+        /// Hex id of the reported event.
+        event_id: &'a str,
+    },
+    /// A user, with no message.
+    Pubkey(&'a str),
+}
+
+/// Build a NIP-56 report (kind 1984).
+///
+/// A message report carries `["p", author]` and `["e", event_id, type]`; a
+/// user report carries `["p", pubkey, type]`. No `h` tag is added: the relay
+/// reads the channel from the stored event. `note` is trimmed and becomes the
+/// content; blank means empty content.
+pub fn build_report(
+    target: ReportTarget<'_>,
+    report_type: &str,
+    note: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    if !REPORT_TYPES.contains(&report_type) {
+        return Err(SdkError::InvalidInput(format!(
+            "report type must be one of {} (got: {report_type})",
+            REPORT_TYPES.join(", ")
+        )));
+    }
+    let tags = match target {
+        ReportTarget::Event {
+            author_pubkey,
+            event_id,
+        } => {
+            let author = check_pubkey_hex(author_pubkey, "author_pubkey")?;
+            let event_id = check_hex_exact(event_id, 64, "event_id")?;
+            vec![tag(&["p", &author])?, tag(&["e", &event_id, report_type])?]
+        }
+        ReportTarget::Pubkey(pubkey) => {
+            let pubkey = check_pubkey_hex(pubkey, "pubkey")?;
+            vec![tag(&["p", &pubkey, report_type])?]
+        }
+    };
+    let note = note.map(str::trim).unwrap_or("");
+    check_content(note, 64 * 1024)?;
+    Ok(EventBuilder::new(Kind::Custom(KIND_REPORT as u16), note).tags(tags))
 }
 
 // ---------------------------------------------------------------------------
@@ -5234,6 +5295,83 @@ mod tests {
         assert!(has_tag(&ev, "status", "dismissed"));
         assert!(has_tag(&ev, "action", "dismiss"));
         assert!(tag_values(&ev, "reason").is_empty());
+    }
+
+    fn tag_vecs(event: &nostr::Event) -> Vec<Vec<String>> {
+        event.tags.iter().map(|t| t.clone().to_vec()).collect()
+    }
+
+    #[test]
+    fn report_message_shape_matches_desktop() {
+        let author = "AB".repeat(32);
+        let eid = event_id().to_hex();
+        let ev = sign(
+            build_report(
+                ReportTarget::Event {
+                    author_pubkey: &author,
+                    event_id: &eid,
+                },
+                "spam",
+                Some("  buy now  "),
+            )
+            .unwrap(),
+        );
+        assert_eq!(ev.kind.as_u16(), KIND_REPORT as u16);
+        assert_eq!(ev.content, "buy now");
+        assert_eq!(
+            tag_vecs(&ev),
+            vec![
+                vec!["p".to_string(), "ab".repeat(32)],
+                vec!["e".to_string(), eid, "spam".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn report_user_puts_type_on_p_tag() {
+        let pk = "c".repeat(64);
+        let ev =
+            sign(build_report(ReportTarget::Pubkey(&pk), "impersonation", Some("  ")).unwrap());
+        assert_eq!(ev.content, "");
+        assert_eq!(
+            tag_vecs(&ev),
+            vec![vec!["p".to_string(), pk, "impersonation".to_string()]]
+        );
+    }
+
+    #[test]
+    fn report_accepts_every_relay_type_and_nothing_else() {
+        let pk = "c".repeat(64);
+        for t in REPORT_TYPES {
+            assert!(
+                build_report(ReportTarget::Pubkey(&pk), t, None).is_ok(),
+                "{t}"
+            );
+        }
+        for bad in ["", "Spam", "abuse", "harassment"] {
+            let err = build_report(ReportTarget::Pubkey(&pk), bad, None).unwrap_err();
+            assert!(matches!(err, SdkError::InvalidInput(_)), "{bad}");
+        }
+    }
+
+    #[test]
+    fn report_rejects_malformed_ids_and_oversized_note() {
+        let pk = "c".repeat(64);
+        let eid = event_id().to_hex();
+        let bad_author = ReportTarget::Event {
+            author_pubkey: "abc",
+            event_id: &eid,
+        };
+        assert!(build_report(bad_author, "spam", None).is_err());
+        let bad_event = ReportTarget::Event {
+            author_pubkey: &pk,
+            event_id: "abc",
+        };
+        assert!(build_report(bad_event, "spam", None).is_err());
+        assert!(build_report(ReportTarget::Pubkey("xyz"), "spam", None).is_err());
+        let big = "a".repeat(64 * 1024 + 1);
+        let err = build_report(ReportTarget::Pubkey(&pk), "spam", Some(&big)).unwrap_err();
+        assert!(matches!(err, SdkError::ContentTooLarge { .. }));
     }
 
     #[test]
