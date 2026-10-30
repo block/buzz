@@ -47,8 +47,16 @@ async fn group_key(
         if id.is_empty() {
             return Err(CliError::Usage("section: needs a section id".into()));
         }
-        if needs_live_section {
-            resolve_section(client, id).await?;
+        if needs_live_section
+            && !fetch_view(client)
+                .await?
+                .sections
+                .iter()
+                .any(|s| s.id == id)
+        {
+            return Err(CliError::NotFound(format!(
+                "no live section has the id \"{id}\""
+            )));
         }
         return Ok(group.to_string());
     }
@@ -244,6 +252,8 @@ mod tests {
             ("Nope", true),
             ("section:", false),
             ("section:missing", true),
+            ("section:Eng", true),
+            ("section: id-Eng", true),
         ] {
             let err = run(set(group, SidebarSortMode::Recent), &client)
                 .await

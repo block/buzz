@@ -140,8 +140,8 @@ lowercase. If the relay reports a newer update (exit 5), run the command again.
 
 `sidebar sort` sets how one sidebar group orders its channels: `alpha` (name,
 the default) or `recent` (last message, newest first). `--group` takes
-`starred`, `channels`, `forums`, `dms`, `section:<id>`, or a section name (or
-bare id). A fixed group name wins over a section with the same name. `sort list`
+`starred`, `channels`, `forums`, `dms`, `section:<id>` (an exact live id), or a
+section name (or bare id). A fixed group name wins over a section with the same name. `sort list`
 prints `{"default": "alpha", "groups": {<key>: <mode>}}` with only the groups
 that have a mode set. `sort reset` writes a `null` register that returns the
 group to the default; resetting a group with no register changes nothing. A
