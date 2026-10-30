@@ -25,6 +25,8 @@ pub(crate) mod read_state;
 mod repo_default_branch;
 pub mod repos;
 pub(crate) mod sent_from_thread;
+pub mod sidebar;
+mod sidebar_doc;
 pub mod social;
 pub mod upload;
 pub mod users;
