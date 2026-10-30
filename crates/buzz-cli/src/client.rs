@@ -1288,6 +1288,55 @@ impl BuzzClient {
         Ok(events.into())
     }
 
+    /// Open an authenticated WebSocket, subscribe with `filter`, and wait for
+    /// the relay's end-of-stored-events marker, so events published afterwards
+    /// cannot be missed. A refused subscription is an error.
+    pub async fn open_subscription(
+        &self,
+        filter: &serde_json::Value,
+    ) -> Result<EventSession, CliError> {
+        use buzz_ws_client::{NostrWsConnection, RelayMessage};
+
+        let connect_budget =
+            env_duration_secs("BUZZ_CONNECT_TIMEOUT_SECS", 15) + Duration::from_secs(45);
+        let mut conn = tokio::time::timeout(
+            connect_budget,
+            NostrWsConnection::connect_authenticated(
+                &to_ws_url(&self.relay_url),
+                &self.keys,
+                self.auth_tag.as_ref(),
+            ),
+        )
+        .await
+        .map_err(|_| CliError::Relay {
+            status: 503,
+            body: "timed out connecting to the relay".into(),
+        })?
+        .map_err(session_ws_error)?;
+        conn.send_raw(&serde_json::json!(["REQ", SESSION_SUB_ID, filter]))
+            .await
+            .map_err(session_ws_error)?;
+
+        let deadline = tokio::time::Instant::now() + SESSION_EOSE_TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match conn.next_event(remaining).await {
+                Ok(RelayMessage::Eose { subscription_id }) if subscription_id == SESSION_SUB_ID => {
+                    return Ok(EventSession { conn });
+                }
+                Ok(RelayMessage::Closed { message, .. }) => return Err(closed_error(&message)),
+                Ok(_) => {}
+                Err(buzz_ws_client::WsClientError::Timeout) => {
+                    return Err(CliError::Relay {
+                        status: 503,
+                        body: "relay did not confirm the subscription".into(),
+                    });
+                }
+                Err(e) => return Err(session_ws_error(e)),
+            }
+        }
+    }
+
     /// Upload a file to the relay's Blossom endpoint.
     /// Returns a BlobDescriptor on success.
     pub async fn upload_file(&self, file_path: &str) -> Result<BlobDescriptor, CliError> {
@@ -1476,6 +1525,95 @@ impl BuzzClient {
             });
         }
         Ok(resp.text().await?)
+    }
+}
+
+const SESSION_SUB_ID: &str = "buzz-cli-session";
+const SESSION_EOSE_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn session_ws_error(e: buzz_ws_client::WsClientError) -> CliError {
+    match e {
+        buzz_ws_client::WsClientError::AuthFailed(message) => CliError::Auth(message),
+        other => CliError::Relay {
+            status: 503,
+            body: other.to_string(),
+        },
+    }
+}
+
+fn closed_error(message: &str) -> CliError {
+    if message.starts_with("auth") || message.starts_with("restricted") {
+        CliError::Auth(message.to_owned())
+    } else {
+        CliError::Relay {
+            status: 502,
+            body: format!("relay closed the subscription: {message}"),
+        }
+    }
+}
+
+/// A live subscription on an authenticated WebSocket that can also publish.
+pub struct EventSession {
+    conn: buzz_ws_client::NostrWsConnection,
+}
+
+impl EventSession {
+    /// Publish `event` once and wait for the relay's OK. A refusal is an
+    /// error: `restricted`/`auth` reasons are auth errors, others relay errors.
+    /// A lost connection or missing OK is [`CliError::DeliveryUnknown`]
+    /// because the relay may already have forwarded the event.
+    pub async fn publish(&mut self, event: nostr::Event) -> Result<(), CliError> {
+        let ok = self.conn.send_event(event).await.map_err(|e| match e {
+            buzz_ws_client::WsClientError::AuthFailed(message) => CliError::Auth(message),
+            other => {
+                CliError::DeliveryUnknown(format!("the relay did not confirm the event: {other}"))
+            }
+        })?;
+        if ok.accepted {
+            return Ok(());
+        }
+        Err(
+            if ok.message.starts_with("auth") || ok.message.starts_with("restricted") {
+                CliError::Auth(ok.message)
+            } else {
+                CliError::Relay {
+                    status: 400,
+                    body: ok.message,
+                }
+            },
+        )
+    }
+
+    /// Next subscribed event, or `None` when `wait` passes with none. A
+    /// closed subscription or lost connection is an error.
+    pub async fn next_event(&mut self, wait: Duration) -> Result<Option<nostr::Event>, CliError> {
+        use buzz_ws_client::{RelayMessage, WsClientError};
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            match self.conn.next_event(remaining).await {
+                Ok(RelayMessage::Event {
+                    subscription_id,
+                    event,
+                }) if subscription_id == SESSION_SUB_ID => return Ok(Some(*event)),
+                Ok(RelayMessage::Closed { message, .. }) => return Err(closed_error(&message)),
+                Ok(_) => {}
+                Err(WsClientError::Timeout) => return Ok(None),
+                Err(e) => return Err(session_ws_error(e)),
+            }
+        }
+    }
+
+    /// Close the subscription and the connection, ignoring close errors.
+    pub async fn close(mut self) {
+        let _ = self
+            .conn
+            .send_raw(&serde_json::json!(["CLOSE", SESSION_SUB_ID]))
+            .await;
+        let _ = self.conn.disconnect().await;
     }
 }
 

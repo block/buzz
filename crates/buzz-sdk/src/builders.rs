@@ -319,6 +319,58 @@ pub fn build_agent_observer_frame(
     .tags(tags))
 }
 
+/// Longest `modelId` accepted in a `switch_model` control payload.
+pub const MAX_CONTROL_MODEL_ID_CHARS: usize = 200;
+
+/// Build the plaintext payload of a `cancel_turn` observer control frame.
+///
+/// Encrypt it to the agent and send it with [`build_agent_observer_frame`]
+/// using [`OBSERVER_FRAME_CONTROL`]. The harness echoes `request_id` in its
+/// `control_result`.
+pub fn build_cancel_turn_control_payload(
+    channel_id: Uuid,
+    request_id: &str,
+) -> Result<serde_json::Value, SdkError> {
+    check_control_request_id(request_id)?;
+    Ok(serde_json::json!({
+        "type": "cancel_turn",
+        "channelId": channel_id.to_string(),
+        "requestId": request_id,
+    }))
+}
+
+/// Build the plaintext payload of a `switch_model` observer control frame.
+///
+/// `model_id` must be 1 to [`MAX_CONTROL_MODEL_ID_CHARS`] characters.
+pub fn build_switch_model_control_payload(
+    channel_id: Uuid,
+    model_id: &str,
+    request_id: &str,
+) -> Result<serde_json::Value, SdkError> {
+    check_control_request_id(request_id)?;
+    let chars = model_id.chars().count();
+    if chars == 0 || chars > MAX_CONTROL_MODEL_ID_CHARS {
+        return Err(SdkError::InvalidInput(format!(
+            "modelId must be 1-{MAX_CONTROL_MODEL_ID_CHARS} characters"
+        )));
+    }
+    Ok(serde_json::json!({
+        "type": "switch_model",
+        "channelId": channel_id.to_string(),
+        "modelId": model_id,
+        "requestId": request_id,
+    }))
+}
+
+fn check_control_request_id(request_id: &str) -> Result<(), SdkError> {
+    if request_id.is_empty() || request_id.len() > 128 {
+        return Err(SdkError::InvalidInput(
+            "requestId must be 1-128 bytes".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Build a forum post thread root (kind 45001).
 pub fn build_forum_post(
     channel_id: Uuid,
@@ -2714,6 +2766,26 @@ mod tests {
             &agent.public_key().to_hex()
         ));
         assert!(has_tag(&ev, OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY));
+    }
+
+    #[test]
+    fn control_payloads_match_the_wire_shape() {
+        let channel = uuid();
+        assert_eq!(
+            build_cancel_turn_control_payload(channel, "r1").unwrap(),
+            serde_json::json!({"type": "cancel_turn", "channelId": channel.to_string(), "requestId": "r1"})
+        );
+        assert_eq!(
+            build_switch_model_control_payload(channel, "m1", "r2").unwrap(),
+            serde_json::json!({"type": "switch_model", "channelId": channel.to_string(), "modelId": "m1", "requestId": "r2"})
+        );
+        let long = "m".repeat(MAX_CONTROL_MODEL_ID_CHARS + 1);
+        for model in ["", long.as_str()] {
+            assert!(build_switch_model_control_payload(channel, model, "r").is_err());
+        }
+        assert!(build_switch_model_control_payload(channel, "é", "r").is_ok());
+        assert!(build_cancel_turn_control_payload(channel, "").is_err());
+        assert!(build_cancel_turn_control_payload(channel, &"r".repeat(129)).is_err());
     }
 
     #[test]
