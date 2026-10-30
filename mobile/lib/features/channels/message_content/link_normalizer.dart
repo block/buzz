@@ -14,10 +14,21 @@ final _bareLinkPattern = RegExp(
 final _trailingPunctuationPattern = RegExp(r'[.,!?:;]+$');
 final _backtickRunPattern = RegExp(r'`+');
 
+/// Matches an autolink or bare link that [normalizeBareLinks] would convert.
+final proseUrlPattern = RegExp(
+  '${_autolinkPattern.pattern}|${_bareLinkPattern.pattern}',
+);
+
 /// Converts supported Buzz and HTTP(S) autolinks and bare links into Markdown
 /// links while leaving inline and fenced code untouched. Punctuation peeling
 /// is limited to Buzz URLs so existing HTTP(S) destinations stay unchanged.
-String normalizeBareLinks(String content) {
+String normalizeBareLinks(String content) =>
+    mapMarkdownProse(content, _normalizeLinkSegment);
+
+/// Applies [transform] to each stretch of [content] outside inline and fenced
+/// code, and returns the rest unchanged. A backslash-escaped backtick outside
+/// code does not open a code span.
+String mapMarkdownProse(String content, String Function(String) transform) {
   final buffer = StringBuffer();
   var offset = 0;
   var proseStart = 0;
@@ -26,6 +37,14 @@ String normalizeBareLinks(String content) {
   var fenceDelimiterLength = 0;
 
   while (offset < content.length) {
+    final inCode = inlineDelimiterLength > 0 || fenceDelimiterLength > 0;
+    if (!inCode &&
+        content[offset] == r'\' &&
+        offset + 1 < content.length &&
+        _isAsciiPunctuation(content.codeUnitAt(offset + 1))) {
+      offset += 2;
+      continue;
+    }
     final run = _backtickRunPattern.matchAsPrefix(content, offset);
     if (run == null) {
       offset++;
@@ -48,15 +67,11 @@ String normalizeBareLinks(String content) {
     } else if (_hasInlineCloserOnLine(content, run.end, runLength) ||
         (!_isOpeningFence(content, run.start, runLength) &&
             _hasInlineCloser(content, run.end, runLength))) {
-      buffer.write(
-        _normalizeLinkSegment(content.substring(proseStart, run.start)),
-      );
+      buffer.write(transform(content.substring(proseStart, run.start)));
       codeStart = run.start;
       inlineDelimiterLength = runLength;
     } else if (_isOpeningFence(content, run.start, runLength)) {
-      buffer.write(
-        _normalizeLinkSegment(content.substring(proseStart, run.start)),
-      );
+      buffer.write(transform(content.substring(proseStart, run.start)));
       codeStart = run.start;
       fenceDelimiterLength = runLength;
     }
@@ -67,10 +82,16 @@ String normalizeBareLinks(String content) {
   if (inlineDelimiterLength > 0 || fenceDelimiterLength > 0) {
     buffer.write(content.substring(codeStart));
   } else {
-    buffer.write(_normalizeLinkSegment(content.substring(proseStart)));
+    buffer.write(transform(content.substring(proseStart)));
   }
   return buffer.toString();
 }
+
+bool _isAsciiPunctuation(int unit) =>
+    (unit >= 0x21 && unit <= 0x2F) ||
+    (unit >= 0x3A && unit <= 0x40) ||
+    (unit >= 0x5B && unit <= 0x60) ||
+    (unit >= 0x7B && unit <= 0x7E);
 
 bool _isOpeningFence(String content, int runStart, int runLength) {
   if (runLength < 3) return false;

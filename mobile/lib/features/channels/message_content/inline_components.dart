@@ -50,6 +50,7 @@ List<MarkdownComponent> _useMessageInlineComponents({
   // parent rebuild reparses unchanged message bodies on the UI isolate.
   return useMemoized(
     () => [
+      _BackslashEscapeMd(),
       _MentionMd(
         mentionNames: inputs.mentionNames,
         mentionLabels: inputs.mentionLabels,
@@ -142,6 +143,18 @@ class _InlineComponentInputs {
   @override
   int get hashCode =>
       Object.hash(content, finalContent, emojiSize, hasMentionHandler);
+}
+
+class _BackslashEscapeMd extends InlineMd {
+  @override
+  RegExp get exp => RegExp('[\uE021-\uE07E]+');
+
+  @override
+  InlineSpan span(
+    BuildContext context,
+    String text,
+    GptMarkdownConfig config,
+  ) => TextSpan(text: unshieldBackslashEscapes(text), style: config.style);
 }
 
 // Encoded label punctuation must remain literal even inside nested formatting.
