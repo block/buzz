@@ -76,10 +76,11 @@ pub fn channel_id(run_id: &str, community: usize, index: usize) -> String {
     .to_string()
 }
 
-/// Deletion request id for community `community`, so a re-run of `teardown`
-/// replays the same request instead of conflicting with it.
-pub fn teardown_request_id(run_id: &str, community: usize) -> uuid::Uuid {
-    uuid(&["buzz-loadgen-teardown", run_id, &community.to_string()])
+/// Deletion request id for `host` in run `run_id`, so a re-run of `teardown`
+/// replays the same request instead of conflicting with it. Keyed by host,
+/// so a changed host template never reuses another host's request id.
+pub fn teardown_request_id(run_id: &str, host: &str) -> uuid::Uuid {
+    uuid(&["buzz-loadgen-teardown", run_id, host])
 }
 
 /// NIP-OA `auth` tag in which `owner` authorizes `agent`.

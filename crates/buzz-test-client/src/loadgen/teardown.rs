@@ -44,9 +44,9 @@ enum Outcome {
 }
 
 /// Archives every templated community of the scenario as its fixture owner,
-/// then requests its deletion under a request id derived from `run_id`, so a
-/// re-run replays the same requests. Deletion itself runs asynchronously on
-/// the relay's deletion drain.
+/// then requests its deletion under a request id derived from `run_id` and
+/// the host, so a re-run replays the same requests. Deletion itself runs
+/// asynchronously on the relay's deletion drain.
 pub async fn teardown(scenario: &Scenario, net: &Net) -> anyhow::Result<Report> {
     if scenario.target.community_host_template.is_none() {
         anyhow::bail!(
@@ -113,7 +113,7 @@ async fn teardown_community(
         json!({
             "host": host,
             "owner_pubkey": owner,
-            "request_id": identity::teardown_request_id(run_id, index).to_string(),
+            "request_id": identity::teardown_request_id(run_id, host).to_string(),
             "acknowledgement_version": ACKNOWLEDGEMENT_VERSION,
         }),
     )
@@ -148,7 +148,8 @@ mod tests {
 
     /// The operator's archive and delete endpoints: owner-checked, archive
     /// before delete, and a request id replayed for its community at any
-    /// stage, even after membership purge, but conflicting with another id.
+    /// stage, even after membership purge. A request id already used for
+    /// another host, or a second id for one community, conflicts.
     /// `unavailable` answers every archive with 503.
     async fn fake_operator(
         communities: Arc<Mutex<HashMap<String, Community>>>,
@@ -177,12 +178,23 @@ mod tests {
                         return (400, json!({"error": "unsupported"}).to_string());
                     }
                     let id = request["request_id"].as_str().unwrap();
-                    let replay = communities
-                        .get(host)
-                        .and_then(|c| c.deletion.as_ref())
-                        .filter(|(known, _)| known == id);
-                    if let Some((_, stage)) = replay {
-                        return (202, json!({ "status": stage }).to_string());
+                    let known = communities.iter().find_map(|(h, c)| {
+                        c.deletion
+                            .as_ref()
+                            .filter(|(known, _)| known == id)
+                            .map(|(_, stage)| (h.as_str(), *stage))
+                    });
+                    match known {
+                        Some((h, stage)) if h == host => {
+                            return (202, json!({ "status": stage }).to_string());
+                        }
+                        Some(_) => {
+                            return (
+                                409,
+                                json!({"code": "deletion_request_conflict"}).to_string(),
+                            );
+                        }
+                        None => {}
                     }
                     let Some(community) = communities.get_mut(host).filter(|c| c.owner == owner)
                     else {
@@ -267,7 +279,7 @@ hold_secs = 1
                 Community {
                     archived: true,
                     deletion: Some((
-                        identity::teardown_request_id("t", 4).to_string(),
+                        identity::teardown_request_id("t", "lg-t-4.example").to_string(),
                         "postgres_purged",
                     )),
                     ..Default::default()
@@ -295,11 +307,26 @@ hold_secs = 1
                 report.failures
             );
         }
+        // The same run under another host template names another owner's
+        // host; it gets its own request id and is left alone.
+        communities.lock().unwrap().insert(
+            "other-0.example".to_string(),
+            Community {
+                owner: Keys::generate().public_key().to_hex(),
+                ..Default::default()
+            },
+        );
+        let other = scenario(&addr, Some("other-{i}.example"));
+        let report = teardown_with(&other, &net, &base, &operator).await;
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(report.absent, 5);
+
         let communities = communities.lock().unwrap();
+        assert!(!communities["other-0.example"].archived);
         assert_eq!(
             communities["lg-t-0.example"].deletion,
             Some((
-                identity::teardown_request_id("t", 0).to_string(),
+                identity::teardown_request_id("t", "lg-t-0.example").to_string(),
                 "submitted"
             ))
         );

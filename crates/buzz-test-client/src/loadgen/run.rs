@@ -146,11 +146,15 @@ async fn run_with(
         let hold_start = Instant::now();
         tokio::time::sleep(Duration::from_secs(step.hold_secs)).await;
         let hold_secs = hold_start.elapsed().as_secs_f64();
-        let after = stats.snapshot();
-        let summaries = after.since(&before);
-
         // Clients only return once stopped, so a finished one panicked.
         let lost = tasks.iter().filter(|t| t.is_finished()).count();
+        // Stop before the last step's snapshot, so the shutdown settles only
+        // work already in flight when that step's window closed.
+        if n + 1 == scenario.ramp.len() {
+            let _ = stop_tx.send(true);
+        }
+        let after = stats.snapshot();
+        let summaries = after.since(&before);
         let reason = if lost > 0 {
             Some(format!("{lost} clients exited unexpectedly"))
         } else {
@@ -1901,13 +1905,17 @@ hold_secs = 1
 
     /// Every author is mid-reply at the stop, with its next reply already
     /// due when that one settles. Each may finish the reply it started, but
-    /// must start no other: one reply per author settles during shutdown.
+    /// must start no other: at most one reply per author settles during
+    /// shutdown.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn hot_thread_authors_start_nothing_once_the_run_stops() {
         let busy = "authors = 8\nreplies_per_hour = 36000000.0";
         let run = hot_thread_run(true, busy, Duration::from_millis(300)).await;
         let report = run.outcome.expect("in-flight replies settle in the grace");
         let settled = &report["shutdown"]["ops"]["hot_reply"]["count"];
-        assert_eq!(settled.as_u64(), Some(8), "{report}");
+        assert!(
+            (1..=8).contains(&settled.as_u64().unwrap_or_default()),
+            "{report}"
+        );
     }
 }

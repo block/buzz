@@ -145,7 +145,7 @@ with `{run}` to avoid colliding with another community.
 `teardown <scenario>` removes the communities `seed` provisioned from
 `target.community_host_template`, using the operator key `seed` used. For each
 host it archives the community as its fixture owner, then requests owner
-deletion with a request id derived from `run_id` and the community index. The
+deletion with a request id derived from `run_id` and the host. The
 relay's deletion drain does the deletion asynchronously; `teardown` reports
 the requests by the stage the relay returned (`requested`), hosts this run's
 fixture owner does not own (`absent`), and failures. It never touches a host
