@@ -27,6 +27,19 @@ test("admits older-history prepends without exposing buffered arrivals", () => {
   );
 });
 
+for (const olderIds of [[], ["older-a", "older-b"]]) {
+  test(`preserves reordered frozen rows with ${olderIds.length} older messages`, () => {
+    assert.deepEqual(
+      selectBufferedTimelineMessages({
+        frozenMessageIds: ["a", "b", "c"],
+        isAtBottom: false,
+        messages: rows(...olderIds, "b", "a", "c", "new"),
+      }).map(({ id }) => id),
+      [...olderIds, "a", "b", "c"],
+    );
+  });
+}
+
 test("releases the full logical dataset at bottom", () => {
   const messages = rows("a", "b", "c", "d");
   assert.deepEqual(
