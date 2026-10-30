@@ -161,7 +161,7 @@ fn validate_custom_emoji_tags(event: &Event) -> Result<(), IngestError> {
 ///
 /// Requires exactly one `d` tag, exactly one `emoji` tag, no `h` tag, a `d` equal
 /// to the normalized shortcode in the `emoji` tag, an `http(s)` image URL, and
-/// `content` of at most [`buzz_sdk::MAX_EMOJI_ENTRY_CONTENT_LEN`] bytes.
+/// `content` equal to [`buzz_sdk::emoji_entry_search_text`] of that shortcode.
 fn validate_emoji_entry(event: &Event) -> Result<(), IngestError> {
     let reject = |message: &str| IngestError::Rejected(format!("invalid: {message}"));
     let mut d_tags = Vec::new();
@@ -194,12 +194,10 @@ fn validate_emoji_entry(event: &Event) -> Result<(), IngestError> {
         ));
     }
     buzz_sdk::check_custom_emoji_url(url).map_err(|err| reject(&err.to_string()))?;
-    if event.content.len() > buzz_sdk::MAX_EMOJI_ENTRY_CONTENT_LEN {
-        return Err(reject(&format!(
-            "emoji entry content exceeds {} bytes (got {})",
-            buzz_sdk::MAX_EMOJI_ENTRY_CONTENT_LEN,
-            event.content.len()
-        )));
+    if event.content != buzz_sdk::emoji_entry_search_text(&normalized) {
+        return Err(reject(
+            "emoji entry content must equal the shortcode with _ and - replaced by spaces",
+        ));
     }
     Ok(())
 }
@@ -4049,10 +4047,13 @@ mod postgres_tests {
         const URL: &str = "https://example.com/p.gif";
         let ok_tags: &[&[&str]] = &[&["d", "party_parrot"], &["emoji", "party_parrot", URL]];
         assert!(validate_emoji_entry(&emoji_entry_event(ok_tags, "party parrot")).is_ok());
-        let max_content = "a".repeat(buzz_sdk::MAX_EMOJI_ENTRY_CONTENT_LEN);
-        assert!(validate_emoji_entry(&emoji_entry_event(ok_tags, &max_content)).is_ok());
+        let dashed_tags: &[&[&str]] =
+            &[&["d", "party-parrot-2"], &["emoji", "party-parrot-2", URL]];
+        assert!(validate_emoji_entry(&emoji_entry_event(dashed_tags, "party parrot 2")).is_ok());
+        let max_shortcode = "a".repeat(buzz_sdk::MAX_CUSTOM_EMOJI_SHORTCODE_LEN);
+        let max_tags: &[&[&str]] = &[&["d", &max_shortcode], &["emoji", &max_shortcode, URL]];
+        assert!(validate_emoji_entry(&emoji_entry_event(max_tags, &max_shortcode)).is_ok());
 
-        let long_content = "a".repeat(buzz_sdk::MAX_EMOJI_ENTRY_CONTENT_LEN + 1);
         let cases: Vec<(&str, Vec<&[&str]>, &str, &str)> = vec![
             ("no d", vec![&["emoji", "a", URL]], "", "exactly one d tag"),
             (
@@ -4105,10 +4106,28 @@ mod postgres_tests {
                 "http:// or https://",
             ),
             (
-                "content too long",
+                "arbitrary content",
                 vec![&["d", "a"], &["emoji", "a", URL]],
-                long_content.as_str(),
-                "content exceeds",
+                "x",
+                "content must equal",
+            ),
+            (
+                "empty content",
+                vec![&["d", "party_parrot"], &["emoji", "party_parrot", URL]],
+                "",
+                "content must equal",
+            ),
+            (
+                "keyword-stuffed content",
+                vec![&["d", "party_parrot"], &["emoji", "party_parrot", URL]],
+                "party parrot cat dog",
+                "content must equal",
+            ),
+            (
+                "content keeps underscores",
+                vec![&["d", "party_parrot"], &["emoji", "party_parrot", URL]],
+                "party_parrot",
+                "content must equal",
             ),
         ];
         for (name, tags, content, needle) in cases {

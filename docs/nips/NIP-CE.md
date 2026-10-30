@@ -43,7 +43,9 @@ An entry MUST NOT have an `h` tag. Entries are never scoped to a channel.
 
 Full-text search splits on spaces. The replacement lets a search for `parrot` find `party_parrot`.
 
-`content` MUST NOT be longer than 256 bytes. A shortcode of 64 bytes gives content of 64 bytes, so the limit leaves room for future text.
+`content` MUST equal this search text exactly. A relay MUST reject an entry with any other `content`, including empty content. Because the content comes from the shortcode, it is never longer than 64 bytes.
+
+The rule keeps the full-text index in step with the shortcode. An author cannot add keywords that the shortcode does not contain.
 
 ## Replace semantics
 
@@ -82,6 +84,8 @@ The relay returns at most 500 hits for each request. Clients SHOULD ask for 50 o
 The relay reads `search_mode` on `POST /query` only. A WebSocket `REQ` with `search` uses full-word matching.
 
 Search needs the relay to index `content` of `kind:30180` in its full-text index. A relay that indexes only an allowlist of kinds MUST add `30180` to the allowlist before clients rely on search. Exact lookup does not depend on the full-text index.
+
+In Buzz, a database that migration `0008_fresh_install_search_allowlist.sql` built, or that an operator converted with `scripts/maintenance/nip_rs_search_allowlist.sql`, indexes only an allowlist of kinds. Such a database does not index `kind:30180` until an operator runs the updated maintenance script. The operator MUST run it before the emoji migration rollout. Without it, entries are stored and exact lookup works, but prefix search returns no results.
 
 ## Relay behavior
 

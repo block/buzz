@@ -122,8 +122,6 @@ fn check_repo_id(repo_id: &str) -> Result<(), SdkError> {
 
 /// Maximum length of a custom emoji shortcode.
 pub const MAX_CUSTOM_EMOJI_SHORTCODE_LEN: usize = 64;
-/// Maximum byte length of a kind:30180 emoji entry `content` (the search text).
-pub const MAX_EMOJI_ENTRY_CONTENT_LEN: usize = 256;
 /// Maximum reaction payload length for a colon-wrapped custom emoji shortcode.
 pub const MAX_CUSTOM_EMOJI_REACTION_LEN: usize = MAX_CUSTOM_EMOJI_SHORTCODE_LEN + 2;
 
