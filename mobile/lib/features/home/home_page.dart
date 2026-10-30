@@ -94,7 +94,7 @@ class HomePage extends HookConsumerWidget {
           reducedMotion: reducedMotion,
         ),
       ),
-      messagesActionsBuilder: (openSwitcher) {
+      messagesActionsBuilder: (openSwitcher, avatarKey) {
         final moreActions = [
           (
             label: 'Switch workspace',
@@ -121,33 +121,35 @@ class HomePage extends HookConsumerWidget {
           (label: 'Settings', symbol: 'gearshape', onPressed: openSettings),
         ];
         return [
-          if (defaultTargetPlatform == TargetPlatform.iOS)
-            IosMessageCreateButton(
-              actions: moreActions,
-              dividerBefore: const {1},
-              icon: 'more',
-              avatarUrl: communityIcon,
-              avatarInitial: communityName.isEmpty
-                  ? '?'
-                  : communityName.characters.first.toUpperCase(),
-              accessibilityLabel: 'Community menu',
-              width: 44,
-              height: 44,
-              plain: false,
-            )
-          else
-            AndroidExpandingMenuButton(
-              label: 'Community menu',
-              actions: moreActions,
-              dividerBefore: const {1},
-              width: 48,
-              height: 48,
-              trigger: CommunityAvatar(
-                name: communityName,
-                relayUrl: community?.relayUrl,
-                size: 36,
-              ),
-            ),
+          SizedBox(
+            key: avatarKey,
+            child: defaultTargetPlatform == TargetPlatform.iOS
+                ? IosMessageCreateButton(
+                    actions: moreActions,
+                    dividerBefore: const {1},
+                    icon: 'more',
+                    avatarUrl: communityIcon,
+                    avatarInitial: communityName.isEmpty
+                        ? '?'
+                        : communityName.characters.first.toUpperCase(),
+                    accessibilityLabel: 'Community menu',
+                    width: 44,
+                    height: 44,
+                    plain: false,
+                  )
+                : AndroidExpandingMenuButton(
+                    label: 'Community menu',
+                    actions: moreActions,
+                    dividerBefore: const {1},
+                    width: 48,
+                    height: 48,
+                    trigger: CommunityAvatar(
+                      name: communityName,
+                      relayUrl: community?.relayUrl,
+                      size: 36,
+                    ),
+                  ),
+          ),
         ];
       },
       messagesFilters: MessagesFilters(

@@ -125,7 +125,7 @@ class ChannelsPage extends HookConsumerWidget {
 
   final WidgetBuilder settingsPageBuilder;
   final Widget? messagesFilters;
-  final List<Widget> Function(VoidCallback openSwitcher)?
+  final List<Widget> Function(VoidCallback openSwitcher, GlobalKey avatarKey)?
   messagesActionsBuilder;
   final Widget? soloSliver;
   final bool showTeam;
@@ -300,7 +300,8 @@ class ChannelsPage extends HookConsumerWidget {
     }, [canSurfaceError]);
 
     Rect? measureCommunityAvatar() {
-      if (defaultTargetPlatform == TargetPlatform.iOS) {
+      if (messagesFilters == null &&
+          defaultTargetPlatform == TargetPlatform.iOS) {
         final header = headerKey.currentContext?.findRenderObject();
         final bounds = nativeCommunityAvatarBounds.value;
         return header is RenderBox && bounds != null
@@ -311,7 +312,14 @@ class ChannelsPage extends HookConsumerWidget {
       return avatar is RenderBox
           ? MatrixUtils.transformRect(
               avatar.getTransformTo(null),
-              Offset.zero & avatar.size,
+              // The menu keeps a larger touch target around its 36dp avatar.
+              messagesFilters != null
+                  ? Rect.fromCenter(
+                      center: avatar.size.center(Offset.zero),
+                      width: 36,
+                      height: 36,
+                    )
+                  : Offset.zero & avatar.size,
             )
           : null;
     }
@@ -646,7 +654,11 @@ class ChannelsPage extends HookConsumerWidget {
                 ),
               ),
         actions: messagesFilters != null
-            ? messagesActionsBuilder?.call(openCommunityGrid) ?? const []
+            ? messagesActionsBuilder?.call(
+                    openCommunityGrid,
+                    communityAvatarKey,
+                  ) ??
+                  const []
             : [
                 _ChannelHeaderActions(
                   onSearch: onSearch,

@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/ios_message_create_button.dart';
 import 'package:buzz/features/channels/default_agent_launcher.dart';
 import 'package:buzz/features/agents/agents_page.dart';
 import 'dart:convert';
@@ -69,6 +70,7 @@ import '../../helpers/thread_ids.dart';
 part 'channels_page_test/presence_tests.dart';
 part 'channels_page_test/dm_recipient_layout_tests.dart';
 part 'channels_page_test/unread_readiness_tests.dart';
+part 'channels_page_test/home_community_flight.dart';
 part 'channels_page_test/read_seed_journey.dart';
 
 void main() {
@@ -171,6 +173,7 @@ void main() {
     );
   }
 
+  _homeCommunityFlightTests(buildTestable);
   _communityUnreadLandingTests(buildTestable);
   _readSeedJourney(buildTestable);
   _communityCachedLandingTests(buildTestable);
