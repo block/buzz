@@ -1,5 +1,6 @@
 import 'dart:io';
 
+// Keep this policy aligned with mobile/android/app/build.gradle.kts.
 bool isValidPushGatewayOrigin(String value, {bool requireHttps = false}) {
   try {
     final uri = Uri.parse(value);

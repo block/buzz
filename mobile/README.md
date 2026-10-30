@@ -192,6 +192,11 @@ migration. Changing gateways requires fresh enrollment; old installations
 expire under their original gateway's lease policy. Current-gateway response
 loss is still retried from the exact journaled request.
 
+To exercise the Android gateway build gate without an Android SDK or signing
+credentials, run `python3 scripts/test-android-push-gateway-origin.py` from the
+repository root with Java configured. This uses the Gradle wrapper and runs the
+production validation hook on empty compile tasks; it does not build an APK.
+
 Relay rollout remains an explicit deployment opt-in. Only deployments with
 `BUZZ_PUSH_ENABLED=true` advertise the descriptor and process push. See
 `docs/push-gateway-deployment.md` for the canonical gateway profile contract,
