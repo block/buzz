@@ -642,6 +642,8 @@ pub async fn validate_admin_event(
                 "t",
                 "join_role",
                 "unlisted",
+                // #645: export control is metadata too; a bare `no-bridge` edit is valid.
+                "no-bridge",
             ];
             let has_recognized = event
                 .tags
@@ -649,7 +651,7 @@ pub async fn validate_admin_event(
                 .any(|t| RECOGNIZED_TAGS.contains(&t.kind().to_string().as_str()));
             if !has_recognized {
                 return Err(anyhow::anyhow!(
-                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl, t, join_role, unlisted)"
+                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl, t, join_role, unlisted, no-bridge)"
                 ));
             }
 

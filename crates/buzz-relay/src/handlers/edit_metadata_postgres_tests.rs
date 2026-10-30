@@ -350,6 +350,46 @@ async fn join_role_edit_is_applied_and_announced() {
     assert!(announced, "one join_role_changed system message");
 }
 
+/// A kind:9002 carrying only `no-bridge` (#645) is a complete metadata edit:
+/// the pre-check recognizes the tag and the flag is applied. Before, the
+/// recognized-tag list predated #645, so a bare export-control edit was refused
+/// as "must include at least one metadata tag" and the policy could only be
+/// set by riding along with `about`. Mutation: drop `no-bridge` from
+/// `RECOGNIZED_TAGS` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn no_bridge_edit_alone_is_applied() {
+    let state = state().await;
+    let tenant = community(&state, "edit-no-bridge-alone").await;
+    let owner = Keys::generate();
+    let channel_id = create_channel(&state, &tenant, &owner, &[]).await;
+    let before = state
+        .db
+        .get_channel(tenant.community(), channel_id)
+        .await
+        .expect("channel");
+    assert!(!before.no_bridge, "channels start with export allowed");
+
+    let event = EventBuilder::new(Kind::Custom(9002), "")
+        .tags([
+            Tag::parse(["h", &channel_id.to_string()]).unwrap(),
+            Tag::parse(["no-bridge", "true"]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .expect("sign 9002");
+    let result = ingest_event(&state, &tenant, event, http_auth(&owner))
+        .await
+        .expect("ingest");
+    assert!(result.accepted, "{:?}", result.message);
+
+    let after = state
+        .db
+        .get_channel(tenant.community(), channel_id)
+        .await
+        .expect("channel");
+    assert!(after.no_bridge, "a bare no-bridge edit sets the flag");
+}
+
 /// Sign a kind:9002 that sets `archived` to `value` on `channel_id`.
 fn archive_event(owner: &Keys, channel_id: Uuid, value: &str) -> nostr::Event {
     EventBuilder::new(Kind::Custom(9002), "")
