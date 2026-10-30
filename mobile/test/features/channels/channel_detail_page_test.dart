@@ -11333,6 +11333,12 @@ void main() {
         findsOneWidget,
       );
       expect(activityStatus('Morty is working'), findsOneWidget);
+      // With no one typing, the status still has a place on screen, so
+      // screen readers can reach and announce it.
+      expect(
+        tester.getSemantics(activityStatus('Morty is working')).rect.height,
+        greaterThan(0),
+      );
       expect(find.bySemanticsLabel('Activity: Morty working'), findsOneWidget);
       expect(
         find.bySemanticsLabel('View thread: Morty is working'),

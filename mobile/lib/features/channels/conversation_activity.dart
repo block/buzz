@@ -53,13 +53,16 @@ class ConversationActivity extends ConsumerWidget {
     return Padding(
       key: const ValueKey('conversation-activity'),
       padding: const EdgeInsets.fromLTRB(Grid.twelve, 0, Grid.twelve, Grid.xxs),
-      child: Row(
-        children: [
-          // The status speaks for both sides, as desktop's live region does.
-          Expanded(
-            child: Semantics(
-              liveRegion: true,
-              label: status.join('. '),
+      // The status speaks for both sides, as desktop's live region does. It
+      // spans the whole row, so it has a place on screen when only agents
+      // show.
+      child: Semantics(
+        container: true,
+        liveRegion: true,
+        label: status.join('. '),
+        child: Row(
+          children: [
+            Expanded(
               child: ExcludeSemantics(
                 child: Align(
                   alignment: AlignmentDirectional.centerStart,
@@ -67,29 +70,29 @@ class ConversationActivity extends ConsumerWidget {
                 ),
               ),
             ),
-          ),
-          if (agents.isNotEmpty)
-            _WorkingAgents(
-              agents: agents.keys.toList(),
-              label: agents.length == 1
-                  ? 'Activity: ${name(agents.keys.single)} working'
-                  : 'Activity: ${agents.length} agents working',
-              // As in desktop's Solo chat, Me opens a lone agent's activity
-              // directly.
-              onTap: scope.allThreads && agents.length == 1
-                  ? () => showAgentActivity(
-                      context,
-                      channelId: scope.channelId,
-                      pubkey: agents.keys.single,
-                    )
-                  : () => showWorkingNowSheet(
-                      context,
-                      scope: scope,
-                      messages: messages,
-                      onOpenThread: onOpenThread,
-                    ),
-            ),
-        ],
+            if (agents.isNotEmpty)
+              _WorkingAgents(
+                agents: agents.keys.toList(),
+                label: agents.length == 1
+                    ? 'Activity: ${name(agents.keys.single)} working'
+                    : 'Activity: ${agents.length} agents working',
+                // As in desktop's Solo chat, Me opens a lone agent's activity
+                // directly.
+                onTap: scope.allThreads && agents.length == 1
+                    ? () => showAgentActivity(
+                        context,
+                        channelId: scope.channelId,
+                        pubkey: agents.keys.single,
+                      )
+                    : () => showWorkingNowSheet(
+                        context,
+                        scope: scope,
+                        messages: messages,
+                        onOpenThread: onOpenThread,
+                      ),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -155,6 +158,7 @@ class _WorkingAgents extends ConsumerWidget {
     // Desktop's 24px tiles, each overlapping the next by 4px.
     const tile = 24.0, step = tile - Grid.half;
     return Semantics(
+      container: true,
       button: true,
       label: label,
       onTap: onTap,
