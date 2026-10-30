@@ -152,9 +152,9 @@ async fn list_relay_agents_for_selection(
     };
 
     // Membership remains the authoritative and bounded authorization scope,
-    // visible only to this viewer. Known owned identities can have any
-    // membership role; other candidates must still have explicit bot-role
-    // evidence.
+    // visible only to this viewer. Every member is a discovery candidate,
+    // regardless of role. Signed runtime/managed-policy evidence below still
+    // determines agent identity and invocation eligibility.
     let mut membership_filter = serde_json::json!({
         "kinds": [39002],
         "authors": [&relay_pubkey],
@@ -189,7 +189,7 @@ async fn list_relay_agents_for_selection(
             let candidate_pubkeys: Vec<String> = requested_pubkeys.iter().cloned().collect();
             let directory_filters = exact_author_filters(&candidate_pubkeys, 10100);
             let profile_filters = exact_author_filters(&candidate_pubkeys, 0);
-            let (owned_events, membership_events, directory_events, profile_events) = tokio::try_join!(
+            let (_owned_events, membership_events, directory_events, profile_events) = tokio::try_join!(
                 owned_query,
                 membership_query,
                 query_filter_batches(
@@ -205,12 +205,8 @@ async fn list_relay_agents_for_selection(
                     "relay agent owner-profile query failed",
                 ),
             )?;
-            let owned_candidates = nostr_convert::managed_agent_pubkeys_from_events(&owned_events);
-            let mut member_agent_channel_ids = nostr_convert::member_agent_channel_ids_from_events(
-                &membership_events,
-                &relay_pubkey,
-                &owned_candidates,
-            );
+            let mut member_agent_channel_ids =
+                nostr_convert::member_channel_ids_from_events(&membership_events, &relay_pubkey);
             member_agent_channel_ids.retain(|pubkey, _| requested_pubkeys.contains(pubkey));
             (
                 member_agent_channel_ids,
@@ -226,11 +222,8 @@ async fn list_relay_agents_for_selection(
             let owned_events = owned_query.await?;
             let membership_events = membership_query.await?;
             let owned_candidates = nostr_convert::managed_agent_pubkeys_from_events(&owned_events);
-            let member_agent_channel_ids = nostr_convert::member_agent_channel_ids_from_events(
-                &membership_events,
-                &relay_pubkey,
-                &owned_candidates,
-            );
+            let member_agent_channel_ids =
+                nostr_convert::member_channel_ids_from_events(&membership_events, &relay_pubkey);
             let candidate_pubkeys: Vec<String> = member_agent_channel_ids
                 .keys()
                 .cloned()
@@ -661,3 +654,6 @@ mod real_relay_tests {
 
 #[cfg(test)]
 mod owned_tests;
+
+#[cfg(test)]
+mod legacy_tests;
