@@ -53,7 +53,7 @@ spec:
             - { name: BUZZ_PUSH_APNS_TOPIC, value: {{ .Values.application.apnsTopic | quote }} }
             - { name: BUZZ_PUSH_APNS_ENVIRONMENT, value: {{ .Values.application.apnsEnvironment | quote }} }
             - { name: BUZZ_PUSH_APNS_CERT_PATH, value: /run/buzz/apns/identity.pem }
-            {{- range $name := list "DATABASE_URL" "BUZZ_PUSH_GRANT_KEYS" "BUZZ_PUSH_TOKEN_KEYS" }}
+            {{- range $name := list "DATABASE_URL" "BUZZ_PUSH_TOKEN_KEYS" }}
             - name: {{ $name }}
               valueFrom: { secretKeyRef: { name: {{ $.Values.existingSecret }}, key: {{ $name }} } }
             {{- end }}

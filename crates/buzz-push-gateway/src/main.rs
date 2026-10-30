@@ -3,7 +3,6 @@ use buzz_push_gateway::{
     app_attest::AppAttestVerifier,
     authority::AuthorityStore,
     config::Config,
-    grant::{GrantKey, GrantKeyring},
     postgres::PostgresAuthorityStore,
     router_with_metrics,
     token::{TokenKey, TokenKeyring},
@@ -62,12 +61,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             transport,
         }
     };
-    let grant_keyring = GrantKeyring::new(
-        c.grant_keys
-            .iter()
-            .map(|key| GrantKey::new(&key.id, &key.key))
-            .collect::<Result<_, _>>()?,
-    )?;
     let token_keyring = TokenKeyring::new(
         c.token_keys
             .iter()
@@ -101,7 +94,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let accepting = Arc::new(AtomicBool::new(true));
     let (public, health) = router_with_metrics(
         AppState {
-            grant_keyring: Arc::new(grant_keyring),
             authority,
             token_keyring: Arc::new(token_keyring),
             application: Arc::new(application),

@@ -11,10 +11,6 @@ fn parsed_configuration_reaches_executable_verifier() {
         let mut command = Command::new(env!("CARGO_BIN_EXE_buzz-push-gateway"));
         command.env_clear().envs([
             (
-                "BUZZ_PUSH_GRANT_KEYS",
-                format!("grant:{}", STANDARD.encode([1; 32])),
-            ),
-            (
                 "BUZZ_PUSH_TOKEN_KEYS",
                 format!("token:{}", STANDARD.encode([2; 32])),
             ),

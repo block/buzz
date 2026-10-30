@@ -47,10 +47,7 @@ pub struct Config {
     pub application: ApplicationConfig,
     pub database_url: String,
     pub app_attest_root_cert_path: PathBuf,
-    /// Ordered current key first, followed by decrypt-only predecessors.
-    pub grant_keys: Vec<KeyConfig>,
-    /// Independent token-custody keyring. These keys MUST NOT be reused for
-    /// externally presented delivery capabilities.
+    /// Token-custody keyring, current key first, then decrypt-only predecessors.
     pub token_keys: Vec<KeyConfig>,
 }
 
@@ -158,15 +155,7 @@ impl Config {
                 .filter(|v| !v.is_empty())
                 .ok_or(ConfigError::Missing(k))
         }
-        let grant_keys = parse_keyring(e, "BUZZ_PUSH_GRANT_KEYS")?;
         let token_keys = parse_keyring(e, "BUZZ_PUSH_TOKEN_KEYS")?;
-        if grant_keys.iter().any(|grant| {
-            token_keys
-                .iter()
-                .any(|token| grant.id == token.id || grant.key == token.key)
-        }) {
-            return Err(ConfigError::Invalid("BUZZ_PUSH_TOKEN_KEYS"));
-        }
         let max_grant_lifetime_seconds = req(e, "BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS")?
             .parse::<i64>()
             .ok()
@@ -219,7 +208,6 @@ impl Config {
             application,
             database_url: req(e, "DATABASE_URL")?.to_owned(),
             app_attest_root_cert_path: req(e, "BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH")?.into(),
-            grant_keys,
             token_keys,
         })
     }
@@ -271,14 +259,6 @@ mod tests {
 
     fn base() -> HashMap<String, String> {
         HashMap::from([
-            (
-                "BUZZ_PUSH_GRANT_KEYS".into(),
-                format!(
-                    "current:{},old:{}",
-                    STANDARD.encode([1; 32]),
-                    STANDARD.encode([2; 32])
-                ),
-            ),
             (
                 "BUZZ_PUSH_TOKEN_KEYS".into(),
                 format!(
@@ -357,13 +337,10 @@ mod tests {
     }
 
     #[test]
-    fn keyrings_preserve_current_then_predecessor_order_and_are_independent() {
+    fn token_keyring_preserves_current_then_predecessor_order() {
         let config = Config::from_map(&base()).unwrap();
-        assert_eq!(config.grant_keys[0].id, "current");
-        assert_eq!(config.grant_keys[1].id, "old");
         assert_eq!(config.token_keys[0].id, "current-token");
         assert_eq!(config.token_keys[1].id, "old-token");
-        assert_ne!(config.grant_keys[0].key, config.token_keys[0].key);
     }
 
     #[test]
@@ -406,18 +383,6 @@ mod tests {
     }
 
     #[test]
-    fn cross_keyring_id_or_material_reuse_fails_startup() {
-        for token_keys in [
-            format!("current:{}", STANDARD.encode([9; 32])),
-            format!("other:{}", STANDARD.encode([1; 32])),
-        ] {
-            let mut env = base();
-            env.insert("BUZZ_PUSH_TOKEN_KEYS".into(), token_keys);
-            assert!(Config::from_map(&env).is_err());
-        }
-    }
-
-    #[test]
     fn listener_defaults_remain_public_when_addresses_are_absent() {
         let mut env = base();
         env.remove("BUZZ_PUSH_BIND_ADDR");
@@ -431,9 +396,6 @@ mod tests {
     #[test]
     fn malformed_or_empty_keyrings_fail_startup() {
         for (variable, value) in [
-            ("BUZZ_PUSH_GRANT_KEYS", ""),
-            ("BUZZ_PUSH_GRANT_KEYS", "missing_separator"),
-            ("BUZZ_PUSH_GRANT_KEYS", "id:bad-base64"),
             ("BUZZ_PUSH_TOKEN_KEYS", ""),
             ("BUZZ_PUSH_TOKEN_KEYS", "missing_separator"),
             ("BUZZ_PUSH_TOKEN_KEYS", "id:bad-base64"),
