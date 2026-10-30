@@ -116,10 +116,11 @@ const INLINE_INDEX_BUILDS: &[(i64, &[(&str, &str)])] = &[
     ),
 ];
 
-/// Build the missing `indexes` in one bounded transaction unless migration
-/// `version` is already recorded. An existing index, valid or not, is left
-/// for the migration to verify, and is skipped before `CREATE INDEX` so a
-/// prebuilt deployment never requests the writer-conflicting lock.
+/// Build each missing index in `indexes` in its own bounded transaction
+/// unless migration `version` is already recorded, so no build holds its
+/// writer-conflicting lock past its own budget. An existing index, valid or
+/// not, is left for the migration to verify, and is skipped before
+/// `CREATE INDEX` so a prebuilt deployment never requests that lock.
 async fn build_indexes_before_migration(
     conn: &mut PgConnection,
     version: i64,
@@ -134,20 +135,21 @@ async fn build_indexes_before_migration(
         return Ok(());
     }
     let build = async {
-        let mut tx = conn.begin().await?;
-        sqlx::raw_sql("SET LOCAL lock_timeout = '1s'; SET LOCAL statement_timeout = '5s'")
-            .execute(&mut *tx)
-            .await?;
         for (name, definition) in indexes {
             let exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
                 .bind(format!("public.{name}"))
-                .fetch_one(&mut *tx)
+                .fetch_one(&mut *conn)
                 .await?;
             if !exists {
+                let mut tx = conn.begin().await?;
+                sqlx::raw_sql("SET LOCAL lock_timeout = '1s'; SET LOCAL statement_timeout = '5s'")
+                    .execute(&mut *tx)
+                    .await?;
                 sqlx::raw_sql(*definition).execute(&mut *tx).await?;
+                tx.commit().await?;
             }
         }
-        tx.commit().await
+        Ok::<(), sqlx::Error>(())
     };
     build.await.map_err(|error| {
         crate::DbError::InvalidData(format!(
@@ -3233,8 +3235,9 @@ mod postgres_tests {
 
     /// Migrations 0076 and 0078 refuse a populated table whose index was not
     /// prebuilt concurrently. Startup auto-migration must still upgrade a small
-    /// populated database, and must fail closed without recording either
-    /// migration when the bounded inline build cannot take its lock.
+    /// populated database. When a bounded inline build cannot take its lock it
+    /// must fail closed without recording that migration, keeping earlier
+    /// migrations and each index already built in its own transaction.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn populated_artifact_tables_auto_migrate_through_inline_index_builds() {
@@ -3317,6 +3320,36 @@ mod postgres_tests {
         );
         assert_eq!(applied_versions(&pool).await.last().copied(), Some(76));
         holder.rollback().await.expect("release second writer lock");
+
+        // Block the third 0078 build. The two artifact_heads builds before it
+        // commit separately, so neither holds its lock while the third waits.
+        run_migrations_through(&pool, 77)
+            .await
+            .expect("apply migration 77");
+        let mut holder = pool.begin().await.expect("begin third lock holder");
+        sqlx::query("LOCK TABLE channel_members IN ROW EXCLUSIVE MODE")
+            .execute(&mut *holder)
+            .await
+            .expect("hold a channel_members writer lock");
+        let blocked = run_migrations(&pool)
+            .await
+            .expect_err("a blocked 0078 build must fail closed")
+            .to_string();
+        assert!(
+            blocked.contains("migration 78 blocked"),
+            "unexpected error: {blocked}"
+        );
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(77));
+        let committed: bool =
+            sqlx::query_scalar("SELECT to_regclass('public.artifact_heads_modified') IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .expect("read earlier 0078 build");
+        assert!(
+            committed,
+            "an earlier build must commit before the next one"
+        );
+        holder.rollback().await.expect("release third writer lock");
 
         run_migrations(&pool)
             .await
