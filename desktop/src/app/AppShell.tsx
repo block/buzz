@@ -58,6 +58,11 @@ import {
   usePresenceSubscription,
 } from "@/features/presence/hooks";
 import {
+  SLASH_UI_SET_PRESENCE,
+  type SetPresenceRequest,
+} from "@/features/slash-commands/lib/presenceUiRequests";
+import { useSlashCommandUiHandler } from "@/features/slash-commands/lib/slashCommandUiRequests";
+import {
   useSetUserStatusMutation,
   useUserStatusQuery,
   visibleUserStatus,
@@ -81,6 +86,11 @@ import { AppSidebar } from "@/features/sidebar/ui/AppSidebar";
 import { requestFocusedThreadClose } from "@/features/channels/focusedThreadCloseRequest";
 import { CommunityRail } from "@/features/sidebar/ui/CommunityRail";
 import { useChannelMutes } from "@/features/sidebar/lib/useChannelMutes";
+import {
+  TOGGLE_CHANNEL_MUTE_UI,
+  type ToggleChannelMutePayload,
+} from "@/features/slash-commands/lib/channelAdminCommands";
+import { useSlashCommandUiHandler } from "@/features/slash-commands/lib/slashCommandUiRequests";
 import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
 import { useCommunities } from "@/features/communities/useCommunities";
 import {
@@ -196,6 +206,14 @@ export function AppShell() {
     identityQuery.data?.pubkey,
     communitiesHook.activeCommunity?.relayUrl,
   );
+  useSlashCommandUiHandler(TOGGLE_CHANNEL_MUTE_UI, (payload) => {
+    if (!identityQuery.data?.pubkey) return;
+    const { channelId, report } = payload as ToggleChannelMutePayload;
+    const wasMuted = mutedChannelIds.has(channelId);
+    if (wasMuted) unmuteChannel(channelId);
+    else muteChannel(channelId);
+    report(!wasMuted);
+  });
   const { starredChannelIds, starChannel, unstarChannel } = useChannelStars(
     identityQuery.data?.pubkey,
     communitiesHook.activeCommunity?.relayUrl,
@@ -238,6 +256,10 @@ export function AppShell() {
   useCommunityEmojiLiveUpdates();
   useMembershipNotifications(identityQuery.data?.pubkey);
   const presenceSession = usePresenceSession(deferredPubkey);
+  useSlashCommandUiHandler(SLASH_UI_SET_PRESENCE, (payload) => {
+    const request = payload as SetPresenceRequest;
+    request.result = presenceSession.setStatus(request.status);
+  });
   const selfStatusQuery = useUserStatusQuery(
     deferredPubkey ? [deferredPubkey] : [],
   );

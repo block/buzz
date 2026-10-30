@@ -1,10 +1,8 @@
 import { EllipsisVertical, Settings2, Users } from "lucide-react";
 import * as React from "react";
-import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
 import { useHuddle } from "@/features/huddle";
 import { HuddleIndicator } from "@/features/huddle/components/HuddleIndicator";
-import { formatHuddleActionError } from "@/features/huddle/lib/huddleError";
 import { buildHuddleChannelName } from "@/features/huddle/lib/huddleChannelName";
 import {
   useAvailableAcpRuntimes,
@@ -164,23 +162,18 @@ export function ChannelMembersBar({
     <HuddleIndicator
       channelId={channel.id}
       onStart={async () => {
-        try {
-          await startHuddle(
-            channel.id,
-            [...huddleMemberPubkeys],
-            buildHuddleChannelName({
-              channel,
-              currentPubkey,
-              members,
-            }),
-          );
-          // Keep the channel cache current so the ephemeral transcript is
-          // available immediately if the huddle returns to the in-app drawer.
-          void queryClient.invalidateQueries({ queryKey: ["channels"] });
-        } catch (e) {
-          console.error("Failed to start huddle:", e);
-          toast.error(formatHuddleActionError(e, "start"));
-        }
+        await startHuddle(
+          channel.id,
+          [...huddleMemberPubkeys],
+          buildHuddleChannelName({
+            channel,
+            currentPubkey,
+            members,
+          }),
+        );
+        // Keep the channel cache current so the ephemeral transcript is
+        // available immediately if the huddle returns to the in-app drawer.
+        void queryClient.invalidateQueries({ queryKey: ["channels"] });
       }}
       renderMode={variant === "compact" ? "menu-item" : "button"}
       startDisabled={

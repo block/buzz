@@ -13,9 +13,6 @@ import '../../shared/widgets/text_editor.dart';
 import 'channel.dart';
 import 'channel_management_provider.dart';
 
-String _channelName(String value) =>
-    value.trim().replaceFirst(RegExp(r'^#+'), '').trim();
-
 /// Opens name and description directly in one full editing sheet.
 Future<bool?> showManageChannelSheet({
   required BuildContext context,
@@ -147,7 +144,7 @@ Future<Channel> _saveDetails(
   String name,
   String description,
 ) async {
-  final canonicalName = _channelName(name);
+  final canonicalName = canonicalChannelName(name);
   final trimmedDescription = description.trim();
   if (canonicalName.isEmpty) {
     throw const FormatException('Channel name is required.');
@@ -235,7 +232,7 @@ class ManageChannelSheet extends HookConsumerWidget {
     final canEditCanvas = channel.isMember && !channel.isArchived;
     // Keep actions bound to the community in which this editor was opened.
     final actions = useMemoized(() => ref.read(channelActionsProvider));
-    final canonicalName = _channelName(name.text);
+    final canonicalName = canonicalChannelName(name.text);
     final changed =
         canonicalName != channel.name.trim() ||
         description.text.trim() != channel.description.trim();

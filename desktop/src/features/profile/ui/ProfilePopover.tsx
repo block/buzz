@@ -12,6 +12,8 @@ import {
   getPresenceChipClassName,
   getPresenceLabel,
 } from "@/features/presence/lib/presence";
+import { SLASH_UI_OPEN_STATUS_DIALOG } from "@/features/slash-commands/lib/presenceUiRequests";
+import { useSlashCommandUiHandler } from "@/features/slash-commands/lib/slashCommandUiRequests";
 import { SetStatusDialog } from "@/features/user-status/ui/SetStatusDialog";
 import {
   DEFAULT_USER_STATUS_EMOJI,
@@ -77,6 +79,9 @@ export function ProfilePopover({
 }: ProfilePopoverProps) {
   const [statusDialogOpen, setStatusDialogOpen] = React.useState(false);
   const [presenceMenuOpen, setPresenceMenuOpen] = React.useState(false);
+  useSlashCommandUiHandler(SLASH_UI_OPEN_STATUS_DIALOG, () =>
+    setStatusDialogOpen(true),
+  );
   const hasUserStatus = Boolean(userStatusText || userStatusEmoji);
   const settingsShortcutLabel = isMacPlatform() ? "⌘," : "Ctrl+,";
 

@@ -21,6 +21,8 @@ import { ChannelScreenHeader } from "@/features/channels/ui/ChannelScreenHeader"
 import { WelcomeAgentCreateDialog } from "@/features/channels/ui/WelcomeAgentCreateDialog";
 import { ForumChannelContent } from "@/features/channels/ui/ForumChannelContent";
 import { MembersSidebar } from "@/features/channels/ui/MembersSidebar";
+import { OPEN_MEMBERS_UI } from "@/features/slash-commands/lib/membershipUi";
+import { useSlashCommandUiHandler } from "@/features/slash-commands/lib/slashCommandUiRequests";
 import {
   useManagedAgentsQuery,
   usePersonasQuery,
@@ -150,6 +152,7 @@ export function ChannelScreen({
     widthPx: threadPanelWidthPx,
   } = useThreadPanelWidth(channelContentWidthPx || undefined);
   const [isMembersSidebarOpen, setIsMembersSidebarOpen] = React.useState(false);
+  useSlashCommandUiHandler(OPEN_MEMBERS_UI, () => setIsMembersSidebarOpen(true));
   const [isAddBotOpen, setIsAddBotOpen] = React.useState(false);
   const [expandedThreadReplyIds, setExpandedThreadReplyIds] = React.useState(
     () => new Set<string>(),

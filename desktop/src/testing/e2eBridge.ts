@@ -376,6 +376,8 @@ type E2eConfig = {
     ensureStarterChannelsErrors?: string[];
     /** Reject successive mock `join_channel` calls, then resume. */
     joinChannelErrors?: string[];
+    /** Reject successive mock `update_channel` calls, then resume. */
+    updateChannelErrors?: string[];
     channelsReadDelayMs?: number;
     /**
      * Hold the first `get_channels` read until
@@ -7646,6 +7648,11 @@ async function handleUpdateChannel(
 
   const identity = getIdentity(config);
   if (!identity) {
+    const updateChannelError = config?.mock?.updateChannelErrors?.shift();
+    if (updateChannelError) {
+      throw new Error(updateChannelError);
+    }
+
     const channel = getMockChannel(args.channelId);
     if (args.name !== undefined) {
       channel.name = args.name;

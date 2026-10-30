@@ -14,6 +14,11 @@ import {
 import { Button } from "@/shared/ui/button";
 import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { useSlashCommandUiHandler } from "@/features/slash-commands/lib/slashCommandUiRequests";
+import {
+  huddleSlashUiName,
+  readSettledUiRequest,
+} from "@/features/slash-commands/lib/slashUiRequest";
 import { useHuddle } from "../HuddleContext";
 import { formatHuddleActionError } from "../lib/huddleError";
 
@@ -33,8 +38,9 @@ type HuddleIndicatorProps = {
   channelId: string;
   className?: string;
   renderMode?: "button" | "menu-item";
-  /** Called when the user clicks the button and no huddle is active (start). */
-  onStart?: () => void;
+  /** Called when the user clicks the button and no huddle is active (start).
+   *  Reject to report a failed start. */
+  onStart?: () => void | Promise<void>;
   /** Whether the start action is disabled (e.g., permissions, already starting). */
   startDisabled?: boolean;
 };
@@ -51,12 +57,71 @@ export function HuddleIndicator({
   onStart,
   startDisabled,
 }: HuddleIndicatorProps) {
-  const { activeEphemeralChannelId, joinHuddle, isStarting } = useHuddle();
+  const {
+    activeEphemeralChannelId,
+    joinHuddle,
+    isStarting,
+    viewHuddleChannel,
+  } = useHuddle();
   const queryClient = useQueryClient();
   const [activeHuddle, setActiveHuddle] = React.useState<ActiveHuddle | null>(
     null,
   );
   const [isJoining, setIsJoining] = React.useState(false);
+
+  const startFromUi = React.useCallback(() => {
+    void Promise.resolve(onStart?.()).catch((error) => {
+      console.error("Failed to start huddle:", error);
+      toast.error(formatHuddleActionError(error, "start"));
+    });
+  }, [onStart]);
+
+  useSlashCommandUiHandler(huddleSlashUiName(channelId), (payload) => {
+    const request = readSettledUiRequest(payload);
+    if (!request) return;
+    void (async () => {
+      if (activeEphemeralChannelId) {
+        if (activeHuddle?.ephemeralChannelId === activeEphemeralChannelId) {
+          viewHuddleChannel(activeEphemeralChannelId);
+          return;
+        }
+        throw new Error("Leave your current huddle first.");
+      }
+      if (isStarting || isJoining) {
+        throw new Error("A huddle is already starting.");
+      }
+      if (activeHuddle) {
+        setIsJoining(true);
+        try {
+          await joinHuddle(
+            channelId,
+            activeHuddle.ephemeralChannelId,
+            activeHuddle.huddleThreadEventId ?? undefined,
+          );
+        } catch (error) {
+          throw new Error(formatHuddleActionError(error, "join"));
+        } finally {
+          setIsJoining(false);
+        }
+        void queryClient.invalidateQueries({ queryKey: ["channels"] });
+        return;
+      }
+      if (!onStart || startDisabled) {
+        throw new Error("You can't start a huddle in this channel right now.");
+      }
+      try {
+        await onStart();
+      } catch (error) {
+        throw new Error(formatHuddleActionError(error, "start"));
+      }
+    })().then(
+      () => request.settle(),
+      (error) =>
+        request.settle(
+          error instanceof Error ? error : new Error(String(error)),
+        ),
+    );
+  });
 
   React.useEffect(() => {
     if (!channelId) return;
@@ -247,7 +312,7 @@ export function HuddleIndicator({
         return;
       }
 
-      if (!startDisabled) onStart?.();
+      if (!startDisabled) startFromUi();
     }
 
     window.addEventListener(HUDDLE_SHORTCUT_EVENT, handleHuddleShortcut);
@@ -260,9 +325,9 @@ export function HuddleIndicator({
     isJoining,
     isStarting,
     joinHuddle,
-    onStart,
     queryClient,
     startDisabled,
+    startFromUi,
   ]);
 
   // No active huddle — render the start button (if onStart provided).
@@ -274,7 +339,7 @@ export function HuddleIndicator({
           className={className}
           data-testid="channel-start-huddle-trigger"
           disabled={startDisabled || isStarting}
-          onSelect={() => onStart()}
+          onSelect={startFromUi}
         >
           <Headphones />
           <span>Start huddle</span>
@@ -294,7 +359,7 @@ export function HuddleIndicator({
               className={className}
               data-testid="channel-start-huddle-trigger"
               disabled={startDisabled || isStarting}
-              onClick={() => onStart()}
+              onClick={startFromUi}
               size="icon"
               type="button"
               variant="outline"

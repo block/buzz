@@ -18,6 +18,9 @@ class ComposeBar extends HookConsumerWidget {
   /// Optional thread IDs for thread-scoped typing indicators.
   final String? threadHeadId;
   final String? rootId;
+
+  /// Runs `/commands` typed as the first token. Off unless a composer opts in.
+  final bool enableSlashCommands;
   const ComposeBar({
     super.key,
     required this.channelId,
@@ -28,6 +31,7 @@ class ComposeBar extends HookConsumerWidget {
     this.focusNode,
     this.onFocusRestorerChanged,
     this.onFocusRequested,
+    this.enableSlashCommands = false,
     required this.onSend,
   });
   @override
@@ -245,8 +249,8 @@ class ComposeBar extends HookConsumerWidget {
               .cachedMembersForChannel(channelId);
     final currentPubkey = ref.watch(currentPubkeyProvider);
     final userCache = ref.watch(userCacheProvider);
-    final isDmChannel =
-        ref.watch(channelByIdProvider(channelId))?.isDm ?? false;
+    final currentChannel = ref.watch(channelByIdProvider(channelId));
+    final isDmChannel = currentChannel?.isDm ?? false;
 
     // Preload profiles for channel members, mentionable agents, and their
     // owners so @mention suggestions show names ("managed by …" included).
@@ -448,6 +452,19 @@ class ComposeBar extends HookConsumerWidget {
     final channels = channelsAsync.asData?.value ?? <Channel>[];
     final channelSuggestions = filterChannels(channels, channelQuery.value);
 
+    final slash = _useSlashCommands(
+      ref: ref,
+      enabled: enableSlashCommands,
+      channelId: channelId,
+      channel: currentChannel,
+      threadHeadId: threadHeadId,
+      rootId: rootId,
+      channels: channelsAsync.asData?.value ?? const [],
+      customEmoji: customEmoji,
+      controller: controller,
+      focusNode: focusNode,
+    );
+
     // Insert a selected channel into the text field.
     void insertChannel(Channel channel) {
       final start = channelStartIdx.value.clamp(0, controller.text.length);
@@ -523,6 +540,17 @@ class ComposeBar extends HookConsumerWidget {
       // Resolved before any await: see
       // `_reportSendCancelledByCommunitySwitch`.
       final messenger = ScaffoldMessenger.maybeOf(context);
+      final command = enableSlashCommands
+          ? slashRegistry.recognize(text)
+          : null;
+      if (command != null && hasAttachments) {
+        messenger?.showSnackBar(
+          const SnackBar(
+            content: Text('Commands cannot be sent with attachments'),
+          ),
+        );
+        return;
+      }
 
       // Extract pubkeys for mentions present in the final text.
       List<MentionCandidate> selectedMentions;
@@ -562,6 +590,25 @@ class ComposeBar extends HookConsumerWidget {
         );
       } on FormatException catch (error) {
         messenger?.showSnackBar(SnackBar(content: Text(error.message)));
+        return;
+      }
+      if (command != null) {
+        isSending.value = true;
+        try {
+          final done = await slash.run(
+            invocation: command,
+            mentions: selectedMentions,
+            send: sendWithOrigin,
+            messenger: messenger,
+          );
+          if (done &&
+              context.mounted &&
+              draftRevision.value == submittedDraftRevision) {
+            clearComposer();
+          }
+        } finally {
+          if (context.mounted) isSending.value = false;
+        }
         return;
       }
       final outgoing = _OutgoingMentions(selectedMentions);
@@ -989,6 +1036,8 @@ class ComposeBar extends HookConsumerWidget {
         final query = mentionQuery.value;
         if (query != null) ref.invalidate(mentionUserSearchProvider(query));
       },
+      slashSuggestions: slash.suggestions,
+      onSlashSelect: slash.select,
       userCache: userCache,
       currentPubkey: currentPubkey,
       isDmChannel: isDmChannel,

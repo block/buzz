@@ -1,7 +1,8 @@
 part of '../activity_page.dart';
 
 /// Reminders surface for the Reminders filter — due/pending NIP-ER
-/// reminders that deep-link to their target message.
+/// reminders. Message reminders deep-link to their target message; note-only
+/// reminders show their note and have no action.
 class _RemindersList extends ConsumerWidget {
   final ScrollController scrollController;
   final void Function(Reminder reminder) onOpen;
@@ -67,7 +68,7 @@ class _RemindersList extends ConsumerWidget {
                         : 'Due ${_inboxTimestamp(reminder.notBefore!)}',
                   )
                 : null,
-            onTap: () => onOpen(reminder),
+            onTap: reminder.target == null ? null : () => onOpen(reminder),
           );
         },
       ),

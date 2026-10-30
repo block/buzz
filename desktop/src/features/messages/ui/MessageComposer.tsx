@@ -36,6 +36,7 @@ import type { SlashCommandDefinition } from "@/features/slash-commands/lib/types
 import { useSlashCommandRegistry } from "@/features/slash-commands/commands/useSlashCommandRegistry";
 import { useSlashCommandAutocomplete } from "@/features/slash-commands/useSlashCommandAutocomplete";
 import { useSlashCommandRunner } from "@/features/slash-commands/useSlashCommandRunner";
+import { useComposerGifRequest } from "./useComposerGifRequest";
 import { CUSTOM_EMOJI_NODE_NAME } from "@/features/messages/lib/customEmojiNode";
 import {
   type AutocompleteEdit,
@@ -401,6 +402,19 @@ function MessageComposerImpl({
     restoreQueuedAttachments: media.restoreQueuedAttachments,
     setSpoileredAttachmentUrls,
   });
+  const gifQuery = useComposerGifRequest({
+    blockedReason:
+      composerDisabled || voiceNote.status !== "idle"
+        ? "GIFs can't be added right now."
+        : voiceNote.hasAttachment
+          ? "Remove the voice note to add a GIF."
+          : null,
+    channelId,
+    enabled: slashCommands && editTarget == null,
+    isPickerOpen: isEmojiPickerOpen,
+    isThread: audienceContext?.type === "thread",
+    openPicker: () => setIsEmojiPickerOpen(true),
+  });
   const slashRunner = useSlashCommandRunner({
     commands: slashRegistry,
     channelId,
@@ -412,7 +426,10 @@ function MessageComposerImpl({
     getThreadContext: () => onCaptureSendContext?.() ?? null,
     resolveMentions: async (text) => {
       await mentions.settlePendingMentionBindings();
-      return mentions.extractMentionPubkeys(text);
+      return {
+        pubkeys: mentions.extractMentionPubkeys(text),
+        ranges: mentions.extractMentionRanges(text),
+      };
     },
     send: async (content, threadContext) => {
       const mentionPubkeys = await mentions.revalidateMentionPubkeys(
@@ -436,7 +453,6 @@ function MessageComposerImpl({
       channelLinks.clearChannels();
       emojiAutocomplete.clearEmojis();
       slashAutocomplete.clear();
-      setIsEmojiPickerOpen(false);
     },
   });
   React.useEffect(() => {
@@ -1050,6 +1066,7 @@ function MessageComposerImpl({
               extraActions={toolbarExtraActions}
               formattingDisabled={composerDisabled}
               gifMediaController={media}
+              gifQuery={gifQuery}
               isEmojiPickerOpen={isEmojiPickerOpen}
               isFormattingOpen={isFormattingOpen}
               isSending={isSending || mentionSendFlow.isPreparingMentionSend}
