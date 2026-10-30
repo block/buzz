@@ -12,9 +12,9 @@ The rule ships in two releases:
    create or rename that would give a listed channel a name another listed
    channel has, with an `invalid:` reply. It
    also reports a write that the contract index refuses with the same reply,
-   so it can run beside that index. It lets a relay operator rename any
-   channel with a name-only kind:9002, and ships the rename script
-   `scripts/maintenance/rename_duplicate_listed_channel_names.sh`.
+   so it can run beside that index. It lets a relay operator rename a listed
+   channel, archived or not, with a name-only kind:9002, and ships the rename
+   script `scripts/maintenance/rename_duplicate_listed_channel_names.sh`.
 2. **Contract release.** Migration `0079_channels_listed_name_unique.sql` adds
    the unique index that makes the database enforce the rule:
 
@@ -29,6 +29,12 @@ The rule ships in two releases:
 
 The writer release is a required stop. Do not upgrade past it to the contract
 release until every step below is complete.
+
+A deployment that plans schema changes from the desired state in `schema/`
+(see [database.md](database.md)) follows the same order: steps 1 to 4 come
+first. Its tool must not build `idx_channels_listed_name` before the renames,
+and the contract release must not deploy until the index is valid, because
+that release no longer checks names in the relay.
 
 ## Procedure
 
@@ -47,9 +53,19 @@ release until every step below is complete.
    ```
 
    The key must belong to a relay operator (`RELAY_OPERATOR_PUBKEYS`, or an
-   `operator` row in `relay_operators`), not a moderator. `BUZZ_RELAY_URL`
+   `operator` row in `relay_operators`), not a moderator. It must also be a
+   member of each community: `POST /events` checks community membership
+   before the operator role, and answers 403 `relay_membership_required` to a
+   key that is not a member. Add it first:
+
+   ```sh
+   RELAY_URL=wss://<community host> buzz-admin add-member --pubkey <operator npub>
+   ```
+
+   The script stops at the first auth refusal and says so. `BUZZ_RELAY_URL`
    defaults to `wss://<community host>`. Run it with `--dry-run` first to see
-   the plan.
+   the plan. The host must match `communities.host` exactly; the script stops
+   for a host that no community has.
 
    In each group of channels that share a name, the oldest unarchived channel
    keeps the name (or the oldest archived one, when all are archived). Each
@@ -59,20 +75,42 @@ release until every step below is complete.
    remains: for example, the relay refused a name that a channel took
    meanwhile. Run it again.
 
-   The plan leaves out a community that is not active. A duplicate there
-   blocks migration 0079 until that community's deletion completes.
+   If a rename fails on every run because another channel holds its new name,
+   rename that channel by hand with
+   `buzz channels update --channel=<id> --name=<new name>`.
+
+   The relay applies no rename in an archived community, and the script
+   stops for one. Unarchive it, run the script, then archive it again. Its
+   channels show to members while it is unarchived:
+
+   ```sh
+   buzz-admin communities unarchive --host <community host> \
+     --owner-pubkey <owner hex> --operator-id <you> --reason "rename duplicate channels"
+   # run the rename script for <community host>
+   buzz-admin communities archive --host <community host> \
+     --owner-pubkey <owner hex> --operator-id <you> --reason "rename duplicate channels"
+   ```
+
+   The relay applies no rename in a community that is being deleted either,
+   and the script stops for one. Its duplicates block migration 0079 until its
+   deletion completes. If the deletion is blocked, fix the recorded failure
+   and resume it as
+   [operator-community-deletion.md](operator-community-deletion.md)
+   describes; do not deploy the contract release until it completes.
 3. Confirm that no duplicate remains in any community:
 
    ```sql
-   SELECT community_id, lower(name), count(*)
-   FROM public.channels
-   WHERE visibility = 'open' AND NOT unlisted
-     AND channel_type IN ('stream', 'forum') AND deleted_at IS NULL
-   GROUP BY 1, 2
+   SELECT co.host, co.archived_at, co.deletion_state, lower(ch.name), count(*)
+   FROM public.channels ch
+   JOIN public.communities co ON co.id = ch.community_id
+   WHERE ch.visibility = 'open' AND NOT ch.unlisted
+     AND ch.channel_type IN ('stream', 'forum') AND ch.deleted_at IS NULL
+   GROUP BY co.host, co.archived_at, co.deletion_state, lower(ch.name)
    HAVING count(*) > 1;
    ```
 
-   Expect zero rows.
+   Expect zero rows. Each row names a host to run the script for: an archived
+   community, or one being deleted, needs the steps in step 2.
 4. Build the index concurrently. Migration 0079 builds it only on an empty
    `channels` table; on a populated one it refuses to start the relay without
    the prebuilt index, because a plain build blocks channel writes.
@@ -104,14 +142,17 @@ release until every step below is complete.
    ```
 
    The writer release works with the index in place.
-5. Apply migration 0079, then deploy the contract release. Migration 0079
-   skips its own `CREATE`, checks the index again, and records the migration.
-   It refuses to run while duplicates remain or without a valid index. With
-   auto-migration on, the relay applies it at startup and does not start until
-   steps 2 to 4 are complete. With auto-migration off, nothing at startup
-   checks the index, and the contract release no longer checks names in the
-   relay: apply 0079 out of band and confirm that it is recorded before you
-   deploy.
+5. Apply migration 0079. Over the prebuilt index it skips its own `CREATE`,
+   checks the index again, and records the migration. It refuses to run while
+   duplicates remain or without a valid index.
+   - **Auto-migration on:** deploy the contract release. The relay applies
+     0079 at startup and does not start until steps 2 to 4 are complete.
+   - **Auto-migration off:** run `buzz-admin migrate` with the target
+     `DATABASE_URL`, confirm that it records 0079, then deploy the contract
+     release. Nothing at startup checks the index, and the contract release
+     no longer checks names in the relay. Do not run the file with `psql`: that
+     does not record the migration ledger, and outside a transaction both
+     `SET LOCAL` timeouts do nothing.
 
 ## Recovery
 

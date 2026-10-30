@@ -5,7 +5,7 @@
 -- that no other listed channel there has, ignoring case. A listed channel is
 -- an open, not unlisted stream or forum that is not deleted; an archived one
 -- still counts. This is the rule the relay enforces on create and rename
--- (`LISTED_CHANNEL_SQL` in crates/buzz-db/src/store/channel.rs).
+-- (the predicate of `idx_channels_listed_name`, migration 0079).
 --
 -- In each group of channels that share a name, one channel keeps it: the
 -- oldest unarchived one, or the oldest archived one when all are archived.
