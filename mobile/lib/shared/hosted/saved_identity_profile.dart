@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:isolate';
 import 'dart:typed_data';
@@ -25,11 +26,12 @@ final savedIdentityProfileProvider = FutureProvider.autoDispose
         return null;
       }
       final auth = ref.read(hostedRelayAuthProvider);
-      final transport = ref.read(savedIdentityProfileClientProvider)();
+      final createTransport = ref.read(savedIdentityProfileClientProvider);
+      http.Client? transport;
       var active = true;
       ref.onDispose(() {
         active = false;
-        transport.close();
+        transport?.close();
       });
       return DeviceIdentitySource().loadProfile(pubkey, (config) async {
         if (!active) return null;
@@ -43,11 +45,15 @@ final savedIdentityProfileProvider = FutureProvider.autoDispose
             },
           ]),
         );
+        final attemptTransport = createTransport();
+        transport = attemptTransport;
+        var requesting = true;
+        StreamIterator<List<int>>? chunks;
         final client = HostedRelayHttpClient(
           auth,
           config,
-          inner: transport,
-          canSend: () => active,
+          inner: attemptTransport,
+          canSend: () => active && requesting,
         );
         final request = http.Request('POST', uri)
           ..followRedirects = false
@@ -62,14 +68,38 @@ final savedIdentityProfileProvider = FutureProvider.autoDispose
               pubkey: pubkey,
             ),
           });
-        final response = await client
-            .send(request)
-            .then(http.Response.fromStream)
-            .timeout(const Duration(seconds: 5));
-        if (!active || response.statusCode != 200) return null;
-        final bytes = response.bodyBytes;
-        final contentType = response.headers['content-type'];
-        return _decodeProfile(bytes, contentType, pubkey);
+        try {
+          return await (() async {
+            final response = await client.send(request);
+            if (!active || !requesting) return null;
+            chunks = StreamIterator(response.stream);
+            // One kind-0 event should fit comfortably within 256 KiB.
+            const maxBytes = 256 * 1024;
+            if (response.statusCode != 200 ||
+                (response.contentLength ?? 0) > maxBytes) {
+              return null;
+            }
+            final bytes = BytesBuilder(copy: false);
+            while (await chunks!.moveNext()) {
+              if (!active || !requesting) return null;
+              final chunk = chunks!.current;
+              if (chunk.length > maxBytes - bytes.length) return null;
+              bytes.add(chunk);
+            }
+            return _decodeProfile(
+              bytes.takeBytes(),
+              response.headers['content-type'],
+              pubkey,
+            );
+          })().timeout(const Duration(seconds: 5));
+        } finally {
+          // Retire this attempt before another relay can be tried. A late auth
+          // lookup must not send through the closed transport after timeout.
+          requesting = false;
+          if (chunks != null) unawaited(chunks!.cancel());
+          client.close();
+          transport = null;
+        }
       });
     });
 
