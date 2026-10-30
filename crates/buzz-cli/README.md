@@ -202,6 +202,8 @@ a huddle. Each scans at most 5000 newest events of the channel. If older events 
 `complete` is `false` and `truncated` is `true`. A huddle with no end event is `active`, then
 `stale` once its start is over an hour old; desktop shows `stale` as ended. The relay's liveness
 snapshots are not served over HTTP, so `liveness_checked` is always `false`.
+Rosters come from the relay's join and leave events only. Desktop's roster view also lists the
+creator from the start event; the CLI lists the creator once the relay records their join.
 
 ## Architecture
 

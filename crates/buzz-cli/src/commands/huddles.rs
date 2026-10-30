@@ -51,9 +51,9 @@ impl Window {
         })
     }
 
-    /// Whether every event at or after `created_at` was scanned. The relay
-    /// returns newest first, so events share the oldest scanned second only
-    /// partially.
+    /// Whether every event at or after `created_at` was scanned. Events in the
+    /// oldest scanned second may have been cut off, so `created_at` must be
+    /// strictly newer than it.
     fn covers(&self, created_at: u64) -> bool {
         !self.truncated
             || self
@@ -72,10 +72,7 @@ impl Window {
 }
 
 async fn fetch_relay_self(client: &BuzzClient) -> Result<String, CliError> {
-    let raw = client
-        .get_public("/")
-        .await
-        .map_err(|e| CliError::Other(format!("failed to fetch relay info document: {e}")))?;
+    let raw = client.get_public("/").await?;
     let info: Value = serde_json::from_str(&raw)
         .map_err(|e| CliError::Other(format!("relay info document is not valid JSON: {e}")))?;
     let self_hex = info.get("self").and_then(Value::as_str).ok_or_else(|| {
@@ -827,6 +824,48 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("self"));
+    }
+
+    #[tokio::test]
+    async fn relay_info_failures_keep_their_exit_codes() {
+        use crate::error::exit_code;
+
+        let failing = |status: axum::http::StatusCode| async move {
+            let app = Router::new().route("/", axum::routing::get(move || async move { status }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            format!("http://{addr}")
+        };
+        let err = run_list(
+            &client(&failing(axum::http::StatusCode::INTERNAL_SERVER_ERROR).await),
+            CHANNEL,
+            false,
+            20,
+            10,
+            200,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(exit_code(&err), 2, "{err}");
+        let err = run_participants(
+            &client(&failing(axum::http::StatusCode::FORBIDDEN).await),
+            CHANNEL,
+            HUDDLE,
+            10,
+            200,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(exit_code(&err), 3, "{err}");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let err = run_list(&client(&dead), CHANNEL, false, 20, 10, 200)
+            .await
+            .unwrap_err();
+        assert_eq!(exit_code(&err), 2, "{err}");
     }
 
     #[tokio::test]
