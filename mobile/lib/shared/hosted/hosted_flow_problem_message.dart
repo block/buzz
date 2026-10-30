@@ -26,6 +26,8 @@ String hostedFlowProblemMessage(
     'Your browser signed in to a different account. Sign in to your original account on the web, then reopen setup. Your saved account and keys have been kept.',
   HostedFlowProblem.identityUnreadable =>
     'Your saved identity could not be read safely. Leave setup and recover access to this device’s secure storage before continuing.',
+  HostedFlowProblem.unsupportedPlatform =>
+    'Hosted account setup requires iOS 17 or later for secure backup. Update iOS to continue. You can still use self-hosted communities.',
   HostedFlowProblem.backupUnavailable =>
     'Secure backup is not supported on this device yet. Your identity has been kept; joining requires a confirmed backup.',
   HostedFlowProblem.requestRejected =>

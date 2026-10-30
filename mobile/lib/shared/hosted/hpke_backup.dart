@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart';
 
 /// Never include input, plaintext, or native exception details in this error.
 enum HpkeBackupFailure { invalidEnrollment, identityMismatch, unavailable }
@@ -13,6 +14,12 @@ enum HpkeBackupFailure { invalidEnrollment, identityMismatch, unavailable }
 /// ciphertext instead of enrolling/sealing again after uncertain responses.
 class HpkeBackup {
   static const _channel = MethodChannel('buzz/hosted_hpke');
+
+  /// iOS 16 can use Nostr communities, but cannot create hosted backups.
+  static Future<bool> supportsHostedSetup() async {
+    if (defaultTargetPlatform != TargetPlatform.iOS) return true;
+    return await _channel.invokeMethod<bool>('isSupported') == true;
+  }
 
   Future<Map<String, dynamic>> seal({
     required Map<String, dynamic> enrollment,

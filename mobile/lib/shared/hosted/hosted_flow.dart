@@ -42,6 +42,7 @@ enum HostedFlowProblem {
   differentAccount,
   identityUnreadable,
   backupUnavailable,
+  unsupportedPlatform,
   invalidResponse,
   requestRejected,
   identityMismatch,
@@ -508,6 +509,14 @@ class HostedFlow extends ChangeNotifier {
       _clearCommunityBatch();
       _batchSubject = session.subject;
     }
+    if (target is! NostrBindDeepLink &&
+        !await HpkeBackup.supportsHostedSetup()) {
+      if (!_disposed && generation == _generation) {
+        _set(HostedFlowStage.blocked, HostedFlowProblem.unsupportedPlatform);
+      }
+      return;
+    }
+    if (_disposed || generation != _generation) return;
     var resolved = await identity.resolve(
       isCurrent: _isCurrent(generation),
       selectedPubkey: selectedPubkey ?? _pairedPubkey,

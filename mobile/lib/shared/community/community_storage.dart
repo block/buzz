@@ -1,8 +1,10 @@
 import 'dart:convert';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../storage/secure_storage.dart';
+import '../storage/serial_queue.dart';
 
 import 'community.dart';
 
@@ -70,6 +72,54 @@ class CommunityStorage {
 
     return [];
   }
+
+  static final _pendingInvites = SerialQueue();
+
+  static String _pendingInviteKey(String relayUrl, String code) {
+    final uri = Uri.parse(relayUrl);
+    final origin = uri
+        .replace(
+          scheme: ['https', 'wss'].contains(uri.scheme) ? 'https' : 'http',
+          path: '',
+          query: null,
+          fragment: null,
+        )
+        .origin;
+    return 'buzz_pending_invite_v1_${sha256.convert(utf8.encode(jsonEncode([origin, code])))}';
+  }
+
+  /// Retain the claim identity before sending a request with uncertain outcomes.
+  /// A failed read/write must never generate a replacement for an unknown key.
+  Future<String> pendingInviteIdentity(
+    String relayUrl,
+    String code,
+    String Function() generate,
+  ) => _pendingInvites.run(() async {
+    final key = _pendingInviteKey(relayUrl, code);
+    final saved = await _secure.read(key: key);
+    if (saved != null) return saved;
+    final nsec = generate();
+    await _secure.write(key: key, value: nsec);
+    if (await _secure.read(key: key) != nsec) {
+      throw StateError('Could not retain the pending invite identity');
+    }
+    return nsec;
+  });
+
+  /// Retire the journal only after the destination identity is durably saved.
+  Future<void> completePendingInvite(
+    String relayUrl,
+    String code,
+    Community community,
+  ) => _pendingInvites.run(() async {
+    final saved = await loadAll();
+    if (!saved.any(
+      (item) => item.id == community.id && item.nsec == community.nsec,
+    )) {
+      return;
+    }
+    await _secure.delete(key: _pendingInviteKey(relayUrl, code));
+  });
 
   Future<void> save(Community community) async {
     final all = await loadAll();

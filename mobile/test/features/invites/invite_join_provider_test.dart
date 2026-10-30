@@ -676,65 +676,96 @@ void main() {
     });
   }
 
-  test('failed claim can be retried and preserves policy receipt', () async {
-    final keys = nostr.Keys.generate();
-    var attempts = 0;
-    final bodies = <String>[];
-    final storage = CommunityStorage(secure: FakeSecureStorage());
-    final auth = _RecordingAuthNotifier();
-    final container = ProviderContainer(
-      overrides: [
-        communityStorageProvider.overrideWithValue(storage),
-        authProvider.overrideWith(() => auth),
-        inviteKeyGeneratorProvider.overrideWithValue(() => keys),
-        inviteJoinRecoveryProvider.overrideWithValue(
-          (_) => _successfulRecovery(),
-        ),
-        inviteJoinHttpClientProvider.overrideWithValue(
-          http_testing.MockClient((request) async {
-            attempts++;
-            bodies.add(request.body);
-            if (attempts == 1) {
-              return http.Response(jsonEncode({'error': 'temporary'}), 503);
-            }
-            return http.Response(
-              jsonEncode({
-                'status': 'joined',
-                'host': 'relay.example.com',
-                'role': 'member',
-              }),
-              200,
-            );
-          }),
-        ),
-      ],
-    );
-    addTearDown(container.dispose);
-
-    await container
-        .read(inviteJoinProvider.notifier)
-        .prepare(
-          const InviteDeepLink(
-            relayUrl: 'wss://relay.example.com',
-            code: 'code',
-            policyReceipt: 'receipt.value',
+  test(
+    'committed claim with lost response retries the same key after restart',
+    () async {
+      var attempts = 0;
+      String? claimedPubkey;
+      final bodies = <String>[];
+      final secure = FakeSecureStorage();
+      final storage = CommunityStorage(secure: secure);
+      final auth = _RecordingAuthNotifier();
+      ProviderContainer open() => ProviderContainer(
+        overrides: [
+          communityStorageProvider.overrideWithValue(storage),
+          authProvider.overrideWith(() => auth),
+          // Keep the production fresh-key generator: a fixed fake masks key loss.
+          inviteJoinRecoveryProvider.overrideWithValue(
+            (_) => _successfulRecovery(),
           ),
-        );
-    await container.read(inviteJoinProvider.notifier).confirmJoin();
-    expect(container.read(inviteJoinProvider).status, InviteJoinStatus.error);
-
-    await container.read(inviteJoinProvider.notifier).confirmJoin();
-
-    expect(container.read(inviteJoinProvider).status, InviteJoinStatus.success);
-    expect(attempts, 2);
-    expect(
-      bodies,
-      everyElement(
-        jsonEncode({'code': 'code', 'policy_receipt': 'receipt.value'}),
-      ),
-    );
-    expect(auth.authenticatedCommunities, hasLength(1));
-  });
+          inviteJoinHttpClientProvider.overrideWithValue(
+            http_testing.MockClient((request) async {
+              attempts++;
+              bodies.add(request.body);
+              final event =
+                  jsonDecode(
+                        utf8.decode(
+                          base64Decode(
+                            request.headers['Authorization']!.substring(
+                              'Nostr '.length,
+                            ),
+                          ),
+                        ),
+                      )
+                      as Map;
+              final pubkey = event['pubkey'] as String;
+              if (attempts == 1) {
+                claimedPubkey = pubkey;
+                throw http.ClientException('Response lost after commit');
+              }
+              if (pubkey != claimedPubkey) {
+                return http.Response(
+                  jsonEncode({'error': 'invite exhausted'}),
+                  403,
+                );
+              }
+              return http.Response(
+                jsonEncode({
+                  'status': 'already_member',
+                  'host': 'relay.example.com',
+                  'role': 'member',
+                }),
+                200,
+              );
+            }),
+          ),
+        ],
+      );
+      const invite = InviteDeepLink(
+        relayUrl: 'wss://relay.example.com',
+        code: 'code',
+        policyReceipt: 'receipt.value',
+      );
+      var container = open();
+      await container.read(inviteJoinProvider.notifier).prepare(invite);
+      await container.read(inviteJoinProvider.notifier).confirmJoin();
+      expect(container.read(inviteJoinProvider).status, InviteJoinStatus.error);
+      expect(await storage.loadAll(), isEmpty);
+      container.dispose();
+      container = open();
+      addTearDown(container.dispose);
+      await container.read(inviteJoinProvider.notifier).prepare(invite);
+      await container.read(inviteJoinProvider.notifier).confirmJoin();
+      expect(
+        container.read(inviteJoinProvider).status,
+        InviteJoinStatus.success,
+      );
+      expect(attempts, 2);
+      expect(
+        bodies,
+        everyElement(
+          jsonEncode({'code': 'code', 'policy_receipt': 'receipt.value'}),
+        ),
+      );
+      expect((await storage.loadAll()).single.pubkey, claimedPubkey);
+      expect(
+        (await secure.readAll()).keys.where(
+          (key) => key.startsWith('buzz_pending_invite_'),
+        ),
+        isEmpty,
+      );
+    },
+  );
 
   test('builds a fresh recovery with the second community identity', () async {
     final firstKeys = nostr.Keys.generate();

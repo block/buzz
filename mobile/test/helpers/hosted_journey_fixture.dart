@@ -323,10 +323,12 @@ class HostedJourneyFixture {
     await tester.binding.setSurfaceSize(const Size(440, 1100));
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
       const MethodChannel('buzz/hosted_hpke'),
-      (_) async => {
-        'enc': Uint8List.fromList([4, ...List.filled(64, 2)]),
-        'ciphertext': Uint8List(48),
-      },
+      (call) async => call.method == 'isSupported'
+          ? true
+          : {
+              'enc': Uint8List.fromList([4, ...List.filled(64, 2)]),
+              'ciphertext': Uint8List(48),
+            },
     );
     await tester.pumpWidget(
       WidgetHelpers.testable(
