@@ -22,6 +22,17 @@ export function isThreadReply(tags: string[][]): boolean {
   return ref.parentId !== null && !isBroadcastReply(tags);
 }
 
+/**
+ * Root id for the live thread-replies cache, or null when the event must not
+ * land there. Broadcast replies stay on the main timeline only (#8063).
+ */
+export function liveThreadReplyCacheRootId(tags: string[][]): string | null {
+  if (isBroadcastReply(tags)) return null;
+  const ref = getThreadReference(tags);
+  if (ref.parentId == null) return null;
+  return ref.rootId;
+}
+
 export function getThreadReference(tags: string[][]): ThreadReference {
   const eventTags = getEventTags(tags);
 
