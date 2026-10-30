@@ -1,39 +1,112 @@
 # User-deletion fencing: event database writes
 
-This PR checks existing restrictions in the two shared event insertion functions in `buzz-db/src/store/event.rs`: `insert_event_on` and `insert_event_with_thread_metadata_tx`. Every event kind reaching those functions is checked. HTTP and WebSocket event handlers report the restriction as a client refusal.
+The two shared event insertion functions in `crates/buzz-db/src/store/event.rs`,
+`insert_event_on` and `insert_event_with_thread_metadata_tx`, refuse events
+whose signer has a user-deletion restriction. Every event kind reaching these
+functions is checked, including relay-signed events.
 
 ## Transaction flow
 
-1. Enter the existing community-admitted database transaction.
-2. Read the event author's stored owner in this community, if present.
-3. Acquire shared global author/owner identity locks and the scoped author lock in canonical order.
-4. Read the owner again. If it changed while acquiring locks, reject for retry in a new transaction.
-5. Read the author's global and community-scoped restrictions. Reject a restricted author.
-6. Persist the event and its transactional derived changes. Commit or rollback releases the locks.
+1. Enter a community-admitted, writer-pool READ COMMITTED transaction.
+2. Read the signer's stored owner in this community, if present.
+3. Acquire shared global signer/owner locks and the scoped signer lock. Each
+   call sorts its global keys before its scoped keys.
+4. Read the owner again. If it changed while acquiring locks, return
+   `EventAuthorOwnershipChanged`; the caller must roll back and retry in a new
+   transaction.
+5. Query the signer's global and community-scoped restrictions together. If
+   either exists, return `UserDeletionRestricted` and roll back.
+6. Persist the event and its transactional derived changes. Hold the locks
+   until commit or rollback.
 
-Human restrictions are global by public key; agent restrictions are community-scoped. The author's own restriction decides whether the event is rejected. An owner's restriction is not an additional authorization check for an independently admitted agent. Restrictions still apply when profile rows are absent or recreated.
+Human restrictions apply across communities by public key. Agent restrictions
+apply in their specified community. The signer's own restriction decides
+whether the event is rejected; the owner's restriction is not an additional
+check for an independently admitted agent. Missing or recreated profile rows do
+not bypass restrictions.
 
-The writer uses the existing identity lock keys used by restriction insertion. If an event transaction wins first, the fence waits for it to finish. If the fence commits first, a waiting event sees the restriction and is rejected. If the fence rolls back, the event may proceed. No user-specific lease is involved.
+If a writer holds the shared identity lock first, an exclusive fence waits for
+its transaction to finish. If the fence commits first, the waiting writer sees
+the restriction and rolls back. If the fence rolls back, the writer may proceed.
+No user-specific lease is involved in this database-write protocol.
 
-## Scope
+## Errors and atomicity
 
-The guard covers persistence through these two functions, including messages, replies, reactions, edits, votes, canvas, channel changes, deletion events and artifacts. Tests exercise actual callers and check that rejection rolls back transactional domain rows and reply counters.
+`event_write_error` maps `UserDeletionRestricted` to the client refusal
+`restricted: identity is restricted for user deletion`. Ownership changes use
+the retryable internal-error category: HTTP responds with 500; WebSocket
+responds with `error: internal server error`. This classification permits a
+retry; it does not implement client retries. Unrelated database errors retain
+the caller's existing mapping rather than becoming restriction errors.
 
-Separate replaceable-event writers (profiles, emoji collections, bookmarks and workflow definitions), personal read state, uploads, git, audio and ephemeral activity are outside this PR. Authentication, agent creation/owner assignment, affected-user checks and background work are also separate work. This is not complete user-activity fencing.
+Archive/unarchive requests (9035/9036) validate consent without changing state.
+Their persistence transaction stores the guarded request, changes
+`archived_identities`, and stores the relay delta (8002/8003). A failure rolls
+back all three. Notifications are dispatched after commit. Duplicate requests
+do not reapply the archive change or create another delta.
 
-There are no schema changes, lease changes, or changes to restriction insertion behavior. The existing restriction reader is exposed within the database module so event writers can read after acquiring the full ordered lock set. Tests install restrictions through the previously merged helper solely as fixture setup.
+The archival snapshot (13535) is refreshed after commit. A refresh failure
+propagates to the caller; retrying the request refreshes the snapshot without
+repeating the mutation. The committed request and delta remain available for
+query/replay. This is not a durable background retry queue: a process exit
+between commit and snapshot refresh can leave the snapshot stale until a later
+refresh. Existing freshness/consent validation still applies to retries.
 
-The real user-deletion worker remains disabled. Before enabling it, ownership/admission writes and other serving paths must be coordinated, and the worker must atomically fence the user and the approved owned-agent set. The owner recheck here only detects changes observed while obtaining locks; it does not implement a complete ownership-assignment protocol.
+## Actual lock order and exclusive-worker requirements
 
-## Validation
+Shared identity locking occurs at event insertion, not necessarily at the
+start of the transaction. Artifact and channel writers can already hold domain
+row/advisory locks. An artifact Move inserts the author's revision and then a
+relay-signed removal, acquiring another global identity lock after the first
+signer's scoped lock. Per-call sorting is not a transaction-wide lock order.
 
-Regression tests cover global/scoped restrictions, unaffected users and communities, missing profiles, fence commit/rollback, writes already in flight, observed ownership changes, and the channel-TTL lock interleaving. Relay tests exercise signed HTTP requests and WebSocket EVENT handling before and after restrictions, including replies and unchanged database snapshots on refusal.
+An exclusive fencing transaction must:
+
+- Acquire community admission, then the deletion request row, then its complete
+  global identity set, then its complete scoped identity set.
+- Write only restriction/request/checkpoint state while holding those locks.
+  Do not lock or mutate users, channels, artifacts, events or other serving
+  domain rows. Read ownership without row locks and perform cleanup in later
+  transactions.
+- Never upgrade a shared identity lock to exclusive. Audit complete exclusive
+  sets against transactions containing multiple signers before wiring a worker;
+  per-call sorting alone does not prove arbitrary multi-key batches safe.
+
+The domain-row restriction prevents a fence from waiting on a row held by a
+writer that is itself waiting on the fence. PostgreSQL regressions exercise
+channel-TTL and artifact Move interleavings and assert that no deadlock was
+recorded. Those cases are evidence for the tested paths, not a proof about every
+future worker or lock combination.
+
+## Coverage and remaining work
+
+Persistence through the two guarded functions includes messages, replies,
+reactions, edits, votes, canvas, channel changes, deletion events, artifacts,
+and identity archive/unarchive requests. A refusal rolls back domain changes
+performed in the same transaction, including counters and notification events.
+
+Separate replaceable-event writers (profiles, emoji collections, bookmarks and
+workflow definitions), personal read state, uploads, git, audio and ephemeral
+activity are outside this guard. Authentication, agent creation/owner
+assignment, checks on affected users other than the signer, and background work
+need separate coordination.
+
+The real user-deletion worker remains disabled. Before enabling it, coordinate
+all remaining serving paths and external work, and atomically fence the user
+and the approved owned-agent set. The owner reread detects changes observed
+while obtaining locks; it is not a complete ownership-assignment protocol.
+Restriction insertion behavior and the schema are unchanged by event guards.
+
+## Regression tests
+
+The directly registered `user_deletion_*_postgres_tests` modules in `buzz-db`
+and `buzz-relay` cover scopes, missing profiles, unaffected actors, commit and
+rollback races, ownership changes, transport errors and transactional state.
+The artifact fence race lives in `artifact_postgres_tests`.
 
 With isolated PostgreSQL and Redis configured:
 
 ```sh
 scripts/postgres-test-run.sh -p buzz-db -p buzz-relay --lib \
-  -E 'test(/user_deletion_write_guard|user_deletion_message/)' --test-threads 4
+  -E 'test(/user_deletion/) or test(/artifact_move_and_identity/)' --test-threads 4
 ```
-
-The earlier 510-case live matrix validated a broader revision that included leases. It is not evidence of this narrowed revision's scope or coverage. Current validation results belong in the PR description.
