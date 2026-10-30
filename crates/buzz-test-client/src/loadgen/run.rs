@@ -1052,6 +1052,11 @@ async fn hot_author(shared: Arc<Shared>, index: usize) {
             _ = tokio::time::sleep_until(due.into()) => {}
             _ = stopping(&shared) => return,
         }
+        // An overdue arrival and the stop can be ready together, and `select!`
+        // picks either; start nothing new once the run is stopping.
+        if stopped(&shared) {
+            return;
+        }
         if next_reply == Some(due) {
             next_reply = rng.after(profile.replies_per_hour);
             let event = EventBuilder::new(
@@ -1765,10 +1770,11 @@ hold_secs = 2
         channel: String,
     }
 
-    /// Runs two hot-thread authors for a second against a relay whose root
-    /// lookup returns a newer reply-shaped decoy by the root's author, plus
-    /// the hot root itself when `seeded`.
-    async fn hot_thread_run(seeded: bool) -> HotRun {
+    /// Runs `[hot_thread]` section `hot` for a second against a relay whose
+    /// root lookup returns a newer reply-shaped decoy by the root's author,
+    /// plus the hot root itself when `seeded`, and which takes `delay` to
+    /// accept each event.
+    async fn hot_thread_run(seeded: bool, hot: &str, delay: Duration) -> HotRun {
         let author = hot_root_keys("t");
         let channel = identity::channel_id("t", 0, 0);
         let root = EventBuilder::new(kind(KIND_STREAM_MESSAGE), HOT_ROOT_PREFIX)
@@ -1792,6 +1798,9 @@ hold_secs = 2
             if target == "/events" {
                 let event: Event = serde_json::from_slice(body).unwrap();
                 post_log.lock().unwrap().push(event);
+                if !delay.is_zero() {
+                    tokio::task::block_in_place(|| std::thread::sleep(delay));
+                }
                 return (200, json!({"accepted": true, "message": ""}).to_string());
             }
             let filter: Value = serde_json::from_slice(body).unwrap();
@@ -1819,9 +1828,7 @@ humans = 0
 agents = 0
 channels_per_member = 1
 [hot_thread]
-authors = 2
-replies_per_hour = 36000.0
-fetches_per_hour = 36000.0
+{hot}
 [[ramp]]
 users = 1.0
 hold_secs = 1
@@ -1842,9 +1849,11 @@ hold_secs = 1
         }
     }
 
+    const TWO_AUTHORS: &str = "authors = 2\nreplies_per_hour = 36000.0\nfetches_per_hour = 36000.0";
+
     #[tokio::test]
     async fn hot_thread_authors_reply_to_the_hot_root_and_fail_without_it() {
-        let run = hot_thread_run(true).await;
+        let run = hot_thread_run(true, TWO_AUTHORS, Duration::ZERO).await;
         let report = run.outcome.expect("hot-thread run passes");
         assert_eq!(report["steps"][0]["hot_authors"], 2, "{report}");
         assert!(!run.posted.is_empty(), "{report}");
@@ -1881,12 +1890,24 @@ hold_secs = 1
         assert!(ops["hot_reply"]["count"].as_u64() > Some(0), "{report}");
 
         // Without a seeded hot root the authors post nothing and the step aborts.
-        let run = hot_thread_run(false).await;
+        let run = hot_thread_run(false, TWO_AUTHORS, Duration::ZERO).await;
         let report = run.outcome.expect_err("a missing hot root fails the run");
         assert!(run.posted.is_empty());
         let reason = report["steps"][0]["abort_reason"]
             .as_str()
             .unwrap_or_default();
         assert!(reason.starts_with("thread_fetch"), "{report}");
+    }
+
+    /// Every author is mid-reply at the stop, with its next reply already
+    /// due when that one settles. Each may finish the reply it started, but
+    /// must start no other: one reply per author settles during shutdown.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn hot_thread_authors_start_nothing_once_the_run_stops() {
+        let busy = "authors = 8\nreplies_per_hour = 36000000.0";
+        let run = hot_thread_run(true, busy, Duration::from_millis(300)).await;
+        let report = run.outcome.expect("in-flight replies settle in the grace");
+        let settled = &report["shutdown"]["ops"]["hot_reply"]["count"];
+        assert_eq!(settled.as_u64(), Some(8), "{report}");
     }
 }
