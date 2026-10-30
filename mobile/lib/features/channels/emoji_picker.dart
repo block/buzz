@@ -10,6 +10,8 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
+import '../../shared/custom_emoji/emoji_catalog_search.dart';
+import '../../shared/custom_emoji/emoji_entry.dart';
 import '../../shared/emoji/emoji_data.dart';
 import '../../shared/emoji/emoji_data_provider.dart';
 import '../../shared/emoji/emoji_search.dart';
@@ -21,6 +23,7 @@ import '../../shared/widgets/modal_presentation.dart';
 import 'recent_emoji_provider.dart';
 
 part 'emoji_picker/search_field.dart';
+part 'emoji_picker/catalog_results.dart';
 part 'emoji_picker/category_rail.dart';
 part 'emoji_picker/custom_emoji_retry_banner.dart';
 part 'emoji_picker/emoji_grid.dart';
@@ -29,6 +32,9 @@ part 'emoji_picker/ios_native_picker.dart';
 /// Android keeps the established Flutter tray height. iOS is presented by a
 /// native sheet with system detents in [ios_native_picker.dart].
 const _sheetHeightFactor = 0.62;
+
+/// Quiet time after the last keystroke before the relay is asked.
+const _catalogSearchDebounce = Duration(milliseconds: 300);
 
 /// Opens the full emoji picker as a modal bottom sheet.
 ///
@@ -132,7 +138,27 @@ class _EmojiPickerContent extends HookConsumerWidget {
     final trimmedQuery = query.value.trim();
     final isSearching = trimmedQuery.isNotEmpty;
 
+    final catalog = ref.watch(emojiCatalogSearchProvider);
+    final catalogText = emojiCatalogSearchText(trimmedQuery);
+    useEffect(() {
+      final notifier = ref.read(emojiCatalogSearchProvider.notifier);
+      if (catalogText == null) {
+        notifier.clear();
+        return null;
+      }
+      final timer = Timer(
+        _catalogSearchDebounce,
+        () => unawaited(notifier.search(catalogText)),
+      );
+      return timer.cancel;
+    }, [catalogText]);
+
     void select(String emoji) => onSelect(emoji);
+
+    void selectCatalog(CustomEmoji emoji) {
+      ref.read(pickedCatalogEmojiProvider.notifier).add(emoji);
+      onSelect(':${emoji.shortcode}:');
+    }
 
     final sections = useMemoized(
       () => _buildSections(
@@ -246,7 +272,9 @@ class _EmojiPickerContent extends HookConsumerWidget {
               ? _EmojiSearchResults(
                   entries: results,
                   customEmoji: customResults,
+                  catalog: catalogText == null ? null : catalog,
                   onSelect: select,
+                  onSelectCatalog: selectCatalog,
                   controller: scrollController,
                 )
               : _ContinuousEmojiGrid(

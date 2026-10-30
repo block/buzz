@@ -28,6 +28,11 @@ abstract final class EventKind {
   static const agentObserverFrame = 24200;
   static const huddleReaction = 24810;
   static const readState = 30078;
+
+  /// Kind:30180 addressable event holding one custom emoji (`d` = shortcode).
+  /// Mirrors `KIND_EMOJI_ENTRY` in `buzz-core/src/kind.rs` and desktop's
+  /// `kinds.ts`.
+  static const emojiEntry = 30180;
   static const eventReminder = 30300;
   static const userStatus = 30315;
   static const dmVisibility = 30622;
