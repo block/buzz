@@ -129,7 +129,6 @@ function assetPattern(platform: BuzzDownloadPlatform): RegExp | undefined {
   switch (platform.operatingSystem) {
     case "macos":
       if (platform.architecture === "arm64") return /_aarch64\.dmg$/i;
-      if (platform.architecture === "x64") return /_x64\.dmg$/i;
       return undefined;
     case "windows":
       return /_x64(?:-setup[^/]*|_unsigned)\.exe$/i;

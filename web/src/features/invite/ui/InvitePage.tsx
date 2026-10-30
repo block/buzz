@@ -74,7 +74,7 @@ export function InvitePage({ code }: { code: string }) {
       if (!active) return;
       if (
         platform.operatingSystem === "macos" &&
-        platform.architecture === "unknown"
+        platform.architecture !== "arm64"
       ) {
         setNeedsMacChoice(true);
         return;
@@ -305,7 +305,8 @@ export function InvitePage({ code }: { code: string }) {
                   Which Mac do you have?
                 </h2>
                 <p className="mt-2 text-sm text-black/60">
-                  Choose based on when your Mac was released.
+                  Buzz for Mac requires Apple Silicon. Intel Macs are not
+                  supported.
                 </p>
               </div>
               <button
@@ -329,32 +330,16 @@ export function InvitePage({ code }: { code: string }) {
                   })
                 }
               >
-                <strong className="block text-lg">Newer Mac</strong>
+                <strong className="block text-lg">Apple Silicon Mac</strong>
                 <span className="mt-1 block text-sm">
-                  2021 or later, or a late-2020 Mac with an Apple M1 chip
-                </span>
-              </a>
-              <a
-                aria-disabled={choosingMacDownload}
-                className="rounded-2xl border border-black p-5 text-black no-underline hover:bg-black hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black aria-disabled:pointer-events-none aria-disabled:opacity-50"
-                href={BUZZ_RELEASES_URL}
-                onClick={(event) =>
-                  void chooseMacDownload(event, {
-                    operatingSystem: "macos",
-                    architecture: "x64",
-                  })
-                }
-              >
-                <strong className="block text-lg">Older Mac</strong>
-                <span className="mt-1 block text-sm">
-                  2019 or earlier, or a 2020 Mac with an Intel processor
+                  Mac with an Apple M-series chip
                 </span>
               </a>
             </div>
             <p className="mt-5 text-sm leading-5">
               <strong>Not sure?</strong> Open the Apple menu and choose{" "}
-              <strong>About This Mac</strong>. “Chip: Apple M…” means Newer Mac.
-              “Processor: Intel” means Older Mac.
+              <strong>About This Mac</strong>. “Chip: Apple M…” means Apple
+              Silicon Mac. “Processor: Intel” means this Mac is not supported.
             </p>
           </div>
         </div>
