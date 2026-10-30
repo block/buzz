@@ -1202,6 +1202,27 @@ async fn a_relay_operator_may_only_rename_a_channel() {
         assert_eq!(name(state.clone()).await, before);
     }
 
+    // The rename repairs archived duplicates too, so archive the channel. An
+    // owner still may not edit it while it is archived.
+    state
+        .db
+        .archive_channel(community_id, channel)
+        .await
+        .expect("archive");
+    match ingest_event(
+        &state,
+        &tenant,
+        edit(&owner, &[&["name", "by-owner"]]),
+        http_auth(&owner),
+    )
+    .await
+    {
+        Err(IngestError::Rejected(message)) => assert!(message.contains("archived"), "{message}"),
+        Err(other) => panic!("expected a refusal, got {other:?}"),
+        Ok(result) => panic!("expected a refusal, got {:?}", result.message),
+    }
+    assert_eq!(name(state.clone()).await, before);
+
     let renamed = ingest_event(
         &state,
         &tenant,
@@ -1212,6 +1233,16 @@ async fn a_relay_operator_may_only_rename_a_channel() {
     .unwrap_or_else(|error| panic!("operator rename: {error:?}"));
     assert!(renamed.accepted, "{}", renamed.message);
     assert_eq!(name(state.clone()).await, "renamed-by-operator");
+    assert!(
+        state
+            .db
+            .get_channel(community_id, channel)
+            .await
+            .expect("channel")
+            .archived_at
+            .is_some(),
+        "the rename keeps the channel archived"
+    );
     let tags = group_state_tags(&state, &tenant, channel, 39000).await;
     assert!(
         tags.iter()

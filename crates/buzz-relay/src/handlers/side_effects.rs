@@ -2144,6 +2144,10 @@ pub(crate) async fn persist_edit_metadata(
     if let Some(labels) = channel_labels_from_tags(event) {
         edit.columns.labels = Some(labels.map_err(|e| anyhow::anyhow!("{e}"))?);
     }
+    // An operator's rename may repair an archived duplicate name, so it
+    // applies to an archived channel and leaves it archived.
+    edit.keep_archived =
+        is_rename_only(event) && actor_is_relay_operator(state, event.pubkey.to_bytes()).await?;
 
     let now = chrono::Utc::now();
     let mut notices = Vec::new();
