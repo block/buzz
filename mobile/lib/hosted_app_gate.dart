@@ -11,6 +11,7 @@ import 'features/onboarding/self_hosted_entry_sheet.dart';
 import 'shared/auth/auth.dart';
 import 'shared/theme/grid.dart';
 import 'shared/theme/theme_extensions.dart';
+import 'shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'shared/deeplink/deep_link.dart';
 import 'shared/hosted/hosted_community_connection.dart';
 import 'shared/hosted/hosted_flow.dart';
@@ -142,39 +143,57 @@ class HostedAppGate extends HookConsumerWidget {
             ),
           ),
           if (fullScreenSetup) ColoredBox(color: context.colors.surface),
-          if (authenticated && !visible) const OrganizationSignInBanner(),
-          if (flow != null) ...[
-            if (authenticated && !visible) HostedReconnectBanner(flow: flow),
-            if (flow.stage == HostedFlowStage.signIn &&
-                authenticated &&
-                !inlineEntry)
-              Positioned(
-                left: Grid.sm,
-                right: Grid.sm,
-                bottom: 0,
-                child: SafeArea(
-                  child: Material(
-                    color: Colors.transparent,
-                    child: Wrap(
-                      alignment: WrapAlignment.center,
-                      children: [
-                        TextButton(
-                          onPressed: flow.retry,
-                          child: const Text('Start login again'),
-                        ),
-                        TextButton(
-                          onPressed: flow.leave,
-                          child: Text(
-                            flow.reconnecting
-                                ? 'Cancel sign-in'
-                                : 'Leave setup',
+          // These overlays only show over Home, so keep them above its
+          // floating tab bar.
+          Positioned.fill(
+            child: MediaQuery(
+              data: MediaQuery.of(context).copyWith(
+                padding: MediaQuery.paddingOf(
+                  context,
+                ).copyWith(bottom: mobileTabBarTop(context) + Grid.xxs),
+              ),
+              child: Stack(
+                children: [
+                  if (authenticated && !visible)
+                    const OrganizationSignInBanner(),
+                  if (flow != null && authenticated && !visible)
+                    HostedReconnectBanner(flow: flow),
+                  if (flow != null &&
+                      flow.stage == HostedFlowStage.signIn &&
+                      authenticated &&
+                      !inlineEntry)
+                    Positioned(
+                      left: Grid.sm,
+                      right: Grid.sm,
+                      bottom: 0,
+                      child: SafeArea(
+                        child: Material(
+                          color: Colors.transparent,
+                          child: Wrap(
+                            alignment: WrapAlignment.center,
+                            children: [
+                              TextButton(
+                                onPressed: flow.retry,
+                                child: const Text('Start login again'),
+                              ),
+                              TextButton(
+                                onPressed: flow.leave,
+                                child: Text(
+                                  flow.reconnecting
+                                      ? 'Cancel sign-in'
+                                      : 'Leave setup',
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                      ],
+                      ),
                     ),
-                  ),
-                ),
+                ],
               ),
+            ),
+          ),
+          if (flow != null) ...[
             if (fullScreenSetup)
               HostedConnectPage(
                 flow: flow,

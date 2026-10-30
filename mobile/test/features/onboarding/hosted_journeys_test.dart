@@ -18,6 +18,7 @@ import 'package:buzz/features/profile/profile_avatar_draft.dart';
 import 'package:buzz/shared/emoji/emoji_avatar.dart';
 import 'package:buzz/shared/widgets/playing_avatar_image.dart';
 import 'package:buzz/features/pairing/pairing_page.dart';
+import 'package:buzz/hosted_app_gate.dart';
 import 'package:buzz/onboarding_app_entry.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
@@ -27,6 +28,7 @@ import 'package:buzz/shared/relay/relay_session.dart';
 import 'package:buzz/shared/relay/relay_provider.dart';
 import 'package:buzz/shared/relay/media_image.dart';
 import 'package:buzz/shared/utils/string_utils.dart';
+import 'package:buzz/shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -36,6 +38,16 @@ import 'package:http/http.dart' as http;
 import '../../helpers/hosted_journey_fixture.dart';
 
 void main() {
+  // Bottom banners over Home must stay above its floating tab bar, which the
+  // fixture's stand-in home does not draw.
+  void expectAboveTabBar(WidgetTester tester, String label) {
+    final screen = tester.getSize(find.byType(HostedAppGate)).height;
+    expect(
+      tester.getRect(find.text(label)).bottom,
+      lessThanOrEqualTo(screen - mobileTabBarHeight - mobileTabBarBottomGap),
+    );
+  }
+
   void journey(
     String name,
     Future<void> Function(WidgetTester, HostedJourneyFixture) run, {
@@ -555,6 +567,7 @@ void main() {
       const refused =
           'Your organization account cannot use this community with this key.';
       expect(find.text(refused), findsOneWidget);
+      expectAboveTabBar(tester, 'Use a different account');
       expect(f.sent('/identity/assertions'), isEmpty);
 
       // Retry keeps the refused account and fails the same way.
