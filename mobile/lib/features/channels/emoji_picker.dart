@@ -273,6 +273,7 @@ class _EmojiPickerContent extends HookConsumerWidget {
                   entries: results,
                   customEmoji: customResults,
                   catalog: catalogText == null ? null : catalog,
+                  catalogQuery: catalogText,
                   onSelect: select,
                   onSelectCatalog: selectCatalog,
                   controller: scrollController,

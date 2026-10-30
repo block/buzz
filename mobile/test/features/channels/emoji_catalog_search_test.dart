@@ -163,5 +163,21 @@ void main() {
     expect(find.text('Couldn’t search the emoji catalog.'), findsNothing);
     expect(_catalogTile('beehive'), findsOneWidget);
     expect(find.byKey(const ValueKey('emoji-tile-custom-bee')), findsOneWidget);
+
+    // A new query drops the old query's results at once.
+    await _type(tester, 'party');
+    await tester.pump(const Duration(milliseconds: 2));
+    expect(_catalogTile('beehive'), findsNothing);
+    session.searches.last.reply.complete([]);
+    await tester.pump();
+
+    // Waiting out the debounce is not "no results".
+    await _type(tester, 'zz');
+    await tester.pump(const Duration(milliseconds: 2));
+    session.searches.last.reply.complete([]);
+    await tester.pump();
+    expect(find.text('No emoji found.'), findsOneWidget);
+    await _type(tester, 'zzz');
+    expect(find.text('No emoji found.'), findsNothing);
   });
 }

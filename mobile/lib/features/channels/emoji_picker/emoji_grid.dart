@@ -208,6 +208,7 @@ class _EmojiSearchResults extends StatelessWidget {
   final List<EmojiEntry> entries;
   final List<CustomEmoji> customEmoji;
   final EmojiCatalogSearchState? catalog;
+  final String? catalogQuery;
   final void Function(String emoji) onSelect;
   final void Function(CustomEmoji emoji) onSelectCatalog;
   final ScrollController controller;
@@ -216,6 +217,7 @@ class _EmojiSearchResults extends StatelessWidget {
     required this.entries,
     required this.customEmoji,
     required this.catalog,
+    required this.catalogQuery,
     required this.onSelect,
     required this.onSelectCatalog,
     required this.controller,
@@ -231,7 +233,7 @@ class _EmojiSearchResults extends StatelessWidget {
         catalogState == null ||
         (!catalogState.loading &&
             !catalogState.failed &&
-            catalogState.query != null);
+            catalogState.query == catalogQuery);
     if (entries.isEmpty &&
         customEmoji.isEmpty &&
         catalogResults.isEmpty &&
