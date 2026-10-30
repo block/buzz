@@ -1119,6 +1119,18 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         );
     }
 
+    // This relay shows computed `member`/`bot` roster labels, which the 0032
+    // trigger refuses. Fail closed until migration 0079 has dropped it, so a
+    // skipped migration stops the rollout instead of freezing rosters.
+    let step = StepTimer::start(StartupStep::ChannelRosterTriggerRetired);
+    if let Err(error) = state.db.verify_channel_roster_trigger_retired().await {
+        error!(%error, "Channel roster trigger check failed");
+        return Err(anyhow::anyhow!(
+            "Channel roster trigger check failed; apply migration 0079 before starting this relay: {error}"
+        ));
+    }
+    step.finish();
+
     // Repair legacy NIP-29 channel rosters that were persisted while the
     // canonical member query still truncated at 1,000 rows.
     let mut step = StepTimer::start(StartupStep::LargeRosterReconcile);
