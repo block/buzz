@@ -1,3 +1,10 @@
+import 'package:buzz/app.dart';
+import 'package:buzz/features/activity/activity_page.dart';
+import 'package:buzz/features/age_gate/age_signal_provider.dart';
+import 'package:buzz/shared/auth/auth.dart';
+import 'package:buzz/shared/theme/theme_provider.dart';
+import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:async';
 
 import 'package:buzz/features/activity/activity_provider.dart';
@@ -391,9 +398,9 @@ void main() {
     },
   );
 
-  test(
-    'live activity resurfaces a hidden DM through the existing open action',
-    () async {
+  testWidgets(
+    'authenticated shell resurfaces hidden DMs without opening Inbox',
+    (tester) async {
       const self =
           '1111111111111111111111111111111111111111111111111111111111111111';
       const alice =
@@ -402,8 +409,13 @@ void main() {
           '3333333333333333333333333333333333333333333333333333333333333333';
       final session = _RecordingSessionNotifier();
       final reopened = <List<String>>[];
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
       final container = ProviderContainer(
         overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          authProvider.overrideWith(_ShellAuth.new),
+          ageSignalProvider.overrideWith(_ShellAge.new),
           relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
           myPubkeyProvider.overrideWithValue(self),
           relaySessionProvider.overrideWith(() => session),
@@ -441,8 +453,16 @@ void main() {
       addTearDown(container.dispose);
 
       await container.read(channelsProvider.future);
-      await container.read(activityProvider.future);
-      await Future<void>.delayed(const Duration(milliseconds: 10));
+      await tester.pumpWidget(
+        UncontrolledProviderScope(container: container, child: const App()),
+      );
+      for (var i = 0; i < 20; i++) {
+        await tester.pump();
+      }
+      expect(find.byType(ActivityPage), findsNothing);
+      expect(session.hiddenDmSubscriptionBatches, [
+        ['hidden-dm'],
+      ]);
 
       session.emit(
         const NostrEvent(
@@ -459,10 +479,14 @@ void main() {
         ),
       );
 
-      await _waitFor(() => reopened.isNotEmpty);
+      for (var i = 0; i < 20 && reopened.isEmpty; i++) {
+        await tester.pump();
+      }
       expect(reopened, [
         [alice, bob],
       ]);
+      await tester.pumpWidget(const SizedBox.shrink());
+      container.dispose();
     },
   );
 
@@ -1200,4 +1224,17 @@ class _DeferredChannelsNotifier extends ChannelsNotifier {
     _hasLoaded = true;
     _gate.complete(channels);
   }
+}
+
+class _ShellAuth extends AuthNotifier {
+  @override
+  Future<AuthState> build() async =>
+      const AuthState(status: AuthStatus.authenticated);
+}
+
+class _ShellAge extends AgeSignalNotifier {
+  @override
+  AgeSignalState build() => AgeSignalState.allowed;
+  @override
+  Future<void> request() async {}
 }

@@ -13,6 +13,8 @@ import '../../../shared/widgets/concentric_sheet_surface.dart';
 import '../../../shared/widgets/bee_refresh_indicator.dart';
 import 'me_assistant_list.dart';
 import 'me_section.dart';
+import 'me_working_provider.dart';
+import 'solo_working_dots.dart';
 import 'me_unread_provider.dart';
 import '../../../shared/widgets/avatar_image.dart';
 import '../../../shared/me/me_groups.dart';
@@ -175,6 +177,7 @@ class MePage extends HookConsumerWidget {
                   ),
                 );
           Widget row(Channel channel) => _MeChatRow(
+            channelId: channel.id,
             name: channel.name,
             isUnread: unreadIds.contains(channel.id),
             onTap: () => Navigator.of(context).push(
@@ -219,11 +222,6 @@ class MePage extends HookConsumerWidget {
                     MeSection(
                       key: ValueKey(group['id']),
                       label: group['name'] as String,
-                      hasUnread: visible.any(
-                        (c) =>
-                            organization.assignments[c.id] == group['id'] &&
-                            unreadIds.contains(c.id),
-                      ),
                       children: [
                         for (final channel in visible.where(
                           (c) => organization.assignments[c.id] == group['id'],
@@ -244,11 +242,6 @@ class MePage extends HookConsumerWidget {
                     MeSection(
                       key: const ValueKey('me-ungrouped-chats'),
                       label: 'Chats',
-                      hasUnread: visible.any(
-                        (c) =>
-                            !organization.assignments.containsKey(c.id) &&
-                            unreadIds.contains(c.id),
-                      ),
                       children: [
                         for (final channel in visible.where(
                           (c) => !organization.assignments.containsKey(c.id),

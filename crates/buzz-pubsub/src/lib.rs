@@ -51,7 +51,7 @@ use std::time::Duration;
 
 use buzz_core::TenantContext;
 use nostr::PublicKey;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
 
 use crate::cache_invalidation::{
     cache_invalidation_channel, CacheInvalidation, ScopedCacheInvalidation,
@@ -70,6 +70,20 @@ pub struct ChannelEvent {
     pub topic: EventTopic,
     /// The Nostr event payload.
     pub event: nostr::Event,
+}
+
+/// Health of this node's Redis event subscription link.
+///
+/// `epoch` advances on every event that can lose messages without a replay:
+/// the link connects, drops, or skips a message it could not decode. A reader
+/// that needs every message records the epoch when its interest is confirmed
+/// and treats any later change as a possible loss.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LinkState {
+    /// Advances on every possible loss.
+    pub epoch: u64,
+    /// Whether the link is connected and its desired topics are subscribed.
+    pub up: bool,
 }
 
 /// Configuration for the pub/sub subsystem.
@@ -115,6 +129,7 @@ pub struct PubSubManager {
     cache_invalidation_tx: broadcast::Sender<ScopedCacheInvalidation>,
     conn_control_tx: broadcast::Sender<ScopedConnControl>,
     nip_fi_disconnect_tx: broadcast::Sender<NipFiDisconnect>,
+    link: watch::Sender<LinkState>,
 }
 
 impl PubSubManager {
@@ -145,6 +160,7 @@ impl PubSubManager {
             cache_invalidation_tx,
             conn_control_tx,
             nip_fi_disconnect_tx,
+            link: watch::Sender::new(LinkState::default()),
         })
     }
 
@@ -163,6 +179,7 @@ impl PubSubManager {
             self.broadcast_tx.clone(),
             self.desired_topics.clone(),
             subscription_rx,
+            self.link.clone(),
         )
         .await;
     }
@@ -230,6 +247,28 @@ impl PubSubManager {
                 .send(subscriber::SubscriptionCommand::Subscribe(topic_key))
                 .await;
         }
+    }
+
+    /// Watch this node's Redis event link (see [`LinkState`]).
+    pub fn link_state(&self) -> watch::Receiver<LinkState> {
+        self.link.subscribe()
+    }
+
+    /// Wait until Redis has confirmed a subscription to an already retained
+    /// topic, and return the link epoch it was confirmed on. Fails when the
+    /// link drops before it answers; the caller bounds the wait.
+    pub async fn confirm_topic(
+        &self,
+        ctx: &TenantContext,
+        topic: EventTopic,
+    ) -> Result<u64, PubSubError> {
+        let (reply, answer) = oneshot::channel();
+        let topic_key = EventTopicKey::from_context(ctx, topic);
+        self.subscription_tx
+            .send(subscriber::SubscriptionCommand::Confirm(topic_key, reply))
+            .await
+            .map_err(|_| PubSubError::SubscriberStopped)?;
+        answer.await.map_err(|_| PubSubError::SubscriberStopped)
     }
 
     /// Release local interest in a scoped Redis event topic.

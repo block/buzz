@@ -1,3 +1,4 @@
+import { BeeField } from "./BeeField";
 import buzzMark from "@/assets/invite/mark.svg";
 import "./invite-page.css";
 import { InviteCommunity } from "./InviteCommunity";
@@ -194,6 +195,7 @@ export function InvitePage({ code }: { code: string }) {
 
   return (
     <div className="invite-page">
+      <BeeField count={24} sizeScale={0.75} zIndex={-1} />
       <img className="invite-mark" src={buzzMark} alt="Buzz" />
       <div className="invite-stack">
         <div className="invite-card">

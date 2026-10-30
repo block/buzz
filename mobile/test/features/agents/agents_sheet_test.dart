@@ -240,7 +240,6 @@ void main() {
         onAgents: showAgents,
         defaultAgentBuilder: (context) =>
             DefaultAgentLauncher(onChooseAgent: () => showAgents(context)),
-        hasUnreadInbox: false,
         settingsPageBuilder: (_) => const SizedBox.shrink(),
         mePageBuilder: (_, _, _) =>
             const SliverToBoxAdapter(child: Text('Solo workspace')),

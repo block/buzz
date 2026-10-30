@@ -7,29 +7,22 @@ import '../../../shared/widgets/collapsible_section_body.dart';
 
 /// A project or unassigned-chat section matching the Channels list headings.
 class MeSection extends HookWidget {
-  const MeSection({
-    super.key,
-    required this.label,
-    required this.children,
-    this.hasUnread = false,
-  });
+  const MeSection({super.key, required this.label, required this.children});
 
   final String label;
 
-  /// Keeps unread activity visible when this section is collapsed.
-  final bool hasUnread;
   final List<Widget> children;
 
   @override
   Widget build(BuildContext context) {
     final expanded = useState(true);
-    final color = navigationMetadataForeground(context);
+    final color = navigationHeadingForeground(context);
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Semantics(
-          label: hasUnread ? '$label, unread' : label,
+          label: label,
           excludeSemantics: true,
           onTap: () => expanded.value = !expanded.value,
           button: true,
@@ -56,18 +49,6 @@ class MeSection extends HookWidget {
                         ),
                       ),
                     ),
-                    if (hasUnread) ...[
-                      Container(
-                        key: ValueKey('solo-section-unread-$label'),
-                        width: 8,
-                        height: 8,
-                        decoration: BoxDecoration(
-                          color: context.colors.primary,
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                      const SizedBox(width: Grid.xxs),
-                    ],
                     const SizedBox(width: Grid.quarter),
                     AnimatedRotation(
                       turns: expanded.value ? 0 : -0.25,
