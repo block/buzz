@@ -509,18 +509,13 @@ class HostedFlow extends ChangeNotifier {
       _clearCommunityBatch();
       _batchSubject = session.subject;
     }
-    if (target is! NostrBindDeepLink &&
-        !await HpkeBackup.supportsHostedSetup()) {
-      if (!_disposed && generation == _generation) {
-        _set(HostedFlowStage.blocked, HostedFlowProblem.unsupportedPlatform);
-      }
-      return;
-    }
+    final canSealBackup =
+        target is NostrBindDeepLink || await HpkeBackup.supportsSealing();
     if (_disposed || generation != _generation) return;
     var resolved = await identity.resolve(
       isCurrent: _isCurrent(generation),
       selectedPubkey: selectedPubkey ?? _pairedPubkey,
-      createNew: createNew,
+      createNew: createNew && canSealBackup,
     );
     if (_pairedPubkey != null && resolved.pubkey != _pairedPubkey) {
       _set(HostedFlowStage.blocked, HostedFlowProblem.identityMismatch);
@@ -529,6 +524,26 @@ class HostedFlow extends ChangeNotifier {
     if (target is! NostrBindDeepLink) {
       for (var step = 0; step < 2; step++) {
         if (_disposed || generation != _generation) return;
+        if (!canSealBackup) {
+          final saved = await store.read();
+          if (_disposed || generation != _generation) return;
+          final needsNewBackup =
+              resolved.state == HostedIdentityState.needsSetup ||
+              resolved.state == HostedIdentityState.needsBackup ||
+              (resolved.state == HostedIdentityState.needsBinding &&
+                  !(saved?.hasBackupFor(
+                        backend: HostedEnvironment.origin.origin,
+                        subject: session.subject,
+                      ) ??
+                      false));
+          if (needsNewBackup) {
+            _set(
+              HostedFlowStage.blocked,
+              HostedFlowProblem.unsupportedPlatform,
+            );
+            return;
+          }
+        }
         if (resolved.state == HostedIdentityState.needsBinding &&
             resolved.pubkey != null) {
           final response = await account.post(

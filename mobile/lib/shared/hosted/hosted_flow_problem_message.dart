@@ -27,7 +27,7 @@ String hostedFlowProblemMessage(
   HostedFlowProblem.identityUnreadable =>
     'Your saved identity could not be read safely. Leave setup and recover access to this device’s secure storage before continuing.',
   HostedFlowProblem.unsupportedPlatform =>
-    'Hosted account setup requires iOS 17 or later for secure backup. Update iOS to continue. You can still use self-hosted communities.',
+    'Creating a secure backup requires iOS 17 or later. Update iOS to continue, or recover an identity that already has a backup. You can still use self-hosted communities.',
   HostedFlowProblem.backupUnavailable =>
     'Secure backup is not supported on this device yet. Your identity has been kept; joining requires a confirmed backup.',
   HostedFlowProblem.requestRejected =>

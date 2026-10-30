@@ -13,6 +13,7 @@ import 'package:buzz/app.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/invites/invite_join_provider.dart';
 import 'package:buzz/shared/auth/auth.dart';
+import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
 
 import '../../shared/community/community_storage_test.dart';
@@ -681,6 +682,7 @@ void main() {
     () async {
       var attempts = 0;
       String? claimedPubkey;
+      String? lastClaimPubkey;
       final bodies = <String>[];
       final secure = FakeSecureStorage();
       final storage = CommunityStorage(secure: secure);
@@ -688,6 +690,10 @@ void main() {
       ProviderContainer open() => ProviderContainer(
         overrides: [
           communityStorageProvider.overrideWithValue(storage),
+          communitySnapshotWriterProvider.overrideWithValue((_) async {}),
+          communityPushLeaseRevocationEnqueuerProvider.overrideWithValue(
+            (_) async => false,
+          ),
           authProvider.overrideWith(() => auth),
           // Keep the production fresh-key generator: a fixed fake masks key loss.
           inviteJoinRecoveryProvider.overrideWithValue(
@@ -709,6 +715,7 @@ void main() {
                       )
                       as Map;
               final pubkey = event['pubkey'] as String;
+              lastClaimPubkey = pubkey;
               if (attempts == 1) {
                 claimedPubkey = pubkey;
                 throw http.ClientException('Response lost after commit');
@@ -764,6 +771,71 @@ void main() {
         ),
         isEmpty,
       );
+      final saved = (await storage.loadAll()).single;
+      // A crash after saving the community can leave the journal behind.
+      await storage.pendingInviteIdentity(
+        invite.relayUrl,
+        invite.code,
+        () => saved.nsec!,
+      );
+      await container.read(inviteJoinProvider.notifier).prepare(invite);
+      expect(
+        (await secure.readAll()).values.where((value) => value == saved.nsec),
+        isEmpty,
+      );
+
+      // Also cover a destination saved after the confirmation page was opened.
+      await storage.saveAll([]);
+      container.invalidate(communityListProvider);
+      await container.read(inviteJoinProvider.notifier).prepare(invite);
+      await storage.saveAll([saved]);
+      container.invalidate(communityListProvider);
+      await storage.pendingInviteIdentity(
+        invite.relayUrl,
+        invite.code,
+        () => saved.nsec!,
+      );
+      await container.read(inviteJoinProvider.notifier).confirmJoin();
+      expect(
+        (await secure.readAll()).values.where((value) => value == saved.nsec),
+        isEmpty,
+      );
+
+      // Any matching journal, including a different invite, must be retired on
+      // sign-out. Unrelated pending identities must survive.
+      await storage.pendingInviteIdentity(
+        invite.relayUrl,
+        invite.code,
+        () => saved.nsec!,
+      );
+      await storage.pendingInviteIdentity(
+        invite.relayUrl,
+        'another-code',
+        () => saved.nsec!,
+      );
+      final unrelated = nostr.Keys.generate().nsec;
+      await storage.pendingInviteIdentity(
+        'wss://other.example',
+        'other-code',
+        () => unrelated,
+      );
+      secure.failPendingInviteDeletes = true;
+      await expectLater(
+        container.read(authProvider.notifier).signOut(),
+        throwsStateError,
+      );
+      expect((await storage.loadAll()).single.nsec, saved.nsec);
+      secure.failPendingInviteDeletes = false;
+      await container.read(authProvider.notifier).signOut();
+      expect(await storage.loadAll(), isEmpty);
+      expect((await secure.readAll()).values, isNot(contains(saved.nsec)));
+      expect((await secure.readAll()).values, contains(unrelated));
+      await container.read(inviteJoinProvider.notifier).prepare(invite);
+      await container.read(inviteJoinProvider.notifier).confirmJoin();
+      expect(attempts, 3);
+      expect(lastClaimPubkey, isNot(claimedPubkey));
+      expect(container.read(inviteJoinProvider).status, InviteJoinStatus.error);
+      expect(await storage.loadAll(), isEmpty);
     },
   );
 

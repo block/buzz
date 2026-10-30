@@ -15,8 +15,8 @@ enum HpkeBackupFailure { invalidEnrollment, identityMismatch, unavailable }
 class HpkeBackup {
   static const _channel = MethodChannel('buzz/hosted_hpke');
 
-  /// iOS 16 can use Nostr communities, but cannot create hosted backups.
-  static Future<bool> supportsHostedSetup() async {
+  /// Existing backups can be recovered on iOS 16, but new ones require iOS 17.
+  static Future<bool> supportsSealing() async {
     if (defaultTargetPlatform != TargetPlatform.iOS) return true;
     return await _channel.invokeMethod<bool>('isSupported') == true;
   }

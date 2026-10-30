@@ -785,7 +785,23 @@ void main() {
         f.profileUnavailable = unreadableProfile;
         await f.mount(tester);
         // Account restoration may resume independently of the Add choices.
-        await f.flow.signInAccount();
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          const MethodChannel('buzz/hosted_hpke'),
+          (call) async {
+            expect(
+              call.method,
+              'isSupported',
+              reason: 'Recovery must not seal a new backup',
+            );
+            return false;
+          },
+        );
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        try {
+          await f.flow.signInAccount();
+        } finally {
+          debugDefaultTargetPlatformOverride = null;
+        }
         await f.settle(tester);
         expect(f.flow.stage, HostedFlowStage.chooseCommunities);
         expect(f.probes, isEmpty);
@@ -811,6 +827,8 @@ void main() {
         expect((await f.store.read())!.pubkey, f.keys.public);
         expect(f.sent('/recovery'), hasLength(1));
         expect(f.sent('/challenge'), isEmpty);
+        expect(f.sent('/nsec-backups'), isEmpty);
+        expect(f.sent('/enrollment'), isEmpty);
         expect(await f.storage.loadActiveId(), saved.id);
         expect(find.byType(OnboardingAppEntry), findsNothing);
       },
