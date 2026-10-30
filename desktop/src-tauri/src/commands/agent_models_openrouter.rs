@@ -86,16 +86,36 @@ pub(super) fn filter_openrouter_models(
     response: OpenRouterModelListResponse,
     selected_model: Option<String>,
 ) -> Result<Option<AgentModelsResponse>, String> {
-    let models: Vec<AgentModelInfo> = response
+    let mut models: Vec<AgentModelInfo> = response
         .data
         .into_iter()
         .filter(|m| m.supported_parameters.iter().any(|p| p == "tools"))
+        // Filter ordinary MiniMax text choices only. The selected model is
+        // returned separately, so legacy/custom saved IDs are never rewritten.
+        .filter(|m| {
+            let text_family = matches!(
+                m.id.strip_prefix("minimax/minimax-m")
+                    .and_then(|s| s.chars().next()),
+                Some('0'..='9')
+            ) || m.id.split(':').next() == Some("minimax/minimax-01");
+            !text_family
+                || matches!(
+                    m.id.as_str(),
+                    "minimax/minimax-m3.1-flash:free" | "minimax/minimax-m3"
+                )
+        })
         .map(|m| AgentModelInfo {
             id: m.id.clone(),
             name: Some(m.id),
             description: None,
         })
         .collect();
+    // Only advertise routes returned by this gateway; do not synthesize IDs.
+    models.sort_by_key(|m| match m.id.as_str() {
+        "minimax/minimax-m3.1-flash:free" => 0,
+        "minimax/minimax-m3" => 1,
+        _ => 2,
+    });
 
     if models.is_empty() {
         return Err("OpenRouter model discovery returned no tools-capable models".to_string());
