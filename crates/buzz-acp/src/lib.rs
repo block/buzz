@@ -2441,6 +2441,64 @@ fn idle_pool_sleep_due(
         && inactivity_expired(last_activity, now, bound, turn_in_flight)
 }
 
+/// Scopes whose turn started since the last call, each once, so their first typing indicator
+/// goes out at once instead of waiting for the next periodic tick. `announced` remembers what was
+/// returned and forgets scopes that stopped typing, so a later turn in the same scope counts again.
+fn newly_typing_scopes<'a>(
+    typing: &'a HashMap<scope::SessionScope, ThreadTags>,
+    announced: &mut HashSet<scope::SessionScope>,
+) -> Vec<(&'a scope::SessionScope, &'a ThreadTags)> {
+    announced.retain(|scope| typing.contains_key(scope));
+    typing
+        .iter()
+        .filter(|(scope, _)| announced.insert((*scope).clone()))
+        .collect()
+}
+
+#[cfg(test)]
+mod newly_typing_scopes_tests {
+    use super::*;
+
+    fn conversation(n: u128) -> scope::SessionScope {
+        scope::SessionScope::Conversation {
+            channel_id: uuid::Uuid::from_u128(n),
+        }
+    }
+
+    #[test]
+    fn a_started_turn_is_announced_once_and_again_after_it_ends() {
+        let mut typing = HashMap::new();
+        let mut announced = HashSet::new();
+        typing.insert(conversation(1), ThreadTags::default());
+
+        let first = newly_typing_scopes(&typing, &mut announced);
+        assert_eq!(
+            first.iter().map(|(s, _)| (*s).clone()).collect::<Vec<_>>(),
+            vec![conversation(1)]
+        );
+        assert!(
+            newly_typing_scopes(&typing, &mut announced).is_empty(),
+            "the tick keeps it alive, not this"
+        );
+
+        typing.insert(conversation(2), ThreadTags::default());
+        let second = newly_typing_scopes(&typing, &mut announced);
+        assert_eq!(
+            second.iter().map(|(s, _)| (*s).clone()).collect::<Vec<_>>(),
+            vec![conversation(2)]
+        );
+
+        typing.remove(&conversation(1));
+        assert!(newly_typing_scopes(&typing, &mut announced).is_empty());
+        typing.insert(conversation(1), ThreadTags::default());
+        let again = newly_typing_scopes(&typing, &mut announced);
+        assert_eq!(
+            again.iter().map(|(s, _)| (*s).clone()).collect::<Vec<_>>(),
+            vec![conversation(1)]
+        );
+    }
+}
+
 #[cfg(test)]
 mod inactivity_tests {
     use super::*;
@@ -3103,6 +3161,8 @@ async fn run_harness(
         None
     };
     let mut typing_channels: HashMap<scope::SessionScope, ThreadTags> = HashMap::new();
+    // Scopes whose first typing indicator went out when their turn started (see the loop's select).
+    let mut typing_announced: HashSet<scope::SessionScope> = HashSet::new();
     let mut presence_task: Option<tokio::task::JoinHandle<()>> = None;
 
     // Independent of pool readiness: a never-mentioned lazy agent must still
@@ -3334,6 +3394,21 @@ async fn run_harness(
         // Borrow result_rx and join_set simultaneously via split-borrow helper.
         pool.retain_held_scopes(|scope| queue.has_pending_scope(scope));
         let hold_deadline = pool.next_hold_deadline(pool::HOLD_BUSY_OWNER_TIMEOUT);
+        // A turn that just started shows typing at once instead of on the next 3 s tick, which
+        // can be up to 3 s late or miss a short turn entirely. The tick keeps it alive after.
+        if config.typing_enabled {
+            for (scope, thread_tags) in newly_typing_scopes(&typing_channels, &mut typing_announced)
+            {
+                if let Ok(event) = relay.build_typing_event(
+                    scope.channel_id(),
+                    thread_tags.root_event_id.as_deref(),
+                    thread_tags.parent_event_id.as_deref(),
+                ) {
+                    let _ = relay.try_publish_event(event);
+                }
+            }
+        }
+
         let pool_event: Option<PoolEvent> = {
             let (result_rx, join_set) = pool.rx_and_join_set();
             tokio::select! {
