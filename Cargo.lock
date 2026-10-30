@@ -1119,6 +1119,7 @@ dependencies = [
  "clap",
  "diffy",
  "dirs",
+ "fs2",
  "futures-util",
  "hex",
  "httpdate",
