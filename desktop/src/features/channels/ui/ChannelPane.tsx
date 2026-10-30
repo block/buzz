@@ -24,6 +24,13 @@ import {
   hasOtherDmParticipant,
 } from "@/features/channels/lib/dmHuddleMembers";
 import { buildVideoReviewPresentationByMessageId } from "@/features/messages/lib/videoReviewContext";
+import { findLatestReactableMessage } from "@/features/messages/lib/latestReactableMessage";
+import {
+  OPEN_REACTION_PICKER_EVENT,
+  type OpenReactionPickerDetail,
+  REACT_TO_LATEST_SHORTCUT_EVENT,
+  type ReactToLatestShortcutDetail,
+} from "@/shared/lib/keyboard-shortcuts";
 import { useComposerHeightPadding } from "@/features/messages/ui/useComposerHeightPadding";
 import { UserProfilePanel } from "@/features/profile/ui/UserProfilePanel";
 import { AgentSessionThreadPanel } from "@/features/channels/ui/AgentSessionThreadPanel";
@@ -386,6 +393,43 @@ export const ChannelPane = React.memo(function ChannelPane({
     threadHeadMessage,
     threadMessages,
   });
+  // ⌘⇧\ (dispatched by the app shell) opens the reaction picker on the newest
+  // reactable message. Resolution lives here because only this pane knows the
+  // rendered main-timeline order; the targeted row's action bar listens for
+  // the second event and owns the picker state.
+  React.useEffect(() => {
+    if (!onToggleReaction) return;
+    const channelId = activeChannel?.id;
+    if (!channelId) return;
+
+    function handleReactToLatest(event: Event) {
+      const { detail } = event as CustomEvent<ReactToLatestShortcutDetail>;
+      if (detail.channelId !== channelId) return;
+      const target = findLatestReactableMessage(mainTimelineEntries);
+      if (!target) return;
+      // Bring a row that is mounted but scrolled out of view back on screen
+      // so the popover anchors somewhere visible. No-op when already visible.
+      document
+        .querySelector(`[data-message-id="${target.id}"]`)
+        ?.scrollIntoView({ block: "nearest" });
+      window.dispatchEvent(
+        new CustomEvent<OpenReactionPickerDetail>(OPEN_REACTION_PICKER_EVENT, {
+          detail: { messageId: target.id },
+        }),
+      );
+    }
+
+    window.addEventListener(
+      REACT_TO_LATEST_SHORTCUT_EVENT,
+      handleReactToLatest,
+    );
+    return () => {
+      window.removeEventListener(
+        REACT_TO_LATEST_SHORTCUT_EVENT,
+        handleReactToLatest,
+      );
+    };
+  }, [activeChannel?.id, mainTimelineEntries, onToggleReaction]);
   const activeVideoReviewCommentSender = activeChannel?.archivedAt
     ? undefined
     : onSendVideoReviewComment;

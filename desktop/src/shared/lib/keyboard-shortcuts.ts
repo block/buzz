@@ -6,6 +6,18 @@ export type HuddleShortcutDetail = {
   channelId: string;
 };
 
+export const REACT_TO_LATEST_SHORTCUT_EVENT = "buzz:react-to-latest-shortcut";
+
+export type ReactToLatestShortcutDetail = {
+  channelId: string;
+};
+
+export const OPEN_REACTION_PICKER_EVENT = "buzz:open-reaction-picker";
+
+export type OpenReactionPickerDetail = {
+  messageId: string;
+};
+
 export type ShortcutCategory =
   | "Navigation"
   | "Messages"
@@ -185,6 +197,14 @@ export const KEYBOARD_SHORTCUTS: KeyboardShortcut[] = [
     description: "Close the current dialog or settings",
     keys: "Escape",
     keysWindows: "Escape",
+    category: "Messages",
+  },
+  {
+    id: "react-to-latest",
+    label: "React to latest message",
+    description: "Open the emoji reaction picker on the most recent message",
+    keys: "⌘⇧\\",
+    keysWindows: "Ctrl+Shift+\\",
     category: "Messages",
   },
   {

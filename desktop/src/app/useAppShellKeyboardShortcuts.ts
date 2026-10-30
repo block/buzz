@@ -4,6 +4,8 @@ import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 import {
   HUDDLE_SHORTCUT_EVENT,
   type HuddleShortcutDetail,
+  REACT_TO_LATEST_SHORTCUT_EVENT,
+  type ReactToLatestShortcutDetail,
 } from "@/shared/lib/keyboard-shortcuts";
 
 type AppShellKeyboardShortcutsOptions = {
@@ -32,25 +34,44 @@ export function useAppShellKeyboardShortcuts({
   React.useLayoutEffect(() => {
     if (disabled) return;
 
-    // Capture phase so the shortcut works even when a composer or control
-    // has focus and stops keydown propagation. Only the huddle shortcut may
-    // live here: capture-phase handling of the other shortcuts would steal
-    // them from more specific handlers (e.g. the composer's ⌘K link dialog).
-    function handleHuddleShortcut(event: KeyboardEvent) {
+    // Capture phase so these shortcuts work even when a composer or control
+    // has focus and stops keydown propagation. Only shortcuts with no more
+    // specific handler may live here: capture-phase handling of the others
+    // would steal them (e.g. the composer's ⌘K link dialog).
+    function handleCaptureShortcuts(event: KeyboardEvent) {
+      if (event.repeat || event.defaultPrevented || !activeChannelId) return;
+
       const isHuddleShortcut =
         event.ctrlKey &&
         event.shiftKey &&
         !event.metaKey &&
         !event.altKey &&
         event.code === "Space";
-      if (!isHuddleShortcut) return;
-      if (event.repeat || event.defaultPrevented || !activeChannelId) return;
-      event.preventDefault();
-      window.dispatchEvent(
-        new CustomEvent<HuddleShortcutDetail>(HUDDLE_SHORTCUT_EVENT, {
-          detail: { channelId: activeChannelId },
-        }),
-      );
+      if (isHuddleShortcut) {
+        event.preventDefault();
+        window.dispatchEvent(
+          new CustomEvent<HuddleShortcutDetail>(HUDDLE_SHORTCUT_EVENT, {
+            detail: { channelId: activeChannelId },
+          }),
+        );
+        return;
+      }
+
+      // `code` rather than `key`: Shift+\ produces "|" on many layouts.
+      const isReactToLatestShortcut =
+        hasPrimaryShortcutModifier(event) &&
+        event.shiftKey &&
+        !event.altKey &&
+        event.code === "Backslash";
+      if (isReactToLatestShortcut) {
+        event.preventDefault();
+        window.dispatchEvent(
+          new CustomEvent<ReactToLatestShortcutDetail>(
+            REACT_TO_LATEST_SHORTCUT_EVENT,
+            { detail: { channelId: activeChannelId } },
+          ),
+        );
+      }
     }
 
     function handleKeyDown(event: KeyboardEvent) {
@@ -100,12 +121,12 @@ export function useAppShellKeyboardShortcuts({
       }
     }
 
-    window.addEventListener("keydown", handleHuddleShortcut, {
+    window.addEventListener("keydown", handleCaptureShortcuts, {
       capture: true,
     });
     window.addEventListener("keydown", handleKeyDown);
     return () => {
-      window.removeEventListener("keydown", handleHuddleShortcut, {
+      window.removeEventListener("keydown", handleCaptureShortcuts, {
         capture: true,
       });
       window.removeEventListener("keydown", handleKeyDown);

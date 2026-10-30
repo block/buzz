@@ -35,6 +35,10 @@ import {
 } from "@/features/messages/ui/useQuickReactionEmojis";
 import { reactionEmojiUrl } from "@/shared/api/customEmoji";
 import { cn } from "@/shared/lib/cn";
+import {
+  OPEN_REACTION_PICKER_EVENT,
+  type OpenReactionPickerDetail,
+} from "@/shared/lib/keyboard-shortcuts";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { emojiDisplayName } from "@/shared/lib/emojiName";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
@@ -460,6 +464,50 @@ export const MessageActionBar = React.memo(function MessageActionBar({
   const hasReplyAction = Boolean(onReply);
   const hasReactionAction = Boolean(onReactionSelect);
 
+  // Local handle on the root element (merged with the host's measurement ref)
+  // so the shortcut handler below can tell which surface this instance is in.
+  const rootRef = React.useRef<HTMLDivElement | null>(null);
+  const assignRootRef = React.useCallback(
+    (node: HTMLDivElement | null) => {
+      rootRef.current = node;
+      if (typeof ref === "function") {
+        ref(node);
+      } else if (ref) {
+        ref.current = node;
+      }
+    },
+    [ref],
+  );
+
+  // The react-to-latest shortcut targets one message id; the matching row's
+  // action bar opens its own picker so anchor, focus, and close behavior stay
+  // identical to a pointer-opened picker. Only the main-timeline instance may
+  // respond: the same message can be mounted again as a thread-panel head, and
+  // two surfaces must not both open a picker for one keypress.
+  React.useEffect(() => {
+    if (!hasReactionAction) return;
+
+    function handleOpenReactionPicker(event: Event) {
+      const { detail } = event as CustomEvent<OpenReactionPickerDetail>;
+      if (detail.messageId !== message.id) return;
+      if (!rootRef.current?.closest('[data-testid="message-timeline"]')) {
+        return;
+      }
+      setIsReactionPickerOpen(true);
+    }
+
+    window.addEventListener(
+      OPEN_REACTION_PICKER_EVENT,
+      handleOpenReactionPicker,
+    );
+    return () => {
+      window.removeEventListener(
+        OPEN_REACTION_PICKER_EVENT,
+        handleOpenReactionPicker,
+      );
+    };
+  }, [hasReactionAction, message.id]);
+
   const hasMoreMenuActions =
     Boolean(onEdit) ||
     Boolean(onDelete) ||
@@ -518,7 +566,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
           : "",
       )}
       data-testid={`message-action-bar-${message.id}`}
-      ref={ref}
+      ref={assignRootRef}
     >
       <div className="overflow-hidden rounded-full border border-border/70 bg-background/95 shadow-xs backdrop-blur-sm supports-[backdrop-filter]:bg-background/85">
         <div className="flex items-center gap-0.5 p-1">

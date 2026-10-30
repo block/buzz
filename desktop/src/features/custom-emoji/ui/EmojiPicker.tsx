@@ -4,6 +4,7 @@ import * as React from "react";
 import { buildCustomEmojiCategory } from "@/features/custom-emoji/emojiMartCategory";
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
 import { emojiMartData } from "@/features/custom-emoji/ui/emojiMartPrewarm";
+import { useTheme } from "@/shared/theme/ThemeProvider";
 
 /**
  * Reach into the `em-emoji-picker` shadow root and disable spellcheck,
@@ -96,6 +97,10 @@ export const EmojiPicker = React.memo(function EmojiPicker({
     () => buildCustomEmojiCategory(customEmoji),
     [customEmoji],
   );
+  // The app theme is a user setting, not the OS scheme — emoji-mart's "auto"
+  // follows prefers-color-scheme, which renders a light picker inside a dark
+  // Buzz theme (and vice versa). Pin it to the resolved app theme instead.
+  const { isDark } = useTheme();
   const hostRef = React.useRef<HTMLDivElement>(null);
 
   React.useEffect(() => {
@@ -123,7 +128,7 @@ export const EmojiPicker = React.memo(function EmojiPicker({
         previewPosition="bottom"
         set="native"
         skinTonePosition="search"
-        theme="auto"
+        theme={isDark ? "dark" : "light"}
       />
     </div>
   );

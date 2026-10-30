@@ -30,6 +30,7 @@ import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { ROUNDED_SQUIRCLE_PATH } from "@/shared/ui/AvatarClipPaths";
 import { useEmojiBurst } from "@/shared/ui/EmojiBurstProvider";
+import { useTheme } from "@/shared/theme/ThemeProvider";
 import {
   Popover,
   PopoverAnchor,
@@ -76,6 +77,8 @@ export function AgentCreationPreview({
   testIdPrefix?: string;
   variant?: "compact" | "default";
 }) {
+  // Match the app theme, not the OS scheme (same fix as the shared EmojiPicker).
+  const { isDark } = useTheme();
   const [isDragOverAvatar, setIsDragOverAvatar] = React.useState(false);
   const [isAvatarMenuOpen, setIsAvatarMenuOpen] = React.useState(false);
   const [avatarUrlDraft, setAvatarUrlDraft] = React.useState("");
@@ -598,7 +601,7 @@ export function AgentCreationPreview({
                 searchPosition="sticky"
                 set="native"
                 skinTonePosition="none"
-                theme="auto"
+                theme={isDark ? "dark" : "light"}
               />
             </div>
 
