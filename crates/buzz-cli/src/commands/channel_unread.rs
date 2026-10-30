@@ -346,8 +346,8 @@ pub async fn cmd_unread(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::read_state::tests::slot_event;
-    use axum::{body::Bytes, extract::State, routing::post, Json, Router};
+    use crate::commands::read_state::tests::{slot_event, snapshot_descriptor, snapshot_envelope};
+    use axum::{body::Bytes, extract::State, routing::get, routing::post, Json, Router};
     use nostr::Keys;
     use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
@@ -405,6 +405,18 @@ mod tests {
                     };
                     let mut relay = relay.lock().unwrap();
                     relay.filters.push(filter.clone());
+                    if filter.get("read_state_snapshot").is_some() {
+                        let own: Vec<Value> = relay
+                            .events
+                            .iter()
+                            .filter(|e| {
+                                e["kind"] == 30078 && filter["authors"] == json!([e["pubkey"]])
+                            })
+                            .cloned()
+                            .collect();
+                        let author = filter["authors"][0].as_str().unwrap();
+                        return Json(snapshot_envelope(author, own));
+                    }
                     let mut hits: Vec<Value> = relay
                         .events
                         .iter()
@@ -415,6 +427,10 @@ mod tests {
                     hits.truncate(filter["limit"].as_u64().unwrap() as usize);
                     Json(json!(hits))
                 }),
+            )
+            .route(
+                "/info",
+                get(|| async { Json(json!({"read_state_snapshot": snapshot_descriptor()})) }),
             )
             .with_state(relay);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -604,9 +620,12 @@ mod tests {
         );
         let dev_q = reads.iter().find(|q| q["#h"] == json!([DEV])).unwrap();
         assert_eq!(dev_q["since"], json!(6));
-        let state_q = &w.queries_for(30078)[0];
-        assert_eq!(state_q["#t"], json!(["read-state"]));
-        assert!(state_q.get("since").is_none());
+        let state_qs = w.queries_for(30078);
+        assert_eq!(state_qs.len(), 1, "read state is one atomic snapshot");
+        assert_eq!(state_qs[0]["read_state_snapshot"], json!(1));
+        for paging in ["#t", "since", "until", "limit"] {
+            assert!(state_qs[0].get(paging).is_none(), "{paging}");
+        }
     }
 
     #[tokio::test]

@@ -107,7 +107,7 @@ buzz messages send --channel <UUID> \
 
 ## Unread Counts
 
-`channels unread [--channel <UUID>...] [--limit <n>]` is read-only: it counts messages newer than your synced NIP-RS read state and never marks anything read. It counts at most 200 channels (`--limit`) and reads at most 1000 events per channel. `capped: true` means `unread_count` is a lower bound. When channels were left out, stderr carries a `channels_truncated` warning with the dropped count; pass `--channel` to count specific ones. A read-state slot that cannot be decrypted or decoded fails with exit 4 instead of counting as empty.
+`channels unread [--channel <UUID>...] [--limit <n>]` is read-only: it counts messages newer than your synced NIP-RS read state and never marks anything read. It counts at most 200 channels (`--limit`) and reads at most 1000 events per channel. `capped: true` means `unread_count` is a lower bound. When channels were left out, stderr carries a `channels_truncated` warning with the dropped count; pass `--channel` to count specific ones. It loads read state as one atomic relay snapshot, so a relay that does not offer `read_state_snapshot` fails with exit 4 rather than risk a partial count. A read-state slot that cannot be decrypted or decoded also fails with exit 4 instead of counting as empty.
 
 ## Workflow Inputs
 

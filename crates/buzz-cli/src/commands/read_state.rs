@@ -23,8 +23,7 @@ const MAX_CONTEXTS: usize = 10_000;
 const MAX_CONTEXT_KEY_BYTES: usize = 256;
 const MAX_SLOT_ID_LEN: usize = 64;
 const MAX_CLIENT_ID_UTF16_UNITS: usize = 64;
-/// Relay-side ceiling on one full-state snapshot (NIP-RS, atomic snapshot).
-const MAX_SLOTS: u32 = 4096;
+const SNAPSHOT_VERSION: u64 = 1;
 
 /// A slot that was valid but written by a newer schema, so left out of the merge.
 #[derive(Debug, PartialEq, Eq)]
@@ -48,15 +47,78 @@ impl ReadState {
 }
 
 /// Load and merge every read-state slot of the signed-in identity.
+///
+/// Uses the relay's atomic snapshot (NIP-RS, Buzz Atomic Snapshot Extension):
+/// paginating by cursor cannot see a slot another client replaces mid-load, so
+/// a relay without the extension is an error rather than a partial read.
 pub(crate) async fn fetch(client: &BuzzClient) -> Result<ReadState, CliError> {
+    let community_id = discover_snapshot(client).await?;
+    let me = client.keys().public_key().to_hex();
     let filter = json!({
         "kinds": [KIND_READ_STATE],
-        "authors": [client.keys().public_key().to_hex()],
-        "#t": [T_TAG],
-        "consistency": "strong",
+        "authors": [me],
+        "read_state_snapshot": SNAPSHOT_VERSION,
     });
-    let events = client.query_all_bounded(filter, MAX_SLOTS).await?;
+    let raw = client.query(&filter).await?;
+    let events = snapshot_events(&raw, &community_id, &me)?;
     merge(client.keys(), events)
+}
+
+fn cannot_prove_complete(detail: impl std::fmt::Display) -> CliError {
+    CliError::Other(format!(
+        "cannot prove your read state is complete: {detail}; refusing to report unread counts"
+    ))
+}
+
+/// The community id a relay advertises for its atomic read-state snapshot.
+async fn discover_snapshot(client: &BuzzClient) -> Result<String, CliError> {
+    let raw = client.get_public("/info").await?;
+    let info: Value = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("invalid NIP-11 response: {e}")))?;
+    let descriptor = info
+        .get("read_state_snapshot")
+        .filter(|d| d.is_object())
+        .ok_or_else(|| {
+            cannot_prove_complete("this relay does not offer the atomic read_state_snapshot")
+        })?;
+    if descriptor.get("version").and_then(Value::as_u64) != Some(SNAPSHOT_VERSION) {
+        return Err(cannot_prove_complete(
+            "this relay offers an unsupported read_state_snapshot version",
+        ));
+    }
+    descriptor
+        .get("community_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| cannot_prove_complete("the relay advertised no community_id"))
+}
+
+/// Validate the snapshot envelope and return its events. Anything but a
+/// complete, version-1 envelope for this identity and community is rejected,
+/// including the plain event array an older relay returns when it ignores the
+/// extension.
+fn snapshot_events(raw: &str, community_id: &str, me: &str) -> Result<Vec<Value>, CliError> {
+    let mut envelope: Value = serde_json::from_str(raw)
+        .map_err(|e| CliError::Other(format!("failed to parse query response: {e}")))?;
+    let field = |name: &str| envelope.get(name);
+    if field("read_state_snapshot").and_then(Value::as_u64) != Some(SNAPSHOT_VERSION)
+        || field("complete") != Some(&Value::Bool(true))
+    {
+        return Err(cannot_prove_complete(
+            "the relay did not return a complete read_state_snapshot",
+        ));
+    }
+    if field("community_id").and_then(Value::as_str) != Some(community_id)
+        || field("pubkey").and_then(Value::as_str) != Some(me)
+    {
+        return Err(cannot_prove_complete(
+            "the snapshot belongs to a different community or identity",
+        ));
+    }
+    match envelope.get_mut("events").map(Value::take) {
+        Some(Value::Array(events)) => Ok(events),
+        _ => Err(cannot_prove_complete("the snapshot has no events array")),
+    }
 }
 
 fn unreadable(event: &Event, detail: impl std::fmt::Display) -> CliError {
@@ -190,7 +252,27 @@ pub(crate) fn merge(keys: &nostr::Keys, raw: Vec<Value>) -> Result<ReadState, Cl
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use axum::{body::Bytes, extract::State, routing::get, routing::post, Json, Router};
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    pub(crate) const COMMUNITY: &str = "5f0c1b9e-2d0b-4f4e-9a7c-0d6f3f3f3f3f";
+
+    pub(crate) fn snapshot_envelope(pubkey: &str, events: Vec<Value>) -> Value {
+        json!({
+            "read_state_snapshot": 1,
+            "complete": true,
+            "community_id": COMMUNITY,
+            "pubkey": pubkey,
+            "snapshot_id": "0".repeat(64),
+            "events": events,
+        })
+    }
+
+    pub(crate) fn snapshot_descriptor() -> Value {
+        json!({"version": 1, "community_id": COMMUNITY, "max_events": 4096})
+    }
 
     pub(crate) fn slot_event(keys: &Keys, slot: &str, plaintext: &str, at: u64) -> Value {
         let content = nip44::encrypt(
@@ -312,5 +394,127 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(state.frontiers.is_empty());
+    }
+
+    type Bodies = Arc<Mutex<Vec<Value>>>;
+
+    #[derive(Clone)]
+    struct Canned {
+        info: Value,
+        query: String,
+        bodies: Bodies,
+    }
+
+    async fn relay(keys: &Keys, info: Value, query: Value) -> (BuzzClient, Bodies) {
+        let canned = Canned {
+            info,
+            query: query.to_string(),
+            bodies: Bodies::default(),
+        };
+        let bodies = canned.bodies.clone();
+        let app = Router::new()
+            .route(
+                "/info",
+                get(|State(c): State<Canned>| async move { Json(c.info) }),
+            )
+            .route(
+                "/query",
+                post(|State(c): State<Canned>, body: Bytes| async move {
+                    c.bodies
+                        .lock()
+                        .unwrap()
+                        .push(serde_json::from_slice(&body).unwrap());
+                    c.query
+                }),
+            )
+            .with_state(canned);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (
+            BuzzClient::new(url, keys.clone(), None, None).unwrap(),
+            bodies,
+        )
+    }
+
+    fn advertised() -> Value {
+        json!({"read_state_snapshot": snapshot_descriptor()})
+    }
+
+    #[tokio::test]
+    async fn fetch_loads_one_atomic_snapshot() {
+        let keys = Keys::generate();
+        let slots = vec![
+            slot_event(&keys, "a", &blob(json!({"c1": 10})), 1),
+            slot_event(&keys, "b", &blob(json!({"c1": 20})), 2),
+        ];
+        let (client, bodies) = relay(
+            &keys,
+            advertised(),
+            snapshot_envelope(&keys.public_key().to_hex(), slots),
+        )
+        .await;
+
+        let state = fetch(&client).await.unwrap();
+
+        assert_eq!(state.frontier("c1"), Some(20));
+        assert_eq!(
+            *bodies.lock().unwrap(),
+            vec![json!([{
+                "kinds": [KIND_READ_STATE],
+                "authors": [keys.public_key().to_hex()],
+                "read_state_snapshot": 1,
+            }])],
+            "one exact snapshot request: no tag, limit or cursor that could page"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_refuses_a_load_it_cannot_prove_complete() {
+        let keys = Keys::generate();
+        let slot = slot_event(&keys, "a", &blob(json!({"c1": 10})), 1);
+        let good = snapshot_envelope(&keys.public_key().to_hex(), vec![slot.clone()]);
+        let with = |field: &str, value: Value| {
+            let mut envelope = good.clone();
+            envelope[field] = value;
+            envelope
+        };
+        let cases: Vec<(&str, Value, Value)> = vec![
+            ("no descriptor", json!({}), good.clone()),
+            (
+                "descriptor version",
+                json!({"read_state_snapshot": {"version": 2, "community_id": COMMUNITY}}),
+                good.clone(),
+            ),
+            (
+                "descriptor community",
+                json!({"read_state_snapshot": {"version": 1}}),
+                good.clone(),
+            ),
+            ("relay ignored the extension", advertised(), json!([slot])),
+            ("incomplete", advertised(), with("complete", json!(false))),
+            ("unmarked", advertised(), with("complete", Value::Null)),
+            (
+                "version",
+                advertised(),
+                with("read_state_snapshot", json!(2)),
+            ),
+            (
+                "community",
+                advertised(),
+                with("community_id", json!("other")),
+            ),
+            (
+                "identity",
+                advertised(),
+                with("pubkey", json!("f".repeat(64))),
+            ),
+            ("events", advertised(), with("events", Value::Null)),
+        ];
+        for (name, info, response) in cases {
+            let (client, _) = relay(&keys, info, response).await;
+            let err = fetch(&client).await.expect_err(name);
+            assert!(err.to_string().contains("cannot prove"), "{name}: {err}");
+        }
     }
 }
