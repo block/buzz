@@ -75,6 +75,14 @@ processes, such as a Kubernetes Indexed Job, with the same scenario. Each
 shard reports its own clients; add counts and take the worst percentiles
 across shards.
 
+`ghcr.io/block/buzz-loadgen:main` (and `:sha-<7>`) packages the binary as the
+image entrypoint, published by `.github/workflows/loadgen-image.yml` from
+`Dockerfile.loadgen`. Mount the scenario and pass the subcommand as the
+container arguments, for example `run /etc/loadgen/scenario.toml --shard
+$(JOB_COMPLETION_INDEX)/30`. Pin `:sha-<7>` or a digest for runs you intend
+to compare; `:main` moves. The container runs as UID 10001 with `/` as its
+working directory and no home, so point `--report` at a writable mount.
+
 ## Abort
 
 Each step reports every operation from the start of its ramp to the end of

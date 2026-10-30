@@ -28,6 +28,10 @@ use super::{api_error, db_read_error, internal_error, not_found, parse_query_or_
 mod thread_roots;
 mod thread_window;
 
+#[cfg(test)]
+#[path = "bridge/workflow_webhook_postgres_tests.rs"]
+mod workflow_webhook_postgres_tests;
+
 /// Authenticate a relay-owned JSON `POST` endpoint for a community member.
 ///
 /// Binds the community from the request host, runs NIP-FI admission over a
@@ -2642,7 +2646,9 @@ pub struct WebhookQuery {
 /// Webhook trigger endpoint. No user auth — the webhook secret authenticates the caller.
 ///
 /// Prefers `X-Webhook-Secret` header over `?secret=` query param (headers aren't logged
-/// by most proxies). Returns 202 Accepted; execution is async.
+/// by most proxies). Returns 202 Accepted; execution is async. Immediately
+/// before the `workflow_runs` insert, the owner authority gate also rejects an
+/// owner banned from the host-bound community.
 pub async fn workflow_webhook(
     State(state): State<Arc<AppState>>,
     Path(id_str): Path<String>,
@@ -2736,9 +2742,10 @@ pub async fn workflow_webhook(
     // executes with the workflow **owner's** standing authority — so the
     // secret alone is insufficient. Immediately before run creation, reject
     // disabled/inactive workflows and recheck the owner's current channel
-    // membership (and role, for exfiltration-capable definitions). Fail
-    // closed with the same generic 404 as the lookups above so a
-    // revoked-owner workflow is indistinguishable from a nonexistent one.
+    // membership (and role, for exfiltration-capable definitions) and that
+    // the owner is not banned. Fail closed with the same generic 404 as the
+    // lookups above so a revoked-owner workflow is indistinguishable from a
+    // nonexistent one.
     if !workflow.enabled || workflow.status != buzz_db::workflow::WorkflowStatus::Active {
         return Err(not_found("workflow not found"));
     }

@@ -1353,7 +1353,6 @@ test("fast middle-page scroll settles with continuous mounted coverage", async (
       element.dispatchEvent(new Event("scroll", { bubbles: true }));
     }
   });
-  await page.waitForTimeout(250);
 
   const viewportCoverage = () =>
     timeline.evaluate((element) => {
@@ -1376,6 +1375,11 @@ test("fast middle-page scroll settles with continuous mounted coverage", async (
       }
       return Math.max(largestGap, viewport.bottom - cursor);
     });
+
+  // Virtua remounts the new range a few frames after the last scroll; under
+  // load that can take longer than any fixed wait. Wait for coverage first,
+  // then sample it while idle: a stale range stays blank, so it still fails.
+  await expect.poll(viewportCoverage).toBeLessThan(100);
 
   // A day heading can produce a small legitimate gap between message rows;
   // the stale-range failure leaves a viewport-scale hole. Check repeatedly

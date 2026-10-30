@@ -62,87 +62,106 @@ class BuzzSettingMenu<T> extends StatelessWidget {
         ),
         menuChildren: [
           for (final option in options)
-            MenuItemButton(
-              key: option.key,
-              onPressed: () => onSelected(option.value),
-              style: MenuItemButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: Grid.twelve),
-              ),
-              // A trailing check keeps labels flush with the menu's edge.
-              trailingIcon: option.value == value
-                  ? Icon(Icons.check, size: 20, color: context.colors.primary)
-                  : const SizedBox(width: 20),
-              // Root menu panels ignore size styles and shrink-wrap their items,
-              // so the label sets the width: the row's, less the item's padding,
-              // the check and the gap before it.
-              child: SizedBox(
-                width: constraints.maxWidth - Grid.twelve * 3 - 20,
-                child: Text(option.label),
+            // The check icon carries no semantics, so mark the selection on
+            // the item's own node.
+            MergeSemantics(
+              child: Semantics(
+                checked: option.value == value,
+                inMutuallyExclusiveGroup: true,
+                child: MenuItemButton(
+                  key: option.key,
+                  onPressed: () => onSelected(option.value),
+                  style: MenuItemButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: Grid.twelve,
+                    ),
+                  ),
+                  // A trailing check keeps labels flush with the menu's edge.
+                  trailingIcon: option.value == value
+                      ? Icon(
+                          Icons.check,
+                          size: 20,
+                          color: context.colors.primary,
+                        )
+                      : const SizedBox(width: 20),
+                  // Root menu panels ignore size styles and shrink-wrap their items,
+                  // so the label sets the width: the row's, less the item's padding,
+                  // the check and the gap before it.
+                  child: SizedBox(
+                    width: constraints.maxWidth - Grid.twelve * 3 - 20,
+                    child: Text(option.label),
+                  ),
+                ),
               ),
             ),
         ],
-        builder: (context, menu, _) => Tooltip(
-          message: '$label: $valueLabel',
-          // Draw on an ink surface so the tap ripple shows inside the border.
-          child: Material(
-            color: context.colors.surface,
-            shape: shape,
-            clipBehavior: Clip.antiAlias,
-            child: InkWell(
-              onTap: enabled
-                  ? () {
-                      if (menu.isOpen) return menu.close();
-                      // Drop the keyboard so it can't cover the menu.
-                      FocusManager.instance.primaryFocus?.unfocus();
-                      menu.open();
-                    }
-                  : null,
-              child: Padding(
-                key: controlKey,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: Grid.twelve,
-                  vertical: Grid.xs,
-                ),
-                child: Opacity(
-                  opacity: enabled ? 1 : 0.5,
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          label,
-                          style: context.textTheme.labelLarge?.copyWith(
-                            color: context.colors.onSurface,
-                            fontWeight: FontWeight.w600,
+        builder: (context, menu, _) => Semantics(
+          button: true,
+          enabled: enabled,
+          expanded: menu.isOpen,
+          child: Tooltip(
+            message: '$label: $valueLabel',
+            // Draw on an ink surface so the tap ripple shows inside the border.
+            child: Material(
+              color: context.colors.surface,
+              shape: shape,
+              clipBehavior: Clip.antiAlias,
+              child: InkWell(
+                onTap: enabled
+                    ? () {
+                        if (menu.isOpen) return menu.close();
+                        // Drop the keyboard so it can't cover the menu.
+                        FocusManager.instance.primaryFocus?.unfocus();
+                        menu.open();
+                      }
+                    : null,
+                child: Padding(
+                  key: controlKey,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: Grid.twelve,
+                    vertical: Grid.xs,
+                  ),
+                  child: Opacity(
+                    opacity: enabled ? 1 : 0.5,
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            label,
+                            style: context.textTheme.labelLarge?.copyWith(
+                              color: context.colors.onSurface,
+                              fontWeight: FontWeight.w600,
+                            ),
                           ),
                         ),
-                      ),
-                      if (valueIcon case final icon?) ...[
+                        if (valueIcon case final icon?) ...[
+                          Icon(
+                            icon,
+                            size: 16,
+                            color: context.colors.onSurfaceVariant,
+                          ),
+                          const SizedBox(width: Grid.half),
+                        ],
+                        // Long values truncate instead of squeezing the label.
+                        ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 180),
+                          child: Text(
+                            valueLabel,
+                            overflow: TextOverflow.ellipsis,
+                            style: context.textTheme.bodyMedium?.copyWith(
+                              color: context.colors.onSurface,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: Grid.half),
                         Icon(
-                          icon,
+                          BuzzIcons.chevronDown,
                           size: 16,
                           color: context.colors.onSurfaceVariant,
                         ),
-                        const SizedBox(width: Grid.half),
                       ],
-                      // Long values truncate instead of squeezing the label.
-                      ConstrainedBox(
-                        constraints: const BoxConstraints(maxWidth: 180),
-                        child: Text(
-                          valueLabel,
-                          overflow: TextOverflow.ellipsis,
-                          style: context.textTheme.bodyMedium?.copyWith(
-                            color: context.colors.onSurface,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: Grid.half),
-                      Icon(
-                        BuzzIcons.chevronDown,
-                        size: 16,
-                        color: context.colors.onSurfaceVariant,
-                      ),
-                    ],
+                    ),
                   ),
                 ),
               ),
