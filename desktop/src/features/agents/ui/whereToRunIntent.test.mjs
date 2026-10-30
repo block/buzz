@@ -4,9 +4,11 @@ import test from "node:test";
 import {
   applyProbeResult,
   canSubmitWhereToRun,
+  draftFromBackend,
   emptyWhereToRunDraft,
   providerConfigComplete,
   resolveBackendIntent,
+  resolveBackendEdit,
 } from "./whereToRunIntent.ts";
 
 const probed = {
@@ -128,4 +130,47 @@ test("probe resolution preserves unrelated draft fields", () => {
     applyProbeResult(unprobedDraft, probeWithDefaults).runOn,
     "kubernetes",
   );
+});
+
+const savedBlox = {
+  type: "provider",
+  id: "blox",
+  config: { region: "us", size: 3 },
+};
+
+test("an unchanged or closed run-on editor sends no backend", () => {
+  const agent = { backend: savedBlox, backendAgentId: "dep-1" };
+  assert.deepEqual(resolveBackendEdit(agent, null), {
+    needsConfirmation: false,
+    valid: true,
+  });
+  const reopened = { ...draftFromBackend(savedBlox), probedProvider: probed };
+  assert.equal(resolveBackendEdit(agent, reopened).backend, undefined);
+});
+
+test("leaving a deployed provider needs confirmation; a settings edit does not", () => {
+  const deployed = { backend: savedBlox, backendAgentId: "dep-1" };
+  const toLocal = resolveBackendEdit(deployed, emptyWhereToRunDraft);
+  assert.deepEqual(toLocal.backend, { type: "local" });
+  assert.equal(toLocal.needsConfirmation, true);
+
+  const resized = resolveBackendEdit(
+    deployed,
+    providerDraft({ providerConfig: { region: "us", size: "5" } }),
+  );
+  assert.deepEqual(resized.backend?.config, { region: "us", size: 5 });
+  assert.equal(resized.needsConfirmation, false);
+
+  const undeployed = { backend: savedBlox, backendAgentId: null };
+  assert.equal(
+    resolveBackendEdit(undeployed, emptyWhereToRunDraft).needsConfirmation,
+    false,
+  );
+});
+
+test("moving to a provider stays invalid until its probe completes", () => {
+  const local = { backend: { type: "local" }, backendAgentId: null };
+  const pending = providerDraft({ probedProvider: null });
+  assert.equal(resolveBackendEdit(local, pending).valid, false);
+  assert.equal(resolveBackendEdit(local, providerDraft()).valid, true);
 });
