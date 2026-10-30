@@ -270,18 +270,36 @@ impl WorkflowDef {
         }
 
         if let TriggerDef::Webhook {
-            verify: WebhookVerify::HmacSha256,
+            verify,
             signature_header,
-            ..
+            signature_prefix,
         } = &self.trigger
         {
-            if signature_header
-                .as_deref()
-                .is_none_or(|header| header.trim().is_empty())
-            {
-                return Err(WorkflowError::InvalidDefinition(
-                    "webhook trigger with verify: hmac_sha256 requires 'signature_header'".into(),
-                ));
+            match verify {
+                WebhookVerify::HmacSha256 => {
+                    let header = signature_header.as_deref().unwrap_or_default();
+                    if header.trim().is_empty() {
+                        return Err(WorkflowError::InvalidDefinition(
+                            "webhook trigger with verify: hmac_sha256 requires 'signature_header'"
+                                .into(),
+                        ));
+                    }
+                    // An invalid name can never match a request header, so
+                    // every call would 404 with no hint why.
+                    if !is_http_header_name(header) {
+                        return Err(WorkflowError::InvalidDefinition(format!(
+                            "signature_header '{header}' is not a valid HTTP header name"
+                        )));
+                    }
+                }
+                WebhookVerify::SharedSecret => {
+                    if signature_header.is_some() || signature_prefix.is_some() {
+                        return Err(WorkflowError::InvalidDefinition(
+                            "'signature_header' and 'signature_prefix' require verify: hmac_sha256"
+                                .into(),
+                        ));
+                    }
+                }
             }
         }
 
@@ -320,6 +338,14 @@ impl WorkflowDef {
 
         Ok(())
     }
+}
+
+/// RFC 9110 field-name `token` characters.
+fn is_http_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
 }
 
 /// Validate a cron expression using the `cron` crate.
@@ -1084,6 +1110,32 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_signature_header_name() {
+        let yaml = "name: Hook\ntrigger:\n  on: webhook\n  verify: hmac_sha256\n  signature_header: 'X CoPlan Signature'\nsteps:\n  - id: s1\n    action: delay\n    duration: 1m\n";
+        match parse_yaml(yaml).unwrap_err() {
+            WorkflowError::InvalidDefinition(msg) => {
+                assert!(msg.contains("not a valid HTTP header name"), "{msg}")
+            }
+            other => panic!("expected InvalidDefinition, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_signature_fields_without_hmac_sha256() {
+        for field in ["signature_header: X-Sig", "signature_prefix: 'sha256='"] {
+            let yaml = format!(
+                "name: Hook\ntrigger:\n  on: webhook\n  {field}\nsteps:\n  - id: s1\n    action: delay\n    duration: 1m\n"
+            );
+            match parse_yaml(&yaml).unwrap_err() {
+                WorkflowError::InvalidDefinition(msg) => {
+                    assert!(msg.contains("require verify: hmac_sha256"), "{msg}")
+                }
+                other => panic!("expected InvalidDefinition, got: {other}"),
+            }
+        }
     }
 
     #[test]

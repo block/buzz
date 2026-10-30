@@ -2,6 +2,8 @@
 //!
 //! Command kinds (41010–41012, 30620, 46020, 46030–46031) are processed
 //! transactionally: validate → begin tx → insert event → execute mutations → commit.
+//! Exception: kind:46021 (webhook secret set) is never inserted, because its
+//! content is the secret.
 //!
 //! SECURITY: This module is only reachable AFTER the ingest pipeline has verified:
 //! 1. Event signature (verify_event)
