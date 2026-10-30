@@ -20,6 +20,9 @@ export const KIND_STREAM_MESSAGE_V2 = 40002;
 export const KIND_STREAM_MESSAGE_EDIT = 40003;
 export const KIND_CHANNEL_THREAD_SUMMARY = 39005;
 export const KIND_CHANNEL_WINDOW_BOUNDS = 39006;
+// NIP-AR channel artifact revision and relay-signed removal marker.
+export const KIND_ARTIFACT = 45010;
+export const KIND_ARTIFACT_REMOVAL = 45011;
 export const KIND_STREAM_MESSAGE_DIFF = 40008;
 export const KIND_REMINDER = 40007;
 export const KIND_SYSTEM_MESSAGE = 40099;
@@ -44,7 +47,8 @@ export const KIND_HUDDLE_ENDED = 48103;
 export const KIND_HUDDLE_LIVENESS = 48104;
 // NIP-78 application-specific data. All use kind 30078; the relay
 // differentiates them by d-tag ("read-state:<slotId>", "channel-sections",
-// "channel-mutes", "channel-stars", "channel-sort", "project-sidebar-membership").
+// "channel-mutes", "channel-stars", "channel-sort", "project-sidebar-membership",
+// "thread-pins").
 export const KIND_READ_STATE = 30078;
 export const KIND_CHANNEL_SECTIONS = 30078;
 export const KIND_CHANNEL_MUTES = 30078;
@@ -52,6 +56,7 @@ export const KIND_CHANNEL_STARS = 30078;
 export const KIND_CHANNEL_SORT = 30078;
 export const KIND_PROJECT_SIDEBAR_MEMBERSHIP = 30078;
 export const KIND_COMMUNITY_THEME = 30078;
+export const KIND_THREAD_PINS = 30078;
 // NIP-33 persona/team/managed-agent projection events (d-tag keyed). Published
 // backend-side as secrets-stripped snapshots; the inbound sync hook subscribes
 // to all three to patch local records. Mirror of buzz-core's KIND_PERSONA etc.
