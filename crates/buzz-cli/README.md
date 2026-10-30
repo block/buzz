@@ -210,7 +210,7 @@ Observer frames are NIP-44 encrypted to the agent's owner and are never stored
 by the relay, so the command listens for `--wait` seconds (1-60, default 10)
 and returns the frames that arrive. `--since` defaults to 5 minutes ago and may
 not be older than 1 hour. An empty array means no frames arrived in the window.
-A non-owner key fails with exit code 3 before any subscription opens. Frames
+The harness sends frames in `batch` envelopes; the command expands them, so `--limit` counts events. A non-owner key fails with exit code 3 before any subscription opens. A connection failure exits 2. Frames
 that cannot be decrypted are counted in a stderr warning; if none can be read
 the command fails.
 

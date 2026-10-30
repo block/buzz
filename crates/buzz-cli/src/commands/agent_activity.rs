@@ -30,6 +30,7 @@ const DEFAULT_LOOKBACK_SECS: u64 = 300;
 const MAX_LOOKBACK_SECS: u64 = 3_600;
 const MAX_COLLECTED: usize = 1_000;
 const TEXT_EXCERPT_CHARS: usize = 280;
+const BATCH_KIND: &str = "batch";
 
 /// Frames to print plus how many received frames could not be read.
 #[derive(Debug)]
@@ -131,14 +132,19 @@ pub(crate) fn decode_activity(
         if !is_agent_telemetry(event, &agent_hex) || event.created_at.as_secs() < since {
             continue;
         }
-        let frame = event
+        let payload = event
             .verify()
             .ok()
-            .and_then(|()| decrypt_observer_payload::<Value>(keys, event).ok())
-            .and_then(|payload| normalize_frame(event.created_at.as_secs(), &payload));
-        match frame {
-            Some(frame) => decoded.push(frame),
-            None => unreadable += 1,
+            .and_then(|()| decrypt_observer_payload::<Value>(keys, event).ok());
+        let Some(payload) = payload else {
+            unreadable += 1;
+            continue;
+        };
+        for inner in unwrap_batch(&payload) {
+            match normalize_frame(event.created_at.as_secs(), inner) {
+                Some(frame) => decoded.push(frame),
+                None => unreadable += 1,
+            }
         }
     }
     if decoded.is_empty() && unreadable > 0 {
@@ -167,6 +173,16 @@ fn is_agent_telemetry(event: &Event, agent_hex: &str) -> bool {
         && event.pubkey.to_hex() == agent_hex
         && tag(OBSERVER_AGENT_TAG) == Some(agent_hex)
         && tag(OBSERVER_FRAME_TAG) == Some(OBSERVER_FRAME_TELEMETRY)
+}
+
+fn unwrap_batch(frame: &Value) -> Vec<&Value> {
+    if frame.get("kind").and_then(Value::as_str) != Some(BATCH_KIND) {
+        return vec![frame];
+    }
+    match frame.pointer("/payload/events").and_then(Value::as_array) {
+        Some(inner) if !inner.is_empty() => inner.iter().collect(),
+        _ => vec![frame],
+    }
 }
 
 fn normalize_frame(created_at: u64, frame: &Value) -> Option<((i64, u64), Value)> {
@@ -215,6 +231,20 @@ fn excerpt(text: &str) -> Value {
     cut.into()
 }
 
+fn block_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items.iter().map(block_text).collect::<Vec<_>>().join("\n"),
+        Value::Object(map) => ["text", "content"]
+            .iter()
+            .filter_map(|key| map.get(*key))
+            .map(block_text)
+            .find(|text| !text.is_empty())
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
 /// Per-type summary fields, matching what the desktop activity views read.
 fn summarize(kind: &str, payload: &Value, out: &mut Map<String, Value>) {
     match kind {
@@ -254,12 +284,9 @@ fn summarize(kind: &str, payload: &Value, out: &mut Map<String, Value>) {
             put(out, "tool_call_id", update.get("toolCallId"));
             put(out, "tool_title", update.get("title"));
             put(out, "tool_status", update.get("status"));
-            let text = update
-                .pointer("/content/text")
-                .or_else(|| update.get("content"))
-                .and_then(Value::as_str);
-            if let Some(text) = text {
-                out.insert("text".into(), excerpt(text));
+            let text = update.get("content").map(block_text).unwrap_or_default();
+            if !text.is_empty() {
+                out.insert("text".into(), excerpt(&text));
             }
         }
         _ => {}
@@ -483,6 +510,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn batch_envelopes_are_expanded_into_their_inner_events() {
+        let (owner, agent) = (Keys::generate(), Keys::generate());
+        let (client, relay) = setup(&owner, &agent).await;
+        let batch = |seq: u64, inner: Vec<Value>| frame(seq, BATCH_KIND, json!({"events": inner}));
+        let chunk = frame(
+            2,
+            "acp_read",
+            json!({"method": "session/update", "params": {"update": {"sessionUpdate": "agent_message_chunk", "content": [{"text": "a"}, {"content": {"text": "b"}}]}}}),
+        );
+        let events = vec![
+            frame_event(
+                &agent,
+                &owner.public_key(),
+                &batch(
+                    9,
+                    vec![
+                        frame(1, "turn_started", json!({"source": "channel"})),
+                        chunk,
+                    ],
+                ),
+                NOW - 30,
+            ),
+            frame_event(
+                &agent,
+                &owner.public_key(),
+                &batch(
+                    10,
+                    vec![frame(
+                        3,
+                        "control_result",
+                        json!({"type": "cancel_turn", "status": "sent", "requestId": "r1"}),
+                    )],
+                ),
+                NOW - 20,
+            ),
+            frame_event(&agent, &owner.public_key(), &batch(11, vec![]), NOW - 10),
+        ];
+        relay.lock().unwrap().frames = events;
+
+        let hex = agent.public_key().to_hex();
+        let all = fetch_activity(&client, &hex, None, 50, 1, NOW)
+            .await
+            .unwrap();
+        let shown: Vec<_> = all
+            .frames
+            .iter()
+            .map(|f| {
+                (
+                    f["type"].as_str().unwrap().to_owned(),
+                    f["seq"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("turn_started".to_owned(), 1),
+                ("acp_read".to_owned(), 2),
+                ("control_result".to_owned(), 3),
+                ("batch".to_owned(), 11),
+            ]
+        );
+        assert_eq!(all.frames[1]["text"], "a\nb");
+        assert_eq!(all.frames[2]["request_id"], "r1");
+
+        let newest = fetch_activity(&client, &hex, None, 2, 1, NOW)
+            .await
+            .unwrap();
+        let seqs: Vec<_> = newest.frames.iter().map(|f| f["seq"].clone()).collect();
+        assert_eq!(seqs, [3, 11]);
+    }
+
+    #[tokio::test]
     async fn non_owner_gets_an_auth_error_not_an_empty_list() {
         let (owner, agent) = (Keys::generate(), Keys::generate());
         let (_, relay) = setup(&owner, &agent).await;
@@ -501,6 +601,37 @@ mod tests {
         assert!(matches!(error, CliError::Auth(_)), "{error:?}");
         assert_eq!(crate::error::exit_code(&error), 3);
         assert!(relay.lock().unwrap().reqs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unreachable_relay_is_a_network_error() {
+        let client =
+            BuzzClient::new("http://127.0.0.1:1".into(), Keys::generate(), None, None).unwrap();
+        let error = client
+            .listen_events(&json!({"kinds": [24_200]}), Duration::from_secs(1), 10)
+            .await
+            .unwrap_err();
+        assert_eq!(crate::error::exit_code(&error), 2, "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn only_the_newest_events_are_kept_under_a_flood() {
+        let (owner, agent) = (Keys::generate(), Keys::generate());
+        let (client, relay) = setup(&owner, &agent).await;
+        seed(
+            &relay,
+            &agent,
+            &owner,
+            &(1..=5)
+                .map(|seq| frame(seq, "turn_liveness", json!({})))
+                .collect::<Vec<_>>(),
+        );
+        let events = client
+            .listen_events(&json!({"kinds": [24_200]}), Duration::from_secs(1), 2)
+            .await
+            .unwrap();
+        let created: Vec<_> = events.iter().map(|e| e.created_at.as_secs()).collect();
+        assert_eq!(created, [NOW - 97, NOW - 96]);
     }
 
     #[tokio::test]

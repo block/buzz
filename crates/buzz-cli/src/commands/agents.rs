@@ -198,7 +198,7 @@ fn ensure_owner(
             "no profile found for agent {agent}"
         ))),
         Err(failure) => Err(CliError::Auth(format!(
-            "only the agent's owner can read its activity: {}",
+            "could not confirm from the agent's profile that you own it; only the owner can read its activity: {}",
             failure.message()
         ))),
     }
