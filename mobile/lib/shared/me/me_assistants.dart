@@ -48,6 +48,16 @@ final meAssistantsProvider = FutureProvider<List<AgentDirectoryEntry>>((
   return choices;
 }, retry: (_, _) => null);
 
+/// Every agent in the owner's inventory, archived ones included, like
+/// desktop's `agentChoices.identities`. Presentation only, never admission.
+final meAgentInventoryProvider = FutureProvider<Set<String>>((ref) async {
+  final sync = ref.watch(meSyncProvider);
+  if (sync.connectionState != null) {
+    ref.watch(relaySessionProvider.select((state) => state.status));
+  }
+  return (await loadMeAgentInventory(sync)).keys.toSet();
+}, retry: (_, _) => null);
+
 /// Freshness-controlled ownership check for one personal-chat recipient.
 final meAssistantOwnershipProvider = FutureProvider.family<bool, String>((
   ref,

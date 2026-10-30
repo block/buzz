@@ -19,6 +19,7 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../../shared/emoji/emoji_burst.dart';
+import '../../shared/me/me_assistants.dart';
 import '../../shared/me/me_sync.dart';
 import '../../shared/me/me_search_placement.dart';
 import 'me/me_assistant_picker.dart';
@@ -462,18 +463,13 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     // root message. Me and DMs already show that typing inline.
     final threadWorking = _threadWorkingAgents(
       ref,
-      currentPubkey,
       personalChat || resolvedChannel.isDm
-          ? const []
-          : ref
-                .watch(
-                  visibleTypingProvider(
-                    channel.id,
-                    selfPubkey: currentPubkey,
-                    include: (e) => e.threadHeadId != null,
-                  ),
-                )
-                .entries,
+          ? ''
+          : ref.watch(
+              channelTypingProvider(
+                channel.id,
+              ).select((all) => _threadTypingKey(all, currentPubkey)),
+            ),
     );
     useEffect(() {
       if (sessionStatus != SessionStatus.connected ||

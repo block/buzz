@@ -246,6 +246,7 @@ Widget _buildTestable({
   List<TypingEntry> typing = const [],
   Map<String, UserProfile> users = const {},
   Set<String>? knownAgentPubkeys,
+  Set<String> inventoryAgents = const {},
   Future<Set<String>> Function()? loadChannelBotPubkeys,
   bool watchChannelMembershipUpdates = false,
   Future<List<AgentDirectoryEntry>> Function()? loadAgentDirectory,
@@ -403,6 +404,7 @@ Widget _buildTestable({
       ),
       if (knownAgentPubkeys != null)
         knownAgentPubkeysProvider.overrideWithValue(knownAgentPubkeys),
+      meAgentInventoryProvider.overrideWith((ref) async => inventoryAgents),
       if (directoryUsers != null)
         relayDirectoryUsersProvider.overrideWith((ref) async => directoryUsers),
       if (createChannelActions != null)
@@ -11204,26 +11206,16 @@ void main() {
           disableAnimations: true,
           huddleCurrentPubkey: 'self',
           knownAgentPubkeys: const {'morty', 'summer', 'jerry', 'rick'},
+          inventoryAgents: const {'morty', 'summer', 'jerry'},
           users: const {
-            'morty': UserProfile(
-              pubkey: 'morty',
-              displayName: 'Morty',
-              ownerPubkey: 'self',
-            ),
-            'summer': UserProfile(
-              pubkey: 'summer',
-              displayName: 'Summer',
-              ownerPubkey: 'self',
-            ),
-            'jerry': UserProfile(
-              pubkey: 'jerry',
-              displayName: 'Jerry',
-              ownerPubkey: 'self',
-            ),
+            'morty': UserProfile(pubkey: 'morty', displayName: 'Morty'),
+            'summer': UserProfile(pubkey: 'summer', displayName: 'Summer'),
+            'jerry': UserProfile(pubkey: 'jerry', displayName: 'Jerry'),
+            // An owner attestation alone is not desktop's inventory.
             'rick': UserProfile(
               pubkey: 'rick',
               displayName: 'Rick',
-              ownerPubkey: 'other',
+              ownerPubkey: 'self',
             ),
             'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
           },
@@ -11247,8 +11239,8 @@ void main() {
       );
       expect(row, findsNothing);
 
-      // As on desktop, people and other owners' agents typing in the thread
-      // stay inside the thread view.
+      // As on desktop, people and agents outside the user's inventory typing
+      // in the thread stay inside the thread view.
       typing.setEntries([
         for (final pubkey in ['alice', 'rick'])
           TypingEntry(
