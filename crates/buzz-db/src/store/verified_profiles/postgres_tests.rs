@@ -8,7 +8,9 @@ async fn fixture() -> (Db, CommunityId, Keys, String, ProfilePolicy) {
     })
     .await
     .unwrap();
-    db.migrate().await.unwrap();
+    if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
+        db.migrate().await.unwrap();
+    }
     let community = CommunityId::from_uuid(uuid::Uuid::new_v4());
     sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
         .bind(community.as_uuid())
