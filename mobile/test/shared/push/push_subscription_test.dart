@@ -207,6 +207,31 @@ void main() {
     );
   });
 
+  test('muted authors stop at the lease size limit', () {
+    final agents = [
+      for (var i = 1; i <= 200; i++) i.toRadixString(16).padLeft(64, '0'),
+    ];
+    final channels = [
+      for (var i = 0; i < 151; i++)
+        '00000000-0000-4000-8000-${i.toString().padLeft(12, '0')}',
+    ];
+
+    final subscriptions = buildDesiredBuzzPushSubscriptions(
+      myPubkey: me,
+      channelIds: channels,
+      mutedAuthorPubkeys: agents,
+    );
+
+    final bytes = utf8.encode(
+      jsonEncode([for (final s in subscriptions) s.toJson()]),
+    );
+    expect(bytes.length, lessThanOrEqualTo(buzzPushMaxSubscriptionBytes));
+    expect(
+      subscriptions.first.ignore.skip(1).expand((f) => f.authors!),
+      isNotEmpty,
+    );
+  });
+
   test('no muted authors leaves the ignore list unchanged', () {
     expect(
       buildDesiredBuzzPushSubscriptions(
