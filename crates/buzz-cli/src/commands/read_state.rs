@@ -7,7 +7,7 @@
 //! is an error: an unread count built on a partial merge would overstate
 //! unread, never understate it, and the user could not tell.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use buzz_core::kind::KIND_READ_STATE;
 use nostr::nips::nip44;
@@ -19,7 +19,7 @@ use crate::error::CliError;
 
 const D_TAG_PREFIX: &str = "read-state:";
 const T_TAG: &str = "read-state";
-const MAX_CONTEXTS: usize = 10_000;
+pub(super) const MAX_CONTEXTS: usize = 10_000;
 const MAX_CONTEXT_KEY_BYTES: usize = 256;
 const MAX_SLOT_ID_LEN: usize = 64;
 const MAX_CLIENT_ID_UTF16_UNITS: usize = 64;
@@ -32,10 +32,36 @@ pub(crate) struct SkippedSlot {
     pub version: i64,
 }
 
-/// Max-merged frontiers of every readable slot.
+/// One decoded slot at its coordinate.
+#[derive(Debug)]
+pub(crate) struct Slot {
+    pub created_at: u64,
+    pub client_id: String,
+    pub contexts: HashMap<String, u64>,
+}
+
+/// Merged manual-unread override register of one context: set counter,
+/// clear counter, baseline.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Register {
+    pub set: u64,
+    pub clear: u64,
+    pub baseline: u64,
+}
+
+impl Register {
+    /// NIP-RS liveness predicate: `S > 0 && F <= B && S > C`.
+    pub(crate) fn is_active(&self, frontier: u64) -> bool {
+        self.set > 0 && frontier <= self.baseline && self.set > self.clear
+    }
+}
+
+/// Max-merged frontiers and override registers of every readable slot.
 #[derive(Debug, Default)]
 pub(crate) struct ReadState {
     frontiers: HashMap<String, u64>,
+    overrides: HashMap<String, Register>,
+    slots: HashMap<String, Slot>,
     pub skipped: Vec<SkippedSlot>,
 }
 
@@ -43,6 +69,23 @@ impl ReadState {
     /// The merged read marker of a context, in unix seconds.
     pub(crate) fn frontier(&self, context: &str) -> Option<u64> {
         self.frontiers.get(context).copied()
+    }
+
+    /// The merged override register of a context, if any slot carries one.
+    pub(crate) fn register(&self, context: &str) -> Option<Register> {
+        self.overrides.get(context).copied()
+    }
+
+    /// The decoded slot at `read-state:<slot_id>`.
+    pub(crate) fn slot(&self, slot_id: &str) -> Option<&Slot> {
+        self.slots.get(slot_id)
+    }
+
+    /// Whether a slot at `read-state:<slot_id>` exists but was left out of the
+    /// merge because its schema version is unknown.
+    pub(crate) fn is_skipped(&self, slot_id: &str) -> bool {
+        let d_tag = format!("{D_TAG_PREFIX}{slot_id}");
+        self.skipped.iter().any(|s| s.d_tag == d_tag)
     }
 }
 
@@ -66,7 +109,7 @@ pub(crate) async fn fetch(client: &BuzzClient) -> Result<ReadState, CliError> {
 
 fn cannot_prove_complete(detail: impl std::fmt::Display) -> CliError {
     CliError::Other(format!(
-        "cannot prove your read state is complete: {detail}; refusing to report unread counts"
+        "cannot prove your read state is complete: {detail}; refusing to continue"
     ))
 }
 
@@ -123,7 +166,7 @@ fn snapshot_events(raw: &str, community_id: &str, me: &str) -> Result<Vec<Value>
 
 fn unreadable(event: &Event, detail: impl std::fmt::Display) -> CliError {
     CliError::Other(format!(
-        "your read-state slot {} is unreadable ({detail}); refusing to report unread counts from a partial read state",
+        "your read-state slot {} is unreadable ({detail}); refusing to continue from a partial read state",
         event.id.to_hex()
     ))
 }
@@ -163,8 +206,46 @@ fn uint32(value: &Value) -> Option<u64> {
     (n <= u64::from(u32::MAX)).then_some(n)
 }
 
+struct Decoded {
+    client_id: String,
+    contexts: HashMap<String, u64>,
+    overrides: HashMap<String, Register>,
+}
+
+/// Collect override groups from the raw entries, before the generic per-entry
+/// discard: a group is a live triple or a lone `ov_c` floor with valid uint32
+/// values, and anything else is rejected whole.
+fn override_groups(contexts: &serde_json::Map<String, Value>) -> HashMap<String, Register> {
+    let mut groups: HashMap<&str, [Option<&Value>; 3]> = HashMap::new();
+    for (key, value) in contexts {
+        for (slot, prefix) in ["ov_s:", "ov_c:", "ov_b:"].into_iter().enumerate() {
+            if let Some(ctx) = key.strip_prefix(prefix) {
+                groups.entry(ctx).or_default()[slot] = Some(value);
+            }
+        }
+    }
+    groups
+        .into_iter()
+        .filter_map(|(ctx, [set, clear, baseline])| {
+            let register = match (set, clear, baseline) {
+                (Some(s), Some(c), Some(b)) => Register {
+                    set: uint32(s)?,
+                    clear: uint32(c)?,
+                    baseline: uint32(b)?,
+                },
+                (None, Some(c), None) => Register {
+                    clear: uint32(c)?,
+                    ..Register::default()
+                },
+                _ => return None,
+            };
+            Some((ctx.to_string(), register))
+        })
+        .collect()
+}
+
 /// Decode one blob. `Ok(Err(version))` is a valid blob of an unknown schema.
-fn decode(event: &Event, plaintext: &str) -> Result<Result<HashMap<String, u64>, i64>, CliError> {
+fn decode(event: &Event, plaintext: &str) -> Result<Result<Decoded, i64>, CliError> {
     let blob: Value = serde_json::from_str(plaintext).map_err(|e| unreadable(event, e))?;
     let Some(blob) = blob.as_object() else {
         return Err(unreadable(event, "not a JSON object"));
@@ -191,18 +272,25 @@ fn decode(event: &Event, plaintext: &str) -> Result<Result<HashMap<String, u64>,
     if contexts.len() > MAX_CONTEXTS {
         return Err(unreadable(event, "too many contexts"));
     }
-    Ok(Ok(contexts
-        .iter()
-        .filter(|(key, _)| key.len() <= MAX_CONTEXT_KEY_BYTES)
-        .filter_map(|(key, value)| Some((key.clone(), uint32(value)?)))
-        .collect()))
+    let client_id = blob["client_id"].as_str().unwrap_or_default().to_string();
+    Ok(Ok(Decoded {
+        client_id,
+        overrides: override_groups(contexts),
+        contexts: contexts
+            .iter()
+            .filter(|(key, _)| key.len() <= MAX_CONTEXT_KEY_BYTES)
+            .filter_map(|(key, value)| Some((key.clone(), uint32(value)?)))
+            .collect(),
+    }))
 }
 
 /// Verify, decrypt and max-merge raw relay events. Events that are not read-state
-/// coordinates are ignored; a coordinate that cannot be read is an error.
+/// coordinates are ignored; a coordinate that cannot be read is an error, and so
+/// is one coordinate held by more than one event.
 pub(crate) fn merge(keys: &nostr::Keys, raw: Vec<Value>) -> Result<ReadState, CliError> {
     let me = keys.public_key();
     let mut heads: HashMap<String, Event> = HashMap::new();
+    let mut coordinates: HashSet<String> = HashSet::new();
     for value in raw {
         let event: Event = serde_json::from_value(value)
             .map_err(|e| CliError::Other(format!("relay returned a malformed event: {e}")))?;
@@ -218,16 +306,17 @@ pub(crate) fn merge(keys: &nostr::Keys, raw: Vec<Value>) -> Result<ReadState, Cl
                 event.id.to_hex()
             ))
         })?;
+        if let Some(d) = single_d_tag(&event) {
+            if !coordinates.insert(d.to_string()) {
+                return Err(CliError::Other(format!(
+                    "relay returned a duplicate or conflicting coordinate {d:?} in the read-state snapshot; refusing to pick one"
+                )));
+            }
+        }
         let Some(d) = is_slot_coordinate(&event) else {
             continue;
         };
-        let d = d.to_string();
-        let newer = heads
-            .get(&d)
-            .is_none_or(|head| (event.created_at, head.id) > (head.created_at, event.id));
-        if newer {
-            heads.insert(d, event);
-        }
+        heads.insert(d.to_string(), event);
     }
 
     let mut state = ReadState::default();
@@ -237,11 +326,26 @@ pub(crate) fn merge(keys: &nostr::Keys, raw: Vec<Value>) -> Result<ReadState, Cl
         let plaintext = nip44::decrypt(keys.secret_key(), &me, &event.content)
             .map_err(|e| unreadable(&event, e))?;
         match decode(&event, &plaintext)? {
-            Ok(contexts) => {
-                for (key, ts) in contexts {
-                    let slot = state.frontiers.entry(key).or_insert(0);
-                    *slot = (*slot).max(ts);
+            Ok(decoded) => {
+                for (key, ts) in &decoded.contexts {
+                    let slot = state.frontiers.entry(key.clone()).or_insert(0);
+                    *slot = (*slot).max(*ts);
                 }
+                for (ctx, register) in decoded.overrides {
+                    let merged = state.overrides.entry(ctx).or_default();
+                    merged.set = merged.set.max(register.set);
+                    merged.clear = merged.clear.max(register.clear);
+                    merged.baseline = merged.baseline.max(register.baseline);
+                }
+                let slot_id = d_tag.strip_prefix(D_TAG_PREFIX).unwrap_or(&d_tag);
+                state.slots.insert(
+                    slot_id.to_string(),
+                    Slot {
+                        created_at: event.created_at.as_secs(),
+                        client_id: decoded.client_id,
+                        contexts: decoded.contexts,
+                    },
+                );
             }
             Err(version) => state.skipped.push(SkippedSlot { d_tag, version }),
         }
@@ -319,12 +423,27 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn newest_version_of_a_coordinate_wins() {
+    fn a_duplicate_or_conflicting_coordinate_is_rejected_not_picked() {
         let keys = Keys::generate();
         let old = slot_event(&keys, "a", &blob(json!({"c1": 99})), 1);
         let new = slot_event(&keys, "a", &blob(json!({"c1": 5})), 2);
-        let state = merge(&keys, vec![new, old]).unwrap();
-        assert_eq!(state.frontier("c1"), Some(5));
+        let untagged = EventBuilder::new(Kind::Custom(KIND_READ_STATE as u16), "x")
+            .tags([Tag::identifier("read-state:a")])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let untagged = serde_json::to_value(untagged).unwrap();
+        for (name, events) in [
+            ("two versions", vec![new.clone(), old.clone()]),
+            ("same event twice", vec![old.clone(), old.clone()]),
+            ("tagged and untagged", vec![old.clone(), untagged]),
+        ] {
+            let err = merge(&keys, events).expect_err(name);
+            let msg = err.to_string();
+            assert!(msg.contains("duplicate or conflicting"), "{name}: {msg}");
+            assert!(msg.contains("read-state:a"), "{name}: {msg}");
+        }
+        let other = slot_event(&keys, "b", &blob(json!({"c1": 5})), 2);
+        assert!(merge(&keys, vec![old, other]).is_ok());
     }
 
     #[test]

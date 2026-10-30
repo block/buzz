@@ -46,6 +46,7 @@ buzz messages send-diff --channel <uuid> --diff - --repo https://github.com/org/
 # Channels
 buzz channels list
 buzz channels unread                      # unread counts from your synced read state (read-only)
+buzz channels mark-read --channel <uuid>  # advance read markers to the newest top-level message
 buzz channels create --name "my-channel" --type stream --visibility open
 buzz channels join --channel <uuid>
 buzz channels topic --channel <uuid> --topic "New topic"
@@ -132,6 +133,7 @@ The table below mirrors that tree for readers who are not at a terminal.
 | `channels` | `list` | List channels |
 | | `get` | Get channel details |
 | | `unread` | Unread counts per channel (read-only) |
+| | `mark-read` | Mark channels read in a CLI-owned NIP-RS slot |
 | | `create` | Create a channel |
 | | `update` | Update channel name/description |
 | | `topic` | Set channel topic |
