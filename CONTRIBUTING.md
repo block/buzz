@@ -162,6 +162,11 @@ Adminer on `:8082`, Keycloak on `:8180` for local OAuth/OIDC testing, MinIO on
 `:9000` for media storage, and Prometheus on `:9090` for metrics) and runs all
 pending database migrations.
 
+`just setup` and `just hooks` install the hooks by setting a repo-local
+`core.hooksPath`, which overrides any global one. If you already have a global
+`core.hooksPath` (a hooks manager of your own), both skip that step and say so.
+Run `BUZZ_LOCAL_HOOKS=1 just hooks` to install the repo's hooks anyway.
+
 ### Running the Relay and Desktop App
 
 ```bash

@@ -58,6 +58,14 @@ hooks:
     # works with no pre-installed lefthook and guarantees the pinned version
     # rather than whatever happens to be on PATH.
     export PATH="{{justfile_directory()}}/bin:$PATH"
+    # A repo-local core.hooksPath overrides a global one, so leave a developer's
+    # own hooks manager in charge unless they opt in.
+    GLOBAL_HOOKS_PATH="$(git config --global --get core.hooksPath || true)"
+    if [[ -n "$GLOBAL_HOOKS_PATH" && "${BUZZ_LOCAL_HOOKS:-}" != "1" ]]; then
+        echo "Skipping git hooks: installing them would override your global core.hooksPath ($GLOBAL_HOOKS_PATH) in this repo."
+        echo "To install them anyway, run: BUZZ_LOCAL_HOOKS=1 just hooks"
+        exit 0
+    fi
     # --path-format=absolute guarantees an absolute path from every invocation context:
     # without it, --git-common-dir returns ".git" from the main checkout and a
     # relative hooksPath would break linked-worktree dispatch just like .hooks did.
