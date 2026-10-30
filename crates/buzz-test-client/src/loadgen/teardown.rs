@@ -287,13 +287,13 @@ hold_secs = 1
             ),
         ])));
         let addr = fake_operator(communities.clone(), "lg-t-3.example").await;
-        let scenario = scenario(&addr, Some("lg-{run}-{i}.example"));
-        let net = Net::new(&scenario).await.unwrap();
+        let fixture = scenario(&addr, Some("lg-{run}-{i}.example"));
+        let net = Net::new(&fixture).await.unwrap();
         let base = format!("http://{addr}");
         let operator = Keys::generate();
 
         for pass in ["first", "re-run"] {
-            let report = teardown_with(&scenario, &net, &base, &operator).await;
+            let report = teardown_with(&fixture, &net, &base, &operator).await;
             assert_eq!(
                 report.requested,
                 BTreeMap::from([("postgres_purged".into(), 1), ("submitted".into(), 1)]),

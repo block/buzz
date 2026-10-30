@@ -1776,9 +1776,9 @@ hold_secs = 2
 
     /// Runs `[hot_thread]` section `hot` for a second against a relay whose
     /// root lookup returns a newer reply-shaped decoy by the root's author,
-    /// plus the hot root itself when `seeded`, and which takes `delay` to
-    /// accept each event.
-    async fn hot_thread_run(seeded: bool, hot: &str, delay: Duration) -> HotRun {
+    /// plus the hot root itself when `seeded`, and which holds every event
+    /// it receives until `held` after the run starts.
+    async fn hot_thread_run(seeded: bool, hot: &str, held: Duration) -> HotRun {
         let author = hot_root_keys("t");
         let channel = identity::channel_id("t", 0, 0);
         let root = EventBuilder::new(kind(KIND_STREAM_MESSAGE), HOT_ROOT_PREFIX)
@@ -1798,12 +1798,14 @@ hold_secs = 2
         let posted = Arc::new(std::sync::Mutex::new(Vec::new()));
         let queries = Arc::new(std::sync::Mutex::new(Vec::new()));
         let (post_log, query_log) = (posted.clone(), queries.clone());
+        let release = Instant::now() + held;
         let addr = super::super::seed::tests::fake_http(move |_, target, body| {
             if target == "/events" {
                 let event: Event = serde_json::from_slice(body).unwrap();
                 post_log.lock().unwrap().push(event);
-                if !delay.is_zero() {
-                    tokio::task::block_in_place(|| std::thread::sleep(delay));
+                let wait = release.saturating_duration_since(Instant::now());
+                if !wait.is_zero() {
+                    tokio::task::block_in_place(|| std::thread::sleep(wait));
                 }
                 return (200, json!({"accepted": true, "message": ""}).to_string());
             }
@@ -1903,19 +1905,18 @@ hold_secs = 1
         assert!(reason.starts_with("thread_fetch"), "{report}");
     }
 
-    /// Every author is mid-reply at the stop, with its next reply already
-    /// due when that one settles. Each may finish the reply it started, but
-    /// must start no other: at most one reply per author settles during
-    /// shutdown.
+    /// The relay holds every reply until a second after the one-second hold
+    /// ends, so each author is mid-reply at the stop and its next reply is
+    /// due when that one settles. Each must finish the reply it started and
+    /// start no other: exactly one reply per author settles during shutdown,
+    /// and the relay receives no more.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn hot_thread_authors_start_nothing_once_the_run_stops() {
         let busy = "authors = 8\nreplies_per_hour = 36000000.0";
-        let run = hot_thread_run(true, busy, Duration::from_millis(300)).await;
+        let run = hot_thread_run(true, busy, Duration::from_secs(2)).await;
         let report = run.outcome.expect("in-flight replies settle in the grace");
         let settled = &report["shutdown"]["ops"]["hot_reply"]["count"];
-        assert!(
-            (1..=8).contains(&settled.as_u64().unwrap_or_default()),
-            "{report}"
-        );
+        assert_eq!(settled.as_u64(), Some(8), "{report}");
+        assert_eq!(run.posted.len(), 8, "{report}");
     }
 }
