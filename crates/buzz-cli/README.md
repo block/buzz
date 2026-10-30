@@ -245,8 +245,12 @@ frame (kind:24200, `frame=control`) signed by your key and wait up to `--wait`
 seconds (1-30, default 8) for the harness `control_result` that carries the
 command's own `requestId`, channel, and type. Results for other requests are
 ignored. The relay stores nothing, so the command subscribes first and sends
-second. Only the agent's owner may send control frames; a non-owner key fails
-with exit 3 before anything is sent. Run them only on an explicit owner request.
+second. Only the agent's owner may send control frames. The command reads the
+agent's profile first and exits 3 before sending when it does not name your
+key as owner. That check is advisory (the profile tag is not verified); the
+relay and the harness are the real gate, and a refused frame shows up as
+`unconfirmed`. A connection failure after the frame was sent is
+`delivery unknown` (exit 2, not retryable), like a timeout. Run them only on an explicit owner request.
 
 Output: `{request_id, agent, channel_id, status, confirmed}` (`set-model` adds
 `model_id`). `confirmed` is true only when the harness answered.
