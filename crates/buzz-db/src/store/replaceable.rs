@@ -639,6 +639,7 @@ impl Db {
 #[cfg(test)]
 mod postgres_tests {
     use super::*;
+    use crate::test_support::ScratchDb;
     use crate::{event, migration, replaceable};
     use sqlx::postgres::PgPoolOptions;
     use sqlx::{Acquire, PgPool};
@@ -676,52 +677,6 @@ mod postgres_tests {
         std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into())
     }
 
-    /// Create a fresh scratch database on the same server and optionally run migrations.
-    async fn create_scratch_db_through(
-        admin: &PgPool,
-        prefix: &str,
-        target: Option<i64>,
-    ) -> (PgPool, String) {
-        let name = format!("{}_{}", prefix, Uuid::new_v4().simple());
-        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
-            .execute(admin)
-            .await
-            .expect("create scratch db");
-        let base = admin_url().await;
-        // Swap the database path segment of the admin URL for the scratch name.
-        let scratch_url = {
-            let idx = base.rfind('/').expect("db url has a path segment");
-            format!("{}/{}", &base[..idx], name)
-        };
-        let pool = PgPool::connect(&scratch_url)
-            .await
-            .expect("connect scratch db");
-        match target {
-            Some(target) => migration::run_migrations_through(&pool, target)
-                .await
-                .expect("migrate scratch db through target"),
-            None => migration::run_migrations(&pool)
-                .await
-                .expect("migrate scratch db"),
-        }
-        (pool, name)
-    }
-
-    /// Create a fresh scratch database on the same server and run all migrations.
-    /// Returns (pool, db_name); callers should `drop_scratch_db` when done.
-    async fn create_scratch_db(admin: &PgPool, prefix: &str) -> (PgPool, String) {
-        create_scratch_db_through(admin, prefix, None).await
-    }
-
-    async fn drop_scratch_db(admin: &PgPool, pool: PgPool, name: &str) {
-        pool.close().await;
-        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
-        )))
-        .execute(admin)
-        .await;
-    }
-
     /// Insert identical community + channel rows into a database so the same
     /// (community, channel) ids resolve in both writer and replica.
     async fn seed_community_channel(
@@ -757,10 +712,7 @@ mod postgres_tests {
     async fn addressable_replacement_rolls_back_when_mention_indexing_fails() {
         use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
-        let admin = PgPool::connect(&admin_url().await)
-            .await
-            .expect("connect admin");
-        let (pool, scratch_name) = create_scratch_db(&admin, "atomic_addressable").await;
+        let (pool, _scratch) = ScratchDb::migrated(&admin_url().await, "atomic_addressable").await;
         let db = Db::from_pool(pool.clone());
         let community_uuid = Uuid::new_v4();
         let channel = Uuid::new_v4();
@@ -830,8 +782,6 @@ mod postgres_tests {
                 .await
                 .expect("count rolled-back event");
         assert_eq!(new_rows, 0, "new roster must roll back with its index");
-
-        drop_scratch_db(&admin, pool, &scratch_name).await;
     }
 
     #[tokio::test]
@@ -839,17 +789,12 @@ mod postgres_tests {
     async fn stale_legacy_roster_cannot_replace_new_locked_snapshot() {
         use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
-        let admin = PgPool::connect(&admin_url().await)
-            .await
-            .expect("connect admin");
-        let (setup_pool, scratch_name) = create_scratch_db(&admin, "mixed_roster_writer").await;
-        let base_url = admin_url().await;
-        let slash = base_url.rfind('/').expect("database URL has path segment");
-        let scratch_url = format!("{}/{}", &base_url[..slash], scratch_name);
+        let (setup_pool, scratch) =
+            ScratchDb::migrated(&admin_url().await, "mixed_roster_writer").await;
         let pool = PgPoolOptions::new()
             .max_connections(1)
             .acquire_timeout(Duration::from_secs(1))
-            .connect(&scratch_url)
+            .connect(scratch.url())
             .await
             .expect("connect one-connection scratch pool");
         setup_pool.close().await;
@@ -1004,8 +949,6 @@ mod postgres_tests {
                 .await
                 .expect("count rejected stale roster");
         assert_eq!(stale_rows, 0, "stale roster insert must roll back");
-
-        drop_scratch_db(&admin, pool, &scratch_name).await;
     }
 
     #[tokio::test]
@@ -1402,10 +1345,8 @@ mod postgres_tests {
     async fn parameterized_replacement_rolls_back_when_mention_indexing_fails() {
         use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
-        let admin = PgPool::connect(&admin_url().await)
-            .await
-            .expect("connect admin");
-        let (pool, scratch_name) = create_scratch_db(&admin, "atomic_parameterized").await;
+        let (pool, _scratch) =
+            ScratchDb::migrated(&admin_url().await, "atomic_parameterized").await;
         let db = Db::from_pool(pool.clone());
         let community = CommunityId::from_uuid(make_community(&pool).await);
         let keys = Keys::generate();
@@ -1494,8 +1435,6 @@ mod postgres_tests {
                 .expect("count rolled-back project");
         assert_eq!(new_rows, 0);
         tx.commit().await.expect("commit usable caller transaction");
-
-        drop_scratch_db(&admin, pool, &scratch_name).await;
     }
 
     #[tokio::test]

@@ -2440,6 +2440,7 @@ mod postgres_tests {
     use super::*;
     use crate::channel::{ChannelType, ChannelVisibility};
     use crate::migration;
+    use crate::test_support::ScratchDb;
     use crate::user::{ensure_user, set_agent_owner};
     use nostr::Keys;
     use sqlx::postgres::PgPoolOptions;
@@ -5154,56 +5155,6 @@ mod postgres_tests {
         assert_eq!(restored.as_deref(), Some("owner"));
     }
 
-    async fn admin_url() -> String {
-        crate::test_support::database_url()
-    }
-
-    /// Create a fresh scratch database on the same server and optionally run migrations.
-    async fn create_scratch_db_through(
-        admin: &PgPool,
-        prefix: &str,
-        target: Option<i64>,
-    ) -> (PgPool, String) {
-        let name = format!("{}_{}", prefix, Uuid::new_v4().simple());
-        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
-            .execute(admin)
-            .await
-            .expect("create scratch db");
-        let base = admin_url().await;
-        // Swap the database path segment of the admin URL for the scratch name.
-        let scratch_url = {
-            let idx = base.rfind('/').expect("db url has a path segment");
-            format!("{}/{}", &base[..idx], name)
-        };
-        let pool = PgPool::connect(&scratch_url)
-            .await
-            .expect("connect scratch db");
-        match target {
-            Some(target) => migration::run_migrations_through(&pool, target)
-                .await
-                .expect("migrate scratch db through target"),
-            None => migration::run_migrations(&pool)
-                .await
-                .expect("migrate scratch db"),
-        }
-        (pool, name)
-    }
-
-    /// Create a fresh scratch database on the same server and run all migrations.
-    /// Returns (pool, db_name); callers should `drop_scratch_db` when done.
-    async fn create_scratch_db(admin: &PgPool, prefix: &str) -> (PgPool, String) {
-        create_scratch_db_through(admin, prefix, None).await
-    }
-
-    async fn drop_scratch_db(admin: &PgPool, pool: PgPool, name: &str) {
-        pool.close().await;
-        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
-        )))
-        .execute(admin)
-        .await;
-    }
-
     /// Insert identical community + channel rows into a database so the same
     /// (community, channel) ids resolve in both writer and replica.
     async fn seed_community_channel(
@@ -5243,10 +5194,8 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn migrations_run_without_the_roster_trigger() {
-        let admin = PgPool::connect(&admin_url().await)
-            .await
-            .expect("connect admin");
-        let (pool, scratch_name) = create_scratch_db(&admin, "roster_fence_absent").await;
+        let (pool, _scratch) =
+            ScratchDb::migrated(&crate::test_support::database_url(), "roster_fence_absent").await;
         sqlx::raw_sql(
             "DROP TRIGGER trg_events_guard_channel_roster_snapshot ON events; \
              DROP FUNCTION guard_channel_roster_snapshot();",
@@ -5259,8 +5208,6 @@ mod postgres_tests {
         migration::run_migrations(&pool)
             .await
             .expect("migrating must not require the roster trigger");
-
-        drop_scratch_db(&admin, pool, &scratch_name).await;
     }
 
     #[tokio::test]
@@ -5268,22 +5215,11 @@ mod postgres_tests {
     async fn desired_schema_rejects_stale_legacy_roster_role() {
         use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
-        let admin = PgPool::connect(&admin_url().await)
-            .await
-            .expect("connect admin");
-        let scratch_name = format!("schema_roster_role_{}", Uuid::new_v4().simple());
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "CREATE DATABASE {scratch_name}"
-        )))
-        .execute(&admin)
-        .await
-        .expect("create desired-schema scratch db");
-        let base_url = admin_url().await;
-        let slash = base_url.rfind('/').expect("database URL has path segment");
-        let scratch_url = format!("{}/{}", &base_url[..slash], scratch_name);
+        let scratch =
+            ScratchDb::create(&crate::test_support::database_url(), "schema_roster_role").await;
         let pool = PgPoolOptions::new()
             .max_connections(1)
-            .connect(&scratch_url)
+            .connect(scratch.url())
             .await
             .expect("connect desired-schema scratch db");
         sqlx::raw_sql(sqlx::AssertSqlSafe(
@@ -5409,7 +5345,5 @@ mod postgres_tests {
                 .await
                 .expect("count rejected stale roster");
         assert_eq!(stale_rows, 0, "legacy stale insert must roll back");
-
-        drop_scratch_db(&admin, pool, &scratch_name).await;
     }
 }

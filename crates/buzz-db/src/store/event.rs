@@ -2952,6 +2952,7 @@ mod e_tag_filter_shape_tests {
 #[cfg(test)]
 mod postgres_tests {
     use super::*;
+    use crate::test_support::ScratchDb;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
@@ -5309,37 +5310,6 @@ mod postgres_tests {
         );
     }
 
-    async fn admin_url() -> String {
-        crate::test_support::database_url()
-    }
-
-    async fn create_scratch_db(admin: &PgPool, prefix: &str) -> (PgPool, String) {
-        let name = format!("{}_{}", prefix, Uuid::new_v4().simple());
-        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
-            .execute(admin)
-            .await
-            .expect("create scratch db");
-        let base = admin_url().await;
-        let idx = base.rfind('/').expect("db url has a path segment");
-        let scratch_url = format!("{}/{}", &base[..idx], name);
-        let pool = PgPool::connect(&scratch_url)
-            .await
-            .expect("connect scratch db");
-        crate::migration::run_migrations(&pool)
-            .await
-            .expect("migrate scratch db");
-        (pool, name)
-    }
-
-    async fn drop_scratch_db(admin: &PgPool, pool: PgPool, name: &str) {
-        pool.close().await;
-        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
-        )))
-        .execute(admin)
-        .await;
-    }
-
     fn make_mentioning_event(mentioned_hex: &str) -> nostr::Event {
         EventBuilder::new(Kind::Custom(9), "mentions someone")
             .tags(vec![Tag::parse(["p", mentioned_hex]).expect("p tag")])
@@ -5368,10 +5338,11 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn insert_event_mention_failure_rolls_back_the_event_insert() {
-        let admin = PgPool::connect(&admin_url().await)
-            .await
-            .expect("connect admin database");
-        let (scratch_pool, name) = create_scratch_db(&admin, "event_mention_rollback").await;
+        let (scratch_pool, _scratch) = ScratchDb::migrated(
+            &crate::test_support::database_url(),
+            "event_mention_rollback",
+        )
+        .await;
         install_mention_failure_injection(&scratch_pool).await;
 
         let db = Db::from_pool(scratch_pool.clone());
@@ -5399,8 +5370,6 @@ mod postgres_tests {
             persisted, 0,
             "event must not persist when mention indexing fails atomically"
         );
-
-        drop_scratch_db(&admin, scratch_pool, &name).await;
     }
 
     #[tokio::test]
@@ -5436,10 +5405,11 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn insert_event_with_thread_metadata_mention_failure_rolls_back_the_event_insert() {
-        let admin = PgPool::connect(&admin_url().await)
-            .await
-            .expect("connect admin database");
-        let (scratch_pool, name) = create_scratch_db(&admin, "event_thread_mention_rollback").await;
+        let (scratch_pool, _scratch) = ScratchDb::migrated(
+            &crate::test_support::database_url(),
+            "event_thread_mention_rollback",
+        )
+        .await;
         install_mention_failure_injection(&scratch_pool).await;
 
         let db = Db::from_pool(scratch_pool.clone());
@@ -5500,8 +5470,6 @@ mod postgres_tests {
             thread_meta_count, 0,
             "thread metadata must not persist when mention indexing fails atomically"
         );
-
-        drop_scratch_db(&admin, scratch_pool, &name).await;
     }
 
     #[tokio::test]

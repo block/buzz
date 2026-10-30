@@ -823,37 +823,14 @@ pub async fn run_probe(writer: PgPool, fence: Arc<ReplicaFence>) {
 #[cfg(test)]
 mod postgres_tests {
     use super::*;
+    use crate::test_support::{ScratchDb, ScratchRole};
 
     /// A private scratch database with migrations applied: the probe tests
     /// mutate the singleton heartbeat row (rewind/rotate), which must never
-    /// race the shared dev database or each other.
-    async fn scratch_db() -> (PgPool, PgPool, String) {
-        let admin = PgPool::connect(&crate::test_support::database_url())
-            .await
-            .expect("connect admin");
-        let name = format!("fence_probe_{}", uuid::Uuid::new_v4().simple());
-        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
-            .execute(&admin)
-            .await
-            .expect("create scratch db");
-        let base = crate::test_support::database_url();
-        let idx = base.rfind('/').expect("db url has a path segment");
-        let pool = PgPool::connect(&format!("{}/{}", &base[..idx], name))
-            .await
-            .expect("connect scratch db");
-        crate::migration::run_migrations(&pool)
-            .await
-            .expect("migrate scratch db");
-        (admin, pool, name)
-    }
-
-    async fn drop_scratch_db(admin: &PgPool, pool: PgPool, name: &str) {
-        pool.close().await;
-        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
-        )))
-        .execute(admin)
-        .await;
+    /// race the shared dev database or each other. Dropping the guard drops
+    /// the database.
+    async fn scratch_db() -> (PgPool, ScratchDb) {
+        ScratchDb::migrated(&crate::test_support::database_url(), "fence_probe").await
     }
 
     #[test]
@@ -1051,7 +1028,7 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn cluster_global_sample_writer_waits_for_shared_floor_lock_before_sampling_time() {
-        let (admin, pool, name) = scratch_db().await;
+        let (pool, _scratch) = scratch_db().await;
 
         let mut blocker = pool.begin().await.expect("begin shared-lock blocker");
         sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
@@ -1090,8 +1067,6 @@ mod postgres_tests {
             sample.sampled_at,
             marker_before_release
         );
-
-        drop_scratch_db(&admin, pool, &name).await;
     }
 
     /// An unprivileged probe role sees NULL `state`/`xact_start` for other
@@ -1101,10 +1076,6 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn cluster_global_sample_writer_fails_closed_when_activity_is_masked() {
-        let admin = PgPool::connect(&crate::test_support::database_url())
-            .await
-            .expect("connect");
-
         // Hold a transaction open as the privileged user: this is the row
         // the unprivileged probe must notice it cannot classify.
         let tx_pool = PgPool::connect(&crate::test_support::database_url())
@@ -1118,19 +1089,22 @@ mod postgres_tests {
 
         // An unprivileged login role (no pg_monitor): pg_stat_activity masks
         // other sessions' state columns for it.
-        let role = format!("fence_probe_{}", uuid::Uuid::new_v4().simple());
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "CREATE ROLE {role} LOGIN PASSWORD 'fence_probe_test'" // sadscan:disable np.postgres.1
-        )))
-        .execute(&admin)
-        .await
-        .expect("create unprivileged role");
+        let role = ScratchRole::create(
+            &crate::test_support::database_url(),
+            "fence_probe",
+            "LOGIN PASSWORD 'fence_probe_test'", // sadscan:disable np.postgres.1
+        )
+        .await;
 
         let base = crate::test_support::database_url();
         let unpriv_url = {
             let rest = base.strip_prefix("postgres://").expect("pg url");
             let at = rest.rfind('@').expect("credentials in url");
-            format!("postgres://{role}:fence_probe_test@{}", &rest[at + 1..])
+            format!(
+                "postgres://{}:fence_probe_test@{}",
+                role.name(),
+                &rest[at + 1..]
+            )
         };
         let unpriv = PgPool::connect(&unpriv_url).await.expect("connect unpriv");
 
@@ -1144,10 +1118,6 @@ mod postgres_tests {
 
         tx.rollback().await.expect("rollback");
         unpriv.close().await;
-        sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE {role}")))
-            .execute(&admin)
-            .await
-            .expect("drop role");
     }
 
     /// The Aurora PostgreSQL identity function name is exact — the
@@ -1191,7 +1161,7 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn cluster_global_probe_commits_tokens_and_sessions_prove_coverage() {
-        let (admin, pool, name) = scratch_db().await;
+        let (pool, _scratch) = scratch_db().await;
         let fence = ReplicaFence::new();
 
         let first = probe_once(&pool, &fence).await.expect("first probe");
@@ -1236,7 +1206,6 @@ mod postgres_tests {
         );
 
         drop(conn);
-        drop_scratch_db(&admin, pool, &name).await;
     }
 
     /// A same-epoch token rewind on the writer (restore adversary) must not
@@ -1246,7 +1215,7 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn cluster_global_probe_rotates_epoch_on_same_epoch_token_regression() {
-        let (admin, pool, name) = scratch_db().await;
+        let (pool, _scratch) = scratch_db().await;
         let fence = ReplicaFence::new();
 
         let before = probe_once(&pool, &fence).await.expect("probe");
@@ -1286,6 +1255,5 @@ mod postgres_tests {
         );
 
         drop(conn);
-        drop_scratch_db(&admin, pool, &name).await;
     }
 }

@@ -362,7 +362,7 @@ async fn unlisted_channel_artifacts_are_read_by_name_for_non_members() {
 #[ignore = "requires Postgres"]
 async fn artifacts_of_a_later_channel_type_are_read_only_by_name() {
     use super::legacy_channel_types_postgres_tests::{scratch_db_with_future_type, FUTURE_TYPE};
-    let (db, admin, name) = scratch_db_with_future_type().await;
+    let (db, _scratch) = scratch_db_with_future_type().await;
     let f = Fixture::on(db).await;
     let later = Uuid::new_v4();
     sqlx::query("INSERT INTO channels(community_id,id,name,visibility,channel_type,created_by) VALUES($1,$2,$3,'open',$4::channel_type,$5)")
@@ -407,13 +407,6 @@ async fn artifacts_of_a_later_channel_type_are_read_only_by_name() {
         );
         assert_eq!(f.count(&f.owner, named).await, per_channel as i64);
     }
-
-    f.db.pool.close().await;
-    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
-    )))
-    .execute(&admin)
-    .await;
 }
 
 #[tokio::test]
