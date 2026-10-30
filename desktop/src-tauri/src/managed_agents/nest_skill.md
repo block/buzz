@@ -94,7 +94,7 @@ buzz messages send --channel <UUID> \
   --content "@Alice check this" --mention <alice-pubkey>
 ```
 
-**Send a thread message to the channel:** `messages send --from-thread <root-event-id>` publishes a new top-level kind 9 message tagged `["buzz:sent-from-thread", <root-id>, <excerpt>]`, like desktop's "Send to channel". Pass the thread **root** id, not a reply id. The root must exist in the same `--channel`, or the command exits 1 before publishing (a reply id is rejected with the root id to use). The excerpt is derived from the root's content (max 64 characters). `--from-thread` conflicts with `--reply-to` and `--broadcast` and works only with kind 9.
+**Send a thread message to the channel:** `messages send --from-thread <root-event-id>` publishes a new top-level kind 9 message tagged `["buzz:sent-from-thread", <root-id>, <excerpt>]`, like desktop's "Send to channel". Pass the thread **root** id, not a reply id. The root must be a top-level kind 9 message in the same `--channel`, or the command exits 1 before publishing (a reply id is rejected with the root id to use). The excerpt is derived from the root's content (max 64 characters). `--from-thread` conflicts with `--reply-to` and `--broadcast` and works only with kind 9.
 
 ```bash
 buzz messages send --channel <UUID> \

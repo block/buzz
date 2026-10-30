@@ -584,12 +584,24 @@ async fn resolve_sent_from_thread_tag(
     channel: Uuid,
     root_event_id: &str,
 ) -> Result<nostr::Tag, CliError> {
-    let root_eid = parse_event_id(root_event_id)?;
-    let root_hex = root_eid.to_hex();
+    let root_hex = parse_event_id(root_event_id)?.to_hex();
     let root = fetch_event(client, &root_hex).await?;
-    if channel_id_from_event(&root_hex, &root)? != channel {
+    sent_from_thread_tag_for_root(channel, &root_hex, &root)
+}
+
+fn sent_from_thread_tag_for_root(
+    channel: Uuid,
+    root_hex: &str,
+    root: &serde_json::Value,
+) -> Result<nostr::Tag, CliError> {
+    if channel_id_from_event(root_hex, root)? != channel {
         return Err(CliError::Usage(format!(
             "--from-thread event {root_hex} is not in channel {channel}"
+        )));
+    }
+    if root.get("kind").and_then(|k| k.as_u64()) != Some(9) {
+        return Err(CliError::Usage(format!(
+            "--from-thread event {root_hex} is not an ordinary channel message (kind 9)"
         )));
     }
     if let Some(real_root) = root.get("tags").and_then(find_root_from_tags) {
@@ -599,7 +611,7 @@ async fn resolve_sent_from_thread_tag(
     }
     let content = root.get("content").and_then(|c| c.as_str()).unwrap_or("");
     Ok(sent_from_thread::build_tag(
-        &root_hex,
+        root_hex,
         sent_from_thread::summarize_thread_root(content).as_deref(),
     ))
 }
@@ -1098,8 +1110,8 @@ mod tests {
         channel_id_from_event, cmd_get_thread, cmd_send_message, event_mention_pubkeys,
         find_root_from_tags, match_profiles_by_name, merge_message_mentions, missing_members,
         normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
-        resolve_thread_target, thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient,
-        CliError, Uuid,
+        resolve_thread_target, sent_from_thread_tag_for_root, thread_ref_from_event,
+        thread_ref_from_parent_tags, BuzzClient, CliError, Uuid,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1159,6 +1171,32 @@ mod tests {
                 .to_hex(),
             ID_A
         );
+    }
+
+    #[test]
+    fn from_thread_accepts_only_top_level_kind_9_roots_in_the_channel() {
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+        let other = "123e4567-e89b-12d3-a456-426614174001";
+        let channel_uuid = Uuid::parse_str(channel).unwrap();
+        let root = |kind: u64, h: &str| json!({"kind": kind, "content": "hi", "tags": [["h", h]]});
+
+        let tag = sent_from_thread_tag_for_root(channel_uuid, ID_A, &root(9, channel)).unwrap();
+        assert_eq!(tag.as_slice()[1], ID_A);
+
+        for kind in [40002, 40008, 45001, 45003] {
+            let err = sent_from_thread_tag_for_root(channel_uuid, ID_A, &root(kind, channel))
+                .unwrap_err();
+            assert!(matches!(err, CliError::Usage(_)), "kind {kind}");
+            assert!(err.to_string().contains("kind 9"), "kind {kind}");
+        }
+        let no_kind = json!({"content": "hi", "tags": [["h", channel]]});
+        assert!(sent_from_thread_tag_for_root(channel_uuid, ID_A, &no_kind).is_err());
+        assert!(sent_from_thread_tag_for_root(channel_uuid, ID_A, &root(9, other)).is_err());
+        let reply = json!({"kind": 9, "tags": [["h", channel], ["e", ID_B, "", "reply"]]});
+        assert!(sent_from_thread_tag_for_root(channel_uuid, ID_A, &reply)
+            .unwrap_err()
+            .to_string()
+            .contains(ID_B));
     }
 
     #[test]
