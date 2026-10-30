@@ -207,7 +207,7 @@ Future<void> _leave(SlashCommandContext ctx) async {
       ],
     ),
   );
-  if (confirmed != true) return;
+  if (confirmed != true) throw const SlashCommandCancelled();
   await actions.leaveChannel(channel.id);
   if (!navigator.mounted) return;
   if (ctx.inThread) {

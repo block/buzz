@@ -264,17 +264,18 @@ void main() {
     await tester.pumpAndSettle();
     expect(sent(9022), isEmpty);
     expect(find.text('open general'), findsNothing);
+    expect(find.text('/part'), findsWidgets, reason: 'cancel keeps the draft');
+    expect(find.byType(SnackBar), findsNothing, reason: 'cancel is silent');
 
     relay.rejectNext(
       'blocked: the last owner cannot leave',
       match: (e) => e.kind == 9022,
     );
-    await type(tester, '/leave');
-    await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+    await tester.tap(find.byIcon(BuzzIcons.arrowUp).hitTestable());
     await tester.pump(const Duration(milliseconds: 500));
     await tester.tap(find.text('Leave'));
     await tester.pumpAndSettle();
-    expect(find.text('/leave'), findsWidgets, reason: 'the draft stays');
+    expect(find.text('/part'), findsWidgets, reason: 'the draft stays');
     expect(find.text('open general'), findsNothing);
     await expectToast(tester, 'the last owner cannot leave');
 
