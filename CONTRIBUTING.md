@@ -163,9 +163,17 @@ Adminer on `:8082`, Keycloak on `:8180` for local OAuth/OIDC testing, MinIO on
 pending database migrations.
 
 `just setup` and `just hooks` install the hooks by setting a repo-local
-`core.hooksPath`, which overrides any global one. If you already have a global
-`core.hooksPath` (a hooks manager of your own), both skip that step and say so.
-Run `BUZZ_LOCAL_HOOKS=1 just hooks` to install the repo's hooks anyway.
+`core.hooksPath`, which overrides one set anywhere else. If your global or
+system git config already sets `core.hooksPath`, directly or through a file it
+includes (a hooks manager of your own), both skip that step and say so.
+Skipping has a cost: unless your manager chains to this repo's lefthook hooks,
+none of them run, including the `commit-msg` hook that adds the DCO
+`Signed-off-by` trailer and the pre-push lanes. Commit with `git commit -s`
+and run `just ci` before you push, or run `BUZZ_LOCAL_HOOKS=1 just hooks` to
+install the repo's hooks anyway. If an earlier `just hooks` or `just setup`
+already set the local `core.hooksPath`, your manager's hooks don't run in this
+repo; the skip message says so, and `git config --local --unset core.hooksPath`
+hands the repo back to your manager.
 
 ### Running the Relay and Desktop App
 
