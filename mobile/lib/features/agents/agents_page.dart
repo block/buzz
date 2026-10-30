@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../../shared/agents/remote_agents.dart';
 import '../../shared/community/community_provider.dart';
 import '../../shared/hosted/hosted_flow.dart';
@@ -27,6 +28,7 @@ import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/theme/buzz_icons.dart';
 import 'agent_card_grid.dart';
 import 'delete_agent_action.dart';
+import 'agent_identity_sections.dart';
 import 'bestie_agent_action.dart';
 
 /// Opens the active community's full-page Agents navigation stack.
@@ -94,9 +96,14 @@ class _AgentsNavigation extends HookConsumerWidget {
                         ? 'Builderbot agent'
                         : 'Manage on desktop',
                     primaryActionsSpacing: Grid.md,
-                    contextualActionsSpacing: Grid.xxs,
-                    contextualActions: (_) => BestieAgentAction(pubkey: pubkey),
-                    headerLeading: DeleteAgentAction(
+                    contextualActions: (_) =>
+                        BestieAgentAction(pubkey: pubkey, compact: true),
+                    agentIdentity: (_) => AgentIdentitySections(
+                      pubkey: pubkey,
+                      controller: controller,
+                    ),
+                    agentSettings: (_) => DeleteAgentAction(
+                      asSettingsRow: true,
                       controller: controller,
                       pubkey: pubkey,
                     ),
@@ -287,7 +294,8 @@ class AgentsPage extends HookConsumerWidget {
         top: false,
         child: Material(
           color: Colors.transparent,
-          child: RefreshIndicator(
+          child: BeeRefreshIndicator(
+            edgeOffset: topHeight,
             onRefresh: refresh,
             child: CustomScrollView(
               physics: const AlwaysScrollableScrollPhysics(),
