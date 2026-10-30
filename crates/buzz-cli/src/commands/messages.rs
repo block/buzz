@@ -627,6 +627,7 @@ pub struct SendMessageParams {
     pub files: Vec<String>,
     pub mentions: Vec<String>,
     pub from_thread: Option<String>,
+    pub mention_groups: Vec<String>,
 }
 
 /// Verify the thread root exists in `channel` and build the provenance tag
@@ -810,6 +811,15 @@ pub async fn cmd_send_message(
         }
     };
 
+    let builder = if p.mention_groups.is_empty() {
+        builder
+    } else {
+        builder.tags(
+            crate::commands::groups::mention_tags(client, &p.mention_groups, &mention_pubkeys)
+                .await?,
+        )
+    };
+
     let event = client.sign_event(builder).await?;
     let emitted_mentions = event_mention_pubkeys(&event);
     let resp = client.submit_event(event).await?;
@@ -991,6 +1001,7 @@ pub async fn dispatch(
             files,
             mentions,
             from_thread,
+            mention_groups,
         } => {
             cmd_send_message(
                 client,
@@ -1003,6 +1014,7 @@ pub async fn dispatch(
                     files,
                     mentions,
                     from_thread,
+                    mention_groups,
                 },
             )
             .await
@@ -1936,6 +1948,7 @@ mod tests {
             files: vec![],
             mentions: vec![],
             from_thread: None,
+            mention_groups: vec![],
         }
     }
 
@@ -2037,6 +2050,55 @@ mod tests {
                 .iter()
                 .any(|t| t.get(1).map(|s| s.as_str()) == Some("notreal")),
             "unknown shortcodes must not produce emoji tags"
+        );
+    }
+
+    #[tokio::test]
+    async fn cmd_send_message_expands_a_mentioned_group_to_marked_p_tags() {
+        let author = Keys::generate();
+        let member = |n: u8| format!("{n:02x}").repeat(32);
+        let group = buzz_core::user_group::UserGroup {
+            handle: "ios-team".into(),
+            name: "iOS Team".into(),
+            description: String::new(),
+            creator: author.public_key().to_hex(),
+            admins: vec![],
+            members: vec![member(1), member(2)],
+            policy: buzz_core::user_group::EditPolicy::Admins,
+            disabled: false,
+        };
+        let head = buzz_sdk::build_user_group(&group)
+            .unwrap()
+            .sign_with_keys(&author)
+            .unwrap();
+        let (url, _, captured_event) = fake_send_relay(serde_json::json!([head]).to_string()).await;
+        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+
+        let mut params = send_params("deploy is out");
+        params.mention_groups = vec!["@ios-team".into()];
+        cmd_send_message(&client, params).await.unwrap();
+
+        let raw = captured_event.lock().unwrap();
+        let event: serde_json::Value =
+            serde_json::from_str(&raw.as_ref().expect("event submitted").body).unwrap();
+        let marked: Vec<(String, String)> = event["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| t[0] == "p")
+            .map(|t| {
+                (
+                    t[1].as_str().unwrap().to_string(),
+                    t[3].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            marked,
+            vec![
+                (member(1), "group:ios-team".to_string()),
+                (member(2), "group:ios-team".to_string())
+            ]
         );
     }
 
