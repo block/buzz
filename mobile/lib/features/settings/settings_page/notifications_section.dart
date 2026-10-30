@@ -64,6 +64,7 @@ class _NotificationsSection extends ConsumerWidget {
                 child: Align(
                   alignment: Alignment.centerRight,
                   child: Switch.adaptive(
+                    key: const ValueKey('push-notifications-switch'),
                     value: community.pushNotificationsEnabled,
                     onChanged: canToggle ? setEnabled : null,
                   ),

@@ -567,6 +567,7 @@ class ComposeBar extends HookConsumerWidget {
       final outgoing = _OutgoingMentions(selectedMentions);
       // A prefill is not typing: skip typing indicators and the mention picker.
       void rememberNotifiedAgents(Map<String, MentionCandidate> sent) {
+        if (!ref.read(rememberMentionedAgentsProvider)) return;
         isModifyingText.value = true;
         try {
           _prefillAgentMentions(

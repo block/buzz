@@ -27,6 +27,7 @@ import 'package:buzz/features/channels/voice_note_waveform.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
+import 'package:buzz/shared/mentions/remember_mentioned_agents.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
@@ -4562,6 +4563,59 @@ void main() {
 
       expect(sent.last.$1, '@Helper Bot again');
       expect(sent.last.$2, [agentPubkey]);
+    });
+
+    testWidgets('forgets mentioned agents when remembering is off', (
+      tester,
+    ) async {
+      final agentPubkey = 'c' * 64;
+      final signer = nostr.Keys.generate();
+      final sent = <List<String>>[];
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(signer.nsec),
+          currentPubkey: signer.public,
+          members: [
+            ChannelMember(
+              pubkey: agentPubkey,
+              role: 'bot',
+              joinedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+              displayName: 'Helper Bot',
+            ),
+          ],
+          relayAgents: [
+            AgentDirectoryEntry(
+              pubkey: agentPubkey,
+              displayName: 'Helper Bot',
+              respondTo: 'anyone',
+              channelIds: const ['channel-1'],
+            ),
+          ],
+          channels: [_makeCurrentChannel()],
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async => sent.add(mentionPubkeys),
+        ),
+      );
+      ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
+      ).read(rememberMentionedAgentsProvider.notifier).setEnabled(false);
+      final field = find.byType(TextField);
+
+      await _expandComposer(tester);
+      await tester.enterText(field, '@hel');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Helper Bot'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pumpAndSettle();
+
+      expect(sent.single, [agentPubkey]);
+      expect(tester.widget<TextField>(field).controller!.text, isEmpty);
     });
 
     testWidgets('keeps edits made while a mentioned agent is being added', (
