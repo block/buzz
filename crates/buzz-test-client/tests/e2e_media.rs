@@ -222,6 +222,76 @@ async fn test_upload_and_get() {
     println!("GET thumbnail → {}", thumb_resp.status());
     // Thumbnail may be same as original for 1x1 images — just check 200
     assert_eq!(thumb_resp.status(), 200, "thumbnail should return 200");
+    assert_eq!(
+        thumb_resp.headers()["content-type"],
+        "image/jpeg",
+        "an opaque image keeps a JPEG thumbnail"
+    );
+}
+
+/// A transparent image's thumbnail keeps its alpha: `{sha}.thumb.jpg` serves a
+/// PNG with `Content-Type: image/png` instead of a JPEG with black pixels.
+#[tokio::test]
+#[ignore]
+async fn test_transparent_png_thumbnail_keeps_alpha() {
+    let client = http_client();
+    let keys = Keys::generate();
+    // A random opaque color keeps the bytes, and so the sha, unique per run.
+    let [r, g, b]: [u8; 3] = rand::random();
+    let mut png = Vec::new();
+    image::RgbaImage::from_fn(8, 8, |x, _| {
+        image::Rgba([r, g, b, if x < 4 { 0 } else { 255 }])
+    })
+    .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+    .expect("encode PNG");
+    let sha256 = hex::encode(Sha256::digest(&png));
+
+    let auth = sign_blossom_auth(&keys, &sha256);
+    let resp = client
+        .put(format!("{}/media/upload", relay_http_url()))
+        .header("Authorization", blossom_auth_header(&auth))
+        .header("Content-Type", "image/png")
+        .header("X-SHA-256", &sha256)
+        .body(png)
+        .send()
+        .await
+        .expect("upload PUT failed");
+    assert_eq!(resp.status(), 200, "upload should succeed");
+    let descriptor: serde_json::Value = resp.json().await.expect("BlobDescriptor JSON");
+    let thumb_url = descriptor["thumb"].as_str().expect("descriptor thumb");
+    assert!(thumb_url.ends_with(&format!("/media/{sha256}.thumb.jpg")));
+
+    let read_auth = blossom_auth_header(&sign_blossom_get_auth(&keys, &sha256));
+    let head = client
+        .head(thumb_url)
+        .header("Authorization", &read_auth)
+        .send()
+        .await
+        .expect("HEAD thumbnail failed");
+    assert_eq!(head.status(), 200);
+    assert_eq!(head.headers()["content-type"], "image/png");
+
+    let get = client
+        .get(thumb_url)
+        .header("Authorization", &read_auth)
+        .send()
+        .await
+        .expect("GET thumbnail failed");
+    assert_eq!(get.status(), 200);
+    assert_eq!(get.headers()["content-type"], "image/png");
+    let thumb = image::load_from_memory(&get.bytes().await.unwrap())
+        .expect("decode thumbnail")
+        .to_rgba8();
+    assert_eq!(
+        thumb.get_pixel(0, 0)[3],
+        0,
+        "transparent pixel stays transparent"
+    );
+    assert_eq!(
+        thumb.get_pixel(thumb.width() - 1, 0).0,
+        [r, g, b, 255],
+        "opaque pixel unchanged"
+    );
 }
 
 /// Idempotency: uploading the same file twice returns the same BlobDescriptor.

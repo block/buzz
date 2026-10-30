@@ -1561,6 +1561,7 @@ dependencies = [
  "clap",
  "futures-util",
  "hex",
+ "image",
  "nostr 0.44.7",
  "rand 0.10.1",
  "reqwest 0.13.4",

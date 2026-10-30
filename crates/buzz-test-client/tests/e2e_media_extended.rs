@@ -696,6 +696,74 @@ async fn test_ws_valid_imeta() {
     client.disconnect().await.unwrap();
 }
 
+/// A transparent PNG's thumbnail is stored as PNG, and an imeta `thumb` that
+/// names its public `.thumb.jpg` path still passes the storage check.
+#[tokio::test]
+#[ignore]
+async fn test_ws_imeta_thumb_of_transparent_png() {
+    use buzz_test_client::BuzzTestClient;
+
+    let keys = Keys::generate();
+    let http = http_client();
+    let channel_id = uuid::Uuid::new_v4().to_string();
+    let create_event = EventBuilder::new(Kind::from(9007), "")
+        .tags(vec![
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["name", &format!("ws-imeta-thumb-{channel_id}")]).unwrap(),
+            Tag::parse(["channel_type", "stream"]).unwrap(),
+            Tag::parse(["visibility", "open"]).unwrap(),
+        ])
+        .sign_with_keys(&keys)
+        .unwrap();
+    let create_resp = http
+        .post(format!("{}/events", relay_http_url()))
+        .header("X-Pubkey", keys.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&create_event).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert!(create_resp.status().is_success(), "channel creation failed");
+
+    // A random opaque color keeps the bytes, and so the sha, unique per run.
+    let [r, g, b]: [u8; 3] = rand::random();
+    let mut png = Vec::new();
+    image::RgbaImage::from_fn(8, 8, |x, _| {
+        image::Rgba([r, g, b, if x < 4 { 0 } else { 255 }])
+    })
+    .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+    .unwrap();
+    let sha256 = hex::encode(Sha256::digest(&png));
+    let resp = upload(&http, &keys, &png).await;
+    assert_eq!(resp.status(), 200);
+
+    let mut client = BuzzTestClient::connect(&relay_ws_url(), &keys)
+        .await
+        .unwrap();
+    let event = EventBuilder::new(Kind::from(9), "transparent image via ws")
+        .tags(vec![
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse([
+                "imeta",
+                &format!("url http://localhost:3000/media/{sha256}.png"),
+                "m image/png",
+                &format!("x {sha256}"),
+                &format!("size {}", png.len()),
+                &format!("thumb http://localhost:3000/media/{sha256}.thumb.jpg"),
+            ])
+            .unwrap(),
+        ])
+        .sign_with_keys(&keys)
+        .unwrap();
+    let ok = client.send_event(event).await.unwrap();
+    assert!(
+        ok.accepted,
+        "imeta thumb of a transparent PNG must be accepted: {:?}",
+        ok.message
+    );
+    client.disconnect().await.unwrap();
+}
+
 #[tokio::test]
 #[ignore]
 async fn test_ws_invalid_imeta_external_url() {
