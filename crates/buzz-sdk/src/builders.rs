@@ -1835,6 +1835,188 @@ pub fn build_git_pr_update(
     Ok(EventBuilder::new(Kind::Custom(KIND_GIT_PR_UPDATE as u16), content).tags(tags))
 }
 
+/// Which side of a diff an inline pull-request comment points at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitDiffSide {
+    /// The pre-change file (`side` tag value `old`).
+    Old,
+    /// The post-change file (`side` tag value `new`).
+    New,
+}
+
+impl GitDiffSide {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Old => "old",
+            Self::New => "new",
+        }
+    }
+}
+
+/// Inline diff anchor of a pull-request comment, pinned to the tip commit the
+/// reviewer inspected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitInlineAnchor {
+    /// Tip commit the comment was written against (`c` tag).
+    pub commit: String,
+    /// Repo-relative file path (`file` tag). No leading `/`, no `\`, no NUL,
+    /// no empty, `.` or `..` segments, at most 4096 UTF-16 code units.
+    pub path: String,
+    /// Diff side (`side` tag).
+    pub side: GitDiffSide,
+    /// 1-based line number on that side (`line` tag).
+    pub line: u64,
+}
+
+impl GitInlineAnchor {
+    fn validate(&self) -> Result<(), SdkError> {
+        check_commit_hex(&self.commit, "anchor commit")?;
+        let path = &self.path;
+        let invalid_path = path.is_empty()
+            || path.encode_utf16().count() > 4096
+            || path.contains('\\')
+            || path.contains('\0')
+            || path
+                .split('/')
+                .any(|segment| segment.is_empty() || segment == "." || segment == "..");
+        if invalid_path {
+            return Err(SdkError::InvalidInput(format!(
+                "inline comment file path is invalid: {path:?}"
+            )));
+        }
+        if self.line == 0 || self.line > 9_007_199_254_740_991 {
+            return Err(SdkError::InvalidInput(
+                "inline comment line must be between 1 and 9007199254740991".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Metadata for a comment on a git issue or pull request.
+#[derive(Debug, Default, Clone)]
+pub struct GitCommentMeta {
+    /// Pubkeys to `p`-tag, in order. Case-insensitive duplicates collapse.
+    pub recipients: Vec<String>,
+    /// Inline diff anchor. Only valid on pull-request comments.
+    pub anchor: Option<GitInlineAnchor>,
+}
+
+fn git_root_tags(
+    repo: &GitRepoCoord,
+    root_event: &str,
+    recipients: &[String],
+) -> Result<Vec<Tag>, SdkError> {
+    let root = check_hex_exact(root_event, 64, "root_event")?;
+    let a_value = repo.to_a_tag_value()?;
+    let mut tags = vec![tag(&["e", &root, "", "root"])?, tag(&["a", &a_value])?];
+    let mut seen: Vec<String> = Vec::new();
+    for recipient in recipients {
+        let pk = check_pubkey_hex(recipient, "recipient")?;
+        if !seen.contains(&pk) {
+            tags.push(tag(&["p", &pk])?);
+            seen.push(pk);
+        }
+    }
+    Ok(tags)
+}
+
+fn check_review_content(content: &str) -> Result<(), SdkError> {
+    check_content(content, 64 * 1024)?;
+    if content.trim().is_empty() {
+        return Err(SdkError::InvalidInput("content must not be empty".into()));
+    }
+    Ok(())
+}
+
+/// Build a comment on a git issue or pull request (kind:1), the shape the
+/// Desktop app publishes.
+///
+/// Tag layout: `["e", <root>, "", "root"]`, `["a", <repo>]`, one `["p", ..]`
+/// per recipient, then — for an inline comment — `["t", "inline-comment"]`,
+/// `["c", <commit>]`, `["file", <path>]`, `["side", "old"|"new"]` and
+/// `["line", <n>]`.
+pub fn build_git_comment(
+    repo: &GitRepoCoord,
+    root_event: &str,
+    content: &str,
+    meta: &GitCommentMeta,
+) -> Result<EventBuilder, SdkError> {
+    check_review_content(content)?;
+    let mut tags = git_root_tags(repo, root_event, &meta.recipients)?;
+    if let Some(anchor) = &meta.anchor {
+        anchor.validate()?;
+        tags.push(tag(&["t", "inline-comment"])?);
+        tags.push(tag(&["c", &anchor.commit])?);
+        tags.push(tag(&["file", &anchor.path])?);
+        tags.push(tag(&["side", anchor.side.as_str()])?);
+        tags.push(tag(&["line", &anchor.line.to_string()])?);
+    }
+    Ok(EventBuilder::new(Kind::Custom(1), content).tags(tags))
+}
+
+/// Build a pull-request review request (kind:1) whose `p` tags are the
+/// requested reviewers, labeled `t: review-request`.
+///
+/// Clients only honor a request signed by the pull-request author or the repo
+/// owner.
+pub fn build_git_review_request(
+    repo: &GitRepoCoord,
+    pr_event: &str,
+    reviewers: &[String],
+    content: &str,
+) -> Result<EventBuilder, SdkError> {
+    check_review_content(content)?;
+    if reviewers.is_empty() || reviewers.len() > 50 {
+        return Err(SdkError::InvalidInput(
+            "between 1 and 50 reviewers are required".into(),
+        ));
+    }
+    let mut tags = git_root_tags(repo, pr_event, reviewers)?;
+    tags.push(tag(&["t", "review-request"])?);
+    Ok(EventBuilder::new(Kind::Custom(1), content).tags(tags))
+}
+
+/// A reviewer's verdict on a pull request's current tip commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitReviewDecision {
+    /// `t: approval`.
+    Approve,
+    /// `t: changes-requested`.
+    RequestChanges,
+}
+
+impl GitReviewDecision {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Approve => "approval",
+            Self::RequestChanges => "changes-requested",
+        }
+    }
+}
+
+/// Build a pull-request review decision (kind:1) bound to `commit`.
+///
+/// Tag layout: root `e`, repo `a`, one `p` per recipient, the decision `t`
+/// label, then `["c", <commit>]`. Clients count a decision only when its `c`
+/// tag equals the pull request's current tip and the signer is a requested
+/// reviewer or the repo owner, never the pull-request author.
+pub fn build_git_review_decision(
+    repo: &GitRepoCoord,
+    pr_event: &str,
+    decision: GitReviewDecision,
+    content: &str,
+    recipients: &[String],
+    commit: &str,
+) -> Result<EventBuilder, SdkError> {
+    check_review_content(content)?;
+    check_commit_hex(commit, "commit")?;
+    let mut tags = git_root_tags(repo, pr_event, recipients)?;
+    tags.push(tag(&["t", decision.label()])?);
+    tags.push(tag(&["c", commit])?);
+    Ok(EventBuilder::new(Kind::Custom(1), content).tags(tags))
+}
+
 /// Build a workflow definition event (kind 30620).
 ///
 /// - `channel_id`: the channel this workflow belongs to (h-tag)
@@ -4408,6 +4590,196 @@ mod tests {
         };
         let err = build_git_issue(&repo, "", "body", &GitIssueMeta::default()).unwrap_err();
         assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    fn tag_rows(event: &nostr::Event) -> Vec<Vec<String>> {
+        event.tags.iter().map(|t| t.as_slice().to_vec()).collect()
+    }
+
+    fn rows(rows: &[&[&str]]) -> Vec<Vec<String>> {
+        rows.iter()
+            .map(|r| r.iter().map(|s| s.to_string()).collect())
+            .collect()
+    }
+
+    fn comment_repo() -> GitRepoCoord {
+        GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".to_string(),
+        }
+    }
+
+    #[test]
+    fn git_comment_tag_shapes_match_desktop() {
+        let repo = comment_repo();
+        let root = "b".repeat(64);
+        let commit = "c".repeat(40);
+        let plain = sign(
+            build_git_comment(
+                &repo,
+                &root,
+                "hi",
+                &GitCommentMeta {
+                    recipients: vec!["A".repeat(64), "d".repeat(64), "a".repeat(64)],
+                    anchor: None,
+                },
+            )
+            .unwrap(),
+        );
+        assert_eq!(plain.kind.as_u16(), 1);
+        assert_eq!(
+            tag_rows(&plain),
+            rows(&[
+                &["e", &root, "", "root"],
+                &["a", &format!("30617:{}:repo", "a".repeat(64))],
+                &["p", &"a".repeat(64)],
+                &["p", &"d".repeat(64)],
+            ])
+        );
+
+        let inline = sign(
+            build_git_comment(
+                &repo,
+                &root,
+                "nit",
+                &GitCommentMeta {
+                    recipients: vec![],
+                    anchor: Some(GitInlineAnchor {
+                        commit: commit.clone(),
+                        path: "src/lib.rs".into(),
+                        side: GitDiffSide::Old,
+                        line: 12,
+                    }),
+                },
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            tag_rows(&inline)[2..],
+            rows(&[
+                &["t", "inline-comment"],
+                &["c", &commit],
+                &["file", "src/lib.rs"],
+                &["side", "old"],
+                &["line", "12"],
+            ])
+        );
+    }
+
+    #[test]
+    fn git_comment_rejects_invalid_input() {
+        let repo = comment_repo();
+        let root = "b".repeat(64);
+        let anchored = |path: &str, line: u64, commit: &str| GitCommentMeta {
+            recipients: vec![],
+            anchor: Some(GitInlineAnchor {
+                commit: commit.into(),
+                path: path.into(),
+                side: GitDiffSide::New,
+                line,
+            }),
+        };
+        let good_commit = "c".repeat(40);
+        assert!(build_git_comment(&repo, &root, "  \n", &GitCommentMeta::default()).is_err());
+        assert!(build_git_comment(&repo, "short", "x", &GitCommentMeta::default()).is_err());
+        let bad_recipient = GitCommentMeta {
+            recipients: vec!["nope".into()],
+            anchor: None,
+        };
+        assert!(build_git_comment(&repo, &root, "x", &bad_recipient).is_err());
+        let long_path = "a".repeat(4097);
+        for path in [
+            "",
+            "/abs",
+            "a//b",
+            "./a",
+            "a/../b",
+            "a/.",
+            "a\\b",
+            "a\0b",
+            long_path.as_str(),
+        ] {
+            assert!(
+                build_git_comment(&repo, &root, "x", &anchored(path, 1, &good_commit)).is_err(),
+                "path {path:?} must be rejected"
+            );
+        }
+        assert!(build_git_comment(&repo, &root, "x", &anchored("a", 0, &good_commit)).is_err());
+        assert!(build_git_comment(
+            &repo,
+            &root,
+            "x",
+            &anchored("a", 9_007_199_254_740_992, &good_commit)
+        )
+        .is_err());
+        assert!(build_git_comment(&repo, &root, "x", &anchored("a", 1, "abc")).is_err());
+        assert!(
+            build_git_comment(&repo, &root, "x", &anchored("dir/a b.rs", 1, &good_commit)).is_ok()
+        );
+        let max_path = "a".repeat(4096);
+        assert!(
+            build_git_comment(&repo, &root, "x", &anchored(&max_path, 1, &good_commit)).is_ok()
+        );
+    }
+
+    #[test]
+    fn git_review_request_and_decision_tag_shapes_match_desktop() {
+        let repo = comment_repo();
+        let owner = "a".repeat(64);
+        let pr = "b".repeat(64);
+        let commit = "c".repeat(40);
+        let request = sign(
+            build_git_review_request(
+                &repo,
+                &pr,
+                &["D".repeat(64), "d".repeat(64), "e".repeat(64)],
+                "Requested a review",
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            tag_rows(&request),
+            rows(&[
+                &["e", &pr, "", "root"],
+                &["a", &format!("30617:{owner}:repo")],
+                &["p", &"d".repeat(64)],
+                &["p", &"e".repeat(64)],
+                &["t", "review-request"],
+            ])
+        );
+        assert!(build_git_review_request(&repo, &pr, &[], "x").is_err());
+        assert!(build_git_review_request(&repo, &pr, &vec!["d".repeat(64); 51], "x").is_err());
+
+        let recipients = vec![owner.clone(), "f".repeat(64)];
+        for (decision, label) in [
+            (GitReviewDecision::Approve, "approval"),
+            (GitReviewDecision::RequestChanges, "changes-requested"),
+        ] {
+            let event = sign(
+                build_git_review_decision(&repo, &pr, decision, "ok", &recipients, &commit)
+                    .unwrap(),
+            );
+            assert_eq!(
+                tag_rows(&event),
+                rows(&[
+                    &["e", &pr, "", "root"],
+                    &["a", &format!("30617:{owner}:repo")],
+                    &["p", &owner],
+                    &["p", &"f".repeat(64)],
+                    &["t", label],
+                    &["c", &commit],
+                ])
+            );
+        }
+        assert!(build_git_review_decision(
+            &repo,
+            &pr,
+            GitReviewDecision::Approve,
+            "ok",
+            &recipients,
+            "abc"
+        )
+        .is_err());
     }
 
     #[test]
