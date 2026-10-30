@@ -1,6 +1,43 @@
 part of '../channel_detail_page_test.dart';
 
 void bubbleLayoutTests() {
+  testWidgets('a message row renders CommonMark backslash escapes', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: [
+          _textMsg(id: 'shrug', pubkey: 'alice', content: r'¯\\\_(ツ)\_/¯'),
+          _textMsg(
+            id: 'path',
+            pubkey: 'alice',
+            content: r'C:\path \*not bold\*',
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    final shrug = find.descendant(
+      of: find.byKey(const ValueKey('message-row-shrug')),
+      matching: findRichText(r'¯\_(ツ)_/¯'),
+    );
+    expect(shrug, findsOneWidget);
+    expect(tester.widget<RichText>(shrug).text.toPlainText(), r'¯\_(ツ)_/¯');
+    expect(
+      tester
+          .widget<RichText>(
+            find.descendant(
+              of: find.byKey(const ValueKey('message-row-path')),
+              matching: findRichText(r'C:\path'),
+            ),
+          )
+          .text
+          .toPlainText(),
+      r'C:\path *not bold*',
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('reply footer does not add reaction padding inside the bubble', (
     tester,
   ) async {

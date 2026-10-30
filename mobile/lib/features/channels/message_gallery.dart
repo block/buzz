@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import 'message_media.dart';
+import 'message_content/backslash_escapes.dart';
 import 'message_content/link_normalizer.dart';
 
 /// Image metadata shared by carousel rendering and loading projection.
@@ -48,7 +49,9 @@ TrailingImageGallery? extractTrailingImageGallery(
     if (mediaKind != MessageMediaKind.image) {
       break;
     }
-    final markdownLabel = decodeMarkdownLabelSyntax(match.group(1)!).trim();
+    final markdownLabel = unshieldBackslashEscapes(
+      decodeMarkdownLabelSyntax(match.group(1)!),
+    ).trim();
     items.add(
       MessageGalleryItem(
         url: url,
