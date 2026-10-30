@@ -811,7 +811,9 @@ mod postgres_tests {
         // Kannaka fork (#645): 0076 adds the per-channel export policy column.
         assert_eq!(migrations[75].version, 76);
         let no_bridge = strip_sql_comments(migrations[75].sql.as_str());
-        assert!(no_bridge.contains("ADD COLUMN no_bridge BOOLEAN NOT NULL DEFAULT FALSE"));
+        assert!(
+            no_bridge.contains("ADD COLUMN IF NOT EXISTS no_bridge BOOLEAN NOT NULL DEFAULT FALSE")
+        );
         assert!(desired_schema.contains("no_bridge       BOOLEAN NOT NULL DEFAULT FALSE"));
         let invite_migration = strip_sql_comments(migrations[74].sql.as_str());
         assert!(invite_migration.contains("SET LOCAL lock_timeout = '5s'"));
