@@ -404,7 +404,9 @@ Widget _buildTestable({
       ),
       if (knownAgentPubkeys != null)
         knownAgentPubkeysProvider.overrideWithValue(knownAgentPubkeys),
-      meAgentInventoryProvider.overrideWith((ref) async => inventoryAgents),
+      meAgentInventoryProvider.overrideWith(
+        (ref) async => {...inventoryAgents},
+      ),
       if (directoryUsers != null)
         relayDirectoryUsersProvider.overrideWith((ref) async => directoryUsers),
       if (createChannelActions != null)
@@ -11199,6 +11201,7 @@ void main() {
         createdAt: now - 3,
       );
       final typing = _FakeTypingNotifier(const []);
+      final inventory = {'morty', 'summer', 'jerry'};
       await tester.pumpWidget(
         _buildTestable(
           messages: [prompt],
@@ -11206,7 +11209,7 @@ void main() {
           disableAnimations: true,
           huddleCurrentPubkey: 'self',
           knownAgentPubkeys: const {'morty', 'summer', 'jerry', 'rick'},
-          inventoryAgents: const {'morty', 'summer', 'jerry'},
+          inventoryAgents: inventory,
           users: const {
             'morty': UserProfile(pubkey: 'morty', displayName: 'Morty'),
             'summer': UserProfile(pubkey: 'summer', displayName: 'Summer'),
@@ -11267,6 +11270,21 @@ void main() {
         findsOneWidget,
       );
       expect(rowAvatars(), ['morty', 'summer']);
+      // Working avatars use the agent shape, though no profile names an owner.
+      for (final avatar
+          in find
+              .descendant(of: row, matching: find.byType(SmallAvatar))
+              .evaluate()) {
+        final frame = tester.widget<Container>(
+          find
+              .descendant(
+                of: find.byWidget(avatar.widget),
+                matching: find.byType(Container),
+              )
+              .first,
+        );
+        expect((frame.decoration! as BoxDecoration).shape, BoxShape.rectangle);
+      }
       // As on desktop, the reply branch waits for a reply.
       expect(connector, findsNothing);
       expect(
@@ -11345,6 +11363,19 @@ void main() {
       expect(row, findsOneWidget);
       expect(find.byKey(const ValueKey('thread-working-dots')), findsNothing);
       expect(find.bySemanticsLabel('View thread: 1 reply'), findsOneWidget);
+
+      // The inventory is read again when thread typing resumes, so an agent
+      // removed from it no longer counts.
+      inventory.remove('morty');
+      typing.setEntries([
+        TypingEntry(
+          pubkey: 'morty',
+          threadHeadId: threadIdRoot,
+          expiresAtMs: (now + 8) * 1000,
+        ),
+      ]);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('thread-working-dots')), findsNothing);
     });
 
     testWidgets('shows single typer', (tester) async {

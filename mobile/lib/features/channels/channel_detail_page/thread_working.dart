@@ -15,8 +15,9 @@ String _threadTypingKey(List<TypingEntry> all, String? selfPubkey) {
 
 /// The user's agents typing in each thread of [typingKey], by lowercase root
 /// message ID, in first-seen order. As on desktop, the user's agents are their
-/// inventory, archived ones included, and it loads only once a thread has
-/// typing. Other typing in a thread stays inside the thread view.
+/// inventory, archived ones included. It is read again each time thread
+/// typing starts after a quiet spell. Other typing in a thread stays inside
+/// the thread view.
 Map<String, List<String>> _threadWorkingAgents(
   WidgetRef ref,
   String typingKey,

@@ -110,7 +110,11 @@ class ReplySummaryLink extends ConsumerWidget {
                           // Working agents sit side by side, as on desktop.
                           for (final (i, pubkey) in shownWorking.indexed) ...[
                             if (i > 0) const SizedBox(width: Grid.xxs),
-                            SmallAvatar(pubkey: pubkey, userCache: userCache),
+                            SmallAvatar(
+                              pubkey: pubkey,
+                              userCache: userCache,
+                              agent: true,
+                            ),
                           ],
                           if (hiddenWorking > 0) ...[
                             const SizedBox(width: Grid.xxs),

@@ -50,7 +50,11 @@ final meAssistantsProvider = FutureProvider<List<AgentDirectoryEntry>>((
 
 /// Every agent in the owner's inventory, archived ones included, like
 /// desktop's `agentChoices.identities`. Presentation only, never admission.
-final meAgentInventoryProvider = FutureProvider<Set<String>>((ref) async {
+/// Disposed when unwatched, so each new watch reads the current inventory
+/// and retries a failed read.
+final meAgentInventoryProvider = FutureProvider.autoDispose<Set<String>>((
+  ref,
+) async {
   final sync = ref.watch(meSyncProvider);
   if (sync.connectionState != null) {
     ref.watch(relaySessionProvider.select((state) => state.status));
