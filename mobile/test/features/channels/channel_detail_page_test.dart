@@ -761,6 +761,11 @@ void main() {
       find.descendant(of: row, matching: find.byType(MessageMediaAvatar)),
       findsOneWidget,
     );
+
+    await tester.tap(row);
+    await tester.pumpAndSettle();
+    expect(fold, findsOneWidget);
+    expect(row, findsNothing);
   });
 
   testWidgets('agent-only rows fit many long recipient names', (tester) async {
