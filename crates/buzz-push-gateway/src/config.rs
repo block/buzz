@@ -1,5 +1,9 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +41,8 @@ pub struct KeyConfig {
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Only these TCP peer ranges may supply X-Buzz-Client-IP.
+    pub trusted_proxy_cidrs: Vec<(IpAddr, u8)>,
     pub gateway_origin: String,
     pub bind_addr: SocketAddr,
     pub health_addr: SocketAddr,
@@ -165,6 +171,34 @@ impl Config {
         {
             return Err(ConfigError::Invalid("BUZZ_PUSH_GATEWAY_ORIGIN"));
         }
+        let trusted_proxy_cidrs = e
+            .get("BUZZ_PUSH_TRUSTED_PROXY_CIDRS")
+            .map(|value| {
+                if value.len() > 4096 || value.split(',').count() > 64 {
+                    return Err(ConfigError::Invalid("BUZZ_PUSH_TRUSTED_PROXY_CIDRS"));
+                }
+                value
+                    .split(',')
+                    .map(|entry| {
+                        let (ip, prefix) = entry
+                            .split_once('/')
+                            .map_or((entry, None), |(ip, prefix)| (ip, Some(prefix)));
+                        let ip = ip
+                            .parse::<IpAddr>()
+                            .map_err(|_| ConfigError::Invalid("BUZZ_PUSH_TRUSTED_PROXY_CIDRS"))?;
+                        let bits = if ip.is_ipv4() { 32 } else { 128 };
+                        let prefix = prefix
+                            .map_or(Ok(bits), str::parse::<u8>)
+                            .map_err(|_| ConfigError::Invalid("BUZZ_PUSH_TRUSTED_PROXY_CIDRS"))?;
+                        if prefix == 0 || prefix > bits {
+                            return Err(ConfigError::Invalid("BUZZ_PUSH_TRUSTED_PROXY_CIDRS"));
+                        }
+                        Ok((ip, prefix))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
         let token_keys = parse_keyring(e, "BUZZ_PUSH_TOKEN_KEYS")?;
         let max_grant_lifetime_seconds = req(e, "BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS")?
             .parse::<i64>()
@@ -214,6 +248,7 @@ impl Config {
             .parse::<SocketAddr>()
             .map_err(|_| ConfigError::Invalid("BUZZ_PUSH_HEALTH_ADDR"))?;
         Ok(Self {
+            trusted_proxy_cidrs,
             gateway_origin,
             bind_addr,
             health_addr,
@@ -434,5 +469,46 @@ mod tests {
             env.insert(variable.into(), value.into());
             assert!(Config::from_map(&env).is_err());
         }
+    }
+    #[test]
+    fn trusted_proxies_are_explicit_bounded_ip_ranges() {
+        assert!(Config::from_map(&base())
+            .unwrap()
+            .trusted_proxy_cidrs
+            .is_empty());
+        let mut env = base();
+        env.insert(
+            "BUZZ_PUSH_TRUSTED_PROXY_CIDRS".into(),
+            "10.0.0.1,10.1.0.0/24,2001:db8::/64,::1".into(),
+        );
+        assert_eq!(
+            Config::from_map(&env).unwrap().trusted_proxy_cidrs,
+            vec![
+                ("10.0.0.1".parse().unwrap(), 32),
+                ("10.1.0.0".parse().unwrap(), 24),
+                ("2001:db8::".parse().unwrap(), 64),
+                ("::1".parse().unwrap(), 128)
+            ]
+        );
+        for invalid in [
+            "",
+            " ",
+            "10.0.0.1,",
+            "10.0.0.0/0",
+            "::/0",
+            "10.0.0.0/33",
+            "::1/129",
+            "proxy.example",
+            "10.0.0.1:8080",
+            "10.0.0.0/24/1",
+        ] {
+            env.insert("BUZZ_PUSH_TRUSTED_PROXY_CIDRS".into(), invalid.into());
+            assert!(Config::from_map(&env).is_err(), "{invalid}");
+        }
+        env.insert(
+            "BUZZ_PUSH_TRUSTED_PROXY_CIDRS".into(),
+            vec!["10.0.0.1"; 65].join(","),
+        );
+        assert!(Config::from_map(&env).is_err());
     }
 }

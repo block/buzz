@@ -22,6 +22,8 @@ migration:
     limits: {cpu: 250m, memory: 128Mi}
 # Canonical public origin bound by management assertions and used by HTTPRoute.
 gatewayOrigin: "https://push.buzz.xyz"
+# TCP proxy peers allowed to provide a stripped/overwritten X-Buzz-Client-IP.
+trustedProxyCidrs: []
 maxGrantLifetimeSeconds: 2592000
 application:
   # Production MUST override this with the exact Apple TEAMID.bundle-id.

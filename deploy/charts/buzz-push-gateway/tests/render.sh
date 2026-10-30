@@ -270,3 +270,11 @@ if helm template push deploy/charts/buzz-push-gateway \
   echo 'expected apnsRetryRatioThreshold=2 to fail' >&2
   exit 1
 fi
+
+# Trusted proxy source metadata reaches the runtime only for explicit peers.
+helm template push deploy/charts/buzz-push-gateway --set 'trustedProxyCidrs[0]=10.0.0.0/24' >"$out"
+env -u GEM_HOME -u GEM_PATH -u RUBYLIB -u RUBYOPT ruby -ryaml - "$out" <<'RUBY'
+d = YAML.load_stream(File.read(ARGV[0])).compact.find { |x| x['kind'] == 'Deployment' }
+e = d.dig('spec', 'template', 'spec', 'containers', 0, 'env').find { |x| x['name'] == 'BUZZ_PUSH_TRUSTED_PROXY_CIDRS' }
+raise 'trusted proxy configuration missing' unless e['value'] == '10.0.0.0/24'
+RUBY

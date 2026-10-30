@@ -69,7 +69,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(20)
-        .connect(&c.database_url)
+        .after_connect(|connection, _| Box::pin(async move {
+                sqlx::raw_sql("SET lock_timeout='2s'; SET statement_timeout='10s'; SET idle_in_transaction_session_timeout='15s'")
+                    .execute(connection).await?;
+                Ok(())
+            }))
+            .connect(&c.database_url)
         .await?;
     let authority = Arc::new(PostgresAuthorityStore::new(pool));
     authority
@@ -95,6 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (public, health) = router_with_metrics(
         AppState {
             gateway_origin: c.gateway_origin,
+            trusted_proxy_cidrs: c.trusted_proxy_cidrs,
             authority,
             token_keyring: Arc::new(token_keyring),
             application: Arc::new(application),
@@ -112,12 +118,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (ptx, prx) = tokio::sync::watch::channel(false);
     let (htx, hrx) = tokio::sync::watch::channel(false);
     let p = tokio::spawn(async move {
-        axum::serve(pl, public)
-            .with_graceful_shutdown(async move {
-                let mut rx = prx;
-                let _ = rx.changed().await;
-            })
-            .await
+        axum::serve(
+            pl,
+            public.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let mut rx = prx;
+            let _ = rx.changed().await;
+        })
+        .await
     });
     let h = tokio::spawn(async move {
         axum::serve(hl, health)

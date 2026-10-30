@@ -397,3 +397,15 @@ Event signatures, body hashes, timestamps, grant checks and replay protection
 remain enforced. No mobile App Attest audiences or relay activation settings change.
 
 Management uses v2 assertions binding operation, registered audience, gateway origin, all parameters, expected versions and a request expiry at most five minutes ahead. Enrollment alone consumes a one-use challenge. Issuance response loss retries with a fresh assertion against the reported current generation; hashes cannot reconstruct grants.
+
+Behind a TLS ingress, set `trustedProxyCidrs` (`BUZZ_PUSH_TRUSTED_PROXY_CIDRS`)
+to its actual TCP peer IP/CIDR ranges. That proxy must strip incoming
+`X-Buzz-Client-IP` and overwrite it with one bare client IP, without appending.
+Restrict pod access to those peers. Missing, duplicate or malformed metadata from
+a trusted peer fails closed; untrusted peers use their TCP address and forwarding
+headers are ignored. IPv4-mapped IPv6 peers use the same IPv4 source identity.
+
+Enrollment, management, revocation and delivery have separate bounded source and
+work limits. The 20-connection pool reserves headroom for revocation; database
+lock/statement/idle-transaction timeouts bound stalled work. Limit exhaustion
+returns 429 with Retry-After. Source bookkeeping is capped at 4,096 addresses per lane.
