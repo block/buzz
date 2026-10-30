@@ -42,6 +42,10 @@ platform and in this composer, and the token ends at whitespace or the end of
 the draft. Matching is case-insensitive. `//away`, `/away-now`, and
 `/usr/bin/foo` are not commands.
 
+A channel-scoped command typed in a DM is still recognized: it fails with
+"/<name> only works in channels" and keeps the draft, rather than sending the
+command text into the DM. Autocomplete does not list it there.
+
 A command draft that also has attachments is rejected with a visible error;
 nothing is published and the draft and attachments stay.
 
@@ -103,12 +107,18 @@ thread in one.
 | `/dm` | `/msg` | `@user… [message]` | Open the DM (up to the DM participant limit) and open it. With a message, send it there first. | any | — | ✅ | ✅ |
 | `/huddle` | | — | Start a huddle in the channel, or join the one already running. | any | — | ✅ | ✅ |
 | `/gif` | `/giphy` | `[query]` | Open the GIF picker, pre-filled with the query. | any | relay has no GIF endpoint | ✅ | — |
-| `/shrug` | | `[text]` | Send `<text> ¯\_(ツ)_/¯`. The rendered message must show the shrug exactly; escape for markdown as needed. | any | — | ✅ | ✅ |
+| `/shrug` | | `[text]` | Send `<text> ¯\\\_(ツ)\_/¯` (see below). | any | — | ✅ | ✅ |
 | `/remind` | | `me <what> <when>` | Create a standalone reminder. See below. | any | — | ✅ | ✅ |
 
 `/status` emoji: the first argument is the emoji when it is a `:shortcode:` that
 resolves on this platform or a single emoji grapheme; otherwise the whole
 argument string is the text and the status has no emoji.
+
+`/shrug` content: the wire form is CommonMark-escaped so every conforming
+renderer shows ¯\\\_(ツ)\_/¯ exactly. Both platforms send the same bytes:
+`<text> ` (omitted when there is no text) followed by `¯\\\_(ツ)\_/¯` : `\\`
+(an escaped backslash) and `\_` (an escaped underscore) before `(ツ)`, and
+`\_` after it.
 
 `/topic` ships on desktop only if desktop displays the channel topic somewhere.
 If it does not, leave `/topic` out; a command must not change state the user
