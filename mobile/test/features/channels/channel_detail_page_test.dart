@@ -756,6 +756,34 @@ void main() {
     expect(find.byKey(const ValueKey('message-row-m1')), findsOneWidget);
   });
 
+  testWidgets('agent-only rows fit many long recipient names', (tester) async {
+    final scout = 'a' * 64;
+    final recipients = [for (final c in 'bcdef'.split('')) c * 64];
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: [
+          _textMsg(
+            id: 'm1',
+            pubkey: scout,
+            content: 'Progress on the build',
+            extraTags: [
+              for (final r in recipients) ['p', r],
+              ['audience', 'agents'],
+            ],
+          ),
+        ],
+        users: {
+          for (final r in [scout, ...recipients])
+            r: UserProfile(pubkey: r, displayName: 'Release Coordinator $r'),
+        },
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('agent-audience-m1')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   for (final thread in [false, true]) {
     for (final reverse in [false, true]) {
       testWidgets('signed qualified caller thread=$thread reverse=$reverse', (
