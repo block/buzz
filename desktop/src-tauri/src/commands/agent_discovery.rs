@@ -42,7 +42,9 @@ pub(crate) fn plan_adapter_install<'c>(
         // doesn't hit EEXIST on the shared `codex-acp` bin-link, then install.
         Some(_) => Some(vec![
             "npm uninstall -g @zed-industries/codex-acp",
-            "npm install -g @agentclientprotocol/codex-acp",
+            // Pinned to the supported major line — see the codex entry in
+            // `discovery/catalog.rs` for why an unbounded install is not safe.
+            "npm install -g @agentclientprotocol/codex-acp@^2",
         ]),
         // Adapter missing: use the catalog's install commands directly.
         None => Some(adapter_install_commands.to_vec()),

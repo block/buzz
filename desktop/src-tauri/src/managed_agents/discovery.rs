@@ -794,6 +794,34 @@ pub(crate) fn classify_runtime(
 /// offered a reinstall on their next discovery pass.
 pub(crate) const MIN_CODEX_ACP_VERSION: (u64, u64, u64) = (1, 10, 0);
 
+/// Newest codex-acp major line this Buzz build has been validated against.
+///
+/// The adapter's ACP contract is versioned independently of Buzz: 2.0 renamed
+/// the `initialize` client fields (`clientInfo` -> `info`,
+/// `clientCapabilities` -> `capabilities`) and required an explicit
+/// `type: "stdio"` on `session/new` MCP descriptors. An adapter whose contract
+/// we have not validated may reject Buzz's handshake, and that failure is
+/// invisible from the app — the agent simply never starts a session, so it
+/// never answers a mention.
+///
+/// The harness speaks both the v1 and v2 dialects and retries with ACP v1 when
+/// an adapter rejects our params, so 1.x and 2.x are both supported. A future
+/// 3.x is treated as unsupported until a Buzz build validates it, which makes
+/// the app offer the supported line instead of running an adapter that cannot
+/// talk to us.
+///
+/// Bump policy: raise this only when a Buzz release has validated the newer
+/// adapter major against the managed-agent flows.
+pub(crate) const MAX_CODEX_ACP_MAJOR: u64 = 2;
+
+/// Returns `true` when the probed codex-acp version is one this build supports.
+///
+/// Supported means "at or above [`MIN_CODEX_ACP_VERSION`] and within the
+/// validated major line" — see [`MAX_CODEX_ACP_MAJOR`].
+pub(crate) fn codex_adapter_version_supported(version: (u64, u64, u64)) -> bool {
+    version >= MIN_CODEX_ACP_VERSION && version.0 <= MAX_CODEX_ACP_MAJOR
+}
+
 /// Probe the full version of a `codex-acp` binary by running `--version`.
 ///
 /// The 1.x adapter (`@agentclientprotocol/codex-acp`) outputs
@@ -896,13 +924,17 @@ pub(crate) fn probe_codex_acp_version_with_path(
 ///
 /// The 0.16.x adapter (`@zed-industries/codex-acp`) does not recognise `--version`
 /// and exits non-zero — that probe failure yields `AdapterOutdated`. An adapter is
-/// available only when its version is at least [`MIN_CODEX_ACP_VERSION`].
+/// available only when its version is supported by this build: at least
+/// [`MIN_CODEX_ACP_VERSION`] and within the validated major line
+/// ([`MAX_CODEX_ACP_MAJOR`]).
 ///
 /// Used by `discover_acp_runtimes`, `cli_login_requirements`, and
 /// `install_acp_runtime_blocking` so the version-gate logic is not duplicated.
 pub(crate) fn codex_adapter_availability(path: &Path) -> AcpAvailabilityStatus {
     match probe_codex_acp_version(path) {
-        Some(version) if version >= MIN_CODEX_ACP_VERSION => AcpAvailabilityStatus::Available,
+        Some(version) if codex_adapter_version_supported(version) => {
+            AcpAvailabilityStatus::Available
+        }
         _ => AcpAvailabilityStatus::AdapterOutdated,
     }
 }
@@ -926,7 +958,7 @@ pub(crate) fn codex_adapter_is_outdated_with_path(
 ) -> bool {
     !matches!(
         probe_codex_acp_version_with_path(path, augmented_path),
-        Some(version) if version >= MIN_CODEX_ACP_VERSION
+        Some(version) if codex_adapter_version_supported(version)
     )
 }
 
@@ -958,7 +990,8 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime, force: bool) -
     // For codex-acp: when the adapter resolves as Available, determine its full
     // version. A forced discovery probes the binary (spawns a subprocess); the
     // cheap default path reuses the last cached availability so it stays
-    // process-free. An adapter below MIN_CODEX_ACP_VERSION is treated as outdated.
+    // process-free. An adapter outside the supported window (below
+    // MIN_CODEX_ACP_VERSION or above MAX_CODEX_ACP_MAJOR) is treated as outdated.
     if runtime.id == "codex"
         && availability == AcpAvailabilityStatus::Available
         && command.as_deref() == Some("codex-acp")
