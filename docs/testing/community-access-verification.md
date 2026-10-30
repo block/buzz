@@ -9,9 +9,12 @@ for each exact deployed revision.
 
 1. Identify the deployment owner and obtain an authorized disposable community
    and dedicated test identities. Record setup and cleanup responsibility.
-2. Invitation revocation and route coverage must be merged, required checks
-   passing, and their source commits present in every serving revision under test.
-   Include live-session revalidation and webhook-owner policy where required.
+2. Identify the integrated revision containing invitation revocation (#8237),
+   historical invitation repair (#8529), live-session revalidation (#8241),
+   route coverage (#8239), and workflow-owner policy (#8242). Required checks
+   must pass and the relevant commits must be present in every serving revision
+   under test. Follow #8529's coordinated repair/rollout order before deploying
+   the invitation change; merging source does not execute the historical repair.
 3. Record the immutable image digest, source SHA, serving pod/runtime revisions,
    deployment scope, UTC start time, and relevant configuration from the owner's
    deployment records. A merge SHA alone does not establish deployment.
@@ -32,9 +35,9 @@ read-only diagnostics. Setup authority is scoped to the disposable community.
 
 ## Local rehearsal
 
-Rehearse on an integrated candidate that includes BUZZ-269
-([#8239](https://github.com/block/buzz/pull/8239)); the route guard below is not
-present on the BUZZ-270 documentation-only branch. Use only task-owned,
+Rehearse on the integrated stack candidate, including
+[#8239](https://github.com/block/buzz/pull/8239). The documentation layer inherits
+its prerequisites from the lower stack layers. Use only task-owned,
 isolated local PostgreSQL and Redis services. Do not reuse the default Buzz
 Desktop/development services, a shared database, or a hosted database.
 
@@ -47,8 +50,9 @@ in [CONTRIBUTING.md](../../CONTRIBUTING.md#postgresql-backed-tests) and
   disposable databases; the full privilege-boundary inventory also requires
   `CREATEROLE` and membership in `pg_read_all_stats`, or an ephemeral superuser.
 - Set `PGHOST`, `PGPORT`, `PGUSER`, and `PGPASSWORD` for the same isolated service,
-  plus `REDIS_URL` for isolated Redis. PostgreSQL client tools must be on `PATH`
-  unless `PG_BIN_DIR` is set.
+  plus `REDIS_URL` for isolated Redis. Put `psql` on `PATH`: the integrated
+  historical repair tests invoke it directly. `PG_BIN_DIR` may locate the
+  wrapper's remaining PostgreSQL client tools but does not replace that need.
 - Set any `DATABASE_URL`, `BUZZ_TEST_DATABASE_URL`, or `TEST_DATABASE_URL` used by
   the package tests to disposable databases on that service, never the default
   shared development database. The wrapper creates run-scoped source/per-test
@@ -60,12 +64,30 @@ suites before staging:
 ```sh
 . ./bin/activate-hermit
 python3 scripts/check-community-ban-route-inventory.py
-cargo test --no-fail-fast -p buzz-db -p buzz-relay
+just test-unit
 scripts/postgres-test-run.sh
 ```
 
-Record the exact integrated candidate HEAD, database/Redis isolation, commands,
-outcomes, failures, and skips. These results are source validation; retain
+The ignored route matrix needs a **running private relay**, not just database
+fixtures. Start that relay from the same candidate with the disposable database,
+isolated Redis and MinIO endpoints, fresh relay signing key, and dedicated bind
+and health ports. Set `BUZZ_V1_ENABLED=true`, leave relay membership gating off
+for the root baseline, and unset `BUZZ_KLIPY_API_KEY` so the GIF controls assert
+the provider-disabled response. Configure `RELAY_URL` and `RELAY_HTTP_URL` for
+that relay and `DATABASE_URL` for its disposable database before running:
+
+```sh
+cargo test -p buzz-test-client --test community_ban_routes -- --ignored --nocapture
+```
+
+Follow [Community-ban route coverage](../../TESTING.md#community-ban-route-coverage)
+for the matrix contracts and [the large-roster rehearsal](../../TESTING.md#5-verify-a-roster-beyond-1000-members)
+for `scripts/e2e-large-channel-roster.sh` against this same private stack.
+Do not run `scripts/start-relay-for-tests.sh` on a workstation with shared default
+services: its Docker defaults use the standard development ports and database.
+
+Record the exact integrated candidate HEAD, database/Redis/media isolation,
+relay configuration, commands, outcomes, failures, and skips. These results are source validation; retain
 staging evidence separately.
 
 ## Fixtures and baseline
@@ -136,9 +158,12 @@ so malformed input, missing resources, or unrelated auth errors cannot count
 as proof of a ban gate. HEAD responses omit the body. Record the route's
 expected status/error contract at the deployed revision.
 
-Apply a timeout separately. Reads and already-admitted root/audio connections
-must retain the documented policy; writes fail until expiry or untimeout.
-A timeout is not a blanket ban. Repeat a same-key action in B to establish
+Apply a timeout separately. Content and ephemeral writes are denied until
+expiry or untimeout. Read access and already-admitted root/audio sessions remain
+available. Reports (kind 1984), unban (9041), untimeout (9043), personal read-state
+updates and Git operations remain permitted subject to their normal permissions;
+do not count these as timeout failures. Cross-pod ephemeral denial may take up
+to the documented 30-second cache interval. A timeout is not a blanket ban. Repeat a same-key action in B to establish
 that an A restriction did not cross the community boundary.
 
 ## Existing sessions and cross-pod evidence
@@ -166,7 +191,7 @@ transient removal restored before a scan need not disconnect an existing
 session. Record the committed ordering rather than implying historical-state
 revocation. Mixed versions need their own limitation and rollout decision.
 
-## Webhook owner policy
+## Workflow owner policy
 
 Create a harmless workflow with a secret and an allowed owner. A valid trigger
 must create one run. A wrong secret must create none. Ban the owner and trigger
@@ -176,8 +201,14 @@ Use owner-authorized run-list reads to compare counts; do not publish the secret
 
 The admission check is point-in-time: a ban committed after the owner's final
 restriction read may race with insertion. Already-created runs are unaffected.
-This case does not alter scheduled or event-triggered workflow policy. A lookup
-failure must deny without enqueueing; use the isolated local failure harness.
+The same owner-ban gate applies to signed triggers, webhooks, channel events
+and cron. Verify each configured trigger source denies a banned owner and an
+agent whose human owner is banned; after unban, the same due cron instant must
+remain available because denial did not consume its claim. A lookup failure
+must deny without enqueueing; use the isolated local failure harness. Keep
+timeout-only owner controls allowed for webhook, channel-event and cron
+triggers. A signed/manual owner trigger is itself an ingest write and remains
+denied during that owner's timeout.
 
 ## Cleanup and verdict
 
