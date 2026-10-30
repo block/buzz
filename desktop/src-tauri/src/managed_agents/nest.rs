@@ -170,7 +170,7 @@ pub fn nest_dir() -> Option<PathBuf> {
              Pin it to a temp dir first: `let _nest = \
              crate::managed_agents::pin_temp_nest_dir_for_thread();` when the nest work \
              runs on the test thread, or `pin_nest_dir_for_test(path)` in a child-process \
-             test (see nest/regen_trigger_tests.rs) when it runs on other threads"
+             test (see commands/agents_tests.rs) when it runs on other threads"
         ),
     }
 }
