@@ -668,23 +668,21 @@ pub async fn cmd_send_message(
         None | Some(9) => {
             // Scan final_content for `:shortcode:` patterns and attach NIP-30
             // emoji tags for any that resolve in the workspace palette.
-            // Palette resolution is scoped to kind 9: forum builders (45001,
+            // Emoji resolution is scoped to kind 9: forum builders (45001,
             // 45003) do not accept emoji_tags, so resolving early would pay
             // the relay query and immediately discard the result.
-            // The fetch is skipped entirely when content has no `:`, keeping
-            // plain sends at zero extra RTTs.  Palette resolution is
-            // decorative enrichment — a fetch or parse failure must not block
-            // delivery of a valid message; on error, degrade to no emoji tags
-            // and log a diagnostic to stderr.
+            // The lookup is skipped entirely when content has no `:`, keeping
+            // plain sends at zero extra RTTs.  Resolution is decorative
+            // enrichment — a lookup or parse failure must not block delivery
+            // of a valid message; on error, degrade to no emoji tags and log
+            // a diagnostic to stderr.
             let emoji_tags = if final_content.contains(':') {
                 match crate::commands::emoji::resolve_emoji_tags_for_content(client, &final_content)
                     .await
                 {
                     Ok(tags) => tags,
                     Err(e) => {
-                        eprintln!(
-                            "warning: emoji palette fetch failed ({e}); sending without emoji tags"
-                        );
+                        eprintln!("warning: emoji lookup failed ({e}); sending without emoji tags");
                         Vec::new()
                     }
                 }
