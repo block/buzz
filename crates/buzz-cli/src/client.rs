@@ -1216,35 +1216,10 @@ impl BuzzClient {
         window: Duration,
         max_events: usize,
     ) -> Result<Vec<nostr::Event>, CliError> {
-        use buzz_ws_client::{NostrWsConnection, RelayMessage, WsClientError};
+        use buzz_ws_client::{RelayMessage, WsClientError};
 
         const SUB_ID: &str = "buzz-cli-listen";
-        let ws_error = |e: WsClientError| match e {
-            WsClientError::AuthFailed(message) => CliError::Auth(message),
-            other => CliError::Relay {
-                status: 503,
-                body: other.to_string(),
-            },
-        };
-        let connect_budget =
-            env_duration_secs("BUZZ_CONNECT_TIMEOUT_SECS", 15) + Duration::from_secs(45);
-        let mut conn = tokio::time::timeout(
-            connect_budget,
-            NostrWsConnection::connect_authenticated(
-                &to_ws_url(&self.relay_url),
-                &self.keys,
-                self.auth_tag.as_ref(),
-            ),
-        )
-        .await
-        .map_err(|_| CliError::Relay {
-            status: 503,
-            body: "timed out connecting to the relay".into(),
-        })?
-        .map_err(ws_error)?;
-        conn.send_raw(&serde_json::json!(["REQ", SUB_ID, filter]))
-            .await
-            .map_err(ws_error)?;
+        let mut conn = connect_subscribed(self, SUB_ID, filter).await?;
 
         let deadline = tokio::time::Instant::now() + window;
         let mut events: std::collections::VecDeque<nostr::Event> =
@@ -1266,21 +1241,10 @@ impl BuzzClient {
                         events.push_back(*event);
                     }
                 }
-                Ok(RelayMessage::Closed { message, .. }) => {
-                    return Err(
-                        if message.starts_with("auth") || message.starts_with("restricted") {
-                            CliError::Auth(message)
-                        } else {
-                            CliError::Relay {
-                                status: 502,
-                                body: format!("relay closed the subscription: {message}"),
-                            }
-                        },
-                    );
-                }
+                Ok(RelayMessage::Closed { message, .. }) => return Err(closed_error(&message)),
                 Ok(_) => {}
                 Err(WsClientError::Timeout) => break,
-                Err(e) => return Err(ws_error(e)),
+                Err(e) => return Err(session_ws_error(e)),
             }
         }
         let _ = conn.send_raw(&serde_json::json!(["CLOSE", SUB_ID])).await;
@@ -1295,27 +1259,9 @@ impl BuzzClient {
         &self,
         filter: &serde_json::Value,
     ) -> Result<EventSession, CliError> {
-        use buzz_ws_client::{NostrWsConnection, RelayMessage};
+        use buzz_ws_client::RelayMessage;
 
-        let connect_budget =
-            env_duration_secs("BUZZ_CONNECT_TIMEOUT_SECS", 15) + Duration::from_secs(45);
-        let mut conn = tokio::time::timeout(
-            connect_budget,
-            NostrWsConnection::connect_authenticated(
-                &to_ws_url(&self.relay_url),
-                &self.keys,
-                self.auth_tag.as_ref(),
-            ),
-        )
-        .await
-        .map_err(|_| CliError::Relay {
-            status: 503,
-            body: "timed out connecting to the relay".into(),
-        })?
-        .map_err(session_ws_error)?;
-        conn.send_raw(&serde_json::json!(["REQ", SESSION_SUB_ID, filter]))
-            .await
-            .map_err(session_ws_error)?;
+        let mut conn = connect_subscribed(self, SESSION_SUB_ID, filter).await?;
 
         let deadline = tokio::time::Instant::now() + SESSION_EOSE_TIMEOUT;
         loop {
@@ -1526,6 +1472,33 @@ impl BuzzClient {
         }
         Ok(resp.text().await?)
     }
+}
+
+async fn connect_subscribed(
+    client: &BuzzClient,
+    sub_id: &str,
+    filter: &serde_json::Value,
+) -> Result<buzz_ws_client::NostrWsConnection, CliError> {
+    let connect_budget =
+        env_duration_secs("BUZZ_CONNECT_TIMEOUT_SECS", 15) + Duration::from_secs(45);
+    let mut conn = tokio::time::timeout(
+        connect_budget,
+        buzz_ws_client::NostrWsConnection::connect_authenticated(
+            &to_ws_url(&client.relay_url),
+            &client.keys,
+            client.auth_tag.as_ref(),
+        ),
+    )
+    .await
+    .map_err(|_| CliError::Relay {
+        status: 503,
+        body: "timed out connecting to the relay".into(),
+    })?
+    .map_err(session_ws_error)?;
+    conn.send_raw(&serde_json::json!(["REQ", sub_id, filter]))
+        .await
+        .map_err(session_ws_error)?;
+    Ok(conn)
 }
 
 const SESSION_SUB_ID: &str = "buzz-cli-session";

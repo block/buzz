@@ -484,8 +484,8 @@ buzz agents activity --agent npub1... --since 1783497600 --limit 20 --wait 30"
     /// Cancel an owned agent's in-flight turn in one channel
     #[command(
         after_help = "Sends one encrypted control frame signed by your key, which must be the \
-agent's owner key (exit 3 otherwise, before anything is sent), then waits up to `--wait` \
-seconds for the agent's answer to this request.\n\n\
+agent's owner key (exit 3 before sending when the agent's profile does not name you as owner), \
+then waits up to `--wait` seconds for the agent's answer to this request.\n\n\
 Output: {request_id, agent, channel_id, status, confirmed}.\n\
   sent             exit 0  the cancel reached the in-flight turn\n\
   no_active_turn   exit 1  nothing was running in that channel\n\
@@ -512,7 +512,7 @@ buzz agents cancel-turn --agent npub1... --channel <UUID> --wait 15"
     /// Switch an owned agent's model in one channel
     #[command(
         after_help = "Sends one encrypted control frame signed by your key, which must be the \
-agent's owner key (exit 3 otherwise, before anything is sent), then waits up to `--wait` \
+agent's owner key (exit 3 before sending when the agent's profile does not name you as owner), then waits up to `--wait` \
 seconds for the agent's answer to this request.\n\n\
 Output: {request_id, agent, channel_id, model_id, status, confirmed}.\n\
   switched          exit 0  the model was applied\n\

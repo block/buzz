@@ -25,7 +25,8 @@ use crate::validate::{parse_uuid, sdk_err};
 pub const DEFAULT_WAIT_SECS: u64 = 8;
 /// Largest accepted `--wait`.
 pub const MAX_WAIT_SECS: u64 = 30;
-const SINCE_SLACK_SECS: u64 = 5;
+const SINCE_SLACK_SECS: u64 = 300;
+const SUBSCRIPTION_LIMIT: usize = 100;
 
 /// The control action to send.
 #[derive(Debug, Clone, PartialEq)]
@@ -117,14 +118,19 @@ impl Outcome {
                 "the agent answered {}",
                 self.status
             ))),
-            Finish::Unconfirmed => Err(CliError::DeliveryUnknown(format!(
-                "the control frame was sent but the agent did not answer in time, so the \
-                 outcome is unknown; do not blindly retry. Run `buzz agents activity --agent {} \
-                 --wait 10` to see the agent's state",
-                self.agent
-            ))),
+            Finish::Unconfirmed => Err(unknown_outcome(
+                &self.agent,
+                "the agent did not answer in time",
+            )),
         }
     }
+}
+
+fn unknown_outcome(agent: &str, cause: &str) -> CliError {
+    CliError::DeliveryUnknown(format!(
+        "the control frame was sent but {cause}, so the outcome is unknown; do not blindly \
+         retry. Run `buzz agents activity --agent {agent} --wait 10` to see the agent's state"
+    ))
 }
 
 pub(crate) async fn run(
@@ -184,24 +190,19 @@ pub(crate) async fn execute(
             "authors": [agent_hex],
             "#p": [client.keys().public_key().to_hex()],
             "since": since,
-            "limit": 1,
+            "limit": SUBSCRIPTION_LIMIT,
         }))
         .await?;
-    let sent = session.publish(event).await;
-    let waited = match sent {
-        Ok(()) => {
-            await_result(
-                &mut session,
-                client.keys(),
-                &agent_key,
-                &control,
-                &channel,
-                &request_id,
-                since,
-                Duration::from_secs(wait),
-            )
-            .await
-        }
+    let request = Request {
+        keys: client.keys(),
+        agent: &agent_key,
+        control: &control,
+        channel: &channel,
+        request_id: &request_id,
+        since,
+    };
+    let waited = match session.publish(event).await {
+        Ok(()) => await_result(&mut session, &request, Duration::from_secs(wait)).await,
         Err(e) => Err(e),
     };
     session.close().await;
@@ -221,26 +222,36 @@ pub(crate) async fn execute(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+struct Request<'a> {
+    keys: &'a Keys,
+    agent: &'a PublicKey,
+    control: &'a Control,
+    channel: &'a str,
+    request_id: &'a str,
+    since: u64,
+}
+
 async fn await_result(
     session: &mut crate::client::EventSession,
-    keys: &Keys,
-    agent: &PublicKey,
-    control: &Control,
-    channel: &str,
-    request_id: &str,
-    since: u64,
+    request: &Request<'_>,
     wait: Duration,
 ) -> Result<(String, Finish), CliError> {
     let deadline = tokio::time::Instant::now() + wait;
     let mut provisional = false;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let Some(event) = session.next_event(remaining).await? else {
+        let next = session.next_event(remaining).await.map_err(|e| match e {
+            CliError::Auth(_) => e,
+            other => unknown_outcome(
+                &request.agent.to_hex(),
+                &format!("the connection failed while waiting ({other})"),
+            ),
+        })?;
+        let Some(event) = next else {
             break;
         };
-        for status in result_statuses(keys, agent, &event, control, channel, request_id, since) {
-            match verdict(control, &status) {
+        for status in result_statuses(request, &event) {
+            match verdict(request.control, &status) {
                 Some(Verdict::Success) => return Ok((status, Finish::Success)),
                 Some(Verdict::Refused) => return Ok((status, Finish::Refused)),
                 None if status == "sent" => provisional = true,
@@ -258,31 +269,23 @@ async fn await_result(
 /// Statuses of `control_result` frames in `event` that answer this exact
 /// request: signed by the agent, tagged as telemetry, no older than `since`,
 /// decryptable by the owner key, and matching type, channel, and `requestId`.
-fn result_statuses(
-    keys: &Keys,
-    agent: &PublicKey,
-    event: &Event,
-    control: &Control,
-    channel: &str,
-    request_id: &str,
-    since: u64,
-) -> Vec<String> {
-    if !is_agent_telemetry(event, &agent.to_hex())
-        || event.created_at.as_secs() < since
+fn result_statuses(request: &Request<'_>, event: &Event) -> Vec<String> {
+    if !is_agent_telemetry(event, &request.agent.to_hex())
+        || event.created_at.as_secs() < request.since
         || event.verify().is_err()
     {
         return Vec::new();
     }
-    let Ok(frame) = decrypt_observer_payload::<Value>(keys, event) else {
+    let Ok(frame) = decrypt_observer_payload::<Value>(request.keys, event) else {
         return Vec::new();
     };
     unwrap_batch(&frame)
         .into_iter()
         .filter(|inner| inner.get("kind").and_then(Value::as_str) == Some("control_result"))
-        .filter(|inner| inner.get("channelId").and_then(Value::as_str) == Some(channel))
+        .filter(|inner| inner.get("channelId").and_then(Value::as_str) == Some(request.channel))
         .filter_map(|inner| inner.get("payload"))
-        .filter(|p| p.get("type").and_then(Value::as_str) == Some(control.type_name()))
-        .filter(|p| p.get("requestId").and_then(Value::as_str) == Some(request_id))
+        .filter(|p| p.get("type").and_then(Value::as_str) == Some(request.control.type_name()))
+        .filter(|p| p.get("requestId").and_then(Value::as_str) == Some(request.request_id))
         .filter_map(|p| p.get("status").and_then(Value::as_str).map(str::to_owned))
         .collect()
 }
@@ -332,6 +335,14 @@ mod tests {
         }
     }
 
+    #[derive(Default, Clone)]
+    enum AfterOk {
+        #[default]
+        Replies,
+        Disconnect,
+        Close(&'static str),
+    }
+
     #[derive(Default)]
     struct Relay {
         replies: Vec<Reply>,
@@ -341,6 +352,7 @@ mod tests {
         profiles: Vec<Value>,
         refuse_req: Option<String>,
         withhold_eose: bool,
+        after_ok: AfterOk,
         refuse_event: Option<String>,
         agent: Option<Keys>,
         owner: Option<Keys>,
@@ -448,6 +460,15 @@ mod tests {
                             None => json!(["OK", event.id.to_hex(), true, ""]),
                         };
                         let _ = ws.send(send(ok)).await;
+                        let after_ok = relay.lock().unwrap().after_ok.clone();
+                        match after_ok {
+                            AfterOk::Disconnect => return,
+                            AfterOk::Close(reason) => {
+                                let _ = ws.send(send(json!(["CLOSED", sub, reason]))).await;
+                                continue;
+                            }
+                            AfterOk::Replies => {}
+                        }
                         if refusal.is_none() {
                             for frame in frames {
                                 let _ = ws.send(send(json!(["EVENT", sub, frame]))).await;
@@ -528,6 +549,7 @@ mod tests {
         assert_eq!(req["#p"], json!([owner.public_key().to_hex()]));
         assert_eq!(req["authors"], json!([agent.public_key().to_hex()]));
         assert_eq!(req["since"], NOW - SINCE_SLACK_SECS);
+        assert_eq!(req["limit"], SUBSCRIPTION_LIMIT);
 
         assert_eq!(relay.published.len(), 1);
         let event = &relay.published[0];
@@ -582,7 +604,7 @@ mod tests {
                 ..reply("sent")
             },
             Reply {
-                created_at: NOW - 60,
+                created_at: NOW - SINCE_SLACK_SECS - 1,
                 ..reply("sent")
             },
             reply("something_new"),
@@ -707,6 +729,26 @@ mod tests {
         let error = go(&client, &agent, Control::CancelTurn).await.unwrap_err();
         assert!(matches!(error, CliError::Auth(_)), "{error:?}");
         assert!(relay.lock().unwrap().published.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failure_after_the_frame_was_sent_is_never_retryable() {
+        for (after_ok, exit) in [
+            (AfterOk::Disconnect, 2),
+            (AfterOk::Close("error: shutting down"), 2),
+            (AfterOk::Close("restricted: revoked"), 3),
+        ] {
+            let (client, relay, _, agent) = setup(vec![]).await;
+            relay.lock().unwrap().after_ok = after_ok;
+            let error = go(&client, &agent, Control::CancelTurn).await.unwrap_err();
+            assert_eq!(relay.lock().unwrap().published.len(), 1);
+            assert_eq!(crate::error::exit_code(&error), exit, "{error:?}");
+            assert!(!crate::error::is_retryable_error(&error), "{error:?}");
+            if exit == 2 {
+                assert!(matches!(error, CliError::DeliveryUnknown(_)), "{error:?}");
+                assert!(error.to_string().contains("buzz agents activity"));
+            }
+        }
     }
 
     #[tokio::test]
