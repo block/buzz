@@ -1,12 +1,12 @@
-export const BUZZ_RELEASES_URL = "https://github.com/block/buzz/releases";
+export const BUZZ_RELEASES_URL = "https://github.com/block/buzz-app/releases";
 /** Official iOS download destination. */
 export const BUZZ_IOS_APP_STORE_URL = "https://apps.apple.com/app/id6779728271";
 /** Official Android download destination. */
 export const BUZZ_ANDROID_PLAY_STORE_URL =
   "https://play.google.com/store/apps/details?id=xyz.block.buzz.mobile";
 const BUZZ_RELEASES_API_URL =
-  "https://api.github.com/repos/block/buzz/releases?per_page=10";
-const CACHE_KEY = "buzz.latestDownload.v1";
+  "https://api.github.com/repos/block/buzz-app/releases?per_page=10";
+const CACHE_KEY = "buzz.latestDownload.v2";
 const CACHE_TTL_MS = 60 * 60 * 1000;
 
 export type BuzzDownloadPlatform = {
@@ -132,11 +132,11 @@ function assetPattern(platform: BuzzDownloadPlatform): RegExp | undefined {
       if (platform.architecture === "x64") return /_x64\.dmg$/i;
       return undefined;
     case "windows":
-      return /_x64-setup[^/]*\.exe$/i;
+      return /_x64(?:-setup[^/]*|_unsigned)\.exe$/i;
     case "linux":
       return platform.architecture === "arm64"
         ? undefined
-        : /_amd64\.AppImage$/i;
+        : /_(?:amd64|x86_64)\.AppImage$/i;
     default:
       return undefined;
   }
@@ -150,7 +150,7 @@ export function selectBuzzDownloadUrl(
   if (!pattern) return undefined;
 
   for (const release of releases) {
-    if (release.draft || release.prerelease) continue;
+    if (release.draft) continue;
     const asset = release.assets.find(({ name }) => pattern.test(name));
     if (asset) return asset.browser_download_url;
   }

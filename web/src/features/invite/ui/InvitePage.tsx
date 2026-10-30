@@ -1,4 +1,7 @@
-import buzzAppIcon from "@/assets/app-icon@3x.png";
+import inviteCubes from "@/assets/invite/cubes.webp";
+import buzzMark from "@/assets/invite/mark.svg";
+import "./invite-page.css";
+import { InviteCommunity } from "./InviteCommunity";
 import { claimInviteInBrowser } from "@/features/invite/invite-api";
 import {
   BUZZ_RELEASES_URL,
@@ -191,24 +194,14 @@ export function InvitePage({ code }: { code: string }) {
   }, [closeMacChoice, showMacChoice]);
 
   return (
-    <div
-      className="flex flex-1 flex-col items-center justify-center px-4 py-16 text-center"
-      style={{
-        backgroundImage: "linear-gradient(180deg, #D7D72E 0%, #D7E7F6 100%)",
-      }}
-    >
-      <div className="w-full max-w-xl space-y-4">
-        <div className="flex w-full flex-col items-center rounded-3xl bg-white px-6 py-10 sm:px-12 sm:py-12">
-          <div
-            className="h-12 w-12 overflow-hidden bg-black"
-            style={{ borderRadius: "22.37%" }}
-          >
-            <img alt="Buzz" className="h-full w-full" src={buzzAppIcon} />
-          </div>
-          <h1 className="mt-4 text-2xl font-semibold tracking-tight text-black">
-            You&apos;re invited to
-          </h1>
-          <p className="mt-9 font-mono text-lg text-black/70">{host}</p>
+    <div className="invite-page">
+      <img className="invite-mark" src={buzzMark} alt="Buzz" />
+      <img className="invite-art" src={inviteCubes} alt="" />
+      <div className="invite-stack">
+        <div className="invite-card">
+          <h1>You're invited</h1>
+          <p className="invite-intro">Join your community on Buzz.</p>
+          <InviteCommunity relay={relay} host={host} />
 
           <div
             className={`grid w-full max-w-md overflow-hidden transition-[grid-template-rows,margin,opacity,transform] duration-[220ms] [transition-timing-function:cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none ${
@@ -231,7 +224,7 @@ export function InvitePage({ code }: { code: string }) {
             </div>
           </div>
 
-          <div className="mt-9 w-full max-w-md space-y-2">
+          <div className="invite-actions space-y-2">
             {browserSigningAvailable ? (
               <Button
                 className="h-10 w-full bg-black text-white hover:bg-black/90 focus-visible:ring-black disabled:cursor-not-allowed disabled:bg-black/30 disabled:text-white/70"
@@ -276,7 +269,7 @@ export function InvitePage({ code }: { code: string }) {
             ) : null}
           </div>
         </div>
-        <p className="flex h-[3.125rem] items-center justify-center rounded-2xl bg-white text-sm text-black/60">
+        <p className="invite-download">
           Don&apos;t have the app?{" "}
           <a
             aria-expanded={needsMacChoice ? showMacChoice : undefined}
@@ -292,18 +285,7 @@ export function InvitePage({ code }: { code: string }) {
               setShowMacChoice(true);
             }}
           >
-            Download it now
-          </a>
-          <span aria-hidden="true" className="mx-1.5 text-black/30">
-            ·
-          </span>
-          <a
-            className="font-medium text-black underline-offset-4 hover:text-black/70 hover:underline focus-visible:underline"
-            href={BUZZ_RELEASES_URL}
-            rel="noreferrer"
-            target="_blank"
-          >
-            Browse releases
+            Download Buzz
           </a>
         </p>
       </div>
