@@ -17,7 +17,19 @@ void main() {
     expect(community.starterSetupIncomplete, isFalse);
     expect(community.pushLeaseInstallationId, isNull);
     expect(community.pushNotificationsEnabled, isTrue);
+    expect(community.pushMuteAgents, isFalse);
     expect(community.pushSubscriptionState.pendingTombstoneGeneration, isNull);
+  });
+
+  test('agent push mute round trips and survives unrelated edits', () {
+    final community = Community.create(
+      name: 'Team',
+      relayUrl: 'https://relay.test',
+    ).copyWith(pushMuteAgents: true);
+
+    expect(Community.fromJson(community.toJson()).pushMuteAgents, isTrue);
+    expect(community.copyWith(name: 'Renamed').pushMuteAgents, isTrue);
+    expect(community.copyWith(pushMuteAgents: false).pushMuteAgents, isFalse);
   });
 
   test('new community gets a unique canonical push lease address id', () {

@@ -15,6 +15,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+final _pushSwitch = find.descendant(
+  of: find.byKey(const ValueKey('push-notifications-setting')),
+  matching: find.byType(Switch),
+);
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   group('artifact without a gateway define', () {
@@ -113,7 +118,7 @@ void main() {
           );
           expect(find.text('Push notifications'), findsNothing);
           if (enabled) {
-            final toggle = tester.widget<Switch>(find.byType(Switch));
+            final toggle = tester.widget<Switch>(_pushSwitch);
             expect(toggle.value, isTrue);
             expect(toggle.onChanged, isNotNull);
           } else {

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 
 /// User-visible Buzz message kinds. This mirrors
 /// `EventKind.channelMessageEventKinds` without importing feature code into
@@ -10,7 +11,12 @@ const buzzPushChannelKinds = [9];
 const buzzPushChannelChunkSize = 50;
 const buzzPushMaxSubscriptions = 16;
 const buzzPushMaxIgnoreFilters = 8;
+const buzzPushMaxAuthorsPerFilter = 20;
 const buzzPushHellthreadParticipantLimit = 20;
+
+// The relay accepts 32 KiB of lease plaintext, including an endpoint of up
+// to 4 KiB and the envelope around the subscriptions.
+const buzzPushMaxSubscriptionBytes = 28 * 1024;
 
 const _supportedNotificationClasses = {'default'};
 const _filterKeys = {'kinds', 'authors', '#p', '#h', '#e'};
@@ -451,6 +457,7 @@ List<BuzzPushSubscription> buildDesiredBuzzPushSubscriptions({
   required String myPubkey,
   Iterable<String> channelIds = const [],
   Iterable<String> mutedChannelIds = const [],
+  Iterable<String> mutedAuthorPubkeys = const [],
 }) {
   final normalizedPubkey = myPubkey.toLowerCase();
   if (!_exactHexPattern.hasMatch(normalizedPubkey)) {
@@ -474,40 +481,73 @@ List<BuzzPushSubscription> buildDesiredBuzzPushSubscriptions({
     throw const FormatException('Too many muted channels for a push lease.');
   }
 
+  // Muted authors take whatever ignore slots and lease bytes remain after the
+  // self and muted-channel filters, and every subscription repeats them. A
+  // muted author beyond that budget still notifies: refusing the lease would
+  // silence every notification instead.
+  var mutedAuthors =
+      ({
+            for (final pubkey in mutedAuthorPubkeys)
+              if (pubkey.toLowerCase() != normalizedPubkey &&
+                  _exactHexPattern.hasMatch(pubkey.toLowerCase()))
+                pubkey.toLowerCase(),
+          }.toList()..sort())
+          .take(
+            (buzzPushMaxIgnoreFilters - 1 - mutedIgnoreFilters.length) *
+                buzzPushMaxAuthorsPerFilter,
+          )
+          .toList();
+
   final selfAuthored = BuzzPushFilter(
     kinds: buzzPushRenderableKinds,
     authors: [normalizedPubkey],
   );
-  final ignores = [selfAuthored, ...mutedIgnoreFilters];
   const suppression = BuzzPushSuppression(
     pTagsMax: buzzPushHellthreadParticipantLimit,
   );
-  final subscriptions = <BuzzPushSubscription>[
-    BuzzPushSubscription(
-      filter: BuzzPushFilter(
-        kinds: buzzPushSelfDirectedKinds,
-        pTags: [normalizedPubkey],
-      ),
-      notificationClass: 'default',
-      ignore: ignores,
-      suppress: suppression,
-    ),
-  ];
-
   final channels = normalizedChannelIds.difference(activeMuted.toSet()).toList()
     ..sort();
-  for (final chunk in _chunks(channels, buzzPushChannelChunkSize)) {
-    subscriptions.add(
+  List<BuzzPushSubscription> lease(List<String> authors) {
+    final ignores = [
+      selfAuthored,
+      ...mutedIgnoreFilters,
+      for (final chunk in _chunks(authors, buzzPushMaxAuthorsPerFilter))
+        BuzzPushFilter(kinds: buzzPushRenderableKinds, authors: chunk),
+    ];
+    return [
       BuzzPushSubscription(
-        filter: BuzzPushFilter(kinds: buzzPushChannelKinds, hTags: chunk),
+        filter: BuzzPushFilter(
+          kinds: buzzPushSelfDirectedKinds,
+          pTags: [normalizedPubkey],
+        ),
         notificationClass: 'default',
         ignore: ignores,
         suppress: suppression,
       ),
-    );
+      for (final chunk in _chunks(channels, buzzPushChannelChunkSize))
+        BuzzPushSubscription(
+          filter: BuzzPushFilter(kinds: buzzPushChannelKinds, hTags: chunk),
+          notificationClass: 'default',
+          ignore: ignores,
+          suppress: suppression,
+        ),
+    ];
   }
+
+  var subscriptions = lease(mutedAuthors);
   if (subscriptions.length > buzzPushMaxSubscriptions) {
     throw const FormatException('Too many channels for a push lease.');
+  }
+  // Each subscription spends an author's quoted key and comma, so drop enough
+  // authors to cover the excess, then remeasure the new chunking.
+  for (
+    var excess = _leaseBytes(subscriptions) - buzzPushMaxSubscriptionBytes;
+    excess > 0 && mutedAuthors.isNotEmpty;
+    excess = _leaseBytes(subscriptions) - buzzPushMaxSubscriptionBytes
+  ) {
+    final drop = (excess / (67 * subscriptions.length)).ceil();
+    mutedAuthors = mutedAuthors.sublist(0, max(0, mutedAuthors.length - drop));
+    subscriptions = lease(mutedAuthors);
   }
   return List.unmodifiable(subscriptions);
 }
@@ -521,6 +561,9 @@ String buzzPushSubscriptionsFingerprint(
 String buzzPushSubscriptionStateFingerprint(
   BuzzPushLeaseSubscriptionState state,
 ) => jsonEncode(state.toJson());
+
+int _leaseBytes(List<BuzzPushSubscription> subscriptions) =>
+    utf8.encode(jsonEncode([for (final s in subscriptions) s.toJson()])).length;
 
 List<List<String>> _chunks(List<String> values, int size) => [
   for (var offset = 0; offset < values.length; offset += size)
