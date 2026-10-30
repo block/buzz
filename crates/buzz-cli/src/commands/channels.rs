@@ -831,15 +831,7 @@ async fn fetch_team_persona_slugs(
         .and_then(|c| c.as_str())
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or(serde_json::Value::Null);
-    let slugs = content
-        .get("persona_ids")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
+    let slugs = super::teams::persona_ids_from_content(&content).unwrap_or_default();
     Ok(slugs)
 }
 
