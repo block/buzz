@@ -1,12 +1,8 @@
 /**
- * Unit tests for the hosted-identity usable-bound-key predicate.
- *
- * Hosted surfaces gate connected/readiness/create/connect decisions on
- * whether the identity payload carries an authoritative `pubkey_hex` that
- * normalizes to a hex key — never on the mere presence of the identity
- * object, and never on the display parser's npub-accepting domain. These
- * tests pin the predicate's boundary semantics; the E2E specs assert the
- * rendered fail-closed states through the real surfaces.
+ * Hosted community API: relay URL synthesis, and the usable-bound-key
+ * predicate. Bound-key tests gate connected/readiness/create/connect
+ * decisions on an authoritative `pubkey_hex` that normalizes to a hex key,
+ * never on the mere presence of the identity object.
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -14,12 +10,52 @@ import test from "node:test";
 import { npubEncode } from "nostr-tools/nip19";
 
 import {
+  HOSTED_COMMUNITY_SUFFIX,
   hostedCommunityErrorMessage,
   hostedCommunityQuotaLimit,
   hostedCommunityQuotaUsed,
+  hostedCommunityRelayUrl,
   normalizedBoundKeyHex,
   usableBoundIdentityNpub,
 } from "./hostedCommunityApi.ts";
+
+test("hostedCommunityRelayUrl: uses normalized_host when present", () => {
+  assert.equal(
+    hostedCommunityRelayUrl({
+      normalized_host: "acme.communities.buzz.xyz",
+      name: "other",
+    }),
+    "wss://acme.communities.buzz.xyz",
+  );
+});
+
+test("hostedCommunityRelayUrl: strips accidental scheme on host", () => {
+  assert.equal(
+    hostedCommunityRelayUrl({
+      normalized_host: "wss://acme.communities.buzz.xyz",
+    }),
+    "wss://acme.communities.buzz.xyz",
+  );
+});
+
+test("hostedCommunityRelayUrl: synthesizes from slug when host missing", () => {
+  assert.equal(
+    hostedCommunityRelayUrl({ slug: "acme", name: "ignored" }),
+    `wss://acme.${HOSTED_COMMUNITY_SUFFIX}`,
+  );
+});
+
+test("hostedCommunityRelayUrl: synthesizes from name when slug missing", () => {
+  assert.equal(
+    hostedCommunityRelayUrl({ name: "my-team" }),
+    `wss://my-team.${HOSTED_COMMUNITY_SUFFIX}`,
+  );
+});
+
+test("hostedCommunityRelayUrl: null when no usable label", () => {
+  assert.equal(hostedCommunityRelayUrl({}), null);
+  assert.equal(hostedCommunityRelayUrl({ name: "Bad Name" }), null);
+});
 
 const BOUND_HEX = "deadbeef".repeat(8);
 
