@@ -39,6 +39,23 @@ function CursorMark({ className }: MarkProps) {
   );
 }
 
+/// Letta ACP registry mark (letta-ai/letta-acp, Apache-2.0).
+function LettaMark({ className }: MarkProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={className}
+      fill="currentColor"
+      role="img"
+      viewBox="0 0 16 16"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <path d="M12.8 2.18V0H3.2v2.18c0 .56-.46 1.02-1.02 1.02H0v9.6h2.18c.56 0 1.02.46 1.02 1.02V16h9.6v-2.18c0-.56.46-1.02 1.02-1.02H16V3.2h-2.18c-.56 0-1.02-.46-1.02-1.02Zm0 9.6c0 .56-.46 1.02-1.02 1.02H4.22c-.56 0-1.02-.46-1.02-1.02V4.22c0-.56.46-1.02 1.02-1.02h7.56c.56 0 1.02.46 1.02 1.02v7.56Z" />
+      <path d="M9.6 6.4H6.4v3.2h3.2V6.4Z" />
+    </svg>
+  );
+}
+
 /// Theme-adaptive inline marks, keyed by runtime/preset id. Consulted before
 /// the bitmap logo maps in `RuntimeIcon`. Codex deliberately has no entry:
 /// the OpenAI blossom was removed from simple-icons v16 at the vendor's
@@ -46,4 +63,5 @@ function CursorMark({ className }: MarkProps) {
 export const RUNTIME_MARKS: Record<string, React.FC<MarkProps>> = {
   cursor: CursorMark,
   goose: GooseMark,
+  letta: LettaMark,
 };
