@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 use crate::client::{normalize_events, normalize_write_response, BuzzClient};
 use crate::commands::event_output::{format_events, thread_markers};
+use crate::commands::sent_from_thread;
 use crate::error::CliError;
 use crate::validate::{
     infer_language, parse_event_id, parse_uuid, read_or_stdin, truncate_diff,
@@ -573,6 +574,34 @@ pub struct SendMessageParams {
     pub broadcast: bool,
     pub files: Vec<String>,
     pub mentions: Vec<String>,
+    pub from_thread: Option<String>,
+}
+
+/// Verify the thread root exists in `channel` and build the provenance tag
+/// desktop's "Send to channel" attaches.
+async fn resolve_sent_from_thread_tag(
+    client: &BuzzClient,
+    channel: Uuid,
+    root_event_id: &str,
+) -> Result<nostr::Tag, CliError> {
+    let root_eid = parse_event_id(root_event_id)?;
+    let root_hex = root_eid.to_hex();
+    let root = fetch_event(client, &root_hex).await?;
+    if channel_id_from_event(&root_hex, &root)? != channel {
+        return Err(CliError::Usage(format!(
+            "--from-thread event {root_hex} is not in channel {channel}"
+        )));
+    }
+    if let Some(real_root) = root.get("tags").and_then(find_root_from_tags) {
+        return Err(CliError::Usage(format!(
+            "--from-thread takes a thread root, but {root_hex} is a reply; use {real_root}"
+        )));
+    }
+    let content = root.get("content").and_then(|c| c.as_str()).unwrap_or("");
+    Ok(sent_from_thread::build_tag(
+        &root_hex,
+        sent_from_thread::summarize_thread_root(content).as_deref(),
+    ))
 }
 
 pub async fn cmd_send_message(
@@ -589,6 +618,15 @@ pub async fn cmd_send_message(
         validate_hex64(r)?;
     }
     let channel_uuid = parse_uuid(&p.channel_id)?;
+    if p.from_thread.is_some() && !matches!(p.kind, None | Some(9)) {
+        return Err(CliError::Usage(
+            "--from-thread only applies to kind 9 messages".into(),
+        ));
+    }
+    let sent_from_thread_tag = match p.from_thread.as_deref() {
+        Some(root) => Some(resolve_sent_from_thread_tag(client, channel_uuid, root).await?),
+        None => None,
+    };
 
     let explicit_mentions = normalize_explicit_mentions(&p.mentions)?;
     let stripped = strip_code_regions(&p.content);
@@ -691,7 +729,7 @@ pub async fn cmd_send_message(
             } else {
                 Vec::new()
             };
-            buzz_sdk::build_message(
+            let builder = buzz_sdk::build_message(
                 channel_uuid,
                 &final_content,
                 thread_ref.as_ref(),
@@ -700,7 +738,11 @@ pub async fn cmd_send_message(
                 &media_tags,
                 &emoji_tags,
             )
-            .map_err(|e| CliError::Other(format!("build_message failed: {e}")))?
+            .map_err(|e| CliError::Other(format!("build_message failed: {e}")))?;
+            match sent_from_thread_tag {
+                Some(tag) => builder.tag(tag),
+                None => builder,
+            }
         }
         Some(k) => {
             return Err(CliError::Usage(format!(
@@ -912,6 +954,7 @@ pub async fn dispatch(
             broadcast,
             files,
             mentions,
+            from_thread,
         } => {
             cmd_send_message(
                 client,
@@ -923,6 +966,7 @@ pub async fn dispatch(
                     broadcast,
                     files,
                     mentions,
+                    from_thread,
                 },
             )
             .await
@@ -1657,6 +1701,7 @@ mod tests {
             broadcast: false,
             files: vec![],
             mentions: vec![],
+            from_thread: None,
         }
     }
 
@@ -1826,6 +1871,149 @@ mod tests {
         assert!(
             emoji_tags.is_empty(),
             "palette-error fallback must produce no emoji tags, got: {emoji_tags:?}"
+        );
+    }
+
+    /// Fake relay that answers `/query` by `ids` filter from `stored` and
+    /// records every `/events` body.
+    async fn fake_thread_relay(
+        stored: Vec<serde_json::Value>,
+    ) -> (String, StdArc<std::sync::Mutex<Vec<String>>>) {
+        type S = (
+            Vec<serde_json::Value>,
+            StdArc<std::sync::Mutex<Vec<String>>>,
+        );
+        let published = StdArc::new(std::sync::Mutex::new(Vec::new()));
+        let app = AxumRouter::new()
+            .route(
+                "/query",
+                axum_post(
+                    |AxumState((stored, _)): AxumState<S>, body: AxumBytes| async move {
+                        let filter: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let filter = filter.get(0).unwrap_or(&filter);
+                        let found: Vec<_> = stored
+                            .iter()
+                            .filter(|e| {
+                                filter["ids"]
+                                    .as_array()
+                                    .is_some_and(|ids| ids.contains(&e["id"]))
+                            })
+                            .collect();
+                        (
+                            AxumStatusCode::OK,
+                            [("content-type", "application/json")],
+                            serde_json::to_string(&found).unwrap(),
+                        )
+                    },
+                ),
+            )
+            .route(
+                "/events",
+                axum_post(
+                    |AxumState((_, published)): AxumState<S>, body: AxumBytes| async move {
+                        published
+                            .lock()
+                            .unwrap()
+                            .push(String::from_utf8_lossy(&body).to_string());
+                        (
+                            AxumStatusCode::OK,
+                            [("content-type", "application/json")],
+                            r#"{"event_id":"fake0000","accepted":true}"#,
+                        )
+                    },
+                ),
+            )
+            .with_state((stored, published.clone()));
+        let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: StdSocketAddr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), published)
+    }
+
+    fn stored_message(
+        id: &str,
+        channel: &str,
+        content: &str,
+        extra: &[serde_json::Value],
+    ) -> serde_json::Value {
+        let mut tags = vec![serde_json::json!(["h", channel])];
+        tags.extend(extra.iter().cloned());
+        serde_json::json!({ "id": id, "kind": 9, "content": content, "tags": tags })
+    }
+
+    #[tokio::test]
+    async fn send_from_thread_publishes_a_top_level_tagged_message() {
+        let root = "a".repeat(64);
+        let reply = "b".repeat(64);
+        let other_channel = "223e4567-e89b-12d3-a456-426614174000";
+        let (url, published) = fake_thread_relay(vec![
+            stored_message(
+                &root,
+                SEND_TEST_CHANNEL,
+                "**Plan**: see [doc](https://x.io) 😀",
+                &[],
+            ),
+            stored_message(
+                &reply,
+                SEND_TEST_CHANNEL,
+                "reply",
+                &[serde_json::json!(["e", root, "", "reply"])],
+            ),
+            stored_message(&"c".repeat(64), other_channel, "elsewhere", &[]),
+        ])
+        .await;
+        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+
+        let send = |from_thread: &str, kind: Option<u16>| {
+            let mut params = send_params("decision: ship it");
+            params.from_thread = Some(from_thread.to_string());
+            params.kind = kind;
+            cmd_send_message(&client, params)
+        };
+
+        for (target, kind) in [
+            (reply.as_str(), None),
+            ("c".repeat(64).as_str(), None),
+            ("d".repeat(64).as_str(), None),
+            ("not-hex", None),
+            (root.as_str(), Some(45001)),
+        ] {
+            let err = send(target, kind).await.unwrap_err();
+            let expected = match target {
+                t if t == "d".repeat(64) => matches!(err, CliError::NotFound(_)),
+                _ => matches!(err, CliError::Usage(_)),
+            };
+            assert!(expected, "{target} {kind:?}: {err}");
+            if target == reply {
+                assert!(err.to_string().contains(&root), "{err}");
+            }
+        }
+        assert!(
+            published.lock().unwrap().is_empty(),
+            "failed checks must not publish"
+        );
+
+        send(&root.to_uppercase(), None).await.unwrap();
+        let bodies = published.lock().unwrap();
+        assert_eq!(bodies.len(), 1, "one send is one publish");
+        let event: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+        assert_eq!(event["kind"], 9);
+        assert_eq!(event["content"], "decision: ship it");
+        let tags = event["tags"].as_array().unwrap();
+        assert!(tags.contains(&serde_json::json!(["h", SEND_TEST_CHANNEL])));
+        assert!(
+            tags.contains(&serde_json::json!([
+                "buzz:sent-from-thread",
+                root,
+                "Plan : see doc 😀"
+            ])),
+            "{tags:?}"
+        );
+        assert!(
+            !tags
+                .iter()
+                .any(|t| matches!(t[0].as_str(), Some("e" | "broadcast"))),
+            "must be top-level: {tags:?}"
         );
     }
 }
