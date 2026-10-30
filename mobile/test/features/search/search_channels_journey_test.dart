@@ -228,6 +228,93 @@ void main() {
     expect(spinner, findsNothing);
     expect(failed, findsNothing);
     expect(unjoined, findsOneWidget);
+
+    // A community switch retires a directory load still in flight. When it
+    // finishes, it must not settle the new community's search.
+    final community =
+        ProviderScope.containerOf(
+              tester.element(find.byType(SearchPage)),
+            ).read(relayConfigProvider.notifier)
+            as _Community;
+    community.switchTo('http://other.test');
+    await tester.pump();
+    await tester.enterText(find.byType(TextField), 'ops');
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(channels.directoryRequests, 5);
+    community.switchTo('http://third.test');
+    await tester.pump();
+    await tester.enterText(find.byType(TextField), 'dev');
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(channels.directoryRequests, 6);
+    session.searches.removeLast().complete(const []);
+    actions.searches.removeLast().complete(const []);
+    channels.finishDirectory();
+    await tester.pump();
+    expect(spinner, findsOneWidget);
+    channels.finishDirectory();
+    await tester.pump();
+    expect(spinner, findsNothing);
+  });
+
+  testWidgets('the production directory refresh holds the spinner', (
+    tester,
+  ) async {
+    final session = _MembershipHeldSession();
+    final actions = _HeldUserSearch();
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          relayConfigProvider.overrideWith(_Community.new),
+          myPubkeyProvider.overrideWith((ref) => 'test'),
+          relaySessionProvider.overrideWith(() => session),
+          channelActionsProvider.overrideWith((ref) => actions),
+          channelsProvider.overrideWith(_NoMemberChannels.new),
+          recentSearchesProvider.overrideWith(_NoRecentSearches.new),
+          profileProvider.overrideWith(_Profile.new),
+        ],
+        child: const SearchPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final spinner = find.byType(BuzzLoadingIndicator);
+
+    // The real refresh reads memberships before it marks the directory
+    // loading. Messages and people finishing first must not stop the spinner.
+    await tester.enterText(find.byType(TextField), '4things');
+    await tester.pump(const Duration(milliseconds: 300));
+    session.searches.removeAt(0).complete(const []);
+    actions.searches.removeAt(0).complete(const []);
+    await tester.pump();
+    expect(session.memberships, hasLength(1));
+    expect(spinner, findsOneWidget);
+    expect(find.text("No results for '4things'"), findsNothing);
+
+    // The refresh fails; search says so and offers a retry.
+    session.memberships.single.completeError(StateError('relay down'));
+    await tester.pump();
+    expect(spinner, findsNothing);
+    expect(find.byKey(const Key('search-channels-failed')), findsOneWidget);
+
+    // Another caller's directory load keeps the spinner on until it ends,
+    // though this search's own request returns at once.
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(SearchPage)),
+    );
+    final status = container.read(channelDirectoryLoadStatusProvider.notifier);
+    final scope = channelDirectoryScope('http://community.test', 'test');
+    status.markLoading(scope);
+    await tester.enterText(find.byType(TextField), 'ops');
+    await tester.pump(const Duration(milliseconds: 300));
+    session.searches.removeAt(0).complete(const []);
+    actions.searches.removeAt(0).complete(const []);
+    await tester.pump();
+    expect(session.memberships, hasLength(1));
+    expect(spinner, findsOneWidget);
+    status.markError(scope);
+    await tester.pump();
+    expect(spinner, findsNothing);
   });
 }
 
@@ -246,6 +333,8 @@ Channel _channel(String name, {required bool isMember}) => Channel(
 class _Community extends RelayConfigNotifier {
   @override
   RelayConfig build() => const RelayConfig(baseUrl: 'http://community.test');
+
+  void switchTo(String baseUrl) => state = RelayConfig(baseUrl: baseUrl);
 }
 
 /// Holds every message search open until the test answers it.
@@ -283,13 +372,13 @@ class _HeldUserSearch implements ChannelActions {
 
 /// Lists member channels, and adds the open directory when it is loaded.
 class _DirectoryChannels extends ChannelsNotifier {
-  Completer<bool>? _directory;
+  final _directories = <Completer<bool>>[];
   var directoryRequests = 0;
   Duration? maxAge;
 
-  void finishDirectory() => _directory!.complete(true);
+  void finishDirectory() => _directories.removeAt(0).complete(true);
 
-  void failDirectory() => _directory!.complete(false);
+  void failDirectory() => _directories.removeAt(0).complete(false);
 
   @override
   Future<List<Channel>> build() async => [
@@ -305,19 +394,24 @@ class _DirectoryChannels extends ChannelsNotifier {
       ref.read(relayConfigProvider).baseUrl,
       ref.read(myPubkeyProvider),
     );
-    if (ref.read(channelDirectoryLoadStatusProvider).status ==
-        ChannelDirectoryLoadStatus.loaded) {
+    final directory = ref.read(channelDirectoryLoadStatusProvider);
+    if (directory.scope == scope &&
+        directory.status == ChannelDirectoryLoadStatus.loaded) {
       return;
     }
     directoryRequests++;
-    status.markLoading(scope);
-    if (!await (_directory = Completer<bool>()).future) {
+    // Like production, the status turns loading only after memberships
+    // arrive, so it stays as it was while the request is held.
+    final load = Completer<bool>();
+    _directories.add(load);
+    if (!await load.future) {
       // Like production retryDirectory: record the error, do not throw.
       status.markError(scope);
       return;
     }
-    state = AsyncData([...?state.value, _channel('4things', isMember: false)]);
+    // Production marks the directory loaded before it installs the list.
     status.markLoaded(scope);
+    state = AsyncData([...?state.value, _channel('4things', isMember: false)]);
   }
 }
 
@@ -330,4 +424,25 @@ class _Profile extends ProfileNotifier {
   @override
   Future<UserProfile?> build() async =>
       const UserProfile(pubkey: 'test', displayName: 'Test');
+}
+
+/// Real channel loading, starting with no memberships.
+class _NoMemberChannels extends ChannelsNotifier {
+  @override
+  Future<List<Channel>> build() async => [];
+}
+
+/// Holds the membership query that starts a real directory refresh.
+class _MembershipHeldSession extends _HeldSession {
+  final memberships = <Completer<List<NostrEvent>>>[];
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) {
+    final membership = Completer<List<NostrEvent>>();
+    memberships.add(membership);
+    return membership.future;
+  }
 }
