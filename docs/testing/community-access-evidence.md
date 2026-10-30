@@ -29,14 +29,14 @@ capturing actual evidence. Include baseline and unban controls, not just denial.
 | Restricted claimant / owner-linked claimant | | denied | | | | NOT RUN |
 | V1 current expiry/cutoff behavior | | deployed contract | | | | NOT RUN |
 | Ban route matrix, one row per enforced route and principal | | denied / allowed controls | | | | NOT RUN |
-| Timeout read/session/write controls | | write-only restriction | | | | NOT RUN |
+| Timeout content/ephemeral denial and read/session/exempt-write controls | | documented selective restriction | | | | NOT RUN |
 | Root/audio direct and owner-linked existing sessions | | policy close / bystander stays | | | | NOT RUN |
 | Root/audio reconnect | | denied | | | | NOT RUN |
 | Tenant B controls | | unaffected | | | | NOT RUN |
 | Cross-pod ordinary revocation | | recorded propagation | | | | NOT RUN |
 | Missed-delivery local bound; staging if separately authorized | | documented bound | | | | NOT RUN |
 | Database failure/grace isolated rehearsal | | bounded fail closed | | | | NOT RUN |
-| Webhook ban / unban / wrong secret / timeout controls | | no denied run; allowed run | | | | NOT RUN |
+| Signed/webhook/event/cron owner-ban, owner-linked agent, unban and timeout controls | | no denied run; allowed run | | | | NOT RUN |
 
 ## Cleanup and closure recommendation
 
