@@ -137,11 +137,17 @@ enum Command {
     ///
     /// Without `--channel`, only channels missing discovery metadata are
     /// reconciled. With `--channel`, only that channel's member snapshot is
-    /// replaced; canonical metadata and admin events remain untouched.
+    /// replaced; canonical metadata and admin events remain untouched unless
+    /// `--metadata` is given.
     ReconcileChannels {
         /// Optional channel UUID to force-republish.
         #[arg(long)]
         channel: Option<String>,
+
+        /// With `--channel`, also republish its kind:39000 metadata from the
+        /// channel row, for example after an operator rename.
+        #[arg(long, requires = "channel")]
+        metadata: bool,
 
         /// Relay private key (hex) for signing events. Falls back to
         /// BUZZ_RELAY_PRIVATE_KEY env var. If neither is set, generates
@@ -211,8 +217,12 @@ async fn run(cli: Cli) -> Result<i32> {
         Command::Deletions { command } => deletions::run(command).await,
         Command::UserDeletions { command } => user_deletions::run(command).await,
         Command::NipFi { command } => nip_fi::run(command).await,
-        Command::ReconcileChannels { channel, relay_key } => {
-            reconcile_channels(channel, relay_key).await?;
+        Command::ReconcileChannels {
+            channel,
+            metadata,
+            relay_key,
+        } => {
+            reconcile_channels(channel, metadata, relay_key).await?;
             Ok(0)
         }
     }
@@ -721,6 +731,7 @@ async fn resolve_admin_tenant(db: &Db) -> Result<TenantContext> {
 
 async fn reconcile_channels(
     channel_arg: Option<String>,
+    republish_metadata: bool,
     relay_key_arg: Option<String>,
 ) -> Result<()> {
     use buzz_core::channel::group_state_identity_tags;
@@ -800,11 +811,16 @@ async fn reconcile_channels(
 
         let members = db.get_members(tenant.community(), channel.id).await?;
 
-        // A targeted repair is deliberately roster-only. kind:39000 metadata
-        // is richer than this legacy backfill builder, and kind:39001 is not
-        // part of the stale-roster incident; replacing either can destroy
-        // canonical state. Full backfill still creates all three event kinds
+        // A targeted repair is roster-only unless `--metadata` asks for
+        // kind:39000 too; kind:39001 is never replaced by a targeted repair.
+        // kind:39000 is built from the channel row by the same function the
+        // relay uses, so an operator rename (for example
+        // scripts/maintenance/rename_duplicate_listed_channel_names.sql)
+        // reaches clients. Full backfill still creates all three event kinds
         // for channels with no discovery metadata.
+        if republish_metadata {
+            republish_channel_metadata(&db, &tenant, channel.id, &relay_keys).await?;
+        }
         if target_channel.is_none() {
             // kind:39000 — channel metadata
             {
@@ -871,6 +887,74 @@ async fn reconcile_channels(
         "Reconciled {reconciled} channels ({skipped} already had events, {} total).",
         channels.len()
     );
+    Ok(())
+}
+
+/// Makes the newest relay-signed kind:39000 of a channel match its row, for
+/// example after an operator rename.
+///
+/// Run it with no relay serving: the relay builds kind:39000 from a channel
+/// read outside the replacement (`emit_group_discovery_events`), so a live
+/// edit between this command's read and write could leave the older
+/// snapshot. The command signs later than the stored event, as the relay
+/// does, so it also replaces an event from the same second. It fails unless
+/// a read after its write finds the stored event matching the row.
+async fn republish_channel_metadata(
+    db: &Db,
+    tenant: &TenantContext,
+    channel_id: uuid::Uuid,
+    relay_keys: &Keys,
+) -> Result<()> {
+    let latest = || async {
+        let stored = db
+            .query_events(&buzz_db::event::EventQuery {
+                kinds: Some(vec![39000]),
+                pubkey: Some(relay_keys.public_key().to_bytes().to_vec()),
+                d_tag: Some(channel_id.to_string()),
+                limit: Some(1),
+                ..buzz_db::event::EventQuery::for_community(tenant.community())
+            })
+            .await?;
+        Ok::<_, anyhow::Error>(stored.into_iter().next().map(|stored| stored.event))
+    };
+    let row_tags = || async {
+        let channel = db.get_channel(tenant.community(), channel_id).await?;
+        let members = db.get_members(tenant.community(), channel_id).await?;
+        Ok::<_, anyhow::Error>(buzz_db::channel::group_metadata_tags(&channel, &members))
+    };
+    let matches = |event: &nostr::Event, tags: &[Vec<String>]| {
+        event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice())
+            .eq(tags.iter().map(Vec::as_slice))
+    };
+
+    let tags = row_tags().await?;
+    let stored = latest().await?;
+    if stored.as_ref().is_some_and(|event| matches(event, &tags)) {
+        return Ok(());
+    }
+    let created_at = stored
+        .map_or(0, |event| event.created_at.as_secs() + 1)
+        .max(nostr::Timestamp::now().as_secs());
+    let event = EventBuilder::new(Kind::Custom(39000), "")
+        .tags(
+            tags.into_iter()
+                .map(Tag::parse)
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+        .custom_created_at(nostr::Timestamp::from(created_at))
+        .sign_with_keys(relay_keys)
+        .map_err(|e| anyhow::anyhow!("sign kind:39000: {e}"))?;
+    db.replace_addressable_event(tenant.community(), &event, Some(channel_id))
+        .await?;
+    let tags = row_tags().await?;
+    if !latest().await?.is_some_and(|event| matches(&event, &tags)) {
+        return Err(anyhow::anyhow!(
+            "channel {channel_id} changed while its kind:39000 was republished; stop every relay and run the command again"
+        ));
+    }
     Ok(())
 }
 
