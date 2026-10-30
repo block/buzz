@@ -63,6 +63,7 @@ impl PostgresAuthorityStore {
                push_gateway_installations,
                push_gateway_delegations,
                push_gateway_endpoint_quotas,
+               push_gateway_relay_quotas,
                push_gateway_delivery_auth_replays,
                push_gateway_delivery_request_replays
              TO {role};"
@@ -121,14 +122,50 @@ async fn commit_management(
     tx.commit().await.map_err(db)
 }
 
+// Reserve four non-overlapping shares. Recent use keeps its slot through the
+// window even after revocation, so changing relay keys cannot spend another share.
+async fn reserve_relay(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    fingerprint: &[u8],
+    relay: &[u8],
+    now: i64,
+    window: i64,
+) -> Result<(), AuthorityError> {
+    if window < 1 {
+        return Err(AuthorityError::Unavailable);
+    }
+    sqlx::query("INSERT INTO push_gateway_endpoint_quotas(token_fingerprint,window_started_at,admitted) VALUES($1,$2,0) ON CONFLICT DO NOTHING")
+        .bind(fingerprint).bind(at(now)?).execute(&mut **tx).await.map_err(db)?;
+    let start = sqlx::query_scalar::<_,DateTime<Utc>>("SELECT window_started_at FROM push_gateway_endpoint_quotas WHERE token_fingerprint=$1 FOR UPDATE")
+        .bind(fingerprint).fetch_one(&mut **tx).await.map_err(db)?;
+    let start = if now.saturating_sub(ts(start)) >= window {
+        now
+    } else {
+        ts(start)
+    };
+    sqlx::query("DELETE FROM push_gateway_relay_quotas q WHERE q.token_fingerprint=$1 AND q.window_started_at < $2 AND NOT EXISTS (SELECT 1 FROM push_gateway_delegations d JOIN push_gateway_installations i ON i.id=d.installation_id WHERE i.token_fingerprint=q.token_fingerprint AND d.relay_pubkey=q.relay_pubkey AND i.endpoint_epoch=d.endpoint_epoch AND i.revoked_at IS NULL AND d.revoked_at IS NULL AND i.expires_at>=$3 AND d.expires_at>=$3)")
+        .bind(fingerprint).bind(at(start)?).bind(at(now)?).execute(&mut **tx).await.map_err(db)?;
+    let relays: Vec<Vec<u8>> = sqlx::query_scalar("SELECT relay_pubkey FROM push_gateway_relay_quotas WHERE token_fingerprint=$1 UNION SELECT d.relay_pubkey FROM push_gateway_delegations d JOIN push_gateway_installations i ON i.id=d.installation_id WHERE i.token_fingerprint=$1 AND i.endpoint_epoch=d.endpoint_epoch AND i.revoked_at IS NULL AND d.revoked_at IS NULL AND i.expires_at>=$2 AND d.expires_at>=$2")
+        .bind(fingerprint).bind(at(now)?).fetch_all(&mut **tx).await.map_err(db)?;
+    if !relays.iter().any(|key| key == relay) && relays.len() >= MAX_APPROVED_RELAYS as usize {
+        return Err(AuthorityError::DeliveryRateLimited(
+            start.saturating_add(window).saturating_sub(now).max(1),
+        ));
+    }
+    sqlx::query("INSERT INTO push_gateway_relay_quotas(token_fingerprint,relay_pubkey,window_started_at,admitted) VALUES($1,$2,$3,0) ON CONFLICT DO NOTHING")
+        .bind(fingerprint).bind(relay).bind(at(start)?).execute(&mut **tx).await.map_err(db)?;
+    Ok(())
+}
+
 #[async_trait]
 impl AuthorityStore for PostgresAuthorityStore {
     async fn ready(&self) -> Result<(), AuthorityError> {
-        const TABLES: [&str; 6] = [
+        const TABLES: [&str; 7] = [
             "push_gateway_challenges",
             "push_gateway_installations",
             "push_gateway_delegations",
             "push_gateway_endpoint_quotas",
+            "push_gateway_relay_quotas",
             "push_gateway_delivery_auth_replays",
             "push_gateway_delivery_request_replays",
         ];
@@ -385,6 +422,16 @@ impl AuthorityStore for PostgresAuthorityStore {
                 return Err(AuthorityError::StaleGeneration(current));
             }
         }
+        let now = assertion.now;
+        let window = assertion.quota_window_seconds;
+        reserve_relay(
+            &mut tx,
+            &i.try_get::<Vec<u8>, _>("token_fingerprint").map_err(db)?,
+            &relay,
+            now,
+            window,
+        )
+        .await?;
         let result=sqlx::query("INSERT INTO push_gateway_delegations(id,installation_id,relay_pubkey,endpoint_epoch,generation,not_before,expires_at,revoked_at,grant_hash) VALUES($1,$2,$3,$4,$5,$6,$7,NULL,$8) ON CONFLICT(installation_id,relay_pubkey) DO UPDATE SET id=EXCLUDED.id,grant_hash=EXCLUDED.grant_hash,endpoint_epoch=EXCLUDED.endpoint_epoch,generation=EXCLUDED.generation,not_before=EXCLUDED.not_before,expires_at=EXCLUDED.expires_at,revoked_at=NULL,updated_at=now() WHERE EXCLUDED.generation > push_gateway_delegations.generation")
             .bind(d.id).bind(d.installation_id).bind(relay).bind(d.endpoint_epoch).bind(d.generation).bind(at(d.not_before)?).bind(at(d.expires_at)?).bind(d.grant_hash.to_vec()).execute(&mut *tx).await.map_err(db)?;
         if result.rows_affected() != 1 {
@@ -533,15 +580,45 @@ impl AuthorityStore for PostgresAuthorityStore {
         if request_expires_at < now || request_expires_at > authority.expires_at {
             return Err(AuthorityError::Rejected);
         }
-        if quota_window_seconds < 1 || quota_max_deliveries < 1 {
+        if quota_window_seconds < 1 || quota_max_deliveries < MAX_APPROVED_RELAYS {
             return Err(AuthorityError::Unavailable);
         }
         let fingerprint: Vec<u8> = i.try_get("token_fingerprint").map_err(db)?;
-        let quota = sqlx::query("INSERT INTO push_gateway_endpoint_quotas(token_fingerprint,window_started_at,admitted) VALUES($1,$2,1) ON CONFLICT(token_fingerprint) DO UPDATE SET window_started_at=CASE WHEN push_gateway_endpoint_quotas.window_started_at <= $2 - make_interval(secs => $3::double precision) THEN $2 ELSE push_gateway_endpoint_quotas.window_started_at END, admitted=CASE WHEN push_gateway_endpoint_quotas.window_started_at <= $2 - make_interval(secs => $3::double precision) THEN 1 ELSE push_gateway_endpoint_quotas.admitted + 1 END, updated_at=now() WHERE push_gateway_endpoint_quotas.window_started_at <= $2 - make_interval(secs => $3::double precision) OR push_gateway_endpoint_quotas.admitted < $4")
-            .bind(fingerprint).bind(at(now)?).bind(quota_window_seconds).bind(quota_max_deliveries).execute(&mut *tx).await.map_err(db)?;
-        if quota.rows_affected() != 1 {
-            return Err(AuthorityError::Rejected);
+        // Destination quota serializes admissions even when installation ownership changes.
+        sqlx::query("INSERT INTO push_gateway_endpoint_quotas(token_fingerprint,window_started_at,admitted) VALUES($1,$2,0) ON CONFLICT DO NOTHING")
+            .bind(&fingerprint).bind(at(now)?).execute(&mut *tx).await.map_err(db)?;
+        let device = sqlx::query("SELECT window_started_at,admitted FROM push_gateway_endpoint_quotas WHERE token_fingerprint=$1 FOR UPDATE")
+            .bind(&fingerprint).fetch_one(&mut *tx).await.map_err(db)?;
+        let old_start = ts(device.try_get("window_started_at").map_err(db)?);
+        let (start, count) = if now.saturating_sub(old_start) >= quota_window_seconds {
+            (now, 0)
+        } else {
+            (old_start, device.try_get::<i64, _>("admitted").map_err(db)?)
+        };
+        sqlx::query("INSERT INTO push_gateway_relay_quotas(token_fingerprint,relay_pubkey,window_started_at,admitted) VALUES($1,$2,$3,0) ON CONFLICT DO NOTHING")
+            .bind(&fingerprint).bind(&relay_bytes).bind(at(start)?).execute(&mut *tx).await.map_err(db)?;
+        let quota = sqlx::query("SELECT window_started_at,admitted FROM push_gateway_relay_quotas WHERE token_fingerprint=$1 AND relay_pubkey=$2 FOR UPDATE")
+            .bind(&fingerprint).bind(&relay_bytes).fetch_one(&mut *tx).await.map_err(db)?;
+        let relay_start = ts(quota.try_get("window_started_at").map_err(db)?);
+        let relay_count = if relay_start == start {
+            quota.try_get::<i64, _>("admitted").map_err(db)?
+        } else {
+            0
+        };
+        if count >= quota_max_deliveries
+            || relay_count >= quota_max_deliveries / MAX_APPROVED_RELAYS
+        {
+            return Err(AuthorityError::DeliveryRateLimited(
+                start
+                    .saturating_add(quota_window_seconds)
+                    .saturating_sub(now)
+                    .max(1),
+            ));
         }
+        sqlx::query("UPDATE push_gateway_endpoint_quotas SET window_started_at=$2,admitted=$3,updated_at=now() WHERE token_fingerprint=$1")
+            .bind(&fingerprint).bind(at(start)?).bind(count+1).execute(&mut *tx).await.map_err(db)?;
+        sqlx::query("UPDATE push_gateway_relay_quotas SET window_started_at=$3,admitted=$4,updated_at=now() WHERE token_fingerprint=$1 AND relay_pubkey=$2")
+            .bind(&fingerprint).bind(&relay_bytes).bind(at(start)?).bind(relay_count+1).execute(&mut *tx).await.map_err(db)?;
         let auth_inserted = sqlx::query("INSERT INTO push_gateway_delivery_auth_replays(relay_pubkey,auth_event_id,expires_at) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
             .bind(&relay_bytes).bind(event_bytes).bind(at(request_expires_at)?).execute(&mut *tx).await.map_err(db)?;
         let request_inserted = sqlx::query("INSERT INTO push_gateway_delivery_request_replays(relay_pubkey,request_id,expires_at) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
@@ -588,6 +665,13 @@ impl AuthorityStore for PostgresAuthorityStore {
             .map_err(db)?;
         sqlx::query(
             "DELETE FROM push_gateway_endpoint_quotas WHERE updated_at < $1 - interval '1 day'",
+        )
+        .bind(at(now)?)
+        .execute(&mut *tx)
+        .await
+        .map_err(db)?;
+        sqlx::query(
+            "DELETE FROM push_gateway_relay_quotas WHERE updated_at < $1 - interval '1 day'",
         )
         .bind(at(now)?)
         .execute(&mut *tx)
@@ -767,6 +851,7 @@ mod postgres_tests {
              CREATE TABLE push_gateway_delivery_auth_replays (expires_at TIMESTAMPTZ NOT NULL);
              CREATE TABLE push_gateway_delivery_request_replays (expires_at TIMESTAMPTZ NOT NULL);
              CREATE TABLE push_gateway_endpoint_quotas (updated_at TIMESTAMPTZ NOT NULL);
+             CREATE TABLE push_gateway_relay_quotas (updated_at TIMESTAMPTZ NOT NULL);
              CREATE TABLE push_gateway_installations (
                  id UUID PRIMARY KEY,
                  expires_at TIMESTAMPTZ NOT NULL,
@@ -1128,7 +1213,7 @@ mod postgres_tests {
         event_hex: &'a str,
         request_id: Uuid,
     ) -> impl std::future::Future<Output = Result<DeliveryPermit, AuthorityError>> + 'a {
-        admit_with_quota(store, event_hex, request_id, 10)
+        admit_with_quota(store, event_hex, request_id, 40)
     }
 
     fn admit_with_quota<'a>(
@@ -1216,8 +1301,8 @@ mod postgres_tests {
         let event_b = "33".repeat(32);
 
         let (a, b) = tokio::join!(
-            admit_with_quota(&store, &event_a, Uuid::new_v4(), 1),
-            admit_with_quota(&store, &event_b, Uuid::new_v4(), 1),
+            admit_with_quota(&store, &event_a, Uuid::new_v4(), 4),
+            admit_with_quota(&store, &event_b, Uuid::new_v4(), 4),
         );
         assert_eq!(
             [a.is_ok(), b.is_ok()].iter().filter(|ok| **ok).count(),
@@ -1402,6 +1487,7 @@ mod postgres_tests {
             request_expires_at: now + 300,
             now,
             expected_generation: None,
+            quota_window_seconds: 60,
         };
         let (a, b) = tokio::join!(
             store.revoke_installation(id, 1, 2, assertion(0, 1)),

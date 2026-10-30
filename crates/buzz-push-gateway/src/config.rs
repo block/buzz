@@ -195,6 +195,11 @@ impl Config {
             bounded_positive("BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SECONDS", 10, 86_400)?;
         let endpoint_quota_max_deliveries =
             bounded_positive("BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES", 10, 10_000)?;
+        if endpoint_quota_max_deliveries < crate::authority::MAX_APPROVED_RELAYS {
+            return Err(ConfigError::Invalid(
+                "BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES",
+            ));
+        }
         let application = parse_application(e)?;
         let bind_addr = e
             .get("BUZZ_PUSH_BIND_ADDR")
