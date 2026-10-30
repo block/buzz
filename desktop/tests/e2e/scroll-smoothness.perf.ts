@@ -25,8 +25,8 @@ import { installMockBridge } from "../helpers/bridge";
  * Sami flagged as the dominant *feel* hazard on the shipped Tauri app — that
  * only reproduces in the real desktop shell and is Tyler's real-wheel pass.
  *
- * Run headed to watch it:
- *   pnpm build && npx playwright test --config=playwright.perf.config.ts --headed
+ * Run headed to watch it (build:e2e, not build — a plain build strips the mock bridge):
+ *   pnpm build:e2e && npx playwright test --config=playwright.perf.config.ts --headed
  */
 
 const SEED_ROWS = 600; // a genuinely busy channel, fully mounted
