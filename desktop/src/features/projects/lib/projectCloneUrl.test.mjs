@@ -79,6 +79,24 @@ test("projectRepoHost identifies an external repository by host", () => {
   );
 });
 
+test("projectRepoHost classifies SCP-style SSH remotes as external", () => {
+  assert.deepEqual(
+    projectRepoHost("git@github.com:block/buzz.git", ORIGIN),
+    { kind: "external", host: "github.com" },
+  );
+  assert.deepEqual(
+    projectRepoHost("git@gitlab.example.org:group/repo", ORIGIN),
+    { kind: "external", host: "gitlab.example.org" },
+  );
+});
+
+test("projectRepoHost still parses ssh:// URLs via WHATWG", () => {
+  assert.deepEqual(
+    projectRepoHost("ssh://git@github.com/block/buzz.git", ORIGIN),
+    { kind: "external", host: "github.com" },
+  );
+});
+
 test("projectRepoHost treats a non-repository relay path as external", () => {
   assert.deepEqual(projectRepoHost(`${ORIGIN}/other/path`, ORIGIN), {
     kind: "external",
@@ -111,6 +129,20 @@ test("repositoryDisplayPath renders an external repo as host/path without .git",
     repositoryDisplayPath(
       {
         cloneUrls: ["https://github.com/block/buzz.git"],
+        dtag: "buzz",
+        owner: OWNER,
+      },
+      ORIGIN,
+    ),
+    "github.com/block/buzz",
+  );
+});
+
+test("repositoryDisplayPath renders an SCP-style SSH remote without .git", () => {
+  assert.equal(
+    repositoryDisplayPath(
+      {
+        cloneUrls: ["git@github.com:block/buzz.git"],
         dtag: "buzz",
         owner: OWNER,
       },
