@@ -82,8 +82,11 @@ class ChannelDetailsPage extends HookConsumerWidget {
                       ?.toLowerCase() ==
                   resolvedCurrentPubkey,
         );
-    final canManageLifecycle =
-        currentMember?.isElevated == true || ownsOwnerAgent;
+    final canManageLifecycle = canManageChannelLifecycle(
+      members: members,
+      agentOwners: agentOwnersAsync.value ?? const {},
+      currentPubkey: resolvedCurrentPubkey,
+    );
     final canEdit =
         !resolvedChannel.isDm &&
         canManageLifecycle &&
@@ -572,7 +575,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
                         context,
                         ref,
                         title: 'Archive #${resolvedChannel.name}?',
-                        body: 'The channel will become read-only.',
+                        body: archiveChannelConfirmBody,
                         confirmLabel: 'Archive',
                         action: () => ref
                             .read(channelActionsProvider)

@@ -106,7 +106,7 @@ void main() {
 
     final popover = find.byKey(const ValueKey('slash-suggestions-popover'));
 
-    await type('/');
+    await type('/sh');
     expect(popover, findsOneWidget);
     await type('/shr');
     final row = find.descendant(of: popover, matching: find.byType(ListTile));
