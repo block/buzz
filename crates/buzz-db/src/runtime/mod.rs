@@ -265,6 +265,9 @@ pub struct Db {
     pub(crate) pool: PgPool,
     /// Optional bounded post-commit producer, shared across handle clones.
     pub(crate) push_enqueue: Option<push_enqueue::PushEnqueue>,
+    /// Post-commit hand-off of new operator-listener outbox rows to this
+    /// process's delivery worker, shared across handle clones.
+    pub(crate) operator_listener_commits: crate::operator_listener::CommittedDeliveries,
     /// Maximum connections configured for this pool (from [`DbConfig::max_connections`]).
     pub(crate) max_connections: u32,
     /// Optional read-replica pool (from [`DbConfig::read_database_url`]).
@@ -823,6 +826,7 @@ impl Db {
             .then(|| push_enqueue::PushEnqueue::new(&pool));
         Ok(Self {
             push_enqueue,
+            operator_listener_commits: Default::default(),
             pool,
             max_connections: config.max_connections,
             read_pool,
@@ -1388,6 +1392,7 @@ impl Db {
     pub fn from_pool(pool: PgPool) -> Self {
         Self {
             push_enqueue: None,
+            operator_listener_commits: Default::default(),
             max_connections: pool.options().get_max_connections(),
             read_max_connections: pool.options().get_max_connections(),
             pool,
@@ -1409,6 +1414,7 @@ impl Db {
     pub fn from_pools(pool: PgPool, read_pool: PgPool) -> Self {
         Self {
             push_enqueue: None,
+            operator_listener_commits: Default::default(),
             max_connections: pool.options().get_max_connections(),
             read_max_connections: read_pool.options().get_max_connections(),
             pool,
@@ -1791,7 +1797,7 @@ impl Db {
             observability::WriterOperation::EventWrite,
         )
         .await?;
-        tx.set_push_enqueue(self.push_enqueue.clone());
+        tx.set_post_commit(self);
         Ok(tx)
     }
 
@@ -1836,7 +1842,7 @@ impl Db {
         let tx = sqlx::Transaction::begin(connection, None).await?;
         let mut tx =
             AdmittedTx::admit_with_serving_lease(tx, &self.deletion_store(), lease).await?;
-        tx.set_push_enqueue(self.push_enqueue.clone());
+        tx.set_post_commit(self);
         event::acquire_canvas_event_write_lock_if_needed(&mut tx, event, channel_id).await?;
         let result =
             event::insert_event_with_thread_metadata_tx(&mut tx, event, channel_id, None).await?;
