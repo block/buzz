@@ -31,6 +31,11 @@ import { useMentions } from "@/features/messages/lib/useMentions";
 import { getPersistentAgentAudienceScope } from "@/features/messages/lib/persistentAgentAudience";
 import { setKeepMentionedAgentsPinned } from "@/features/messages/lib/autoPinMentionedAgentsPreference";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
+import type { SlashCommandDefinition } from "@/features/slash-commands/lib/types";
+import { useSlashCommandRegistry } from "@/features/slash-commands/commands/useSlashCommandRegistry";
+import { useSlashCommandAutocomplete } from "@/features/slash-commands/useSlashCommandAutocomplete";
+import { useSlashCommandRunner } from "@/features/slash-commands/useSlashCommandRunner";
 import { CUSTOM_EMOJI_NODE_NAME } from "@/features/messages/lib/customEmojiNode";
 import {
   type AutocompleteEdit,
@@ -97,6 +102,7 @@ function MessageComposerImpl({
   mediaController,
   showBackgroundUploadProgress = true,
   showTopBorder = false,
+  slashCommands = false,
   toolbarExtraActions,
   typingParentEventId = null,
   typingRootEventId = null,
@@ -150,6 +156,16 @@ function MessageComposerImpl({
   const channelLinks = useChannelLinks();
   const customEmoji = useCustomEmoji();
   const emojiAutocomplete = useEmojiAutocomplete(customEmoji);
+  const slashRegistry = useSlashCommandRegistry({
+    enabled: slashCommands && editTarget == null && channelId != null,
+    channelId,
+    channelName,
+    channelType,
+    isThread: audienceContext?.type === "thread",
+  });
+  const slashAutocomplete = useSlashCommandAutocomplete(slashRegistry, {
+    isDm: channelType === "dm",
+  });
   const notifyTyping = useTypingBroadcast(
     channelId,
     typingParentEventId,
@@ -225,6 +241,7 @@ function MessageComposerImpl({
     setIsEmojiPickerOpen(false);
     channelLinks.clearChannels();
     emojiAutocomplete.clearEmojis();
+    slashAutocomplete.clear();
   }, [effectiveDraftKey]);
   const disabledRef = React.useRef(disabled);
   const isSendingRef = React.useRef(isSending);
@@ -253,7 +270,8 @@ function MessageComposerImpl({
   isAutocompleteOpenRef.current =
     mentions.isMentionOpen ||
     channelLinks.isChannelOpen ||
-    emojiAutocomplete.isEmojiAutocompleteOpen;
+    emojiAutocomplete.isEmojiAutocompleteOpen ||
+    slashAutocomplete.isOpen;
   const submitMessageRef = React.useRef<() => void>(() => {});
   const composerScrollRef = React.useRef<HTMLDivElement>(null);
   const formRef = React.useRef<HTMLFormElement>(null);
@@ -308,6 +326,7 @@ function MessageComposerImpl({
       mentions.updateMentionQuery(text, cursor);
       channelLinks.updateChannelQuery(text, cursor);
       emojiAutocomplete.updateEmojiQuery(text, cursor);
+      slashAutocomplete.updateQuery(text, cursor);
       if (text.trim().length > 0) {
         notifyTyping();
       }
@@ -381,6 +400,44 @@ function MessageComposerImpl({
     clearQueuedAttachments: media.clearQueuedAttachments,
     restoreQueuedAttachments: media.restoreQueuedAttachments,
     setSpoileredAttachmentUrls,
+  });
+  const slashRunner = useSlashCommandRunner({
+    commands: slashRegistry,
+    channelId,
+    channelName,
+    channelType,
+    channels: channelLinks.channels,
+    draftKey: effectiveDraftKey,
+    getComposerRevision,
+    getThreadContext: () => onCaptureSendContext?.() ?? null,
+    resolveMentions: async (text) => {
+      await mentions.settlePendingMentionBindings();
+      return mentions.extractMentionPubkeys(text);
+    },
+    send: async (content, threadContext) => {
+      const mentionPubkeys = await mentions.revalidateMentionPubkeys(
+        mentions.extractMentionPubkeys(content),
+        channelId,
+        { phase: "publish" },
+      );
+      await onSendRef.current(
+        content,
+        mentionPubkeys,
+        buildCustomEmojiTags(content, customEmoji),
+        channelId,
+        threadContext,
+      );
+    },
+    clearComposer: () => {
+      setComposerContent("");
+      contentRef.current = "";
+      richText.clearContent();
+      mentions.clearMentions();
+      channelLinks.clearChannels();
+      emojiAutocomplete.clearEmojis();
+      slashAutocomplete.clear();
+      setIsEmojiPickerOpen(false);
+    },
   });
   React.useEffect(() => {
     onDeferredEditPendingChange?.(isDeferredEditPending);
@@ -492,6 +549,17 @@ function MessageComposerImpl({
     [
       applyAutocompleteEdit,
       channelLinks.insertChannel,
+      richText.getPlainTextAndCursor,
+    ],
+  );
+  const applySlashCommandInsert = React.useCallback(
+    (command: SlashCommandDefinition) => {
+      const { cursor } = richText.getPlainTextAndCursor();
+      applyAutocompleteEdit(slashAutocomplete.insertCommand(command, cursor));
+    },
+    [
+      applyAutocompleteEdit,
+      slashAutocomplete.insertCommand,
       richText.getPlainTextAndCursor,
     ],
   );
@@ -621,6 +689,11 @@ function MessageComposerImpl({
     ) {
       return;
     }
+    const slashInvocation = slashRunner.recognize(trimmed);
+    if (slashInvocation) {
+      await slashRunner.run(slashInvocation, hasMedia);
+      return;
+    }
     const capturedThreadContext = onCaptureSendContext?.() ?? null;
     if (
       capturedThreadContext !== null &&
@@ -684,6 +757,8 @@ function MessageComposerImpl({
     onCaptureSendContext,
     onPreparingMentionSendChange,
     persistentAudience.pubkeys,
+    slashRunner.recognize,
+    slashRunner.run,
     isEditSubmissionLocked,
     effectiveDraftKey,
     mentions.getDraftMentionRefs,
@@ -727,6 +802,13 @@ function MessageComposerImpl({
     (event: React.KeyboardEvent<HTMLDivElement>) => {
       if (handleAlwaysAddressShortcut(event)) return;
       // Let autocomplete handle keys first
+      const slashResult = slashAutocomplete.handleKeyDown(event);
+      if (slashResult.handled) {
+        if (slashResult.suggestion) {
+          applySlashCommandInsert(slashResult.suggestion);
+        }
+        return;
+      }
       const emojiResult = emojiAutocomplete.handleEmojiKeyDown(event);
       if (emojiResult.handled) {
         if (emojiResult.suggestion) {
@@ -784,6 +866,8 @@ function MessageComposerImpl({
     },
     [
       handleAlwaysAddressShortcut,
+      slashAutocomplete.handleKeyDown,
+      applySlashCommandInsert,
       emojiAutocomplete.handleEmojiKeyDown,
       applyEmojiInsert,
       channelLinks.handleChannelKeyDown,
@@ -810,6 +894,7 @@ function MessageComposerImpl({
     media.isUploading ||
     voiceNote.status !== "idle" ||
     mentionSendFlow.isPreparingMentionSend ||
+    slashRunner.isPending ||
     (isContentEmpty &&
       media.pendingImeta.length === 0 &&
       media.queuedAttachments.length === 0);
@@ -887,9 +972,11 @@ function MessageComposerImpl({
               lockedAgentPubkeys={lockedAgentPubkeys}
               mentions={mentions}
               openOptionsRequest={openMentionOptionsRequest}
+              slashAutocomplete={slashAutocomplete}
               onChannelSelect={applyChannelInsert}
               onEmojiSelect={applyEmojiInsert}
               onMentionSelect={selectMentionSuggestion}
+              onSlashCommandSelect={applySlashCommandInsert}
               onOptionsRevealComplete={completeMentionOptionsReveal}
               onToggleAlwaysAddressAgent={(suggestion) =>
                 toggleAlwaysAddressAgent(suggestion, {

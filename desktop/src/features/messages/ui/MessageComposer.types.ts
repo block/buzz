@@ -108,6 +108,11 @@ export type MessageComposerProps = {
     id: string;
   } | null;
   showTopBorder?: boolean;
+  /**
+   * Opt in to composer slash commands (`/shrug`, ...). Off by default; edit
+   * mode never runs commands regardless of this flag.
+   */
+  slashCommands?: boolean;
   /** Render the app-wide upload queue above this composer dock. */
   showBackgroundUploadProgress?: boolean;
   toolbarExtraActions?: ReactNode;

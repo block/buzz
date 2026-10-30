@@ -856,6 +856,7 @@ export function MessageThreadPanel({
               onEditLastOwnMessage={onEditLastOwnMessage}
               onEditSave={onEditSave}
               onSend={onSend}
+              slashCommands
               placeholder={
                 isHuddleTranscript
                   ? "Message the huddle"
