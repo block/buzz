@@ -20,8 +20,8 @@ const ACKNOWLEDGEMENT_VERSION: i32 = 1;
 pub struct Report {
     /// Deletion requests by the stage the relay reported.
     pub requested: BTreeMap<String, usize>,
-    /// Communities the fixture owner does not own: never seeded, or deleted
-    /// past the point where the relay still reports the request.
+    /// Communities with neither this run's fixture owner nor this run's
+    /// deletion request: never seeded, or another owner's host.
     pub absent: usize,
     /// One reason per community whose archive or deletion request failed.
     pub failures: Vec<String>,
@@ -139,13 +139,16 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct Community {
+        /// Empty once deletion has purged membership.
         owner: String,
         archived: bool,
-        deletion: Option<String>,
+        /// Request id and stage of the community's deletion request.
+        deletion: Option<(String, &'static str)>,
     }
 
     /// The operator's archive and delete endpoints: owner-checked, archive
-    /// before delete, and a request id replayed only for the same community.
+    /// before delete, and a request id replayed for its community at any
+    /// stage, even after membership purge, but conflicting with another id.
     /// `unavailable` answers every archive with 503.
     async fn fake_operator(
         communities: Arc<Mutex<HashMap<String, Community>>>,
@@ -157,14 +160,15 @@ mod tests {
             let owner = request["owner_pubkey"].as_str().unwrap();
             let mut communities = communities.lock().unwrap();
             let not_found = (404, json!({"error": "community not found"}).to_string());
-            let Some(community) = communities.get_mut(host).filter(|c| c.owner == owner) else {
-                return not_found;
-            };
             match target {
-                "/operator/communities/archive" if host == unavailable => {
-                    (503, json!({"error": "propagation pending"}).to_string())
-                }
                 "/operator/communities/archive" => {
+                    let Some(community) = communities.get_mut(host).filter(|c| c.owner == owner)
+                    else {
+                        return not_found;
+                    };
+                    if host == unavailable {
+                        return (503, json!({"error": "propagation pending"}).to_string());
+                    }
                     community.archived = true;
                     (200, json!({"status": "archived"}).to_string())
                 }
@@ -172,17 +176,29 @@ mod tests {
                     if request["acknowledgement_version"] != 1 {
                         return (400, json!({"error": "unsupported"}).to_string());
                     }
+                    let id = request["request_id"].as_str().unwrap();
+                    let replay = communities
+                        .get(host)
+                        .and_then(|c| c.deletion.as_ref())
+                        .filter(|(known, _)| known == id);
+                    if let Some((_, stage)) = replay {
+                        return (202, json!({ "status": stage }).to_string());
+                    }
+                    let Some(community) = communities.get_mut(host).filter(|c| c.owner == owner)
+                    else {
+                        return not_found;
+                    };
                     if !community.archived {
                         return (409, json!({"code": "community_not_archived"}).to_string());
                     }
-                    let id = request["request_id"].as_str().unwrap().to_string();
-                    if *community.deletion.get_or_insert_with(|| id.clone()) != id {
+                    if community.deletion.is_some() {
                         return (
                             409,
                             json!({"code": "deletion_request_conflict"}).to_string(),
                         );
                     }
-                    (202, json!({"status": "accepted"}).to_string())
+                    community.deletion = Some((id.to_string(), "submitted"));
+                    (202, json!({"status": "submitted"}).to_string())
                 }
                 other => panic!("unexpected {other}"),
             }
@@ -212,7 +228,7 @@ channels_per_member = 1
 users = 1.0
 hold_secs = 1
 "#,
-            if template.is_empty() { 1 } else { 4 }
+            if template.is_empty() { 1 } else { 5 }
         ))
         .unwrap()
     }
@@ -244,6 +260,19 @@ hold_secs = 1
                     ..Default::default()
                 },
             ),
+            (
+                // Deletion already purged membership, so archive finds no
+                // owner; the request is still replayed for its stage.
+                "lg-t-4.example".to_string(),
+                Community {
+                    archived: true,
+                    deletion: Some((
+                        identity::teardown_request_id("t", 4).to_string(),
+                        "postgres_purged",
+                    )),
+                    ..Default::default()
+                },
+            ),
         ])));
         let addr = fake_operator(communities.clone(), "lg-t-3.example").await;
         let scenario = scenario(&addr, Some("lg-{run}-{i}.example"));
@@ -255,7 +284,7 @@ hold_secs = 1
             let report = teardown_with(&scenario, &net, &base, &operator).await;
             assert_eq!(
                 report.requested,
-                BTreeMap::from([("accepted".into(), 1)]),
+                BTreeMap::from([("postgres_purged".into(), 1), ("submitted".into(), 1)]),
                 "{pass}"
             );
             assert_eq!(report.absent, 2, "{pass}");
@@ -268,8 +297,11 @@ hold_secs = 1
         }
         let communities = communities.lock().unwrap();
         assert_eq!(
-            communities["lg-t-0.example"].deletion.as_deref(),
-            Some(identity::teardown_request_id("t", 0).to_string().as_str())
+            communities["lg-t-0.example"].deletion,
+            Some((
+                identity::teardown_request_id("t", 0).to_string(),
+                "submitted"
+            ))
         );
         assert!(!communities["lg-t-1.example"].archived);
         assert!(communities["lg-t-1.example"].deletion.is_none());
