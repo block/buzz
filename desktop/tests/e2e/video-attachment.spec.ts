@@ -1,4 +1,4 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 import { expectCornerRadiusPx, expectSmoothCorners } from "../helpers/css";
@@ -1490,6 +1490,31 @@ function emitVideoMessage(
   });
 }
 
+// A live row reaches the timeline floor in two scroll steps: first to the
+// virtualizer's estimated floor, which leaves a video row hanging under the
+// composer overlay, then to its measured floor. Right-click only once the
+// player clears the composer. Earlier, the click lands on the composer, and
+// the second step's scroll dismisses any menu that did open.
+async function rightClickSettledPlayer(player: Locator) {
+  await expect
+    .poll(() =>
+      player.evaluate((element) => {
+        const composer = document.querySelector(
+          '[data-testid="message-composer"]',
+        );
+        return (
+          composer !== null &&
+          element.getBoundingClientRect().bottom <=
+            composer.getBoundingClientRect().top
+        );
+      }),
+    )
+    .toBe(true);
+  // No `force`: the Play button is inside the player, so the hit-target check
+  // passes, and the contextmenu still reaches the surface's capture handler.
+  await player.click({ button: "right" });
+}
+
 test("right-click menus expose distinct selectors for links, relay video, and off-relay video", async ({
   page,
 }) => {
@@ -1550,10 +1575,7 @@ test("right-click menus expose distinct selectors for links, relay video, and of
     .locator(`[data-message-id="${relayMessage.id}"]`)
     .getByTestId("video-player");
   await expect(relayPlayer).toBeVisible();
-  // Right-click the player surface. `force` skips the actionability guard: the
-  // Play-button overlay sits above the video, but the contextmenu event still
-  // capture-bubbles to the surface handler that opens the menu.
-  await relayPlayer.click({ button: "right", force: true });
+  await rightClickSettledPlayer(relayPlayer);
 
   const videoMenu = page.locator("[data-video-context-menu]");
   await expect(videoMenu).toBeVisible();
@@ -1599,7 +1621,7 @@ test("right-click menus expose distinct selectors for links, relay video, and of
     .locator(`[data-message-id="${offRelayMessage.id}"]`)
     .getByTestId("video-player");
   await expect(offRelayPlayer).toBeVisible();
-  await offRelayPlayer.click({ button: "right", force: true });
+  await rightClickSettledPlayer(offRelayPlayer);
 
   const offRelayMenu = page.locator("[data-video-context-menu]");
   await expect(offRelayMenu).toBeVisible();

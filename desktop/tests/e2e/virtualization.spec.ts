@@ -2,7 +2,10 @@ import { expect, test } from "@playwright/test";
 import type { Locator, Page } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
-import { waitForMockChannelHeadReady } from "../helpers/channelHeadReady";
+import {
+  openGeneral,
+  waitForMockChannelHeadReady,
+} from "../helpers/channelHeadReady";
 
 const WATERCOOLER_CHANNEL_ID = "a27e1ee9-76a6-5bdf-a5d5-1d85610dad11";
 const FORUM_THREAD_ID = "mock-forum-release-thread";
@@ -1030,17 +1033,11 @@ test("deleting a row while reading keeps live arrivals counted", async ({
     }
     return newest;
   });
-  await page.getByTestId("channel-general").click();
+  // The deletion and the arrival below are live events, so live admission and
+  // its head refresh must land before reading starts.
+  await openGeneral(page);
   const timeline = page.getByTestId("message-timeline");
   await expect(timeline).toContainText("delete-while-reading seed 19");
-  await expect
-    .poll(() =>
-      timeline.evaluate(
-        (element) =>
-          element.scrollHeight - element.clientHeight - element.scrollTop,
-      ),
-    )
-    .toBeLessThanOrEqual(1);
 
   await timeline.evaluate((element) => {
     element.dispatchEvent(new WheelEvent("wheel", { deltaY: -1 }));

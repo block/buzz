@@ -216,20 +216,25 @@ test("same-second live messages render in one order and never swap", async ({
 
   const low = "1".repeat(64);
   const high = "f".repeat(64);
-  // Record every order the pair is ever painted in.
+  // Record every order the pair is ever committed in. The observer runs right
+  // after each DOM commit, before any later task, so the read below has seen
+  // the final commit. Sampling on animation frames missed it whenever the read
+  // beat the next frame.
   await page.evaluate(
     ({ low, high }) => {
       const orders: string[] = [];
       Object.assign(window, { __SAME_SECOND_ORDERS__: orders });
-      const sample = () => {
+      new MutationObserver(() => {
         const order = [...document.querySelectorAll("[data-message-id]")]
           .map((row) => row.getAttribute("data-message-id"))
           .filter((id) => id === low || id === high)
           .join(",");
         if (order.includes(",") && orders.at(-1) !== order) orders.push(order);
-        requestAnimationFrame(sample);
-      };
-      sample();
+      }).observe(document.body, {
+        attributeFilter: ["data-message-id"],
+        childList: true,
+        subtree: true,
+      });
     },
     { low, high },
   );
@@ -246,7 +251,7 @@ test("same-second live messages render in one order and never swap", async ({
       { createdAt, id },
     );
   }
-  // Live events apply in order, so once a later message paints, both writes
+  // Live events apply in order, so once a later message renders, both writes
   // for the pair have landed.
   await page.evaluate(
     (createdAt) =>
