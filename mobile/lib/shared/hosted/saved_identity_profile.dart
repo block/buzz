@@ -28,8 +28,7 @@ final savedIdentityProfileProvider = FutureProvider.autoDispose
       if (ref.watch(ageSignalProvider) == AgeSignalState.restricted) {
         return null;
       }
-      final account = ref.read(builderlabAccountProvider);
-      HostedRelayAuth? auth;
+      final auth = ref.read(hostedRelayAuthProvider);
       final createTransport = ref.read(savedIdentityProfileClientProvider);
       final slot = ref.read(_profileQueueProvider).request();
       http.Client? transport;
@@ -38,19 +37,18 @@ final savedIdentityProfileProvider = FutureProvider.autoDispose
       ref.onDispose(() {
         active = false;
         slot.cancelQueued();
-        auth?.dispose();
         if (chunks != null) unawaited(chunks!.cancel());
         transport?.close();
       });
       if (!await slot.ready.future) return null;
       try {
         if (!active) return null;
-        // Optional metadata reads must not clear or replace active reconnect
-        // failures. Share the account session, but own assertion/recovery state.
-        final profileAuth = HostedRelayAuth(account);
-        auth = profileAuth;
         return await DeviceIdentitySource().loadProfile(pubkey, (config) async {
           if (!active) return null;
+          // Passive cards must never queue account restore/identity/assertion
+          // work ahead of reconnect or admission, even while still visible.
+          final headers = auth.cachedHeaders(config);
+          if (headers == null) return null;
           final uri = Uri.parse(config.baseUrl).resolve('/query');
           final body = utf8.encode(
             jsonEncode([
@@ -65,16 +63,12 @@ final savedIdentityProfileProvider = FutureProvider.autoDispose
           transport = attemptTransport;
           var requesting = true;
           chunks = null;
-          final client = HostedRelayHttpClient(
-            profileAuth,
-            config,
-            inner: attemptTransport,
-            canSend: () => active && requesting,
-          );
+          final client = attemptTransport;
           final request = http.Request('POST', uri)
             ..followRedirects = false
             ..bodyBytes = body
             ..headers.addAll({
+              ...headers,
               'Content-Type': 'application/json',
               'Authorization': buildNip98AuthHeader(
                 method: 'POST',
@@ -109,8 +103,7 @@ final savedIdentityProfileProvider = FutureProvider.autoDispose
             // Retain the queue slot until bounded decoding actually finishes.
             return await _decodeProfile(response.$1, response.$2, pubkey);
           } finally {
-            // Retire this attempt before another relay can be tried. A late auth
-            // lookup must not send through the closed transport after timeout.
+            // Retire this attempt before another relay can be tried.
             requesting = false;
             if (chunks != null) unawaited(chunks!.cancel());
             client.close();

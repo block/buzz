@@ -22,7 +22,7 @@ void main() {
   final other = nostr.Keys('2'.padLeft(64, '0'));
 
   test(
-    'inactive profile auth failure preserves active reconnect recovery',
+    'inactive profile lookup avoids account work and preserves reconnect recovery',
     () async {
       final account = _SignedOutAccount();
       final container = ProviderContainer(
@@ -67,7 +67,7 @@ void main() {
         await container.read(savedIdentityProfileProvider(other.public).future),
         isNull,
       );
-      expect(account.restores, 2);
+      expect(account.restores, 1);
       expect((auth.failedRelay, auth.failedPubkey, auth.failure), previous);
       expect(notifications, 0);
     },
