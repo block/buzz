@@ -71,6 +71,8 @@ Output varies by command group — `--help` shows flags but not response shapes.
 | `reactions get` | `{"reactions": [{emoji, count, pubkeys}]}` — aggregated, not raw events |
 | `pack validate/inspect` | human-readable text, not JSON |
 
+`sidebar sections` commands each read and then publish your full sections list. Concurrent edits from another CLI run or another client can overwrite each other, and the last publish wins.
+
 **Errors** go to stderr as `{"error": "<category>", "message": "<detail>"}`. Exit codes: 0 = success, 1 = input/not-found, 2 = relay/network, 3 = auth, 4 = other, 5 = write conflict (value superseded).
 
 ## Compact Format

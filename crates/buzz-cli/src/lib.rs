@@ -900,6 +900,10 @@ pub enum ReactionsCmd {
 #[derive(Subcommand)]
 pub enum SidebarCmd {
     /// List, create, and arrange your channel sections (synced with Buzz desktop)
+    ///
+    /// Each edit reads your current sections and publishes the full result.
+    /// Concurrent edits from another CLI run or another client can overwrite
+    /// each other, and the last publish wins.
     #[command(subcommand)]
     Sections(SidebarSectionsCmd),
 }

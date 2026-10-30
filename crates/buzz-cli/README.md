@@ -114,7 +114,8 @@ buzz channels list | jq '.[].name'
 `sidebar sections` edits the signing identity's own sidebar. Each command is
 one read and one publish, so a multi-channel `move` lands together. `--section`
 takes a section id or a unique section name. A repeated command prints
-`"message": "unchanged"` and publishes nothing.
+`"message": "unchanged"` and publishes nothing. Concurrent edits from another
+CLI run or another client can overwrite each other, and the last publish wins.
 
 `protect set` replaces every existing rule for the exact ref pattern. Any
 constraint omitted from the command is removed. `protect list` reports malformed
