@@ -20,3 +20,13 @@ class SlashCommandFailure implements Exception {
   @override
   String toString() => message;
 }
+
+/// Thrown by a command when the user cancels one of its confirmations. It is
+/// neither a success nor an error: the executor keeps the draft and shows
+/// nothing.
+class SlashCommandCancelled implements Exception {
+  const SlashCommandCancelled();
+
+  @override
+  String toString() => 'SlashCommandCancelled';
+}
