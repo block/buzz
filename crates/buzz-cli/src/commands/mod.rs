@@ -21,6 +21,8 @@ mod repo_default_branch;
 pub mod repos;
 pub mod sidebar;
 mod sidebar_doc;
+mod sidebar_flags;
+mod sidebar_sync;
 pub mod social;
 pub mod upload;
 pub mod users;

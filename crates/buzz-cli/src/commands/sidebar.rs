@@ -6,90 +6,37 @@
 //! multi-channel `move` lands atomically. A head this CLI cannot read is never
 //! overwritten.
 
-use std::time::SystemTime;
-
-use buzz_core::kind::KIND_READ_STATE;
-use nostr::nips::nip44;
-use nostr::{EventBuilder, Kind, Tag, Timestamp};
 use serde_json::{json, Value};
 
-use super::parse_write_response;
 use super::sidebar_doc::{self, Edit, Projection, Section, Stamp, Tree};
+use super::sidebar_flags;
+use super::sidebar_sync::{self, channel_ids, now, Lane};
 use crate::client::BuzzClient;
 use crate::error::CliError;
 use crate::{SidebarCmd, SidebarSectionsCmd};
 
-const D_TAG: &str = "channel-sections";
-/// Relay event size ceiling shared with desktop's sidebar blobs.
-const MAX_CIPHERTEXT_BYTES: usize = 65_535;
+const LANE: Lane = Lane {
+    d_tag: "channel-sections",
+    label: "sidebar sections",
+};
 
 struct Head {
     created_at: u64,
     tree: Tree,
 }
 
-fn now() -> std::time::Duration {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-}
-
-/// The relay's current sections event for this identity, decoded. An absent
-/// head is an empty tree; an unreadable one is an error, never an empty list.
-/// The read is pinned to the writer (`consistency: strong`): a write derives a
-/// full snapshot from it, and a lagging replica would drop the caller's own
-/// just-accepted edits.
+/// The relay's current sections event for this identity, decoded; an absent
+/// head is an empty tree.
 async fn fetch_head(client: &BuzzClient) -> Result<Head, CliError> {
-    let me = client.keys().public_key();
-    let filter = json!({
-        "kinds": [KIND_READ_STATE],
-        "authors": [me.to_hex()],
-        "#d": [D_TAG],
-        "limit": 1,
-        "consistency": "strong",
-    });
-    let raw = client.query(&filter).await?;
-    let events: Vec<Value> = serde_json::from_str(&raw)
-        .map_err(|e| CliError::Other(format!("failed to parse sidebar sections query: {e}")))?;
-    let returned = events.len();
-    let head = events
-        .into_iter()
-        .filter_map(|event| serde_json::from_value::<nostr::Event>(event).ok())
-        .filter(|event| {
-            event.pubkey == me && event.tags.identifier() == Some(D_TAG) && event.verify().is_ok()
-        })
-        .min_by(|a, b| {
-            b.created_at
-                .cmp(&a.created_at)
-                .then_with(|| a.id.to_hex().cmp(&b.id.to_hex()))
-        });
-    let Some(event) = head else {
-        if returned > 0 {
-            return Err(CliError::Other(
-                "the relay returned a sidebar sections event that is not yours or fails verification; refusing to overwrite it".into(),
-            ));
-        }
-        return Ok(Head {
-            created_at: 0,
-            tree: Tree::new(),
-        });
-    };
-
-    let unreadable = |detail: String| {
-        CliError::Other(format!(
-            "your sidebar sections event {} is unreadable ({detail}); refusing to read or overwrite it",
-            event.id.to_hex()
-        ))
-    };
-    let plaintext = nip44::decrypt(client.keys().secret_key(), &me, &event.content)
-        .map_err(|e| unreadable(e.to_string()))?;
-    let json: Value = serde_json::from_str(&plaintext).map_err(|e| unreadable(e.to_string()))?;
-    let created_at = event.created_at.as_secs();
-    let legacy_v = i64::try_from(created_at.saturating_mul(1_000)).unwrap_or(i64::MAX);
-    let tree = sidebar_doc::decode(&json, legacy_v).ok_or_else(|| {
-        unreadable("unsupported format; a newer client may have written it".into())
-    })?;
-    Ok(Head { created_at, tree })
+    let head = sidebar_sync::fetch_head(client, LANE, |json, created_at| {
+        let legacy_v = i64::try_from(created_at.saturating_mul(1_000)).unwrap_or(i64::MAX);
+        sidebar_doc::decode(json, legacy_v)
+    })
+    .await?;
+    Ok(Head {
+        created_at: head.created_at,
+        tree: head.doc.unwrap_or_default(),
+    })
 }
 
 /// A live section by exact id, or by exact name when that name is unique.
@@ -127,18 +74,6 @@ fn section_icon(icon: Option<&str>) -> Result<Option<String>, CliError> {
     }
 }
 
-/// Channel ids in the lowercase hyphenated form desktop keys assignments by.
-fn channel_ids(channels: &[String]) -> Result<Vec<String>, CliError> {
-    channels
-        .iter()
-        .map(|channel| {
-            uuid::Uuid::parse_str(channel.trim())
-                .map(|id| id.hyphenated().to_string())
-                .map_err(|_| CliError::Usage(format!("invalid channel UUID: {channel}")))
-        })
-        .collect()
-}
-
 /// Reads the head, applies `apply`, and publishes the result once. Returns
 /// the write response, or an `unchanged` response without publishing.
 async fn edit(
@@ -154,7 +89,7 @@ async fn edit(
     };
     apply(&mut Edit::new(&mut tree, &stamp), &view)?;
     if tree == head.tree {
-        return Ok(json!({"event_id": null, "accepted": true, "message": "unchanged"}));
+        return Ok(sidebar_sync::unchanged());
     }
     if !sidebar_doc::project(&tree).within_limits() {
         return Err(CliError::Usage(format!(
@@ -163,37 +98,9 @@ async fn edit(
             sidebar_doc::MAX_ASSIGNMENTS
         )));
     }
-
-    let keys = client.keys();
     let plaintext = serde_json::to_string(&sidebar_doc::encode(&tree))
         .map_err(|e| CliError::Other(format!("failed to encode sidebar sections: {e}")))?;
-    let too_large =
-        || CliError::Usage("sidebar sections would exceed the relay's event size limit".into());
-    // NIP-44 rejects longer plaintexts outright.
-    if plaintext.len() > u16::MAX as usize {
-        return Err(too_large());
-    }
-    let content = nip44::encrypt(
-        keys.secret_key(),
-        &keys.public_key(),
-        plaintext,
-        nip44::Version::V2,
-    )
-    .map_err(|e| CliError::Other(format!("failed to encrypt sidebar sections: {e}")))?;
-    if content.len() > MAX_CIPHERTEXT_BYTES {
-        return Err(too_large());
-    }
-    let created_at = now().as_secs().max(head.created_at + 1);
-    let builder = EventBuilder::new(Kind::Custom(KIND_READ_STATE as u16), content)
-        .tags([Tag::identifier(D_TAG), Tag::hashtag(D_TAG)])
-        .custom_created_at(Timestamp::from(created_at));
-    let raw = client.submit_event(client.sign_event(builder)?).await?;
-    let normalized = parse_write_response(
-        &raw,
-        "a newer sidebar sections update won; run the command again",
-    )?;
-    serde_json::from_str(&normalized)
-        .map_err(|e| CliError::Other(format!("relay response is not JSON: {e}")))
+    sidebar_sync::publish(client, LANE, plaintext, head.created_at).await
 }
 
 async fn run(cmd: SidebarSectionsCmd, client: &BuzzClient) -> Result<Value, CliError> {
@@ -284,101 +191,34 @@ async fn run(cmd: SidebarSectionsCmd, client: &BuzzClient) -> Result<Value, CliE
 }
 
 pub async fn dispatch(cmd: SidebarCmd, client: &BuzzClient) -> Result<(), CliError> {
-    let SidebarCmd::Sections(cmd) = cmd;
-    let output = run(cmd, client).await?;
+    let output = match cmd {
+        SidebarCmd::Sections(cmd) => run(cmd, client).await?,
+        SidebarCmd::Stars(cmd) => {
+            sidebar_flags::run(&sidebar_flags::STARS, cmd.into(), client).await?
+        }
+        SidebarCmd::Mutes(cmd) => {
+            sidebar_flags::run(&sidebar_flags::MUTES, cmd.into(), client).await?
+        }
+        SidebarCmd::Projects(cmd) => {
+            sidebar_flags::run(&sidebar_flags::PROJECTS, cmd.into(), client).await?
+        }
+    };
     println!("{output}");
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::sidebar_sync::test_support::{self, Shared};
     use super::*;
-    use axum::{body::Bytes, extract::State, routing::post, Json, Router};
     use nostr::Keys;
-    use std::sync::{Arc, Mutex};
-    use tokio::net::TcpListener;
-
-    #[derive(Default)]
-    struct Relay {
-        events: Vec<Value>,
-        duplicate: bool,
-    }
-    type Shared = Arc<Mutex<Relay>>;
-
-    /// Fake relay: `/query` checks the head filter and returns every stored
-    /// event matching its author and d-tag (more than the relay's `limit`, so
-    /// head selection is exercised); `/events` stores one.
-    async fn fake_relay(relay: Shared) -> String {
-        let app = Router::new()
-            .route(
-                "/query",
-                post(|State(relay): State<Shared>, body: Bytes| async move {
-                    let filters: Vec<Value> = serde_json::from_slice(&body).unwrap();
-                    let [filter] = filters.as_slice() else {
-                        panic!("one filter expected: {filters:?}")
-                    };
-                    assert_eq!(filter["kinds"], json!([KIND_READ_STATE]));
-                    assert_eq!(filter["#d"], json!([D_TAG]));
-                    assert_eq!(filter["limit"], json!(1));
-                    assert_eq!(filter["consistency"], json!("strong"));
-                    let author = &filter["authors"][0];
-                    let relay = relay.lock().unwrap();
-                    let matching: Vec<_> = relay
-                        .events
-                        .iter()
-                        .filter(|e| &e["pubkey"] == author && e["tags"][0] == json!(["d", D_TAG]))
-                        .cloned()
-                        .collect();
-                    Json(json!(matching))
-                }),
-            )
-            .route(
-                "/events",
-                post(|State(relay): State<Shared>, body: Bytes| async move {
-                    let event: Value = serde_json::from_slice(&body).unwrap();
-                    let mut relay = relay.lock().unwrap();
-                    let message = if relay.duplicate {
-                        "duplicate: newer head"
-                    } else {
-                        ""
-                    };
-                    if !relay.duplicate {
-                        relay.events.push(event.clone());
-                    }
-                    Json(json!({"event_id": event["id"], "accepted": true, "message": message}))
-                }),
-            )
-            .with_state(relay);
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        format!("http://{addr}")
-    }
 
     async fn setup() -> (BuzzClient, Shared) {
-        let relay = Shared::default();
-        let url = fake_relay(relay.clone()).await;
-        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
-        (client, relay)
+        test_support::setup().await
     }
 
     fn seed_at(client: &BuzzClient, relay: &Shared, plaintext: &str, created_at: u64) -> Value {
-        let keys = client.keys();
-        let content = nip44::encrypt(
-            keys.secret_key(),
-            &keys.public_key(),
-            plaintext,
-            nip44::Version::V2,
-        )
-        .unwrap();
-        let event = EventBuilder::new(Kind::Custom(KIND_READ_STATE as u16), content)
-            .tags([Tag::identifier(D_TAG)])
-            .custom_created_at(Timestamp::from(created_at))
-            .sign_with_keys(keys)
-            .unwrap();
-        let event = serde_json::to_value(event).unwrap();
-        relay.lock().unwrap().events.push(event.clone());
-        event
+        test_support::seed_at(client, relay, LANE, plaintext, created_at)
     }
 
     fn seed(client: &BuzzClient, relay: &Shared, plaintext: &str) {
@@ -398,19 +238,7 @@ mod tests {
         sidebar_doc::encode(&tree).to_string()
     }
 
-    /// The decrypted document of the newest published event.
-    fn published(client: &BuzzClient, relay: &Shared) -> (nostr::Event, Value) {
-        let raw = relay.lock().unwrap().events.last().cloned().unwrap();
-        let event: nostr::Event = serde_json::from_value(raw).unwrap();
-        let keys = client.keys();
-        let plaintext =
-            nip44::decrypt(keys.secret_key(), &keys.public_key(), &event.content).unwrap();
-        (event, serde_json::from_str(&plaintext).unwrap())
-    }
-
-    fn published_count(relay: &Shared) -> usize {
-        relay.lock().unwrap().events.len()
-    }
+    use test_support::{published, published_count};
 
     const C1: &str = "11111111-1111-4111-8111-111111111111";
     const C2: &str = "22222222-2222-4222-8222-222222222222";
@@ -455,9 +283,9 @@ mod tests {
         assert_eq!(published_count(&relay), before + 1);
 
         let (event, doc) = published(&client, &relay);
-        assert_eq!(event.kind.as_u16() as u32, KIND_READ_STATE);
-        assert!(event.tags.iter().any(|t| t.as_slice() == ["d", D_TAG]));
-        assert!(event.tags.iter().any(|t| t.as_slice() == ["t", D_TAG]));
+        assert_eq!(event.kind.as_u16(), 30078);
+        assert!(event.tags.iter().any(|t| t.as_slice() == ["d", LANE.d_tag]));
+        assert!(event.tags.iter().any(|t| t.as_slice() == ["t", LANE.d_tag]));
         assert_eq!(doc["meta"]["v"], json!(1));
         assert_eq!(doc["assignments"][C1], json!(eng_id));
         assert_eq!(doc["sections"][0]["icon"], json!("🛠"));

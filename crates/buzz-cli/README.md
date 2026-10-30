@@ -95,6 +95,12 @@ buzz sidebar sections create --name "Engineering" --icon "🛠"
 buzz sidebar sections move --section "Engineering" --channel <uuid> --channel <uuid>
 buzz sidebar sections list
 
+# Sidebar stars, mutes, and project pins
+buzz sidebar stars add --channel <uuid> --channel <uuid>
+buzz sidebar mutes remove --channel <uuid>
+buzz sidebar projects add --project 30621:<owner-pubkey>:<d-tag>
+buzz sidebar stars list
+
 # Agent Memory (NIP-AE)
 buzz mem ls
 buzz mem get <slug>
@@ -116,6 +122,15 @@ one read and one publish, so a multi-channel `move` lands together. `--section`
 takes a section id or a unique section name. A repeated command prints
 `"message": "unchanged"` and publishes nothing. Concurrent edits from another
 CLI run or another client can overwrite each other, and the last publish wins.
+
+`sidebar stars`, `sidebar mutes`, and `sidebar projects` edit the other synced
+sidebar lists the same way: one head read and one publish per command, and
+`"message": "unchanged"` when nothing changes. `remove` keeps a `false` entry
+(as desktop does) so the change syncs; removing an id that is not set changes
+nothing. Stars and mutes keep the newest 500 entries; a command that would
+evict its own ids fails. Project addresses are `30621:<owner-pubkey>:<d-tag>`.
+Pass the same ids in any case; channel UUIDs and project owners are stored in
+lowercase. If the relay reports a newer update (exit 5), run the command again.
 
 `protect set` replaces every existing rule for the exact ref pattern. Any
 constraint omitted from the command is removed. `protect list` reports malformed
@@ -162,6 +177,9 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `sections reorder` | Put sections in order |
 | | `sections move` | Move one or more channels into a section |
 | | `sections unassign` | Return channels to the default channel list |
+| | `stars list` / `add` / `remove` | List, star, or unstar channels |
+| | `mutes list` / `add` / `remove` | List, mute, or unmute channels |
+| | `projects list` / `add` / `remove` | List, pin, or unpin sidebar projects |
 | `reactions` | `add` | React to a message |
 | | `remove` | Remove a reaction |
 | | `get` | List reactions |

@@ -272,7 +272,7 @@ enum Cmd {
     /// Get and set channel canvas documents
     #[command(subcommand)]
     Canvas(CanvasCmd),
-    /// Organize your own sidebar into channel sections
+    /// Organize your own sidebar: sections, stars, mutes, and project pins
     #[command(subcommand)]
     Sidebar(SidebarCmd),
     /// Add, remove, and list emoji reactions
@@ -906,6 +906,52 @@ pub enum SidebarCmd {
     /// each other, and the last publish wins.
     #[command(subcommand)]
     Sections(SidebarSectionsCmd),
+    /// List, star, and unstar your channels (synced with Buzz desktop)
+    #[command(subcommand)]
+    Stars(SidebarChannelFlagCmd),
+    /// List, mute, and unmute your channels (synced with Buzz desktop)
+    #[command(subcommand)]
+    Mutes(SidebarChannelFlagCmd),
+    /// List, pin, and unpin your sidebar projects (synced with Buzz desktop)
+    #[command(subcommand)]
+    Projects(SidebarProjectsCmd),
+}
+
+/// Shared by `sidebar stars` and `sidebar mutes`.
+#[derive(Subcommand)]
+pub enum SidebarChannelFlagCmd {
+    /// List the channels that are set
+    List,
+    /// Set one or more channels
+    Add {
+        /// Channel UUID (repeatable)
+        #[arg(long = "channel", required = true)]
+        channels: Vec<String>,
+    },
+    /// Clear one or more channels
+    Remove {
+        /// Channel UUID (repeatable)
+        #[arg(long = "channel", required = true)]
+        channels: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SidebarProjectsCmd {
+    /// List the projects pinned to your sidebar
+    List,
+    /// Pin one or more projects
+    Add {
+        /// Project address `30621:<owner-pubkey>:<d-tag>` (repeatable)
+        #[arg(long = "project", required = true)]
+        projects: Vec<String>,
+    },
+    /// Unpin one or more projects
+    Remove {
+        /// Project address `30621:<owner-pubkey>:<d-tag>` (repeatable)
+        #[arg(long = "project", required = true)]
+        projects: Vec<String>,
+    },
 }
 
 /// `--section` takes a section id, or a section name that is unique.
