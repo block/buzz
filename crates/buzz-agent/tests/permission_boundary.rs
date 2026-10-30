@@ -136,18 +136,16 @@ async fn drive(
 // Session init + call-log helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn call_log_path(tag: &str) -> String {
-    let p = std::env::temp_dir().join(format!(
-        "buzz_perm_calllog_{tag}_{}_{:x}.log",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
-    let s = p.to_string_lossy().to_string();
-    let _ = std::fs::remove_file(&s);
-    s
+/// A fresh call-log path inside its own temp dir. Keep the returned `TempDir`
+/// bound for the whole test: dropping it deletes the log, including when an
+/// assertion panics.
+fn call_log_path(tag: &str) -> (tempfile::TempDir, String) {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("buzz_perm_calllog_{tag}_"))
+        .tempdir()
+        .expect("create call-log temp dir");
+    let path = dir.path().join("calls.log").to_string_lossy().into_owned();
+    (dir, path)
 }
 
 /// Invoked tool names recorded by fake_mcp (bare names, one per `tools/call`).
@@ -214,7 +212,7 @@ fn stop_reason(resp: &Value) -> String {
 /// the tally ends at one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_allow_reaches_tool_exactly_once_and_not_before_approval() {
-    let log = call_log_path("allow");
+    let (_log_dir, log) = call_log_path("allow");
     let llm = spawn_capturing_llm(vec![shell_call("tc1"), openai_text("done")]).await;
     let mut h = Harness::spawn(&llm.url).await;
     let sid = init(
@@ -250,7 +248,7 @@ async fn test_allow_reaches_tool_exactly_once_and_not_before_approval() {
 /// sees a permission-denied tool error (the turn continues to `end_turn`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_reject_option_never_invokes_tool() {
-    let log = call_log_path("reject");
+    let (_log_dir, log) = call_log_path("reject");
     let llm = spawn_capturing_llm(vec![shell_call("tc1"), openai_text("understood")]).await;
     let mut h = Harness::spawn(&llm.url).await;
     let sid = init(
@@ -321,7 +319,7 @@ async fn test_adversarial_outcomes_never_invoke_tool() {
     ];
 
     for (tag, build) in shapes {
-        let log = call_log_path(tag);
+        let (_log_dir, log) = call_log_path(tag);
         let llm = spawn_capturing_llm(vec![shell_call("tc1"), openai_text("ok")]).await;
         let mut h = Harness::spawn(&llm.url).await;
         let sid = init(
@@ -352,7 +350,7 @@ async fn test_adversarial_outcomes_never_invoke_tool() {
 /// waiter; the correct id then authorizes exactly once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_stale_id_ignored_then_real_id_authorizes() {
-    let log = call_log_path("staleid");
+    let (_log_dir, log) = call_log_path("staleid");
     let llm = spawn_capturing_llm(vec![shell_call("tc1"), openai_text("done")]).await;
     let mut h = Harness::spawn(&llm.url).await;
     let sid = init(
@@ -406,7 +404,7 @@ async fn test_stale_id_ignored_then_real_id_authorizes() {
 /// by staying silent, and cancellation must not depend on that answer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_cancel_while_waiting_executes_nothing_without_client_answer() {
-    let log = call_log_path("cancelwait");
+    let (_log_dir, log) = call_log_path("cancelwait");
     let llm = spawn_capturing_llm(vec![shell_call("tc1"), openai_text("done")]).await;
     let mut h = Harness::spawn(&llm.url).await;
     let sid = init(
@@ -452,7 +450,7 @@ async fn test_cancel_while_waiting_executes_nothing_without_client_answer() {
 /// proves only the allowed (second) call reached MCP — order-agnostic.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_crossed_parallel_decisions_authorize_only_matching_call() {
-    let log = call_log_path("crossed");
+    let (_log_dir, log) = call_log_path("crossed");
     // Two distinct registered tools so the call log distinguishes them by name.
     let llm = spawn_capturing_llm(vec![
         openai_tool_calls(&[
@@ -547,7 +545,7 @@ async fn test_load_skill_emits_no_permission_request() {
 /// objects once, forcing a hook invocation the test can observe.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_stop_hook_reaches_mcp_without_permission_ask() {
-    let log = call_log_path("stophook");
+    let (_log_dir, log) = call_log_path("stophook");
     // Text turn triggers the _Stop gate → hook objects once → agent loops →
     // second text turn, hook silent → end_turn. No model-issued tool call.
     let llm = spawn_capturing_llm(vec![
@@ -599,7 +597,7 @@ async fn test_stop_hook_reaches_mcp_without_permission_ask() {
 /// with an end-to-end proof that the negotiated version reaches the wire.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_v2_negotiation_emits_v2_request_shape() {
-    let log = call_log_path("v2shape");
+    let (_log_dir, log) = call_log_path("v2shape");
     let llm = spawn_capturing_llm(vec![shell_call("tc1"), openai_text("done")]).await;
     let mut h = Harness::spawn(&llm.url).await;
     let sid = init(
