@@ -789,6 +789,7 @@ fn summary_fixture(
         last_error_code: None,
         start_on_app_launch: false,
         auto_restart_on_config_change: false,
+        self_update_fields: Vec::new(),
         log_path: String::new(),
         respond_to: RespondTo::OwnerOnly,
         respond_to_allowlist: Vec::new(),

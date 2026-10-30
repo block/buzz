@@ -70,6 +70,8 @@ pub use sharing::set_persona_shared;
 pub use sharing::update_persona_and_publish;
 mod update;
 pub use update::update_persona;
+mod self_update;
+pub use self_update::apply_agent_self_update;
 mod inbound;
 pub use inbound::reconcile_inbound_persona_event;
 #[cfg(test)]
