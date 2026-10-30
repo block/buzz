@@ -451,6 +451,41 @@ void main() {
       expect(pairingCodeButton.onPressed, isNull);
     });
 
+    for (final adding in [false, true]) {
+      testWidgets(
+        'a pasted pairing code in the community link field starts pairing '
+        '(${adding ? 'add community' : 'onboarding'})',
+        (tester) async {
+          final notifier = _RecordingPairingNotifier();
+          await tester.pumpWidget(
+            WidgetHelpers.testable(
+              overrides: [pairingProvider.overrideWith(() => notifier)],
+              child: PairingPage(
+                addingCommunity: adding,
+                connectionLanding: true,
+                enteringCommunityLink: true,
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final code =
+              'nostrpair://${'ab' * 32}?secret=${'cd' * 32}'
+              '&relay=wss%3A%2F%2Frelay.example.com&v=1';
+          await tester.enterText(
+            find.byKey(const Key('community-link-input')).hitTestable(),
+            ' $code ',
+          );
+          await tester.tap(
+            find.widgetWithText(FilledButton, 'Continue').hitTestable(),
+          );
+          await tester.pump();
+
+          expect(notifier.pairedCodes, [code]);
+        },
+      );
+    }
+
     testWidgets('recovery entry rejects ordinary nostrpair codes', (
       tester,
     ) async {

@@ -24,6 +24,12 @@ void main() {
     expect(link.relayUrl, 'wss://community.example.com');
   });
 
+  test('passes a pasted pairing code through unchanged', () {
+    const code =
+        'nostrpair://desktop?secret=abc&relay=wss%3A%2F%2Fr.example.com';
+    expect(parseCommunityLinkInput(' $code ').toString(), code);
+  });
+
   test('rejects unrelated actions and unsafe or incomplete addresses', () {
     for (final value in [
       '',
@@ -37,7 +43,6 @@ void main() {
       'https://127.0.0.1',
       'https://community.example.com.',
       'buzz://channel/580ca78b-9dae-46f3-8854-bd671853ba32',
-      'nostrpair://example',
     ]) {
       expect(parseCommunityLinkInput(value), isNull, reason: value);
     }

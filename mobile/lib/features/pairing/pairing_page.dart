@@ -302,6 +302,9 @@ class PairingPage extends HookConsumerWidget {
               onPairing: onAlreadyUseBuzz,
               onScan: openScanner,
               onOpenCommunity: (uri) {
+                if (uri.scheme == 'nostrpair') {
+                  return unawaited(handleScannerResult(uri.toString()));
+                }
                 ref.read(hostedInlineEntryProvider.notifier).setActive(true);
                 ref.read(pendingDeepLinkProvider.notifier).open(uri);
               },
@@ -381,6 +384,9 @@ class PairingPage extends HookConsumerWidget {
                       onCreateCommunity: onCreateCommunity,
                       onOpenCommunity: (uri) {
                         FocusManager.instance.primaryFocus?.unfocus();
+                        if (uri.scheme == 'nostrpair') {
+                          return unawaited(handleScannerResult(uri.toString()));
+                        }
                         ref.read(pendingDeepLinkProvider.notifier).open(uri);
                       },
                       onBuilderlab: onBuilderlab,

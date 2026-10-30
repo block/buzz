@@ -1,7 +1,8 @@
 import 'deep_link.dart';
 
 /// Converts user-entered community addresses or invites to validated app links.
-/// Other deep-link actions are deliberately excluded from this input.
+/// Other deep-link actions are deliberately excluded from this input, except a
+/// pasted `nostrpair://` code, which the caller must pair exactly as a scan.
 Uri? parseCommunityLinkInput(String input) {
   final raw = input.trim();
   if (raw.isEmpty || raw.length > 8192 || RegExp(r'\s').hasMatch(raw)) {
@@ -9,6 +10,7 @@ Uri? parseCommunityLinkInput(String input) {
   }
   try {
     final uri = Uri.parse(raw.contains('://') ? raw : 'https://$raw');
+    if (uri.scheme == 'nostrpair') return uri;
     if (parseInviteDeepLink(uri) != null ||
         parseAddCommunityDeepLink(uri) != null) {
       return uri;

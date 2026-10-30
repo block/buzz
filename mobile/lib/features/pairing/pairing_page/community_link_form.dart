@@ -67,7 +67,9 @@ class _CommunityLinkForm extends HookConsumerWidget {
         return;
       }
       error.value = null;
-      ref.read(hostedInlineEntryProvider.notifier).setActive(true);
+      if (link.scheme != 'nostrpair') {
+        ref.read(hostedInlineEntryProvider.notifier).setActive(true);
+      }
       onOpen(link);
     }
 
