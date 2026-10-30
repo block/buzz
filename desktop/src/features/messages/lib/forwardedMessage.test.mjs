@@ -171,25 +171,24 @@ test("an edited forward starts a new provenance chain", () => {
     id: OTHER_EVENT,
     pubkey: MENTION,
     edited: true,
-    tags: [["h", SOURCE_CHANNEL], buildForwardedFromTag({
-      sourceEventId: SOURCE_EVENT,
-      sourceChannelId: SOURCE_CHANNEL,
-      authorPubkey: AUTHOR,
-      threadRootId: null,
-    })],
+    tags: [
+      ["h", SOURCE_CHANNEL],
+      buildForwardedFromTag({
+        sourceEventId: SOURCE_EVENT,
+        sourceChannelId: SOURCE_CHANNEL,
+        authorPubkey: AUTHOR,
+        threadRootId: null,
+      }),
+    ],
   });
 
-  assert.deepEqual(
-    forwardProvenanceFor(editedCopy, SOURCE_CHANNEL),
-    {
-      sourceEventId: OTHER_EVENT,
-      sourceChannelId: SOURCE_CHANNEL,
-      authorPubkey: MENTION,
-      threadRootId: null,
-    },
-  );
+  assert.deepEqual(forwardProvenanceFor(editedCopy, SOURCE_CHANNEL), {
+    sourceEventId: OTHER_EVENT,
+    sourceChannelId: SOURCE_CHANNEL,
+    authorPubkey: MENTION,
+    threadRootId: null,
+  });
 });
-
 
 test("a message that cannot be attributed cannot be forwarded", () => {
   assert.equal(forwardProvenanceFor(message(), null), null);

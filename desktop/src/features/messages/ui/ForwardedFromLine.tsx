@@ -1,15 +1,13 @@
 import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
-import {
-  forwardedFromAttribution,
-  getForwardedFromReference,
-} from "@/features/messages/lib/forwardedMessage";
+import { getForwardedFromReference } from "@/features/messages/lib/forwardedMessage";
 import type { ParsedMessageLink } from "@/features/messages/lib/messageLink";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { MessageLinkPill } from "@/shared/ui/markdown/MessageLinkPill";
+import { useMessageLinkMetadata } from "@/shared/ui/markdown/useMessageLinkMetadata";
 import { MESSAGE_MARKDOWN_CLASS } from "@/shared/ui/mentionChip";
 
 /**
@@ -41,6 +39,21 @@ export function ForwardedFromLine({
   const { channels } = useChannelNavigation();
   const { goChannel } = useAppNavigation();
   const reference = getForwardedFromReference(tags);
+  const link: ParsedMessageLink = reference
+    ? {
+        channelId: reference.sourceChannelId,
+        messageId: reference.sourceEventId,
+        threadRootId: reference.threadRootId,
+      }
+    : { channelId: "", messageId: "", threadRootId: null };
+  const sourceChannelReadable = Boolean(
+    reference &&
+      channels.some((channel) => channel.id === reference.sourceChannelId),
+  );
+  const sourceMetadata = useMessageLinkMetadata(
+    link,
+    Boolean(reference && sourceChannelReadable),
+  );
   const onOpenMessageLink = React.useCallback(
     (target: ParsedMessageLink) => {
       void goChannel(target.channelId, {
@@ -50,27 +63,34 @@ export function ForwardedFromLine({
     },
     [goChannel],
   );
-
   if (!reference) return null;
-  const link: ParsedMessageLink = {
-    channelId: reference.sourceChannelId,
-    messageId: reference.sourceEventId,
-    threadRootId: reference.threadRootId,
-  };
-  const author = resolveUserLabel({
-    currentPubkey,
-    profiles,
-    pubkey: reference.authorPubkey,
-  });
+
+  const sourceAuthorMatches =
+    sourceMetadata.state.kind === "ready" &&
+    sourceMetadata.state.authorPubkey.toLowerCase() ===
+      reference.authorPubkey.toLowerCase();
+  const author = sourceAuthorMatches
+    ? resolveUserLabel({
+        currentPubkey,
+        profiles,
+        pubkey: reference.authorPubkey,
+      })
+    : "the original author";
+  const attribution =
+    sourceMetadata.state.kind === "deleted"
+      ? "Forwarded message (original deleted):"
+      : edited
+        ? "Forwarded and edited:"
+        : sourceAuthorMatches
+          ? `Forwarded from ${author}:`
+          : "Forwarded message:";
 
   return (
     <div
       className={`${MESSAGE_MARKDOWN_CLASS} mb-1 flex min-h-[var(--inline-chip-min-height)] min-w-0 items-center gap-1.5 pt-0.5 text-sm font-normal leading-4 text-muted-foreground/70`}
       data-testid="forwarded-from"
     >
-      <span className="shrink-0">
-        {forwardedFromAttribution(author, edited)}
-      </span>
+      <span className="shrink-0">{attribution}</span>
       <MessageLinkPill
         channels={channels}
         interactive

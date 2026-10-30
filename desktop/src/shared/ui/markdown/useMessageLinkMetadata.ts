@@ -28,6 +28,7 @@ async function getMessageLinkEvent(messageId: string) {
 
 type MessageLinkMetadata = {
   author: string;
+  authorPubkey: string;
   createdAt: number;
   snippet: string;
 };
@@ -71,6 +72,7 @@ function fetchMetadata(
             profile?.displayName?.trim() ||
             profile?.nip05Handle?.trim() ||
             truncateNpub(event.pubkey),
+          authorPubkey: event.pubkey,
           createdAt: event.created_at,
           snippet: summarizeMessageLinkContent(event.content),
         };
