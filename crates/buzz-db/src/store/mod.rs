@@ -89,6 +89,7 @@ pub mod artifact;
 mod artifact_query;
 /// Timestamp-based incremental artifact reads.
 pub mod artifact_sync;
+pub use artifact_query::{ArtifactSnapshot, SnapshotDenied};
 
 #[cfg(test)]
 mod artifact_postgres_tests;

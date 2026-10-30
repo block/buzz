@@ -86,7 +86,7 @@ const contentListTitleTextStyle = messageUsernameTextStyle;
 const navigationChatTitleTextStyle = TextStyle(
   fontFamily: _fontFamily,
   fontSize: 17,
-  fontWeight: FontWeight.w500,
+  fontWeight: FontWeight.w400,
   height: 22 / 17,
   letterSpacing: 0,
 );

@@ -316,7 +316,7 @@ void main() {
         expect(
           find.descendant(
             of: find.byType(CommunityGridOption),
-            matching: find.text('two.communities.buzz.xyz'),
+            matching: find.text('two'),
           ),
           findsWidgets,
         );

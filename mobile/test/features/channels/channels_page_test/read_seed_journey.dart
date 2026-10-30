@@ -47,11 +47,11 @@ void _readSeedJourney(
     expect(store.nonemptySnapshots.where((count) => count > 1), [400]);
     expect(
       tester.widget<Text>(find.text('channel-0')).style?.fontWeight,
-      FontWeight.w700,
+      FontWeight.w600,
     );
     expect(
       tester.widget<Text>(find.text('channel-1')).style?.fontWeight,
-      FontWeight.w500,
+      FontWeight.w400,
     );
     final saved = ReadStateStorage(
       prefs,

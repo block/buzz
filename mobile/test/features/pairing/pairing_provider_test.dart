@@ -73,6 +73,45 @@ void main() {
       },
     );
 
+    test(
+      'legacy validation rejects failed connection before saving, then retries',
+      () async {
+        final auth = FakeAuthNotifier();
+        var connected = false;
+        final notifier = PairingNotifier(
+          validationSocketFactory:
+              ({
+                required wsUrl,
+                required nsec,
+                required onMessage,
+                required onConnected,
+                required onDisconnected,
+              }) => _ValidationOutcomeSocket(() => connected),
+        );
+        container = ProviderContainer(
+          overrides: [
+            pairingProvider.overrideWith(() => notifier),
+            authProvider.overrideWith(() => auth),
+          ],
+        );
+        final input = base64Url.encode(
+          utf8.encode(
+            jsonEncode({
+              'relayUrl': 'https://relay.example',
+              'nsec': nostr.Keys.generate().nsec,
+            }),
+          ),
+        );
+        await container.read(pairingProvider.notifier).pair(input);
+        expect(container.read(pairingProvider).status, PairingStatus.error);
+        expect(auth.lastCommunity, isNull);
+        connected = true;
+        await notifier.pair(input);
+        expect(container.read(pairingProvider).status, PairingStatus.success);
+        expect(auth.lastCommunity, isNotNull);
+      },
+    );
+
     test('starts in idle state', () {
       container = createContainer();
       final state = container.read(pairingProvider);
@@ -1474,4 +1513,23 @@ class _PendingValidationSocket extends RelaySocket {
   void dispose() => disposed = true;
   @override
   Future<void> disconnect() async => disposed = true;
+}
+
+class _ValidationOutcomeSocket extends RelaySocket {
+  _ValidationOutcomeSocket(this.connected)
+    : super(
+        wsUrl: 'wss://relay.example',
+        nsec: null,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (_) {},
+      );
+  final bool Function() connected;
+  @override
+  SocketState get state =>
+      connected() ? SocketState.connected : SocketState.disconnected;
+  @override
+  Future<void> connect() async {}
+  @override
+  Future<void> disconnect() async {}
 }

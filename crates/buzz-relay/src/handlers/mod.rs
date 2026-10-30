@@ -1,6 +1,10 @@
 /// NIP-42 authentication handler.
 pub mod admin_action_worker;
 pub mod admin_outbox_worker;
+/// NIP-AR Sync subscriptions.
+pub mod artifact_sync;
+#[cfg(test)]
+mod artifact_sync_postgres_tests;
 pub mod auth;
 /// Pure NIP-29 channel membership-authority decisions (kinds 9000/9001/9022).
 pub mod channel_authz;

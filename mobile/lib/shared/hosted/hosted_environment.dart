@@ -10,6 +10,23 @@ abstract final class HostedEnvironment {
         'https://app.builderlabstaging.xyz',
   };
 
+  /// Shortens hostname fallbacks for display without changing relay identity.
+  static String communityDisplayName(String name, String relayUrl) {
+    final relay = Uri.tryParse(relayUrl);
+    if (relay == null ||
+        name != relay.host ||
+        accountOriginFor(relay) == null) {
+      return name;
+    }
+    for (final domain in _communityAccounts.keys) {
+      final suffix = '.$domain';
+      if (name.endsWith(suffix)) {
+        return name.substring(0, name.length - suffix.length);
+      }
+    }
+    return name;
+  }
+
   /// Creation and admission use the same trusted build-specific host mapping.
   static String get communitySuffix => _communityAccounts.entries
       .singleWhere((entry) => Uri.parse(entry.value) == origin)

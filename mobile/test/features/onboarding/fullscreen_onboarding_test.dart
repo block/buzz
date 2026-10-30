@@ -165,7 +165,7 @@ void main() {
       await tester.tap(find.byKey(const Key('community-switcher-add')));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 300));
-      expect(find.byTooltip('Back'), findsNothing);
+      expect(find.byTooltip('Back').hitTestable(), findsNothing);
       expect(find.byType(BeeLoadingMark), findsOneWidget);
       await tester.tap(find.text('Cancel'));
       await tester.pump();
@@ -230,11 +230,16 @@ void main() {
       fixture.beforeAdmission = (_) => resumedAdmission.future;
       await tester.tap(find.byType(CommunityGridOption).last);
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pump();
+      await tester.pump(
+        ModalRoute.of(
+          tester.element(find.text('Joining your community')),
+        )!.transitionDuration,
+      );
       expect(find.text('Home content'), findsNothing);
       expect(find.text('Joining your community'), findsOneWidget);
       expect(find.byType(CircularProgressIndicator), findsNothing);
-      expect(find.byTooltip('Back'), findsNothing);
+      expect(find.byTooltip('Back').hitTestable(), findsNothing);
       expect(
         tester.getBottomLeft(find.byType(BeeLoadingMark)).dy,
         lessThan(tester.getTopLeft(find.text('Joining your community')).dy),

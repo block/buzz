@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
@@ -59,6 +60,9 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     this.requestTimeout = const Duration(seconds: 30),
   });
 
+  /// Maximum encoded image body retained before decoding (20 MiB).
+  static const maxResponseBytes = 20 * 1024 * 1024;
+
   static const _defaultCooldown = Duration(seconds: 30);
   static const _maxRetryAfter = Duration(minutes: 5);
   static final Map<String, DateTime> _cooldownUntil = {};
@@ -105,15 +109,32 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       try {
         final abort = Completer<void>();
         final deadline = Timer(requestTimeout, abort.complete);
+        StreamIterator<List<int>>? body;
         try {
           final request = http.AbortableRequest(
             'GET',
             uri,
             abortTrigger: abort.future,
           )..headers.addAll(auth.headersFor(url));
-          response = await http.Response.fromStream(await client.send(request));
+          final streamed = await client.send(request);
+          final iterator = body = StreamIterator(streamed.stream);
+          final bytes = BytesBuilder(copy: false);
+          while (await iterator.moveNext()) {
+            final chunk = iterator.current;
+            if (chunk.length > maxResponseBytes - bytes.length) {
+              throw const FormatException('Image response too large');
+            }
+            bytes.add(chunk);
+          }
+          response = http.Response.bytes(
+            bytes.takeBytes(),
+            streamed.statusCode,
+            headers: streamed.headers,
+          );
         } finally {
           deadline.cancel();
+          if (!abort.isCompleted) abort.complete();
+          unawaited(body?.cancel());
         }
       } catch (_) {
         _cooldownUntil[url] = debugNow().add(_defaultCooldown);

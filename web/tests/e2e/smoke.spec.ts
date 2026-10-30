@@ -291,6 +291,14 @@ for (const architecture of ["unknown", "x64"]) {
         },
       });
     }, architecture);
+    await context.route(
+      "https://github.com/block/buzz-app/releases/download/**",
+      (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: "Installer destination",
+        }),
+    );
     const page = await context.newPage();
     await page.route("**/api/join-policy", async (route) => {
       await route.fulfill({
@@ -523,4 +531,51 @@ test("invite shows community artwork and name with a text-only fallback", async 
   await page.goto("/invite/visual-preview");
   await expect(page.locator(".invite-community")).toHaveText("127.0.0.1:4173");
   await expect(page.locator(".invite-community-icon")).toHaveCount(0);
+});
+
+test("invite swarm follows width and height changes with reduced motion", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.route("**/api/join-policy", (route) =>
+    route.fulfill({ json: { policy: null } }),
+  );
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto("/invite/resize-preview");
+  const positions = () =>
+    page.locator(".bee-sprite").evaluateAll((sprites) =>
+      sprites.map((sprite) => {
+        const node = sprite.parentElement;
+        const field = node?.parentElement;
+        if (!node || !field) throw new Error("Missing bee field");
+        const transform = new DOMMatrix(getComputedStyle(node).transform);
+        return {
+          x: transform.m41 / field.clientWidth,
+          y: transform.m42 / field.clientHeight,
+        };
+      }),
+    );
+  await expect(page.locator(".bee-sprite")).toHaveCount(24);
+  const original = await positions();
+  for (const viewport of [
+    { width: 700, height: 1000 },
+    { width: 700, height: 700 },
+    { width: 1800, height: 1200 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await expect
+      .poll(async () => {
+        const current = await positions();
+        return Math.max(
+          ...current.map((p, i) =>
+            Math.max(
+              Math.abs(p.x - original[i].x),
+              Math.abs(p.y - original[i].y),
+            ),
+          ),
+        );
+      })
+      .toBeLessThan(0.001);
+    await expect(page.locator(".bee-sprite")).toHaveCount(24);
+  }
 });

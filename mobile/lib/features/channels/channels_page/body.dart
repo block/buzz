@@ -5,7 +5,6 @@ class _ChannelsBody extends StatelessWidget {
   final bool showTeam;
   final bool showTeamHeading;
   final VoidCallback? onInbox;
-  final bool hasUnreadInbox;
   final List<Channel>? channels;
   final AsyncValue<List<Channel>> channelsAsync;
   final bool showError;
@@ -23,7 +22,6 @@ class _ChannelsBody extends StatelessWidget {
     this.showTeam = true,
     this.showTeamHeading = false,
     required this.onInbox,
-    required this.hasUnreadInbox,
     required this.channels,
     required this.channelsAsync,
     required this.showError,
@@ -40,7 +38,7 @@ class _ChannelsBody extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final inbox = Semantics(
-      label: hasUnreadInbox ? 'Inbox, unread' : 'Inbox',
+      label: 'Inbox',
       button: true,
       onTap: onInbox,
       excludeSemantics: true,
@@ -58,13 +56,10 @@ class _ChannelsBody extends StatelessWidget {
                 width: _kChannelLeadingWidth,
                 child: Align(
                   alignment: Alignment.centerLeft,
-                  child: Badge(
-                    isLabelVisible: hasUnreadInbox,
-                    child: Icon(
-                      BuzzIcons.bell,
-                      size: _kChannelIconSize,
-                      color: channelNavigationForeground(context),
-                    ),
+                  child: Icon(
+                    BuzzIcons.bell,
+                    size: _kChannelIconSize,
+                    color: channelNavigationForeground(context),
                   ),
                 ),
               ),
@@ -75,13 +70,7 @@ class _ChannelsBody extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: navigationChatTitleTextStyle.copyWith(
-                    color: channelNavigationForeground(
-                      context,
-                      unread: hasUnreadInbox,
-                    ),
-                    fontWeight: hasUnreadInbox
-                        ? FontWeight.w700
-                        : FontWeight.w500,
+                    color: channelNavigationForeground(context),
                   ),
                 ),
               ),
