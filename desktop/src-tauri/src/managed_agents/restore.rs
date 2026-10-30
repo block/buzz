@@ -376,11 +376,12 @@ fn spawn_and_register_restored_agents<R: tauri::Runtime>(
                                 &record.relay_url,
                                 restore_relay,
                             );
-                            let outcome = match super::ManagedAgentRuntimeKey::new(
+                            let outcome = match super::ManagedAgentRelayTarget::new(
                                 record.pubkey.clone(),
                                 &relay_url,
                             ) {
-                                Ok(key) => {
+                                Ok(relay_target) => {
+                                    let key = relay_target.key.clone();
                                     // F2: if a concurrent startup reconcile already
                                     // tracked a live child for this exact pair during
                                     // the Phase A window, leave it alone. Mirrors the
@@ -410,7 +411,7 @@ fn spawn_and_register_restored_agents<R: tauri::Runtime>(
                                                 spawn_agent_child(
                                                     app,
                                                     record,
-                                                    &key.relay_url,
+                                                    &relay_target,
                                                     admitted,
                                                     true,
                                                     owner_hex_ref,

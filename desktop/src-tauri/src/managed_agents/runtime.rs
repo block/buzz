@@ -9,7 +9,7 @@ use crate::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
         missing_command_message, normalize_agent_args, open_log_file, resolve_command,
         spawn_key_refusal, KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord,
-        ManagedAgentRuntimeKey, ManagedAgentSummary,
+        ManagedAgentRelayTarget, ManagedAgentRuntimeKey, ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -108,8 +108,8 @@ mod lifecycle;
 #[cfg(test)]
 use lifecycle::kill_stale_tracked_processes_with;
 pub use lifecycle::{kill_stale_tracked_processes, sync_managed_agent_processes};
-mod spawn_key; // production spawn-key derivation + its regressions
-pub(crate) use spawn_key::bound_runtime_key;
+mod spawn_key; // production spawn-target derivation + its regressions
+pub(crate) use spawn_key::bound_runtime_target;
 
 /// Classify an agent's persona against the live catalog for the Agents-menu
 /// drift indicator. Returns `(out_of_date, orphaned)`.
@@ -484,17 +484,20 @@ pub(crate) fn spawn_with_effort_proof(
 pub fn spawn_agent_child<R: tauri::Runtime>(
     app: &AppHandle<R>,
     record: &ManagedAgentRecord,
-    relay_url: &str,
+    relay_target: &ManagedAgentRelayTarget,
     admitted: &super::Admitted<'_>,
     lazy: bool,
     owner_hex: Option<&str>,
     replay_floor_unix: Option<u64>,
 ) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
-    admitted.covers(relay_url)?;
+    admitted.covers(&relay_target.connection_url)?;
     if let Some(error) = spawn_key_refusal(record) {
         return Err(error);
     }
-    let runtime_key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), relay_url)?;
+    if !relay_target.key.pubkey.eq_ignore_ascii_case(&record.pubkey) {
+        return Err("managed-agent relay target belongs to a different agent".into());
+    }
+    let runtime_key = relay_target.key.clone();
     // Resolve the effective harness (agent command) from the linked persona, so
     // persona harness edits propagate on the next spawn; an explicit per-agent
     // override wins. `agent_args` and `mcp_command` are pure derivations of the
@@ -579,9 +582,10 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| effective_command.clone());
 
-    // The caller supplies the explicit canonical pair relay. This is the only
-    // relay this child may connect to, regardless of the record/workspace default.
-    let effective_relay_url = runtime_key.relay_url.clone();
+    // Runtime identity is canonical, but the connection URL must preserve the
+    // workspace-selected host spelling. The relay binds communities from the
+    // Host header, so rewriting `localhost` to `127.0.0.1` can select no tenant.
+    let effective_relay_url = relay_target.connection_url.clone();
     // Augment PATH for DMG launches so child processes can find:
     //   - bundled CLI via ~/.local/bin symlink
     //   - nvm-managed node/npm (nvm initializes only in interactive shells)
@@ -900,7 +904,7 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
 /// `bind_expected_relay_scope`, so this spawn consumes — by construction — the
 /// exact workspace-relay read the caller's scope assertion passed on; it never
 /// re-reads the mutable override (see `relay::scope`). The key comes from
-/// [`bound_runtime_key`] — the seam the spawn-key regressions exercise.
+/// [`bound_runtime_target`] — the seam the spawn-target regressions exercise.
 pub fn start_managed_agent_process<R: tauri::Runtime>(
     app: &AppHandle<R>,
     record: &mut ManagedAgentRecord,
@@ -910,7 +914,8 @@ pub fn start_managed_agent_process<R: tauri::Runtime>(
     admitted: &super::Admitted<'_>,
     replay_floor_unix: Option<u64>,
 ) -> Result<(), String> {
-    let key = bound_runtime_key(record, workspace_relay)?;
+    let relay_target = bound_runtime_target(record, workspace_relay)?;
+    let key = relay_target.key.clone();
     if let Some(runtime) = runtimes.get_mut(&key) {
         if runtime
             .child
@@ -931,7 +936,7 @@ pub fn start_managed_agent_process<R: tauri::Runtime>(
     let mut process = spawn_agent_child(
         app,
         record,
-        &key.relay_url,
+        &relay_target,
         admitted,
         false,
         owner_hex,
