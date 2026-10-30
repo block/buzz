@@ -42,6 +42,29 @@ final class BrowserAuthBridgeTests: XCTestCase {
     XCTAssertEqual(starts, 2, "Ordinary active-app login should start immediately")
     messenger.invoke("cancel", arguments: [:]) { _ in }
   }
+
+  func testAllowsOnlyBuilderlabLoginPages() {
+    for allowed in [
+      "https://app.builderlab.xyz/auth/native?state=s",
+      "https://app.builderlabstaging.xyz/auth/native",
+      "https://block.builderlab.xyz/api/goose/v1/auth/login?type=cli",
+      "https://block.builderlabstaging.xyz/api/goose/v1/auth/login",
+    ] {
+      XCTAssertTrue(BuzzBrowserAuthBridge.allowsLogin(URL(string: allowed)!), allowed)
+    }
+    for refused in [
+      "http://block.builderlab.xyz/api/goose/v1/auth/login",
+      "https://builderlab.xyz/auth/native",
+      "https://evilbuilderlab.xyz/auth/native",
+      "https://block.builderlab.xyz.example.com/auth/native",
+      "https://block.builderlab.xyz/api/goose/v1/auth/me",
+      "https://block.builderlab.xyz:8443/auth/native",
+      "https://user@block.builderlab.xyz/auth/native",
+      "https://block.builderlab.xyz/auth/native#fragment",
+    ] {
+      XCTAssertFalse(BuzzBrowserAuthBridge.allowsLogin(URL(string: refused)!), refused)
+    }
+  }
 }
 
 private final class BrowserAuthTestMessenger: NSObject, FlutterBinaryMessenger {
