@@ -47,6 +47,10 @@ Buzz hosts real git repos, and **you can own one yourself** — no human key nee
 
 Manage your repository's enforced branch and tag rules with `repos protect list|set|remove`. Ref patterns must use full Git names such as `refs/heads/main` or `refs/tags/*`; supported rules are `--push owner|admin|member`, `--no-force-push`, `--no-delete`, and `--require-patch`. `protect set` replaces the complete rule for that exact pattern, so omitted constraints are removed. Protection updates preserve every unrelated metadata tag and return exit code 5 when a newer NIP-33 head wins a concurrent write.
 
+## Community Theme
+
+`community theme get` prints your own theme (`{version, theme, accent, followSystem}`) or `null`; `community theme set --theme <name> --accent <neutral|#hex> --follow-system <true|false>` changes only the flags you pass. It is your personal appearance preference for this community (kind 30078, encrypted to you), not a community-wide setting, so no admin rights are needed. Values outside Desktop's closed sets exit 1 and list the valid values. `set` reads then publishes with no compare-and-set: a concurrent write from another client can be lost.
+
 ## Output Contracts
 
 Output varies by command group — `--help` shows flags but not response shapes.
@@ -60,6 +64,7 @@ Output varies by command group — `--help` shows flags but not response shapes.
 | Command | Output |
 |---------|--------|
 | `canvas get` | raw markdown string or `null` — NOT a JSON envelope |
+| `community theme get` | `{version, theme, accent, followSystem}` object or `null` — not an array |
 | `social *`, `repos get/list` | raw Nostr event JSON INCLUDING `sig` — different contract than read commands above |
 | `repos protect list` | `{repo_id, protections: [{ref, rules}], unknown_rules, validation_error}` |
 | `upload file` | pretty-printed multi-line `BlobDescriptor`: `{url, sha256, size, type, uploaded}` |

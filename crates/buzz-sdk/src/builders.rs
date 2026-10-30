@@ -12,7 +12,7 @@ use buzz_core::{
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
         KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_PROJECT,
-        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_READ_STATE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -572,6 +572,37 @@ pub fn build_custom_emoji_set(emojis: &[CustomEmoji]) -> Result<EventBuilder, Sd
         tags.push(tag(&["emoji", &shortcode, &emoji.url])?);
     }
     Ok(EventBuilder::new(Kind::Custom(KIND_EMOJI_SET as u16), "").tags(tags))
+}
+
+/// d-tag (and `t` tag) of the per-user community theme preference.
+pub const COMMUNITY_THEME_D_TAG: &str = "community-theme";
+
+/// Build the caller's community theme preference (kind 30078,
+/// d=`community-theme`).
+///
+/// Shares the kind with read state and is told apart by its d-tag. A
+/// parameterized replaceable event: the newest `(created_at, lowest id)` per
+/// author replaces the prior one, so `created_at` must exceed the head being
+/// replaced. `encrypted_content` must be NIP-44 v2 ciphertext addressed to the
+/// author's own key.
+pub fn build_community_theme(
+    encrypted_content: &str,
+    created_at: u64,
+) -> Result<EventBuilder, SdkError> {
+    if !content_looks_like_nip44(encrypted_content) {
+        return Err(SdkError::InvalidInput(
+            "community theme content must be NIP-44 v2 ciphertext".into(),
+        ));
+    }
+    let tags = vec![
+        tag(&["d", COMMUNITY_THEME_D_TAG])?,
+        tag(&["t", COMMUNITY_THEME_D_TAG])?,
+    ];
+    Ok(
+        EventBuilder::new(Kind::Custom(KIND_READ_STATE as u16), encrypted_content)
+            .tags(tags)
+            .custom_created_at(nostr::Timestamp::from(created_at)),
+    )
 }
 
 /// Build a canvas update event (kind 40100).
@@ -3335,6 +3366,22 @@ mod tests {
         assert_eq!(ev.kind.as_u16(), 30030);
         assert!(has_tag(&ev, "d", CUSTOM_EMOJI_SET_D_TAG));
         assert!(has_tag(&ev, "emoji", "party"));
+    }
+
+    #[test]
+    fn community_theme_carries_d_and_t_tags_and_exact_created_at() {
+        let ciphertext = "A".repeat(132);
+        let ev = sign(build_community_theme(&ciphertext, 1_700_000_123).unwrap());
+        assert_eq!(ev.kind.as_u16(), 30078);
+        assert!(has_tag(&ev, "d", COMMUNITY_THEME_D_TAG));
+        assert!(has_tag(&ev, "t", COMMUNITY_THEME_D_TAG));
+        assert_eq!(ev.created_at.as_secs(), 1_700_000_123);
+        assert_eq!(ev.content, ciphertext);
+    }
+
+    #[test]
+    fn community_theme_rejects_plaintext_content() {
+        assert!(build_community_theme("{\"version\":1}", 1).is_err());
     }
 
     #[test]

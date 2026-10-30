@@ -329,6 +329,9 @@ enum Cmd {
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
+    /// Your own per-community settings
+    #[command(subcommand)]
+    Community(CommunityCmd),
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -2081,6 +2084,37 @@ pub enum PackCmd {
     },
 }
 
+/// Your own per-community settings. The community is selected by the relay host.
+#[derive(Subcommand)]
+pub enum CommunityCmd {
+    /// Read and set your community theme (the appearance Buzz Desktop syncs)
+    #[command(subcommand)]
+    Theme(CommunityThemeCmd),
+}
+
+#[derive(Subcommand)]
+pub enum CommunityThemeCmd {
+    /// Print your current theme as JSON, or null when none is stored
+    #[command(after_help = "Examples:\n  buzz community theme get")]
+    Get,
+    /// Change the given theme fields and keep the rest (publishes your own
+    /// kind 30078 preference; any member may write theirs)
+    #[command(
+        after_help = "Examples:\n  buzz community theme set --theme nord\n  buzz community theme set --accent '#22c55e' --follow-system false\n\nWith no stored theme, unset fields start from the Desktop defaults (buzz, #3b82f6, follow-system true).\nThe command reads your current theme, then publishes the merged result. There is no compare-and-set yet: if another client (or a second run) writes between the read and the publish, the later write wins and the other change is lost."
+    )]
+    Set {
+        /// Syntax theme name (e.g. buzz, buzz-dark, nord, dracula)
+        #[arg(long)]
+        theme: Option<String>,
+        /// Accent: neutral or one of the Desktop accent hex values (e.g. '#3b82f6')
+        #[arg(long)]
+        accent: Option<String>,
+        /// Follow the system light/dark setting: true | false
+        #[arg(long)]
+        follow_system: Option<bool>,
+    },
+}
+
 /// Community moderation commands.
 ///
 /// The community (tenant) is selected by the relay host in `--relay` /
@@ -2283,6 +2317,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
+        Cmd::Community(sub) => commands::community::dispatch(sub, &client).await,
         Cmd::Pack(_) => unreachable!("handled above"),
     }
 }
@@ -2455,6 +2490,7 @@ mod tests {
             "agents",
             "canvas",
             "channels",
+            "community",
             "dms",
             "emoji",
             "feed",
@@ -2516,6 +2552,19 @@ mod tests {
         }
 
         let cmd = Cli::command();
+        assert_eq!(names(&cmd, "community"), vec!["theme"]);
+        let theme = cmd
+            .get_subcommands()
+            .find(|s| s.get_name() == "community")
+            .and_then(|c| c.find_subcommand("theme"))
+            .expect("theme");
+        let mut leaves: Vec<&str> = theme
+            .get_subcommands()
+            .map(|s| s.get_name())
+            .filter(|n| *n != "help")
+            .collect();
+        leaves.sort();
+        assert_eq!(leaves, vec!["get", "set"]);
         assert_eq!(
             names(&cmd, "agents"),
             vec![
