@@ -2,8 +2,18 @@ import Picker from "@emoji-mart/react";
 import * as React from "react";
 
 import { buildCustomEmojiCategory } from "@/features/custom-emoji/emojiMartCategory";
+import { emojiResolver } from "@/features/custom-emoji/emojiCatalog";
+import {
+  frequentEmoji,
+  getEmojiUsageSnapshot,
+  recentEmoji,
+  recordEmojiUse,
+  subscribeEmojiUsage,
+} from "@/features/custom-emoji/emojiUsageStore";
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
+import { EmojiCatalogSearch } from "@/features/custom-emoji/ui/EmojiCatalogSearch";
 import { emojiMartData } from "@/features/custom-emoji/ui/emojiMartPrewarm";
+import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 
 /**
  * Reach into the `em-emoji-picker` shadow root and disable spellcheck,
@@ -92,9 +102,27 @@ export const EmojiPicker = React.memo(function EmojiPicker({
   perLine = 8,
 }: EmojiPickerProps) {
   const customEmoji = useCustomEmoji();
+  const usage = React.useSyncExternalStore(
+    subscribeEmojiUsage,
+    getEmojiUsageSnapshot,
+  );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `usage` is the change signal for the store reads.
   const custom = React.useMemo(
-    () => buildCustomEmojiCategory(customEmoji),
-    [customEmoji],
+    () =>
+      buildCustomEmojiCategory(customEmoji, {
+        recent: recentEmoji(24),
+        frequent: frequentEmoji(12),
+      }),
+    [customEmoji, usage],
+  );
+
+  const selectCatalogEmoji = React.useCallback(
+    (emoji: CustomEmoji) => {
+      emojiResolver.remember([emoji]);
+      recordEmojiUse(emoji);
+      onSelect(`:${emoji.shortcode}:`);
+    },
+    [onSelect],
   );
   const hostRef = React.useRef<HTMLDivElement>(null);
 
@@ -105,6 +133,7 @@ export const EmojiPicker = React.memo(function EmojiPicker({
 
   return (
     <div ref={hostRef}>
+      <EmojiCatalogSearch onSelect={selectCatalogEmoji} />
       <Picker
         autoFocus={autoFocus}
         custom={custom}
@@ -115,6 +144,13 @@ export const EmojiPicker = React.memo(function EmojiPicker({
           // their `:shortcode:` (emoji-mart `id` == shortcode) instead. Ignore a
           // malformed selection that has neither.
           const value = emoji.native ?? (emoji.id ? `:${emoji.id}:` : "");
+          const used = emoji.id
+            ? (customEmoji.find((e) => e.shortcode === emoji.id) ??
+              usage.find((e) => e.shortcode === emoji.id))
+            : undefined;
+          if (!emoji.native && used) {
+            recordEmojiUse(used);
+          }
           if (value) {
             onSelect(value);
           }

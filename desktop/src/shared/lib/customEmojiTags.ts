@@ -44,3 +44,47 @@ export function buildCustomEmojiTags(
 
   return tags;
 }
+
+/** Lowercase `:name:` tokens in `content`, distinct, in first-appearance order. */
+export function collectEmojiShortcodes(content: string): string[] {
+  const names = new Set<string>();
+  for (const match of content.matchAll(SHORTCODE_SCAN)) {
+    names.add(match[1].toLowerCase());
+  }
+  return [...names];
+}
+
+/** The part of the catalog resolver the send path needs. */
+export type EmojiNameResolver = {
+  resolve(names: ReadonlyArray<string>): Promise<{
+    found: ReadonlyMap<string, CustomEmoji>;
+    failed: boolean;
+  }>;
+};
+
+/**
+ * Like `buildCustomEmojiTags`, but names missing from the legacy list resolve
+ * through `resolver` in one batched lookup. A name that does not resolve gets no
+ * tag and stays plain text. `lookupFailed` is true when the lookup itself
+ * failed, so the caller can tell "no such emoji" from "could not check".
+ */
+export async function resolveCustomEmojiTags(
+  content: string,
+  customEmoji: ReadonlyArray<CustomEmoji>,
+  resolver: EmojiNameResolver,
+): Promise<{ tags: string[][]; lookupFailed: boolean }> {
+  const names = collectEmojiShortcodes(content);
+  if (names.length === 0) return { tags: [], lookupFailed: false };
+  const known = new Map(customEmoji.map((e) => [e.shortcode, e]));
+  const unknown = names.filter((name) => !known.has(name));
+  const { found, failed } =
+    unknown.length > 0
+      ? await resolver.resolve(unknown)
+      : { found: new Map<string, CustomEmoji>(), failed: false };
+  const tags: string[][] = [];
+  for (const name of names) {
+    const emoji = known.get(name) ?? found.get(name);
+    if (emoji) tags.push(["emoji", name, emoji.url]);
+  }
+  return { tags, lookupFailed: failed };
+}

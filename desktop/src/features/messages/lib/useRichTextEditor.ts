@@ -35,6 +35,8 @@ import {
 } from "./macEmacsTextShortcuts";
 import type { MentionIdentity } from "./mentionClipboard";
 import { CUSTOM_EMOJI_NODE_NAME } from "./customEmojiNode";
+import { emojiResolver } from "@/features/custom-emoji/emojiCatalog";
+import { resolvePastedEmoji } from "./pastedEmojiTokens";
 import { useComposerCustomEmoji } from "./useComposerCustomEmoji";
 import { buildPlainTextProjection } from "./plainTextProjection";
 import { parseSnapshotClipboardHtml } from "./agentSnapshotClipboard";
@@ -390,15 +392,27 @@ export function useRichTextEditor({
               isCut: true,
               view,
             }),
-          paste: (view, event) =>
-            parseSnapshotClipboardHtml(
+          paste: (view, event) => {
+            const pastedText =
+              (event as ClipboardEvent).clipboardData?.getData("text/plain") ??
+              "";
+            void resolvePastedEmoji(
+              view,
+              pastedText,
+              emojiResolver,
+              customEmojiWiring.resolveUrl,
+            ).catch((error: unknown) => {
+              console.warn("Could not resolve pasted emoji.", error);
+            });
+            return parseSnapshotClipboardHtml(
               (event as ClipboardEvent).clipboardData?.getData("text/html") ??
                 "",
             )
               ? false
               : createComposerLinkPasteHandler(
                   messageLinkWiring.resolveChannelName,
-                )(view, event as ClipboardEvent),
+                )(view, event as ClipboardEvent);
+          },
         },
         attributes: {
           autocapitalize: "none",

@@ -63,6 +63,10 @@ export const KIND_MANAGED_AGENT = 30177;
 // publisher's personas. Separate from KIND_TEAM (30176, the team's own wire
 // body) so an ordinary team edit cannot disturb catalog share state.
 export const KIND_TEAM_CATALOG = 30178;
+// One addressable event per catalog emoji: d = normalized shortcode, content =
+// the search text, tags carry one ["emoji", shortcode, url]. Mirror of buzz-core's
+// KIND_EMOJI_ENTRY.
+export const KIND_EMOJI_ENTRY = 30180;
 export const KIND_USER_STATUS = 30315;
 export const KIND_AGENT_OBSERVER_FRAME = 24200;
 export const KIND_AGENT_TURN_METRIC = 44200;

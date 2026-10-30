@@ -40,7 +40,6 @@ const schema = getSchema([
   MentionNode,
   CustomEmojiNode.configure({
     resolveUrl: () => undefined,
-    shortcodes: () => [],
   }),
   UnknownLeaf,
 ]);

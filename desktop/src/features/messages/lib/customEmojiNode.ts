@@ -1,7 +1,6 @@
 import { mergeAttributes, Node, nodeInputRule } from "@tiptap/core";
 
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
-import { escapeRegExp } from "@/shared/lib/mentionPattern";
 
 /**
  * Inline atom node for a custom emoji, modeled on Tiptap's mention/emoji
@@ -25,27 +24,23 @@ import { escapeRegExp } from "@/shared/lib/mentionPattern";
 export const CUSTOM_EMOJI_NODE_NAME = "customEmoji";
 
 export interface CustomEmojiNodeOptions {
-  /** Resolve a (lowercased) shortcode to its image URL. */
+  /**
+   * Resolve a (lowercased) shortcode to its image URL from caches only. Never
+   * waits on the network: a name that is not cached stays plain text here and
+   * resolves at send time.
+   */
   resolveUrl: (shortcode: string) => string | undefined;
-  /** All known shortcodes, used to build the input-rule pattern. */
-  shortcodes: () => string[];
 }
 
+/** Longest shortcode the relay accepts. */
+const MAX_SHORTCODE_LENGTH = 64;
+const SHORTCODE_CHARS = `[A-Za-z0-9_-]{1,${MAX_SHORTCODE_LENGTH}}`;
+
 /**
- * Build a case-insensitive regex matching a completed `:shortcode:` for any
- * known shortcode, longest-first so a longer name isn't shadowed by a shorter
- * prefix. Returns null when there are no known shortcodes. Exported for testing
- * and reused by the input rule.
+ * A completed `:name:` token. It names no emoji, so its cost does not grow with
+ * the catalog; the caller decides whether the name resolves.
  */
-export function buildKnownShortcodeAlternation(
-  shortcodes: string[],
-): string | null {
-  const sorted = [...new Set(shortcodes)]
-    .filter((s) => s.trim().length > 0)
-    .sort((a, b) => b.length - a.length);
-  if (sorted.length === 0) return null;
-  return sorted.map((s) => escapeRegExp(s)).join("|");
-}
+export const EMOJI_TOKEN_PATTERN = `:${SHORTCODE_CHARS}:`;
 
 /**
  * Register a markdown-it inline rule that turns a known `:shortcode:` into an
@@ -92,22 +87,21 @@ export function registerCustomEmojiMarkdownIt(
       if (isWordChar) return false;
     }
 
-    const alternation = buildKnownShortcodeAlternation(options.shortcodes());
-    if (!alternation) return false;
-
-    // Match a known `:shortcode:` anchored at the current position. `y` (sticky)
+    // Match a `:name:` token anchored at the current position. `y` (sticky)
     // anchors at lastIndex without `^`, so we don't accidentally match later in
     // the line.
-    const re = new RegExp(`:(?:${alternation}):`, "iy");
+    const re = new RegExp(EMOJI_TOKEN_PATTERN, "iy");
     re.lastIndex = state.pos;
     const match = re.exec(state.src);
     if (!match) return false;
 
+    const shortcode = match[0].slice(1, -1).toLowerCase();
+    const src = options.resolveUrl(shortcode);
+    if (src === undefined) return false;
+
     if (!silent) {
-      const matched = match[0];
-      const shortcode = matched.slice(1, -1).toLowerCase();
       const token = state.push(TOKEN_TYPE, "img", 0);
-      token.meta = { shortcode, src: options.resolveUrl(shortcode) ?? "" };
+      token.meta = { shortcode, src };
     }
     state.pos += match[0].length;
     return true;
@@ -146,7 +140,6 @@ export const CustomEmojiNode = Node.create<CustomEmojiNodeOptions>({
   addOptions() {
     return {
       resolveUrl: () => undefined,
-      shortcodes: () => [],
     };
   },
 
@@ -242,17 +235,14 @@ export const CustomEmojiNode = Node.create<CustomEmojiNodeOptions>({
     const options = this.options;
     return [
       nodeInputRule({
-        // Lazily resolve the pattern from the *current* known set on each
-        // keystroke. An empty set → a regex that can never match.
+        // Match a completed `:name:` ending at the input position, then keep
+        // it only if the name resolves from cache. Typing stays O(1) in the
+        // catalog size; an uncached name resolves at send time.
         find: (text: string) => {
-          const alternation = buildKnownShortcodeAlternation(
-            options.shortcodes(),
-          );
-          if (!alternation) return null;
-          // Match a completed `:shortcode:` ending at the input position.
-          const re = new RegExp(`(:(?:${alternation}):)$`, "i");
-          const match = re.exec(text);
+          const match = new RegExp(`(${EMOJI_TOKEN_PATTERN})$`).exec(text);
           if (!match) return null;
+          const shortcode = match[1].slice(1, -1).toLowerCase();
+          if (options.resolveUrl(shortcode) === undefined) return null;
           return {
             index: match.index,
             text: match[0],

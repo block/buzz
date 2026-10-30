@@ -11,6 +11,7 @@ import {
   useEmojiAutocomplete,
   type EmojiSuggestion,
 } from "@/features/messages/lib/useEmojiAutocomplete";
+import { emojiResolver } from "@/features/custom-emoji/emojiCatalog";
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
 import {
   findSpoileredImetaMediaUrls,
@@ -512,21 +513,17 @@ function MessageComposerImpl({
       if (!richText.editor) return;
       const match = /^:([^:\s]+):$/.exec(emoji);
       const shortcode = match?.[1]?.toLowerCase();
-      const known =
-        shortcode &&
-        customEmoji.some((e) => e.shortcode.toLowerCase() === shortcode);
-      if (known && shortcode) {
+      const url = shortcode
+        ? (customEmoji.find((e) => e.shortcode.toLowerCase() === shortcode)
+            ?.url ?? emojiResolver.lookup(shortcode)?.url)
+        : undefined;
+      if (url && shortcode) {
         richText.editor
           .chain()
           .focus()
           .insertContent({
             type: CUSTOM_EMOJI_NODE_NAME,
-            attrs: {
-              shortcode,
-              src:
-                customEmoji.find((e) => e.shortcode.toLowerCase() === shortcode)
-                  ?.url ?? "",
-            },
+            attrs: { shortcode, src: url },
           })
           .insertContent(" ")
           .run();

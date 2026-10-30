@@ -1,3 +1,4 @@
+import { toast } from "sonner";
 import { snapshotUnresolvedEditMentionPubkeys } from "@/features/messages/lib/draftMentionRefs";
 import {
   AgentMentionAuthorizationError,
@@ -14,7 +15,11 @@ import {
 } from "@/features/messages/lib/imetaMediaMarkdown";
 import { diffAddedMentionPubkeys } from "@/features/messages/lib/threading";
 import { mergeOutgoingTagsWithReferenceMentions } from "@/features/messages/ui/useMentionSendFlow.helpers";
-import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
+import { emojiResolver } from "@/features/custom-emoji/emojiCatalog";
+import {
+  type EmojiNameResolver,
+  resolveCustomEmojiTags,
+} from "@/shared/lib/customEmojiTags";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 
 type EditDraft = {
@@ -32,6 +37,7 @@ type SubmitMessageEditOptions = Omit<
 > & {
   clearComposer: () => void;
   customEmoji: ReadonlyArray<CustomEmoji>;
+  emojiNames?: EmojiNameResolver;
   extractMentionPubkeys: (
     content: string,
     competingDisplayNames?: readonly string[],
@@ -71,6 +77,7 @@ export async function submitMessageEdit({
   clearComposer,
   content,
   customEmoji,
+  emojiNames = emojiResolver,
   editTargetId,
   enqueueUpload = enqueueBackgroundMediaUpload,
   editTarget,
@@ -161,11 +168,19 @@ export async function submitMessageEdit({
       },
     );
     if (signal?.aborted) return;
+    const emojiTags = await resolveCustomEmojiTags(
+      finalContent,
+      customEmoji,
+      emojiNames,
+    );
+    if (signal?.aborted) return;
+    if (emojiTags.lookupFailed) {
+      toast.warning(
+        "Could not look up some custom emoji. They were saved as text.",
+      );
+    }
     const outgoingTags = mergeOutgoingTagsWithReferenceMentions(
-      mergeOutgoingTags(
-        mediaTags,
-        buildCustomEmojiTags(finalContent, customEmoji),
-      ),
+      mergeOutgoingTags(mediaTags, emojiTags.tags),
       [
         ...draft.mentionRefs.map(({ pubkey }) => pubkey),
         ...draft.unresolvedMentionPubkeys,

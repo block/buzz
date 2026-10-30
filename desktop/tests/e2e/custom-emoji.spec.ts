@@ -102,7 +102,7 @@ test("emoji autocomplete ranks an exact standard shortcode before a custom subst
 
   const autocomplete = page.getByTestId("emoji-autocomplete");
   await expect(autocomplete).toBeVisible();
-  const labels = await autocomplete.locator("button").allTextContents();
+  const labels = await autocomplete.getByRole("option").allTextContents();
   expect(labels[0]).toContain(":joy:");
   expect(
     labels.findIndex((label) => label.includes(":bufo_joy:")),
@@ -135,7 +135,7 @@ test("emoji autocomplete keeps semantic matches ahead of loose shortcode fallbac
 
   const autocomplete = page.getByTestId("emoji-autocomplete");
   await expect(autocomplete).toBeVisible();
-  await expect(autocomplete.locator("button").first()).not.toContainText(
+  await expect(autocomplete.getByRole("option").first()).not.toContainText(
     ":sandwich:",
   );
 });

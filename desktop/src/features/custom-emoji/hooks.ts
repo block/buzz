@@ -16,6 +16,8 @@ import {
   setCustomEmoji,
 } from "@/shared/api/customEmoji";
 import { relayClient } from "@/shared/api/relayClient";
+import { getRelayWsUrl } from "@/shared/api/tauri";
+import { loadEmojiUsage } from "@/features/custom-emoji/emojiUsageStore";
 import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 import {
   customEmojiCatalogStatus,
@@ -117,7 +119,8 @@ export function useOwnCustomEmojiQuery() {
 /**
  * Subscribe to every member's kind:30030 emoji sets and invalidate the palette
  * query whenever one arrives. Call once near the app root (alongside other
- * global live subscriptions). Safe to mount once; disposes on unmount.
+ * global live subscriptions). Safe to mount once; disposes on unmount. It also
+ * loads the community's recent/frequent emoji cache.
  */
 export function useCommunityEmojiLiveUpdates(): void {
   const queryClient = useQueryClient();
@@ -125,6 +128,14 @@ export function useCommunityEmojiLiveUpdates(): void {
   React.useEffect(() => {
     let disposed = false;
     let dispose: (() => void) | undefined;
+
+    getRelayWsUrl()
+      .then((relayUrl) => {
+        if (!disposed) loadEmojiUsage(relayUrl);
+      })
+      .catch((error: unknown) => {
+        console.warn("Could not load recent emoji.", error);
+      });
 
     void relayClient
       .subscribeLive(

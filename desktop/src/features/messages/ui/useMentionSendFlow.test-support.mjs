@@ -164,7 +164,10 @@ export async function setup({ lifecycle = false } = {}) {
       // render display names, never key-form labels.
       truncateNpub: (key) => key,
     },
-    "@/shared/lib/customEmojiTags": { buildCustomEmojiTags: () => [] },
+    "@/shared/lib/customEmojiTags": {
+      resolveCustomEmojiTags: async () => ({ tags: [], lookupFailed: false }),
+    },
+    "@/features/custom-emoji/emojiCatalog": { emojiResolver: {} },
     "./useMentionSendFlow.helpers": helpers,
     "@/features/messages/lib/agentAddressMention.mjs": {
       buildAgentAddressMentionTags: () => [],

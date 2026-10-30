@@ -25,6 +25,7 @@ import {
   clearAllDrafts,
   initDraftStore,
 } from "@/features/messages/lib/useDrafts";
+import { resetEmojiCatalog } from "@/features/custom-emoji/emojiCatalog";
 import { resetRenderScopedReactionHydration } from "@/features/messages/lib/renderScopedReactions";
 import { resetAudioMediaLoadScheduler } from "@/features/messages/lib/audioMediaLoadScheduler";
 import { resetBackgroundMediaUploads } from "@/features/messages/lib/backgroundMediaUploadStore";
@@ -103,6 +104,7 @@ async function resetCommunityState({
   clearSearchHitEventCache();
   clearMarkdownNodeCache();
   resetMessageLinkMetadataCache();
+  resetEmojiCatalog();
 }
 
 type CommunityInitResult =

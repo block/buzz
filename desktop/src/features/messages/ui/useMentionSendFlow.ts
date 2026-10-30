@@ -29,7 +29,8 @@ import { useEnsureAgentMentionsReady } from "./useEnsureAgentMentionsReady";
 import { syncAgentsToActiveHuddle } from "@/shared/api/tauriChannels";
 import type { AcpRuntime, ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
-import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
+import { emojiResolver } from "@/features/custom-emoji/emojiCatalog";
+import { resolveCustomEmojiTags } from "@/shared/lib/customEmojiTags";
 import {
   dedupeQueuedAgentWakes,
   enqueueAgentWake,
@@ -833,10 +834,18 @@ export function useMentionSendFlow({
           explicitMentionPubkeys,
           addressedAgentPubkeys,
         );
-        const outgoingTags = [
-          ...buildCustomEmojiTags(trimmed, customEmoji),
-          ...linkPreviewTags,
-        ];
+        const emojiTags = await resolveCustomEmojiTags(
+          trimmed,
+          customEmoji,
+          emojiResolver,
+        );
+        if (isSendCancelled()) return;
+        if (emojiTags.lookupFailed) {
+          toast.warning(
+            "Could not look up some custom emoji. They were sent as text.",
+          );
+        }
+        const outgoingTags = [...emojiTags.tags, ...linkPreviewTags];
         const nonMemberPubkeys =
           channelType === null ||
           channelType === "dm" ||

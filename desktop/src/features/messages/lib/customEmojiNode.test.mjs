@@ -1,66 +1,27 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildKnownShortcodeAlternation } from "./customEmojiNode.ts";
+import {
+  EMOJI_TOKEN_PATTERN,
+  registerCustomEmojiMarkdownIt,
+} from "./customEmojiNode.ts";
 
-// The input rule converts a *completed* known `:shortcode:` into the atom
-// node. `buildKnownShortcodeAlternation` produces the inner alternation; the
-// rule wraps it as `(:(?:<alt>):)$`, case-insensitive. These tests exercise
-// that wrapped pattern so they cover the actual matching behavior.
+// The input rule matches a completed `:name:` with one fixed pattern, however
+// many emoji exist, then asks `resolveUrl` whether the name is known.
 
-function ruleRegex(shortcodes) {
-  const alt = buildKnownShortcodeAlternation(shortcodes);
-  if (!alt) return null;
-  return new RegExp(`(:(?:${alt}):)$`, "i");
-}
+const tokenAtEnd = new RegExp(`(${EMOJI_TOKEN_PATTERN})$`);
 
-test("returns null when there are no usable shortcodes", () => {
-  assert.equal(buildKnownShortcodeAlternation([]), null);
-  assert.equal(buildKnownShortcodeAlternation(["", "   "]), null);
+test("the token pattern does not depend on the catalog", () => {
+  assert.ok(EMOJI_TOKEN_PATTERN.length < 64);
+  assert.equal(tokenAtEnd.exec("hello :party_parrot:")[1], ":party_parrot:");
+  assert.equal(tokenAtEnd.exec(":WAVE:")[1], ":WAVE:");
 });
 
-test("matches a completed known shortcode at the input end", () => {
-  const re = ruleRegex(["party_parrot"]);
-  const m = re.exec("hello :party_parrot:");
-  assert.ok(m);
-  assert.equal(m[1], ":party_parrot:");
-});
-
-test("does not match an unknown shortcode", () => {
-  const re = ruleRegex(["party_parrot"]);
-  assert.equal(re.exec("typing :foo:"), null);
-});
-
-test("does not match an incomplete (unclosed) shortcode", () => {
-  const re = ruleRegex(["party_parrot"]);
-  // User mid-typing — no trailing colon yet.
-  assert.equal(re.exec(":party_parro"), null);
-});
-
-test("only matches when the shortcode ends at the input position", () => {
-  const re = ruleRegex(["wave"]);
-  // `:wave:` is present but not at the end → the input rule shouldn't fire.
-  assert.equal(re.exec(":wave: trailing"), null);
-});
-
-test("is case-insensitive on the shortcode", () => {
-  const re = ruleRegex(["Wave"]);
-  const m = re.exec(":WAVE:");
-  assert.ok(m);
-  assert.equal(m[1], ":WAVE:");
-});
-
-test("longest-first: a longer name is not shadowed by a shorter prefix", () => {
-  const re = ruleRegex(["party", "party_parrot"]);
-  const m = re.exec(":party_parrot:");
-  assert.ok(m);
-  // Must prefer the full `:party_parrot:`, not stop at `:party`.
-  assert.equal(m[1], ":party_parrot:");
-});
-
-test("dedupes and ignores blank entries", () => {
-  const alt = buildKnownShortcodeAlternation(["wave", "wave", "", "  "]);
-  assert.equal(alt, "wave");
+test("the token pattern ignores unclosed names and names not at the end", () => {
+  assert.equal(tokenAtEnd.exec(":party_parro"), null);
+  assert.equal(tokenAtEnd.exec(":wave: trailing"), null);
+  assert.equal(tokenAtEnd.exec("::"), null);
+  assert.equal(tokenAtEnd.exec(`:${"a".repeat(65)}:`), null);
 });
 
 // ── markdown-it inline rule: word-boundary behavior ──────────────────────
@@ -68,8 +29,6 @@ test("dedupes and ignores blank entries", () => {
 // (no reimplementation), using a minimal fake markdown-it that captures the
 // rule and a minimal `state` shaped like markdown-it's inline state. The guard
 // added for the edit-composer parse path must not fire mid-word or inside URLs.
-import { registerCustomEmojiMarkdownIt } from "./customEmojiNode.ts";
-
 function captureRule(shortcodes) {
   let captured = null;
   const md = {
@@ -84,8 +43,8 @@ function captureRule(shortcodes) {
     utils: { escapeHtml: (s) => s },
   };
   registerCustomEmojiMarkdownIt(md, {
-    shortcodes: () => shortcodes,
-    resolveUrl: (sc) => `https://b/${sc}.png`,
+    resolveUrl: (sc) =>
+      shortcodes.includes(sc) ? `https://b/${sc}.png` : undefined,
   });
   return captured;
 }
@@ -135,4 +94,11 @@ test("rule fires after punctuation boundary (e.g. parenthesis)", () => {
   // `(` is not a word char, so a `:shortcode:` after it still materializes.
   const { matched } = runRule(rule, "(:buzz:)", 1);
   assert.equal(matched, true);
+});
+
+test("rule leaves a name that is not cached as plain text", () => {
+  const rule = captureRule(["buzz"]);
+  const { matched, advanced } = runRule(rule, ":ghost:", 0);
+  assert.equal(matched, false);
+  assert.equal(advanced, 0);
 });

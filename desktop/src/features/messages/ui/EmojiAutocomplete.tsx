@@ -21,6 +21,8 @@ type EmojiAutocompleteProps = {
    */
   composerOwnsFocus: boolean;
   onSelect: (suggestion: EmojiSuggestion) => void;
+  /** The community emoji search failed; the list shows only local matches. */
+  searchFailed?: boolean;
   position?: "above" | "below";
 };
 
@@ -29,6 +31,7 @@ export const EmojiAutocomplete = React.memo(function EmojiAutocomplete({
   selectedIndex,
   composerOwnsFocus,
   onSelect,
+  searchFailed = false,
   position = "above",
 }: EmojiAutocompleteProps) {
   const listVirtualizerRef = React.useRef<ListVirtualizer | null>(null);
@@ -71,45 +74,57 @@ export const EmojiAutocomplete = React.memo(function EmojiAutocomplete({
         onMouseDown={(event) => event.preventDefault()}
         style={POPOVER_SHADOW_STYLE}
       >
-        <VirtualizedList
-          className="max-h-48"
-          estimateSize={36}
-          getItemKey={(suggestion) => suggestion.id}
-          items={suggestions}
-          onVirtualizer={handleVirtualizer}
-          renderItem={(suggestion, index) => (
-            <button
-              className={cn(
-                "flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-1.5 text-left text-sm",
-                index === selectedIndex
-                  ? "bg-accent text-accent-foreground"
-                  : "text-popover-foreground hover:bg-accent/50",
-              )}
-              onMouseDown={(event) => {
-                event.preventDefault();
-                onSelect(suggestion);
-              }}
-              tabIndex={-1}
-              type="button"
-            >
-              {suggestion.url ? (
-                <img
-                  alt={`:${suggestion.id}:`}
-                  src={suggestion.url}
-                  className="h-5 w-5 object-contain"
-                  draggable={false}
-                />
-              ) : (
-                <span className="text-lg leading-none">
-                  {suggestion.native}
+        <div aria-label="Emoji suggestions" role="listbox">
+          <VirtualizedList
+            className="max-h-48"
+            estimateSize={36}
+            getItemKey={(suggestion) => suggestion.id}
+            items={suggestions}
+            onVirtualizer={handleVirtualizer}
+            renderItem={(suggestion, index) => (
+              <div
+                aria-label={`:${suggestion.id}:`}
+                aria-selected={index === selectedIndex}
+                className={cn(
+                  "flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-1.5 text-left text-sm",
+                  index === selectedIndex
+                    ? "bg-accent text-accent-foreground"
+                    : "text-popover-foreground hover:bg-accent/50",
+                )}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  onSelect(suggestion);
+                }}
+                role="option"
+                tabIndex={-1}
+              >
+                {suggestion.url ? (
+                  <img
+                    alt=""
+                    src={suggestion.url}
+                    className="h-5 w-5 object-contain"
+                    draggable={false}
+                  />
+                ) : (
+                  <span aria-hidden="true" className="text-lg leading-none">
+                    {suggestion.native}
+                  </span>
+                )}
+                <span
+                  aria-hidden="true"
+                  className="truncate text-muted-foreground"
+                >
+                  :{suggestion.id}:
                 </span>
-              )}
-              <span className="truncate text-muted-foreground">
-                :{suggestion.id}:
-              </span>
-            </button>
-          )}
-        />
+              </div>
+            )}
+          />
+        </div>
+        {searchFailed ? (
+          <p className="px-3 py-1 text-2xs text-muted-foreground" role="status">
+            Community emoji search failed. Showing local matches only.
+          </p>
+        ) : null}
       </div>
     </div>
   );

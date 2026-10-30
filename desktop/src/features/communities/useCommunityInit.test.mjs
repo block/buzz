@@ -176,3 +176,28 @@ for (const failingUpdate of [0, 1]) {
     assert.equal(pendingTrust.length, failingUpdate + 1);
   });
 }
+
+test("switching community drops the emoji catalog caches", async () => {
+  const { emojiResolver } = await import(
+    "@/features/custom-emoji/emojiCatalog"
+  );
+  const usage = await import("@/features/custom-emoji/emojiUsageStore");
+  const { result, rerender } = renderHook(
+    ({ community }) =>
+      useCommunityInit(community, community.id, false, false, [a, b]),
+    { initialProps: { community: b } },
+  );
+  await waitFor(() => assert.equal(result.current.isReady, true));
+
+  const warmed = { shortcode: "bufo_joy", url: "https://x/bufo.png" };
+  emojiResolver.remember([warmed]);
+  usage.loadEmojiUsage(b.relayUrl);
+  usage.recordEmojiUse(warmed);
+  assert.deepEqual(emojiResolver.lookup("bufo_joy"), warmed);
+  assert.equal(usage.getEmojiUsageSnapshot().length, 1);
+
+  rerender({ community: a });
+  await waitFor(() => assert.equal(result.current.appliedKey, a.id));
+  assert.equal(emojiResolver.lookup("bufo_joy"), undefined);
+  assert.equal(usage.getEmojiUsageSnapshot().length, 0);
+});

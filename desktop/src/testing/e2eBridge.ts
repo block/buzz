@@ -1,4 +1,5 @@
 import * as React from "react";
+import { mockSearchEmojiEntries } from "./e2eEmojiCatalog";
 import { createRoot, type Root } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AgentSessionThreadPanel } from "@/features/channels/ui/AgentSessionThreadPanel";
@@ -14487,6 +14488,10 @@ export function maybeInstallE2eTauriMocks() {
         return handleLeaveChannel(
           payload as Parameters<typeof handleLeaveChannel>[0],
           activeConfig,
+        );
+      case "search_emoji_entries":
+        return mockSearchEmojiEntries(
+          payload as Parameters<typeof mockSearchEmojiEntries>[0],
         );
       case "search_messages":
         return handleSearchMessages(

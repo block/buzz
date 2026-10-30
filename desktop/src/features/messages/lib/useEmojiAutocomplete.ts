@@ -3,6 +3,13 @@ import * as React from "react";
 import { init, SearchIndex } from "emoji-mart";
 import data from "@emoji-mart/data";
 
+import { emojiAutocompleteSearcher } from "@/features/custom-emoji/emojiCatalog";
+import { EMOJI_AUTOCOMPLETE_RESULT_CAP } from "@/features/custom-emoji/emojiCatalogSource";
+import { emojiListKeyAction } from "@/features/custom-emoji/emojiListKeys";
+import {
+  getEmojiUsageSnapshot,
+  recordEmojiUse,
+} from "@/features/custom-emoji/emojiUsageStore";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 import {
   fuzzyStandardEmoji,
@@ -18,11 +25,23 @@ export type EmojiSuggestion = {
   native: string;
   /** Set for custom (image) emoji; absent for standard unicode emoji. */
   url?: string;
+  /** The unrewritten custom emoji URL, as published. */
+  sourceUrl?: string;
 };
 
 const EMOJI_DEBOUNCE_MS = 120;
 const MIN_QUERY_LENGTH = 2;
 const UNLIMITED_RESULTS = Number.POSITIVE_INFINITY;
+
+function toCustomSuggestion(e: CustomEmoji): EmojiSuggestion {
+  return {
+    id: e.shortcode,
+    name: e.shortcode,
+    native: "",
+    url: rewriteRelayUrl(e.url),
+    sourceUrl: e.url,
+  };
+}
 
 init({ data });
 
@@ -52,6 +71,11 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
   const [emojiStartIndex, setEmojiStartIndex] = React.useState(0);
   const [emojiSelectedIndex, setEmojiSelectedIndex] = React.useState(0);
   const [suggestions, setSuggestions] = React.useState<EmojiSuggestion[]>([]);
+  const [isSearchFailed, setIsSearchFailed] = React.useState(false);
+  const suggestionsRef = React.useRef(suggestions);
+  suggestionsRef.current = suggestions;
+  const selectedIndexRef = React.useRef(emojiSelectedIndex);
+  selectedIndexRef.current = emojiSelectedIndex;
 
   // Keep the latest custom emoji list in a ref so the search effect can read it
   // without re-running on every list-identity change.
@@ -74,24 +98,62 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
 
   React.useEffect(() => {
     if (emojiQuery === null) {
+      // Also drops a relay search still waiting out its debounce.
+      void emojiAutocompleteSearcher.request("");
       setSuggestions([]);
+      setIsSearchFailed(false);
       return;
     }
 
     let cancelled = false;
+    let standard: EmojiSuggestion[] = [];
+    let fuzzy: EmojiSuggestion[] = [];
+    let relayMatches: EmojiSuggestion[] = [];
+    let localReady = false;
 
-    // Custom emoji match by shortcode, separator-insensitive and fuzzy.
+    // Custom emoji match by shortcode, separator-insensitive and fuzzy. The
+    // pool is the legacy union plus recently used catalog emoji; the rest of
+    // the catalog comes from the relay.
+    const legacy = customEmojiRef.current;
+    const legacyNames = new Set(legacy.map((e) => e.shortcode));
+    const pool = [
+      ...legacy,
+      ...getEmojiUsageSnapshot().filter((e) => !legacyNames.has(e.shortcode)),
+    ];
     const customMatches: EmojiSuggestion[] = rankByShortcode(
       emojiQuery,
-      customEmojiRef.current,
+      pool,
       (e) => e.shortcode,
       UNLIMITED_RESULTS,
-    ).map((e) => ({
-      id: e.shortcode,
-      name: e.shortcode,
-      native: "",
-      url: rewriteRelayUrl(e.url),
-    }));
+    ).map(toCustomSuggestion);
+
+    const publish = (resetSelection: boolean) => {
+      const shown = new Set<string>(customMatches.map((e) => e.id));
+      // Rank exact/prefix shortcode matches across custom and standard emoji
+      // before semantic and weaker matches (for example, `joy` before
+      // `bufo_joy`). Keep emoji-mart's name/keyword results ahead of loose
+      // substring and subsequence matches.
+      const next = rankShortcodeMatchesFirst(
+        emojiQuery,
+        [
+          ...standard,
+          ...customMatches,
+          ...relayMatches.filter((e) => !shown.has(e.id)),
+          ...fuzzy,
+        ],
+        (emoji) => emoji.id,
+      ).slice(0, EMOJI_AUTOCOMPLETE_RESULT_CAP);
+      const selectedId = suggestionsRef.current[selectedIndexRef.current]?.id;
+      setSuggestions(next);
+      setEmojiSelectedIndex(
+        resetSelection
+          ? 0
+          : Math.max(
+              0,
+              next.findIndex((e) => e.id === selectedId),
+            ),
+      );
+    };
 
     SearchIndex.search(emojiQuery, {
       caller: "useEmojiAutocomplete",
@@ -106,7 +168,7 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
           }> | null,
         ) => {
           if (cancelled) return;
-          const standard: EmojiSuggestion[] = (results ?? [])
+          standard = (results ?? [])
             .map((emoji) => ({
               id: emoji.id,
               name: emoji.name,
@@ -119,31 +181,32 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
           const shown = new Set<string>(
             [...customMatches, ...standard].map((e) => e.id),
           );
-          const fuzzy: EmojiSuggestion[] = fuzzyStandardEmoji(
-            emojiQuery,
-            UNLIMITED_RESULTS,
-            shown,
-          ).map((e) => ({ id: e.id, name: e.name, native: e.native }));
-          // Rank exact/prefix shortcode matches across custom and standard emoji
-          // before semantic and weaker matches (for example, `joy` before
-          // `bufo_joy`). Keep emoji-mart's name/keyword results ahead of loose
-          // substring and subsequence matches.
-          setSuggestions(
-            rankShortcodeMatchesFirst(
-              emojiQuery,
-              [...standard, ...customMatches, ...fuzzy],
-              (emoji) => emoji.id,
-            ),
+          fuzzy = fuzzyStandardEmoji(emojiQuery, UNLIMITED_RESULTS, shown).map(
+            (e) => ({ id: e.id, name: e.name, native: e.native }),
           );
-          setEmojiSelectedIndex(0);
+          localReady = true;
+          publish(relayMatches.length === 0);
         },
       )
       .catch(() => {
         if (cancelled) return;
         // emoji-mart failed; still surface custom matches.
-        setSuggestions(customMatches);
-        setEmojiSelectedIndex(0);
+        localReady = true;
+        publish(true);
       });
+
+    void emojiAutocompleteSearcher.request(emojiQuery).then((outcome) => {
+      if (cancelled) return;
+      if (outcome.status === "error") {
+        console.warn("Community emoji search failed.", outcome.error);
+        setIsSearchFailed(true);
+        return;
+      }
+      if (outcome.status !== "ok") return;
+      setIsSearchFailed(false);
+      relayMatches = outcome.results.map(toCustomSuggestion);
+      if (localReady) publish(false);
+    });
 
     return () => {
       cancelled = true;
@@ -163,6 +226,12 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
       // standard emoji insert their native unicode. Both get a trailing
       // space.
       const isCustom = Boolean(suggestion.url);
+      if (isCustom && suggestion.sourceUrl) {
+        recordEmojiUse({
+          shortcode: suggestion.id,
+          url: suggestion.sourceUrl,
+        });
+      }
       const insertText = isCustom ? " " : `${suggestion.native} `;
 
       setEmojiQuery(null);
@@ -229,47 +298,32 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
         return { handled: false };
       }
 
-      if (event.key === "ArrowDown") {
-        event.preventDefault();
+      // Forward Tab selects; Shift+Tab deliberately does not. The reverse
+      // move stays the browser's, so this overlay can't swallow a keyboard
+      // user's way back out (see useMentions for the same split).
+      const action = emojiListKeyAction(event, { tabSelects: true });
+      if (action === null) return { handled: false };
+      event.preventDefault();
+      if (action === "next") {
         setEmojiSelectedIndex((current) =>
           current < suggestions.length - 1 ? current + 1 : 0,
         );
         return { handled: true };
       }
-
-      if (event.key === "ArrowUp") {
-        event.preventDefault();
+      if (action === "prev") {
         setEmojiSelectedIndex((current) =>
           current > 0 ? current - 1 : suggestions.length - 1,
         );
         return { handled: true };
       }
-
-      // Forward Tab selects; Shift+Tab deliberately does not. The reverse
-      // move stays the browser's, so this overlay can't swallow a keyboard
-      // user's way back out (see useMentions for the same split).
-      if (
-        (event.key === "Tab" && !event.shiftKey) ||
-        (event.key === "Enter" &&
-          !event.ctrlKey &&
-          !event.metaKey &&
-          !event.altKey &&
-          !event.shiftKey)
-      ) {
-        event.preventDefault();
+      if (action === "select") {
         return {
           handled: true,
           suggestion: suggestions[emojiSelectedIndex],
         };
       }
-
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setEmojiQuery(null);
-        return { handled: true };
-      }
-
-      return { handled: false };
+      setEmojiQuery(null);
+      return { handled: true };
     },
     [isEmojiAutocompleteOpen, emojiSelectedIndex, suggestions],
   );
@@ -281,6 +335,7 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
     handleEmojiKeyDown,
     insertEmoji,
     isEmojiAutocompleteOpen,
+    isSearchFailed,
     updateEmojiQuery,
   };
 }

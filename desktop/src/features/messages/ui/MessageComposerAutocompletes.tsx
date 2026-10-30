@@ -66,6 +66,7 @@ export function MessageComposerAutocompletes({
       <EmojiAutocomplete
         composerOwnsFocus={composerOwnsFocus}
         onSelect={onEmojiSelect}
+        searchFailed={emojiAutocomplete.isSearchFailed}
         selectedIndex={emojiAutocomplete.emojiSelectedIndex}
         suggestions={
           emojiAutocomplete.isEmojiAutocompleteOpen
