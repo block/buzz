@@ -7,7 +7,7 @@ import '../../shared/relay/relay.dart';
 import '../channels/channel.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/channels_provider.dart';
-import 'channel_search_score.dart';
+import 'name_match.dart';
 
 @immutable
 class SearchHit {
@@ -94,7 +94,7 @@ class SearchState {
 }
 
 /// Most channel rows one query shows, ranked best first.
-const searchChannelResultLimit = 20;
+const searchChannelResultLimit = 8;
 
 class SearchNotifier extends Notifier<SearchState> {
   Timer? _debounce;
@@ -265,13 +265,16 @@ class SearchNotifier extends Notifier<SearchState> {
   }
 
   /// Ranks the loaded channels against the current query with the same rules
-  /// as desktop search.
+  /// as desktop (buzz-app `SearchResults.tsx`): name match rank first, an
+  /// archived channel half a step behind a live one, then joined channels
+  /// before open ones and list order.
   void _refreshChannels() {
     final query = state.query;
     if (query.isEmpty) return;
-    final lowerQuery = query.toLowerCase();
+    final needle = query.toLowerCase().replaceFirst(RegExp(r'^#'), '');
+    if (needle.isEmpty) return;
     final channels = ref.read(channelsProvider).value ?? const <Channel>[];
-    final ranked = <({Channel channel, int score})>[];
+    final ranked = <({Channel channel, double rank, int order})>[];
     for (final channel in channels) {
       if (channel.isDm) continue;
       // An archived channel stays findable only by its members.
@@ -279,20 +282,18 @@ class SearchNotifier extends Notifier<SearchState> {
           ? channel.isMember
           : channel.visibility == 'open' || channel.isMember;
       if (!visible) continue;
-      final score = scoreChannelMatch(
-        name: channel.name,
-        description: channel.description,
-        lowerQuery: lowerQuery,
-      );
-      if (score == null) continue;
-      ranked.add((channel: channel, score: score));
+      final rank = matchRank(channel.name, needle);
+      if (rank == null) continue;
+      ranked.add((
+        channel: channel,
+        rank: rank + (channel.isArchived ? 0.5 : 0),
+        // Joined channels win ties, then the list keeps its own order.
+        order: ranked.length + (channel.isMember ? 0 : channels.length),
+      ));
     }
     ranked.sort((a, b) {
-      final byScore = a.score.compareTo(b.score);
-      if (byScore != 0) return byScore;
-      return a.channel.name.toLowerCase().compareTo(
-        b.channel.name.toLowerCase(),
-      );
+      final byRank = a.rank.compareTo(b.rank);
+      return byRank != 0 ? byRank : a.order.compareTo(b.order);
     });
     state = state.copyWith(
       channelResults: [

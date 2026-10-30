@@ -53,9 +53,19 @@ void main() {
     expect(spinner, findsOneWidget);
     expect(unjoined, findsNothing);
 
+    final joined = find.byKey(
+      const ValueKey('search-channel-row-team-4things-id'),
+    );
+    expect(joined, findsOneWidget);
+
     channels.finishDirectory();
     await tester.pump();
     expect(unjoined, findsOneWidget);
+    // Match rank comes before membership: the exact name leads.
+    expect(
+      tester.getTopLeft(unjoined).dy,
+      lessThan(tester.getTopLeft(joined).dy),
+    );
     expect(
       find.descendant(of: unjoined, matching: find.text('Open')),
       findsOneWidget,
@@ -72,7 +82,7 @@ void main() {
     expect(spinner, findsNothing);
     expect(unjoined, findsOneWidget);
 
-    // A one-letter typo still finds the member channel, like desktop.
+    // Letters in order still find the member channel, like desktop.
     await tester.enterText(find.byType(TextField), 'genral');
     await tester.pump(const Duration(milliseconds: 300));
     // The directory is already loaded for this community.
@@ -175,7 +185,10 @@ class _DirectoryChannels extends ChannelsNotifier {
   void finishDirectory() => _directory.complete();
 
   @override
-  Future<List<Channel>> build() async => [_channel('general', isMember: true)];
+  Future<List<Channel>> build() async => [
+    _channel('general', isMember: true),
+    _channel('team-4things', isMember: true),
+  ];
 
   @override
   Future<void> ensureDirectoryLoaded() async {
