@@ -2,6 +2,7 @@ import { ImagePlus, Trash2 } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
+import { customEmojiCatalogNotice } from "@/features/custom-emoji/catalogStatus";
 import {
   useCustomEmojiCatalogStatus,
   useCustomEmojiQuery,
@@ -34,13 +35,7 @@ export function CustomEmojiSettingsCard() {
   const { data: community = [], isLoading: communityLoading } =
     useCustomEmojiQuery();
   const catalogStatus = useCustomEmojiCatalogStatus();
-  const catalogNotice = catalogStatus.refreshFailed
-    ? "Could not refresh community emoji. Showing the last loaded list."
-    : catalogStatus.droppedEntries > 0
-      ? `Community emoji list is too large. ${catalogStatus.droppedEntries} emoji are hidden.`
-      : catalogStatus.setLimitReached
-        ? "Community emoji list may be incomplete."
-        : null;
+  const catalogNotice = customEmojiCatalogNotice(catalogStatus);
   const setEmoji = useSetCustomEmojiMutation();
   const removeEmoji = useRemoveCustomEmojiMutation();
 

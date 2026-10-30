@@ -84,3 +84,95 @@ test("the query publishes the catalog report for the hook to read", async (t) =>
   assert.equal(report.setLimitReached, true);
   assert.equal(report.droppedEntries, COMMUNITY_EMOJI_SET_LIMIT - 1);
 });
+
+import {
+  customEmojiCatalogNotice,
+  customEmojiCatalogStatus,
+} from "./catalogStatus.ts";
+
+async function observe(t, responses) {
+  t.mock.method(console, "warn", () => {});
+  t.mock.method(relayClient, "fetchEvents", async () => {
+    const next = responses.shift();
+    if (next instanceof Error) throw next;
+    return next;
+  });
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const observer = new QueryObserver(queryClient, {
+    queryKey: customEmojiQueryKey,
+    queryFn: customEmojiQueryFn(queryClient),
+  });
+  const unsubscribe = observer.subscribe(() => {});
+  t.after(unsubscribe);
+  const status = () =>
+    customEmojiCatalogStatus(
+      observer.getCurrentResult(),
+      queryClient.getQueryData(customEmojiCatalogReportQueryKey),
+    );
+  return { observer, queryClient, status };
+}
+
+test("status flags a failed first load, not just a failed refresh", async (t) => {
+  const { observer, status } = await observe(t, [
+    new Error("timeout"),
+    [setEvent([["emoji", "a", "https://r/a.png"]])],
+    new Error("down"),
+  ]);
+  await observer.refetch();
+  assert.deepEqual(
+    { failed: status().refreshFailed, has: status().hasCatalog },
+    { failed: true, has: false },
+  );
+  assert.equal(
+    customEmojiCatalogNotice(status()),
+    "Could not load community emoji.",
+  );
+
+  await observer.refetch();
+  assert.equal(status().refreshFailed, false);
+  assert.equal(customEmojiCatalogNotice(status()), null);
+
+  await observer.refetch();
+  assert.equal(status().refreshFailed, true);
+  assert.equal(status().hasCatalog, true);
+  assert.match(customEmojiCatalogNotice(status()), /last loaded list/);
+});
+
+test("the catalog report is never garbage-collected", async (t) => {
+  const { observer, queryClient } = await observe(t, [
+    [setEvent([["emoji", "a", "https://r/a.png"]])],
+  ]);
+  await observer.refetch();
+  const query = queryClient
+    .getQueryCache()
+    .find({ queryKey: customEmojiCatalogReportQueryKey });
+  assert.equal(query.gcTime, Number.POSITIVE_INFINITY);
+});
+
+test("notice text covers every status branch", () => {
+  const base = {
+    refreshFailed: false,
+    hasCatalog: true,
+    setLimitReached: false,
+    droppedEntries: 0,
+  };
+  assert.equal(customEmojiCatalogNotice(base), null);
+  assert.match(
+    customEmojiCatalogNotice({ ...base, droppedEntries: 7 }),
+    /7 emoji are hidden/,
+  );
+  assert.match(
+    customEmojiCatalogNotice({ ...base, setLimitReached: true }),
+    /incomplete/,
+  );
+  assert.match(
+    customEmojiCatalogNotice({
+      ...base,
+      refreshFailed: true,
+      droppedEntries: 7,
+    }),
+    /Could not refresh/,
+  );
+});

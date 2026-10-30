@@ -17,6 +17,10 @@ import {
 } from "@/shared/api/customEmoji";
 import { relayClient } from "@/shared/api/relayClient";
 import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
+import {
+  customEmojiCatalogStatus,
+  type CustomEmojiCatalogStatus,
+} from "@/features/custom-emoji/catalogStatus";
 import type { CommunityEmojiCatalog } from "@/shared/api/customEmoji";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 
@@ -51,7 +55,7 @@ export const customEmojiQueryKey = ["custom-emoji"] as const;
 /** Query key for the caller's OWN editable 30030 set (distinct from the union). */
 export const ownCustomEmojiQueryKey = ["custom-emoji-own"] as const;
 
-/** Holds the last catalog report (`setLimitReached`, `droppedEntries`); written by the palette query. */
+/** Holds the last catalog report (`setLimitReached`, `droppedEntries`); written by the palette query and never garbage-collected, so it outlives the poll interval. */
 export const customEmojiCatalogReportQueryKey = [
   "custom-emoji-catalog-report",
 ] as const;
@@ -69,6 +73,9 @@ export function customEmojiQueryFn(
   queryClient: QueryClient,
 ): () => Promise<CustomEmoji[]> {
   return async () => {
+    queryClient.setQueryDefaults(customEmojiCatalogReportQueryKey, {
+      gcTime: Number.POSITIVE_INFINITY,
+    });
     const { emoji, ...report } = await fetchCommunityEmojiCatalog();
     queryClient.setQueryData<CatalogReport>(
       customEmojiCatalogReportQueryKey,
@@ -162,27 +169,14 @@ export function useCustomEmoji(): CustomEmoji[] {
   return useCustomEmojiQuery().data ?? [];
 }
 
-export type CustomEmojiCatalogStatus = {
-  /** The latest refresh failed; the palette still shows the last good catalog. */
-  refreshFailed: boolean;
-  /** The relay returned the full set limit, so some sets may be missing. */
-  setLimitReached: boolean;
-  /** Entries left out of the palette by the entry cap. */
-  droppedEntries: number;
-};
-
 /** Health of the community palette for UI that needs more than the list. */
 export function useCustomEmojiCatalogStatus(): CustomEmojiCatalogStatus {
-  const { isRefetchError } = useCustomEmojiQuery();
+  const palette = useCustomEmojiQuery();
   const { data: report } = useQuery<CatalogReport>({
     queryKey: customEmojiCatalogReportQueryKey,
     queryFn: skipToken,
   });
-  return {
-    refreshFailed: isRefetchError,
-    setLimitReached: report?.setLimitReached ?? false,
-    droppedEntries: report?.droppedEntries ?? 0,
-  };
+  return customEmojiCatalogStatus(palette, report);
 }
 
 export function useSetCustomEmojiMutation() {

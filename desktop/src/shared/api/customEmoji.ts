@@ -177,6 +177,7 @@ export function buildCommunityEmojiCatalog(
   };
 }
 
+/** Union of member sets as a plain list; see `buildCommunityEmojiCatalog`. */
 export function unionCustomEmoji(
   events: ReadonlyArray<RelayEvent>,
 ): CustomEmoji[] {
