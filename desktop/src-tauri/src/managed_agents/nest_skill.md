@@ -67,6 +67,8 @@ Output varies by command group — `--help` shows flags but not response shapes.
 | `mem hash` | SHA-256 hex string |
 | `mem set/patch/rm` | nothing to stdout; progress to stderr |
 | `mem ls` | tab-delimited (`slug\tcreated_at\tevent_id`) by default; `--json` for JSON array |
+| `pins list` | `{channel_id, pins: [{event_id, pin_event_id, pinned_by, pinned_at, message: {id, pubkey, kind, created_at, content} \| null}]}` — newest pin first |
+| `pins add/rm` | `{channel_id, message_id, accepted, message}`; `add` adds `event_id` (the pin), `rm` adds `removed` (pin event ids); `message` is `unchanged` when nothing was published |
 | `reactions get` | `{"reactions": [{emoji, count, pubkeys}]}` — aggregated, not raw events |
 | `pack validate/inspect` | human-readable text, not JSON |
 

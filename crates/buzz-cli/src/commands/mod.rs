@@ -13,6 +13,7 @@ pub mod moderation;
 pub mod notes;
 pub mod pack;
 pub mod patches;
+pub mod pins;
 pub mod pr;
 pub mod project_channel;
 pub mod projects;
