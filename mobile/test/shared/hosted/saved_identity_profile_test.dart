@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:buzz/shared/hosted/saved_identity_profile.dart';
@@ -93,80 +94,80 @@ void main() {
     });
   }
 
-  for (final invalid in [false, true]) {
-    test(
-      'loads only the saved key profile; invalid signature: $invalid',
-      () async {
-        final records = jsonEncode([
-          {
-            'name': 'Other',
-            'relayUrl': 'wss://other.example',
-            'pubkey': other.public,
-            'nsec': other.nsec,
-          },
-          {
-            'name': 'Unavailable',
-            'relayUrl': 'wss://offline.example',
-            'pubkey': keys.public,
-            'nsec': keys.nsec,
-          },
-          {
-            'name': 'Home',
-            'relayUrl': 'wss://home.example',
-            'pubkey': keys.public,
-            'nsec': keys.nsec,
-          },
-        ]);
-        FlutterSecureStorage.setMockInitialValues({
-          'buzz_communities': records,
-        });
-        final event =
-            jsonDecode(
-                  signNostrEvent(
-                    kind: 0,
-                    secretKey: secret,
-                    content: jsonEncode({
-                      'name': 'Real name',
-                      'picture': 'https://home.example/avatar.png',
-                    }),
-                  ).toJson(),
-                )
-                as Map<String, dynamic>;
-        if (invalid) event['sig'] = '0' * 128;
-        final requests = <String>[];
-        final container = ProviderContainer(
-          overrides: [
-            savedIdentityProfileClientProvider.overrideWithValue(
-              () => MockClient((request) async {
-                requests.add(request.url.host);
-                expect(request.followRedirects, isFalse);
-                expect(request.headers['Authorization'], startsWith('Nostr '));
-                expect(jsonDecode(request.body)[0]['authors'], [keys.public]);
-                if (request.url.host == 'offline.example') {
-                  return http.Response('', 503);
-                }
-                return http.Response(jsonEncode([event]), 200);
-              }),
-            ),
-          ],
-        );
-        addTearDown(container.dispose);
-        final profile = await container.read(
-          savedIdentityProfileProvider(keys.public).future,
-        );
-        expect(requests, ['offline.example', 'home.example']);
-        if (invalid) {
-          expect(profile, isNull);
-        } else {
-          expect(profile?.displayName, 'Real name');
-          expect(profile?.avatarUrl, 'https://home.example/avatar.png');
-        }
-        expect(
-          await const FlutterSecureStorage().read(key: 'buzz_communities'),
-          records,
-        );
-      },
-    );
+  for (final variant in ['valid', 'invalid signature', 'raw gzip']) {
+    final invalid = variant == 'invalid signature';
+    test('loads only the saved key profile: $variant', () async {
+      final records = jsonEncode([
+        {
+          'name': 'Other',
+          'relayUrl': 'wss://other.example',
+          'pubkey': other.public,
+          'nsec': other.nsec,
+        },
+        {
+          'name': 'Unavailable',
+          'relayUrl': 'wss://offline.example',
+          'pubkey': keys.public,
+          'nsec': keys.nsec,
+        },
+        {
+          'name': 'Home',
+          'relayUrl': 'wss://home.example',
+          'pubkey': keys.public,
+          'nsec': keys.nsec,
+        },
+      ]);
+      FlutterSecureStorage.setMockInitialValues({'buzz_communities': records});
+      final event =
+          jsonDecode(
+                signNostrEvent(
+                  kind: 0,
+                  secretKey: secret,
+                  content: jsonEncode({
+                    'name': 'Real name',
+                    'picture': 'https://home.example/avatar.png',
+                  }),
+                ).toJson(),
+              )
+              as Map<String, dynamic>;
+      if (invalid) event['sig'] = '0' * 128;
+      final requests = <String>[];
+      final container = ProviderContainer(
+        overrides: [
+          savedIdentityProfileClientProvider.overrideWithValue(
+            () => MockClient((request) async {
+              requests.add(request.url.host);
+              expect(request.followRedirects, isFalse);
+              expect(request.headers['Authorization'], startsWith('Nostr '));
+              expect(jsonDecode(request.body)[0]['authors'], [keys.public]);
+              if (request.url.host == 'offline.example') {
+                return http.Response('', 503);
+              }
+              final json = jsonEncode([event]);
+              if (variant == 'raw gzip') {
+                return http.Response.bytes(gzip.encode(utf8.encode(json)), 200);
+              }
+              return http.Response(json, 200);
+            }),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      final profile = await container.read(
+        savedIdentityProfileProvider(keys.public).future,
+      );
+      expect(requests, ['offline.example', 'home.example']);
+      if (invalid || variant == 'raw gzip') {
+        expect(profile, isNull);
+      } else {
+        expect(profile?.displayName, 'Real name');
+        expect(profile?.avatarUrl, 'https://home.example/avatar.png');
+      }
+      expect(
+        await const FlutterSecureStorage().read(key: 'buzz_communities'),
+        records,
+      );
+    });
   }
 }
 

@@ -108,6 +108,9 @@ Future<UserProfile?> _decodeProfile(
   String? contentType,
   String pubkey,
 ) => Isolate.run(() {
+  // The transport normally inflates HTTP gzip before the byte cap. Reject
+  // raw gzip here so the shared parser cannot expand a second, uncapped body.
+  if (bytes.length > 2 && bytes[0] == 0x1f && bytes[1] == 0x8b) return null;
   final events = parseRelayQueryEvents(bytes, contentType);
   for (final event in events) {
     if (event.kind != 0 || event.pubkey != pubkey) continue;
