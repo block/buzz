@@ -1,6 +1,6 @@
 import * as React from "react";
 import { ChevronRight, ExternalLink, Plus, Search } from "lucide-react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalUrl } from "@/shared/lib/openExternalUrl";
 
 import {
   useAcpRuntimesQueryForced,
@@ -509,7 +509,7 @@ function CatalogDetail({ entry }: { entry: AcpRuntimeCatalogEntry }) {
             ? `harness-catalog-setup-${entry.id}`
             : `harness-catalog-docs-${entry.id}`
         }
-        onClick={() => void openUrl(docsUrl)}
+        onClick={() => void openExternalUrl(docsUrl)}
         type="button"
         variant={action.kind === "docs" ? "default" : "outline"}
       >
