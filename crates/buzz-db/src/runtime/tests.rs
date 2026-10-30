@@ -3325,7 +3325,7 @@ async fn armed_pool_rejects_old_channel_inserts_through_public_api() {
         .await
         .expect("fresh insert passes the armed guard");
 
-    // db pool still holds connections to the dropped DB; close it.
+    // Close before the `scratch` guard force-drops the database on return.
     db.pool.close().await;
 }
 
