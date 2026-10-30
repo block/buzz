@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
 
@@ -15,6 +16,7 @@ import '../community/community_storage_test.dart' show FakeSecureStorage;
 import 'package:buzz/features/age_gate/age_signal_provider.dart';
 import 'package:buzz/features/home/home_page.dart';
 import 'package:buzz/shared/auth/auth.dart';
+import 'package:buzz/shared/crypto/nip44.dart';
 import 'package:buzz/shared/push/dev_push_lease.dart';
 import 'package:buzz/shared/push/push_bootstrap.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
@@ -336,6 +338,254 @@ void main() {
   );
 
   testWidgets(
+    'inactive ownership switches and shared renewal keep the active grant current',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keys = nostr.Keys.generate();
+      final communities = [
+        for (final name in ['one', 'two'])
+          Community.create(
+            name: name,
+            relayUrl: 'https://$name.example',
+            nsec: keys.nsec,
+            pubkey: keys.public,
+          ).copyWith(
+            pushSubscriptionState: BuzzPushLeaseSubscriptionState.desired(
+              desired: [
+                BuzzPushSubscription(
+                  filter: BuzzPushFilter(kinds: [9], pTags: [keys.public]),
+                  notificationClass: 'default',
+                ),
+              ],
+            ),
+          ),
+      ];
+      final storage = CommunityStorage(secure: FakeSecureStorage());
+      for (final community in communities) {
+        await storage.save(community);
+      }
+      final pending = Completer<Community?>();
+      Future<Community?> selection = pending.future;
+      final discoveries = <String>[];
+      var restoring = false;
+      final session = _ConnectedSession(
+        initialStatus: SessionStatus.disconnected,
+      );
+      final relayKey = nostr.Keys('2' * 64).public;
+      final descriptor = BuzzPushLeaseDescriptor(
+        origin: 'wss://one.example',
+        executorKeyId: 'key',
+        executorPubkey: relayKey,
+        transport: 'apns',
+        maxLeaseTtlSeconds: 3600,
+        maxContentLength: 65536,
+        maxPlaintextLength: 32768,
+        maxEndpointLength: 2048,
+        maxStringLength: 512,
+      );
+      final expiresAt = DateTime.now().millisecondsSinceEpoch ~/ 1000 + 3600;
+      Map<String, Object> grant(String name, int generation) => {
+        'relayOrigin': 'wss://$name.example',
+        'relayPubkey': relayKey,
+        'installationId': '0' * 32,
+        'endpointGrant': 'g2_shared_$generation',
+        'endpointHash': 'b' * 64,
+        'endpointEpoch': 1,
+        'generation': generation,
+        'expiresAt': expiresAt,
+        'gatewayInstallationHandle': '22222222-2222-4222-8222-222222222222',
+        'appAttestKeyId': 'installed-key',
+      };
+      var nativeA = grant('one', 1);
+      var nativeB = grant('two', 1);
+      var pendingB = false;
+      var activeEnrollments = 0;
+      var inactiveEnrollments = 0;
+      final lostIssuance = Completer<Map<String, Object>>();
+      final activeRecovery = Completer<Map<String, Object>>();
+      final inactiveRecovery = Completer<Map<String, Object>>();
+      const native = MethodChannel('buzz/push');
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(native, (
+        call,
+      ) async {
+        switch (call.method) {
+          case 'endpointGrants':
+            return [
+              nativeA,
+              nativeB,
+              if (pendingB)
+                {...grant('two', 2), 'pending': true, 'endpointGrant': ''},
+            ];
+          case 'enrollPush':
+            final origin = (call.arguments as Map)['relayUrl'] as String;
+            if (origin == 'wss://one.example') {
+              activeEnrollments++;
+              if (activeEnrollments == 1) return nativeA;
+              if (activeEnrollments == 2) return activeRecovery.future;
+              nativeA = grant('one', 4);
+              return nativeA;
+            }
+            expect(origin, 'wss://two.example');
+            inactiveEnrollments++;
+            if (inactiveEnrollments == 1) return lostIssuance.future;
+            if (inactiveEnrollments == 2) return inactiveRecovery.future;
+            throw PlatformException(code: 'inactive_handoff_unavailable');
+          case 'startRegistration':
+          case 'syncPushSnapshot':
+          case 'takePendingNotificationResponse':
+            return null;
+          default:
+            throw StateError('Unexpected native call ${call.method}');
+        }
+      });
+      addTearDown(() {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          native,
+          null,
+        );
+        apnsDeviceToken.value = null;
+        pushEndpointGrants.value = [];
+      });
+      apnsDeviceToken.value = 'token';
+      await tester.pumpWidget(
+        ProviderScope(
+          retry: (_, _) => null,
+          overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            communityStorageProvider.overrideWithValue(storage),
+            communitySnapshotWriterProvider.overrideWithValue((_) async {}),
+            buzzPushLeaseRevocationStorageProvider.overrideWithValue(
+              BuzzPushLeaseRevocationStorage(secure: FakeSecureStorage()),
+            ),
+            activeCommunityProvider.overrideWith((ref) async {
+              final saved = ref.watch(communityListProvider).value;
+              final selected = await selection;
+              return saved
+                      ?.where((value) => value.id == selected?.id)
+                      .firstOrNull ??
+                  selected;
+            }),
+            relaySessionProvider.overrideWith(() => session),
+            pushSubscriptionSyncProvider.overrideWith((_) async => 0),
+            currentRelayPushDescriptorProvider.overrideWith(
+              (_) async => restoring ? descriptor : null,
+            ),
+            buzzPushDescriptorFetcherProvider.overrideWithValue((url) async {
+              discoveries.add(url);
+              if (!restoring) {
+                throw StateError('Stop before enrollment and network handoff.');
+              }
+              return descriptor;
+            }),
+          ],
+          child: const BuzzPushBootstrap(child: SizedBox()),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(discoveries, isEmpty);
+      pending.complete(null);
+      await tester.pumpAndSettle();
+      expect(discoveries, [for (final value in communities) value.relayUrl]);
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(BuzzPushBootstrap)),
+      );
+      for (final active in communities) {
+        discoveries.clear();
+        selection = Future.value(active);
+        container.invalidate(activeCommunityProvider);
+        await tester.pumpAndSettle();
+        expect(discoveries, [
+          communities.firstWhere((value) => value.id != active.id).relayUrl,
+        ]);
+      }
+      // Refreshing the same selection must not restart inactive publication.
+      discoveries.clear();
+      container.invalidate(activeCommunityProvider);
+      await tester.pumpAndSettle();
+      expect(discoveries, isEmpty);
+      // A and B share (installation, signer). B commits generation 2 but loses
+      // its response. A then recovers generation 3 while B's retry is pending.
+      restoring = true;
+      selection = Future.value(communities.first);
+      container.invalidate(activeCommunityProvider);
+      container.invalidate(currentRelayPushDescriptorProvider);
+      session.setStatus(SessionStatus.connected);
+      await tester.pumpAndSettle();
+      expect(activeEnrollments, 1);
+      expect(inactiveEnrollments, 1);
+      expect(session.published, hasLength(1));
+      nativeB = {...nativeB, 'endpointGrant': ''};
+      pendingB = true;
+      lostIssuance.completeError(
+        PlatformException(code: 'lost_grant_response'),
+      );
+      await tester.pumpAndSettle();
+      final handoff = Completer<void>();
+      session.handoff = handoff;
+      await container
+          .read(communityListProvider.notifier)
+          .updateDesiredPushSubscriptions(communities.first.id, [
+            BuzzPushSubscription(
+              filter: BuzzPushFilter(
+                kinds: [9],
+                pTags: [keys.public],
+                authors: [keys.public],
+              ),
+              notificationClass: 'default',
+            ),
+          ]);
+      await tester.pumpAndSettle();
+      expect(activeEnrollments, 2);
+      nativeA = grant('one', 3);
+      activeRecovery.complete(nativeA);
+      await tester.pumpAndSettle();
+      expect(session.published, hasLength(2));
+      expect(inactiveEnrollments, 2);
+      // B saves generation 4 before its method-channel response is lost. A's
+      // generation-3 handoff is still pending; native notifications coalesce.
+      nativeB = grant('two', 4);
+      pendingB = false;
+      inactiveRecovery.completeError(
+        PlatformException(code: 'lost_native_response'),
+      );
+      await tester.pumpAndSettle();
+      expect(activeEnrollments, 2);
+      expect(session.published, hasLength(2));
+      session.handoff = null;
+      handoff.complete();
+      await tester.pumpAndSettle();
+      expect(activeEnrollments, 3);
+      expect(session.peakPublishing, 1);
+      expect(
+        session.published.map(
+          (event) =>
+              (jsonDecode(
+                    nip44Decrypt(
+                      getConversationKey('2' * 64, event.pubkey),
+                      event.content,
+                    ),
+                  )
+                  as Map)['endpoint'],
+        ),
+        ['g2_shared_1', 'g2_shared_3', 'g2_shared_4'],
+      );
+      // The active publisher's own save and repeated identical native snapshots
+      // must settle, without another enrollment or lease-publication loop.
+      for (var i = 0; i < 3; i++) {
+        await readBuzzPushEndpointGrants();
+        await tester.pumpAndSettle();
+      }
+      expect(activeEnrollments, 3);
+      expect(session.published, hasLength(3));
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets(
     'opt-out fences late native generation recovery and journals cleanup',
     (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
@@ -541,8 +791,32 @@ class _Age extends AgeSignalNotifier {
 }
 
 class _ConnectedSession extends RelaySessionNotifier {
+  _ConnectedSession({this.initialStatus = SessionStatus.connected});
+  final SessionStatus initialStatus;
+  final published = <NostrEvent>[];
+  Completer<void>? handoff;
+  int publishing = 0;
+  int peakPublishing = 0;
+
   @override
-  SessionState build() => const SessionState(status: SessionStatus.connected);
+  SessionState build() => SessionState(status: initialStatus);
+  void setStatus(SessionStatus value) => state = SessionState(status: value);
+
+  @override
+  Future<NostrEvent> publish(
+    NostrEvent event, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    publishing++;
+    if (publishing > peakPublishing) peakPublishing = publishing;
+    published.add(event);
+    try {
+      await handoff?.future;
+      return event;
+    } finally {
+      publishing--;
+    }
+  }
 }
 
 class _Session extends RelaySessionNotifier {

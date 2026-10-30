@@ -597,7 +597,7 @@ import os.log
           grants.append([
             "relayOrigin": pending.relayOrigin, "relayPubkey": pending.relayPubkey,
             "installationId": pending.installationId, "endpointGrant": "",
-            "endpointHash": pending.endpointHash, "endpointEpoch": 1,
+            "endpointHash": pending.endpointHash, "endpointEpoch": pending.endpointEpoch,
             "generation": max(1, pending.delegationGeneration), "expiresAt": pending.expiresAt,
             "pending": true,
           ])
