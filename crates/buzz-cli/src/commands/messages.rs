@@ -51,7 +51,10 @@ fn thread_ref_from_parent_tags(
 /// - Nested reply: `root` is the parent's own root marker; `parent` is unchanged.
 ///
 /// Ensures CLI-sent replies thread correctly using the same NIP-10 logic.
-async fn fetch_event(client: &BuzzClient, event_id: &str) -> Result<serde_json::Value, CliError> {
+pub(super) async fn fetch_event(
+    client: &BuzzClient,
+    event_id: &str,
+) -> Result<serde_json::Value, CliError> {
     let filter = serde_json::json!({ "ids": [event_id], "limit": 1 });
     let raw = client.query(&filter).await?;
     let events: serde_json::Value = serde_json::from_str(&raw)
@@ -82,7 +85,10 @@ fn thread_ref_from_event(event_id: &str, event: &serde_json::Value) -> Result<Th
 
 /// Resolve the channel UUID for an event by querying for it via POST /query.
 /// Extracts the `h` tag value from the returned event's tags.
-fn channel_id_from_event(event_id: &str, event: &serde_json::Value) -> Result<Uuid, CliError> {
+pub(super) fn channel_id_from_event(
+    event_id: &str,
+    event: &serde_json::Value,
+) -> Result<Uuid, CliError> {
     let tags = event
         .get("tags")
         .and_then(|tags| tags.as_array())
@@ -973,6 +979,25 @@ pub async fn dispatch(
                 action_id,
                 reason_code.as_deref(),
                 public_reason.as_deref(),
+            )
+            .await
+        }
+        MessagesCmd::Report {
+            channel,
+            event,
+            pubkey,
+            reason,
+            note,
+        } => {
+            super::message_report::cmd_report_message(
+                client,
+                super::message_report::ReportParams {
+                    channel: channel.as_deref(),
+                    event: event.as_deref(),
+                    pubkey: pubkey.as_deref(),
+                    reason: &reason,
+                    note: note.as_deref(),
+                },
             )
             .await
         }

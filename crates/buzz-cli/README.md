@@ -39,6 +39,8 @@ buzz messages search --query "architecture"
 buzz messages search --author <pubkey|npub|name> --since <unix-ts>
 buzz messages edit --event <event-id> --content "Updated text"
 buzz messages delete --event <event-id>
+buzz messages report --event <event-id> --reason spam --note "why"   # to moderators only
+buzz messages report --pubkey <pubkey> --reason impersonation
 
 # Diffs
 buzz messages send-diff --channel <uuid> --diff - --repo https://github.com/org/repo --commit abc123 < diff.patch
@@ -124,6 +126,7 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `send-diff` | Send a code diff with metadata |
 | | `edit` | Edit a message you sent |
 | | `delete` | Delete a message |
+| | `report` | Report a message or user to community moderators (NIP-56); reasons: `illegal`, `nudity`, `malware`, `spam`, `impersonation`, `profanity`, `other` |
 | | `get` | List messages in a channel |
 | | `thread` | Get a message thread |
 | | `search` | Full-text search, filterable by author |
