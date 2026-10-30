@@ -122,9 +122,9 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
   /// All starter work is fenced to the community and identity that started it.
   /// A partial setup remains recoverable, so a failed operation deliberately
   /// propagates to the invite flow instead of being reported as success. The
-  /// one exception is a starter name the relay reports as already held by a
-  /// channel that cannot serve as the starter: that is permanent, so the
-  /// starter is skipped instead of blocking the join.
+  /// one exception is a starter whose name or id the relay reports as taken
+  /// by a channel the directory shows cannot serve as the starter: that is
+  /// permanent, so the starter is skipped instead of blocking the join.
   @override
   Future<String?> ensureStarterChannels() async {
     _ensureScopeCurrent();
@@ -155,17 +155,20 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
           _ensureScopeCurrent();
           channels = await _loadChannels();
           _ensureScopeCurrent();
-          channel =
+          final holder =
               _findStarterChannel(channels, starter.slug) ??
               channels
                   .where((candidate) => candidate.id == channelId)
-                  .firstOrNull;
-          // The relay reserves a listed channel's name, archived ones
-          // included, so a taken name will never become creatable on retry.
-          // An archived or non-stream namesake cannot serve as the starter, so
-          // skip it rather than strand the invite in permanent recovery.
-          if (channel == null && nameTaken) continue;
-          if (channel == null) rethrow;
+                  .firstOrNull ??
+              (nameTaken ? _findListedNamesake(channels, starter.slug) : null);
+          // A holder the directory does not show yet may still be usable, so
+          // keep the setup recoverable.
+          if (holder == null) rethrow;
+          // The relay keeps a channel's id and a listed channel's name, archived
+          // ones included, so an unusable holder never frees the starter. Skip
+          // it rather than strand the invite in permanent recovery.
+          if (!_isUsableStarter(holder)) continue;
+          channel = holder;
         }
       }
 
@@ -191,18 +194,20 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
   }
 }
 
-Channel? _findStarterChannel(List<Channel> channels, String name) {
-  final normalizedName = name.trim().toLowerCase();
-  return channels
-      .where(
-        (channel) =>
-            channel.name.trim().toLowerCase() == normalizedName &&
-            channel.isStream &&
-            channel.visibility == 'open' &&
-            !channel.isArchived,
-      )
-      .firstOrNull;
-}
+Channel? _findStarterChannel(List<Channel> channels, String name) => channels
+    .where((channel) => _hasName(channel, name) && _isUsableStarter(channel))
+    .firstOrNull;
+
+/// The open channel that holds [name] in the relay's listed-name rule.
+Channel? _findListedNamesake(List<Channel> channels, String name) => channels
+    .where((channel) => _hasName(channel, name) && channel.visibility == 'open')
+    .firstOrNull;
+
+bool _hasName(Channel channel, String name) =>
+    channel.name.trim().toLowerCase() == name.trim().toLowerCase();
+
+bool _isUsableStarter(Channel channel) =>
+    channel.isStream && channel.visibility == 'open' && !channel.isArchived;
 
 bool _isDuplicateChannelError(Object error) =>
     error.toString().contains('duplicate: channel already exists');
