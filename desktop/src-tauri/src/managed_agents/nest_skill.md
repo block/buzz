@@ -67,6 +67,9 @@ Output varies by command group — `--help` shows flags but not response shapes.
 | `mem hash` | SHA-256 hex string |
 | `mem set/patch/rm` | nothing to stdout; progress to stderr |
 | `mem ls` | tab-delimited (`slug\tcreated_at\tevent_id`) by default; `--json` for JSON array |
+| `community members list` | `[{pubkey, role}]`, owners first; exit 1 if the relay published no list |
+| `community members add/remove/set-role` | `[{pubkey, event_id, accepted, message}]`, one per member; a mid-run failure prints the members already done, then exits non-zero |
+| `community invite create` | `{code, url, expires_at, max_uses, uses_remaining}` — the code is shown once |
 | `reactions get` | `{"reactions": [{emoji, count, pubkeys}]}` — aggregated, not raw events |
 | `pack validate/inspect` | human-readable text, not JSON |
 
@@ -129,6 +132,8 @@ buzz messages send --channel <UUID> \
 6. **`users get` always returns an array** — even for a single pubkey lookup. Never expect a bare object.
 7. **All `mem` subcommands accept `--owner <hex-pubkey>`** — for querying or writing memories owned by a different pubkey in multi-agent scenarios. Defaults to the owner from `BUZZ_AUTH_TAG`.
 8. **`mem rm` cannot delete `core`** — use `mem set core ''` instead.
+9. **`community invite create` output is a credential** — the code and url are printed once and each run mints a new invite. Share them only with the person being invited; never post them to a channel or log them. The command is never retried; exit 2 with `delivery unknown` means an invite may exist.
+10. **`community members` roles are `admin` and `member`** — `owner` can be neither granted nor changed. `add` leaves an existing member's role alone (use `set-role`, owner only). Permission refusals exit 3; unknown members and invalid targets exit 1.
 
 ## Forum Posts
 

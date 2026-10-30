@@ -102,6 +102,13 @@ buzz repos protect list --id my-repo
 buzz repos protect set --id my-repo --ref refs/heads/main --push admin --no-force-push --no-delete
 buzz repos protect remove --id my-repo --ref refs/heads/main
 
+# Community members and invite links (owner/admin; set-role is owner only)
+buzz community members list
+buzz community members add --pubkey <hex|npub>... --role member
+buzz community members remove --pubkey <hex|npub>...
+buzz community members set-role --pubkey <hex|npub> --role admin
+buzz community invite create --ttl 24h --max-uses 5
+
 # Pipe to jq
 buzz channels list | jq '.[].name'
 ```
@@ -109,6 +116,12 @@ buzz channels list | jq '.[].name'
 `protect set` replaces every existing rule for the exact ref pattern. Any
 constraint omitted from the command is removed. `protect list` reports malformed
 stored rules in `validation_error` so an owner can remove and repair them.
+
+`community invite create` prints the invite `code` and `url` once. The relay
+does not show them again, and each run mints a new invite. Treat both as
+credentials: anyone who has them can join until the invite expires or runs out.
+The command is never retried, so an ambiguous network failure exits 2 with
+`delivery unknown` — check with an admin before running it again.
 
 ## Commands
 
@@ -181,6 +194,11 @@ The table below mirrors that tree for readers who are not at a terminal.
 | `upload` | `file` | Upload a file to the Blossom store |
 | `pack` | `validate` | Validate a persona pack (local, no relay) |
 | | `inspect` | Inspect a persona pack (local, no relay) |
+| `community` | `members list` | List members and roles from the relay-signed NIP-43 list |
+| | `members add` | Add members by hex or npub (owner or admin) |
+| | `members remove` | Remove members (owner or admin; admins remove only members) |
+| | `members set-role` | Change a member's role to `admin` or `member` (owner only) |
+| | `invite create` | Mint an invite link; prints the code once |
 | `mem` | `ls` | List non-tombstoned memories |
 | | `get` | Print memory value to stdout |
 | | `hash` | Print SHA-256 hex of memory value |
