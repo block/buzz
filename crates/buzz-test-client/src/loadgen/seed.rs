@@ -119,6 +119,12 @@ async fn post_all(
 }
 
 async fn provision(scenario: &Scenario, net: &Net, host: &str, owner: &Keys) -> anyhow::Result<()> {
+    let (base, operator) = operator(scenario)?;
+    provision_host(net, base, &operator, host, owner).await
+}
+
+/// The operator API base URL and the operator's keys, for templated communities.
+pub(super) fn operator(scenario: &Scenario) -> anyhow::Result<(&str, Keys)> {
     let base = scenario
         .target
         .operator_url
@@ -130,8 +136,7 @@ async fn provision(scenario: &Scenario, net: &Net, host: &str, owner: &Keys) -> 
             scenario.target.operator_key_env
         )
     })?;
-    let operator = Keys::parse(&secret)?;
-    provision_host(net, base, &operator, host, owner).await
+    Ok((base, Keys::parse(&secret)?))
 }
 
 /// Creates `host` owned by `owner`. The request is `create_only`, so the relay

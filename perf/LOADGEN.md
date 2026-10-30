@@ -8,6 +8,7 @@ per operation for each step.
 ```bash
 cargo run --release -p buzz-test-client --bin buzz-loadgen -- seed perf/scenarios/local-smoke.toml
 cargo run --release -p buzz-test-client --bin buzz-loadgen -- run perf/scenarios/local-smoke.toml
+cargo run --release -p buzz-test-client --bin buzz-loadgen -- teardown perf/scenarios/<templated>.toml
 ```
 
 ## Scale vectors
@@ -138,6 +139,25 @@ owner of an existing host. A host that already exists is reused only when the
 fixture owner derived from `run_id` owns it (re-running `seed` for the same
 scenario); otherwise `seed` fails. Use a fresh `run_id` or a host template
 with `{run}` to avoid colliding with another community.
+
+## Teardown
+
+`teardown <scenario>` removes the communities `seed` provisioned from
+`target.community_host_template`, using the operator key `seed` used. For each
+host it archives the community as its fixture owner, then requests owner
+deletion with a request id derived from `run_id` and the community index. The
+relay's deletion drain does the deletion asynchronously; `teardown` reports
+the requests by the stage the relay returned (`requested`), hosts this run's
+fixture owner does not own (`absent`), and failures. It never touches a host
+owned by anyone else, and refuses a scenario without a host template.
+
+Re-running `teardown` replays the same request ids, so it retries failures
+and reports progress without conflicting. It exits non-zero while any
+community failed.
+
+Deleted hosts stay reserved as tombstones, so a torn-down `run_id` cannot be
+seeded again: `seed` fails on the first host. Give each fixture a new
+`run_id`.
 
 ## Safety
 
