@@ -780,7 +780,7 @@ mod postgres_tests {
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }
-        assert!(migrations[75]
+        assert!(migrations[78]
             .sql
             .as_str()
             .contains("ADD COLUMN auto_join BOOLEAN NOT NULL DEFAULT false"));
