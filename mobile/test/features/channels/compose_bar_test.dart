@@ -1915,6 +1915,118 @@ void main() {
       });
     });
 
+    group('hardware keyboard', () {
+      final sent = <String>[];
+      Future<TextEditingController> pumpComposer(WidgetTester tester) async {
+        sent.clear();
+        final members = [
+          for (final (i, name) in ['Alice', 'Bob'].indexed)
+            ChannelMember(
+              pubkey: '${i + 1}' * 64,
+              role: 'member',
+              joinedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+              displayName: name,
+            ),
+        ];
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            membersFuture: Future.value(members),
+            cachedMembers: members,
+            channels: [_makeCurrentChannel()],
+            onSend: (content, _, {mediaTags = const <List<String>>[]}) async {
+              sent.add(content);
+            },
+            searchPeople: (_) async => const [],
+          ),
+        );
+        await _expandComposer(tester);
+        return tester.widget<TextField>(find.byType(TextField)).controller!;
+      }
+
+      Finder popover() =>
+          find.byKey(const ValueKey('mention-suggestions-popover'));
+
+      testWidgets('Tab accepts the top mention suggestion', (tester) async {
+        final controller = await pumpComposer(tester);
+        await tester.enterText(find.byType(TextField), 'hi @a');
+        await tester.pump();
+        expect(popover(), findsOneWidget);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+        await tester.pump();
+
+        expect(controller.text, 'hi @Alice ');
+        expect(popover(), findsNothing);
+        await tester.pump(mentionSearchDebounce * 2);
+      });
+
+      testWidgets('Tab without an open picker leaves the draft alone', (
+        tester,
+      ) async {
+        final controller = await pumpComposer(tester);
+        await tester.enterText(find.byType(TextField), 'hi');
+        await tester.pump();
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+        await tester.pump();
+
+        expect(controller.text, 'hi');
+        expect(sent, isEmpty);
+      });
+
+      testWidgets('Shift+Tab does not accept a mention', (tester) async {
+        final controller = await pumpComposer(tester);
+        await tester.enterText(find.byType(TextField), 'hi @a');
+        await tester.pump();
+
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+        await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+        await tester.pump();
+
+        expect(controller.text, 'hi @a');
+        expect(popover(), findsOneWidget);
+        await tester.pump(mentionSearchDebounce * 2);
+      });
+
+      testWidgets('Enter sends the message', (tester) async {
+        final controller = await pumpComposer(tester);
+        await tester.enterText(find.byType(TextField), 'hello');
+        await tester.pump();
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pumpAndSettle();
+
+        expect(sent, ['hello']);
+        expect(controller.text, isEmpty);
+      });
+
+      testWidgets('Shift+Enter does not send', (tester) async {
+        await pumpComposer(tester);
+        await tester.enterText(find.byType(TextField), 'hello');
+        await tester.pump();
+
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+        await tester.pumpAndSettle();
+
+        expect(sent, isEmpty);
+      });
+
+      testWidgets('the software return key does not send', (tester) async {
+        await pumpComposer(tester);
+        await tester.enterText(find.byType(TextField), 'hello');
+        await tester.pump();
+
+        await tester.testTextInput.receiveAction(TextInputAction.newline);
+        await tester.pumpAndSettle();
+
+        expect(sent, isEmpty);
+      });
+    });
+
     testWidgets('dismisses mention suggestions in the selection frame', (
       tester,
     ) async {
