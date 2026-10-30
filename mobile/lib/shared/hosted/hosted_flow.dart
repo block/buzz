@@ -503,6 +503,15 @@ class HostedFlow extends ChangeNotifier {
     if ((target == null && !accountOnly) || session == null) {
       throw AccountFailure.signedOut;
     }
+    // Older native sessions may predate the web setup gate. Preserve their
+    // subject and destination while completing the same browser handoff.
+    if (session.needsAccountSetup) {
+      _set(HostedFlowStage.signIn);
+      await browser.start(
+        target == null ? {'type': 'account'} : _intent(target),
+      );
+      return;
+    }
     final store = this.store.forSubject(session.subject);
     if (target != null && !_acceptTarget(target)) return;
     if (target == null && _batchSubject != session.subject) {

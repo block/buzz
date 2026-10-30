@@ -60,6 +60,8 @@ class HostedJourneyFixture {
   int starterFailures = 0;
   final policyResponses = <http.Response>[];
   int browserStarts = 0;
+  final browserUrls = <Uri>[];
+  bool needsAccountSetup = false;
   int secondRelayFailures = 0;
   DateTime assertionNow = DateTime.now();
   bool relayAuthEnabled = false;
@@ -130,7 +132,15 @@ class HostedJourneyFixture {
       };
     } else if (path.endsWith('/me')) {
       if (expiredSession) return http.Response('{}', 401);
-      result = {'subject': subject, 'expires_at': expiry};
+      result = {
+        'subject': subject,
+        'expires_at': expiry,
+        if (needsAccountSetup)
+          'account_standing': {
+            'details_status': 'ACCOUNT_DETAILS_STATUS_MISSING',
+            'screening_status': 'ACCOUNT_SCREENING_STATUS_NOT_SCREENED',
+          },
+      };
     } else if (path.endsWith('/identity/assertions')) {
       await beforeAssertionReturn?.call();
       if (expiredSession) return http.Response('{}', 401);
@@ -302,7 +312,8 @@ class HostedJourneyFixture {
 
   HostedFlow createFlow(Ref ref) => activeFlow = createHostedFlow(
     ref,
-    browserAuth: _Browser(() async {
+    browserAuth: _Browser((uri) async {
+      browserUrls.add(uri);
       browserStarts++;
       await beforeBrowserReturn?.call();
     }),
@@ -542,10 +553,10 @@ class _Recovery implements InviteJoinRecovery {
 }
 
 class _Browser extends BrowserAuth {
-  _Browser(Future<void> Function() onStart)
+  _Browser(Future<void> Function(Uri) onStart)
     : super(
         openBrowser: (uri) async {
-          await onStart();
+          await onStart(uri);
           return Uri.parse(BrowserAuth.callback)
               .replace(
                 queryParameters: {
