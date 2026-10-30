@@ -207,19 +207,37 @@ class _ContinuousEmojiGrid extends StatelessWidget {
 class _EmojiSearchResults extends StatelessWidget {
   final List<EmojiEntry> entries;
   final List<CustomEmoji> customEmoji;
+  final EmojiCatalogSearchState? catalog;
+  final String? catalogQuery;
   final void Function(String emoji) onSelect;
+  final void Function(CustomEmoji emoji) onSelectCatalog;
   final ScrollController controller;
 
   const _EmojiSearchResults({
     required this.entries,
     required this.customEmoji,
+    required this.catalog,
+    required this.catalogQuery,
     required this.onSelect,
+    required this.onSelectCatalog,
     required this.controller,
   });
 
   @override
   Widget build(BuildContext context) {
-    if (entries.isEmpty && customEmoji.isEmpty) {
+    final catalogState = catalog;
+    final catalogResults = catalogState == null
+        ? const <CustomEmoji>[]
+        : _catalogResultsToShow(catalogState.results, customEmoji);
+    final catalogSettled =
+        catalogState == null ||
+        (!catalogState.loading &&
+            !catalogState.failed &&
+            catalogState.query == catalogQuery);
+    if (entries.isEmpty &&
+        customEmoji.isEmpty &&
+        catalogResults.isEmpty &&
+        catalogSettled) {
       return _EmojiEmptyState(
         icon: BuzzIcons.searchX,
         message: 'No emoji found.',
@@ -264,6 +282,12 @@ class _EmojiSearchResults extends StatelessWidget {
             ),
           ),
         ],
+        if (catalogState != null)
+          _CatalogResultsSliver(
+            state: catalogState,
+            results: catalogResults,
+            onSelect: onSelectCatalog,
+          ),
         SliverToBoxAdapter(
           child: SizedBox(
             height: MediaQuery.viewPaddingOf(context).bottom + Grid.xxs,

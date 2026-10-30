@@ -164,6 +164,17 @@ abstract final class NostrFilters {
     extensions: const {'search_mode': 'prefix'},
   );
 
+  /// Catalog emoji whose name starts a word with [prefix] (kind:30180).
+  /// [prefix] is search text: shortcode separators already turned to spaces.
+  /// Bridge-only — send through `queryRelay`, not a WebSocket REQ.
+  static NostrFilter emojiEntrySearch(String prefix, {int limit = 50}) =>
+      NostrFilter(
+        kinds: const [EventKind.emojiEntry],
+        search: prefix,
+        limit: limit,
+        extensions: const {'search_mode': 'prefix'},
+      );
+
   /// Relay membership list (kind:13534).
   static NostrFilter relayMembers() =>
       const NostrFilter(kinds: [EventKind.relayMembership], limit: 1);
