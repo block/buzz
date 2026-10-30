@@ -3,8 +3,9 @@
 //! The route inventory is shared with `scripts/check-community-ban-route-inventory.py`.
 //! This ignored test uses a disposable local relay/PostgreSQL/MinIO stack and
 //! fresh tenant hosts and identities. Run without BUZZ_KLIPY_API_KEY so GIF
-//! controls assert the disabled-provider response; Git and workflow requests use absent
-//! resources and must stop before subprocess or durable work.
+//! controls assert the disabled-provider response. Git reads and workflows use
+//! absent resources; Git push uses an invalid name. All stop before subprocess
+//! or durable work.
 //!
 //! ```text
 //! ./scripts/start-relay-for-tests.sh
@@ -244,6 +245,11 @@ fn route_path(row: &RouteRow, case: &str, actor: &Principal) -> String {
         .replace("{sha256_ext}", &format!("{missing_blob}.jpg"))
         .replace("{owner}", &repo_owner)
         .replace("{repo}", &missing_repo);
+    // Push initializes absent repositories, so reject a deliberately invalid
+    // name after the shared admission gate and before storage/subprocess work.
+    if case == "git_receive_pack" {
+        path = path.replace(&missing_repo, "invalid..repo");
+    }
     if case == "git_info_refs" {
         path.push_str("?service=git-upload-pack");
     }
@@ -456,11 +462,13 @@ fn assert_allowed_control(response_status: StatusCode, body: &str, route: &Route
         | "moderation_owner_ban"
         | "moderation_audit"
         | "moderation_restricted" => StatusCode::OK,
-        "profile_search" | "invite_mint" | "buzz_read_state" => StatusCode::BAD_REQUEST,
+        "profile_search" | "invite_mint" | "buzz_read_state" | "git_receive_pack" => {
+            StatusCode::BAD_REQUEST
+        }
         // This isolated fixture runs without a GIF provider key.
         "gif_search" | "gif_share" | "workflow_runs" | "workflow_approvals" | "media_get"
-        | "media_head" | "git_info_refs" | "git_upload_pack" | "git_receive_pack"
-        | "git_default_get" | "git_default_post" => StatusCode::NOT_FOUND,
+        | "media_head" | "git_info_refs" | "git_upload_pack" | "git_default_get"
+        | "git_default_post" => StatusCode::NOT_FOUND,
         "media_upload" => StatusCode::UNPROCESSABLE_ENTITY,
         _ => panic!("no positive-control contract for {case}"),
     };
@@ -476,9 +484,20 @@ fn assert_allowed_control(response_status: StatusCode, body: &str, route: &Route
     }
     if matches!(
         case,
-        "git_info_refs" | "git_upload_pack" | "git_receive_pack"
+        "git_info_refs"
+            | "git_upload_pack"
+            | "git_receive_pack"
+            | "git_default_get"
+            | "git_default_post"
     ) {
-        assert_eq!(body, "repository not found");
+        assert_eq!(
+            body,
+            if case == "git_receive_pack" {
+                "invalid repo name"
+            } else {
+                "repository not found"
+            }
+        );
         return;
     }
     let value: serde_json::Value = serde_json::from_str(body)
@@ -512,7 +531,6 @@ fn assert_allowed_control(response_status: StatusCode, body: &str, route: &Route
                 "workflow_runs" | "workflow_approvals" => "workflow not found",
                 "media_get" => "not found",
                 "media_upload" => "invalid image data",
-                "git_default_get" | "git_default_post" => "repository not found",
                 _ => unreachable!(),
             };
             assert_eq!(value["error"], expected_error, "case {case}: {body}");
