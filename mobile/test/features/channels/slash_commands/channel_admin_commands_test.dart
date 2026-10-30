@@ -123,8 +123,8 @@ void main() {
       await tester.pumpAndSettle();
     }
 
-    await type('/');
     for (final name in ['rename', 'archive', 'mute']) {
+      await type('/$name');
       expect(
         find.bySemanticsLabel(RegExp('^/$name')),
         findsOneWidget,
@@ -195,12 +195,18 @@ void main() {
 
     await tester.tap(find.text('Message #general'));
     await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextField), '/');
-    await tester.pump();
-
-    expect(find.bySemanticsLabel(RegExp('^/mute')), findsOneWidget);
-    expect(find.bySemanticsLabel(RegExp('^/rename')), findsNothing);
-    expect(find.bySemanticsLabel(RegExp('^/archive')), findsNothing);
+    for (final (name, offered) in [
+      ('mute', true),
+      ('rename', false),
+      ('archive', false),
+    ]) {
+      await tester.enterText(find.byType(TextField), '/$name');
+      await tester.pump();
+      expect(
+        find.bySemanticsLabel(RegExp('^/$name')),
+        offered ? findsOneWidget : findsNothing,
+      );
+    }
     semantics.dispose();
   });
 }
