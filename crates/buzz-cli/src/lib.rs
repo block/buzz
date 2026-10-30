@@ -620,6 +620,17 @@ pub enum MessagesCmd {
 }
 
 #[derive(Subcommand)]
+pub enum ChannelsTemplatesCmd {
+    /// List the templates `channels create --template` can use (read-only)
+    List {
+        /// Override the channel-templates.json path (default: the desktop
+        /// app's prod app-data dir). Same flag as `channels create`.
+        #[arg(long, value_name = "PATH")]
+        templates_file: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum ChannelsCmd {
     /// List channels visible to the current identity
     #[command(
@@ -699,6 +710,9 @@ pub enum ChannelsCmd {
         #[arg(long, value_name = "PATH")]
         templates_file: Option<String>,
     },
+    /// Inspect the desktop channel templates `channels create --template` uses
+    #[command(subcommand)]
+    Templates(ChannelsTemplatesCmd),
     /// Update channel name, description, visibility, join role, unlisted, or ephemeral TTL
     #[command(
         after_help = "Examples:\n  buzz channels update --channel <uuid> --name general\n  buzz channels update --channel <uuid> --visibility open\n  buzz channels update --channel <uuid> --visibility private\n  buzz channels update --channel <uuid> --join-role guest\n  buzz channels update --channel <uuid> --visibility open --unlisted true"
@@ -1360,6 +1374,15 @@ pub enum ReposCmd {
         /// Channel UUID to bind. Replaces any existing binding.
         #[arg(long)]
         channel: String,
+    },
+    /// Read a repository's live branches, tags, and HEAD (NIP-34 state)
+    State {
+        /// Repository identifier (d-tag)
+        #[arg(long, visible_alias = "id")]
+        repo: String,
+        /// Owner pubkey (64-char hex). Defaults to your signing identity.
+        #[arg(long)]
+        owner: Option<String>,
     },
     /// Manage branch and tag protection rules on one of your repositories.
     #[command(subcommand)]
@@ -2555,6 +2578,7 @@ mod tests {
                 "remove-member",
                 "search",
                 "set-add-policy",
+                "templates",
                 "topic",
                 "unarchive",
                 "update"
@@ -2602,7 +2626,15 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "repos"),
-            vec!["bind", "create", "default-branch", "get", "list", "protect"]
+            vec![
+                "bind",
+                "create",
+                "default-branch",
+                "get",
+                "list",
+                "protect",
+                "state"
+            ]
         );
         let repos = cmd
             .get_subcommands()
@@ -2668,7 +2700,7 @@ mod tests {
         let expected: Vec<(&str, usize)> = vec![
             ("agents", 5),
             ("canvas", 4),
-            ("channels", 16),
+            ("channels", 17),
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
@@ -2680,7 +2712,7 @@ mod tests {
             ("pr", 5),
             ("projects", 8),
             ("reactions", 3),
-            ("repos", 6),
+            ("repos", 7),
             ("social", 7),
             ("upload", 1),
             ("users", 5),
