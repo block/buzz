@@ -62,6 +62,27 @@ void main() {
     },
   );
 
+  test('ensureDirectoryLoaded reads again once older than maxAge', () async {
+    final session = _FakeRelaySession(
+      memberships: const [],
+      metadata: [_meta(id: _channelA, name: 'general')],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+    await container.read(channelsProvider.future);
+    final channels = container.read(channelsProvider.notifier);
+
+    await channels.ensureDirectoryLoaded();
+    final reads = session.directoryQueryFilters.length;
+    expect(reads, isPositive);
+    // A loaded directory serves later calls until it is older than maxAge.
+    await channels.ensureDirectoryLoaded();
+    await channels.ensureDirectoryLoaded(maxAge: const Duration(hours: 1));
+    expect(session.directoryQueryFilters, hasLength(reads));
+    await channels.ensureDirectoryLoaded(maxAge: Duration.zero);
+    expect(session.directoryQueryFilters, hasLength(reads * 2));
+  });
+
   test('paginates channel discovery with a composite cursor', () async {
     final firstPage = List.generate(
       500,

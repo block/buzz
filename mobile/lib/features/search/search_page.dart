@@ -312,12 +312,27 @@ class _SearchBody extends ConsumerWidget {
     final showMessages =
         filter == _SearchFilter.all || filter == _SearchFilter.messages;
 
+    // Only the active tab's results count, so a tab with none of its own
+    // says so rather than showing a blank list.
     final hasAnyResults =
-        state.channelResults.isNotEmpty ||
-        state.userResults.isNotEmpty ||
-        state.messageResults.isNotEmpty;
+        (showChannels && state.channelResults.isNotEmpty) ||
+        (showPeople && state.userResults.isNotEmpty) ||
+        (showMessages && state.messageResults.isNotEmpty);
     void recordResultSelection() =>
         ref.read(recentSearchesProvider.notifier).record(state.query);
+    // A failed directory means unjoined open channels may be missing, so the
+    // page must not claim there are no results.
+    final channelsFailed = showChannels && state.channelSearchFailed;
+    void retryChannels() => ref.read(searchProvider.notifier).retryChannels();
+
+    if (!state.isLoading && !hasAnyResults && channelsFailed) {
+      return Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.viewInsetsOf(context).bottom,
+        ),
+        child: Center(child: _ChannelSearchFailed(onRetry: retryChannels)),
+      );
+    }
 
     if (!state.isLoading && !hasAnyResults) {
       return Padding(
@@ -353,6 +368,10 @@ class _SearchBody extends ConsumerWidget {
                   channels: state.channelResults,
                   onResultSelected: recordResultSelection,
                 ),
+              if (channelsFailed)
+                SliverToBoxAdapter(
+                  child: _ChannelSearchFailed(onRetry: retryChannels),
+                ),
               if (showPeople && state.userResults.isNotEmpty)
                 _PeopleSection(
                   users: state.userResults,
@@ -380,6 +399,37 @@ class _SearchBody extends ConsumerWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Tells the user open-channel search failed, with desktop's Retry channels.
+class _ChannelSearchFailed extends StatelessWidget {
+  final VoidCallback onRetry;
+
+  const _ChannelSearchFailed({required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      key: const Key('search-channels-failed'),
+      padding: const EdgeInsets.symmetric(
+        horizontal: Grid.gutter,
+        vertical: Grid.xs,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            "Open channel search couldn't finish.",
+            textAlign: TextAlign.center,
+            style: context.textTheme.bodyMedium?.copyWith(
+              color: context.colors.onSurfaceVariant,
+            ),
+          ),
+          TextButton(onPressed: onRetry, child: const Text('Retry channels')),
+        ],
+      ),
     );
   }
 }

@@ -26,13 +26,21 @@ class ChannelDirectoryLoadState {
   /// Current loading status for [scope].
   final ChannelDirectoryLoadStatus status;
 
+  /// When the directory for [scope] last finished loading.
+  final DateTime? loadedAt;
+
   /// Creates directory loading state.
-  const ChannelDirectoryLoadState({required this.scope, required this.status});
+  const ChannelDirectoryLoadState({
+    required this.scope,
+    required this.status,
+    this.loadedAt,
+  });
 
   /// Initial state before any directory request has started.
   const ChannelDirectoryLoadState.idle()
     : scope = null,
-      status = ChannelDirectoryLoadStatus.idle;
+      status = ChannelDirectoryLoadStatus.idle,
+      loadedAt = null;
 }
 
 /// Returns the stable directory scope for a relay and signing identity.
@@ -65,6 +73,7 @@ class ChannelDirectoryLoadNotifier extends Notifier<ChannelDirectoryLoadState> {
   void markLoaded(String scope) => state = ChannelDirectoryLoadState(
     scope: scope,
     status: ChannelDirectoryLoadStatus.loaded,
+    loadedAt: DateTime.now(),
   );
 
   /// Marks the directory request as unsuccessful.

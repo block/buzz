@@ -3687,7 +3687,7 @@ class _FakeNotifier extends ChannelsNotifier {
   }
 
   @override
-  Future<void> ensureDirectoryLoaded() async {
+  Future<void> ensureDirectoryLoaded({Duration? maxAge}) async {
     ref
         .read(channelDirectoryLoadStatusProvider.notifier)
         .markLoaded(_activeDirectoryScope(ref));

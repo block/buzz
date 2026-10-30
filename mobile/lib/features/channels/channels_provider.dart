@@ -1062,16 +1062,22 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     return _channelFromMeta(latest, data, isMember: false);
   }
 
-  /// Loads the directory when Browse channels opens after startup or an error.
-  Future<void> ensureDirectoryLoaded() async {
+  /// Loads the directory unless it is loading, or loaded within [maxAge]
+  /// (any age when null), for the current relay and identity.
+  Future<void> ensureDirectoryLoaded({Duration? maxAge}) async {
     final directoryState = ref.read(channelDirectoryLoadStatusProvider);
     final scope = channelDirectoryScope(
       ref.read(relayConfigProvider).baseUrl,
       ref.read(myPubkeyProvider),
     );
+    final loadedAt = directoryState.loadedAt;
+    final fresh =
+        directoryState.status == ChannelDirectoryLoadStatus.loaded &&
+        (maxAge == null ||
+            (loadedAt != null && DateTime.now().difference(loadedAt) < maxAge));
     if (directoryState.scope == scope &&
         (directoryState.status == ChannelDirectoryLoadStatus.loading ||
-            directoryState.status == ChannelDirectoryLoadStatus.loaded)) {
+            fresh)) {
       return;
     }
     await retryDirectory();
