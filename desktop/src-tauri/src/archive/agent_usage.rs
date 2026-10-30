@@ -715,6 +715,10 @@ pub(super) fn compute_series(
         let Some(reported_at) = row.reported_at else {
             continue;
         };
+        // Usage-null rows (tools/skills/context only) are not usage reports.
+        if row.is_usage_null() {
+            continue;
+        }
         let Some(bucket_idx) = assign_bucket_index(boundaries, reported_at) else {
             continue;
         };
