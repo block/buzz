@@ -29,7 +29,10 @@ import {
 } from "./SettingsOptionGroup";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 import {
+  activeTtsBackend,
   selectedVoiceForBackend,
+  speechLanguageLabel,
+  type SpeechLanguage,
   type VoiceRegistryEntry,
   voiceOptionLabel,
   voicesForBackend,
@@ -39,6 +42,7 @@ export type TtsSettings = {
   version: number;
   agentTextToSpeech: boolean;
   voicePreferences: string[];
+  speechLanguage?: SpeechLanguage;
 };
 
 type TtsVoiceMutation = {
@@ -113,6 +117,44 @@ export function VoiceSettingsCard() {
     }
   }, []);
 
+  const saveSpeechLanguage = React.useCallback(async (language: SpeechLanguage) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const saved = await invokeTauri<TtsSettings>("set_speech_language", {
+        language,
+      });
+      setSettings(saved);
+    } catch (saveError) {
+      setError(
+        saveError instanceof Error
+          ? saveError.message
+          : "Speech language could not be saved.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  const saveGermanVoice = React.useCallback(async (voiceKey: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const saved = await invokeTauri<TtsSettings>("set_german_voice", {
+        voiceKey,
+      });
+      setSettings(saved);
+    } catch (saveError) {
+      setError(
+        saveError instanceof Error
+          ? saveError.message
+          : "German voice could not be saved.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
   const savePocketVoice = React.useCallback(async (voiceKey: string) => {
     setBusy(true);
     setError(null);
@@ -176,13 +218,20 @@ export function VoiceSettingsCard() {
     }
   }, []);
 
-  const voices = voicesForBackend(registry, "pocket");
+  const speechLanguage: SpeechLanguage = settings?.speechLanguage ?? "en";
+  const ttsBackend = activeTtsBackend(speechLanguage);
+  const voices = voicesForBackend(registry, ttsBackend);
   const selectedVoice = selectedVoiceForBackend(
     settings?.voicePreferences ?? [],
     voices,
   );
   const enabled = settings?.agentTextToSpeech ?? true;
   const controlsDisabled = !settings || busy || !enabled;
+  const germanVoices = voicesForBackend(registry, "kokoro");
+  const selectedGermanVoice = selectedVoiceForBackend(
+    settings?.voicePreferences ?? [],
+    germanVoices,
+  );
 
   return (
     <section className="min-w-0" data-testid="settings-voice">
@@ -192,6 +241,106 @@ export function VoiceSettingsCard() {
       />
 
       <SettingsOptionGroupList>
+        <SettingsOptionGroup title="Speech Language">
+          <SettingsOptionRow>
+            <div className="min-w-0">
+              <p className="text-sm font-medium">Speech Language</p>
+              <p
+                className="text-sm text-muted-foreground/70"
+                data-settings-subcopy
+              >
+                English keeps the original Buzz voice stack.
+              </p>
+            </div>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  aria-label={`Speech language: ${speechLanguageLabel(speechLanguage)}`}
+                  className="min-w-32 justify-between"
+                  data-testid="speech-language-selector"
+                  disabled={!settings || busy}
+                  variant="outline"
+                >
+                  {speechLanguageLabel(speechLanguage)}
+                  <ChevronDown className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuRadioGroup
+                  onValueChange={(value) => {
+                    if (value === "en" || value === "de") {
+                      void saveSpeechLanguage(value);
+                    }
+                  }}
+                  value={speechLanguage}
+                >
+                  <DropdownMenuRadioItem value="en">
+                    English (Original)
+                  </DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem value="de">Deutsch</DropdownMenuRadioItem>
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </SettingsOptionRow>
+        </SettingsOptionGroup>
+
+        {speechLanguage === "de" && (
+          <SettingsOptionGroup title="Deutsch">
+            <SettingsOptionRow>
+              <div className="min-w-0">
+                <p className="text-sm font-medium">ASR</p>
+                <p className="text-sm text-muted-foreground/70" data-settings-subcopy>
+                  Kroko
+                </p>
+              </div>
+            </SettingsOptionRow>
+            <SettingsOptionRow>
+              <div className="min-w-0">
+                <p className="text-sm font-medium">TTS</p>
+                <p className="text-sm text-muted-foreground/70" data-settings-subcopy>
+                  Kokoro
+                </p>
+              </div>
+            </SettingsOptionRow>
+            <SettingsOptionRow>
+              <div className="min-w-0">
+                <p className="text-sm font-medium">Voice</p>
+                <p className="text-sm text-muted-foreground/70" data-settings-subcopy>
+                  Martin or Victoria
+                </p>
+              </div>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    aria-label={`German voice: ${selectedGermanVoice?.displayName ?? "Martin"}`}
+                    className="min-w-32 justify-between"
+                    data-testid="german-voice-selector"
+                    disabled={controlsDisabled}
+                    variant="outline"
+                  >
+                    {selectedGermanVoice?.displayName ?? "Martin"}
+                    <ChevronDown className="h-4 w-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuRadioGroup
+                    onValueChange={(voiceKey) => {
+                      if (settings) void saveGermanVoice(voiceKey);
+                    }}
+                    value={selectedGermanVoice?.key ?? "kokoro:de_martin"}
+                  >
+                    {germanVoices.map((voice) => (
+                      <DropdownMenuRadioItem key={voice.key} value={voice.key}>
+                        {voice.displayName}
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </DropdownMenuRadioGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </SettingsOptionRow>
+          </SettingsOptionGroup>
+        )}
+
         <SettingsOptionGroup title="Playback">
           <SettingsOptionRow>
             <div className="min-w-0">
@@ -220,6 +369,7 @@ export function VoiceSettingsCard() {
           </SettingsOptionRow>
         </SettingsOptionGroup>
 
+        {speechLanguage === "en" && (
         <div
           aria-disabled={!enabled}
           className={cn(
@@ -333,6 +483,7 @@ export function VoiceSettingsCard() {
             </SettingsOptionRow>
           </SettingsOptionGroup>
         </div>
+        )}
       </SettingsOptionGroupList>
       {error && (
         <p
