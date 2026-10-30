@@ -53,6 +53,10 @@ pub(crate) async fn run_migrations_through(pool: &PgPool, target: i64) -> Result
 
 async fn run_migrations_locked(conn: &mut PgConnection) -> Result<()> {
     reject_legacy_nip_rs_cardinality_ambiguity(conn).await?;
+    for (version, indexes) in INLINE_INDEX_BUILDS {
+        MIGRATOR.run_to(version - 1, &mut *conn).await?;
+        build_indexes_before_migration(conn, *version, indexes).await?;
+    }
     MIGRATOR.run(&mut *conn).await?;
     // The replica-fence proof (see `replica_fence`) requires the commit-time
     // `created_at` floor trigger from migration 0021 — correctly shaped — on
@@ -63,6 +67,95 @@ async fn run_migrations_locked(conn: &mut PgConnection) -> Result<()> {
     // re-runs this same check at startup on non-migrating relays.)
     crate::replica_fence::verify_floor_guard_catalog(&mut *conn).await?;
     Ok(())
+}
+
+/// Indexes that a migration verifies but refuses to build on a populated
+/// table, keyed by that migration's version, as `(name, definition)`.
+///
+/// Migrations 0076 and 0078 are checksum-frozen and expect every populated
+/// database to prebuild these indexes with `CREATE INDEX CONCURRENTLY`
+/// (`docs/artifact-sync-deployment.md`). Startup migration builds a missing
+/// index here instead, under the same bounded budgets 0049 uses, so a small
+/// populated database upgrades like an empty one and a large one still fails
+/// closed. `CONCURRENTLY` is not used: a replica blocked on the migration lock
+/// holds a snapshot that a concurrent build would wait for.
+const INLINE_INDEX_BUILDS: &[(i64, &[(&str, &str)])] = &[
+    (
+        76,
+        &[(
+            "idx_artifact_revisions_artifact",
+            "CREATE INDEX idx_artifact_revisions_artifact \
+             ON public.artifact_revisions (community_id, artifact_id)",
+        )],
+    ),
+    (
+        78,
+        &[
+            (
+                "artifact_heads_modified",
+                "CREATE INDEX artifact_heads_modified \
+                 ON public.artifact_heads (community_id, modified_at, artifact_id)",
+            ),
+            (
+                "artifact_heads_channel",
+                "CREATE INDEX artifact_heads_channel \
+                 ON public.artifact_heads (community_id, channel_id, artifact_id)",
+            ),
+            (
+                "channel_members_sync",
+                "CREATE INDEX channel_members_sync \
+                 ON public.channel_members (community_id, pubkey, sync_modified_at, channel_id)",
+            ),
+            (
+                "artifact_revisions_moves",
+                "CREATE INDEX artifact_revisions_moves \
+                 ON public.artifact_revisions (community_id, modified_at, event_id) \
+                 WHERE source_channel_id IS NOT NULL",
+            ),
+        ],
+    ),
+];
+
+/// Build the missing `indexes` in one bounded transaction unless migration
+/// `version` is already recorded. An existing index, valid or not, is left
+/// for the migration to verify, and is skipped before `CREATE INDEX` so a
+/// prebuilt deployment never requests the writer-conflicting lock.
+async fn build_indexes_before_migration(
+    conn: &mut PgConnection,
+    version: i64,
+    indexes: &[(&'static str, &'static str)],
+) -> Result<()> {
+    let applied: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM _sqlx_migrations WHERE version = $1)")
+            .bind(version)
+            .fetch_one(&mut *conn)
+            .await?;
+    if applied {
+        return Ok(());
+    }
+    let build = async {
+        let mut tx = conn.begin().await?;
+        sqlx::raw_sql("SET LOCAL lock_timeout = '1s'; SET LOCAL statement_timeout = '5s'")
+            .execute(&mut *tx)
+            .await?;
+        for (name, definition) in indexes {
+            let exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+                .bind(format!("public.{name}"))
+                .fetch_one(&mut *tx)
+                .await?;
+            if !exists {
+                sqlx::raw_sql(*definition).execute(&mut *tx).await?;
+            }
+        }
+        tx.commit().await
+    };
+    build.await.map_err(|error| {
+        crate::DbError::InvalidData(format!(
+            "migration {version} blocked: building its indexes within the startup budget failed \
+             ({error}); prebuild them concurrently as described in \
+             docs/artifact-sync-deployment.md, then retry"
+        ))
+    })
 }
 
 /// Run `op` while holding the exclusive schema/destruction session lock.
@@ -2056,9 +2149,9 @@ mod postgres_tests {
             if *path == this_file {
                 assert_eq!(
                     (macro_hits, run_hits, run_to_hits),
-                    (1, 1, 1),
+                    (1, 1, 2),
                     "migration.rs must embed the migrator once, run it once in production, \
-                     and expose exactly one test-only bounded run"
+                     and have one test-only and one production bounded run"
                 );
             } else if *path == push_gateway_exception {
                 continue;
@@ -2095,9 +2188,16 @@ mod postgres_tests {
             source[entry..locked].contains("with_exclusive_schema_destruction_lock("),
             "run_migrations must delegate through the exclusive schema/destruction lock"
         );
+        let production_run_to_site = source[run_to_site + 1..]
+            .find(&migrator_run_to)
+            .map(|offset| run_to_site + 1 + offset)
+            .expect("production bounded migrator run site");
         assert!(
-            run_site > locked && run_site < wrapper,
-            "the production migrator run site must live inside run_migrations_locked"
+            run_site > locked
+                && run_site < wrapper
+                && production_run_to_site > locked
+                && production_run_to_site < run_site,
+            "the production migrator run sites must live inside run_migrations_locked"
         );
         assert!(
             run_to_site > entry
@@ -3129,6 +3229,115 @@ mod postgres_tests {
         .execute(&admin)
         .await
         .expect("drop probe database");
+    }
+
+    /// Migrations 0076 and 0078 refuse a populated table whose index was not
+    /// prebuilt concurrently. Startup auto-migration must still upgrade a small
+    /// populated database, and must fail closed without recording either
+    /// migration when the bounded inline build cannot take its lock.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn populated_artifact_tables_auto_migrate_through_inline_index_builds() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(75, &pool)
+            .await
+            .expect("apply migrations 1-75");
+
+        let community_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("artifact-{}.example", community_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert community");
+        let artifact_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO artifact_revisions (community_id, event_id, artifact_id) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(community_id)
+        .bind(vec![1_u8; 32])
+        .bind(artifact_id)
+        .execute(&pool)
+        .await
+        .expect("insert artifact revision");
+        sqlx::query(
+            "INSERT INTO artifact_heads \
+             (community_id, artifact_id, event_id, channel_id, artifact_type) \
+             VALUES ($1, $2, $3, $4, 'doc')",
+        )
+        .bind(community_id)
+        .bind(artifact_id)
+        .bind(vec![1_u8; 32])
+        .bind(uuid::Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .expect("insert artifact head");
+
+        let mut holder = pool.begin().await.expect("begin lock holder");
+        sqlx::query("LOCK TABLE artifact_revisions IN ROW EXCLUSIVE MODE")
+            .execute(&mut *holder)
+            .await
+            .expect("hold a writer lock");
+        let blocked = run_migrations(&pool)
+            .await
+            .expect_err("a build that cannot take its lock must fail closed")
+            .to_string();
+        assert!(
+            blocked.contains("migration 76 blocked")
+                && blocked.contains("docs/artifact-sync-deployment.md"),
+            "unexpected error: {blocked}"
+        );
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(75));
+        holder.rollback().await.expect("release writer lock");
+
+        // A prebuilt index is skipped without requesting the build lock, so
+        // the same held writer lock first blocks 0077's ALTER TABLE instead.
+        sqlx::query(
+            "CREATE INDEX idx_artifact_revisions_artifact \
+             ON public.artifact_revisions (community_id, artifact_id)",
+        )
+        .execute(&pool)
+        .await
+        .expect("prebuild the 0076 index");
+        let mut holder = pool.begin().await.expect("begin second lock holder");
+        sqlx::query("LOCK TABLE artifact_revisions IN ROW EXCLUSIVE MODE")
+            .execute(&mut *holder)
+            .await
+            .expect("hold a writer lock again");
+        let blocked = run_migrations(&pool)
+            .await
+            .expect_err("0077 cannot alter a table under a held writer lock")
+            .to_string();
+        assert!(
+            !blocked.contains("migration 76 blocked"),
+            "a prebuilt index must not be rebuilt: {blocked}"
+        );
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(76));
+        holder.rollback().await.expect("release second writer lock");
+
+        run_migrations(&pool)
+            .await
+            .expect("populated small database auto-migrates");
+        let versions = applied_versions(&pool).await;
+        assert!(
+            [76, 77, 78]
+                .iter()
+                .all(|version| versions.contains(version)),
+            "artifact sync migrations not recorded: {versions:?}"
+        );
+        let valid: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid \
+             WHERE c.relname IN ('idx_artifact_revisions_artifact', 'artifact_heads_modified', \
+                 'artifact_heads_channel', 'channel_members_sync', 'artifact_revisions_moves') \
+               AND i.indisvalid AND i.indisready AND i.indislive",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read index flags");
+        assert_eq!(valid, 5);
     }
 
     #[tokio::test]
