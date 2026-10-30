@@ -173,7 +173,8 @@ final class NotificationService: UNNotificationServiceExtension {
   }
 
   private func finish(_ content: UNNotificationContent) {
-    // Cancelling on expiry also stops a timed-out query from starting its retry.
+    // Cancelling on expiry also stops a retry that is running or about to start.
+    resolver?.cancel()
     session?.invalidateAndCancel()
     session = nil
     handoff?.finish(
