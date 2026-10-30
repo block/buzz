@@ -7,9 +7,9 @@ import 'package:flutter/services.dart';
 import 'package:buzz/features/settings/settings_page.dart';
 import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/community/community_membership_provider.dart';
+import 'package:buzz/shared/community/community_storage.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
-import 'package:buzz/shared/community/community_storage.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/shared/push/dev_push_lease.dart';
@@ -26,6 +26,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../shared/community/community_storage_test.dart'
     show FakeSecureStorage;
+
+final _pushSwitch = find.descendant(
+  of: find.byKey(const ValueKey('push-notifications-setting')),
+  matching: find.byType(Switch),
+);
 
 void main() {
   setUp(() {
@@ -195,14 +200,7 @@ void main() {
       find.byKey(const ValueKey('push-notifications-enabled')),
       findsOneWidget,
     );
-    expect(
-      tester
-          .widget<Switch>(
-            find.byKey(const ValueKey('push-notifications-switch')),
-          )
-          .value,
-      isTrue,
-    );
+    expect(tester.widget<Switch>(_pushSwitch).value, isTrue);
     debugDefaultTargetPlatformOverride = null;
   });
 
