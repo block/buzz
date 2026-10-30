@@ -41,6 +41,10 @@ pub enum DbError {
     #[error("identity is restricted for user deletion")]
     UserDeletionRestricted,
 
+    /// Ownership changed while acquiring event-author locks; retry in a new transaction.
+    #[error("agent ownership changed; retry the write")]
+    EventAuthorOwnershipChanged,
+
     /// Invitation admission or minting was denied by authoritative restrictions.
     #[error("invitation principal is restricted")]
     InviteRestricted,

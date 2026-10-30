@@ -27,10 +27,8 @@ pub(crate) async fn guard_event_author(
     lock_shared(tx, &identities).await?;
     if owner != self::owner(tx, community, signer).await? {
         // Restart in a new transaction: adding another owner lock now could
-        // invert the global-before-scoped ordering. No write has occurred.
-        return Err(DbError::AccessDenied(
-            "agent ownership changed; retry the write".into(),
-        ));
+        // invert the global-before-scoped ordering. The caller must roll back.
+        return Err(DbError::EventAuthorOwnershipChanged);
     }
     check_signer(tx, community, signer).await
 }

@@ -139,6 +139,19 @@ impl Fixture {
     }
 
     async fn send(&self, key: &Keys, event: &Event, websocket: bool) -> (bool, String) {
+        let (accepted, message, status) = self.submit(key, event, websocket).await;
+        if let Some(status) = status.filter(|s| !s.is_success()) {
+            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{message}");
+        }
+        (accepted, message)
+    }
+
+    async fn submit(
+        &self,
+        key: &Keys,
+        event: &Event,
+        websocket: bool,
+    ) -> (bool, String, Option<axum::http::StatusCode>) {
         if websocket {
             let (conn, mut rx) = test_conn(&self.tenant, key);
             if let crate::connection::AuthState::Authenticated(ctx) =
@@ -158,6 +171,7 @@ impl Fixture {
             (
                 frame[2].as_bool().unwrap(),
                 frame[3].as_str().unwrap().to_string(),
+                None,
             )
         } else {
             let response = reqwest::Client::new()
@@ -174,10 +188,14 @@ impl Fixture {
                 (
                     body["accepted"].as_bool().unwrap(),
                     body["message"].as_str().unwrap_or("").to_owned(),
+                    Some(status),
                 )
             } else {
-                assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
-                (false, body["error"].as_str().unwrap().to_owned())
+                (
+                    false,
+                    body["error"].as_str().unwrap().to_owned(),
+                    Some(status),
+                )
             }
         }
     }
@@ -240,3 +258,6 @@ async fn http_and_websocket_messages_honor_user_and_agent_fences() {
 
 #[path = "user_deletion_expanded_postgres_tests.rs"]
 mod expanded_postgres_tests;
+
+#[path = "user_deletion_error_postgres_tests.rs"]
+mod error_postgres_tests;

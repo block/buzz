@@ -472,13 +472,16 @@ pub enum BanRefusal {
     Unavailable,
 }
 
-/// Keep durable identity restrictions as client refusals on every insert path.
-pub(crate) fn event_write_error(error: buzz_db::DbError) -> IngestError {
+/// Classify identity-fencing failures without changing unrelated write errors.
+pub(crate) fn event_write_error(error: &buzz_db::DbError) -> Option<IngestError> {
     match error {
-        buzz_db::DbError::UserDeletionRestricted => {
-            IngestError::Rejected("restricted: identity is restricted for user deletion".into())
-        }
-        other => IngestError::Internal(format!("error: {other}")),
+        buzz_db::DbError::UserDeletionRestricted => Some(IngestError::Rejected(
+            "restricted: identity is restricted for user deletion".into(),
+        )),
+        buzz_db::DbError::EventAuthorOwnershipChanged => Some(IngestError::Internal(
+            "error: agent ownership changed; retry the write".into(),
+        )),
+        _ => None,
     }
 }
 
@@ -3476,8 +3479,10 @@ async fn ingest_event_inner(
                 emoji,
             )
             .await
-            .map_err(event_write_error)?
-        {
+            .map_err(|e| {
+                event_write_error(&e)
+                    .unwrap_or_else(|| IngestError::Internal(format!("error: {e}")))
+            })? {
             buzz_db::ReactionEventInsertOutcome::TargetMissing => {
                 return Err(IngestError::Rejected(format!(
                     "invalid: {REACTION_TARGET_NOT_FOUND}"
@@ -3568,8 +3573,10 @@ async fn ingest_event_inner(
             .db
             .create_channel_with_event(tenant.community(), create.channel_id, channel, &event)
             .await
-            .map_err(event_write_error)?
-        {
+            .map_err(|e| {
+                event_write_error(&e)
+                    .unwrap_or_else(|| IngestError::Internal(format!("error: {e}")))
+            })? {
             buzz_db::channel::ChannelCreate::Created(stored) => {
                 metrics::counter!(
                     "buzz_channels_created_total",
@@ -3600,11 +3607,12 @@ async fn ingest_event_inner(
         // divide insertion and repair ownership between two relay workers.
         crate::handlers::side_effects::persist_workflow_deletion(tenant, &event, state)
             .await
-            .map_err(|e| match e.downcast_ref::<buzz_db::DbError>() {
-                Some(buzz_db::DbError::UserDeletionRestricted) => {
-                    event_write_error(buzz_db::DbError::UserDeletionRestricted)
-                }
-                _ => IngestError::Internal(format!("error: workflow deletion failed: {e}")),
+            .map_err(|e| {
+                e.downcast_ref::<buzz_db::DbError>()
+                    .and_then(event_write_error)
+                    .unwrap_or_else(|| {
+                        IngestError::Internal(format!("error: workflow deletion failed: {e}"))
+                    })
             })?
     } else if let Some(plan) = put_user {
         // One commit stores the event and applies its membership changes. A
@@ -3620,14 +3628,15 @@ async fn ingest_event_inner(
             thread_params,
         )
         .await
-        .map_err(|e| match e.downcast_ref::<buzz_db::DbError>() {
-            Some(buzz_db::DbError::UserDeletionRestricted) => {
-                event_write_error(buzz_db::DbError::UserDeletionRestricted)
-            }
-            Some(buzz_db::DbError::AccessDenied(reason)) => {
-                IngestError::Rejected(format!("invalid: {reason}"))
-            }
-            _ => IngestError::Internal(format!("error: membership write failed: {e}")),
+        .map_err(|e| {
+            e.downcast_ref::<buzz_db::DbError>()
+                .and_then(event_write_error)
+                .unwrap_or_else(|| match e.downcast_ref::<buzz_db::DbError>() {
+                    Some(buzz_db::DbError::AccessDenied(reason)) => {
+                        IngestError::Rejected(format!("invalid: {reason}"))
+                    }
+                    _ => IngestError::Internal(format!("error: membership write failed: {e}")),
+                })
         })?;
         message = ok_message;
         (stored, inserted)
@@ -3638,14 +3647,15 @@ async fn ingest_event_inner(
         // that is not archived) is the client's error; anything else is ours.
         crate::handlers::side_effects::persist_edit_metadata(tenant, &event, state)
             .await
-            .map_err(|e| match e.downcast_ref::<buzz_db::DbError>() {
-                Some(buzz_db::DbError::UserDeletionRestricted) => {
-                    event_write_error(buzz_db::DbError::UserDeletionRestricted)
-                }
-                Some(buzz_db::DbError::AccessDenied(reason)) => {
-                    IngestError::Rejected(format!("invalid: {reason}"))
-                }
-                _ => IngestError::Internal(format!("error: channel update failed: {e}")),
+            .map_err(|e| {
+                e.downcast_ref::<buzz_db::DbError>()
+                    .and_then(event_write_error)
+                    .unwrap_or_else(|| match e.downcast_ref::<buzz_db::DbError>() {
+                        Some(buzz_db::DbError::AccessDenied(reason)) => {
+                            IngestError::Rejected(format!("invalid: {reason}"))
+                        }
+                        _ => IngestError::Internal(format!("error: channel update failed: {e}")),
+                    })
             })?
     } else if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
@@ -3686,7 +3696,10 @@ async fn ingest_event_inner(
             .db
             .insert_canvas_head_checked(tenant.community(), &event, channel, precondition)
             .await
-            .map_err(event_write_error)?;
+            .map_err(|e| {
+                event_write_error(&e)
+                    .unwrap_or_else(|| IngestError::Internal(format!("error: {e}")))
+            })?;
         match status {
             buzz_db::ChannelHeadWriteStatus::RevisionMissing => {
                 return Err(IngestError::CanvasConflict(
@@ -3724,13 +3737,9 @@ async fn ingest_event_inner(
                     buzz_db::DbError::AuthEventRejected => {
                         IngestError::Rejected("invalid: AUTH events cannot be stored".into())
                     }
-                    buzz_db::DbError::UserDeletionRestricted => IngestError::Rejected(
-                        "restricted: identity is restricted for user deletion".into(),
-                    ),
-                    buzz_db::DbError::AccessDenied(reason) => {
-                        IngestError::Rejected(format!("restricted: {reason}"))
-                    }
-                    other => IngestError::Internal(format!("error: database error: {other}")),
+                    other => event_write_error(&other).unwrap_or_else(|| {
+                        IngestError::Internal(format!("error: database error: {other}"))
+                    }),
                 });
             }
         }

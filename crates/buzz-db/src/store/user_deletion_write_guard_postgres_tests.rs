@@ -359,9 +359,10 @@ async fn ownership_change_while_waiting_rejects_and_retry_uses_current_owner() {
         .await
         .unwrap();
     assignment.commit().await.unwrap();
-    assert!(
-        matches!(sending.await.unwrap(), Err(DbError::AccessDenied(reason)) if reason.contains("ownership changed"))
-    );
+    assert!(matches!(
+        sending.await.unwrap(),
+        Err(DbError::EventAuthorOwnershipChanged)
+    ));
     assert!(f
         .db
         .get_event_by_id(f.community, event.id.as_bytes())
