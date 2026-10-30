@@ -39,7 +39,7 @@ void main() {
       ),
     );
     expect(find.text('Saved identity'), findsOneWidget);
-    expect(find.text('Used in Home'), findsOneWidget);
+    expect(find.text('Used in Home'), findsNothing);
     profile.complete(
       const UserProfile(
         pubkey: pubkey,
@@ -94,7 +94,7 @@ void main() {
     expect(find.textContaining('honeycombstudios'), findsNothing);
     expect(find.text('Join community'), findsNothing);
     expect(find.text('You already have a saved identity'), findsOneWidget);
-    expect(find.text('Used in mobile'), findsOneWidget);
+    expect(find.text('Used in mobile'), findsNothing);
     expect(find.text(shortPubkey(keys.public)), findsOneWidget);
     expect(find.text(fullNpub(keys.public)!), findsNothing);
     expect(
@@ -131,7 +131,7 @@ void main() {
         );
     await tester.pumpAndSettle();
     expect(find.text('Alex'), findsOneWidget);
-    expect(find.text('Used in mobile'), findsOneWidget);
+    expect(find.text('Used in mobile'), findsNothing);
     expect(
       tester.widget<AvatarImage>(find.byType(AvatarImage)).imageUrl,
       'https://example.com/avatar.png',

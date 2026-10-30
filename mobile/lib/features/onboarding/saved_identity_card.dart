@@ -3,7 +3,6 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/hosted/device_identity_source.dart';
 import '../../shared/hosted/saved_identity_profile.dart';
-import '../../shared/hosted/hosted_environment.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/theme/buzz_icons.dart';
@@ -29,12 +28,6 @@ class SavedIdentityCard extends ConsumerWidget {
     final profile =
         cachedProfile ??
         ref.watch(savedIdentityProfileProvider(identity.pubkey)).asData?.value;
-    final source = identity.label
-        .split(', ')
-        .map(
-          (name) => HostedEnvironment.communityDisplayName(name, 'wss://$name'),
-        )
-        .join(', ');
     final profileName = profile?.displayName;
     final name = profileName != null && profileName.trim().isNotEmpty
         ? profileName
@@ -72,13 +65,16 @@ class SavedIdentityCard extends ConsumerWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(name, style: context.textTheme.titleMedium),
-                  if (source != 'Saved identity')
-                    Text('Used in $source', style: context.textTheme.bodySmall),
+                  Text(
+                    name,
+                    style: context.textTheme.titleSmall?.copyWith(height: 1.5),
+                  ),
                   const SizedBox(height: Grid.half),
                   Text(
                     shortPubkey(identity.pubkey),
-                    style: context.textTheme.bodySmall,
+                    style: context.textTheme.bodySmall?.copyWith(
+                      color: context.colors.onSurfaceVariant,
+                    ),
                   ),
                 ],
               ),
