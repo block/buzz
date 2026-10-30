@@ -1974,17 +1974,19 @@ hold_secs = 1
             .map(|i| tokio::spawn(hot_author(shared.clone(), i)))
             .collect();
         let deadline = Duration::from_secs(10);
-        tokio::time::timeout(deadline, async {
+        let arrived = tokio::time::timeout(deadline, async {
             while gate.arrived.load(Ordering::SeqCst) < 8 {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
-        .await
-        .expect("every author starts a reply");
+        .await;
 
         stop_tx.send(true).unwrap();
         let at_stop = stats.snapshot();
+        // Release before any assertion, so a failure never leaves handlers
+        // blocked in the gate and the runtime unable to shut down.
         gate.release();
+        arrived.expect("every author starts a reply");
         for author in authors {
             tokio::time::timeout(deadline, author)
                 .await
