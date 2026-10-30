@@ -12,6 +12,8 @@ import {
   type EmojiSuggestion,
 } from "@/features/messages/lib/useEmojiAutocomplete";
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
+import { parseGiphyCommand } from "@/features/gifs/giphyCommand";
+import { useRelayKlipyCapability } from "@/features/gifs/useRelayKlipyCapability";
 import {
   findSpoileredImetaMediaUrls,
   type ImetaMedia,
@@ -116,6 +118,21 @@ function MessageComposerImpl({
     getReadyTags: getReadyLinkPreviewTags,
   } = useComposerLinkPreviews(previewContent, editTarget == null);
   const [isEmojiPickerOpen, setIsEmojiPickerOpen] = React.useState(false);
+  // `/giphy <query>` swaps the send for a pre-searched GIF picker; the command
+  // lasts only as long as that picker stays open.
+  const [gifCommandQuery, setGifCommandQuery] = React.useState<string | null>(
+    null,
+  );
+  React.useEffect(() => {
+    if (!isEmojiPickerOpen) setGifCommandQuery(null);
+  }, [isEmojiPickerOpen]);
+  const gifCapability = useRelayKlipyCapability();
+  const gifCapabilityRef = React.useRef(gifCapability);
+  gifCapabilityRef.current = gifCapability;
+  // A command submitted before capability discovery settles waits here.
+  const [pendingGifCommand, setPendingGifCommand] = React.useState<
+    string | null
+  >(null);
   const [isFormattingOpen, setIsFormattingOpen] = React.useState(false);
   const handleFormattingToggle = React.useCallback((pressed: boolean) => {
     if (pressed) setIsEmojiPickerOpen(false);
@@ -223,6 +240,7 @@ function MessageComposerImpl({
   React.useEffect(() => {
     media.setUploadState({ status: "idle" });
     setIsEmojiPickerOpen(false);
+    setPendingGifCommand(null);
     channelLinks.clearChannels();
     emojiAutocomplete.clearEmojis();
   }, [effectiveDraftKey]);
@@ -551,6 +569,36 @@ function MessageComposerImpl({
     onOpenPicker: mentionPicker.openMentionPicker,
     onToggle: toggleAlwaysAddressAgent,
   });
+  const openGifCommand = React.useCallback(
+    (query: string) => {
+      if (voiceNote.hasAttachmentRef.current) return;
+      setIsFormattingOpen(false);
+      setGifCommandQuery(query);
+      setIsEmojiPickerOpen(true);
+    },
+    [voiceNote.hasAttachmentRef],
+  );
+  React.useEffect(() => {
+    if (pendingGifCommand === null || gifCapability.loading) return;
+    setPendingGifCommand(null);
+    // Without GIF support the text stays put; the next send posts it as text.
+    // Open only if the composer still holds this command: the user may have
+    // edited, sent, or switched to editing a message while discovery ran.
+    if (
+      gifCapability.available &&
+      editTargetRef.current == null &&
+      parseGiphyCommand(syncComposerContentFromEditor().trim()) ===
+        pendingGifCommand
+    ) {
+      openGifCommand(pendingGifCommand);
+    }
+  }, [
+    gifCapability.available,
+    gifCapability.loading,
+    openGifCommand,
+    pendingGifCommand,
+    syncComposerContentFromEditor,
+  ]);
   const submitMessage = React.useCallback(async () => {
     const trimmed = syncComposerContentFromEditor().trim();
     // Edit mode
@@ -619,6 +667,16 @@ function MessageComposerImpl({
       isUploadingRef.current ||
       mentionSendFlow.isPreparingMentionSend
     ) {
+      return;
+    }
+    // Never let a recognized command post as text while GIFs might be
+    // reachable: capability still loading, or a voice note blocking the picker.
+    // Only a relay without GIF support sends `/giphy` as an ordinary message.
+    const giphyQuery = parseGiphyCommand(trimmed);
+    const gifs = gifCapabilityRef.current;
+    if (giphyQuery !== null && (gifs.available || gifs.loading)) {
+      if (gifs.loading) setPendingGifCommand(giphyQuery);
+      else openGifCommand(giphyQuery);
       return;
     }
     const capturedThreadContext = onCaptureSendContext?.() ?? null;
@@ -690,9 +748,23 @@ function MessageComposerImpl({
     mentions.restoreDraftMentionRefs,
     mentions.revalidateMentionPubkeys,
     mentions.settlePendingMentionBindings,
+    openGifCommand,
     voiceNote.statusRef,
   ]);
   submitMessageRef.current = submitMessage;
+  const handleGifCommandSelect = React.useCallback(() => {
+    setComposerContent("");
+    richText.clearContent();
+    mentions.clearMentions();
+    channelLinks.clearChannels();
+    emojiAutocomplete.clearEmojis();
+  }, [
+    channelLinks.clearChannels,
+    emojiAutocomplete.clearEmojis,
+    mentions.clearMentions,
+    richText.clearContent,
+    setComposerContent,
+  ]);
   // Draft auto-submit runs once after persisted editor state loads.
   const onAutoSubmitCompleteRef = React.useRef(onAutoSubmitComplete);
   onAutoSubmitCompleteRef.current = onAutoSubmitComplete;
@@ -962,6 +1034,7 @@ function MessageComposerImpl({
               editor={richText.editor}
               extraActions={toolbarExtraActions}
               formattingDisabled={composerDisabled}
+              gifCommandQuery={gifCommandQuery}
               gifMediaController={media}
               isEmojiPickerOpen={isEmojiPickerOpen}
               isFormattingOpen={isFormattingOpen}
@@ -977,6 +1050,7 @@ function MessageComposerImpl({
               onAutoPinConfirmationTurnOff={mentionPicker.turnOff}
               onEmojiPickerOpenChange={setIsEmojiPickerOpen}
               onEmojiSelect={insertEmoji}
+              onGifCommandSelect={handleGifCommandSelect}
               onFormattingToggle={handleFormattingToggle}
               onLinkButton={linkEditor.openFromToolbar}
               onOpenMentionPicker={mentionPicker.openMentionSettings}
