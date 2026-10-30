@@ -11,7 +11,6 @@ import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import { AgentCreationPreview } from "./AgentCreationPreview";
 import { AgentIdentityFields } from "./AgentDescriptionField";
-import { PersonaDropdownField } from "./PersonaDropdownField";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { PersonaAdvancedFields } from "./PersonaAdvancedFields";
 import { PersonaModelField } from "./PersonaModelField";
@@ -50,8 +49,11 @@ import {
   PERSONA_FIELD_SHELL_CLASS,
   PERSONA_LABEL_OPTIONAL_CLASS,
   shouldClearKnownModelForSelectionScope,
+  withDiscoveredProviderOptions,
 } from "./agentConfigOptions";
 import { RequiredFieldLabel } from "./agentConfigControls";
+import { ProviderSelectField } from "./ProviderSelectField";
+import { useAgentProviderDiscovery } from "./useAgentProviderDiscovery";
 import {
   modelDropdownOptions as buildModelDropdownOptions,
   relayMeshModelPickerState,
@@ -528,6 +530,14 @@ export function AgentDefinitionDialog({
       : "",
     selectedRuntime,
   });
+  // Harness-published provider inventory (goose). Rides the dialog's own env so
+  // a harness that needs credentials to enumerate providers sees them.
+  const { discoveredProviders, providerDiscoveryLoading } =
+    useAgentProviderDiscovery({
+      enabled: open,
+      envVars: envVarsForDiscovery,
+      selectedRuntime,
+    });
   const staticModelOptions = getPersonaModelOptions(runtime, effectiveProvider);
   const runtimeModelOptions = getRuntimePersonaModelOptions(runtime);
   const {
@@ -583,14 +593,20 @@ export function AgentDefinitionDialog({
     ? formatRuntimeOptionLabel(selectedRuntime)
     : runtime.trim() || "Not configured";
   const providerDropdownOptions: PersonaDropdownOption[] = [
-    ...providerOptions
-      .filter((option) => option.id.trim().length > 0)
-      .map((option) => ({
-        label: option.label,
-        value: option.id,
-      })),
+    ...withDiscoveredProviderOptions(
+      providerOptions
+        .filter((option) => option.id.trim().length > 0)
+        .map((option) => ({
+          label: option.label,
+          value: option.id,
+        })),
+      discoveredProviders,
+    ),
     { label: "Custom provider...", value: CUSTOM_PROVIDER_DROPDOWN_VALUE },
   ];
+  // A harness that publishes its own inventory can list dozens of providers;
+  // give those a searchable control instead of a scroll-through menu.
+  const providerSearchable = selectedRuntime?.providerInventory === true;
   const modelDropdownOptions: PersonaDropdownOption[] =
     buildModelDropdownOptions({
       allowCustom: !isRelayMesh,
@@ -842,14 +858,21 @@ export function AgentDefinitionDialog({
                   <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
                 ) : null}
               </RequiredFieldLabel>
-              <PersonaDropdownField
+              <ProviderSelectField
                 disabled={isPending}
                 id="persona-llm-provider"
                 onValueChange={handleProviderDropdownChange}
                 options={providerDropdownOptions}
                 placeholder="Choose a provider"
+                searchable={providerSearchable}
                 value={providerSelectValue}
               />
+              {providerDiscoveryLoading ? (
+                <p className="text-xs text-muted-foreground" role="status">
+                  Loading providers from{" "}
+                  {selectedRuntime?.label ?? "the harness"}…
+                </p>
+              ) : null}
               {showCustomProviderInput ? (
                 <div
                   className={cn(

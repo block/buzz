@@ -9,6 +9,7 @@ import {
   type PersonaDropdownOption,
 } from "./agentConfigOptions";
 import { PersonaDropdownField } from "./PersonaDropdownField";
+import { ProviderSelectField } from "./ProviderSelectField";
 import { PersonaProviderApiKeyField } from "./PersonaProviderApiKeyField";
 
 /**
@@ -26,6 +27,8 @@ export function EditAgentProviderModelFields({
   providerRequired,
   providerDropdownOptions,
   providerSelectValue,
+  providerSearchable,
+  providerDiscoveryLoading,
   onProviderDropdownChange,
   isCustomProviderEditing,
   provider,
@@ -52,6 +55,10 @@ export function EditAgentProviderModelFields({
   providerRequired: boolean;
   providerDropdownOptions: PersonaDropdownOption[];
   providerSelectValue: string;
+  /** Harness publishes its own inventory → render the searchable combobox. */
+  providerSearchable: boolean;
+  /** Provider-inventory discovery in flight; renders a status line. */
+  providerDiscoveryLoading: boolean;
   onProviderDropdownChange: (value: string) => void;
   isCustomProviderEditing: boolean;
   provider: string;
@@ -91,14 +98,20 @@ export function EditAgentProviderModelFields({
               <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
             )}
           </label>
-          <PersonaDropdownField
+          <ProviderSelectField
             disabled={disabled}
             id="edit-agent-llm-provider"
             onValueChange={onProviderDropdownChange}
             options={providerDropdownOptions}
             placeholder="Default (auto)"
+            searchable={providerSearchable}
             value={providerSelectValue}
           />
+          {providerDiscoveryLoading ? (
+            <p className="text-xs text-muted-foreground" role="status">
+              Loading providers from the harness…
+            </p>
+          ) : null}
           {isCustomProviderEditing ? (
             <div
               className={cn(

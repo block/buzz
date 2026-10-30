@@ -1,5 +1,6 @@
 import type {
   AcpRuntimeCatalogEntry,
+  AgentProviderInfo,
   GlobalAgentConfig,
 } from "@/shared/api/types";
 import { BUZZ_AGENT_THINKING_EFFORT } from "./buzzAgentConfig";
@@ -416,6 +417,43 @@ export function getPersonaProviderOptions(
     ...options,
     { id: trimmedProvider, label: `${trimmedProvider} (current)` },
   ];
+}
+
+/**
+ * Append a harness-published provider inventory to the built-in provider rows.
+ *
+ * Harnesses that publish their own inventory (goose) know far more providers
+ * than the built-in catalog lists; anything missing today is only reachable by
+ * picking "Custom provider…" and typing the id by hand. Discovered rows keep
+ * the harness's order, are de-duplicated against rows already present (built-in
+ * ids or a saved value's `(current)` tail), and keep the raw id as the option
+ * value — that id is what the harness reads off its provider env var.
+ *
+ * The description carries the `configured` flag so a user can tell at a glance
+ * which providers already have credentials behind them.
+ */
+export function withDiscoveredProviderOptions(
+  baseOptions: readonly PersonaDropdownOption[],
+  discovered: readonly AgentProviderInfo[],
+): PersonaDropdownOption[] {
+  if (discovered.length === 0) {
+    return [...baseOptions];
+  }
+  const present = new Set(baseOptions.map((option) => option.value));
+  const discoveredOptions: PersonaDropdownOption[] = [];
+  for (const provider of discovered) {
+    const id = provider.id.trim();
+    if (id.length === 0 || present.has(id)) {
+      continue;
+    }
+    present.add(id);
+    discoveredOptions.push({
+      label: provider.name?.trim() || id,
+      ...(provider.configured ? { description: "Configured" } : {}),
+      value: id,
+    });
+  }
+  return [...baseOptions, ...discoveredOptions];
 }
 
 /**

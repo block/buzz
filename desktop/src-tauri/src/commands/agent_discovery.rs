@@ -148,6 +148,7 @@ pub async fn save_custom_harness(
         mcp_command: None,
         model_env_var: None,
         provider_env_var: None,
+        provider_inventory: false,
         thinking_env_var: None,
         effort_canonical_values: None,
         max_tokens_env_var: None,
