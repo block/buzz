@@ -1074,3 +1074,97 @@ async fn removed_creator_join_racing_a_private_switch_is_refused() {
         "a removed creator must not rejoin a channel that became private"
     );
 }
+
+/// A create or rename that would list a second open channel under a taken
+/// name is refused with its reason as a client error, and stores nothing.
+/// Mutation: let `ChannelNameTaken` fall through to the internal-error arm
+/// of either kind → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_taken_open_name_is_refused_as_a_client_error() {
+    use crate::handlers::ingest::IngestError;
+
+    let state = state().await;
+    let tenant = community(&state, "group-state-name-taken").await;
+    let owner = Keys::generate();
+    let create = |name: &str| {
+        let channel_id = Uuid::new_v4();
+        let event = EventBuilder::new(Kind::Custom(9007), "")
+            .tags([
+                Tag::parse(["h", &channel_id.to_string()]).unwrap(),
+                Tag::parse(["name", name]).unwrap(),
+            ])
+            .sign_with_keys(&owner)
+            .expect("sign 9007");
+        (channel_id, event)
+    };
+
+    let (_, first) = create("launch");
+    assert!(
+        ingest_event(&state, &tenant, first, http_auth(&owner))
+            .await
+            .expect("first create")
+            .accepted
+    );
+
+    let (second, event) = create("Launch");
+    match ingest_event(&state, &tenant, event, http_auth(&owner)).await {
+        Err(IngestError::Rejected(message)) => assert_eq!(
+            message,
+            "invalid: an open channel named \"Launch\" already exists"
+        ),
+        Err(other) => panic!("expected a refusal, got {other:?}"),
+        Ok(result) => panic!("expected a refusal, got {:?}", result.message),
+    }
+    assert!(
+        state
+            .db
+            .get_channel(tenant.community(), second)
+            .await
+            .is_err(),
+        "the refused create stores no channel"
+    );
+
+    let other = create_channel(&state, &tenant, &owner, &[]).await;
+    let before = state
+        .db
+        .get_channel(tenant.community(), other)
+        .await
+        .expect("channel")
+        .name;
+    let rename = EventBuilder::new(Kind::Custom(9002), "")
+        .tags([
+            Tag::parse(["h", &other.to_string()]).unwrap(),
+            Tag::parse(["name", "LAUNCH"]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .expect("sign 9002");
+    let rename_id = rename.id;
+    match ingest_event(&state, &tenant, rename, http_auth(&owner)).await {
+        Err(IngestError::Rejected(message)) => assert_eq!(
+            message,
+            "invalid: an open channel named \"LAUNCH\" already exists"
+        ),
+        Err(other) => panic!("expected a refusal, got {other:?}"),
+        Ok(result) => panic!("expected a refusal, got {:?}", result.message),
+    }
+    assert_eq!(
+        state
+            .db
+            .get_channel(tenant.community(), other)
+            .await
+            .expect("channel")
+            .name,
+        before,
+        "the refused rename keeps the name"
+    );
+    let stored: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM events WHERE community_id = $1 AND id = $2)",
+    )
+    .bind(tenant.community().as_uuid())
+    .bind(rename_id.as_bytes().as_slice())
+    .fetch_one(state.db.pool())
+    .await
+    .expect("look up the 9002");
+    assert!(!stored, "the refused 9002 is not stored");
+}
