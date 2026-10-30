@@ -16,11 +16,13 @@ class DeleteAgentAction extends HookConsumerWidget {
   const DeleteAgentAction({
     required this.controller,
     required this.pubkey,
+    this.asSettingsRow = false,
     super.key,
   });
 
   final RemoteAgentController controller;
   final String pubkey;
+  final bool asSettingsRow;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -89,6 +91,14 @@ class DeleteAgentAction extends HookConsumerWidget {
       }
     }
 
+    if (asSettingsRow) {
+      return TextButton.icon(
+        onPressed: controller.busy ? null : remove,
+        style: TextButton.styleFrom(foregroundColor: context.colors.error),
+        icon: const Icon(BuzzIcons.trash2, size: 18),
+        label: Text(controller.busy ? 'Deleting…' : 'Delete agent'),
+      );
+    }
     if (Theme.of(context).platform == TargetPlatform.iOS) {
       return IosGlassNavigationButton(
         icon: IosGlassNavigationIcon.trash,

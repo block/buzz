@@ -1,6 +1,9 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import '../../shared/success_haptic.dart';
+import '../../shared/widgets/profile_action_chip.dart';
+import '../../shared/widgets/app_list_card.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -79,6 +82,10 @@ class UserProfileSheet extends HookConsumerWidget {
   /// Optional action opposite the sheet close control.
   final Widget? headerLeading;
 
+  /// Agent-specific content supplied by the owning surface.
+  final WidgetBuilder? agentIdentity;
+  final WidgetBuilder? agentSettings;
+
   /// Space before the primary profile actions.
   final double primaryActionsSpacing;
 
@@ -94,6 +101,8 @@ class UserProfileSheet extends HookConsumerWidget {
     this.names,
     this.contextualActions,
     this.headerLeading,
+    this.agentIdentity,
+    this.agentSettings,
     this.primaryActionsSpacing = Grid.xs + Grid.half,
     this.contextualActionsSpacing = Grid.xs,
   });
@@ -152,15 +161,21 @@ class UserProfileSheet extends HookConsumerWidget {
     final initial =
         profile?.initial ?? (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?');
 
+    final copyGeneration = useRef(0);
+
     Future<void> copyPublicKey() async {
       if (npub == null) return;
       await Clipboard.setData(ClipboardData(text: npub));
       if (!context.mounted) return;
+      final generation = ++copyGeneration.value;
       copied.value = true;
+      unawaited(successHaptic());
       _showProfileCopyToast(context);
       unawaited(
         Future<void>.delayed(const Duration(seconds: 2), () {
-          if (context.mounted) copied.value = false;
+          if (context.mounted && copyGeneration.value == generation) {
+            copied.value = false;
+          }
         }),
       );
     }
@@ -204,42 +219,62 @@ class UserProfileSheet extends HookConsumerWidget {
                   children: [
                     // Center the presence chip on the avatar's lower edge.
                     Padding(
-                      padding: const EdgeInsets.only(bottom: Grid.xl / 2),
+                      padding: EdgeInsets.only(
+                        bottom: agentPresentation ? 0 : Grid.xl / 2,
+                      ),
                       child: Stack(
                         clipBehavior: Clip.none,
                         children: [
                           Align(
                             alignment: Alignment.center,
-                            child: FractionallySizedBox(
-                              widthFactor: 0.5,
-                              child: _ProfileAvatar(
-                                avatarUrl: avatarUrl,
-                                initial: initial,
-                                isAgent: profile?.isAgent == true,
-                              ),
+                            child: agentPresentation
+                                ? SizedBox(
+                                    width: Grid.xxl * 2,
+                                    child: _ProfileAvatar(
+                                      avatarUrl: avatarUrl,
+                                      initial: initial,
+                                      isAgent: true,
+                                    ),
+                                  )
+                                : FractionallySizedBox(
+                                    widthFactor: 0.5,
+                                    child: _ProfileAvatar(
+                                      avatarUrl: avatarUrl,
+                                      initial: initial,
+                                      isAgent: profile?.isAgent == true,
+                                    ),
+                                  ),
+                          ),
+                          if (!agentPresentation)
+                            Positioned(
+                              left: 0,
+                              right: 0,
+                              bottom: -(Grid.xl / 2),
+                              child: _ProfilePresenceChip(presence: presence),
                             ),
-                          ),
-                          Positioned(
-                            left: 0,
-                            right: 0,
-                            bottom: -(Grid.xl / 2),
-                            child: _ProfilePresenceChip(presence: presence),
-                          ),
                         ],
                       ),
                     ),
-                    const SizedBox(height: Grid.half),
+                    SizedBox(height: agentPresentation ? Grid.xs : Grid.half),
 
                     // Display name — centered, large
                     Center(
                       child: Text(
                         displayName,
-                        style: context.textTheme.headlineSmall?.copyWith(
-                          fontWeight: FontWeight.w700,
-                        ),
+                        style: agentPresentation
+                            ? context.textTheme.bodyLarge?.copyWith(
+                                fontSize: 20,
+                                height: 1.4,
+                                letterSpacing: -0.2,
+                              )
+                            : context.textTheme.headlineSmall?.copyWith(
+                                fontWeight: FontWeight.w700,
+                              ),
+                        textAlign: TextAlign.center,
                       ),
                     ),
-                    if (agentSubtitle != null) ...[
+
+                    if (!agentPresentation && agentSubtitle != null) ...[
                       const SizedBox(height: Grid.xxs),
                       Center(
                         child: Wrap(
@@ -316,41 +351,140 @@ class UserProfileSheet extends HookConsumerWidget {
                       ),
                     ],
 
-                    SizedBox(height: primaryActionsSpacing),
+                    // The 48-point target adds 8 points above the 32-point capsule.
+                    SizedBox(
+                      height: agentPresentation
+                          ? Grid.xxs
+                          : primaryActionsSpacing,
+                    ),
 
-                    Row(
-                      children: [
-                        if (pk != currentPubkey) ...[
-                          Expanded(
-                            child: BuzzActionTile(
-                              icon: isOpeningDirectMessage.value
-                                  ? null
-                                  : BuzzIcons.messageSquare,
-                              label: isOpeningDirectMessage.value
-                                  ? 'Opening…'
-                                  : 'Message',
-                              isLoading: isOpeningDirectMessage.value,
-                              loadingSemanticLabel: 'Opening direct message',
-                              onTap: openDirectMessage,
+                    if (agentPresentation) ...[
+                      Center(
+                        child: Wrap(
+                          alignment: WrapAlignment.center,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          spacing: Grid.xxs,
+                          runSpacing: Grid.xxs,
+                          children: [
+                            if (pk != currentPubkey)
+                              ProfileActionChip(
+                                onPressed: isOpeningDirectMessage.value
+                                    ? null
+                                    : openDirectMessage,
+                                label: isOpeningDirectMessage.value
+                                    ? 'Opening…'
+                                    : 'Message',
+                              ),
+                            if (contextualActions != null)
+                              Builder(builder: contextualActions!),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: Grid.sm),
+                      if (agentIdentity != null)
+                        Builder(builder: agentIdentity!),
+                      if (agentSettings != null)
+                        Builder(builder: agentSettings!),
+                      AppListCard(
+                        label: 'Public key',
+                        horizontalPadding: 0,
+                        children: [
+                          Semantics(
+                            button: true,
+                            enabled: npub != null,
+                            label: copied.value
+                                ? 'Copied public key'
+                                : 'Copy public key',
+                            value: npub,
+                            liveRegion: true,
+                            child: Tooltip(
+                              message: 'Copy public key',
+                              excludeFromSemantics: true,
+                              child: InkWell(
+                                onTap: npub == null ? null : copyPublicKey,
+                                child: Padding(
+                                  padding: const EdgeInsets.all(Grid.xs),
+                                  child: ExcludeSemantics(
+                                    child: Row(
+                                      children: [
+                                        Expanded(
+                                          child: Text(
+                                            npub ?? 'Public key unavailable',
+                                            style: context.textTheme.bodySmall,
+                                          ),
+                                        ),
+                                        const SizedBox(width: Grid.xs),
+                                        AnimatedSwitcher(
+                                          duration:
+                                              MediaQuery.disableAnimationsOf(
+                                                context,
+                                              )
+                                              ? Duration.zero
+                                              : const Duration(
+                                                  milliseconds: 180,
+                                                ),
+                                          switchInCurve: Curves.easeOutCubic,
+                                          switchOutCurve: Curves.easeInCubic,
+                                          transitionBuilder:
+                                              (child, animation) =>
+                                                  ScaleTransition(
+                                                    scale: animation,
+                                                    child: child,
+                                                  ),
+                                          child: Icon(
+                                            copied.value
+                                                ? BuzzIcons.check
+                                                : BuzzIcons.copy,
+                                            key: ValueKey(copied.value),
+                                            size: 18,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ),
                             ),
                           ),
-                          const SizedBox(width: Grid.twelve),
                         ],
-                        Expanded(
-                          child: BuzzActionTile(
-                            icon: copied.value
-                                ? BuzzIcons.check
-                                : BuzzIcons.key,
-                            label: copied.value ? 'Copied' : 'Copy public key',
-                            isEnabled: npub != null,
-                            onTap: copyPublicKey,
+                      ),
+                    ] else ...[
+                      Row(
+                        children: [
+                          if (pk != currentPubkey) ...[
+                            Expanded(
+                              child: BuzzActionTile(
+                                icon: isOpeningDirectMessage.value
+                                    ? null
+                                    : BuzzIcons.messageSquare,
+                                label: isOpeningDirectMessage.value
+                                    ? 'Opening…'
+                                    : 'Message',
+                                isLoading: isOpeningDirectMessage.value,
+                                loadingSemanticLabel: 'Opening direct message',
+                                onTap: openDirectMessage,
+                              ),
+                            ),
+                            const SizedBox(width: Grid.twelve),
+                          ],
+                          Expanded(
+                            child: BuzzActionTile(
+                              icon: copied.value
+                                  ? BuzzIcons.check
+                                  : BuzzIcons.key,
+                              label: copied.value
+                                  ? 'Copied'
+                                  : 'Copy public key',
+                              isEnabled: npub != null,
+                              onTap: copyPublicKey,
+                            ),
                           ),
-                        ),
-                      ],
-                    ),
-                    SizedBox(height: contextualActionsSpacing),
-                    if (contextualActions != null)
-                      Builder(builder: contextualActions!),
+                        ],
+                      ),
+                      SizedBox(height: contextualActionsSpacing),
+                      if (contextualActions != null)
+                        Builder(builder: contextualActions!),
+                    ],
                   ],
                 ),
               ),
@@ -402,7 +536,7 @@ void _showProfileCopyToast(BuildContext context) {
             children: [
               Icon(BuzzIcons.check, size: 18, color: colors.onInverseSurface),
               const SizedBox(width: Grid.xxs),
-              Text('Public key copied', style: textStyle),
+              Flexible(child: Text('Public key copied', style: textStyle)),
             ],
           ),
         ),

@@ -36,6 +36,17 @@ class _Relay extends FakeRelay {
   SessionState build() => const SessionState(status: SessionStatus.connected);
 
   @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    final handler = harness.onQuery;
+    return handler == null
+        ? super.queryRelay(filters, timeout: timeout)
+        : handler(filters.single);
+  }
+
+  @override
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
@@ -110,6 +121,7 @@ class GatedController extends RelayFakeController {
 /// belong to the fake-async zone that created them, so each file holds only
 /// one widget test that touches the store.
 class AgentsHarness {
+  Future<List<NostrEvent>> Function(NostrFilter)? onQuery;
   AgentsHarness._(this.registry, this.controller, this.community);
   final FakeRegistry registry;
   final GatedController controller;
