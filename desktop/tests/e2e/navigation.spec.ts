@@ -733,7 +733,15 @@ test("message links to visible root messages open the thread panel", async ({
     name: "Open message in channel general",
   });
   await expect(rootThreadLink).toHaveText("general");
-  const pendingChipBox = await rootThreadLink.boundingBox();
+  // The sent row can still be mounting here, and boundingBox() then reads
+  // null. Poll until the chip has laid out and keep that pending width.
+  let pendingChipWidth = 0;
+  await expect
+    .poll(async () => {
+      pendingChipWidth = (await rootThreadLink.boundingBox())?.width ?? 0;
+      return pendingChipWidth;
+    })
+    .toBeGreaterThan(0);
   await expect
     .poll(() =>
       page.evaluate(
@@ -776,9 +784,7 @@ test("message links to visible root messages open the thread panel", async ({
   // channel label at the exact width it had while the fetch was in flight, and
   // never the fetched snippet or the truncated event hash.
   await expect(rootThreadLink).toHaveText("general");
-  expect((await rootThreadLink.boundingBox())?.width).toBe(
-    pendingChipBox?.width,
-  );
+  expect((await rootThreadLink.boundingBox())?.width).toBe(pendingChipWidth);
   await expect(
     messageTooltip.locator('[data-buzz-tooltip-metadata-content=""]'),
   ).toHaveClass(/line-clamp-3/);
