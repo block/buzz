@@ -121,7 +121,10 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
   ///
   /// All starter work is fenced to the community and identity that started it.
   /// A partial setup remains recoverable, so a failed operation deliberately
-  /// propagates to the invite flow instead of being reported as success.
+  /// propagates to the invite flow instead of being reported as success. The
+  /// one exception is a starter name the relay reports as already held by a
+  /// channel that cannot serve as the starter: that is permanent, so the
+  /// starter is skipped instead of blocking the join.
   @override
   Future<String?> ensureStarterChannels() async {
     _ensureScopeCurrent();
@@ -147,7 +150,8 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
           );
           _ensureScopeCurrent();
         } catch (error) {
-          if (!_isDuplicateChannelError(error)) rethrow;
+          final nameTaken = _isChannelNameTakenError(error);
+          if (!nameTaken && !_isDuplicateChannelError(error)) rethrow;
           _ensureScopeCurrent();
           channels = await _loadChannels();
           _ensureScopeCurrent();
@@ -156,6 +160,11 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
               channels
                   .where((candidate) => candidate.id == channelId)
                   .firstOrNull;
+          // The relay reserves a listed channel's name, archived ones
+          // included, so a taken name will never become creatable on retry.
+          // An archived or non-stream namesake cannot serve as the starter, so
+          // skip it rather than strand the invite in permanent recovery.
+          if (channel == null && nameTaken) continue;
           if (channel == null) rethrow;
         }
       }
@@ -197,6 +206,15 @@ Channel? _findStarterChannel(List<Channel> channels, String name) {
 
 bool _isDuplicateChannelError(Object error) =>
     error.toString().contains('duplicate: channel already exists');
+
+/// The relay refuses creating an open channel whose name another listed
+/// channel already holds, ignoring case:
+/// `invalid: an open channel named "general" already exists`.
+bool _isChannelNameTakenError(Object error) {
+  final message = error.toString().toLowerCase();
+  return message.contains('invalid: an open channel named') &&
+      message.contains('already exists');
+}
 
 /// Returns desktop's deterministic per-relay UUID for a public starter.
 @visibleForTesting
