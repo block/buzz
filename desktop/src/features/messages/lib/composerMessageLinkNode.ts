@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { mergeAttributes, Node } from "@tiptap/core";
 import type { Mark, Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Selection, TextSelection } from "@tiptap/pm/state";
@@ -372,7 +374,7 @@ function composerLinkPresentation(
       channelName ||
       channel.value.channelId.slice(0, 8);
     return {
-      ariaLabel: `Open channel ${resolvedChannelName}`,
+      ariaLabel: uiT("Open channel {0}", { p0: resolvedChannelName }),
       channelName: resolvedChannelName,
       dataAttributes: { "data-channel-deep-link": "" },
       icon: "channel",
@@ -383,11 +385,15 @@ function composerLinkPresentation(
   const entity = parseEntityLink(href);
   if (!entity.ok) {
     return {
-      ariaLabel: "Buzz link",
+      get ariaLabel() {
+        return uiT("Buzz link");
+      },
       channelName: "",
       dataAttributes: {},
       icon: "message",
-      label: "Buzz link",
+      get label() {
+        return uiT("Buzz link");
+      },
     };
   }
 

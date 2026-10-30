@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -19,7 +21,7 @@ export function ProjectAuthorIdentity({
   testId?: string;
 }) {
   const profile = profiles?.[normalizePubkey(pubkey)];
-  const roleLabel = profile?.isAgent === true ? "Agent" : "Person";
+  const roleLabel = profile?.isAgent === true ? uiT("Agent") : uiT("Person");
 
   return (
     <span className="inline-flex align-middle">

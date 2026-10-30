@@ -1,3 +1,6 @@
+import { uiDateFormatter, uiRelativeTimeFormatter } from "@/shared/i18n/format";
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { Check, type LucideIcon } from "lucide-react";
 
 import {
@@ -23,8 +26,15 @@ import { Markdown } from "@/shared/ui/markdown";
 import { hasLinkPreviewSuppression } from "@/features/messages/lib/formatTimelineMessages";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
-const relativeTimeFormatter = new Intl.RelativeTimeFormat("en-US", {
+const relativeTimeFormatter = uiRelativeTimeFormatter({
   numeric: "auto",
+});
+
+const absoluteTimeFormatter = uiDateFormatter({
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
 });
 
 function formatRelativeTime(unixSeconds: number) {
@@ -50,46 +60,41 @@ function formatRelativeTime(unixSeconds: number) {
     );
   }
 
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(new Date(unixSeconds * 1_000));
+  return absoluteTimeFormatter.format(new Date(unixSeconds * 1_000));
 }
 
 function feedHeadline(item: FeedItem) {
   switch (item.kind) {
     case KIND_REMINDER:
-      return "Reminder";
+      return uiT("Reminder");
     case KIND_JOB_REQUEST:
-      return "Job requested";
+      return uiT("Job requested");
     case KIND_JOB_ACCEPTED:
-      return "Job accepted";
+      return uiT("Job accepted");
     case KIND_JOB_PROGRESS:
-      return "Progress update";
+      return uiT("Progress update");
     case KIND_JOB_RESULT:
-      return "Job result";
+      return uiT("Job result");
     case KIND_JOB_CANCEL:
-      return "Job cancelled";
+      return uiT("Job cancelled");
     case KIND_JOB_ERROR:
-      return "Job failed";
+      return uiT("Job failed");
     case KIND_FORUM_POST:
-      return "Forum post";
+      return uiT("Forum post");
     case KIND_FORUM_COMMENT:
-      return "Forum reply";
+      return uiT("Forum reply");
     case KIND_APPROVAL_REQUEST:
-      return "Approval requested";
+      return uiT("Approval requested");
     default:
       if (item.category === "mention") {
-        return "Mention";
+        return uiT("Mention");
       }
 
       if (item.category === "agent_activity") {
-        return "Agent update";
+        return uiT("Agent update");
       }
 
-      return "Channel update";
+      return uiT("Channel update");
   }
 }
 
@@ -141,6 +146,7 @@ export function FeedSection({
   onMarkDone,
   onUndoDone,
 }: FeedSectionProps) {
+  useUiLanguage();
   return (
     <section>
       <div className="flex items-center gap-2 pb-2">
@@ -180,7 +186,9 @@ export function FeedSection({
               >
                 {canOpenChannel ? (
                   <button
-                    aria-label={`Open ${item.channelName || "channel"}`}
+                    aria-label={uiT("Open {0}", {
+                      p0: item.channelName || "channel",
+                    })}
                     className="absolute inset-0"
                     data-testid={`home-feed-open-${item.id}`}
                     onClick={() => {
@@ -246,7 +254,7 @@ export function FeedSection({
 
                 {showDoneAction ? (
                   <Button
-                    aria-label={isDone ? "Undo done" : "Mark done"}
+                    aria-label={isDone ? uiT("Undo done") : uiT("Mark done")}
                     onClick={() => {
                       if (isDone) {
                         onUndoDone(item.id);

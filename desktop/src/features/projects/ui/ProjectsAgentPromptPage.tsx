@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiMessage, uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { EditorContent } from "@tiptap/react";
 import {
   ALargeSmall,
@@ -134,21 +136,29 @@ function buildSuggestions(projects: readonly Project[]) {
   const firstRepo = projects[0]?.name;
   return [
     {
-      label: "Reviews",
+      get label() {
+        return uiT("Reviews");
+      },
       prompt: "Which reviews need attention today?",
     },
     {
-      label: "Release check",
+      get label() {
+        return uiT("Release check");
+      },
       prompt: firstRepo
         ? `Are we safe to cut a release of ${firstRepo} this week?`
         : "Are we safe to cut a release this week?",
     },
     {
-      label: "Tasks",
+      get label() {
+        return uiT("Tasks");
+      },
       prompt: "Summarize the open tasks and flag anything urgent.",
     },
     {
-      label: "Activity",
+      get label() {
+        return uiT("Activity");
+      },
       prompt: firstRepo
         ? `Summarize recent activity in ${firstRepo}.`
         : "Summarize recent repository activity.",
@@ -233,6 +243,8 @@ export function ConversationThread({
   selfAvatarUrl: string | null;
   opener: ProjectsConversationOpener;
 }) {
+  useUiLanguage();
+
   useChannelSubscription(channel);
   const messagesQuery = useChannelMessagesQuery(channel);
   const threadRootIds = React.useMemo(
@@ -379,7 +391,7 @@ export function ConversationThread({
       {agentWorking.working ? (
         <div className="flex items-center gap-2 pl-11 text-sm text-muted-foreground">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          {agent.name} is working…
+          {agent.name} {uiT(" is working…")}
         </div>
       ) : null}
       <div ref={bottomRef} />
@@ -399,6 +411,8 @@ export function ProjectsAgentPromptPage({
   onClose: () => void;
   workspaceId: string | null;
 }) {
+  const __buzzLanguage = useUiLanguage();
+
   const [prompt, setPrompt] = React.useState("");
   const [storedConversation, setStoredConversation] =
     React.useState<StoredProjectsAgentConversation | null>(null);
@@ -491,7 +505,7 @@ export function ProjectsAgentPromptPage({
     onUpdate: ({ text }) => setPrompt(text),
     placeholder: conversation
       ? `Reply to ${conversation.agent.name}…`
-      : "Are we safe to release this week?",
+      : uiT("Are we safe to release this week?"),
   });
   const linkEditor = useLinkEditor(richText);
   onEditLinkRef.current = linkEditor.openFromClick;
@@ -513,9 +527,10 @@ export function ProjectsAgentPromptPage({
     return () => window.cancelAnimationFrame(frame);
   }, [richText.editor, richText.focusPreserve]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: This UI projection reads locale-dependent labels.
   const suggestions = React.useMemo(
     () => buildSuggestions(projects),
-    [projects],
+    [projects, __buzzLanguage],
   );
   // Computed once so the pre-send preview and the appended opener payload
   // are byte-identical: the user inspects exactly what will be signed under
@@ -591,7 +606,9 @@ export function ProjectsAgentPromptPage({
       richText.clearContent();
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Failed to reach the agent",
+        error instanceof Error
+          ? error.message
+          : uiT("Failed to reach the agent"),
       );
     } finally {
       setIsSending(false);
@@ -640,13 +657,13 @@ export function ProjectsAgentPromptPage({
         <div className="flex items-center justify-between gap-2 pt-2">
           <div className="flex min-w-0 items-center gap-1">
             <Button
-              aria-label="Toggle formatting"
+              aria-label={uiT("Toggle formatting")}
               aria-pressed={isFormattingOpen}
               className="h-7 w-7 shrink-0 px-0"
               disabled={isSending}
               onClick={() => setIsFormattingOpen((open) => !open)}
               size="icon"
-              title="Formatting"
+              title={uiT("Formatting")}
               type="button"
               variant={isFormattingOpen ? "default" : "ghost"}
             >
@@ -682,7 +699,7 @@ export function ProjectsAgentPromptPage({
                       />
                     ) : null}
                     <span className="min-w-0 truncate">
-                      {selectedAgent?.name ?? "No agents available"}
+                      {selectedAgent?.name ?? uiT("No agents available")}
                     </span>
                     {candidates.length > 0 && conversation === null ? (
                       <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
@@ -735,19 +752,20 @@ export function ProjectsAgentPromptPage({
             type="button"
             variant="default"
           >
-            {isSending ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <SendHorizontal className="h-3.5 w-3.5" />
-            )}
-            Ask
+            {uiMessage("{0} Ask", {
+              p0: isSending ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <SendHorizontal className="h-3.5 w-3.5" />
+              ),
+            })}
           </Button>
         </div>
         {conversation ? null : (
           <div className="flex justify-end pt-1">
             <AgentContextPayloadPreview
               payload={repoContextPayload}
-              triggerLabel="Context appended to your first message"
+              triggerLabel={uiT("Context appended to your first message")}
             />
           </div>
         )}
@@ -771,7 +789,7 @@ export function ProjectsAgentPromptPage({
                 variant="ghost"
               >
                 <Trash2 className="h-3.5 w-3.5" />
-                Clear conversation
+                {uiT("Clear conversation")}
               </Button>
             </div>
             <ConversationThread
@@ -795,15 +813,16 @@ export function ProjectsAgentPromptPage({
     <div className="flex flex-1 items-center justify-center overflow-y-auto px-4">
       <div className="w-full max-w-xl space-y-6 py-10">
         <h2 className="text-center text-lg font-semibold text-foreground">
-          Ask an agent about your projects
+          {uiT("Ask an agent about your projects")}
         </h2>
 
         {promptBox}
 
         {candidates.length === 0 ? (
           <p className="text-center text-sm text-muted-foreground">
-            No agents available yet — create or start one from the Agents view
-            to ask about your repositories.
+            {uiT(
+              "No agents available yet — create or start one from the Agents view to ask about your repositories.",
+            )}
           </p>
         ) : (
           <div className="space-y-1.5">

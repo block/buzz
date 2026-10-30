@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { ArrowLeft } from "lucide-react";
 import * as React from "react";
 
@@ -33,6 +35,8 @@ export function CreateProjectFormContent({
   onCreate: (input: CreateProjectInput) => Promise<void>;
   onCreated: () => void;
 }) {
+  useUiLanguage();
+
   const [name, setName] = React.useState("");
   const [description, setDescription] = React.useState("");
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
@@ -69,7 +73,9 @@ export function CreateProjectFormContent({
       onCreated();
     } catch (error) {
       setErrorMessage(
-        error instanceof Error ? error.message : "Failed to create project.",
+        error instanceof Error
+          ? error.message
+          : uiT("Failed to create project."),
       );
     }
   }
@@ -79,7 +85,9 @@ export function CreateProjectFormContent({
       className="max-w-lg"
       contentClassName="pt-3"
       data-testid="create-project-dialog"
-      headerSubtitle="A project starts as a channel with a repository. People in the channel can talk, clone, and open tasks here."
+      headerSubtitle={uiT(
+        "A project starts as a channel with a repository. People in the channel can talk, clone, and open tasks here.",
+      )}
       footer={
         <div className="flex w-full items-center justify-end gap-3">
           <Button
@@ -88,13 +96,13 @@ export function CreateProjectFormContent({
             form="create-project-form"
             type="submit"
           >
-            {isCreating ? "Creating..." : "Create project"}
+            {isCreating ? uiT("Creating...") : uiT("Create project")}
           </Button>
         </div>
       }
       footerClassName="border-t-0 pt-0"
       headerClassName="pb-2"
-      title="Create a new project"
+      title={uiT("Create a new project")}
     >
       {onBack ? (
         <Button
@@ -106,7 +114,7 @@ export function CreateProjectFormContent({
           variant="ghost"
         >
           <ArrowLeft className="h-4 w-4" />
-          Back to projects
+          {uiT("Back to projects")}
         </Button>
       ) : null}
       <form
@@ -121,7 +129,7 @@ export function CreateProjectFormContent({
             className="text-sm font-medium text-foreground"
             htmlFor="create-project-name"
           >
-            Name
+            {uiT("Name")}
           </label>
           <div
             className={cn(
@@ -157,8 +165,10 @@ export function CreateProjectFormContent({
             className="text-sm font-medium text-foreground"
             htmlFor="create-project-description"
           >
-            Description
-            <span className={CREATE_LABEL_OPTIONAL_CLASS}>Optional</span>
+            {uiT("Description")}
+            <span className={CREATE_LABEL_OPTIONAL_CLASS}>
+              {uiT("Optional")}
+            </span>
           </label>
           <div className={CREATE_FIELD_SHELL_CLASS}>
             <Textarea
@@ -173,7 +183,7 @@ export function CreateProjectFormContent({
                 setDescription(event.target.value);
                 setErrorMessage(null);
               }}
-              placeholder="What this project should become"
+              placeholder={uiT("What this project should become")}
               rows={2}
               value={description}
             />

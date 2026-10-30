@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { Markdown } from "@/shared/ui/markdown";
 import { useAgentSessionTranscriptVariant } from "../agentSessionTranscriptContext";
@@ -26,6 +28,8 @@ function MessageItem({
   item: Extract<TranscriptItem, { type: "message" }>;
   profiles?: UserProfileLookup;
 }) {
+  useUiLanguage();
+
   const variant = useAgentSessionTranscriptVariant();
   const isCompactPreview = variant === "compactPreview";
   const isAssistant = item.role === "assistant";

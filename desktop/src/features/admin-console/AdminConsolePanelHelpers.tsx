@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 /**
  * Shared helpers for the admin console panel sub-components.
  *
@@ -226,7 +228,7 @@ export function LoadingSpinner() {
   return (
     <div className="flex items-center gap-2 text-sm text-muted-foreground">
       <LoaderCircle className="h-4 w-4 animate-spin" />
-      Loading…
+      {uiT("Loading…")}
     </div>
   );
 }
@@ -411,6 +413,8 @@ export function CommunityGroupedList<
   renderItem: (item: T) => ReactNode;
   hideHeadings?: boolean;
 }) {
+  useUiLanguage();
+
   const groups = useMemo(() => groupByCommunity(items), [items]);
   return (
     <div className="space-y-4">

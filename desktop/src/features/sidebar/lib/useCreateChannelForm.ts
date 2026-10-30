@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { useChannelTemplatesQuery } from "@/features/channel-templates/hooks";
@@ -167,7 +169,7 @@ export function useCreateChannelForm({
           setErrorMessage(
             error instanceof Error
               ? error.message
-              : `Failed to create ${kindLabel}.`,
+              : uiT("Failed to create {0}.", { p0: kindLabel }),
           );
         }
       })();

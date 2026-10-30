@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiMessage, uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { SmilePlus } from "lucide-react";
 import * as React from "react";
@@ -305,14 +307,14 @@ function MemberNamesInlineList({
       })}
       {hiddenTargets.length > 0 ? (
         <>
-          , and{" "}
+          {uiT(", and")}{" "}
           <Tooltip>
             <TooltipTrigger asChild>
               <button
                 className="cursor-help rounded-xs hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
                 type="button"
               >
-                {hiddenTargets.length} others
+                {uiT("{0} others", { p0: hiddenTargets.length })}
               </button>
             </TooltipTrigger>
             <TooltipContent className="max-w-72 p-2 text-left" side="top">
@@ -434,7 +436,7 @@ function describeGroupedArrivals({
           <ProfileName pubkey={sharedActor} underlineOnHover>
             {resolveInlineDisplayLabel(sharedActor, currentPubkey, profiles)}
           </ProfileName>
-          , along with{" "}
+          {uiT(", along with")}{" "}
           <MemberNamesInlineList
             agentPubkeys={agentPubkeys}
             currentPubkey={currentPubkey}
@@ -452,7 +454,7 @@ function describeGroupedArrivals({
       title: membershipTitle,
       action: (
         <>
-          {addedActionPrefix(isTargetCurrentUser)} along with{" "}
+          {addedActionPrefix(isTargetCurrentUser)} {uiT(" along with")}{" "}
           <MemberNamesInlineList
             agentPubkeys={agentPubkeys}
             currentPubkey={currentPubkey}
@@ -470,7 +472,7 @@ function describeGroupedArrivals({
       title: membershipTitle,
       action: (
         <>
-          joined along with{" "}
+          {uiT("joined along with")}{" "}
           <MemberNamesInlineList
             agentPubkeys={agentPubkeys}
             currentPubkey={currentPubkey}
@@ -487,7 +489,7 @@ function describeGroupedArrivals({
     title: membershipTitle,
     action: (
       <>
-        arrived along with{" "}
+        {uiT("arrived along with")}{" "}
         <MemberNamesInlineList
           agentPubkeys={agentPubkeys}
           currentPubkey={currentPubkey}
@@ -599,7 +601,9 @@ function describeSystemEvent(
     case "member_removed":
       return {
         title: actorName,
-        action: <>removed {targetName} from the channel</>,
+        action: (
+          <>{uiMessage("removed {0} from the channel", { p0: targetName })}</>
+        ),
       };
     case "topic_changed":
       return {
@@ -632,7 +636,9 @@ function describeSystemEvent(
       // content and the reporter are never disclosed here.
       if (payload.public_reason) {
         return {
-          title: "Removed by community moderators",
+          get title() {
+            return uiT("Removed by community moderators");
+          },
           action: payload.public_reason,
         };
       }
@@ -670,6 +676,8 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
     remove: boolean,
   ) => Promise<void>;
 }) {
+  useUiLanguage();
+
   const sourceMessages = React.useMemo(
     () => groupedMessages ?? [message],
     [groupedMessages, message],
@@ -827,7 +835,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
             <TooltipTrigger asChild>
               <PopoverTrigger asChild>
                 <Button
-                  aria-label="Open reactions"
+                  aria-label={uiT("Open reactions")}
                   className={SYSTEM_ACTION_BUTTON_CLASS}
                   size="sm"
                   type="button"
@@ -837,7 +845,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
                 </Button>
               </PopoverTrigger>
             </TooltipTrigger>
-            <TooltipContent>React</TooltipContent>
+            <TooltipContent>{uiT("React")}</TooltipContent>
           </Tooltip>
           <PopoverContent
             align="end"

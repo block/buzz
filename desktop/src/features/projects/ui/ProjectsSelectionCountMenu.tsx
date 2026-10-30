@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import {
   Bot,
   CircleDot,
@@ -52,6 +54,8 @@ export function ProjectsSelectionCountMenu({
   presentation: ProjectSelectionPresentation;
   selectionItems: ProjectSelectionItem[];
 }) {
+  useUiLanguage();
+
   const selection = useProjectSelection();
   const openChannelWithDraft = useProjectDiscussInChannel(selectionItems);
   const selectionKind = selectionItems[0]?.kind;
@@ -150,7 +154,7 @@ export function ProjectsSelectionCountMenu({
           variant="ghost"
         >
           <X className="h-3.5 w-3.5" />
-          Clear selection
+          {uiT("Clear selection")}
         </Button>
       </div>
     </div>

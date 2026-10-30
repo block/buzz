@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { SimpleImageLightbox } from "@/shared/ui/SimpleImageLightbox";
@@ -10,6 +12,8 @@ export function ViewImageToolPreview({
   src: string;
   title: string | null;
 }) {
+  useUiLanguage();
+
   const [lightboxOpen, setLightboxOpen] = React.useState(false);
   const [imageFailed, setImageFailed] = React.useState(false);
   const resolvedSrc = React.useMemo(() => resolveToolImageSrc(src), [src]);

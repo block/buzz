@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
@@ -20,7 +22,7 @@ export function ProjectStatusProgressIcon({
 }) {
   return (
     <svg
-      aria-label={ariaLabel ?? `${state} status`}
+      aria-label={ariaLabel ?? uiT("{0} status", { p0: state })}
       className={cn("shrink-0", className)}
       data-project-status-progress={state}
       fill="none"

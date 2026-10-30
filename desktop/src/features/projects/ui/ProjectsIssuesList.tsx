@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { Eye, FolderKanban } from "lucide-react";
 import * as React from "react";
 
@@ -76,6 +78,8 @@ const IssueGridCard = React.memo(function IssueGridCard({
   project: Project;
   repository: Repository;
 }) {
+  useUiLanguage();
+
   return (
     <Card
       className="group relative flex min-h-32 flex-col overflow-hidden border-border/60 bg-transparent p-4 shadow-none transition-colors duration-150 hover:bg-muted/20"
@@ -86,7 +90,9 @@ const IssueGridCard = React.memo(function IssueGridCard({
         onClick={() => onOpen(project, repository, issue)}
         type="button"
       >
-        <span className="sr-only">View task {issue.title}</span>
+        <span className="sr-only">
+          {uiT("View task {0}", { p0: issue.title })}
+        </span>
       </button>
       <div className="flex min-h-0 flex-1 flex-col gap-2">
         <h3
@@ -99,7 +105,7 @@ const IssueGridCard = React.memo(function IssueGridCard({
           className={cn(PROJECT_GRID_CARD_BODY_CLASS, "text-muted-foreground")}
           data-testid="projects-grid-card-body"
         >
-          {issue.content || "No description provided."}
+          {issue.content || uiT("No description provided.")}
         </p>
         <div
           className="mt-auto flex items-center gap-1.5 text-xs font-medium text-muted-foreground"
@@ -149,6 +155,8 @@ const IssueListRow = React.memo(function IssueListRow({
   rangeItems: ReturnType<typeof issueSelectionItem>[];
   repository: Repository;
 }) {
+  useUiLanguage();
+
   const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
 
   return (
@@ -177,14 +185,16 @@ const IssueListRow = React.memo(function IssueListRow({
       titleAttr={`Open task ${issue.title}`}
       titleIcon={<ProjectEventTypeIcon className="h-3.5 w-3.5" kind="issue" />}
       trailing={
-        <ProjectListRowMenu label={`More options for ${issue.title}`}>
+        <ProjectListRowMenu
+          label={uiT("More options for {0}", { p0: issue.title })}
+        >
           <DropdownMenuItem onSelect={() => onOpen(project, repository, issue)}>
             <Eye className="h-4 w-4" />
             {nextStepLabel(issue.status)}
           </DropdownMenuItem>
           <CopyShareLinkMenuItem
             link={issueShareLink(issue)}
-            label="Copy task link"
+            label={uiT("Copy task link")}
             testId={`projects-issue-copy-link-${issue.id}`}
           />
         </ProjectListRowMenu>
@@ -206,6 +216,8 @@ export function ProjectsIssuesList({
   profiles,
   viewMode,
 }: ProjectsIssuesListProps) {
+  useUiLanguage();
+
   // Grouping and per-group selection arrays are identity-stable across
   // re-renders so the memoized rows only re-render when their data changes.
   const allGroups = React.useMemo(
@@ -241,7 +253,7 @@ export function ProjectsIssuesList({
   );
 
   if (isLoading) {
-    return <BuzzLoadingState label="Loading tasks" />;
+    return <BuzzLoadingState label={uiT("Loading tasks")} />;
   }
 
   const loadNotice = (
@@ -264,15 +276,17 @@ export function ProjectsIssuesList({
             size="sm"
             variant="outline"
           >
-            {isRetrying ? "Retrying..." : "Retry"}
+            {isRetrying ? uiT("Retrying...") : uiT("Retry")}
           </Button>
         }
         description={
-          error instanceof Error ? error.message : "The relay request failed."
+          error instanceof Error
+            ? error.message
+            : uiT("The relay request failed.")
         }
         error
         panel={false}
-        title="Could not load tasks"
+        title={uiT("Could not load tasks")}
       />
     );
   }

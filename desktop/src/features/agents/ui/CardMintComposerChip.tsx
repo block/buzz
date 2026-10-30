@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { Loader2, Sparkles, X } from "lucide-react";
 
 import {
@@ -14,6 +16,8 @@ import { Shimmer } from "@/shared/ui/Shimmer";
  * composer dock's bottom activity rail next to agent-working/typing rows.
  */
 export function CardMintComposerChip() {
+  useUiLanguage();
+
   const jobs = useCardMintJobs();
   if (jobs.length === 0) return null;
 
@@ -32,7 +36,9 @@ export function CardMintComposerChip() {
             >
               <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin opacity-70" />
               <Shimmer className="-my-px truncate py-px">
-                {`Minting ${job.input.agentName}’s card… (takes a few minutes)`}
+                {uiT("Minting {0}’s card… (takes a few minutes)", {
+                  p0: job.input.agentName,
+                })}
               </Shimmer>
             </span>
           );
@@ -48,7 +54,9 @@ export function CardMintComposerChip() {
             >
               <Sparkles className="h-3.5 w-3.5 shrink-0" />
               <span className="truncate">
-                {`${job.input.agentName}’s card is ready — view it`}
+                {uiT("{0}’s card is ready — view it", {
+                  p0: job.input.agentName,
+                })}
               </span>
             </button>
           );
@@ -60,10 +68,10 @@ export function CardMintComposerChip() {
             key={job.jobId}
           >
             <span className="truncate">
-              {`Minting ${job.input.agentName}’s card failed`}
+              {uiT("Minting {0}’s card failed", { p0: job.input.agentName })}
             </span>
             <button
-              aria-label="Dismiss failed mint"
+              aria-label={uiT("Dismiss failed mint")}
               className="shrink-0 opacity-70 hover:opacity-100"
               onClick={() => dismissCardMintJob(job.jobId)}
               type="button"

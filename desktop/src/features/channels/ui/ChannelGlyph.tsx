@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { FileText, Hash, Lock } from "lucide-react";
 
 import { useIsProjectHomeChannel } from "@/features/projects/lib/projectHomeChannel";
@@ -13,6 +15,8 @@ export function ChannelGlyph({
   channel: Pick<Channel, "channelType" | "id" | "visibility">;
   className?: string;
 }) {
+  useUiLanguage();
+
   const projectHome = useIsProjectHomeChannel(channel.id);
   const iconClass = cn("size-4 shrink-0", className);
 

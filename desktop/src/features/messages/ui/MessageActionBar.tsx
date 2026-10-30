@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import {
   BellOff,
   BellRing,
@@ -119,6 +121,8 @@ function MoreActionsMenu({
   isFollowingThread?: boolean;
   isUnread?: boolean;
 }) {
+  useUiLanguage();
+
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false);
   const [isReportDialogOpen, setIsReportDialogOpen] = React.useState(false);
   // Transfer focus ownership only after the menu has finished closing.
@@ -149,7 +153,7 @@ function MoreActionsMenu({
           <TooltipTrigger asChild>
             <DropdownMenuTrigger asChild>
               <Button
-                aria-label="More actions"
+                aria-label={uiT("More actions")}
                 className={ACTION_BUTTON_CLASS}
                 data-testid={`more-actions-${message.id}`}
                 size="sm"
@@ -160,7 +164,7 @@ function MoreActionsMenu({
               </Button>
             </DropdownMenuTrigger>
           </TooltipTrigger>
-          <TooltipContent>More actions</TooltipContent>
+          <TooltipContent>{uiT("More actions")}</TooltipContent>
         </Tooltip>
         <DropdownMenuContent
           align="end"
@@ -183,7 +187,7 @@ function MoreActionsMenu({
               }}
             >
               <Pencil className="h-4 w-4" />
-              Edit message
+              {uiT("Edit message")}
             </DropdownMenuItem>
           ) : null}
 
@@ -203,7 +207,7 @@ function MoreActionsMenu({
               ) : (
                 <MailOpen className="h-4 w-4" />
               )}
-              {isUnread ? "Mark read" : "Mark unread"}
+              {isUnread ? uiT("Mark read") : uiT("Mark unread")}
             </DropdownMenuItem>
           ) : null}
 
@@ -222,7 +226,9 @@ function MoreActionsMenu({
               ) : (
                 <BellRing className="h-4 w-4" />
               )}
-              {isFollowingThread ? "Unfollow thread" : "Follow thread"}
+              {isFollowingThread
+                ? uiT("Unfollow thread")
+                : uiT("Follow thread")}
             </DropdownMenuItem>
           ) : null}
 
@@ -240,7 +246,7 @@ function MoreActionsMenu({
               }}
             >
               <Copy className="h-4 w-4" />
-              Copy message
+              {uiT("Copy message")}
             </DropdownMenuItem>
           ) : null}
 
@@ -251,23 +257,23 @@ function MoreActionsMenu({
               }}
             >
               <Clock className="h-4 w-4" />
-              Remind me later
+              {uiT("Remind me later")}
             </DropdownMenuItem>
           ) : null}
 
           {onSendToChannel ? (
             <DropdownMenuItem
-              aria-label="Send to channel"
+              aria-label={uiT("Send to channel")}
               data-testid={`send-to-channel-${message.id}`}
               onClick={() => {
                 void onSendToChannel(message)
-                  .then(() => toast.success("Sent to channel"))
+                  .then(() => toast.success(uiT("Sent to channel")))
                   .catch((error) => {
                     console.error(
                       "Failed to send thread message to channel",
                       error,
                     );
-                    toast.error("Couldn't send to channel");
+                    toast.error(uiT("Couldn't send to channel"));
                   });
               }}
             >
@@ -276,7 +282,7 @@ function MoreActionsMenu({
                 className="h-4 w-4"
                 data-testid="send-to-channel-icon"
               />
-              Send to channel
+              {uiT("Send to channel")}
             </DropdownMenuItem>
           ) : null}
 
@@ -288,7 +294,7 @@ function MoreActionsMenu({
               }}
             >
               <Link2 className="h-4 w-4" />
-              Copy link
+              {uiT("Copy link")}
             </DropdownMenuItem>
           ) : null}
 
@@ -302,7 +308,7 @@ function MoreActionsMenu({
               }}
             >
               <Flag className="h-4 w-4" />
-              Report message
+              {uiT("Report message")}
             </DropdownMenuItem>
           ) : null}
 
@@ -315,7 +321,7 @@ function MoreActionsMenu({
               }}
             >
               <Trash2 className="h-4 w-4" />
-              Delete message
+              {uiT("Delete message")}
             </DropdownMenuItem>
           ) : null}
 
@@ -364,7 +370,7 @@ function QuickReactionButton({
     <Tooltip>
       <TooltipTrigger asChild>
         <button
-          aria-label={`React with ${displayName}`}
+          aria-label={uiT("React with {0}", { p0: displayName })}
           className="flex h-8 w-8 items-center justify-center rounded-full text-base leading-none text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
           onClick={() => onSelect(emoji)}
           title={displayName}
@@ -441,6 +447,8 @@ export const MessageActionBar = React.memo(function MessageActionBar({
   /** Resolves the mention identities carried by "Copy message". */
   profiles?: UserProfileLookup;
 }) {
+  useUiLanguage();
+
   const [isReactionPickerOpen, setIsReactionPickerOpen] = React.useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = React.useState(false);
   const customEmoji = useCustomEmoji();
@@ -544,7 +552,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
                 <TooltipTrigger asChild>
                   <PopoverTrigger asChild>
                     <Button
-                      aria-label="Open reactions"
+                      aria-label={uiT("Open reactions")}
                       className={ACTION_BUTTON_CLASS}
                       data-testid={`react-message-${message.id}`}
                       size="sm"
@@ -555,7 +563,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
                     </Button>
                   </PopoverTrigger>
                 </TooltipTrigger>
-                <TooltipContent>React</TooltipContent>
+                <TooltipContent>{uiT("React")}</TooltipContent>
               </Tooltip>
               <PopoverContent
                 align="end"
@@ -596,7 +604,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
-                  aria-label="Reply"
+                  aria-label={uiT("Reply")}
                   className={ACTION_BUTTON_CLASS}
                   data-testid={`reply-message-${message.id}`}
                   onClick={() => {
@@ -609,7 +617,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
                   <CornerUpLeft className={ACTION_ICON_CLASS} />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>Reply</TooltipContent>
+              <TooltipContent>{uiT("Reply")}</TooltipContent>
             </Tooltip>
           ) : null}
 
@@ -617,7 +625,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
-                  aria-label="Copy link"
+                  aria-label={uiT("Copy link")}
                   className={ACTION_BUTTON_CLASS}
                   data-testid={`copy-link-message-${message.id}`}
                   onClick={() => {
@@ -630,7 +638,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
                   <Link2 className={ACTION_ICON_CLASS} />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>Copy link</TooltipContent>
+              <TooltipContent>{uiT("Copy link")}</TooltipContent>
             </Tooltip>
           ) : null}
 

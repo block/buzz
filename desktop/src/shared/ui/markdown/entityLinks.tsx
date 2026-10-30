@@ -1,3 +1,5 @@
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
 import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
@@ -42,6 +44,8 @@ function EntityMetadataTooltip({
   link: ParsedEntityLink;
   projects: Project[] | undefined;
 }) {
+  useUiLanguage();
+
   const { contentRef, onPointerMove } = useInlineTooltipPosition();
   const [resolved, setResolved] = React.useState<{
     href: string;
@@ -135,14 +139,20 @@ function entityLinkPresentation(link: ParsedEntityLink) {
       };
     case "pr":
       return {
-        ariaLabel: `Open pull request ${link.id.slice(0, 8)} in repository ${link.dtag}`,
+        ariaLabel: uiT("Open pull request {0} in repository {1}", {
+          p0: link.id.slice(0, 8),
+          p1: link.dtag,
+        }),
         icon: "pr" as const,
         label: `${link.dtag} · ${link.id.slice(0, 8)}`,
         tooltipFooter: `Pull request · ${link.dtag}`,
       };
     case "issue":
       return {
-        ariaLabel: `Open issue ${link.id.slice(0, 8)} in repository ${link.dtag}`,
+        ariaLabel: uiT("Open issue {0} in repository {1}", {
+          p0: link.id.slice(0, 8),
+          p1: link.dtag,
+        }),
         icon: "issue" as const,
         // Tooltip fallback only — the inline chip renders the repository name
         // alone (see `chip` below).
@@ -151,7 +161,7 @@ function entityLinkPresentation(link: ParsedEntityLink) {
       };
     case "project":
       return {
-        ariaLabel: `Open project ${link.dtag}`,
+        ariaLabel: uiT("Open project {0}", { p0: link.dtag }),
         icon: "project" as const,
         label: link.dtag,
         tooltipFooter: "Project",

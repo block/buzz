@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 
@@ -177,15 +179,23 @@ const REVIEW_DECISION_DETAILS: Record<
 > = {
   approve: {
     content: "Approved these changes",
-    errorMessage: "Failed to approve review.",
+    get errorMessage() {
+      return uiT("Failed to approve review.");
+    },
     label: PR_APPROVAL_LABEL,
-    timeoutMessage: "Timed out approving review.",
+    get timeoutMessage() {
+      return uiT("Timed out approving review.");
+    },
   },
   "request-changes": {
     content: "Requested changes",
-    errorMessage: "Failed to request changes.",
+    get errorMessage() {
+      return uiT("Failed to request changes.");
+    },
     label: PR_CHANGES_REQUESTED_LABEL,
-    timeoutMessage: "Timed out requesting changes.",
+    get timeoutMessage() {
+      return uiT("Timed out requesting changes.");
+    },
   },
 };
 

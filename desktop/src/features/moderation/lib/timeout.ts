@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 /**
  * Reactive detection of a community timeout from a send rejection.
  *
@@ -22,9 +24,24 @@ export const TIMEOUT_PRESETS: ReadonlyArray<{
   label: string;
   seconds: number;
 }> = [
-  { label: "1 hour", seconds: 60 * 60 },
-  { label: "24 hours", seconds: 24 * 60 * 60 },
-  { label: "7 days", seconds: 7 * 24 * 60 * 60 },
+  {
+    get label() {
+      return uiT("1 hour");
+    },
+    seconds: 60 * 60,
+  },
+  {
+    get label() {
+      return uiT("24 hours");
+    },
+    seconds: 24 * 60 * 60,
+  },
+  {
+    get label() {
+      return uiT("7 days");
+    },
+    seconds: 7 * 24 * 60 * 60,
+  },
 ];
 
 /**

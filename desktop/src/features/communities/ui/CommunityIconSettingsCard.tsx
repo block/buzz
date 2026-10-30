@@ -1,3 +1,5 @@
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 import { toast } from "sonner";
@@ -21,6 +23,8 @@ export function CommunityIconSettingsCard({
 }: {
   compact?: boolean;
 }) {
+  useUiLanguage();
+
   const { activeCommunity } = useCommunities();
   const relayUrl = activeCommunity?.relayUrl;
   const iconQuery = useActiveCommunityIcon(relayUrl);
@@ -72,7 +76,7 @@ export function CommunityIconSettingsCard({
             toast.error(
               error instanceof Error
                 ? error.message
-                : "Couldn’t update the community icon.",
+                : uiT("Couldn’t update the community icon."),
             );
           }
         }
@@ -105,9 +109,9 @@ export function CommunityIconSettingsCard({
       data-testid="community-icon-settings"
     >
       <AgentCreationPreview
-        assetLabel="community icon"
+        assetLabel={uiT("community icon")}
         avatarUrl={draftIcon || null}
-        label={activeCommunity?.name ?? "Community"}
+        label={activeCommunity?.name ?? uiT("Community")}
         onClearAvatar={clearIconPreview}
         onCommitAvatar={persistIcon}
         onSelectAvatar={previewIcon}

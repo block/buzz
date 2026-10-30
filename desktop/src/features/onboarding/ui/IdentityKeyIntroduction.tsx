@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { CircleSlash2, HardDriveDownload, ShieldCheck } from "lucide-react";
 
 import { Button } from "@/shared/ui/button";
@@ -34,11 +36,12 @@ export function IdentityKeyIntroduction({
     >
       <div className="w-full shrink-0 text-left">
         <h1 className="text-title font-normal text-foreground">
-          Create a private identity key
+          {uiT("Create a private identity key")}
         </h1>
         <p className="mt-2 text-base leading-6 text-foreground/75">
-          This key will be how you log into Buzz. You can use it across Buzz
-          communities and other platforms.
+          {uiT(
+            "This key will be how you log into Buzz. You can use it across Buzz communities and other platforms.",
+          )}
         </p>
         <div className="mt-2">
           <IdentityKeyHelpDialog inline onOpen={onOpenHelp} />
@@ -64,7 +67,7 @@ export function IdentityKeyIntroduction({
               <ShieldCheck aria-hidden className="size-5" />
             </span>
             <p className="text-base leading-6 text-foreground">
-              Stored securely on this device
+              {uiT("Stored securely on this device")}
             </p>
           </div>
           <div className="flex min-h-14 items-center gap-4 text-left">
@@ -75,7 +78,7 @@ export function IdentityKeyIntroduction({
               <CircleSlash2 aria-hidden className="size-5" />
             </span>
             <p className="text-base leading-6 text-foreground">
-              Never share it—anyone with this key can sign in as you
+              {uiT("Never share it—anyone with this key can sign in as you")}
             </p>
           </div>
           <div className="flex min-h-14 items-center gap-4 text-left">
@@ -86,7 +89,7 @@ export function IdentityKeyIntroduction({
               <HardDriveDownload aria-hidden className="size-5" />
             </span>
             <p className="text-base leading-6 text-foreground">
-              Use a secure backup to recover your account
+              {uiT("Use a secure backup to recover your account")}
             </p>
           </div>
         </div>
@@ -100,7 +103,7 @@ export function IdentityKeyIntroduction({
           onClick={onCreate}
           type="button"
         >
-          {disabled ? "Creating key…" : "Create my private key"}
+          {disabled ? uiT("Creating key…") : uiT("Create my private key")}
         </Button>
       </OnboardingFooter>
     </OnboardingSlideTransition>

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type { Workflow } from "@/shared/api/types";
 import {
   AlertDialog,
@@ -36,11 +38,14 @@ export function WorkflowDeleteDialog({
     >
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Delete workflow?</AlertDialogTitle>
+          <AlertDialogTitle>{uiT("Delete workflow?")}</AlertDialogTitle>
           <AlertDialogDescription>
             {workflow
-              ? `Delete "${workflow.name}". This removes the current workflow and stops new triggers. Publishing its definition again, even an older version, can recreate it.`
-              : "Delete this workflow."}
+              ? uiT(
+                  'Delete "{0}". This removes the current workflow and stops new triggers. Publishing its definition again, even an older version, can recreate it.',
+                  { p0: workflow.name },
+                )
+              : uiT("Delete this workflow.")}
           </AlertDialogDescription>
           {error ? (
             <p
@@ -48,15 +53,17 @@ export function WorkflowDeleteDialog({
               className="rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
               role="alert"
             >
-              Couldn’t delete workflow. {error} Try again or cancel to keep
-              editing.
+              {uiT(
+                "Couldn’t delete workflow. {0} Try again or cancel to keep editing.",
+                { p0: error },
+              )}
             </p>
           ) : null}
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel asChild>
             <Button disabled={isPending} type="button" variant="outline">
-              Cancel
+              {uiT("Cancel")}
             </Button>
           </AlertDialogCancel>
           <Button
@@ -69,7 +76,7 @@ export function WorkflowDeleteDialog({
             type="button"
             variant="destructive"
           >
-            {isPending ? "Deleting…" : "Delete"}
+            {isPending ? uiT("Deleting…") : uiT("Delete")}
           </Button>
         </AlertDialogFooter>
       </AlertDialogContent>

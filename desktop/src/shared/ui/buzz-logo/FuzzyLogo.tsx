@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { cn } from "@/shared/lib/cn";
 import BuzzLogoAnimation, {
   type BuzzLogoAnimationProps,
@@ -25,7 +27,7 @@ export type FuzzyLogoProps = {
 export function FuzzyLogo({
   fuzz = true,
   className,
-  ariaLabel = "Buzz logo",
+  ariaLabel = uiT("Buzz logo"),
   loop = false,
   loopRestSeconds = 0,
   pulse = true,

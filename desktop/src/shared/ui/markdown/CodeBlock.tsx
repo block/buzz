@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { Copy } from "lucide-react";
 import { toast } from "sonner";
@@ -72,6 +74,8 @@ export function MarkdownCodeBlock({
   children?: React.ReactNode;
   language?: string;
 }) {
+  useUiLanguage();
+
   const [isCopying, setIsCopying] = React.useState(false);
   const codeBlockRef = React.useRef<HTMLPreElement | null>(null);
   const code = React.useMemo(() => getCodeBlockText(children), [children]);
@@ -85,10 +89,10 @@ export function MarkdownCodeBlock({
 
       try {
         await copyCodeBlockToClipboard(code);
-        toast.success("Copied code to clipboard");
+        toast.success(uiT("Copied code to clipboard"));
       } catch (error) {
         console.error("Failed to copy code block", error);
-        toast.error("Failed to copy code");
+        toast.error(uiT("Failed to copy code"));
       } finally {
         setIsCopying(false);
       }
@@ -113,7 +117,7 @@ export function MarkdownCodeBlock({
       <Tooltip>
         <TooltipTrigger asChild>
           <Button
-            aria-label="Copy code block"
+            aria-label={uiT("Copy code block")}
             className="absolute right-2 top-2 h-7 w-7 bg-background/80 text-muted-foreground opacity-0 shadow-xs ring-1 ring-border/60 backdrop-blur-sm transition-opacity hover:bg-background hover:text-foreground hover:opacity-100 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 disabled:opacity-60"
             disabled={isCopying}
             onClick={handleCopy}
@@ -122,10 +126,10 @@ export function MarkdownCodeBlock({
             variant="ghost"
           >
             <Copy className="h-4 w-4" />
-            <span className="sr-only">Copy code block</span>
+            <span className="sr-only">{uiT("Copy code block")}</span>
           </Button>
         </TooltipTrigger>
-        <TooltipContent>Copy code</TooltipContent>
+        <TooltipContent>{uiT("Copy code")}</TooltipContent>
       </Tooltip>
     </div>
   );
@@ -140,6 +144,8 @@ export function SyntaxHighlightedCode({
   code: string;
   language: string;
 } & React.ComponentProps<"code">) {
+  useUiLanguage();
+
   const { themeName } = useTheme();
   // Buzz aliases ("buzz" / "buzz-dark") are not bundled Shiki themes — resolve
   // to the real bundle (github-light / github-dark) before touching Shiki, or

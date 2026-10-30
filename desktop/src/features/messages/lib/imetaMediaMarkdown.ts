@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 /**
  * Helpers for round-tripping NIP-92 imeta attachments through the message
  * editor.
@@ -304,7 +306,7 @@ export function formatImetaMediaLine(
   // available, otherwise the original filename (falling back to the URL tail).
   // The filename remains in imeta for download/import integrity.
   const label =
-    options.label?.trim() || filename || url.split("/").pop() || "file";
+    options.label?.trim() || filename || url.split("/").pop() || uiT("file");
   // Escape markdown link-label metacharacters so filenames containing `[`, `]`,
   // or `\` (e.g. `a].pdf`) still render as a FileCard with the correct label
   // rather than breaking the link or mangling the visible text.

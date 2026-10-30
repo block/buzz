@@ -1,3 +1,6 @@
+import { uiDateFormatter } from "@/shared/i18n/format";
+import { uiMessage, uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
 import { Bot, ChevronDown, ChevronRight } from "lucide-react";
 import * as React from "react";
 
@@ -14,19 +17,21 @@ type AgentActivityCardProps = {
   agentStatus?: "online" | "away" | "offline" | "unknown";
 };
 
+const noteDate = uiDateFormatter({
+  month: "short",
+  day: "numeric",
+});
+
 function formatRelativeTime(unixSeconds: number): string {
   const now = Date.now() / 1_000;
   const diff = now - unixSeconds;
 
-  if (diff < 60) return "just now";
-  if (diff < 3_600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86_400) return `${Math.floor(diff / 3_600)}h ago`;
-  if (diff < 604_800) return `${Math.floor(diff / 86_400)}d ago`;
+  if (diff < 60) return uiT("just now");
+  if (diff < 3_600) return uiT("{0}m ago", { p0: Math.floor(diff / 60) });
+  if (diff < 86_400) return uiT("{0}h ago", { p0: Math.floor(diff / 3_600) });
+  if (diff < 604_800) return uiT("{0}d ago", { p0: Math.floor(diff / 86_400) });
 
-  return new Date(unixSeconds * 1_000).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
+  return noteDate.format(new Date(unixSeconds * 1_000));
 }
 
 function StatusDot({ status }: { status: "online" | "away" | "offline" }) {
@@ -38,7 +43,7 @@ function StatusDot({ status }: { status: "online" | "away" | "offline" }) {
         : "bg-zinc-400";
   return (
     <span
-      aria-label={`Agent ${status}`}
+      aria-label={uiT("Agent {0}", { p0: status })}
       role="img"
       className={`inline-block h-2 w-2 rounded-full ${color}`}
     />
@@ -50,6 +55,8 @@ export function AgentActivityCard({
   profile,
   agentStatus,
 }: AgentActivityCardProps) {
+  useUiLanguage();
+
   const [expanded, setExpanded] = React.useState(false);
   const displayName = profile?.displayName ?? truncateNpub(group.pubkey);
   const avatarUrl = profile?.avatarUrl ?? null;
@@ -68,7 +75,7 @@ export function AgentActivityCard({
           role={"bot" as const}
         >
           <button
-            aria-label={`Open profile for ${displayName}`}
+            aria-label={uiT("Open profile for {0}", { p0: displayName })}
             className="relative flex shrink-0 rounded-xl pt-1 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
             type="button"
           >
@@ -99,12 +106,14 @@ export function AgentActivityCard({
             onClick={() => setExpanded(!expanded)}
             type="button"
           >
-            {expanded ? (
-              <ChevronDown className="h-4 w-4" />
-            ) : (
-              <ChevronRight className="h-4 w-4" />
-            )}
-            {group.notes.length} updates
+            {uiMessage("{0}{1} updates", {
+              p0: expanded ? (
+                <ChevronDown className="h-4 w-4" />
+              ) : (
+                <ChevronRight className="h-4 w-4" />
+              ),
+              p1: group.notes.length,
+            })}
           </button>
         ) : null}
       </div>

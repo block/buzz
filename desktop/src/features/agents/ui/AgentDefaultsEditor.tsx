@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiMessage, uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 /**
  * Settings card for global agent configuration defaults.
  *
@@ -73,6 +75,8 @@ export function AgentDefaultsEditor({
   onSavingChange,
   secondaryAction,
 }: AgentDefaultsEditorProps) {
+  useUiLanguage();
+
   const flatLayout = layout === "flat";
   const shouldReduceMotion = useReducedMotion();
   const [config, setConfig] =
@@ -233,7 +237,7 @@ export function AgentDefaultsEditor({
       }
     } catch (err) {
       setSaveState("error");
-      setSaveError(typeof err === "string" ? err : "Couldn't save.");
+      setSaveError(typeof err === "string" ? err : uiT("Couldn't save."));
     } finally {
       onSavingChange?.(false);
     }
@@ -268,7 +272,7 @@ export function AgentDefaultsEditor({
       {configSurfaceLoading ? (
         <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
           <Loader className="size-4 animate-spin" />
-          Loading…
+          {uiT("Loading…")}
         </div>
       ) : configSurfaceError ? (
         runtimeCatalogError && !loadError ? (
@@ -278,7 +282,7 @@ export function AgentDefaultsEditor({
         ) : (
           <div className="flex items-center gap-2 py-4 text-sm text-destructive">
             <AlertCircle className="size-4" />
-            Couldn't load agent defaults. Restart the app to try again.
+            {uiT("Couldn't load agent defaults. Restart the app to try again.")}
           </div>
         )
       ) : (
@@ -288,14 +292,14 @@ export function AgentDefaultsEditor({
               className="text-sm font-medium text-foreground"
               htmlFor="global-agent-default-harness"
             >
-              Default harness
+              {uiT("Default harness")}
             </label>
             <AgentDropdownSelect
               className={flatLayout ? PERSONA_SELECT_TRIGGER_CLASS : undefined}
               id="global-agent-default-harness"
               onValueChange={handleHarnessChange}
               options={harnessOptions}
-              placeholder="Select a harness"
+              placeholder={uiT("Select a harness")}
               placeholderClassName={
                 flatLayout ? "text-muted-foreground/55" : undefined
               }
@@ -332,10 +336,23 @@ export function AgentDefaultsEditor({
             <span className="flex min-w-0 items-center gap-1 text-sm text-green-600 dark:text-green-400">
               <Check className="size-3.5 shrink-0" />
               {restartedCount > 0
-                ? `Saved. Restarted ${restartedCount} agent${restartedCount === 1 ? "" : "s"}.${failedRestartCount > 0 ? ` ${failedRestartCount} couldn't restart — check the Agents page.` : ""}`
+                ? uiT("Saved. Restarted {0} agent{1}.{2}", {
+                    p0: restartedCount,
+                    p1: restartedCount === 1 ? "" : "s",
+                    p2:
+                      failedRestartCount > 0
+                        ? ` ${failedRestartCount} couldn't restart — check the Agents page.`
+                        : "",
+                  })
                 : failedRestartCount > 0
-                  ? `Saved. ${failedRestartCount} agent${failedRestartCount === 1 ? "" : "s"} couldn't restart — check the Agents page.`
-                  : "Saved."}
+                  ? uiT(
+                      "Saved. {0} agent{1} couldn't restart — check the Agents page.",
+                      {
+                        p0: failedRestartCount,
+                        p1: failedRestartCount === 1 ? "" : "s",
+                      },
+                    )
+                  : uiT("Saved.")}
             </span>
           )}
           {saveState === "error" && saveError && (
@@ -356,10 +373,12 @@ export function AgentDefaultsEditor({
               onClick={() => void handleSave()}
               size="sm"
             >
-              {saveState === "saving" ? (
-                <Loader className="mr-1.5 size-3.5 animate-spin" />
-              ) : null}
-              Save defaults
+              {uiMessage("{0} Save defaults", {
+                p0:
+                  saveState === "saving" ? (
+                    <Loader className="mr-1.5 size-3.5 animate-spin" />
+                  ) : null,
+              })}
             </Button>
           </div>
         </div>

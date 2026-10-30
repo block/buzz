@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type { ReactNode } from "react";
 
 import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
@@ -35,13 +37,13 @@ export function getUserProfilePanelHeaderContent({
   view: ProfilePanelView;
   viewerIsOwner: boolean;
 }) {
-  const title = PROFILE_PANEL_VIEW_TITLES[view];
+  const title = uiT(PROFILE_PANEL_VIEW_TITLES[view]);
   const shouldShowLogDetails =
     (view === "diagnostics" || view === "logs") && Boolean(logSubtitle);
   const headerLeftContent = (
     <AuxiliaryPanelHeaderGroup
       align={shouldShowLogDetails ? "start" : "center"}
-      backButtonAriaLabel="Back to profile"
+      backButtonAriaLabel={uiT("Back to profile")}
       backButtonTestId="user-profile-panel-back"
       onBack={view !== "summary" ? onBack : undefined}
     >
@@ -71,7 +73,7 @@ export function getUserProfilePanelHeaderContent({
       {view === "summary" ? agentSettingsMenu : null}
       {view === "summary" && onEditAgent ? (
         <Button
-          aria-label="Edit agent"
+          aria-label={uiT("Edit agent")}
           className="text-sm"
           data-testid="user-profile-header-edit-agent"
           onClick={onEditAgent}
@@ -79,14 +81,14 @@ export function getUserProfilePanelHeaderContent({
           type="button"
           variant="ghost"
         >
-          Edit
+          {uiT("Edit")}
         </Button>
       ) : null}
       {shouldShowLogDetails ? (
         <CopyButton
           className="text-muted-foreground hover:text-foreground"
           iconOnly
-          label="Copy log"
+          label={uiT("Copy log")}
           size="icon"
           value={logCopyValue ?? ""}
           variant="ghost"

@@ -1,3 +1,5 @@
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
 import type * as React from "react";
 import type { ThreadPanelLayoutProps } from "@/features/channels/lib/threadPanelLayout";
 import {
@@ -20,7 +22,7 @@ import { Skeleton } from "@/shared/ui/skeleton";
 /** Shared title row so the skeleton and loaded panel keep the same chrome. */
 export function MessageThreadPanelHeader({
   headerLeading,
-  headerTitle = "Thread",
+  headerTitle = uiT("Thread"),
   headerTitleAriaLabel,
   isFocusMode,
   isSinglePanelView,
@@ -39,11 +41,11 @@ export function MessageThreadPanelHeader({
 }) {
   const title = onHeaderTitleClick ? (
     <button
-      aria-label={headerTitleAriaLabel ?? `Open ${headerTitle}`}
+      aria-label={headerTitleAriaLabel ?? uiT("Open {0}", { p0: headerTitle })}
       className="min-w-0 max-w-full truncate text-left hover:underline"
       data-testid="message-thread-open-channel"
       onClick={onHeaderTitleClick}
-      title={headerTitleAriaLabel ?? `Open ${headerTitle}`}
+      title={headerTitleAriaLabel ?? uiT("Open {0}", { p0: headerTitle })}
       type="button"
     >
       {headerTitle}
@@ -55,7 +57,7 @@ export function MessageThreadPanelHeader({
   return (
     <AuxiliaryPanelHeader backdrop>
       <AuxiliaryPanelHeaderGroup
-        backButtonAriaLabel="Back to conversation"
+        backButtonAriaLabel={uiT("Back to conversation")}
         backButtonTestId="message-thread-back"
         leading={headerLeading}
         // Focus drawers fill width via isSinglePanelView but use the scrim to go
@@ -170,6 +172,8 @@ export function MessageThreadPanelSkeleton({
   widthPx,
   transparentChrome = false,
 }: MessageThreadPanelSkeletonProps) {
+  useUiLanguage();
+
   const isOverlay = useIsThreadPanelOverlay();
   const hasConstrainedColumn = columnMaxWidthPx != null;
   useEscapeKey(onClose, isOverlay || isSinglePanelView || isFocusMode);

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiMessage, uiT } from "@/shared/i18n/uiTranslation";
 import type * as React from "react";
 import { motion } from "motion/react";
 
@@ -53,10 +55,13 @@ export function PersonaModelField({
           className="text-sm font-medium text-foreground"
           htmlFor="persona-model"
         >
-          Model
-          {!isExplicitModelRequired ? (
-            <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
-          ) : null}
+          {uiMessage("Model {0}", {
+            p0: !isExplicitModelRequired ? (
+              <span className={PERSONA_LABEL_OPTIONAL_CLASS}>
+                {uiT("Optional")}
+              </span>
+            ) : null,
+          })}
         </label>
         <PersonaModelCombobox
           disabled={disabled}
@@ -64,7 +69,9 @@ export function PersonaModelField({
           onValueChange={onModelValueChange}
           options={modelDropdownOptions}
           placeholder={
-            isExplicitModelRequired ? "Choose a model" : "Default model"
+            isExplicitModelRequired
+              ? uiT("Choose a model")
+              : uiT("Default model")
           }
           value={modelSelectValue}
         />
@@ -76,7 +83,7 @@ export function PersonaModelField({
             )}
           >
             <Input
-              aria-label="Custom model ID"
+              aria-label={uiT("Custom model ID")}
               autoCorrect="off"
               className={cn(
                 "h-8 px-0 py-0 leading-6",
@@ -85,15 +92,16 @@ export function PersonaModelField({
               disabled={disabled}
               id="persona-custom-model"
               onChange={(event) => onCustomModelChange(event.target.value)}
-              placeholder="Custom model ID"
+              placeholder={uiT("Custom model ID")}
               value={model}
             />
           </div>
         ) : null}
         {showSharedComputeAutoHint ? (
           <p className="text-xs text-muted-foreground">
-            Auto uses Mesh collective intelligence when two or more models stay
-            available, otherwise it chooses one available model.
+            {uiT(
+              "Auto uses Mesh collective intelligence when two or more models stay available, otherwise it chooses one available model.",
+            )}
           </p>
         ) : null}
         {modelDiscoveryStatus ? (

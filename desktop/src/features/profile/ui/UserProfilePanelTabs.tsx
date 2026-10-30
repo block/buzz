@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import type { LucideIcon } from "lucide-react";
 import {
@@ -159,7 +161,7 @@ export function ProfileTabBar({
       value={activeTab}
     >
       <TabsList
-        aria-label="Profile sections"
+        aria-label={uiT("Profile sections")}
         className="relative isolate grid h-9 w-full overflow-hidden rounded-lg bg-muted p-0.5"
         data-testid="user-profile-tab-list"
         style={{
@@ -239,13 +241,18 @@ export function ProfileInfoTabContent({
   showActivityIngress: boolean;
   showInstructionBlock: boolean;
 }) {
+  useUiLanguage();
+
   const infoFields: ProfileField[] = isArchived
     ? [
         ...agentInfoFields,
         {
-          displayValue: "Archived",
+          id: "visibility",
+          displayValue: uiT("Archived"),
           icon: Archive,
-          label: "Visibility",
+          get label() {
+            return uiT("Visibility");
+          },
           testId: "user-profile-archived-flair",
           trailingNode: <ArchiveStatusTooltip />,
         },
@@ -285,7 +292,7 @@ export function ProfileInfoTabContent({
         ) : (
           <ProfileIngressRow
             icon={Wrench}
-            label="Activity log"
+            label={uiT("Activity log")}
             onClick={() => onOpenActivity(null)}
             testId={`user-profile-view-activity-${pubkey}`}
             trailing="View"
@@ -293,12 +300,15 @@ export function ProfileInfoTabContent({
         )
       ) : null}
       {hasInfoFields || showInstructionBlock ? (
-        <ProfileSectionGroup testId="user-profile-info-section" title="Info">
+        <ProfileSectionGroup
+          testId="user-profile-info-section"
+          title={uiT("Info")}
+        >
           {showInstructionBlock ? (
             <ProfileIngressRow
               grouped
               icon={MessageSquare}
-              label="Agent instructions"
+              label={uiT("Agent instructions")}
               onClick={onEditAgent}
               testId="user-profile-agent-instruction-row"
             />
@@ -339,6 +349,8 @@ function ProfileLiveActivityEmbed({
   feedScope: ProfileActivityFeedScope;
   onOpenActivity: (channelId?: string | null) => void;
 }) {
+  useUiLanguage();
+
   const [carouselApi, setCarouselApi] = React.useState<CarouselApi>();
   const [selectedChannelId, setSelectedChannelId] = React.useState<
     string | null
@@ -421,7 +433,7 @@ function ProfileLiveActivityEmbed({
     selectedTurn?.anchorAt ??
     null;
   const emptyState = feedScope.isLive ? "loading" : "idle";
-  const emptyDescription = "Live activity will appear here.";
+  const emptyDescription = uiT("Live activity will appear here.");
   const openSelectedActivity = React.useCallback(() => {
     onOpenActivity(activeChannelId);
   }, [activeChannelId, onOpenActivity]);
@@ -440,12 +452,16 @@ function ProfileLiveActivityEmbed({
   if (slides.length === 0) {
     return (
       <section
-        aria-label={`Open activity feed. Last live ${formatLastLiveLabel(lastLiveAt, Date.now())}.`}
+        aria-label={uiT("Open activity feed. Last live {0}.", {
+          p0: formatLastLiveLabel(lastLiveAt, Date.now()),
+        })}
         className="relative flex h-56 cursor-pointer flex-col overflow-hidden rounded-2xl border bg-background text-left shadow-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         data-testid={`user-profile-live-activity-${activityAgent.pubkey}`}
       >
         <button
-          aria-label={`Open activity feed. Last live ${formatLastLiveLabel(lastLiveAt, Date.now())}.`}
+          aria-label={uiT("Open activity feed. Last live {0}.", {
+            p0: formatLastLiveLabel(lastLiveAt, Date.now()),
+          })}
           className="absolute inset-0 z-10 rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           onClick={openSelectedActivity}
           type="button"
@@ -473,7 +489,7 @@ function ProfileLiveActivityEmbed({
           <div className="absolute inset-x-0 bottom-0 flex flex-col items-start bg-linear-to-t from-background via-background/90 to-transparent px-3 pb-3 pt-24">
             <div className="min-w-0">
               <span className="block text-sm font-semibold text-muted-foreground">
-                Latest Activity
+                {uiT("Latest Activity")}
               </span>
             </div>
           </div>
@@ -485,12 +501,16 @@ function ProfileLiveActivityEmbed({
   return (
     <div>
       <section
-        aria-label={`Open activity feed. Last live ${formatLastLiveLabel(lastLiveAt, Date.now())}.`}
+        aria-label={uiT("Open activity feed. Last live {0}.", {
+          p0: formatLastLiveLabel(lastLiveAt, Date.now()),
+        })}
         className="relative flex h-56 cursor-pointer flex-col overflow-hidden rounded-2xl border bg-background text-left shadow-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         data-testid={`user-profile-live-activity-${activityAgent.pubkey}`}
       >
         <button
-          aria-label={`Open activity feed. Last live ${formatLastLiveLabel(lastLiveAt, Date.now())}.`}
+          aria-label={uiT("Open activity feed. Last live {0}.", {
+            p0: formatLastLiveLabel(lastLiveAt, Date.now()),
+          })}
           className="absolute inset-0 z-10 rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           onClick={openSelectedActivity}
           type="button"
@@ -548,7 +568,7 @@ function ProfileLiveActivityEmbed({
           <div className="absolute inset-x-0 bottom-0 flex flex-col items-start bg-linear-to-t from-background via-background/80 to-transparent px-3 pb-3 pt-16">
             <div className="min-w-0">
               <span className="block text-xs font-semibold text-muted-foreground">
-                Latest Activity
+                {uiT("Latest Activity")}
               </span>
               {activeChannelName ? (
                 <span
@@ -590,7 +610,7 @@ function ActivityCarouselDots({
 
   return (
     <div
-      aria-label="Choose active channel feed"
+      aria-label={uiT("Choose active channel feed")}
       className="mt-2 flex items-center justify-center gap-1.5"
       role="tablist"
     >
@@ -600,7 +620,7 @@ function ActivityCarouselDots({
 
         return (
           <button
-            aria-label={`Show #${channelName} activity`}
+            aria-label={uiT("Show #{0} activity", { p0: channelName })}
             aria-selected={isSelected}
             className="group relative flex items-center justify-center before:absolute before:-inset-2 before:content-['']"
             data-testid={`user-profile-activity-dot-${channelId}`}
@@ -637,19 +657,21 @@ function LiveActivityOpenButton({
   lastLiveAt: number | null;
   onOpenActivity: (channelId?: string | null) => void;
 }) {
+  useUiLanguage();
+
   const now = useNow(15_000);
   const label = formatLastLiveLabel(lastLiveAt, now);
 
   return (
     <Button
-      aria-label={`Open full activity. Last live ${label}.`}
+      aria-label={uiT("Open full activity. Last live {0}.", { p0: label })}
       className="absolute right-3 top-3 z-40 rounded-full bg-primary px-2.5 text-xs font-semibold text-primary-foreground hover:bg-primary/90"
       onClick={(event) => {
         event.stopPropagation();
         onOpenActivity(activeChannelId);
       }}
       size="xs"
-      title={`Last live ${label}`}
+      title={uiT("Last live {0}", { p0: label })}
       type="button"
     >
       {label}
@@ -659,32 +681,32 @@ function LiveActivityOpenButton({
 
 function formatLastLiveLabel(timestamp: number | null, now: number): string {
   if (timestamp === null) {
-    return "No activity yet";
+    return uiT("No activity yet");
   }
 
   const elapsedMs = Math.max(0, now - timestamp);
   const totalSeconds = Math.floor(elapsedMs / 1000);
   if (totalSeconds < 60) {
-    return "Just now";
+    return uiT("Just now");
   }
 
   const totalMinutes = Math.floor(totalSeconds / 60);
   if (totalMinutes < 60) {
-    return `${totalMinutes}m ago`;
+    return uiT("{0}m ago", { p0: totalMinutes });
   }
 
   const totalHours = Math.floor(totalMinutes / 60);
   if (totalHours < 24) {
-    return `${totalHours}h ago`;
+    return uiT("{0}h ago", { p0: totalHours });
   }
 
   const totalDays = Math.floor(totalHours / 24);
   if (totalDays < 7) {
-    return `${totalDays}d ago`;
+    return uiT("{0}d ago", { p0: totalDays });
   }
 
   const totalWeeks = Math.floor(totalDays / 7);
-  return `${totalWeeks}w ago`;
+  return uiT("{0}w ago", { p0: totalWeeks });
 }
 
 function ArchiveStatusTooltip() {
@@ -692,7 +714,7 @@ function ArchiveStatusTooltip() {
     <Tooltip>
       <TooltipTrigger asChild>
         <button
-          aria-label="What archived means"
+          aria-label={uiT("What archived means")}
           className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           data-testid="user-profile-archived-info"
           type="button"
@@ -702,8 +724,9 @@ function ArchiveStatusTooltip() {
       </TooltipTrigger>
       <TooltipContent align="end" className="max-w-72 text-left" side="top">
         <p className="text-sm">
-          Archived agents do not appear in search, autocomplete, or member-add
-          flows in this space. You can unarchive them at any time.
+          {uiT(
+            "Archived agents do not appear in search, autocomplete, or member-add flows in this space. You can unarchive them at any time.",
+          )}
         </p>
       </TooltipContent>
     </Tooltip>
@@ -748,8 +771,10 @@ export function ProfileRuntimeTabContent({
   onToggleStartOnLaunch?: () => void;
   showDiagnosticsIngress: boolean;
 }) {
+  useUiLanguage();
+
   const startOnLaunchFieldIndex = configurationFields.findIndex(
-    (field) => field.label === "Start on launch",
+    (field) => field.id === "start-on-launch",
   );
   const startOnLaunchField = configurationFields[startOnLaunchFieldIndex];
   const StartOnLaunchIcon = startOnLaunchField?.icon;
@@ -764,7 +789,7 @@ export function ProfileRuntimeTabContent({
     onToggleStartOnLaunch?.();
   }, [onToggleStartOnLaunch, startOnLaunchPending]);
   const statusDiagnosticsFields = diagnosticsFields.filter(
-    (field) => field.label === "Status",
+    (field) => field.id === "status",
   );
   const hasActivityRows =
     statusDiagnosticsFields.length > 0 ||
@@ -794,7 +819,7 @@ export function ProfileRuntimeTabContent({
           <RefreshCw className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
           <div className="min-w-0 text-sm">
             <p className="font-medium text-amber-600 dark:text-amber-400">
-              Restart required
+              {uiT("Restart required")}
             </p>
             <p className="mt-0.5 text-xs text-muted-foreground">
               {autoRestartEnabled
@@ -810,7 +835,7 @@ export function ProfileRuntimeTabContent({
       {hasActivityRows ? (
         <ProfileSectionGroup
           testId="user-profile-runtime-activity-section"
-          title="Activity"
+          title={uiT("Activity")}
         >
           {statusDiagnosticsFields.length > 0 ? (
             <ProfileFieldRows
@@ -862,7 +887,7 @@ export function ProfileRuntimeTabContent({
             <ProfileIngressRow
               grouped
               icon={ScrollText}
-              label="Harness log"
+              label={uiT("Harness log")}
               onClick={onOpenDiagnostics}
               testId="user-profile-diagnostics-ingress"
               trailing={diagnosticsSummary}
@@ -873,7 +898,7 @@ export function ProfileRuntimeTabContent({
       {hasConfigurationRows ? (
         <ProfileSectionGroup
           testId="user-profile-agent-configuration-section"
-          title="Agent configuration"
+          title={uiT("Agent configuration")}
         >
           <ProfileFieldRows
             fields={remainingConfigurationFields}

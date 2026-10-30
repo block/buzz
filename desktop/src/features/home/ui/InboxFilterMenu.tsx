@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { ChevronDown } from "lucide-react";
 
 import type { InboxFilter } from "@/features/home/lib/inbox";
@@ -15,14 +17,54 @@ const INBOX_FILTER_OPTIONS: Array<{
   label: string;
   value: InboxFilter;
 }> = [
-  { value: "all", label: "All" },
-  { value: "project", label: "Projects" },
-  { value: "mention", label: "Mentions" },
-  { value: "thread", label: "Threads" },
-  { value: "needs_action", label: "Needs action" },
-  { value: "agent_activity", label: "Agents" },
-  { value: "reminders", label: "Reminders" },
-  { value: "drafts", label: "Drafts" },
+  {
+    value: "all",
+    get label() {
+      return uiT("All");
+    },
+  },
+  {
+    value: "project",
+    get label() {
+      return uiT("Projects");
+    },
+  },
+  {
+    value: "mention",
+    get label() {
+      return uiT("Mentions");
+    },
+  },
+  {
+    value: "thread",
+    get label() {
+      return uiT("Threads");
+    },
+  },
+  {
+    value: "needs_action",
+    get label() {
+      return uiT("Needs action");
+    },
+  },
+  {
+    value: "agent_activity",
+    get label() {
+      return uiT("Agents");
+    },
+  },
+  {
+    value: "reminders",
+    get label() {
+      return uiT("Reminders");
+    },
+  },
+  {
+    value: "drafts",
+    get label() {
+      return uiT("Drafts");
+    },
+  },
 ];
 
 const TRIGGER_CLASS =
@@ -48,21 +90,30 @@ export function InboxFilterMenu({
   );
   const statusLabel =
     dueReminderCount > 0
-      ? `${dueReminderCount} due reminder${dueReminderCount === 1 ? "" : "s"}`
+      ? uiT("{0} due reminder{1}", {
+          p0: dueReminderCount,
+          p1: dueReminderCount === 1 ? "" : "s",
+        })
       : activeDraftCount > 0
-        ? `${activeDraftCount} active draft${activeDraftCount === 1 ? "" : "s"}`
+        ? uiT("{0} active draft{1}", {
+            p0: activeDraftCount,
+            p1: activeDraftCount === 1 ? "" : "s",
+          })
         : null;
 
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button
-          aria-label={`Filter inbox: ${activeFilter?.label ?? "All"}${statusLabel ? `. ${statusLabel}` : ""}`}
+          aria-label={uiT("Filter inbox: {0}{1}", {
+            p0: activeFilter?.label ?? uiT("All"),
+            p1: statusLabel ? `. ${statusLabel}` : "",
+          })}
           className={cn(TRIGGER_CLASS)}
           data-testid="inbox-filter-trigger"
           type="button"
         >
-          <span>{activeFilter?.label ?? "All"}</span>
+          <span>{activeFilter?.label ?? uiT("All")}</span>
           <ChevronDown className="text-muted-foreground" />
         </button>
       </DropdownMenuTrigger>

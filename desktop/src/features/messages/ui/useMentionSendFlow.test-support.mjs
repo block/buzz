@@ -6,6 +6,7 @@ import { JSDOM } from "jsdom";
 import * as React from "react";
 import ts from "typescript";
 import * as helpers from "./useMentionSendFlow.helpers.ts";
+import * as uiTranslation from "../../../shared/i18n/uiTranslation.ts";
 import * as draftStore from "../lib/useDrafts.ts";
 
 // Execute the product hooks with real React effects/renders; only external
@@ -89,6 +90,7 @@ export async function setup({ lifecycle = false } = {}) {
   };
   const stubs = {
     react: React,
+    "@/shared/i18n/uiTranslation": uiTranslation,
     "@/features/messages/lib/useDrafts": draftStore,
     sonner: { toast: { error: (error) => calls.push(["error", error]) } },
     "@/features/agents/hooks": new Proxy(

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { flushSync } from "react-dom";
 
@@ -29,7 +31,7 @@ type UseAvatarUploadReturn = {
 };
 
 export function useAvatarUpload({
-  fallbackErrorMessage = "Could not upload that avatar.",
+  fallbackErrorMessage = uiT("Could not upload that avatar."),
   onUploadStart,
   onUploadSettled,
   onUploadSuccess,
@@ -50,7 +52,7 @@ export function useAvatarUpload({
   const uploadFile = React.useCallback(
     async (file: File) => {
       if (!AVATAR_IMAGE_TYPES.includes(file.type)) {
-        setErrorMessage("Choose a PNG, JPG, GIF, or WebP image.");
+        setErrorMessage(uiT("Choose a PNG, JPG, GIF, or WebP image."));
         return;
       }
 
@@ -71,7 +73,7 @@ export function useAvatarUpload({
           // backstop. Verify the server-detected MIME is actually an image before
           // accepting it as an avatar — defends against spoofed/blank picker MIME.
           if (!uploaded.type.startsWith("image/")) {
-            setErrorMessage("Choose a PNG, JPG, GIF, or WebP image.");
+            setErrorMessage(uiT("Choose a PNG, JPG, GIF, or WebP image."));
             return;
           }
           onUploadSuccess(uploaded.url);

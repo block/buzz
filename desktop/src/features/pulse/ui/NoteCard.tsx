@@ -1,3 +1,6 @@
+import { uiDateFormatter } from "@/shared/i18n/format";
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import {
   Bot,
   Heart,
@@ -55,6 +58,8 @@ function ReplyParentContext({
   parentId: string;
   profiles: Record<string, UserProfileSummary>;
 }) {
+  useUiLanguage();
+
   const parentNoteQuery = useNoteByIdQuery(parentId);
   const parentNote = parentNoteQuery.data ?? null;
   const cachedProfile = parentNote
@@ -107,31 +112,33 @@ function ReplyParentContext({
                 {parentDisplayName}
               </button>
             </UserProfilePopover>
-            : {parentSnippet || "No text"}
+            : {parentSnippet || uiT("No text")}
           </span>
         </div>
       ) : parentNoteQuery.isLoading ? (
-        "Loading reply context…"
+        uiT("Loading reply context…")
       ) : (
-        "Replying to an unavailable note"
+        uiT("Replying to an unavailable note")
       )}
     </div>
   );
 }
 
+const noteDate = uiDateFormatter({
+  month: "short",
+  day: "numeric",
+});
+
 function formatRelativeTime(unixSeconds: number): string {
   const now = Date.now() / 1_000;
   const diff = now - unixSeconds;
 
-  if (diff < 60) return "just now";
-  if (diff < 3_600) return `${Math.floor(diff / 60)}m`;
-  if (diff < 86_400) return `${Math.floor(diff / 3_600)}h`;
-  if (diff < 604_800) return `${Math.floor(diff / 86_400)}d`;
+  if (diff < 60) return uiT("just now");
+  if (diff < 3_600) return uiT("{0}m", { p0: Math.floor(diff / 60) });
+  if (diff < 86_400) return uiT("{0}h", { p0: Math.floor(diff / 3_600) });
+  if (diff < 604_800) return uiT("{0}d", { p0: Math.floor(diff / 86_400) });
 
-  return new Date(unixSeconds * 1_000).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
+  return noteDate.format(new Date(unixSeconds * 1_000));
 }
 
 export function NoteCard({
@@ -149,6 +156,8 @@ export function NoteCard({
   members = [],
   actions,
 }: NoteCardProps) {
+  useUiLanguage();
+
   const displayName = profile?.displayName ?? truncateNpub(note.pubkey);
   const avatarUrl = profile?.avatarUrl ?? null;
   const [isReplyComposerOpen, setIsReplyComposerOpen] = React.useState(false);
@@ -200,7 +209,7 @@ export function NoteCard({
           </UserProfilePopover>
           {isAgent ? (
             <span className="inline-flex h-4 items-center rounded bg-muted px-1 text-2xs font-medium text-muted-foreground">
-              bot
+              {uiT("bot")}
             </span>
           ) : null}
           {profile?.nip05Handle ? (
@@ -229,7 +238,7 @@ export function NoteCard({
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
-                  aria-label={isUpvoted ? "Unlike" : "Like"}
+                  aria-label={isUpvoted ? uiT("Unlike") : uiT("Like")}
                   aria-pressed={isUpvoted}
                   className={`${actionButtonClass} ${isUpvoted ? activeActionClass : ""} disabled:opacity-45`}
                   disabled={isUpvotePending}
@@ -246,12 +255,14 @@ export function NoteCard({
                   {reactionCountLabel}
                 </button>
               </TooltipTrigger>
-              <TooltipContent>{isUpvoted ? "Unlike" : "Like"}</TooltipContent>
+              <TooltipContent>
+                {isUpvoted ? uiT("Unlike") : uiT("Like")}
+              </TooltipContent>
             </Tooltip>
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
-                  aria-label="Reply"
+                  aria-label={uiT("Reply")}
                   aria-expanded={isReplyComposerOpen}
                   className={actionButtonClass}
                   onClick={() => setIsReplyComposerOpen((current) => !current)}
@@ -261,12 +272,12 @@ export function NoteCard({
                   {countPlaceholder}
                 </button>
               </TooltipTrigger>
-              <TooltipContent>Reply</TooltipContent>
+              <TooltipContent>{uiT("Reply")}</TooltipContent>
             </Tooltip>
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
-                  aria-label="Share"
+                  aria-label={uiT("Share")}
                   className={actionButtonClass}
                   onClick={() => actions?.share?.(note)}
                   type="button"
@@ -275,13 +286,13 @@ export function NoteCard({
                   {countPlaceholder}
                 </button>
               </TooltipTrigger>
-              <TooltipContent>Share</TooltipContent>
+              <TooltipContent>{uiT("Share")}</TooltipContent>
             </Tooltip>
             {!isOwnNote ? (
               <Tooltip>
                 <TooltipTrigger asChild>
                   <button
-                    aria-label="Start direct message"
+                    aria-label={uiT("Start direct message")}
                     className={actionButtonClass}
                     onClick={() => actions?.startDm?.(note.pubkey)}
                     type="button"
@@ -289,7 +300,7 @@ export function NoteCard({
                     <PenSquare className="h-4 w-4" />
                   </button>
                 </TooltipTrigger>
-                <TooltipContent>Start direct message</TooltipContent>
+                <TooltipContent>{uiT("Start direct message")}</TooltipContent>
               </Tooltip>
             ) : null}
           </div>
@@ -323,7 +334,7 @@ export function NoteCard({
                     setIsReplyComposerOpen(false);
                   })
               }
-              placeholder="Post your reply"
+              placeholder={uiT("Post your reply")}
               profiles={composerProfiles}
             />
           </div>

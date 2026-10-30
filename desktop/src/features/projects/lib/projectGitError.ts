@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type { ProjectRepoUnavailableReason } from "./projectRepoAvailability";
 
 export type ProjectGitErrorPresentation = {
@@ -28,9 +30,14 @@ export function projectCloneErrorPresentation(
 
   if (unavailableReason === "access") {
     return {
-      title: "Repository access restricted",
-      description:
-        "You need access to the repository’s channel before you can clone it.",
+      get title() {
+        return uiT("Repository access restricted");
+      },
+      get description() {
+        return uiT(
+          "You need access to the repository’s channel before you can clone it.",
+        );
+      },
     };
   }
   if (
@@ -39,17 +46,28 @@ export function projectCloneErrorPresentation(
     )
   ) {
     return {
-      title: "Repository access required",
+      get title() {
+        return uiT("Repository access required");
+      },
       description: github
-        ? "This repository requires GitHub authentication. Buzz currently clones public GitHub repositories without credentials."
-        : "Buzz could not authenticate with this repository. Check your access and try again.",
+        ? uiT(
+            "This repository requires GitHub authentication. Buzz currently clones public GitHub repositories without credentials.",
+          )
+        : uiT(
+            "Buzz could not authenticate with this repository. Check your access and try again.",
+          ),
     };
   }
   if (/\b404\b|repository not found|repository does not exist/.test(message)) {
     return {
-      title: "Repository not found",
-      description:
-        "Check that the repository link is correct and that the repository still exists.",
+      get title() {
+        return uiT("Repository not found");
+      },
+      get description() {
+        return uiT(
+          "Check that the repository link is correct and that the repository still exists.",
+        );
+      },
     };
   }
   if (
@@ -58,8 +76,12 @@ export function projectCloneErrorPresentation(
     )
   ) {
     return {
-      title: "Couldn’t reach the repository",
-      description: "Check your connection and try cloning again.",
+      get title() {
+        return uiT("Couldn’t reach the repository");
+      },
+      get description() {
+        return uiT("Check your connection and try cloning again.");
+      },
     };
   }
   if (
@@ -68,15 +90,24 @@ export function projectCloneErrorPresentation(
     )
   ) {
     return {
-      title: "Local folder already exists",
-      description:
-        "Choose a different repositories directory or remove the existing checkout.",
+      get title() {
+        return uiT("Local folder already exists");
+      },
+      get description() {
+        return uiT(
+          "Choose a different repositories directory or remove the existing checkout.",
+        );
+      },
     };
   }
   return {
-    title: "Couldn’t clone repository",
+    get title() {
+      return uiT("Couldn’t clone repository");
+    },
     description: github
-      ? "Try again, or open the repository on GitHub for more information."
-      : "Try again. If the problem continues, contact the repository owner.",
+      ? uiT("Try again, or open the repository on GitHub for more information.")
+      : uiT(
+          "Try again. If the problem continues, contact the repository owner.",
+        ),
   };
 }

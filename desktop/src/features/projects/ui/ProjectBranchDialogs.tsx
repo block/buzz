@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { Loader2 } from "lucide-react";
 import * as React from "react";
 
@@ -43,6 +45,8 @@ export function CreateProjectBranchDialog({
   sourceBranch: string;
   sourceCommit: string | null;
 }) {
+  useUiLanguage();
+
   const [branchName, setBranchName] = React.useState("");
   const [submitError, setSubmitError] = React.useState<string | null>(null);
   const validationError = projectBranchNameError(branchName, existingBranches);
@@ -78,18 +82,21 @@ export function CreateProjectBranchDialog({
       <DialogContent data-testid="project-create-branch-dialog">
         <form className="space-y-5" onSubmit={handleSubmit}>
           <DialogHeader>
-            <DialogTitle>Create branch</DialogTitle>
+            <DialogTitle>{uiT("Create branch")}</DialogTitle>
             <DialogDescription>
-              Create a remote branch from{" "}
+              {uiT("Create a remote branch from")}{" "}
               <span className="font-mono text-foreground">{sourceBranch}</span>
-              {sourceCommit ? ` at ${sourceCommit.slice(0, 7)}` : ""}.
+              {sourceCommit
+                ? uiT(" at {0}", { p0: sourceCommit.slice(0, 7) })
+                : ""}
+              .
             </DialogDescription>
           </DialogHeader>
           <label
             className="block space-y-2 text-sm font-medium"
             htmlFor="project-create-branch-name"
           >
-            <span>Branch name</span>
+            <span>{uiT("Branch name")}</span>
             <Input
               autoFocus
               data-testid="project-create-branch-name"
@@ -105,7 +112,7 @@ export function CreateProjectBranchDialog({
           ) : null}
           {!sourceCommit ? (
             <p className="text-sm text-destructive">
-              Refresh the repository before creating a branch.
+              {uiT("Refresh the repository before creating a branch.")}
             </p>
           ) : null}
           {submitError ? (
@@ -118,7 +125,7 @@ export function CreateProjectBranchDialog({
               type="button"
               variant="outline"
             >
-              Cancel
+              {uiT("Cancel")}
             </Button>
             <Button
               data-testid="project-create-branch-submit"
@@ -126,7 +133,7 @@ export function CreateProjectBranchDialog({
               type="submit"
             >
               {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-              {pending ? "Creating…" : "Create branch"}
+              {pending ? uiT("Creating…") : uiT("Create branch")}
             </Button>
           </DialogFooter>
         </form>
@@ -148,6 +155,8 @@ export function DeleteProjectBranchDialog({
   open: boolean;
   pending: boolean;
 }) {
+  useUiLanguage();
+
   const [submitError, setSubmitError] = React.useState<string | null>(null);
 
   React.useEffect(() => {
@@ -175,11 +184,13 @@ export function DeleteProjectBranchDialog({
     >
       <AlertDialogContent data-testid="project-delete-branch-dialog">
         <AlertDialogHeader>
-          <AlertDialogTitle>Delete branch?</AlertDialogTitle>
+          <AlertDialogTitle>{uiT("Delete branch?")}</AlertDialogTitle>
           <AlertDialogDescription>
-            Delete the remote branch{" "}
-            <span className="font-mono text-foreground">{branch}</span>. This
-            cannot be undone and may be rejected by repository protection rules.
+            {uiT("Delete the remote branch")}{" "}
+            <span className="font-mono text-foreground">{branch}</span>
+            {uiT(
+              ". This cannot be undone and may be rejected by repository protection rules.",
+            )}
           </AlertDialogDescription>
         </AlertDialogHeader>
         {submitError ? (
@@ -188,7 +199,7 @@ export function DeleteProjectBranchDialog({
         <AlertDialogFooter>
           <AlertDialogCancel asChild>
             <Button disabled={pending} type="button" variant="outline">
-              Cancel
+              {uiT("Cancel")}
             </Button>
           </AlertDialogCancel>
           <Button
@@ -199,7 +210,7 @@ export function DeleteProjectBranchDialog({
             variant="destructive"
           >
             {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-            {pending ? "Deleting…" : "Delete branch"}
+            {pending ? uiT("Deleting…") : uiT("Delete branch")}
           </Button>
         </AlertDialogFooter>
       </AlertDialogContent>

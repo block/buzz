@@ -1,3 +1,5 @@
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
 import * as React from "react";
 
 import { avatarSourceUrlForShape } from "@/features/profile/ui/ProfileAvatarEditor.utils";
@@ -68,6 +70,8 @@ export function UserAvatar({
   imageDraggable,
   testId,
 }: UserAvatarProps) {
+  useUiLanguage();
+
   const initials = getInitials(initialsLabel ?? displayName);
   const resolvedShape = shape ?? "circle";
   const shapedAvatarUrl = avatarSourceUrlForShape(avatarUrl, resolvedShape);
@@ -100,7 +104,7 @@ export function UserAvatar({
     >
       {src ? (
         <AvatarImage
-          alt={`${displayName} avatar`}
+          alt={uiT("{0} avatar", { p0: displayName })}
           className={cn("object-cover", !animated && "bg-secondary")}
           data-testid={testId ? `${testId}-image` : undefined}
           draggable={imageDraggable}

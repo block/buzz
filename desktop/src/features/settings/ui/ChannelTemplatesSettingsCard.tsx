@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import {
   Bot,
   Copy,
@@ -60,6 +62,8 @@ import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 
 export function ChannelTemplatesSettingsCard() {
+  useUiLanguage();
+
   const templatesQuery = useChannelTemplatesQuery();
   const deleteMutation = useDeleteChannelTemplateMutation();
   const duplicateMutation = useDuplicateChannelTemplateMutation();
@@ -75,11 +79,11 @@ export function ChannelTemplatesSettingsCard() {
   function handleDuplicate(template: ChannelTemplate) {
     duplicateMutation.mutate(template.id, {
       onSuccess: (created) => {
-        toast.success(`Duplicated as "${created.name}"`);
+        toast.success(uiT('Duplicated as "{0}"', { p0: created.name }));
       },
       onError: (error) => {
         toast.error(
-          error instanceof Error ? error.message : "Failed to duplicate",
+          error instanceof Error ? error.message : uiT("Failed to duplicate"),
         );
       },
     });
@@ -89,12 +93,12 @@ export function ChannelTemplatesSettingsCard() {
     if (!deleteTarget) return;
     deleteMutation.mutate(deleteTarget.id, {
       onSuccess: () => {
-        toast.success(`Deleted "${deleteTarget.name}"`);
+        toast.success(uiT('Deleted "{0}"', { p0: deleteTarget.name }));
         setDeleteTarget(null);
       },
       onError: (error) => {
         toast.error(
-          error instanceof Error ? error.message : "Failed to delete",
+          error instanceof Error ? error.message : uiT("Failed to delete"),
         );
       },
     });
@@ -103,11 +107,12 @@ export function ChannelTemplatesSettingsCard() {
   return (
     <section className="min-w-0" data-testid="settings-channel-templates">
       <SettingsSectionHeader
-        title="Channel templates"
+        title={uiT("Channel templates")}
         description={
           <>
-            Save reusable channel configurations and apply them when creating
-            new channels.
+            {uiT(
+              "Save reusable channel configurations and apply them when creating new channels.",
+            )}
           </>
         }
         action={
@@ -118,26 +123,27 @@ export function ChannelTemplatesSettingsCard() {
             variant="outline"
           >
             <Plus className="mr-1.5 h-4 w-4" />
-            Create
+            {uiT("Create")}
           </Button>
         }
       />
 
       {templatesQuery.isLoading ? (
-        <SettingsOptionGroup title="Templates">
+        <SettingsOptionGroup title={uiT("Templates")}>
           <p className="px-4 py-6 text-center text-sm text-muted-foreground">
-            Loading templates...
+            {uiT("Loading templates...")}
           </p>
         </SettingsOptionGroup>
       ) : templates.length === 0 ? (
-        <SettingsOptionGroup title="Templates">
+        <SettingsOptionGroup title={uiT("Templates")}>
           <div className="px-4 py-8 text-center text-sm text-muted-foreground">
-            No templates yet. Create one to save a reusable channel
-            configuration.
+            {uiT(
+              "No templates yet. Create one to save a reusable channel configuration.",
+            )}
           </div>
         </SettingsOptionGroup>
       ) : (
-        <SettingsOptionGroup title="Templates">
+        <SettingsOptionGroup title={uiT("Templates")}>
           {templates.map((template) => (
             <TemplateRow
               key={template.id}
@@ -174,19 +180,21 @@ export function ChannelTemplatesSettingsCard() {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete template</AlertDialogTitle>
+            <AlertDialogTitle>{uiT("Delete template")}</AlertDialogTitle>
             <AlertDialogDescription>
-              Are you sure you want to delete &quot;{deleteTarget?.name}&quot;?
-              This action cannot be undone.
+              {uiT(
+                'Are you sure you want to delete "{0}"? This action cannot be undone.',
+                { p0: deleteTarget?.name },
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel>{uiT("Cancel")}</AlertDialogCancel>
             <AlertDialogAction
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               onClick={handleDelete}
             >
-              Delete
+              {uiT("Delete")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -216,7 +224,7 @@ function TemplateRow({
           <span className="truncate text-sm font-medium">{template.name}</span>
           {template.isBuiltin ? (
             <Badge className="shrink-0 text-2xs uppercase" variant="outline">
-              built-in
+              {uiT("built-in")}
             </Badge>
           ) : null}
         </div>
@@ -235,19 +243,19 @@ function TemplateRow({
           {personaCount > 0 ? (
             <span className="flex items-center gap-1">
               <Bot className="h-4 w-4" />
-              {personaCount} {personaCount === 1 ? "agent" : "agents"}
+              {personaCount} {personaCount === 1 ? uiT("agent") : uiT("agents")}
             </span>
           ) : null}
           {teamCount > 0 ? (
             <span className="flex items-center gap-1">
               <Users className="h-4 w-4" />
-              {teamCount} {teamCount === 1 ? "team" : "teams"}
+              {teamCount} {teamCount === 1 ? uiT("team") : uiT("teams")}
             </span>
           ) : null}
           {template.canvasTemplate ? (
             <span className="flex items-center gap-1">
               <MessageSquare className="h-4 w-4" />
-              canvas
+              {uiT("canvas")}
             </span>
           ) : null}
         </div>
@@ -267,11 +275,11 @@ function TemplateRow({
         <DropdownMenuContent align="end">
           <DropdownMenuItem onClick={onEdit}>
             <Pencil className="mr-2 h-4 w-4" />
-            Edit
+            {uiT("Edit")}
           </DropdownMenuItem>
           <DropdownMenuItem onClick={onDuplicate}>
             <Copy className="mr-2 h-4 w-4" />
-            Duplicate
+            {uiT("Duplicate")}
           </DropdownMenuItem>
           {!template.isBuiltin ? (
             <DropdownMenuItem
@@ -279,7 +287,7 @@ function TemplateRow({
               onClick={onDelete}
             >
               <Trash2 className="mr-2 h-4 w-4" />
-              Delete
+              {uiT("Delete")}
             </DropdownMenuItem>
           ) : null}
         </DropdownMenuContent>
@@ -299,6 +307,8 @@ export function TemplateFormDialog({
   onOpenChange: (open: boolean) => void;
   onCreated?: (template: ChannelTemplate) => void;
 }) {
+  useUiLanguage();
+
   const isEditing = template !== null;
   const createMutation = useCreateChannelTemplateMutation();
   const updateMutation = useUpdateChannelTemplateMutation();
@@ -384,12 +394,12 @@ export function TemplateFormDialog({
 
       updateMutation.mutate(input, {
         onSuccess: () => {
-          toast.success(`Updated "${trimmedName}"`);
+          toast.success(uiT('Updated "{0}"', { p0: trimmedName }));
           onOpenChange(false);
         },
         onError: (error) => {
           toast.error(
-            error instanceof Error ? error.message : "Failed to update",
+            error instanceof Error ? error.message : uiT("Failed to update"),
           );
         },
       });
@@ -403,13 +413,13 @@ export function TemplateFormDialog({
 
       createMutation.mutate(input, {
         onSuccess: (created) => {
-          toast.success(`Created "${trimmedName}"`);
+          toast.success(uiT('Created "{0}"', { p0: trimmedName }));
           onCreated?.(created);
           onOpenChange(false);
         },
         onError: (error) => {
           toast.error(
-            error instanceof Error ? error.message : "Failed to create",
+            error instanceof Error ? error.message : uiT("Failed to create"),
           );
         },
       });
@@ -448,11 +458,11 @@ export function TemplateFormDialog({
     <Dialog onOpenChange={onOpenChange} open={open}>
       <ChooserDialogContent
         className="max-w-lg"
-        title={isEditing ? "Edit template" : "Create template"}
+        title={isEditing ? uiT("Edit template") : uiT("Create template")}
         description={
           isEditing
-            ? "Update this channel template configuration."
-            : "Save a reusable channel configuration."
+            ? uiT("Update this channel template configuration.")
+            : uiT("Save a reusable channel configuration.")
         }
         footer={
           <div className="flex w-full items-center justify-end gap-2">
@@ -462,7 +472,7 @@ export function TemplateFormDialog({
               type="button"
               variant="ghost"
             >
-              Cancel
+              {uiT("Cancel")}
             </Button>
             <Button
               disabled={isPending || name.trim().length === 0}
@@ -471,11 +481,11 @@ export function TemplateFormDialog({
             >
               {isPending
                 ? isEditing
-                  ? "Saving..."
-                  : "Creating..."
+                  ? uiT("Saving...")
+                  : uiT("Creating...")
                 : isEditing
-                  ? "Save"
-                  : "Create"}
+                  ? uiT("Save")
+                  : uiT("Create")}
             </Button>
           </div>
         }
@@ -487,14 +497,14 @@ export function TemplateFormDialog({
               className="text-sm font-medium text-foreground"
               htmlFor="template-name"
             >
-              Name
+              {uiT("Name")}
             </label>
             <Input
               autoComplete="off"
               disabled={isPending}
               id="template-name"
               onChange={(e) => setName(e.target.value)}
-              placeholder="Sprint Planning"
+              placeholder={uiT("Sprint Planning")}
               value={name}
             />
           </div>
@@ -505,9 +515,9 @@ export function TemplateFormDialog({
               className="text-sm font-medium text-foreground"
               htmlFor="template-description"
             >
-              Description{" "}
+              {uiT("Description")}{" "}
               <span className="font-normal text-muted-foreground">
-                (optional)
+                {uiT("(optional)")}
               </span>
             </label>
             <Textarea
@@ -515,7 +525,7 @@ export function TemplateFormDialog({
               disabled={isPending}
               id="template-description"
               onChange={(e) => setDescription(e.target.value)}
-              placeholder="What this template is for"
+              placeholder={uiT("What this template is for")}
               rows={2}
               value={description}
             />
@@ -527,9 +537,9 @@ export function TemplateFormDialog({
               className="text-sm font-medium text-foreground"
               htmlFor="template-canvas"
             >
-              Canvas template{" "}
+              {uiT("Canvas template")}{" "}
               <span className="font-normal text-muted-foreground">
-                (optional)
+                {uiT("(optional)")}
               </span>
             </label>
             <Textarea
@@ -537,7 +547,7 @@ export function TemplateFormDialog({
               disabled={isPending}
               id="template-canvas"
               onChange={(e) => setCanvasTemplate(e.target.value)}
-              placeholder="Canvas content here..."
+              placeholder={uiT("Canvas content here...")}
               rows={4}
               value={canvasTemplate}
             />
@@ -545,7 +555,10 @@ export function TemplateFormDialog({
               className="text-xs text-muted-foreground/70"
               data-settings-subcopy
             >
-              Use {"{channel.name}"} and {"{template.name}"} as placeholders.
+              {uiT("Use {0} and {1} as placeholders.", {
+                p0: "{channel.name}",
+                p1: "{template.name}",
+              })}
             </p>
           </div>
 
@@ -617,12 +630,12 @@ function TemplateTeamSelector({
   return (
     <div className="space-y-3">
       <div>
-        <div className="text-sm font-medium">Teams</div>
+        <div className="text-sm font-medium">{uiT("Teams")}</div>
         <p
           className="text-sm font-normal text-muted-foreground/70"
           data-settings-subcopy
         >
-          Select teams to include in this template.
+          {uiT("Select teams to include in this template.")}
         </p>
       </div>
       <div className="flex flex-wrap gap-2">
@@ -695,20 +708,22 @@ function RuntimeAssignments({
   return (
     <div className="space-y-3">
       <div>
-        <div className="text-sm font-medium">Runtimes</div>
+        <div className="text-sm font-medium">{uiT("Runtimes")}</div>
         <p
           className="text-sm font-normal text-muted-foreground/70"
           data-settings-subcopy
         >
-          Choose which runtime to use for each agent.
+          {uiT("Choose which runtime to use for each agent.")}
         </p>
       </div>
 
       {providersLoading ? (
-        <p className="text-xs text-muted-foreground">Discovering runtimes...</p>
+        <p className="text-xs text-muted-foreground">
+          {uiT("Discovering runtimes...")}
+        </p>
       ) : providers.length === 0 ? (
         <p className="text-xs text-muted-foreground">
-          No ACP runtimes detected. Install one to assign runtimes.
+          {uiT("No ACP runtimes detected. Install one to assign runtimes.")}
         </p>
       ) : (
         <div className="space-y-2">
@@ -779,7 +794,7 @@ function RuntimeRow({
         onChange={(e) => onChange(e.target.value)}
         value={value}
       >
-        <option value="">Default</option>
+        <option value="">{uiT("Default")}</option>
         {providers.map((runtime) => (
           <option key={runtime.id} value={runtime.id}>
             {runtime.label}

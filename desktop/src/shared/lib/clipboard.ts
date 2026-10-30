@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { toast } from "sonner";
 
 import { copyTextToSystemClipboard } from "@/shared/api/tauriMedia";
@@ -27,6 +29,6 @@ export function copyTextToClipboard(
       toast.success(successMessage);
     })
     .catch(() => {
-      toast.error("Failed to copy to clipboard");
+      toast.error(uiT("Failed to copy to clipboard"));
     });
 }

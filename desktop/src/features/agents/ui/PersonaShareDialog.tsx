@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiMessage, uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import {
   AlertCircle,
@@ -116,16 +118,16 @@ type PendingMemoryShare = {
   recipientNames?: string[];
 };
 
-function buildSnapshotShareLevels(itemLabel: "Agent" | "Team") {
+function buildSnapshotShareLevels(itemLabel: string) {
   return [
-    { value: "none" as const, label: `${itemLabel} only` },
+    { value: "none" as const, label: uiT("{0} only", { p0: itemLabel }) },
     {
       value: "core" as const,
-      label: `${itemLabel} + core memory`,
+      label: uiT("{0} + core memory", { p0: itemLabel }),
     },
     {
       value: "everything" as const,
-      label: `${itemLabel} + all memories`,
+      label: uiT("{0} + all memories", { p0: itemLabel }),
     },
   ];
 }
@@ -152,7 +154,9 @@ function MemoryShareConfirmation({
 }) {
   const isLinkShare = pendingShare?.action === "copy";
   const memoryLabel =
-    pendingShare?.memoryLevel === "core" ? "core memory" : "all memories";
+    pendingShare?.memoryLevel === "core"
+      ? uiT("core memory")
+      : uiT("all memories");
   const recipientAudience = formatRecipientAudience(
     pendingShare?.recipientNames ?? [],
   );
@@ -166,19 +170,24 @@ function MemoryShareConfirmation({
     >
       <AlertDialogContent data-testid={`${testIdPrefix}-memory-confirmation`}>
         <AlertDialogHeader>
-          <AlertDialogTitle>Share memories?</AlertDialogTitle>
+          <AlertDialogTitle>{uiT("Share memories?")}</AlertDialogTitle>
           <AlertDialogDescription>
-            This {itemLabel} includes <strong>plaintext {memoryLabel}</strong>.{" "}
+            {uiMessage("This {0} includes plaintext {1}.", {
+              p0: itemLabel,
+              p1: <strong>{memoryLabel}</strong>,
+            })}{" "}
             {isLinkShare
-              ? "Anyone with the link can view it."
-              : `${recipientAudience}—and anyone with the file link—can view it.`}{" "}
-            Only share with people you trust.
+              ? uiT("Anyone with the link can view it.")
+              : uiT("{0}—and anyone with the file link—can view it.", {
+                  p0: recipientAudience,
+                })}{" "}
+            {uiT("Only share with people you trust.")}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel asChild>
             <Button type="button" variant="outline">
-              Cancel
+              {uiT("Cancel")}
             </Button>
           </AlertDialogCancel>
           <AlertDialogAction asChild>
@@ -189,7 +198,7 @@ function MemoryShareConfirmation({
               }}
               type="button"
             >
-              {isLinkShare ? "Copy link" : "Send"}
+              {isLinkShare ? uiT("Copy link") : uiT("Send")}
             </Button>
           </AlertDialogAction>
         </AlertDialogFooter>
@@ -238,6 +247,8 @@ export function SnapshotShareDialog({
   snapshotKind,
   testIdPrefix,
 }: SnapshotShareDialogProps) {
+  const __buzzLanguage = useUiLanguage();
+
   const openDmMutation = useOpenDmMutation();
   const upsertCachedChannel = useUpsertCachedChannel();
   const snapshotSendController = useSnapshotSendController(open);
@@ -260,10 +271,10 @@ export function SnapshotShareDialog({
   const isCopying = copyStatus === "copying";
   const copyStatusLabel =
     copyStatus === "copying"
-      ? "Copying…"
+      ? uiT("Copying…")
       : copyStatus === "copied"
-        ? "Copied"
-        : "Copy link";
+        ? uiT("Copied")
+        : uiT("Copy link");
   const isActionPending = isPending || isCopying || isSending;
   const isInterfacePending = isPending || isSending;
   const hasSelectedRecipients = selectedRecipients.length > 0;
@@ -287,11 +298,12 @@ export function SnapshotShareDialog({
         : [],
     [snapshotSendController.relaySelfPubkey],
   );
-  const itemLabel = snapshotKind === "team" ? "team" : "agent";
-  const itemLabelTitle = snapshotKind === "team" ? "Team" : "Agent";
+  const itemLabel = snapshotKind === "team" ? uiT("team") : uiT("agent");
+  const itemLabelTitle = snapshotKind === "team" ? uiT("Team") : uiT("Agent");
+  // biome-ignore lint/correctness/useExhaustiveDependencies: This UI projection reads locale-dependent labels.
   const shareLevels = React.useMemo(
     () => buildSnapshotShareLevels(itemLabelTitle),
-    [itemLabelTitle],
+    [itemLabelTitle, __buzzLanguage],
   );
   const getEncodedSnapshot = React.useCallback(
     (memoryLevel: SnapshotMemoryLevel) => {
@@ -368,7 +380,7 @@ export function SnapshotShareDialog({
       setCopyStatus("copied");
     } catch {
       setCopyStatus("idle");
-      toast.error("Couldn’t copy link. Try again.");
+      toast.error(uiT("Couldn’t copy link. Try again."));
     }
   }
 
@@ -388,7 +400,7 @@ export function SnapshotShareDialog({
     );
 
     if (sent) {
-      toast.success(`Sent a copy of ${displayName}`);
+      toast.success(uiT("Sent a copy of {0}", { p0: displayName }));
       onOpenChange(false);
     } else if (sent === false) {
       toast.error(
@@ -451,13 +463,15 @@ export function SnapshotShareDialog({
         >
           <DialogHeader>
             <DialogTitle className="min-w-0 truncate pr-10">
-              Share {displayName}
+              {uiT("Share {0}", { p0: displayName })}
             </DialogTitle>
             <DialogDescription
               data-testid={`${testIdPrefix}-share-description`}
             >
-              Anyone you share this {itemLabel} with will receive a copy they
-              can add and use. Changes you make later won’t sync.
+              {uiT(
+                "Anyone you share this {0} with will receive a copy they can add and use. Changes you make later won’t sync.",
+                { p0: itemLabel },
+              )}
             </DialogDescription>
           </DialogHeader>
           <DialogClose
@@ -465,7 +479,7 @@ export function SnapshotShareDialog({
             disabled={isActionPending}
           >
             <X className="h-4 w-4" />
-            <span className="sr-only">Close</span>
+            <span className="sr-only">{uiT("Close")}</span>
           </DialogClose>
 
           <div className="space-y-4 pt-4">
@@ -509,7 +523,7 @@ export function SnapshotShareDialog({
                         onClick={() => requestMemoryShare("send", shareLevel)}
                         type="button"
                       >
-                        {isSending ? "Sending…" : "Send"}
+                        {isSending ? uiT("Sending…") : uiT("Send")}
                       </Button>
                     </motion.div>
                   ) : null}
@@ -523,17 +537,17 @@ export function SnapshotShareDialog({
                 data-testid={`${testIdPrefix}-link-settings`}
               >
                 <h3 className="text-xs font-medium text-secondary-foreground/75">
-                  Share settings
+                  {uiT("Share settings")}
                 </h3>
                 <div
                   className="flex items-center gap-3"
                   data-testid={`${testIdPrefix}-share-level-row`}
                 >
                   <h4 className="min-w-0 flex-1 text-sm font-medium">
-                    What’s included
+                    {uiT("What’s included")}
                   </h4>
                   <ShareLevelControl
-                    ariaLabel="What to include"
+                    ariaLabel={uiT("What to include")}
                     disabled={isInterfacePending}
                     onChange={setShareLevel}
                     options={shareLevels}
@@ -643,8 +657,11 @@ export function SnapshotShareDialog({
                   >
                     <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
                     <p>
-                      Memory is stored as <strong>plaintext</strong> in the
-                      snapshot. Only share it with people you trust.
+                      {uiT("Memory is stored as ")}
+                      <strong>{uiT("plaintext")}</strong>{" "}
+                      {uiT(
+                        " in the snapshot. Only share it with people you trust.",
+                      )}
                     </p>
                   </div>
                 </motion.div>
@@ -661,7 +678,9 @@ export function SnapshotShareDialog({
           type="button"
         >
           <Download className="h-4 w-4 shrink-0 text-muted-foreground" />
-          <span className="min-w-0 flex-1">Export {itemLabel}</span>
+          <span className="min-w-0 flex-1">
+            {uiT("Export {0}", { p0: itemLabel })}
+          </span>
           <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
         </button>
       </DialogContent>
@@ -687,6 +706,8 @@ export function PersonaShareDialog({
   open,
   persona,
 }: PersonaShareDialogProps) {
+  useUiLanguage();
+
   const encodeSnapshotMutation = useEncodeAgentSnapshotForSendMutation();
   const encodeSnapshot = React.useCallback(
     async (memoryLevel: SnapshotMemoryLevel) =>
@@ -715,15 +736,15 @@ export function PersonaShareDialog({
           >
             <BookUser className="h-4 w-4 shrink-0 text-muted-foreground" />
             <div className="min-w-0 flex-1">
-              <h3 className="text-sm font-medium">Share to catalog</h3>
+              <h3 className="text-sm font-medium">{uiT("Share to catalog")}</h3>
               <p className="text-xs text-secondary-foreground/75">
-                Anyone in this community can find and use a copy. Your agent
-                instruction is shared as plaintext. Memories and secrets aren’t
-                included.
+                {uiT(
+                  "Anyone in this community can find and use a copy. Your agent instruction is shared as plaintext. Memories and secrets aren’t included.",
+                )}
               </p>
             </div>
             <Switch
-              aria-label="Share to catalog"
+              aria-label={uiT("Share to catalog")}
               checked={catalogShareLevel !== "not-shared"}
               data-testid="persona-share-catalog-access"
               disabled={isPending}

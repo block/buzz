@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { Eye, EyeOff } from "lucide-react";
 import * as React from "react";
 
@@ -29,6 +31,8 @@ export function WorkflowWebhookSecretDialog({
   webhookSecret,
   workflowId,
 }: WorkflowWebhookSecretDialogProps) {
+  useUiLanguage();
+
   const [revealed, setRevealed] = React.useState(false);
   const webhookUrl = relayHttpUrl
     ? `${relayHttpUrl}/hooks/${workflowId}`
@@ -38,24 +42,25 @@ export function WorkflowWebhookSecretDialog({
     <Dialog onOpenChange={(nextOpen) => !nextOpen && onContinue()} open={open}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>Webhook ready</DialogTitle>
+          <DialogTitle>{uiT("Webhook ready")}</DialogTitle>
           <DialogDescription>
-            This private secret is shown once and cannot be recovered. Copy and
-            store it before continuing.
+            {uiT(
+              "This private secret is shown once and cannot be recovered. Copy and store it before continuing.",
+            )}
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
           <div className="space-y-1.5">
             <p className="text-xs font-medium text-muted-foreground">
-              Webhook URL
+              {uiT("Webhook URL")}
             </p>
             {webhookUrl ? (
               <>
                 <pre className="overflow-x-auto rounded-md bg-muted/50 p-3 font-mono text-xs">
                   {webhookUrl}
                 </pre>
-                <CopyButton label="Copy URL" value={webhookUrl} />
+                <CopyButton label={uiT("Copy URL")} value={webhookUrl} />
               </>
             ) : (
               <p
@@ -66,8 +71,11 @@ export function WorkflowWebhookSecretDialog({
                 }
               >
                 {relayUrlError
-                  ? `The workflow was saved, but its webhook URL could not be loaded: ${relayUrlError}`
-                  : "Loading webhook URL…"}
+                  ? uiT(
+                      "The workflow was saved, but its webhook URL could not be loaded: {0}",
+                      { p0: relayUrlError },
+                    )
+                  : uiT("Loading webhook URL…")}
               </p>
             )}
           </div>
@@ -82,7 +90,9 @@ export function WorkflowWebhookSecretDialog({
               </code>
               <Button
                 aria-label={
-                  revealed ? "Hide webhook secret" : "Reveal webhook secret"
+                  revealed
+                    ? uiT("Hide webhook secret")
+                    : uiT("Reveal webhook secret")
                 }
                 onClick={() => setRevealed((value) => !value)}
                 size="icon-xs"
@@ -92,12 +102,12 @@ export function WorkflowWebhookSecretDialog({
                 {revealed ? <EyeOff /> : <Eye />}
               </Button>
             </div>
-            <CopyButton label="Copy Secret" value={webhookSecret} />
+            <CopyButton label={uiT("Copy Secret")} value={webhookSecret} />
           </div>
         </div>
         <DialogFooter>
           <Button onClick={onContinue} type="button">
-            Continue
+            {uiT("Continue")}
           </Button>
         </DialogFooter>
       </DialogContent>

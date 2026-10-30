@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
@@ -109,6 +111,8 @@ const MANY_PROJECTS_THRESHOLD = 12;
 const PROJECTS_CONTEXT_POD_MIN_VIEWPORT_PX = 1024;
 
 export function ProjectsView() {
+  const __buzzLanguage = useUiLanguage();
+
   const { goProject } = useAppNavigation();
   const { activeCommunity } = useCommunities();
   const relayOrigin = useRelayOrigin();
@@ -301,6 +305,7 @@ export function ProjectsView() {
     [localRepositoriesQuery.data],
   );
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: UI label getters depend on the active language.
   const visibleProjects = React.useMemo(() => {
     if (filter !== "projects" && filter !== "agents" && filter !== "users") {
       return [];
@@ -351,8 +356,10 @@ export function ProjectsView() {
     projects,
     searchQuery,
     sort,
+    __buzzLanguage,
   ]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: UI label getters depend on the active language.
   const visibleRepositories = React.useMemo(() => {
     if (filter !== "repositories") return [];
     const repositories = [
@@ -396,8 +403,10 @@ export function ProjectsView() {
     repositoryActivitySummariesQuery.data,
     searchQuery,
     sort,
+    __buzzLanguage,
   ]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: UI label getters depend on the active language.
   const visiblePullRequests = React.useMemo(() => {
     const pullRequests = projectsWorkItemsQuery.data?.pullRequests.items ?? [];
     return pullRequests
@@ -419,8 +428,9 @@ export function ProjectsView() {
         }
         return right.pullRequest.updatedAt - left.pullRequest.updatedAt;
       });
-  }, [projectsWorkItemsQuery.data, searchQuery, sort]);
+  }, [projectsWorkItemsQuery.data, searchQuery, sort, __buzzLanguage]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: UI label getters depend on the active language.
   const visibleIssues = React.useMemo(() => {
     const issues = projectsWorkItemsQuery.data?.issues.items ?? [];
     return issues
@@ -442,7 +452,7 @@ export function ProjectsView() {
         }
         return right.issue.updatedAt - left.issue.updatedAt;
       });
-  }, [projectsWorkItemsQuery.data, searchQuery, sort]);
+  }, [projectsWorkItemsQuery.data, searchQuery, sort, __buzzLanguage]);
   const {
     agentContext: selectionAgentContext,
     overviewContext: overviewAgentContext,
@@ -550,13 +560,13 @@ export function ProjectsView() {
   if (projectsQuery.isError) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-2 text-muted-foreground">
-        <p className="text-sm text-red-400">Failed to load projects</p>
+        <p className="text-sm text-red-400">{uiT("Failed to load projects")}</p>
         <Button
           onClick={() => void projectsQuery.refetch()}
           size="sm"
           variant="outline"
         >
-          Retry
+          {uiT("Retry")}
         </Button>
       </div>
     );
@@ -845,7 +855,7 @@ export function ProjectsView() {
                                   embedded={viewMode === "list"}
                                   emptyMessage={
                                     searchQuery.trim()
-                                      ? "No matching reviews"
+                                      ? uiT("No matching reviews")
                                       : undefined
                                   }
                                   error={projectsWorkItemsQuery.error}
@@ -871,7 +881,7 @@ export function ProjectsView() {
                                   embedded={viewMode === "list"}
                                   emptyMessage={
                                     searchQuery.trim()
-                                      ? "No matching tasks"
+                                      ? uiT("No matching tasks")
                                       : undefined
                                   }
                                   error={projectsWorkItemsQuery.error}
@@ -939,7 +949,7 @@ export function ProjectsView() {
           testId="projects-overview-context-rail"
         >
           <aside
-            aria-label="Project context"
+            aria-label={uiT("Project context")}
             className="relative z-30 flex h-full flex-col overflow-hidden bg-sidebar text-sidebar-foreground"
           >
             <div className="min-h-0 flex-1 overflow-y-auto">

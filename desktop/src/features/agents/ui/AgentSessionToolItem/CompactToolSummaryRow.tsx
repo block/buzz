@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { ChevronDown } from "lucide-react";
 
@@ -36,6 +38,8 @@ export function CompactToolSummaryRow({
   preview: string | null;
   thumbnailSrc: string | null;
 }) {
+  useUiLanguage();
+
   const [thumbnailFailed, setThumbnailFailed] = React.useState(false);
   const variant = useAgentSessionTranscriptVariant();
   const isCompactPreview = variant === "compactPreview";

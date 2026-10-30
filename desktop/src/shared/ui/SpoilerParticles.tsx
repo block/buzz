@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 type Hsl = {
@@ -57,6 +59,8 @@ export function SpoilerParticles({
   active,
   contentRef,
 }: SpoilerParticlesProps) {
+  useUiLanguage();
+
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
 
   React.useEffect(() => {

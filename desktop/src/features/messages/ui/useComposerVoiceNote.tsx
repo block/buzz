@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -87,7 +89,7 @@ export function useComposerVoiceNote({
     }
     const attachments = getAttachmentsRef.current();
     if (attachments.pending.length > 0 || attachments.queued.length > 0) {
-      toast.error("A voice note must be the only attachment.");
+      toast.error(uiT("A voice note must be the only attachment."));
       return;
     }
     recordingContextRef.current = currentContextRef.current;
@@ -119,8 +121,8 @@ export function useComposerVoiceNote({
     if (statusRef.current !== "idle" || hasVoiceNoteAttachment) {
       toast.error(
         statusRef.current === "idle"
-          ? "A voice note must be the only attachment."
-          : "Finish or discard the voice note before attaching a file.",
+          ? uiT("A voice note must be the only attachment.")
+          : uiT("Finish or discard the voice note before attaching a file."),
       );
       return false;
     }

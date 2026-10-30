@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { type Virtualizer, useVirtualizer } from "@tanstack/react-virtual";
 import * as React from "react";
 import { createPortal } from "react-dom";
@@ -82,6 +84,8 @@ export function VirtualizedList<T>({
   overscan = 5,
   onVirtualizer,
 }: VirtualizedListProps<T>) {
+  useUiLanguage();
+
   const internalScrollRef = React.useRef<HTMLDivElement>(null);
   const spacerRef = React.useRef<HTMLDivElement>(null);
   const ownsScroll = scrollRef === undefined;

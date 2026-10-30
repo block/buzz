@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import {
   isChannelReferenceOpenable,
@@ -11,6 +13,8 @@ export function ProjectOriginReference({
   agentName?: string | null;
   channelId?: string | null;
 }) {
+  useUiLanguage();
+
   const { goChannel } = useAppNavigation();
   const channel = useChannelReference(channelId);
 
@@ -21,22 +25,29 @@ export function ProjectOriginReference({
         className="inline-flex max-w-full min-w-0 items-center gap-1"
         title={
           isOpenable
-            ? "Origin is claimed by the event author and is not relay-verified."
+            ? uiT(
+                "Origin is claimed by the event author and is not relay-verified.",
+              )
             : // Resolved via a bounded per-id lookup ({@link useChannelReference}),
               // so an unresolved id is a private, deleted, or otherwise
               // inaccessible channel — a non-member open channel still names it.
-              `Origin channel ${channelId} is not visible to you. Origin is claimed by the event author and is not relay-verified.`
+              uiT(
+                "Origin channel {0} is not visible to you. Origin is claimed by the event author and is not relay-verified.",
+                { p0: channelId },
+              )
         }
       >
         <span
           className="shrink-0 whitespace-nowrap"
           data-project-metadata-phrase
         >
-          started from
+          {uiT("started from")}
         </span>
         {isOpenable ? (
           <button
-            aria-label={`Open author-claimed origin channel #${channel.name}`}
+            aria-label={uiT("Open author-claimed origin channel #{0}", {
+              p0: channel.name,
+            })}
             className="min-w-0 truncate font-medium text-foreground underline-offset-2 hover:underline"
             onClick={() => void goChannel(channel.id)}
             type="button"
@@ -44,13 +55,15 @@ export function ProjectOriginReference({
             #{channel.name}
           </button>
         ) : (
-          <span className="shrink-0 whitespace-nowrap">a private channel</span>
+          <span className="shrink-0 whitespace-nowrap">
+            {uiT("a private channel")}
+          </span>
         )}
         <span
           className="shrink-0 whitespace-nowrap"
           data-project-metadata-phrase
         >
-          (author-claimed)
+          {uiT("(author-claimed)")}
         </span>
       </span>
     );
@@ -60,13 +73,15 @@ export function ProjectOriginReference({
     return (
       <span
         className="inline-flex max-w-full min-w-0 items-center gap-1"
-        title="The private conversation identifier is intentionally omitted."
+        title={uiT(
+          "The private conversation identifier is intentionally omitted.",
+        )}
       >
         <span
           className="shrink-0 whitespace-nowrap"
           data-project-metadata-phrase
         >
-          started privately with
+          {uiT("started privately with")}
         </span>
         <span className="truncate font-medium text-foreground">
           {agentName}

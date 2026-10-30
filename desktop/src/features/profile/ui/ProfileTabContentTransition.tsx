@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import {
   AnimatePresence,
@@ -51,6 +53,8 @@ export function ProfileTabContentTransition({
   className?: string;
   tabs: ProfilePanelTab[];
 }) {
+  useUiLanguage();
+
   const reduceMotion = useReducedMotion() ?? false;
   const [lastTransition, setLastTransition] = React.useState<{
     direction: TabTransitionDirection;

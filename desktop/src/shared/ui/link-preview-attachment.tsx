@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import type { ResolvedLinkPreview } from "@/shared/lib/useResolvedLinkPreviews";
 import {
   type LinkPreviewStyle,
@@ -64,6 +66,8 @@ export function LinkPreviewAttachment({
   preview,
   ...props
 }: LinkPreviewAttachmentProps) {
+  useUiLanguage();
+
   useMediaProxyPort();
   const renderedPreview = {
     ...preview,

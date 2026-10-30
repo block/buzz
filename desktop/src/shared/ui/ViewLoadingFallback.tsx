@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { Card } from "@/shared/ui/card";
 import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
 import { Skeleton } from "@/shared/ui/skeleton";
@@ -404,7 +406,7 @@ export function ViewLoadingFallback({
       {kind === "agents" ? <AgentsLoadingBody /> : null}
       {kind === "workflows" ? <CardListLoadingBody /> : null}
       {kind === "projects" ? (
-        <BuzzLoadingState fill label="Loading projects" />
+        <BuzzLoadingState fill label={uiT("Loading projects")} />
       ) : null}
       {kind === "channel" ? (
         <ChannelLoadingBody hasHeader={shouldShowChannelHeader} />

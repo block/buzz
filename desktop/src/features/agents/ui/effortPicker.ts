@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type {
   AcpConfigOptionValue,
   ManagedAgentBackend,
@@ -63,7 +65,12 @@ export function effortPickerState({
     (Array.isArray(effortOptions) || stored.length > 0);
 
   const options: PersonaDropdownOption[] = [
-    { label: "Adapter default", value: EFFORT_DEFAULT_DROPDOWN_VALUE },
+    {
+      get label() {
+        return uiT("Adapter default");
+      },
+      value: EFFORT_DEFAULT_DROPDOWN_VALUE,
+    },
     ...listed.map((option) => ({
       label: option.displayName ?? option.value,
       value: option.value,

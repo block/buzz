@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { useUnreadOverflow } from "@/features/sidebar/lib/useUnreadOverflow";
@@ -22,7 +24,7 @@ export function hasHighPriorityOverflow(
 
 /** Formats the accessible label for a distinct unread destination count. */
 export function sidebarOverflowUnreadLabel(count: number) {
-  return `${count} unread`;
+  return uiT("{0} unread", { p0: count });
 }
 
 /**

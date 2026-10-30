@@ -1,9 +1,13 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 
 import { ProjectsView } from "@/features/projects/ui/ProjectsView";
 
 export function ProjectsScreen() {
+  useUiLanguage();
+
   const queryClient = useQueryClient();
   React.useEffect(() => {
     return () => {

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { SmilePlus, X } from "lucide-react";
 import * as React from "react";
 
@@ -38,6 +40,8 @@ export function WorkflowEmojiField({
   onChange,
   value,
 }: WorkflowEmojiFieldProps) {
+  useUiLanguage();
+
   const [pickerOpen, setPickerOpen] = React.useState(false);
 
   return (
@@ -60,7 +64,9 @@ export function WorkflowEmojiField({
             ) : (
               <>
                 <SmilePlus className="text-muted-foreground" />
-                <span className="text-muted-foreground">Choose a reaction</span>
+                <span className="text-muted-foreground">
+                  {uiT("Choose a reaction")}
+                </span>
               </>
             )}
           </Button>

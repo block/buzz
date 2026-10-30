@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { X } from "lucide-react";
 
 import { Button } from "@/shared/ui/button";
@@ -30,17 +32,19 @@ export function WorkflowUnavailableDialog({
       <DialogContent className="sm:max-w-lg" showCloseButton={false}>
         <DialogHeader>
           <DialogTitle>
-            {loading ? "Loading workflow…" : "Workflow unavailable"}
+            {loading ? uiT("Loading workflow…") : uiT("Workflow unavailable")}
           </DialogTitle>
           <DialogDescription>
             {loading
-              ? "Resolving workflow details."
-              : "This workflow could not be loaded. It may no longer be available to you."}
+              ? uiT("Resolving workflow details.")
+              : uiT(
+                  "This workflow could not be loaded. It may no longer be available to you.",
+                )}
           </DialogDescription>
         </DialogHeader>
         {loading ? (
           <div
-            aria-label="Loading workflow"
+            aria-label={uiT("Loading workflow")}
             className="space-y-3"
             role="status"
           >
@@ -52,11 +56,11 @@ export function WorkflowUnavailableDialog({
             <DialogClose asChild>
               <Button type="button" variant="outline">
                 <X className="h-4 w-4" />
-                Close
+                {uiT("Close")}
               </Button>
             </DialogClose>
             <Button onClick={onRetry} type="button">
-              Retry
+              {uiT("Retry")}
             </Button>
           </DialogFooter>
         )}

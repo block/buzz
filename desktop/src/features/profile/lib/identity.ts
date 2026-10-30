@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type { Profile, UserProfileSummary } from "@/shared/api/types";
 import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
 
@@ -108,7 +110,7 @@ export function resolveUserLabel(input: {
     normalizePubkey(currentPubkey) === normalizePubkey(pubkey)
   ) {
     if (!preferResolvedSelfLabel) {
-      return "You";
+      return uiT("You");
     }
   }
 
@@ -181,7 +183,7 @@ export function formatOwnerLabel(
     currentPubkey &&
     normalizedOwnerPubkey === normalizePubkey(currentPubkey)
   ) {
-    return "you";
+    return uiT("you");
   }
 
   const owner = ownerProfiles?.[normalizedOwnerPubkey];

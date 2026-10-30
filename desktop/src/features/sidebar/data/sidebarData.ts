@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 export type Channel = {
   name: string;
   unread?: number;
@@ -12,7 +14,9 @@ export type ChannelSection = {
 
 export const sidebarSections: ChannelSection[] = [
   {
-    title: "Pinned",
+    get title() {
+      return uiT("Pinned");
+    },
     items: [
       {
         name: "general",
@@ -28,7 +32,9 @@ export const sidebarSections: ChannelSection[] = [
     ],
   },
   {
-    title: "Channels",
+    get title() {
+      return uiT("Channels");
+    },
     items: [
       {
         name: "engineering",
@@ -41,7 +47,9 @@ export const sidebarSections: ChannelSection[] = [
     ],
   },
   {
-    title: "Direct Messages",
+    get title() {
+      return uiT("Direct Messages");
+    },
     items: [
       {
         name: "Avery",

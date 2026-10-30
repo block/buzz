@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { toast } from "sonner";
 
 import { personaManagedAgentUpdate } from "@/features/profile/ui/UserProfilePanelUtils";
@@ -59,7 +61,7 @@ export function validateLinkedAgentRuntimeEdit({
     return null;
   }
 
-  const runtimeLabel = runtime?.label ?? "This provider";
+  const runtimeLabel = runtime?.label ?? uiT("This provider");
   return `${runtimeLabel} is not available. Install it before saving this linked agent.`;
 }
 
@@ -97,24 +99,35 @@ export async function submitProfilePersonaDialog({
       const result = agentUpdate ? await updateManagedAgent(agentUpdate) : null;
       if (result?.profileSyncError) {
         toast.warning(
-          `${result.agent.name} was updated, but profile sync failed: ${result.profileSyncError}`,
+          uiT("{0} was updated, but profile sync failed: {1}", {
+            p0: result.agent.name,
+            p1: result.profileSyncError,
+          }),
         );
       }
-      toast.success(`Updated ${input.displayName}.`);
+      toast.success(uiT("Updated {0}.", { p0: input.displayName }));
     } else {
       const persona = await createPersona(input);
       try {
         const created = await createManagedAgentForPersona(persona);
         if (created.spawnError) {
           toast.error(
-            `${persona.displayName} was created, but it did not start: ${created.spawnError}`,
+            uiT("{0} was created, but it did not start: {1}", {
+              p0: persona.displayName,
+              p1: created.spawnError,
+            }),
           );
         } else {
-          toast.success(`Created and started ${created.agent.name}.`);
+          toast.success(
+            uiT("Created and started {0}.", { p0: created.agent.name }),
+          );
         }
         if (created.profileSyncError) {
           toast.warning(
-            `${created.agent.name} was created, but profile sync failed: ${created.profileSyncError}`,
+            uiT("{0} was created, but profile sync failed: {1}", {
+              p0: created.agent.name,
+              p1: created.profileSyncError,
+            }),
           );
         }
       } catch (error) {
@@ -129,7 +142,7 @@ export async function submitProfilePersonaDialog({
     onDone();
   } catch (error) {
     toast.error(
-      error instanceof Error ? error.message : "Failed to save agent.",
+      error instanceof Error ? error.message : uiT("Failed to save agent."),
     );
   }
 }

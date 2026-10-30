@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { Check, MessageSquare, Minus } from "lucide-react";
 import type * as React from "react";
 
@@ -68,7 +70,7 @@ export function ProjectEntityFacepile({
               index > 0 && "-ml-1.5",
             )}
             triggerElement="span"
-            triggerAriaLabel={`View ${label}'s profile`}
+            triggerAriaLabel={uiT("View {0}'s profile", { p0: label })}
           >
             <span className="relative z-10" title={label}>
               {avatar}
@@ -88,7 +90,7 @@ export function ProjectEntityFacepile({
 export function ProjectEntitySelectControl({
   checked,
   indeterminate = false,
-  label = "Select",
+  label = uiT("Select"),
   onToggle,
   testId = "projects-row-select",
 }: {
@@ -194,6 +196,8 @@ export function ProjectEntityListRow({
   titleSecondaryTestId?: string;
   trailing?: React.ReactNode;
 }) {
+  useUiLanguage();
+
   const projectSelection = useProjectSelection();
   const selected = Boolean(
     selection && projectSelection?.isSelected(selection.item.id),
@@ -238,7 +242,7 @@ export function ProjectEntityListRow({
           >
             <ProjectEntitySelectControl
               checked={selected}
-              label={`Select ${selection.item.title}`}
+              label={uiT("Select {0}", { p0: selection.item.title })}
               onToggle={({ shiftKey }) =>
                 projectSelection.toggle(selection.item, {
                   rangeItems: selection.rangeItems,

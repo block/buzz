@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiMessage, uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -68,6 +70,8 @@ function relayHost(url: string | null | undefined) {
 }
 
 export function HostedCommunitiesSettingsCard() {
+  useUiLanguage();
+
   const onboarding = useCommunityOnboarding();
   const { activeCommunity } = useCommunities();
   const localPubkey = useIdentityQuery().data?.pubkey ?? null;
@@ -448,8 +452,10 @@ export function HostedCommunitiesSettingsCard() {
   return (
     <section className="space-y-6" data-testid="hosted-communities-settings">
       <SettingsSectionHeader
-        title="Hosted communities"
-        description="Buzz works with any relay. This page is only for relay hosting provided by Block — sign in with a Builderlab account to create and manage Block-hosted communities. Builderlab sign-in is used on this page alone."
+        title={uiT("Hosted communities")}
+        description={uiT(
+          "Buzz works with any relay. This page is only for relay hosting provided by Block — sign in with a Builderlab account to create and manage Block-hosted communities. Builderlab sign-in is used on this page alone.",
+        )}
       />
 
       {error ? (
@@ -461,17 +467,21 @@ export function HostedCommunitiesSettingsCard() {
 
       {loading ? (
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <LoaderCircle className="h-4 w-4 animate-spin" /> Checking sign-in…
+          <LoaderCircle className="h-4 w-4 animate-spin" />{" "}
+          {uiT(" Checking sign-in…")}
         </div>
       ) : !auth ? (
         <div className="rounded-xl border border-border/70 p-5">
-          <h3 className="font-medium">Sign in to manage hosted communities</h3>
+          <h3 className="font-medium">
+            {uiT("Sign in to manage hosted communities")}
+          </h3>
           <p
             className="mt-2 max-w-2xl text-sm text-muted-foreground/70"
             data-settings-subcopy
           >
-            Authentication opens in your browser and returns securely to Buzz.
-            You can use every other part of the app without signing in.
+            {uiT(
+              "Authentication opens in your browser and returns securely to Buzz. You can use every other part of the app without signing in.",
+            )}
           </p>
           <Button
             className="mt-4"
@@ -483,7 +493,7 @@ export function HostedCommunitiesSettingsCard() {
             ) : (
               <ExternalLink className="h-4 w-4" />
             )}
-            {action ?? "Sign in with Builderlab"}
+            {action ?? uiT("Sign in with Builderlab")}
           </Button>
         </div>
       ) : (
@@ -491,7 +501,7 @@ export function HostedCommunitiesSettingsCard() {
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border/70 p-4">
             <div>
               <p className="text-sm font-medium">
-                {auth.name || auth.email || "Builderlab account"}
+                {auth.name || auth.email || uiT("Builderlab account")}
               </p>
               {auth.name && auth.email ? (
                 <p className="text-xs text-muted-foreground">{auth.email}</p>
@@ -503,23 +513,22 @@ export function HostedCommunitiesSettingsCard() {
               disabled={busy}
               onClick={() => void signOut()}
             >
-              <LogOut className="h-4 w-4" /> Sign out
+              <LogOut className="h-4 w-4" /> {uiT(" Sign out")}
             </Button>
           </div>
 
           {!identity ? (
             <div className="rounded-xl border border-amber-500/40 bg-amber-500/5 p-5">
               <h3 className="font-medium">
-                Link this account to your Buzz identity
+                {uiT("Link this account to your Buzz identity")}
               </h3>
               <p
                 className="mt-2 text-sm text-muted-foreground/70"
                 data-settings-subcopy
               >
-                This Builderlab account isn&apos;t linked to a Buzz identity
-                yet. Connect this device&apos;s key to create and own
-                communities under it — Buzz signs a one-time challenge locally,
-                so your private key never leaves Desktop.
+                {uiT(
+                  "This Builderlab account isn't linked to a Buzz identity yet. Connect this device's key to create and own communities under it — Buzz signs a one-time challenge locally, so your private key never leaves Desktop.",
+                )}
               </p>
               <Button
                 className="mt-4"
@@ -529,7 +538,7 @@ export function HostedCommunitiesSettingsCard() {
                 {action ? (
                   <LoaderCircle className="h-4 w-4 animate-spin" />
                 ) : null}
-                {action ?? "Connect Buzz identity"}
+                {action ?? uiT("Connect Buzz identity")}
               </Button>
             </div>
           ) : identityMismatch ? (
@@ -538,26 +547,31 @@ export function HostedCommunitiesSettingsCard() {
                 <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
                 <div>
                   <h3 className="font-medium">
-                    This account is connected to a different Buzz identity
+                    {uiT(
+                      "This account is connected to a different Buzz identity",
+                    )}
                   </h3>
                   <p
                     className="mt-2 text-sm text-muted-foreground/70"
                     data-settings-subcopy
                   >
-                    Your Builderlab account owns communities under another Buzz
-                    key, so connecting them here would join a relay this device
-                    isn&apos;t a member of. Creating and connecting are paused
-                    until the identities match.
+                    {uiT(
+                      "Your Builderlab account owns communities under another Buzz key, so connecting them here would join a relay this device isn't a member of. Creating and connecting are paused until the identities match.",
+                    )}
                   </p>
                   <dl className="mt-3 space-y-1 text-xs">
                     <div className="flex flex-wrap gap-x-2">
-                      <dt className="text-muted-foreground">Account uses</dt>
+                      <dt className="text-muted-foreground">
+                        {uiT("Account uses")}
+                      </dt>
                       <dd className="font-mono">
                         {boundNpub ?? UNAVAILABLE_KEY_LABEL}
                       </dd>
                     </div>
                     <div className="flex flex-wrap gap-x-2">
-                      <dt className="text-muted-foreground">This device</dt>
+                      <dt className="text-muted-foreground">
+                        {uiT("This device")}
+                      </dt>
                       <dd className="font-mono">
                         {localNpub ?? UNAVAILABLE_KEY_LABEL}
                       </dd>
@@ -573,14 +587,14 @@ export function HostedCommunitiesSettingsCard() {
                 {action ? (
                   <LoaderCircle className="h-4 w-4 animate-spin" />
                 ) : null}
-                {action ?? "Switch to this device's identity"}
+                {action ?? uiT("Switch to this device's identity")}
               </Button>
             </div>
           ) : (
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border/70 p-4">
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <CheckCircle2 className="h-4 w-4 text-emerald-500" /> Buzz
-                identity connected
+                <CheckCircle2 className="h-4 w-4 text-emerald-500" />{" "}
+                {uiT(" Buzz identity connected")}
                 {boundNpub ? (
                   <span className="font-mono text-xs">{boundNpub}</span>
                 ) : null}
@@ -595,10 +609,12 @@ export function HostedCommunitiesSettingsCard() {
           <div className="space-y-3">
             <div className="flex items-center justify-between gap-3">
               <h3 className="font-medium">
-                Your communities
+                {uiT("Your communities")}
                 <span className="ml-2 text-xs font-normal text-muted-foreground">
                   {quotaUsed ?? communities.length}
-                  {quotaLimit === null ? " used" : ` of ${quotaLimit} used`}
+                  {quotaLimit === null
+                    ? uiT(" used")
+                    : uiT(" of {0} used", { p0: quotaLimit })}
                 </span>
               </h3>
               <Button
@@ -607,12 +623,12 @@ export function HostedCommunitiesSettingsCard() {
                 disabled={busy}
                 onClick={() => void run("Refreshing…", loadAccount)}
               >
-                <RefreshCw className="h-4 w-4" /> Refresh
+                <RefreshCw className="h-4 w-4" /> {uiT(" Refresh")}
               </Button>
             </div>
             {communities.length === 0 ? (
               <p className="rounded-xl border border-dashed p-5 text-sm text-muted-foreground">
-                No hosted communities yet.
+                {uiT("No hosted communities yet.")}
               </p>
             ) : (
               <ul className="space-y-2">
@@ -663,24 +679,24 @@ export function HostedCommunitiesSettingsCard() {
             onSubmit={createCommunity}
           >
             <div>
-              <h3 className="font-medium">Create a community</h3>
+              <h3 className="font-medium">{uiT("Create a community")}</h3>
               <p
                 className="mt-1 text-sm text-muted-foreground/70"
                 data-settings-subcopy
               >
-                Choose the address your team will use to connect.
+                {uiT("Choose the address your team will use to connect.")}
               </p>
             </div>
             {atCommunityLimit ? (
               <p className="text-sm text-muted-foreground">
-                You&apos;ve reached your hosted community creation limit.
-                Transferring a community may free an active slot; deleted
-                community addresses remain reserved.
+                {uiT(
+                  "You've reached your hosted community creation limit. Transferring a community may free an active slot; deleted community addresses remain reserved.",
+                )}
               </p>
             ) : null}
             <div className="flex max-w-xl items-center gap-2">
               <Input
-                aria-label="Community address"
+                aria-label={uiT("Community address")}
                 autoComplete="off"
                 disabled={
                   !usableBoundIdentity ||
@@ -703,19 +719,19 @@ export function HostedCommunitiesSettingsCard() {
             </div>
             {name && !validName ? (
               <p className="text-sm text-destructive">
-                Use lowercase letters, numbers, and single hyphens.
+                {uiT("Use lowercase letters, numbers, and single hyphens.")}
               </p>
             ) : validName && checkingName ? (
               <p className="text-sm text-muted-foreground">
-                Checking availability…
+                {uiT("Checking availability…")}
               </p>
             ) : availability === false ? (
               <p className="text-sm text-destructive">
-                That address is already taken.
+                {uiT("That address is already taken.")}
               </p>
             ) : availability === true ? (
               <p className="text-sm text-emerald-600">
-                That address is available.
+                {uiT("That address is available.")}
               </p>
             ) : null}
             <Button
@@ -733,7 +749,7 @@ export function HostedCommunitiesSettingsCard() {
               {action ? (
                 <LoaderCircle className="h-4 w-4 animate-spin" />
               ) : null}
-              {action ?? "Create and connect"}
+              {action ?? uiT("Create and connect")}
             </Button>
           </form>
         </>
@@ -749,6 +765,8 @@ function UnpairIdentityButton({
   busy: boolean;
   onConfirm: () => void;
 }) {
+  useUiLanguage();
+
   const [open, setOpen] = React.useState(false);
   return (
     <AlertDialog open={open} onOpenChange={setOpen}>
@@ -759,24 +777,26 @@ function UnpairIdentityButton({
         disabled={busy}
         onClick={() => setOpen(true)}
       >
-        <Unlink className="h-4 w-4" /> Unpair identity
+        <Unlink className="h-4 w-4" /> {uiT(" Unpair identity")}
       </Button>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Unpair this Buzz identity?</AlertDialogTitle>
+          <AlertDialogTitle>
+            {uiT("Unpair this Buzz identity?")}
+          </AlertDialogTitle>
           <AlertDialogDescription>
-            Your Builderlab account will no longer be connected to this Buzz
-            key. You can reconnect any key later, but community actions stay
-            unavailable until you do.
+            {uiT(
+              "Your Builderlab account will no longer be connected to this Buzz key. You can reconnect any key later, but community actions stay unavailable until you do.",
+            )}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
-          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogCancel>{uiT("Cancel")}</AlertDialogCancel>
           <AlertDialogAction
             className={buttonVariants({ variant: "destructive" })}
             onClick={onConfirm}
           >
-            Unpair identity
+            {uiT("Unpair identity")}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
@@ -803,6 +823,8 @@ function CommunityRow({
   onTransfer: (npub: string) => Promise<boolean>;
   showIconPicker: boolean;
 }) {
+  useUiLanguage();
+
   const [confirmArchive, setConfirmArchive] = React.useState(false);
   const [confirmUnarchive, setConfirmUnarchive] = React.useState(false);
   const [transferOpen, setTransferOpen] = React.useState(false);
@@ -826,7 +848,7 @@ function CommunityRow({
             data-settings-subcopy
           >
             {community.normalized_host}
-            {archived ? " · Archived" : ""}
+            {archived ? uiT("· Archived") : ""}
           </p>
         </div>
       </div>
@@ -839,7 +861,7 @@ function CommunityRow({
             disabled={busy || !community.id}
             onClick={() => setConfirmUnarchive(true)}
           >
-            <ArchiveRestore className="h-4 w-4" /> Unarchive
+            <ArchiveRestore className="h-4 w-4" /> {uiT(" Unarchive")}
           </Button>
           <AlertDialog
             open={confirmUnarchive}
@@ -847,16 +869,19 @@ function CommunityRow({
           >
             <AlertDialogContent>
               <AlertDialogHeader>
-                <AlertDialogTitle>Unarchive {displayName}?</AlertDialogTitle>
+                <AlertDialogTitle>
+                  {uiT("Unarchive {0}?", { p0: displayName })}
+                </AlertDialogTitle>
                 <AlertDialogDescription>
-                  This address becomes connectable again. Connections that
-                  closed during archival will not reconnect automatically.
+                  {uiT(
+                    "This address becomes connectable again. Connections that closed during archival will not reconnect automatically.",
+                  )}
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
-                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogCancel>{uiT("Cancel")}</AlertDialogCancel>
                 <AlertDialogAction onClick={onUnarchive}>
-                  Unarchive
+                  {uiT("Unarchive")}
                 </AlertDialogAction>
               </AlertDialogFooter>
             </AlertDialogContent>
@@ -871,7 +896,7 @@ function CommunityRow({
               disabled={busy}
               onClick={onConnect}
             >
-              Connect
+              {uiT("Connect")}
             </Button>
           ) : null}
           <Button
@@ -880,7 +905,7 @@ function CommunityRow({
             disabled={busy || !community.id}
             onClick={() => setTransferOpen(true)}
           >
-            <ArrowLeftRight className="h-4 w-4" /> Transfer
+            <ArrowLeftRight className="h-4 w-4" /> {uiT(" Transfer")}
           </Button>
           <Button
             variant="ghost"
@@ -889,27 +914,28 @@ function CommunityRow({
             disabled={busy || !community.id}
             onClick={() => setConfirmArchive(true)}
           >
-            <Archive className="h-4 w-4" /> Archive
+            <Archive className="h-4 w-4" /> {uiT(" Archive")}
           </Button>
 
           <AlertDialog open={confirmArchive} onOpenChange={setConfirmArchive}>
             <AlertDialogContent>
               <AlertDialogHeader>
-                <AlertDialogTitle>Archive {displayName}?</AlertDialogTitle>
+                <AlertDialogTitle>
+                  {uiT("Archive {0}?", { p0: displayName })}
+                </AlertDialogTitle>
                 <AlertDialogDescription>
-                  New and existing connections stop and the address stays
-                  reserved. Archiving can&apos;t be undone from here without
-                  unarchiving, and the community keeps counting toward your
-                  quota — it isn&apos;t deleted.
+                  {uiT(
+                    "New and existing connections stop and the address stays reserved. Archiving can't be undone from here without unarchiving, and the community keeps counting toward your quota — it isn't deleted.",
+                  )}
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
-                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogCancel>{uiT("Cancel")}</AlertDialogCancel>
                 <AlertDialogAction
                   className={buttonVariants({ variant: "destructive" })}
                   onClick={onArchive}
                 >
-                  Archive
+                  {uiT("Archive")}
                 </AlertDialogAction>
               </AlertDialogFooter>
             </AlertDialogContent>
@@ -941,6 +967,8 @@ function TransferOwnershipDialog({
   busy: boolean;
   onTransfer: (npub: string) => Promise<boolean>;
 }) {
+  useUiLanguage();
+
   const [npub, setNpub] = React.useState("");
   const npubIsValid = npub.startsWith("npub1") && npub.length >= 50;
 
@@ -958,16 +986,17 @@ function TransferOwnershipDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Transfer ownership</DialogTitle>
+          <DialogTitle>{uiT("Transfer ownership")}</DialogTitle>
           <DialogDescription>
-            Transfer {communityName} to another person. You become a regular
-            member. The recipient needs a connected Buzz identity first, and
-            this can&apos;t be undone.
+            {uiT(
+              "Transfer {0} to another person. You become a regular member. The recipient needs a connected Buzz identity first, and this can't be undone.",
+              { p0: communityName },
+            )}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">
           <Input
-            aria-label="Recipient npub"
+            aria-label={uiT("Recipient npub")}
             autoComplete="off"
             className="font-mono text-sm"
             placeholder="npub1…"
@@ -977,21 +1006,24 @@ function TransferOwnershipDialog({
           />
           {npub.length > 0 && !npubIsValid ? (
             <p className="text-sm text-destructive">
-              Enter a valid npub that starts with npub1.
+              {uiT("Enter a valid npub that starts with npub1.")}
             </p>
           ) : null}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
-            Cancel
+            {uiT("Cancel")}
           </Button>
           <Button
             variant="destructive"
             disabled={!npubIsValid || busy}
             onClick={() => void submit()}
           >
-            {busy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : null}
-            Transfer ownership
+            {uiMessage("{0} Transfer ownership", {
+              p0: busy ? (
+                <LoaderCircle className="h-4 w-4 animate-spin" />
+              ) : null,
+            })}
           </Button>
         </DialogFooter>
       </DialogContent>

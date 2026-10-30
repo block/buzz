@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -153,10 +155,12 @@ export function useIdentityArchive(
     archiveMutation.mutate(
       { targetPubkey },
       {
-        onSuccess: () => toast.success("Archived on this relay"),
+        onSuccess: () => toast.success(uiT("Archived on this relay")),
         onError: (error) =>
           toast.error(
-            `Archive failed: ${error instanceof Error ? error.message : String(error)}`,
+            uiT("Archive failed: {0}", {
+              p0: error instanceof Error ? error.message : String(error),
+            }),
           ),
       },
     );
@@ -167,10 +171,12 @@ export function useIdentityArchive(
     unarchiveMutation.mutate(
       { targetPubkey },
       {
-        onSuccess: () => toast.success("Unarchived on this relay"),
+        onSuccess: () => toast.success(uiT("Unarchived on this relay")),
         onError: (error) =>
           toast.error(
-            `Unarchive failed: ${error instanceof Error ? error.message : String(error)}`,
+            uiT("Unarchive failed: {0}", {
+              p0: error instanceof Error ? error.message : String(error),
+            }),
           ),
       },
     );

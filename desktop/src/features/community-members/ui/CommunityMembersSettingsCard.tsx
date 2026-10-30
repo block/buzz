@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { Crown, MoreHorizontal, Search, Shield } from "lucide-react";
 import { nip19 } from "nostr-tools";
 import * as React from "react";
@@ -99,6 +101,8 @@ function RelayMemberRow({
   profile?: UserProfileSummary;
   member: RelayMember;
 }) {
+  useUiLanguage();
+
   const removeMutation = useRemoveRelayMemberMutation();
   const changeRoleMutation = useChangeRelayMemberRoleMutation();
   const isSelf = currentPubkey
@@ -125,7 +129,7 @@ function RelayMemberRow({
       toast.error(
         error instanceof Error
           ? error.message
-          : "Couldn’t update this community member.",
+          : uiT("Couldn’t update this community member."),
       );
     }
   }
@@ -137,7 +141,7 @@ function RelayMemberRow({
     >
       <UserProfilePopover
         pubkey={member.pubkey}
-        triggerAriaLabel={`Open profile for ${displayName}`}
+        triggerAriaLabel={uiT("Open profile for {0}", { p0: displayName })}
         triggerElement="span"
       >
         <ProfileAvatar
@@ -168,13 +172,15 @@ function RelayMemberRow({
           <span aria-hidden="true" className="shrink-0">
             ·
           </span>
-          <span className="shrink-0">Added {formatDate(member.createdAt)}</span>
+          <span className="shrink-0">
+            {uiT("Added {0}", { p0: formatDate(member.createdAt) })}
+          </span>
           {isSelf ? (
             <>
               <span aria-hidden="true" className="shrink-0">
                 ·
               </span>
-              <span className="shrink-0">You</span>
+              <span className="shrink-0">{uiT("You")}</span>
             </>
           ) : null}
         </div>
@@ -184,7 +190,7 @@ function RelayMemberRow({
         <DropdownMenu modal={false}>
           <DropdownMenuTrigger asChild>
             <Button
-              aria-label={`Actions for ${displayName}`}
+              aria-label={uiT("Actions for {0}", { p0: displayName })}
               data-testid={`relay-member-actions-${member.pubkey}`}
               disabled={isBusy}
               size="icon"
@@ -207,7 +213,7 @@ function RelayMemberRow({
                   )
                 }
               >
-                Make admin
+                {uiT("Make admin")}
               </DropdownMenuItem>
             ) : null}
             {canDemote ? (
@@ -223,7 +229,7 @@ function RelayMemberRow({
                   )
                 }
               >
-                Make member
+                {uiT("Make member")}
               </DropdownMenuItem>
             ) : null}
             {canRemove && (canPromote || canDemote) ? (
@@ -239,7 +245,7 @@ function RelayMemberRow({
                   )
                 }
               >
-                Remove from community
+                {uiT("Remove from community")}
               </DropdownMenuItem>
             ) : null}
           </DropdownMenuContent>
@@ -254,6 +260,8 @@ export function CommunityMembersSettingsCard({
 }: {
   currentPubkey?: string;
 }) {
+  useUiLanguage();
+
   const myMembershipQuery = useMyRelayMembershipLookupQuery();
   const currentRole = myMembershipQuery.data?.membership?.role ?? null;
   const canManageRelay = currentRole === "owner" || currentRole === "admin";
@@ -295,7 +303,7 @@ export function CommunityMembersSettingsCard({
     return (
       <section className="min-w-0" data-testid="settings-community-members">
         <p className="text-sm text-muted-foreground">
-          Checking invite permissions…
+          {uiT("Checking invite permissions…")}
         </p>
       </section>
     );
@@ -313,17 +321,17 @@ export function CommunityMembersSettingsCard({
             data-testid="community-invite-dialog-trigger"
             onClick={() => setInviteDialogOpen(true)}
           >
-            Invite to community
+            {uiT("Invite to community")}
           </Button>
         }
-        title="Invites"
-        description="Manage members and community access."
+        title={uiT("Invites")}
+        description={uiT("Manage members and community access.")}
       />
 
       <SettingsOptionGroup
         title={
           <>
-            Members
+            {uiT("Members")}
             {members.length > 0 ? (
               <span className="ml-1.5 font-normal">{members.length}</span>
             ) : null}
@@ -339,7 +347,7 @@ export function CommunityMembersSettingsCard({
               className="w-full rounded-lg border border-border/70 bg-background py-2 pl-9 pr-3 text-sm placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
               data-testid="community-members-search"
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search members"
+              placeholder={uiT("Search members")}
               spellCheck={false}
               type="text"
               value={search}
@@ -354,15 +362,15 @@ export function CommunityMembersSettingsCard({
 
           {membersQuery.isLoading ? (
             <p className="py-3 text-sm text-muted-foreground">
-              Loading community members…
+              {uiT("Loading community members…")}
             </p>
           ) : members.length === 0 ? (
             <p className="rounded-lg border border-dashed border-border/70 px-3 py-6 text-center text-sm text-muted-foreground">
-              No community members yet.
+              {uiT("No community members yet.")}
             </p>
           ) : filteredMembers.length === 0 ? (
             <p className="rounded-lg border border-dashed border-border/70 px-3 py-6 text-center text-sm text-muted-foreground">
-              No members match your search.
+              {uiT("No members match your search.")}
             </p>
           ) : (
             <VirtualizedList

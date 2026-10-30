@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { toast } from "sonner";
 import { useStartManagedAgentMutation } from "@/features/agents/hooks";
@@ -75,7 +77,10 @@ function detachedStartFailureDetail(error: unknown): string {
  */
 function warnAgentMayNotRespond(agentName: string, detail: string): void {
   toast.error(
-    `Could not start ${agentName} — your message was sent, but the agent may not respond. ${detail}`,
+    uiT(
+      "Could not start {0} — your message was sent, but the agent may not respond. {1}",
+      { p0: agentName, p1: detail },
+    ),
   );
 }
 

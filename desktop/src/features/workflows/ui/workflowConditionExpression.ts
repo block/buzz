@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type { TriggerType } from "./workflowFormTypes";
 
 export const CONDITION_OPERATORS = [
@@ -27,19 +29,44 @@ export type ParsedConditionExpression = {
 };
 
 const AUTHOR_FIELD: ConditionField = {
-  label: "Author",
+  get label() {
+    return uiT("Author");
+  },
   value: "trigger_author",
 };
 const FIELDS_BY_TRIGGER: Record<TriggerType, ConditionField[]> = {
   message_posted: [
-    { label: "Message text", value: "trigger_text" },
+    {
+      get label() {
+        return uiT("Message text");
+      },
+      value: "trigger_text",
+    },
     AUTHOR_FIELD,
   ],
-  diff_posted: [{ label: "Diff text", value: "trigger_text" }, AUTHOR_FIELD],
-  reaction_added: [
-    { label: "Reaction emoji", value: "trigger_emoji" },
+  diff_posted: [
+    {
+      get label() {
+        return uiT("Diff text");
+      },
+      value: "trigger_text",
+    },
     AUTHOR_FIELD,
-    { label: "Message", value: "trigger_message_id" },
+  ],
+  reaction_added: [
+    {
+      get label() {
+        return uiT("Reaction emoji");
+      },
+      value: "trigger_emoji",
+    },
+    AUTHOR_FIELD,
+    {
+      get label() {
+        return uiT("Message");
+      },
+      value: "trigger_message_id",
+    },
   ],
   webhook: [],
   schedule: [],

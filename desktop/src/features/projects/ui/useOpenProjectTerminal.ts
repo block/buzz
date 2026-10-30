@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 import { toast } from "sonner";
@@ -7,7 +9,9 @@ import { projectCloneErrorPresentation } from "@/features/projects/lib/projectGi
 import { openProjectTerminal } from "@/shared/api/projectGit";
 
 export function projectTerminalLabel(hasLocalCheckout: boolean) {
-  return hasLocalCheckout ? "Open in Terminal" : "Clone & open in Terminal";
+  return hasLocalCheckout
+    ? uiT("Open in Terminal")
+    : uiT("Clone & open in Terminal");
 }
 
 /**
@@ -25,7 +29,7 @@ export function useOpenProjectTerminal(reposDir?: string | null) {
     ) => {
       const toastId = options.hasLocalCheckout
         ? undefined
-        : toast.loading(`Cloning ${project.name}…`);
+        : toast.loading(uiT("Cloning {0}…", { p0: project.name }));
       try {
         const result = await openProjectTerminal({
           reposDir,
@@ -34,7 +38,9 @@ export function useOpenProjectTerminal(reposDir?: string | null) {
           defaultBranch: options.branch ?? project.defaultBranch ?? null,
         });
         if (result.cloned) {
-          toast.success(`Cloned to ${result.path}`, { id: toastId });
+          toast.success(uiT("Cloned to {0}", { p0: result.path }), {
+            id: toastId,
+          });
           void queryClient.invalidateQueries({
             queryKey: ["project", project.id],
           });
@@ -45,9 +51,14 @@ export function useOpenProjectTerminal(reposDir?: string | null) {
       } catch (error) {
         const presentation = options.hasLocalCheckout
           ? {
-              title: "Couldn’t open terminal",
-              description:
-                "Buzz could not open this checkout in your configured terminal.",
+              get title() {
+                return uiT("Couldn’t open terminal");
+              },
+              get description() {
+                return uiT(
+                  "Buzz could not open this checkout in your configured terminal.",
+                );
+              },
             }
           : projectCloneErrorPresentation(error, project.cloneUrls[0]);
         toast.error(presentation.title, {

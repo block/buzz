@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { truncateNpub } from "@/shared/lib/pubkey";
 import {
   formatDurationSecondsVerbose,
@@ -50,13 +52,14 @@ function configuredStepDetail(
     case "send_message": {
       const text = quoted(step.text);
       const channel = channelLabel ? `#${channelLabel}` : null;
-      if (text && channel) return `${text} in ${channel}`;
+      if (text && channel) return uiT("{0} in {1}", { p0: text, p1: channel });
       return text ?? channel;
     }
     case "send_dm": {
       const text = quoted(step.text);
       const recipient = destination(step.to);
-      if (text && recipient) return `${text} to ${recipient}`;
+      if (text && recipient)
+        return uiT("{0} to {1}", { p0: text, p1: recipient });
       return text ?? recipient;
     }
     case "call_webhook": {
@@ -67,7 +70,8 @@ function configuredStepDetail(
     case "request_approval": {
       const message = quoted(step.message);
       const approver = destination(step.from);
-      if (message && approver) return `${message} from ${approver}`;
+      if (message && approver)
+        return uiT("{0} from {1}", { p0: message, p1: approver });
       return message ?? approver;
     }
     case "add_reaction":

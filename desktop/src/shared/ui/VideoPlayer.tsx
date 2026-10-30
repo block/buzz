@@ -1,3 +1,6 @@
+import { formatTimecode, formatCommentTimecode } from "./videoTimecodeFormat";
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { createPortal } from "react-dom";
 import {
@@ -137,49 +140,6 @@ function GlassSurface({ className }: { className?: string }) {
   );
 }
 
-function formatTimecode(
-  seconds: number,
-  options: { fractionalDigits?: number; trimZeroFraction?: boolean } = {},
-): string {
-  const safeSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
-  const fractionalDigits = Math.max(0, options.fractionalDigits ?? 0);
-  const precisionFactor = 10 ** fractionalDigits;
-  const totalTicks =
-    fractionalDigits > 0
-      ? Math.round(safeSeconds * precisionFactor)
-      : Math.floor(safeSeconds);
-  const totalSeconds =
-    fractionalDigits > 0
-      ? Math.floor(totalTicks / precisionFactor)
-      : totalTicks;
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const remainingSeconds = totalSeconds % 60;
-  const paddedSeconds = String(remainingSeconds).padStart(2, "0");
-  const fraction = fractionalDigits > 0 ? totalTicks % precisionFactor : 0;
-
-  const baseTimecode =
-    hours > 0
-      ? `${hours}:${String(minutes).padStart(2, "0")}:${paddedSeconds}`
-      : `${String(minutes).padStart(2, "0")}:${paddedSeconds}`;
-
-  if (
-    fractionalDigits <= 0 ||
-    (options.trimZeroFraction === true && fraction === 0)
-  ) {
-    return baseTimecode;
-  }
-
-  return `${baseTimecode}.${String(fraction).padStart(fractionalDigits, "0")}`;
-}
-
-function formatCommentTimecode(seconds: number): string {
-  return formatTimecode(seconds, {
-    fractionalDigits: 1,
-    trimZeroFraction: true,
-  });
-}
-
 function formatPlaybackSpeed(speed: number): string {
   return `${speed}x`;
 }
@@ -297,6 +257,8 @@ function VideoGlow({
 }: {
   videoRef: React.RefObject<HTMLVideoElement | null>;
 }) {
+  useUiLanguage();
+
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
 
   React.useEffect(() => {
@@ -369,6 +331,8 @@ function VideoScrubber({
   showHoverPreview?: boolean;
   testIdPrefix: string;
 }) {
+  useUiLanguage();
+
   const sliderRef = React.useRef<HTMLDivElement>(null);
   const draggingRef = React.useRef(false);
   const [hoverRatio, setHoverRatio] = React.useState<number | null>(null);
@@ -555,7 +519,7 @@ function VolumeControl({
   return (
     <div className="group/volume flex shrink-0 items-center">
       <button
-        aria-label={isSilent ? "Unmute" : "Mute"}
+        aria-label={isSilent ? uiT("Unmute") : uiT("Mute")}
         className="flex h-7 w-7 items-center justify-center rounded-md text-white transition-colors hover:bg-white/15 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-primary"
         type="button"
         onClick={(event) => {
@@ -570,7 +534,7 @@ function VolumeControl({
         )}
       </button>
       <input
-        aria-label="Volume"
+        aria-label={uiT("Volume")}
         className={cn(
           "video-volume-slider h-3 cursor-pointer transition-all duration-200",
           expanded
@@ -606,6 +570,8 @@ function PlaybackSpeedControl({
   size?: "inline" | "review";
   testId: string;
 }) {
+  useUiLanguage();
+
   const [open, setOpen] = React.useState(false);
   const label = formatPlaybackSpeed(playbackSpeed);
   const triggerSizeClass =
@@ -617,7 +583,7 @@ function PlaybackSpeedControl({
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <button
-          aria-label={`Playback speed: ${label}`}
+          aria-label={uiT("Playback speed: {0}", { p0: label })}
           className={cn(
             "flex shrink-0 items-center justify-center font-semibold tabular-nums text-white transition-colors hover:bg-white/15 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/60",
             triggerSizeClass,
@@ -639,7 +605,7 @@ function PlaybackSpeedControl({
         onClick={(event) => event.stopPropagation()}
       >
         <div className="px-2 pb-1 pt-1 text-2xs font-medium text-white/55">
-          Speed
+          {uiT("Speed")}
         </div>
         <div className="grid gap-0.5">
           {PLAYBACK_SPEEDS.map((speed) => {
@@ -681,6 +647,8 @@ export function VideoPlayer({
   downloadUrl,
   filename,
 }: VideoPlayerProps) {
+  useUiLanguage();
+
   const persistedReviewKey = reviewKey ?? src;
   const videoRef = React.useRef<HTMLVideoElement>(null);
   const inlineSurfaceRef = React.useRef<HTMLDivElement | null>(null);
@@ -1055,7 +1023,7 @@ export function VideoPlayer({
           />
           {!hasError && !isBuffering ? (
             <button
-              aria-label={isPlaying ? "Pause video" : "Play video"}
+              aria-label={isPlaying ? uiT("Pause video") : uiT("Play video")}
               className={cn(
                 "absolute inset-0 flex cursor-pointer items-center justify-center opacity-100 outline-hidden transition-opacity duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] focus-visible:ring-2 focus-visible:ring-white/60 motion-reduce:transition-none",
                 started &&
@@ -1090,7 +1058,7 @@ export function VideoPlayer({
           {hasError ? (
             <button
               type="button"
-              aria-label="Retry loading video"
+              aria-label={uiT("Retry loading video")}
               className="group absolute inset-0 flex cursor-pointer flex-col items-center justify-center gap-2"
               onClick={handleTogglePlay}
             >
@@ -1099,7 +1067,7 @@ export function VideoPlayer({
                 <AlertCircle className="h-6 w-6 text-white" />
               </span>
               <span className="rounded-md bg-black/50 px-2 py-1 text-xs text-white backdrop-blur-sm">
-                Failed to load — tap to retry
+                {uiT("Failed to load — tap to retry")}
               </span>
             </button>
           ) : null}
@@ -1126,7 +1094,7 @@ export function VideoPlayer({
                   {formatTimecode(currentTime)}
                 </span>
                 <VideoScrubber
-                  ariaLabel="Video progress"
+                  ariaLabel={uiT("Video progress")}
                   className="group h-7 min-w-0 flex-1"
                   currentTime={currentTime}
                   duration={duration}
@@ -1159,9 +1127,9 @@ export function VideoPlayer({
         {!hasError ? (
           <button
             type="button"
-            aria-label="Open video review"
+            aria-label={uiT("Open video review")}
             data-video-review-launcher=""
-            title="Open video review"
+            title={uiT("Open video review")}
             className="group absolute right-2 top-2 z-10 flex h-8 w-8 items-center justify-center rounded-full text-white shadow-sm outline-hidden focus-visible:ring-2 focus-visible:ring-white/60"
             onClick={handleOpenReview}
           >
@@ -1230,6 +1198,8 @@ function VideoReviewDialog({
   title: string;
   videoRef: React.RefObject<HTMLVideoElement | null>;
 }) {
+  useUiLanguage();
+
   const [isPlaying, setIsPlaying] = React.useState(false);
   const [isPosting, setIsPosting] = React.useState(false);
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
@@ -1531,7 +1501,9 @@ function VideoReviewDialog({
           current.filter((comment) => comment.id !== optimisticComment.id),
         );
         setErrorMessage(
-          error instanceof Error ? error.message : "Failed to post comment.",
+          error instanceof Error
+            ? error.message
+            : uiT("Failed to post comment."),
         );
         // Rethrow so the composer restores the draft it cleared on submit.
         throw error;
@@ -1626,7 +1598,7 @@ function VideoReviewDialog({
       )}
     >
       <button
-        aria-label="Close video review"
+        aria-label={uiT("Close video review")}
         className="absolute inset-0 cursor-default"
         data-testid="video-review-backdrop"
         type="button"
@@ -1641,10 +1613,10 @@ function VideoReviewDialog({
         role="dialog"
       >
         <h2 className="sr-only" id="video-review-title">
-          Video review
+          {uiT("Video review")}
         </h2>
         <p className="sr-only" id="video-review-description">
-          Review video comments and timecoded replies.
+          {uiT("Review video comments and timecoded replies.")}
         </p>
 
         <header className="flex h-12 shrink-0 items-center gap-3 border-b border-border bg-background px-4">
@@ -1655,7 +1627,9 @@ function VideoReviewDialog({
           </div>
           {showCommentsPanel ? (
             <Button
-              aria-label={isPanelOpen ? "Hide comments" : "Show comments"}
+              aria-label={
+                isPanelOpen ? uiT("Hide comments") : uiT("Show comments")
+              }
               aria-pressed={isPanelOpen}
               className={cn(
                 "h-8 w-8 rounded-lg border border-border bg-muted/40 text-foreground hover:bg-muted",
@@ -1671,7 +1645,7 @@ function VideoReviewDialog({
             </Button>
           ) : null}
           <Button
-            aria-label="Close video review"
+            aria-label={uiT("Close video review")}
             className="h-8 w-8 rounded-lg border border-border bg-muted/40 text-foreground hover:bg-muted"
             size="icon"
             type="button"
@@ -1761,7 +1735,9 @@ function VideoReviewDialog({
                     <GlassSurface />
                     <button
                       aria-label={
-                        isPlaying ? "Pause review video" : "Play review video"
+                        isPlaying
+                          ? uiT("Pause review video")
+                          : uiT("Play review video")
                       }
                       className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-white transition-colors hover:bg-white/15 outline-hidden focus-visible:ring-2 focus-visible:ring-white/60"
                       type="button"
@@ -1780,7 +1756,7 @@ function VideoReviewDialog({
                       {formatTimecode(currentTime)}
                     </span>
                     <VideoScrubber
-                      ariaLabel="Video timeline"
+                      ariaLabel={uiT("Video timeline")}
                       className="group h-8 min-w-0 flex-1"
                       currentTime={currentTime}
                       duration={visibleDuration}
@@ -1794,7 +1770,9 @@ function VideoReviewDialog({
                           <Tooltip key={item.comment.id}>
                             <TooltipTrigger asChild>
                               <button
-                                aria-label={`Seek to ${item.timecode}`}
+                                aria-label={uiT("Seek to {0}", {
+                                  p0: item.timecode,
+                                })}
                                 className="absolute top-1/2 z-20 flex h-5 w-5 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-white/40 bg-black/60 shadow-md transition-transform hover:scale-110 outline-hidden focus-visible:ring-2 focus-visible:ring-white/60"
                                 data-video-review-marker=""
                                 style={{ left }}
@@ -1852,7 +1830,10 @@ function VideoReviewDialog({
                   <GlassSurface />
                   {QUICK_REACTIONS.map((emoji, index) => (
                     <button
-                      aria-label={`React ${emoji} at ${formatTimecode(currentTime)}`}
+                      aria-label={uiT("React {0} at {1}", {
+                        p0: emoji,
+                        p1: formatTimecode(currentTime),
+                      })}
                       className="flex h-8 w-8 items-center justify-center rounded-full text-lg transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-35"
                       data-testid={`video-review-reaction-${index}`}
                       disabled={!canPost}
@@ -1869,21 +1850,21 @@ function VideoReviewDialog({
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <button
-                          aria-label="More reactions"
+                          aria-label={uiT("More reactions")}
                           aria-pressed={isEmojiPickerOpen}
                           className={cn(
                             "flex h-8 w-8 items-center justify-center rounded-full text-white/80 transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-35",
                             isEmojiPickerOpen && "bg-white/15 text-white",
                           )}
                           disabled={!canPost}
-                          title={postDisabledReason ?? "More reactions"}
+                          title={postDisabledReason ?? uiT("More reactions")}
                           type="button"
                           onClick={() => setIsEmojiPickerOpen((open) => !open)}
                         >
                           <SmilePlus className="pointer-events-none h-4 w-4" />
                         </button>
                       </TooltipTrigger>
-                      <TooltipContent>More reactions</TooltipContent>
+                      <TooltipContent>{uiT("More reactions")}</TooltipContent>
                     </Tooltip>
                     {isEmojiPickerOpen ? (
                       <div
@@ -1914,7 +1895,7 @@ function VideoReviewDialog({
                   <div className="flex min-w-0 items-center gap-2">
                     <MessageCircle className="h-4 w-4 text-muted-foreground" />
                     <h3 className="text-sm font-semibold text-foreground">
-                      Comments
+                      {uiT("Comments")}
                     </h3>
                   </div>
                   <span className="ml-auto rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
@@ -1949,7 +1930,7 @@ function VideoReviewDialog({
                   ) : (
                     <div className="rounded-lg border border-dashed border-border px-4 py-6 text-center">
                       <p className="text-sm font-medium text-muted-foreground">
-                        No comments yet
+                        {uiT("No comments yet")}
                       </p>
                     </div>
                   )}
@@ -1970,7 +1951,9 @@ function VideoReviewDialog({
                     </span>
                     {replyTarget ? (
                       <span className="text-2xs text-muted-foreground">
-                        Replying to {replyTarget.comment.author}
+                        {uiT("Replying to {0}", {
+                          p0: replyTarget.comment.author,
+                        })}
                       </span>
                     ) : (
                       <label
@@ -1986,7 +1969,7 @@ function VideoReviewDialog({
                             setPostAtCurrentFrame(checked === true)
                           }
                         />
-                        Comment at current frame
+                        {uiT("Comment at current frame")}
                       </label>
                     )}
                   </div>
@@ -2020,7 +2003,7 @@ function VideoReviewDialog({
                         }
                         onSend={handleComposerSend}
                         placeholder={
-                          replyTarget ? undefined : "Leave your comment..."
+                          replyTarget ? undefined : uiT("Leave your comment...")
                         }
                         profiles={reviewContext?.profiles}
                         replyTarget={
@@ -2162,7 +2145,7 @@ function VideoReviewCommentBody({
         <div className="mt-2 flex flex-wrap gap-1.5">
           {reactions.map((reaction) => (
             <button
-              aria-label={`Toggle ${reaction.emoji} reaction`}
+              aria-label={uiT("Toggle {0} reaction", { p0: reaction.emoji })}
               aria-pressed={reaction.reactedByCurrentUser}
               className={cn(
                 "flex h-7 items-center gap-1 rounded-full border px-2 text-xs transition-colors",
@@ -2198,7 +2181,7 @@ function VideoReviewCommentBody({
           type="button"
           onClick={() => onReply(item)}
         >
-          Reply
+          {uiT("Reply")}
         </button>
       ) : null}
     </div>

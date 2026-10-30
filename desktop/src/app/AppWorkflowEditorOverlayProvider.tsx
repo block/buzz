@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "@tanstack/react-router";
@@ -34,6 +36,8 @@ function withPane(
 export function AppWorkflowEditorOverlayProvider({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
+  useUiLanguage();
+
   const queryClient = useQueryClient();
   const channelsQuery = useChannelsQuery();
   const memberChannels = React.useMemo(

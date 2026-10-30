@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { AlertTriangle } from "lucide-react";
 
 import {
@@ -198,6 +200,8 @@ export function ConfigNudgeCard({
   className?: string;
   nudge: ConfigNudgePayload;
 }) {
+  useUiLanguage();
+
   const { openProfilePanel } = useProfilePanel();
   const { onOpenSettings } = useAppShell();
 
@@ -268,7 +272,7 @@ export function ConfigNudgeCard({
       </AttachmentMedia>
       <AttachmentContent>
         <AttachmentTitle className="whitespace-normal text-destructive line-clamp-2">
-          {nudge.agent_name} needs configuration
+          {uiT("{0} needs configuration", { p0: nudge.agent_name })}
         </AttachmentTitle>
         <div className="mt-1 flex flex-col gap-0.5">
           {nudge.requirements.map((req, i) => (
@@ -287,7 +291,7 @@ export function ConfigNudgeCard({
       {opensDoctor && !informationalOnly && (
         <AttachmentActions className="items-end self-end">
           <span className="text-xs text-muted-foreground">
-            Open Agent runtimes →
+            {uiT("Open Agent runtimes →")}
           </span>
         </AttachmentActions>
       )}
@@ -296,8 +300,8 @@ export function ConfigNudgeCard({
         <AttachmentTrigger
           aria-label={
             opensDoctor
-              ? `Open Agent runtimes for ${nudge.agent_name}`
-              : `Open Edit Agent for ${nudge.agent_name}`
+              ? uiT("Open Agent runtimes for {0}", { p0: nudge.agent_name })
+              : uiT("Open Edit Agent for {0}", { p0: nudge.agent_name })
           }
           onClick={handleOpen}
         />
@@ -325,11 +329,11 @@ function RequirementRow({
       return (
         <div className="flex items-center gap-2 text-xs leading-4 text-muted-foreground">
           <span className="flex-1 [overflow-wrap:anywhere]">
-            Set{" "}
+            {uiT("Set")}{" "}
             <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs text-foreground">
               {requirement.key}
             </code>{" "}
-            in Edit Agent → Environment variables
+            {uiT("in Edit Agent → Environment variables")}
           </span>
           {!allCliLogin && (
             <button
@@ -339,7 +343,7 @@ function RequirementRow({
               }
               type="button"
             >
-              Edit Agent →
+              {uiT("Edit Agent →")}
             </button>
           )}
         </div>
@@ -348,8 +352,9 @@ function RequirementRow({
       return (
         <div className="flex items-center gap-2 text-xs leading-4 text-muted-foreground">
           <span className="flex-1 [overflow-wrap:anywhere]">
-            Set the <strong>{requirement.field}</strong> field in Edit Agent
-            dropdowns
+            {uiT("Set the ")}
+            <strong>{requirement.field}</strong>{" "}
+            {uiT(" field in Edit Agent dropdowns")}
           </span>
           {!allCliLogin && (
             <button
@@ -359,7 +364,7 @@ function RequirementRow({
               }
               type="button"
             >
-              Edit Agent →
+              {uiT("Edit Agent →")}
             </button>
           )}
         </div>
@@ -384,7 +389,7 @@ function RequirementRow({
               onClick={onOpenDoctor}
               type="button"
             >
-              Open Agent runtimes →
+              {uiT("Open Agent runtimes →")}
             </button>
           )}
         </div>
@@ -393,7 +398,7 @@ function RequirementRow({
       return (
         <div className="flex items-center gap-2 text-xs leading-4 text-muted-foreground">
           <span className="flex-1 [overflow-wrap:anywhere]">
-            Git for Windows is required for buzz-agent shell tools
+            {uiT("Git for Windows is required for buzz-agent shell tools")}
           </span>
         </div>
       );
@@ -421,11 +426,11 @@ function RequirementRow({
       return (
         <div className="flex items-center gap-2 text-xs leading-4 text-muted-foreground">
           <span className="flex-1 [overflow-wrap:anywhere]">
-            {configFile} is invalid:{" "}
+            {configFile} {uiT(" is invalid:")}{" "}
             <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs text-foreground">
               {requirement.diagnostic}
             </code>{" "}
-            — fix the config and restart the agent
+            {uiT("— fix the config and restart the agent")}
           </span>
         </div>
       );

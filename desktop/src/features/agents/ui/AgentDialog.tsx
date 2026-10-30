@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import type {
@@ -137,6 +139,8 @@ function AgentCreateDialogRouter({
   onDirtyChange,
   onSubmitDefinition,
 }: AgentDialogCreateProps) {
+  useUiLanguage();
+
   const [runDraft, setRunDraft] = React.useState(emptyWhereToRunDraft);
   const [effortLevel, setEffortLevel] = React.useState<string | null>(null);
   const initialValues = React.useMemo(

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import * as React from "react";
@@ -82,6 +84,8 @@ export function HuddleProvider({
   /** Reveals an active or archived Huddle channel in the main app. */
   onViewHuddleChannel?: (ephemeralChannelId: string) => void;
 }) {
+  useUiLanguage();
+
   const workletRef = React.useRef<AudioWorkletHandle | null>(null);
   const tokenRef = React.useRef(0);
   const busyRef = React.useRef(false);

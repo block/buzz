@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -141,6 +143,8 @@ export function ProjectsOverviewProjectItems({
   viewMode: ProjectsViewMode;
   visibleProjects: Project[];
 }) {
+  useUiLanguage();
+
   // One selection array shared by every row (was rebuilt per row per render —
   // O(n²) object churn that also defeated row memoization).
   const selectionRangeItems = React.useMemo(
@@ -198,13 +202,17 @@ export function ProjectsOverviewProjectItems({
       items: visibleProjects.filter((project) =>
         isProjectMine(project, currentPubkey),
       ),
-      title: "Mine",
+      get title() {
+        return uiT("Mine");
+      },
     },
     {
       items: visibleProjects.filter(
         (project) => !isProjectMine(project, currentPubkey),
       ),
-      title: "Other projects",
+      get title() {
+        return uiT("Other projects");
+      },
     },
   ].filter((group) => group.items.length > 0);
   if (viewMode === "grid") {
@@ -321,6 +329,8 @@ export function ProjectsOverviewRepositoryItems({
   viewMode: ProjectsViewMode;
   visibleRepositories: Array<{ project: Project; repository: Repository }>;
 }) {
+  useUiLanguage();
+
   // Shared, identity-stable selection array (see ProjectsOverviewProjectItems).
   const selectionRangeItems = React.useMemo(
     () =>
@@ -363,13 +373,17 @@ export function ProjectsOverviewRepositoryItems({
       items: visibleRepositories.filter(({ repository }) =>
         repositoryIsMine(repository, currentPubkey),
       ),
-      title: "Mine",
+      get title() {
+        return uiT("Mine");
+      },
     },
     {
       items: visibleRepositories.filter(
         ({ repository }) => !repositoryIsMine(repository, currentPubkey),
       ),
-      title: "Other repositories",
+      get title() {
+        return uiT("Other repositories");
+      },
     },
   ].filter((group) => group.items.length > 0);
   if (viewMode === "grid") {

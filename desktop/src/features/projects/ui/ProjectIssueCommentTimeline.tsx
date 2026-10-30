@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { ChevronDown, ChevronUp, History } from "lucide-react";
 import * as React from "react";
 
@@ -25,6 +27,8 @@ export function ProjectIssueCommentTimeline({
   comments: ProjectIssue["comments"];
   profiles?: UserProfileLookup;
 }) {
+  useUiLanguage();
+
   const [isCollapsed, setIsCollapsed] = React.useState(false);
   const [isExpanded, setIsExpanded] = React.useState(false);
   const orderedComments = React.useMemo(
@@ -68,8 +72,10 @@ export function ProjectIssueCommentTimeline({
         </span>
         <span className="flex min-h-5 min-w-0 flex-1 items-center text-left">
           {isCollapsed
-            ? `Show ${pluralize(orderedComments.length, "earlier comment")}`
-            : "Collapse comment history"}
+            ? uiT("Show {0}", {
+                p0: pluralize(orderedComments.length, "earlier comment"),
+              })
+            : uiT("Collapse comment history")}
         </span>
         {isCollapsed ? (
           <ChevronDown className="mt-0.5 h-3.5 w-3.5" />
@@ -92,7 +98,9 @@ export function ProjectIssueCommentTimeline({
             </span>
           </span>
           <span className="min-w-0 flex-1 text-left">
-            Show {pluralize(earlierCommentCount, "earlier comment")}
+            {uiT("Show {0}", {
+              p0: pluralize(earlierCommentCount, "earlier comment"),
+            })}
           </span>
         </button>
       ) : null}

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import {
   AUTO_MODEL_DROPDOWN_VALUE,
   buildTemplateModelDropdownOptions,
@@ -13,7 +15,12 @@ function withSharedComputeAutoOption(
 ): readonly PersonaModelOption[] {
   const modelOptions = options.filter((option) => option.id.trim() !== "");
   return [
-    { id: "", label: "Auto (collective when available)" },
+    {
+      id: "",
+      get label() {
+        return uiT("Auto (collective when available)");
+      },
+    },
     ...modelOptions,
   ];
 }
@@ -91,10 +98,25 @@ export function modelDropdownOptions({
   return [
     ...modelOptions,
     ...(loading
-      ? [{ disabled: true, label: "Loading models...", value: loadingValue }]
+      ? [
+          {
+            disabled: true,
+            get label() {
+              return uiT("Loading models...");
+            },
+            value: loadingValue,
+          },
+        ]
       : []),
     ...(allowCustom
-      ? [{ label: "Custom model...", value: CUSTOM_MODEL_DROPDOWN_VALUE }]
+      ? [
+          {
+            get label() {
+              return uiT("Custom model...");
+            },
+            value: CUSTOM_MODEL_DROPDOWN_VALUE,
+          },
+        ]
       : []),
   ];
 }

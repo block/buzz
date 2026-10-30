@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { ChevronRight, Folders } from "lucide-react";
 import type * as React from "react";
 
@@ -28,6 +30,7 @@ export function ProjectDetailChrome({
   project: Project;
   repository?: Repository | null;
 }) {
+  useUiLanguage();
   const repositoryCrumb = repository ? (
     activeWorkItemCrumb ? (
       <>
@@ -45,7 +48,7 @@ export function ProjectDetailChrome({
           onClick={activeWorkItemCrumb.clear}
           type="button"
         >
-          {activeWorkItemCrumb.category}
+          {uiT(activeWorkItemCrumb.category)}
         </button>
         <ChevronRight className="h-3 w-3 shrink-0 opacity-60" />
         <span
@@ -70,7 +73,7 @@ export function ProjectDetailChrome({
           aria-current="page"
           className="min-w-0 truncate px-0.5 font-medium opacity-60"
         >
-          {activeTabCrumb}
+          {uiT(activeTabCrumb)}
         </span>
       </>
     ) : (
@@ -91,7 +94,7 @@ export function ProjectDetailChrome({
         data-testid="project-detail-chrome"
       >
         <nav
-          aria-label="Project breadcrumb"
+          aria-label={uiT("Project breadcrumb")}
           className="absolute flex max-w-[50%] min-w-0 -translate-x-1/2 -translate-y-px items-center gap-0.5 text-xs text-sidebar-foreground/65 transition-[left] duration-200 ease-linear motion-reduce:transition-none"
           style={{
             left: "calc(50% + var(--app-top-chrome-center-offset, 0rem))",
@@ -103,7 +106,7 @@ export function ProjectDetailChrome({
             type="button"
           >
             <Folders className="h-3.5 w-3.5" />
-            Projects
+            {uiT("Projects")}
           </button>
           <ChevronRight className="h-3 w-3 shrink-0 opacity-60" />
           {repositoryCrumb ? (
@@ -159,7 +162,7 @@ export function ProjectsWorkspaceChrome({
         data-testid="projects-workspace-chrome"
       >
         <nav
-          aria-label="Projects breadcrumb"
+          aria-label={uiT("Projects breadcrumb")}
           className="absolute flex max-w-[50%] min-w-0 -translate-x-1/2 -translate-y-px items-center gap-0.5 text-xs text-sidebar-foreground/65 transition-[left] duration-200 ease-linear motion-reduce:transition-none"
           style={{
             left: "calc(50% + var(--app-top-chrome-center-offset, 0rem))",
@@ -168,7 +171,7 @@ export function ProjectsWorkspaceChrome({
           {onActivity ? (
             <span className="flex min-w-0 items-center gap-1.5 px-1 py-1 font-medium">
               <Folders className="h-3.5 w-3.5 shrink-0" />
-              Projects
+              {uiT("Projects")}
             </span>
           ) : (
             <button
@@ -177,7 +180,7 @@ export function ProjectsWorkspaceChrome({
               type="button"
             >
               <Folders className="h-3.5 w-3.5 shrink-0" />
-              Projects
+              {uiT("Projects")}
             </button>
           )}
           <ChevronRight className="h-3 w-3 shrink-0 opacity-60" />

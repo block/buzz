@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiMessage, uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { AlertTriangle, Brain, ChevronDown, RefreshCw } from "lucide-react";
 
@@ -68,6 +70,8 @@ export function MemoryRefreshButton({
   iconClassName?: string;
   variant?: ButtonProps["variant"];
 }): React.ReactElement | null {
+  useUiLanguage();
+
   const { query } = useAgentMemoryGraph(agentPubkey, {
     enabled: viewerIsOwner,
   });
@@ -76,7 +80,7 @@ export function MemoryRefreshButton({
 
   return (
     <Button
-      aria-label="Refresh memory"
+      aria-label={uiT("Refresh memory")}
       className={cn(className, query.isFetching && "cursor-wait")}
       data-testid="agent-memory-refetch"
       disabled={query.isFetching}
@@ -102,6 +106,8 @@ function MemorySectionForOwner({
   agentPubkey: string;
   variant: MemorySectionVariant;
 }) {
+  useUiLanguage();
+
   const { query, graph } = useAgentMemoryGraph(agentPubkey);
 
   // Order matters here. We want:
@@ -155,7 +161,7 @@ function MemorySectionForOwner({
 function MemorySkeleton({ variant }: { variant: MemorySectionVariant }) {
   return (
     <div
-      aria-label="Loading memory"
+      aria-label={uiT("Loading memory")}
       className={cn("space-y-2", variant === "grouped" && "p-4")}
       data-testid="agent-memory-skeleton"
       role="status"
@@ -193,7 +199,7 @@ function MemoryErrorState({
         <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
         <div className="space-y-1">
           <div className="font-medium text-destructive">
-            Couldn't load memory
+            {uiT("Couldn't load memory")}
           </div>
           <div className="text-muted-foreground">{message}</div>
         </div>
@@ -205,7 +211,7 @@ function MemoryErrorState({
         size="sm"
         variant="outline"
       >
-        {retrying ? "Retrying…" : "Retry"}
+        {retrying ? uiT("Retrying…") : uiT("Retry")}
       </Button>
     </div>
   );
@@ -227,13 +233,15 @@ function MemoryStaleErrorBanner({
       data-testid="agent-memory-stale-error"
     >
       <AlertTriangle className="h-4 w-4 shrink-0 text-warning" />
-      <span className="flex-1 text-muted-foreground">Refresh failed.</span>
+      <span className="flex-1 text-muted-foreground">
+        {uiT("Refresh failed.")}
+      </span>
       <button
         className="font-medium text-warning hover:underline"
         onClick={onRetry}
         type="button"
       >
-        Retry
+        {uiT("Retry")}
       </button>
     </div>
   );
@@ -248,6 +256,8 @@ function MemoryGraphView({
   truncated: boolean;
   variant: MemorySectionVariant;
 }) {
+  useUiLanguage();
+
   const { rootedTree, orphans, dangling } = graph;
   const [showAllEntries, setShowAllEntries] = React.useState(false);
   const danglingSlugs = React.useMemo(
@@ -263,9 +273,11 @@ function MemoryGraphView({
         data-testid="agent-memory-empty"
       >
         <Brain className="mx-auto h-4 w-4 text-muted-foreground" />
-        <p className="mt-3 text-sm font-medium">Build this agent's memory</p>
+        <p className="mt-3 text-sm font-medium">
+          {uiT("Build this agent's memory")}
+        </p>
         <p className="mt-1 text-sm text-muted-foreground">
-          Try telling this agent to remember something for next time.
+          {uiT("Try telling this agent to remember something for next time.")}
         </p>
       </div>
     );
@@ -292,8 +304,9 @@ function MemoryGraphView({
           )}
           data-testid="agent-memory-no-core"
         >
-          No <code className="font-mono text-2xs">core</code> memory yet — agent
-          identity is unrooted.
+          {uiMessage("No {0} memory yet — agent identity is unrooted.", {
+            p0: <code className="font-mono text-2xs">core</code>,
+          })}
         </p>
       ) : null}
 
@@ -338,7 +351,7 @@ function MemoryGraphView({
           onClick={() => setShowAllEntries(false)}
           type="button"
         >
-          Show less
+          {uiT("Show less")}
         </button>
       ) : null}
     </div>
@@ -370,7 +383,7 @@ function MemoryShowMoreButton({
       onClick={onClick}
       type="button"
     >
-      View all ({count})
+      {uiT("View all ({0})", { p0: count })}
     </button>
   );
 
@@ -456,18 +469,20 @@ function MemoryDanglingRefsHint({ slugs }: { slugs: string[] }) {
     >
       <div className="rounded-xl bg-warning/5 px-2.5 py-2 text-xs leading-5">
         <p className="text-warning">
-          Missing {slugs.length === 1 ? "link" : "links"}:{" "}
-          {slugs.map((slug, index) => (
-            <React.Fragment key={slug}>
-              {index > 0 ? ", " : null}
-              <span
-                className="wrap-break-word break-all text-warning"
-                data-testid="agent-memory-dangling-ref"
-              >
-                [[{slug}]]
-              </span>
-            </React.Fragment>
-          ))}
+          {uiMessage("Missing {0}: {1}", {
+            p0: slugs.length === 1 ? "link" : "links",
+            p1: slugs.map((slug, index) => (
+              <React.Fragment key={slug}>
+                {index > 0 ? ", " : null}
+                <span
+                  className="wrap-break-word break-all text-warning"
+                  data-testid="agent-memory-dangling-ref"
+                >
+                  [[{slug}]]
+                </span>
+              </React.Fragment>
+            )),
+          })}
         </p>
         <p className="mt-0.5 text-foreground/50">
           {MEMORY_DANGLING_REF_TOOLTIP}
@@ -532,6 +547,8 @@ function MemoryEntryAccordion({
   entry: EngramEntry;
   variant: MemorySectionVariant;
 }) {
+  useUiLanguage();
+
   const [open, setOpen] = React.useState(false);
   const [showCaret, setShowCaret] = React.useState(false);
   const articleRef = React.useRef<HTMLElement>(null);
@@ -588,7 +605,7 @@ function MemoryEntryAccordion({
           ref={bodyRef}
         >
           {isEmpty ? (
-            <span className="italic text-foreground/50">(empty)</span>
+            <span className="italic text-foreground/50">{uiT("(empty)")}</span>
           ) : (
             <MemoryBodyText body={entry.body} />
           )}

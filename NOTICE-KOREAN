@@ -1,0 +1,12 @@
+Buzz Korean desktop localization
+Based on Block, Inc.'s Buzz, licensed under the Apache License, Version 2.0.
+The original LICENSE and existing notices remain applicable.
+
+Selected internationalization infrastructure is derived from public Buzz contributions by
+Sam Wong (hyperfocusam) and 李亦真 (liyizhen); commits and provenance are recorded in
+docs/korean/THIRD_PARTY.md.
+
+Korean literal translations are derived from the public Gwani-28/buzz
+korean-ui-patch catalogue at commit 0a1e20470327270e572b2495eddb55bd726951f6.
+The original DOM mutation implementation is not included.
+Additional Korean translations and source-level integration are maintained in this fork.

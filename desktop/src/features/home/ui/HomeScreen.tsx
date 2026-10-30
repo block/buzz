@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { useAppShell } from "@/app/AppShellContext";
@@ -26,6 +28,8 @@ export function HomeScreen({
   currentPubkey,
   onOpenContext,
 }: HomeScreenProps) {
+  useUiLanguage();
+
   const homeFeedQuery = useHomeFeedQuery();
   const { threadActivityFeedItems } = useAppShell();
   const hiddenDmIds = useHiddenDmIds(currentPubkey);

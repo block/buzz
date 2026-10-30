@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 /**
  * Feedback tab — shows the deployment-wide product feedback queue with
  * optional image attachment viewer and status triage controls.
@@ -93,6 +95,8 @@ export function FeedbackTab({
   pubkey: string;
   generation: number;
 }) {
+  useUiLanguage();
+
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // List refresh fence: bumped when a feedback status change completes in the
   // detail view, so returning to the list shows fresh status without a tab
@@ -127,7 +131,11 @@ export function FeedbackTab({
 
   const items = listState.data;
   if (!Array.isArray(items) || items.length === 0) {
-    return <p className="text-sm text-muted-foreground">No feedback found.</p>;
+    return (
+      <p className="text-sm text-muted-foreground">
+        {uiT("No feedback found.")}
+      </p>
+    );
   }
 
   return (
@@ -183,6 +191,8 @@ function AttachmentViewer({
    *  context has changed and any in-flight load result is stale. */
   panelGeneration: number;
 }) {
+  useUiLanguage();
+
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [error, setError] = useState<AdminAttachmentErrorCode | null>(null);
   const [saving, setSaving] = useState(false);
@@ -287,7 +297,7 @@ function AttachmentViewer({
         attachment.size,
       );
       if (saved) {
-        toast.success("Attachment saved");
+        toast.success(uiT("Attachment saved"));
       }
     } catch (e) {
       setSaveError(
@@ -320,7 +330,7 @@ function AttachmentViewer({
           ) : (
             <>
               <Download className="h-3.5 w-3.5" />
-              {`Save attachment (${attachment.mime})`}
+              {uiT("Save attachment ({0})", { p0: attachment.mime })}
             </>
           )}
         </Button>
@@ -333,14 +343,14 @@ function AttachmentViewer({
     return (
       <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
         <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
-        Loading…
+        {uiT("Loading…")}
       </div>
     );
   }
 
   return (
     <img
-      alt="Feedback attachment"
+      alt={uiT("Feedback attachment")}
       className="max-h-96 max-w-full rounded-md border border-border/60 object-contain"
       src={blobUrl}
     />
@@ -356,20 +366,23 @@ function FeedbackFields({ data }: { data: AdminFeedbackDto }) {
       data-testid="feedback-detail-fields"
     >
       <DetailRow label="ID" value={data.id} mono />
-      <DetailRow label="Body" value={data.body} />
-      <DetailRow label="Submitter" value={data.submitterPubkey} mono />
-      <DetailRow label="Category" value={data.category ?? null} />
-      <DetailRow label="Community" value={data.communityId} mono />
+      <DetailRow label={uiT("Body")} value={data.body} />
+      <DetailRow label={uiT("Submitter")} value={data.submitterPubkey} mono />
+      <DetailRow label={uiT("Category")} value={data.category ?? null} />
+      <DetailRow label={uiT("Community")} value={data.communityId} mono />
       <div className="flex items-center gap-2 text-xs">
-        <span className="text-muted-foreground">Host</span>
+        <span className="text-muted-foreground">{uiT("Host")}</span>
         <CommunityBadge host={data.communityHost} id={data.communityId} />
       </div>
-      <DetailRow label="Event ID" value={data.eventId} mono />
+      <DetailRow label={uiT("Event ID")} value={data.eventId} mono />
       <DetailRow
-        label="Event created"
+        label={uiT("Event created")}
         value={formatTimestamp(data.eventCreatedAt)}
       />
-      <DetailRow label="Received" value={formatTimestamp(data.receivedAt)} />
+      <DetailRow
+        label={uiT("Received")}
+        value={formatTimestamp(data.receivedAt)}
+      />
     </div>
   );
 }
@@ -392,6 +405,8 @@ function FeedbackStatusControl({
   origin: string;
   onStatusChanged: (newStatus: AdminFeedbackStatus) => void;
 }) {
+  useUiLanguage();
+
   const [isWorking, setIsWorking] = useState(false);
 
   const statuses: AdminFeedbackStatus[] = ["new", "reviewed", "archived"];
@@ -401,7 +416,7 @@ function FeedbackStatusControl({
     setIsWorking(true);
     try {
       await patchAdminFeedback(origin, feedbackId, newStatus);
-      toast.success(`Feedback marked ${newStatus}`);
+      toast.success(uiT("Feedback marked {0}", { p0: newStatus }));
       onStatusChanged(newStatus);
     } catch (e) {
       toast.error(adminErrorMessage(e));
@@ -415,7 +430,9 @@ function FeedbackStatusControl({
       className="flex flex-col gap-1.5"
       data-testid="feedback-status-control"
     >
-      <span className="text-xs font-medium text-muted-foreground">Status</span>
+      <span className="text-xs font-medium text-muted-foreground">
+        {uiT("Status")}
+      </span>
       <div className="flex gap-1.5">
         {statuses.map((s) => (
           <Button
@@ -460,6 +477,8 @@ export function FeedbackDetail({
   /** Called after a status change completes so the parent list can refetch. */
   onMutated: () => void;
 }) {
+  useUiLanguage();
+
   // Local status state: initialized from server, updated on PATCH.
   const [localStatus, setLocalStatus] = useState<AdminFeedbackStatus | null>(
     null,
@@ -500,7 +519,7 @@ export function FeedbackDetail({
         type="button"
       >
         <ChevronLeft className="h-3.5 w-3.5" />
-        Back to feedback
+        {uiT("Back to feedback")}
       </button>
       {detailState.status === "loading" && <LoadingSpinner />}
       {detailState.status === "error" && (
@@ -526,7 +545,7 @@ export function FeedbackDetail({
                 data-testid="feedback-status-readonly"
               >
                 <span className="text-xs font-medium text-muted-foreground">
-                  Status
+                  {uiT("Status")}
                 </span>
                 <Badge variant="secondary">{localStatus}</Badge>
               </div>
@@ -534,7 +553,7 @@ export function FeedbackDetail({
           )}
           {attachments.length > 0 && (
             <div className="space-y-3">
-              <h4 className="text-sm font-medium">Attachments</h4>
+              <h4 className="text-sm font-medium">{uiT("Attachments")}</h4>
               {attachments.map((a) => (
                 <AttachmentViewer
                   attachment={a}
@@ -550,9 +569,10 @@ export function FeedbackDetail({
                   className="text-xs text-muted-foreground"
                   data-testid="attachment-truncated-notice"
                 >
-                  {truncatedCount} attachment
-                  {truncatedCount === 1 ? "" : "s"} not shown (display limit
-                  reached).
+                  {uiT(
+                    "{0} attachment {1} not shown (display limit reached).",
+                    { p0: truncatedCount, p1: truncatedCount === 1 ? "" : "s" },
+                  )}
                 </p>
               )}
             </div>
@@ -576,7 +596,7 @@ function AttachmentError({ code }: { code: AdminAttachmentErrorCode }) {
   return (
     <div className="flex items-center gap-1.5 text-xs text-destructive">
       <AlertCircle className="h-3.5 w-3.5" />
-      {FRIENDLY_ATTACHMENT_ERROR[code] ?? `Error: ${code}`}
+      {FRIENDLY_ATTACHMENT_ERROR[code] ?? uiT("Error: {0}", { p0: code })}
     </div>
   );
 }

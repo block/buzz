@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { Ellipsis, Play, Square, Trash2 } from "lucide-react";
 
 import {
@@ -48,7 +50,7 @@ export function MembersSidebarAgentControls({
           onClick={onRespawnAll}
         >
           <Play className="h-4 w-4" />
-          Spawn or respawn all
+          {uiT("Spawn or respawn all")}
         </DropdownMenuItem>
         <DropdownMenuItem
           data-testid="members-sidebar-stop-all"
@@ -56,7 +58,7 @@ export function MembersSidebarAgentControls({
           onClick={onStopAll}
         >
           <Square className="h-4 w-4" />
-          Stop all
+          {uiT("Stop all")}
         </DropdownMenuItem>
         {canBulkRemove ? (
           <>
@@ -68,7 +70,7 @@ export function MembersSidebarAgentControls({
               onClick={onRemoveAll}
             >
               <Trash2 className="h-4 w-4" />
-              Remove all from channel
+              {uiT("Remove all from channel")}
             </DropdownMenuItem>
           </>
         ) : null}

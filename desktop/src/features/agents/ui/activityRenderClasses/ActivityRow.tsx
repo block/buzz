@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { ChevronDown } from "lucide-react";
 
@@ -114,6 +116,8 @@ export function ActivityRowLabel({
   stats?: ActivityRowStats | null;
   title?: string;
 }) {
+  useUiLanguage();
+
   const variant = useAgentSessionTranscriptVariant();
   const isCompactPreview = variant === "compactPreview";
 

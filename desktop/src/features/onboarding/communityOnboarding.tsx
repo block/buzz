@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import {
   deriveCommunityName,
   normalizeRelayUrl,
@@ -334,6 +336,8 @@ export function CommunityOnboardingProvider({
   children: React.ReactNode;
   enabled?: boolean;
 }) {
+  useUiLanguage();
+
   const [transaction, setTransaction] = React.useState(() =>
     enabled ? loadCommunityOnboardingTransaction() : null,
   );

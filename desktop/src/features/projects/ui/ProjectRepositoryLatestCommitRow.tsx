@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
@@ -15,7 +17,9 @@ export function ProjectRepositoryLatestCommitRow({
   return (
     <tr
       aria-label={
-        commitShortHash ? `Open commit ${commitShortHash}` : undefined
+        commitShortHash
+          ? uiT("Open commit {0}", { p0: commitShortHash })
+          : undefined
       }
       className={cn(
         "bg-muted/20",
