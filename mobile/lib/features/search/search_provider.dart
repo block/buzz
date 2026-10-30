@@ -59,6 +59,10 @@ class SearchState {
   final bool isLoading;
   final String? error;
 
+  /// The open-channel directory failed to load, so channel results may be
+  /// missing open channels the user has not joined.
+  final bool channelSearchFailed;
+
   const SearchState({
     this.query = '',
     this.messageResults = const [],
@@ -66,6 +70,7 @@ class SearchState {
     this.channelResults = const [],
     this.isLoading = false,
     this.error,
+    this.channelSearchFailed = false,
   });
 
   const SearchState.initial()
@@ -74,7 +79,8 @@ class SearchState {
       userResults = const [],
       channelResults = const [],
       isLoading = false,
-      error = null;
+      error = null,
+      channelSearchFailed = false;
 
   SearchState copyWith({
     String? query,
@@ -83,6 +89,7 @@ class SearchState {
     List<Channel>? channelResults,
     bool? isLoading,
     String? error,
+    bool? channelSearchFailed,
   }) => SearchState(
     query: query ?? this.query,
     messageResults: messageResults ?? this.messageResults,
@@ -90,42 +97,80 @@ class SearchState {
     channelResults: channelResults ?? this.channelResults,
     isLoading: isLoading ?? this.isLoading,
     error: error ?? this.error,
+    channelSearchFailed: channelSearchFailed ?? this.channelSearchFailed,
   );
 }
 
 /// Most channel rows one query shows, ranked best first.
 const searchChannelResultLimit = 8;
 
+/// How long a loaded open-channel directory serves searches before the next
+/// search reads it again, as desktop's `PUBLIC_CHANNEL_PAGE_TTL` does.
+const searchDirectoryMaxAge = Duration(seconds: 30);
+
+/// Ranks [channels] for a search [query] with the same rules as desktop
+/// (buzz-app `SearchResults.tsx` and `store.ts` `searchPublic`): name match
+/// rank first, an archived channel half a step behind a live one, then joined
+/// channels in list order before open ones by name. A bare "#" lists joined
+/// channels only, since desktop does not search open channels for it.
+List<Channel> rankSearchChannels(Iterable<Channel> channels, String query) {
+  final needle = query.trim().toLowerCase().replaceFirst(RegExp(r'^#'), '');
+  final ranked = <({Channel channel, double rank, int order})>[];
+  for (final channel in channels) {
+    if (channel.isDm) continue;
+    // An archived channel stays findable only by its members.
+    final visible = channel.isArchived || needle.isEmpty
+        ? channel.isMember
+        : channel.visibility == 'open' || channel.isMember;
+    if (!visible) continue;
+    final rank = matchRank(channel.name, needle);
+    if (rank == null) continue;
+    ranked.add((
+      channel: channel,
+      rank: rank + (channel.isArchived ? 0.5 : 0),
+      order: ranked.length,
+    ));
+  }
+  ranked.sort((a, b) {
+    final byRank = a.rank.compareTo(b.rank);
+    if (byRank != 0) return byRank;
+    // Joined channels win ties and keep the list's order.
+    if (a.channel.isMember != b.channel.isMember) {
+      return a.channel.isMember ? -1 : 1;
+    }
+    if (a.channel.isMember) return a.order.compareTo(b.order);
+    final byName = a.channel.name.compareTo(b.channel.name);
+    return byName != 0 ? byName : a.channel.id.compareTo(b.channel.id);
+  });
+  return [
+    for (final entry in ranked.take(searchChannelResultLimit)) entry.channel,
+  ];
+}
+
 class SearchNotifier extends Notifier<SearchState> {
   Timer? _debounce;
 
   // The relay lookups still running for the current query. The spinner shows
-  // only while one of them is pending, so the last lookup to finish settles it
-  // regardless of which results came back empty.
+  // only while one of them, or the directory load, is pending, so the last
+  // lookup to finish settles it regardless of which results came back empty.
   bool _messagesPending = false;
   bool _usersPending = false;
-  bool _directoryPending = false;
 
   // Bumped by every new query, clear and rebuild. A lookup writes its result
   // only while its generation is current, so a late reply to an earlier query,
   // even one with the same text, cannot settle the current spinner.
   int _generation = 0;
 
-  // Bumped by rebuild only. A directory load spans keystrokes, so it is
-  // fenced by community rather than by query.
-  int _directoryEpoch = 0;
-
   @override
   SearchState build() {
     // Watch relayConfig so search state resets on community switch.
     ref.watch(relayConfigProvider);
     _generation++;
-    _directoryEpoch++;
     _messagesPending = false;
     _usersPending = false;
-    _directoryPending = false;
     // Channel rows come from the loaded channel list, which gains open
-    // channels when the directory arrives. Re-rank whenever either changes.
+    // channels when the directory arrives. Re-rank whenever either changes;
+    // the directory status for this community also drives the spinner.
     ref.listen(channelsProvider, (_, _) => _refreshChannels());
     ref.listen(
       channelDirectoryLoadStatusProvider,
@@ -170,36 +215,34 @@ class SearchNotifier extends Notifier<SearchState> {
   bool get _isLoading =>
       _messagesPending ||
       _usersPending ||
-      _directoryPending ||
-      ref
-          .read(channelDirectoryLoadStatusProvider.notifier)
-          .isLoading(
+      _directoryIs(ChannelDirectoryLoadStatus.loading);
+
+  /// Whether this community's directory load is in [status].
+  bool _directoryIs(ChannelDirectoryLoadStatus status) {
+    final directory = ref.read(channelDirectoryLoadStatusProvider);
+    return directory.status == status &&
+        directory.scope ==
             channelDirectoryScope(
               ref.read(relayConfigProvider).baseUrl,
               ref.read(myPubkeyProvider),
-            ),
-          );
+            );
+  }
+
+  /// Loads the directory again after it failed, like desktop's Retry channels.
+  void retryChannels() => _loadDirectory();
 
   /// Loads the open-channel directory so search also finds open channels the
-  /// user has not joined, as desktop search does.
+  /// user has not joined, as desktop search does. Its status changes re-rank
+  /// the channels and settle the spinner.
   void _loadDirectory() {
-    if (_directoryPending) return;
-    _directoryPending = true;
-    final epoch = _directoryEpoch;
     unawaited(
       ref
           .read(channelsProvider.notifier)
-          .ensureDirectoryLoaded()
+          .ensureDirectoryLoaded(maxAge: searchDirectoryMaxAge)
           .catchError((Object error) {
             debugPrint(
               '[SearchNotifier] channel directory load failed: $error',
             );
-          })
-          .whenComplete(() {
-            // A rebuild (community switch) already retired this load.
-            if (!ref.mounted || epoch != _directoryEpoch) return;
-            _directoryPending = false;
-            _refreshChannels();
           }),
     );
   }
@@ -264,42 +307,15 @@ class SearchNotifier extends Notifier<SearchState> {
     state = state.copyWith(userResults: users, isLoading: _isLoading);
   }
 
-  /// Ranks the loaded channels against the current query with the same rules
-  /// as desktop (buzz-app `SearchResults.tsx`): name match rank first, an
-  /// archived channel half a step behind a live one, then joined channels
-  /// before open ones and list order.
+  /// Publishes the channel rows and spinner for the current query.
   void _refreshChannels() {
-    final query = state.query;
-    if (query.isEmpty) return;
-    final needle = query.toLowerCase().replaceFirst(RegExp(r'^#'), '');
-    if (needle.isEmpty) return;
-    final channels = ref.read(channelsProvider).value ?? const <Channel>[];
-    final ranked = <({Channel channel, double rank, int order})>[];
-    for (final channel in channels) {
-      if (channel.isDm) continue;
-      // An archived channel stays findable only by its members.
-      final visible = channel.isArchived
-          ? channel.isMember
-          : channel.visibility == 'open' || channel.isMember;
-      if (!visible) continue;
-      final rank = matchRank(channel.name, needle);
-      if (rank == null) continue;
-      ranked.add((
-        channel: channel,
-        rank: rank + (channel.isArchived ? 0.5 : 0),
-        // Joined channels win ties, then the list keeps its own order.
-        order: ranked.length + (channel.isMember ? 0 : channels.length),
-      ));
-    }
-    ranked.sort((a, b) {
-      final byRank = a.rank.compareTo(b.rank);
-      return byRank != 0 ? byRank : a.order.compareTo(b.order);
-    });
+    if (state.query.isEmpty) return;
     state = state.copyWith(
-      channelResults: [
-        for (final entry in ranked.take(searchChannelResultLimit))
-          entry.channel,
-      ],
+      channelResults: rankSearchChannels(
+        ref.read(channelsProvider).value ?? const <Channel>[],
+        state.query,
+      ),
+      channelSearchFailed: _directoryIs(ChannelDirectoryLoadStatus.error),
       isLoading: _isLoading,
     );
   }

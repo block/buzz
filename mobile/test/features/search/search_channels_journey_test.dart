@@ -6,6 +6,7 @@ import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/search/recent_searches_provider.dart';
 import 'package:buzz/features/search/search_page.dart';
+import 'package:buzz/features/search/search_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
@@ -50,6 +51,8 @@ void main() {
     await tester.enterText(find.byType(TextField), '4things');
     await tester.pump(const Duration(milliseconds: 300));
     expect(channels.directoryRequests, 1);
+    // Later searches read the directory again once it is this old.
+    expect(channels.maxAge, searchDirectoryMaxAge);
     expect(spinner, findsOneWidget);
     expect(unjoined, findsNothing);
 
@@ -124,6 +127,107 @@ void main() {
     actions.searches.removeAt(0).complete(const []);
     await tester.pump();
     expect(spinner, findsNothing);
+
+    // The Channels tab says it has no results even when People has some.
+    await tester.enterText(find.byType(TextField), 'ada');
+    await tester.pump(const Duration(milliseconds: 300));
+    session.searches.removeAt(0).complete(const []);
+    actions.searches.removeAt(0).complete(const [
+      DirectoryUser(pubkey: 'ada', displayName: 'Ada'),
+    ]);
+    await tester.pump();
+    expect(find.text("No results for 'ada'"), findsNothing);
+    await tester.tap(find.text('Channels'));
+    await tester.pump();
+    expect(find.text("No results for 'ada'"), findsOneWidget);
+  });
+
+  testWidgets('a failed directory offers a retry instead of no results', (
+    tester,
+  ) async {
+    final session = _HeldSession();
+    final actions = _HeldUserSearch();
+    final channels = _DirectoryChannels();
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          relayConfigProvider.overrideWith(_Community.new),
+          relaySessionProvider.overrideWith(() => session),
+          channelActionsProvider.overrideWith((ref) => actions),
+          channelsProvider.overrideWith(() => channels),
+          recentSearchesProvider.overrideWith(_NoRecentSearches.new),
+          profileProvider.overrideWith(_Profile.new),
+        ],
+        child: const SearchPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final spinner = find.byType(BuzzLoadingIndicator);
+    final failed = find.byKey(const Key('search-channels-failed'));
+    final retry = find.widgetWithText(TextButton, 'Retry channels');
+    final unjoined = find.byKey(
+      const ValueKey('search-channel-row-4things-id'),
+    );
+
+    // A bare "#" lists joined channels, like desktop. The directory finishing
+    // last must still stop the spinner.
+    await tester.enterText(find.byType(TextField), '#');
+    await tester.pump(const Duration(milliseconds: 300));
+    session.searches.removeAt(0).complete(const []);
+    actions.searches.removeAt(0).complete(const []);
+    await tester.pump();
+    expect(spinner, findsOneWidget);
+    channels.failDirectory();
+    await tester.pump();
+    expect(spinner, findsNothing);
+    expect(
+      find.byKey(const ValueKey('search-channel-row-general-id')),
+      findsOneWidget,
+    );
+    expect(failed, findsOneWidget);
+
+    // Each query tries the directory again. A failure must not read as
+    // "No results".
+    await tester.enterText(find.byType(TextField), 'zzzz');
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(channels.directoryRequests, 2);
+    session.searches.removeAt(0).complete(const []);
+    actions.searches.removeAt(0).complete(const []);
+    channels.failDirectory();
+    await tester.pump();
+    expect(spinner, findsNothing);
+    expect(failed, findsOneWidget);
+    expect(find.text("No results for 'zzzz'"), findsNothing);
+
+    // When it fails again, the member match stays beside the notice.
+    await tester.enterText(find.byType(TextField), '4things');
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(channels.directoryRequests, 3);
+    session.searches.removeAt(0).complete(const []);
+    actions.searches.removeAt(0).complete(const []);
+    channels.failDirectory();
+    await tester.pump();
+    expect(spinner, findsNothing);
+    expect(
+      find.byKey(const ValueKey('search-channel-row-team-4things-id')),
+      findsOneWidget,
+    );
+    expect(unjoined, findsNothing);
+    expect(failed, findsOneWidget);
+
+    // Retry loads the directory and finds the open channel.
+    await tester.tap(retry);
+    await tester.pump();
+    expect(channels.directoryRequests, 4);
+    expect(spinner, findsOneWidget);
+    expect(failed, findsNothing);
+    channels.finishDirectory();
+    await tester.pump();
+    expect(spinner, findsNothing);
+    expect(failed, findsNothing);
+    expect(unjoined, findsOneWidget);
   });
 }
 
@@ -179,10 +283,13 @@ class _HeldUserSearch implements ChannelActions {
 
 /// Lists member channels, and adds the open directory when it is loaded.
 class _DirectoryChannels extends ChannelsNotifier {
-  final _directory = Completer<void>();
+  Completer<bool>? _directory;
   var directoryRequests = 0;
+  Duration? maxAge;
 
-  void finishDirectory() => _directory.complete();
+  void finishDirectory() => _directory!.complete(true);
+
+  void failDirectory() => _directory!.complete(false);
 
   @override
   Future<List<Channel>> build() async => [
@@ -191,7 +298,8 @@ class _DirectoryChannels extends ChannelsNotifier {
   ];
 
   @override
-  Future<void> ensureDirectoryLoaded() async {
+  Future<void> ensureDirectoryLoaded({Duration? maxAge}) async {
+    this.maxAge = maxAge;
     final status = ref.read(channelDirectoryLoadStatusProvider.notifier);
     final scope = channelDirectoryScope(
       ref.read(relayConfigProvider).baseUrl,
@@ -203,7 +311,11 @@ class _DirectoryChannels extends ChannelsNotifier {
     }
     directoryRequests++;
     status.markLoading(scope);
-    await _directory.future;
+    if (!await (_directory = Completer<bool>()).future) {
+      // Like production retryDirectory: record the error, do not throw.
+      status.markError(scope);
+      return;
+    }
     state = AsyncData([...?state.value, _channel('4things', isMember: false)]);
     status.markLoaded(scope);
   }
