@@ -11,12 +11,23 @@ import 'custom_emoji.dart';
 /// renderer, picker, autocomplete, and reaction/send tag plumbing.
 class CustomEmojiPaletteNotifier extends AsyncNotifier<List<CustomEmoji>> {
   List<CustomEmoji>? _lastGood;
+  String? _lastGoodRelayUrl;
   int _generation = 0;
 
   @override
   Future<List<CustomEmoji>> build() async {
     ref.watch(relayClientProvider);
     ref.watch(relaySessionProvider);
+    final relayUrl = ref.watch(relayConfigProvider.select((c) => c.baseUrl));
+    if (relayUrl != _lastGoodRelayUrl) {
+      final switched = _lastGoodRelayUrl != null;
+      _lastGood = null;
+      _lastGoodRelayUrl = relayUrl;
+      if (switched) {
+        state = const AsyncData([]);
+        Future.microtask(() => _setRefreshFailed(false));
+      }
+    }
     final generation = ++_generation;
     if (ref.read(relaySessionProvider).status != SessionStatus.connected) {
       return _lastGood ?? const [];

@@ -59,6 +59,7 @@ void main() {
         Exception('relay down'),
         Exception('relay still down'),
         [_set('a', 'oldparrot'), _set('b', 'newparrot')],
+        Exception('other community down'),
       ]);
       await tester.pumpWidget(
         WidgetHelpers.testable(
@@ -104,6 +105,16 @@ void main() {
       expect(_tile('newparrot'), findsOneWidget);
       expect(find.text('Retry'), findsNothing);
       expect(session.fetches, 4);
+
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: 'https://other.example.test');
+      await tester.pump();
+      await tester.pump();
+      expect(_tile('oldparrot'), findsNothing);
+      expect(_tile('newparrot'), findsNothing);
+      expect(find.text('Retry'), findsOneWidget);
+      expect(session.fetches, 5);
     },
   );
 
