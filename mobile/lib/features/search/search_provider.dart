@@ -151,10 +151,17 @@ class SearchNotifier extends Notifier<SearchState> {
   Timer? _debounce;
 
   // The relay lookups still running for the current query. The spinner shows
-  // only while one of them, or the directory load, is pending, so the last
+  // only while one of them, or a directory load, is pending, so the last
   // lookup to finish settles it regardless of which results came back empty.
   bool _messagesPending = false;
   bool _usersPending = false;
+
+  // The directory load this search started, until its future completes. The
+  // shared directory status is not enough: production marks it loading only
+  // after memberships arrive, and loaded before the new list is installed.
+  // A rebuild drops it, so a load from an earlier community cannot settle a
+  // newer one.
+  Object? _directoryLoad;
 
   // Bumped by every new query, clear and rebuild. A lookup writes its result
   // only while its generation is current, so a late reply to an earlier query,
@@ -168,6 +175,7 @@ class SearchNotifier extends Notifier<SearchState> {
     _generation++;
     _messagesPending = false;
     _usersPending = false;
+    _directoryLoad = null;
     // Channel rows come from the loaded channel list, which gains open
     // channels when the directory arrives. Re-rank whenever either changes;
     // the directory status for this community also drives the spinner.
@@ -215,6 +223,7 @@ class SearchNotifier extends Notifier<SearchState> {
   bool get _isLoading =>
       _messagesPending ||
       _usersPending ||
+      _directoryLoad != null ||
       _directoryIs(ChannelDirectoryLoadStatus.loading);
 
   /// Whether this community's directory load is in [status].
@@ -229,12 +238,16 @@ class SearchNotifier extends Notifier<SearchState> {
   }
 
   /// Loads the directory again after it failed, like desktop's Retry channels.
-  void retryChannels() => _loadDirectory();
+  void retryChannels() {
+    _loadDirectory();
+    _refreshChannels();
+  }
 
   /// Loads the open-channel directory so search also finds open channels the
-  /// user has not joined, as desktop search does. Its status changes re-rank
-  /// the channels and settle the spinner.
+  /// user has not joined, as desktop search does.
   void _loadDirectory() {
+    if (_directoryLoad != null) return;
+    final load = _directoryLoad = Object();
     unawaited(
       ref
           .read(channelsProvider.notifier)
@@ -243,6 +256,11 @@ class SearchNotifier extends Notifier<SearchState> {
             debugPrint(
               '[SearchNotifier] channel directory load failed: $error',
             );
+          })
+          .whenComplete(() {
+            if (!ref.mounted || _directoryLoad != load) return;
+            _directoryLoad = null;
+            _refreshChannels();
           }),
     );
   }
@@ -315,7 +333,10 @@ class SearchNotifier extends Notifier<SearchState> {
         ref.read(channelsProvider).value ?? const <Channel>[],
         state.query,
       ),
-      channelSearchFailed: _directoryIs(ChannelDirectoryLoadStatus.error),
+      // An earlier failure stays hidden while our next load runs.
+      channelSearchFailed:
+          _directoryLoad == null &&
+          _directoryIs(ChannelDirectoryLoadStatus.error),
       isLoading: _isLoading,
     );
   }
