@@ -84,8 +84,20 @@ pub fn verify_nip98_event(
         )));
     }
 
-    // 5. Verify `u` tag matches expected_url (normalised).
+    // 5. Verify `u` tag — exactly one, matching expected_url (normalised).
     // NIP-98 uses the single-letter "u" tag, not the multi-letter "url" tag.
+    {
+        let count = event
+            .tags
+            .iter()
+            .filter(|t| t.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::U)))
+            .count();
+        if count != 1 {
+            return Err(AuthError::Nip98Invalid(format!(
+                "expected exactly one `u` tag, got {count}"
+            )));
+        }
+    }
     let u_tag = event
         .tags
         .find(TagKind::SingleLetter(SingleLetterTag::lowercase(
@@ -100,7 +112,19 @@ pub fn verify_nip98_event(
         )));
     }
 
-    // 6. Verify `method` tag matches expected_method (case-insensitive).
+    // 6. Verify `method` tag — exactly one, matching expected_method (case-insensitive).
+    {
+        let count = event
+            .tags
+            .iter()
+            .filter(|t| t.kind() == TagKind::Method)
+            .count();
+        if count != 1 {
+            return Err(AuthError::Nip98Invalid(format!(
+                "expected exactly one `method` tag, got {count}"
+            )));
+        }
+    }
     let method_tag = event
         .tags
         .find(TagKind::Method)
@@ -114,7 +138,68 @@ pub fn verify_nip98_event(
     }
 
     // 7. If `payload` tag present AND body is Some: verify SHA-256(body) == payload hex.
-    let payload_tag = event.tags.find(TagKind::Payload).and_then(|t| t.content());
+    //
+    // Cardinality contract: AT MOST ONE payload tag globally; presence is NOT
+    // required here even when body bytes are supplied. This is deliberate — the
+    // shared verifier serves callers with differing needs, so payload *presence*
+    // is enforced per-consumer at the seam that needs body-integrity binding
+    // (admin `authorize_nip98` and bridge's `require_payload=true` routes both
+    // reject a body without a payload tag before calling in), while body-bearing
+    // bridge routes that opt out (`/events`, `/query`, `/count`) legitimately
+    // sign without one. Rejecting duplicates closes the real attack: a valid-first
+    // /contradictory-second pair would let `.find()` accept the first and silently
+    // ignore the second, bypassing the body-hash check.
+    //
+    // Digest format contract: the content value must be exactly 64 lowercase
+    // hex characters (a valid sha256 digest). A one-element `["payload"]` tag
+    // with no content, or a malformed digest, must be rejected — the tag
+    // *claims* body-hash binding but provides no valid digest.  An absent tag
+    // makes no claim; body-bearing routes that opt out of payload binding
+    // (e.g. `/events`, `/query`, `/count`) fall here legitimately.
+    {
+        let count = event
+            .tags
+            .iter()
+            .filter(|t| t.kind() == TagKind::Payload)
+            .count();
+        if count > 1 {
+            return Err(AuthError::Nip98Invalid(format!(
+                "at most one `payload` tag allowed, got {count}"
+            )));
+        }
+    }
+    // Validate the payload tag digest when the tag is present.
+    //
+    // A present tag *claims* body-hash binding.  A missing hash value (one-element
+    // tag or empty string content) is structurally invalid — the claim is made but
+    // no digest is provided — and must be rejected.  An absent tag makes no claim;
+    // body-bearing routes that opt out of payload binding (e.g. `/events`, `/query`,
+    // `/count`) fall here legitimately.
+    //
+    // When the tag is present, the content must be exactly 64 lowercase hex chars.
+    let payload_tag = if let Some(tag) = event.tags.find(TagKind::Payload) {
+        let hex_str = tag.content().unwrap_or("");
+        if hex_str.is_empty() {
+            return Err(AuthError::Nip98Invalid(
+                "payload tag is missing its SHA-256 hash".to_string(),
+            ));
+        }
+        // Must be exactly 64 lowercase hex chars (valid sha256 digest).
+        // Use a static diagnostic — attacker-controlled tag content must not
+        // appear in error messages (length, format code, or unicode boundary
+        // slicing could panic or leak attacker data).
+        if hex_str.len() != 64
+            || !hex_str.chars().all(|c| c.is_ascii_hexdigit())
+            || hex_str.chars().any(|c| c.is_ascii_uppercase())
+        {
+            return Err(AuthError::Nip98Invalid(
+                "payload tag digest must be exactly 64 lowercase hex chars (sha256)".to_string(),
+            ));
+        }
+        Some(hex_str)
+    } else {
+        None
+    };
 
     if let (Some(payload_hex), Some(body_bytes)) = (payload_tag, body) {
         let computed: [u8; 32] = Sha256::digest(body_bytes).into();
@@ -267,8 +352,33 @@ mod tests {
     }
 
     #[test]
+    fn payload_tag_without_hash_rejected_with_body() {
+        let keys = Keys::generate();
+        for payload in [vec!["payload"], vec!["payload", ""]] {
+            let json = make_nip98_event_raw_tags(
+                &keys,
+                vec![
+                    nostr::Tag::parse(["u", TEST_URL]).unwrap(),
+                    nostr::Tag::parse(["method", TEST_METHOD]).unwrap(),
+                    nostr::Tag::parse(payload).unwrap(),
+                ],
+            );
+            let result = verify_nip98_event(&json, TEST_URL, TEST_METHOD, Some(b"some body"));
+            assert!(
+                matches!(result, Err(AuthError::Nip98Invalid(_))),
+                "{result:?}"
+            );
+        }
+    }
+
+    #[test]
     fn payload_tag_absent_with_body_passes() {
-        // payload tag is optional per spec; clients SHOULD include it but it's not required
+        // Contract: the shared verifier does NOT require a payload tag even when
+        // a body is supplied (at-most-one globally, not exactly-one-with-body).
+        // Payload *presence* is enforced per-consumer at the seams that need
+        // body-integrity binding (admin `authorize_nip98`, bridge
+        // `require_payload=true`); body-bearing bridge routes that opt out
+        // (`/events`, `/query`, `/count`) legitimately sign without one.
         let keys = Keys::generate();
         let json = make_nip98_event(&keys, TEST_URL, TEST_METHOD, None, None);
         let result = verify_nip98_event(&json, TEST_URL, TEST_METHOD, Some(b"some body"));
@@ -283,6 +393,232 @@ mod tests {
         // expected_url without trailing slash — should still match
         let result = verify_nip98_event(&json, TEST_URL, TEST_METHOD, None);
         assert!(result.is_ok());
+    }
+
+    fn make_nip98_event_raw_tags(keys: &Keys, tags: Vec<nostr::Tag>) -> String {
+        let event = EventBuilder::new(Kind::HttpAuth, "")
+            .tags(tags)
+            .sign_with_keys(keys)
+            .expect("sign");
+        serde_json::to_string(&event).expect("serialize")
+    }
+
+    #[test]
+    fn duplicate_u_tag_rejected() {
+        use nostr::Tag;
+        let keys = Keys::generate();
+        // Two `u` tags — first valid, second different. Must be rejected regardless of order.
+        let json = make_nip98_event_raw_tags(
+            &keys,
+            vec![
+                Tag::parse(["u", TEST_URL]).unwrap(),
+                Tag::parse(["u", "https://other.example.com/other"]).unwrap(),
+                Tag::parse(["method", TEST_METHOD]).unwrap(),
+            ],
+        );
+        let result = verify_nip98_event(&json, TEST_URL, TEST_METHOD, None);
+        assert!(
+            matches!(result, Err(AuthError::Nip98Invalid(_))),
+            "duplicate u tag must be rejected; got {result:?}"
+        );
+
+        // Reversed: invalid first, valid second — still rejected.
+        let json2 = make_nip98_event_raw_tags(
+            &keys,
+            vec![
+                Tag::parse(["u", "https://other.example.com/other"]).unwrap(),
+                Tag::parse(["u", TEST_URL]).unwrap(),
+                Tag::parse(["method", TEST_METHOD]).unwrap(),
+            ],
+        );
+        let result2 = verify_nip98_event(&json2, TEST_URL, TEST_METHOD, None);
+        assert!(
+            matches!(result2, Err(AuthError::Nip98Invalid(_))),
+            "invalid-first duplicate u tag must also be rejected; got {result2:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_method_tag_rejected() {
+        use nostr::Tag;
+        let keys = Keys::generate();
+        // Two `method` tags — valid first, invalid second.
+        let json = make_nip98_event_raw_tags(
+            &keys,
+            vec![
+                Tag::parse(["u", TEST_URL]).unwrap(),
+                Tag::parse(["method", TEST_METHOD]).unwrap(),
+                Tag::parse(["method", "GET"]).unwrap(),
+            ],
+        );
+        let result = verify_nip98_event(&json, TEST_URL, TEST_METHOD, None);
+        assert!(
+            matches!(result, Err(AuthError::Nip98Invalid(_))),
+            "duplicate method tag must be rejected; got {result:?}"
+        );
+
+        // Reversed: invalid first, valid second — still rejected.
+        let json2 = make_nip98_event_raw_tags(
+            &keys,
+            vec![
+                Tag::parse(["u", TEST_URL]).unwrap(),
+                Tag::parse(["method", "GET"]).unwrap(),
+                Tag::parse(["method", TEST_METHOD]).unwrap(),
+            ],
+        );
+        let result2 = verify_nip98_event(&json2, TEST_URL, TEST_METHOD, None);
+        assert!(
+            matches!(result2, Err(AuthError::Nip98Invalid(_))),
+            "invalid-first duplicate method tag must also be rejected; got {result2:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_payload_tag_rejected() {
+        use nostr::Tag;
+        use sha2::{Digest, Sha256};
+        let keys = Keys::generate();
+        let body = b"hello world";
+        let hash: [u8; 32] = Sha256::digest(body).into();
+        let valid_hex = hex::encode(hash);
+        let wrong_hex = "deadbeef".repeat(8);
+        // Valid hash first, wrong second — contradictory duplicate.
+        let json = make_nip98_event_raw_tags(
+            &keys,
+            vec![
+                Tag::parse(["u", TEST_URL]).unwrap(),
+                Tag::parse(["method", TEST_METHOD]).unwrap(),
+                Tag::parse(["payload", &valid_hex]).unwrap(),
+                Tag::parse(["payload", &wrong_hex]).unwrap(),
+            ],
+        );
+        let result = verify_nip98_event(&json, TEST_URL, TEST_METHOD, Some(body));
+        assert!(
+            matches!(result, Err(AuthError::Nip98Invalid(_))),
+            "duplicate payload tag must be rejected; got {result:?}"
+        );
+
+        // Wrong first, valid second — also rejected.
+        let json2 = make_nip98_event_raw_tags(
+            &keys,
+            vec![
+                Tag::parse(["u", TEST_URL]).unwrap(),
+                Tag::parse(["method", TEST_METHOD]).unwrap(),
+                Tag::parse(["payload", &wrong_hex]).unwrap(),
+                Tag::parse(["payload", &valid_hex]).unwrap(),
+            ],
+        );
+        let result2 = verify_nip98_event(&json2, TEST_URL, TEST_METHOD, Some(body));
+        assert!(
+            matches!(result2, Err(AuthError::Nip98Invalid(_))),
+            "invalid-first duplicate payload tag must also be rejected; got {result2:?}"
+        );
+    }
+
+    // ── F1 regression: payload tag present with no or empty digest ─────────
+    //
+    // The old code did `.and_then(|t| t.content())` which returned `None` for a
+    // one-element `["payload"]` tag — silently skipping the body-hash check.
+    // A client could sign an event with `["payload"]` (no digest), present any
+    // body, and the verifier would not check the body against the tag.
+    //
+    // Fix: a present tag with no content (or empty string) is rejected as
+    // structurally invalid — the claim is made but no digest is provided.
+    // An absent tag makes no claim and is accepted.  A present tag with content
+    // must be exactly 64 lowercase hex chars; invalid format rejects the event.
+    //
+    // Mutation evidence: removing the format check makes `unwrap_err()` panic.
+
+    #[test]
+    fn payload_tag_malformed_digest_rejected() {
+        // A payload tag present with a value that is NOT 64 lowercase hex chars
+        // must be rejected — it is a structurally invalid event.
+        use nostr::Tag;
+        let keys = Keys::generate();
+        let body = b"any body";
+
+        // Too short.
+        let json = make_nip98_event_raw_tags(
+            &keys,
+            vec![
+                Tag::parse(["u", TEST_URL]).unwrap(),
+                Tag::parse(["method", TEST_METHOD]).unwrap(),
+                Tag::parse(["payload", "deadbeef"]).unwrap(), // 8 chars, not 64
+            ],
+        );
+        let result = verify_nip98_event(&json, TEST_URL, TEST_METHOD, Some(body));
+        assert!(
+            matches!(result, Err(AuthError::Nip98Invalid(_))),
+            "payload tag with short digest must be rejected: {result:?}"
+        );
+
+        // Uppercase hex (structurally invalid per NIP-98 lowercase-hex contract).
+        let keys2 = Keys::generate();
+        let hash: [u8; 32] = Sha256::digest(body).into();
+        let upper_hex = hex::encode(hash).to_uppercase();
+        let json2 = make_nip98_event_raw_tags(
+            &keys2,
+            vec![
+                Tag::parse(["u", TEST_URL]).unwrap(),
+                Tag::parse(["method", TEST_METHOD]).unwrap(),
+                Tag::parse(["payload", &upper_hex]).unwrap(),
+            ],
+        );
+        let result2 = verify_nip98_event(&json2, TEST_URL, TEST_METHOD, Some(body));
+        assert!(
+            matches!(result2, Err(AuthError::Nip98Invalid(_))),
+            "payload tag with uppercase hex must be rejected: {result2:?}"
+        );
+
+        // Non-hex content.
+        let keys3 = Keys::generate();
+        let non_hex = "z".repeat(64);
+        let json3 = make_nip98_event_raw_tags(
+            &keys3,
+            vec![
+                Tag::parse(["u", TEST_URL]).unwrap(),
+                Tag::parse(["method", TEST_METHOD]).unwrap(),
+                Tag::parse(["payload", &non_hex]).unwrap(),
+            ],
+        );
+        let result3 = verify_nip98_event(&json3, TEST_URL, TEST_METHOD, Some(body));
+        assert!(
+            matches!(result3, Err(AuthError::Nip98Invalid(_))),
+            "payload tag with non-hex content must be rejected: {result3:?}"
+        );
+    }
+
+    #[test]
+    fn payload_tag_multibyte_boundary_does_not_panic() {
+        // Regression for R2 (Thufir round-1): the old code did
+        //   `&hex_str[..hex_str.len().min(80)]`
+        // on attacker-controlled tag content.  79 ASCII 'a' chars followed by
+        // 'é' (U+00E9, 2 UTF-8 bytes) produces a 81-byte str; truncating at
+        // byte 80 splits the multibyte character and panics with a byte-index
+        // boundary panic.
+        //
+        // Mutation evidence: restoring the old byte-slice panic reproduces the
+        // panic here rather than returning an ordinary `AuthError`.
+        use nostr::Tag;
+        let keys = Keys::generate();
+        // 79 lowercase 'a' chars + 'é' (2 UTF-8 bytes) = 81 bytes, not 64 chars.
+        let malformed = format!("{}{}", "a".repeat(79), "é");
+        assert_eq!(malformed.len(), 81, "precondition: 81 UTF-8 bytes");
+        assert_eq!(malformed.chars().count(), 80, "precondition: 80 chars");
+        let json = make_nip98_event_raw_tags(
+            &keys,
+            vec![
+                Tag::parse(["u", TEST_URL]).unwrap(),
+                Tag::parse(["method", TEST_METHOD]).unwrap(),
+                Tag::parse(["payload", &malformed]).unwrap(),
+            ],
+        );
+        // Must return an ordinary AuthError, not panic.
+        let result = verify_nip98_event(&json, TEST_URL, TEST_METHOD, None);
+        assert!(
+            matches!(result, Err(AuthError::Nip98Invalid(_))),
+            "multibyte-boundary malformed payload tag must return AuthError, not panic: {result:?}"
+        );
     }
 
     #[test]

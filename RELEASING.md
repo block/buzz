@@ -1,7 +1,8 @@
 # Releasing Buzz
 
 Buzz has three independent release lanes. Desktop and relay use release PRs.
-Mobile uses immutable release-candidate tags cut directly from remote `main`:
+Mobile uses immutable release-candidate tags cut from remote `main` by default,
+with an optional stable source branch:
 
 | Lane | Entry point | Artifact |
 |------|-------------|----------|
@@ -38,7 +39,8 @@ scripts/mobile-release.sh candidate 0.5.0
 Desktop uses an immutable generated candidate PR; relay continues using its
 metadata PR. Mobile does not. Each `mobile-vX.Y.Z-rc.N` tag is an immutable
 candidate and the artifact of record.
-There is no mobile release branch, stable mobile tag alias, finalization step,
+Optional stable branches use `mobile-vMAJOR.MINOR`. There is no
+stable mobile tag alias, finalization step,
 or mobile GitHub Release.
 
 ---
@@ -48,27 +50,30 @@ or mobile GitHub Release.
 ### Desktop
 
 1. Run `just release-desktop <version>` from a clean, up-to-date `main` checkout.
-   The script fetches the current `origin/main`, regenerates
-   `version-bump/<version>` as one
-   deterministic candidate commit, records the frozen base and proposed
-   `desktop-v<version>` tag in `.release/desktop-candidate.json`, updates every
-   desktop manifest and lockfile, writes a full-SHA changelog, and opens or
-   updates the PR.
-2. Review the recorded base and candidate SHA, the complete changelog, and CI.
-   The required **Desktop Release Candidate** check validates the exact head.
-   Authorization is either an approval on that exact head or a permitted Default
-   ruleset bypass at merge time. Any regeneration changes the head and requires
-   the checks—and, for the review path, approval—to run again.
-3. **Squash merge** the PR. The protected branch must still be exactly the
-   recorded base; otherwise regenerate the candidate from current `main`.
-4. `auto-tag-on-release-pr-merge` verifies the frozen parent, full-tree identity,
-   required checks, and one of the two authorization paths, then tags the squash
-   commit as `desktop-v<version>`.
-5. The tag triggers `release.yml`. It builds and stages Apple Silicon and Intel
-   macOS, Windows, and Linux artifacts; publishes the versioned release only
-   after the complete set succeeds; then updates the rolling updater manifest
-   last for stable versions. A failed platform leaves no partially published
-   versioned release.
+   The script creates one deterministic candidate commit and records both its
+   frozen base and the verified prior release ledger in candidate metadata.
+2. Review the exact candidate SHA, complete changelog, and CI. Regenerating or
+   pushing the branch creates a new candidate and requires checks to run again.
+3. **Squash merge** the PR after all protected-branch checks pass. The merge is
+   the human authorization event; an authorized owner/admin bypass is treated
+   the same way. Unrelated changes reaching `main` do not invalidate the
+   reviewed candidate.
+4. `auto-tag-on-release-pr-merge` verifies the closed event against GitHub's PR
+   identity, validates candidate content, and proves every required check came
+   from its trusted producer and was successful when the PR merged. It creates
+   `desktop-v<version>` at the exact reviewed PR head—not the squash commit.
+   Retries accept that tag only at the same SHA and never move it. GitHub does
+   not expose when an individual check rerun was created, so an ordinary rerun
+   after merge deliberately makes tag verification fail closed; inspect that
+   run and create a new candidate version rather than retrying the blocked tag.
+5. The tag triggers `release.yml`. It builds and stages all platform artifacts,
+   publishes the versioned release only after the complete set succeeds, then
+   updates the rolling updater manifest last for stable versions.
+
+Because squash merging leaves immutable candidate tags on side history, the next
+release uses validated prior candidate metadata as its ledger boundary. It
+includes unrelated commits after the prior frozen base and excludes exactly the
+prior release's recorded squash commit; tag ancestry is deliberately irrelevant.
 
 ### Relay
 
@@ -91,11 +96,13 @@ Every push to `main` continues to publish the rolling relay `:main` and
 1. **Publish a candidate.** From a clean checkout whose `origin` is the
    canonical `block/buzz` repository, run
    `scripts/mobile-release.sh candidate X.Y.Z`. The script resolves and fetches
-   the exact current `origin/main` commit, derives the next number from exact
+   a snapshot of `origin/main`, derives the next number from exact
    remote tags for that marketing version, and publishes an annotated
    `mobile-vX.Y.Z-rc.N` tag there through the dedicated `buzz-release-bot`
    GitHub App. It never uses the operator's checked-out commit and never moves
-   an existing candidate.
+   an existing candidate. To select a historical commit, add `--commit FULL_SHA`.
+   Both operator and publisher require that commit to be in the selected source
+   branch's history. Later branch advances do not change or invalidate the tag.
 2. **Build the exact tag.** Enter the candidate tag as `mobile_ref` in the
    private Buzz mobile Buildkite pipeline. OSS CI deliberately cannot trigger
    that private pipeline. The tag supplies both source commit and release
@@ -111,10 +118,50 @@ RC tags. For example, iOS can ship `mobile-v0.5.0-rc.2` while Android ships
 There is intentionally no single selected or final candidate for the marketing
 version.
 
-The simplification trades away a separate stabilization line. Unrelated commits
-that reach `main` become part of every later candidate, and there is no retained
-hotfix branch or branch-ancestry history. Add a dedicated hotfix flow later if a
-release actually needs isolation from `main`.
+### Optional stable release branches
+
+For a release that needs isolation from ongoing development, create a branch
+such as `mobile-v0.25` from an explicitly selected, verified source commit.
+Publish candidates from its current remote tip:
+
+```bash
+scripts/mobile-release.sh candidate 0.25.0 --source-branch mobile-v0.25
+```
+
+The branch must match the marketing version's major and minor components:
+`mobile-v0.25` accepts 0.25.x, but rejects 0.26.x and 1.25.x. Without the option,
+the source remains `main`. Both the operator and publisher validate the source;
+a missing branch or a commit outside its history fails rather than falling back
+to `main`. `--commit FULL_SHA` also works with a stable source branch, whose
+review and check protections remain required.
+The GitHub workflow itself continues to run from reviewed `main`. The private
+pipeline still builds only the resulting immutable candidate tag.
+
+For the October 2026 stabilization period, all distributed mobile builds,
+including Company Portal dogfood builds, must come from `mobile-v0.25` until
+after the conference. Do not upload builds from `main` or a later minor version
+that would displace the stable dogfood build. The branch starts from
+`mobile-v0.24.0-rc.2`, the source of uploaded iOS 0.24.0 (7).
+
+General fix PRs must target `main` and land there first. At each fix landing,
+ask the release owner whether to
+backport the merged commit to the stable branch. For each explicitly approved
+fix, cherry-pick with `-x --signoff` onto a backport branch and open a backport-only
+PR targeting the stable branch. Require review and passing checks before merging
+that PR. Preserve the original commit provenance and validate the resulting
+stable source. A correction for a regression introduced by an earlier backport
+may target the stable branch directly; identify the faulty backport and keep the
+correction scoped to that regression. The same review and checks apply.
+Never merge `main` wholesale.
+Remote agents and App Clip are post-conference work. There is no preselected
+fix list and no requirement to create a stable branch for every minor release.
+
+The initial 0.25.0 candidate pins that baseline with `--commit`. The second
+candidate uses an empty commit above that baseline to verify
+that the existing pipeline builds a commit outside `main`. Verify identical
+source trees, absence of that commit from remote `main`, and the exact tag,
+commit, marketing version and build number in the uploaded artifacts. Upload
+and external TestFlight review do not establish production App Store approval.
 
 `mobile/pubspec.yaml` keeps `0.0.0+1` only as a valid, visibly non-release
 fallback for local development and validation builds. Release jobs always
@@ -170,10 +217,10 @@ for distributable builds or builds from an immutable release tag.
 `release.yml` has no manual dispatch and cannot build from `main` or another
 caller-selected ref. If a run for an existing immutable
 `desktop-v<version>` tag fails, rerun that failed workflow from GitHub Actions
-(or use `gh run rerun <run-id> --failed --repo block/buzz`). A stable rerun also
-repairs `buzz-desktop-latest/latest.json` if the original run published the
-versioned release but failed during that final rolling-manifest upload. Do not
-recreate, move, or push the immutable tag again.
+(or use `gh run rerun <run-id> --failed --repo block/buzz`). A rerun
+repairs the versioned draft if publication did not complete. It does not
+promote that version to the auto-updater; promotion is a separate manual
+action. Do not recreate, move, or push the immutable tag again.
 
 Mobile intentionally has no branch or arbitrary-ref fallback. The private
 Buildkite pipeline accepts only an exact candidate tag.
@@ -184,10 +231,12 @@ Buildkite pipeline accepts only an exact candidate tag.
 
 For mobile, trigger the private
 [Release Mobile pipeline](https://buildkite.com/runway/buzz-mobile-releases) with
-an exact RC tag for the platform build being cut. For desktop, use
-[Release Desktop](https://buildkite.com/runway/sprout-releases). See the
+an exact RC tag for the platform build being cut. For desktop, start
+[Release Desktop](https://buildkite.com/runway/sprout-releases) and enter the
+exact public source tag as `desktop_ref=desktop-v<version>`; a generic
+`v<version>` tag is intentionally rejected. See the
 [buzz-releases README](https://github.com/squareup/buzz-releases#cutting-a-release)
-for the private pipeline contract.
+for the rest of the private pipeline contract.
 
 ---
 
@@ -195,8 +244,25 @@ for the private pipeline contract.
 
 Desktop publishes two GitHub releases:
 
-1. **`desktop-v<version>`**: the user-facing release with installers.
-2. **`buzz-desktop-latest`**: the rolling auto-updater release.
+1. **`desktop-v<version>`**: the user-facing release with installers and the
+   exact `updater-manifest.json` promotion candidate. Publishing this release
+   does not expose it through in-app auto-update.
+2. **`buzz-desktop-latest`**: the rolling auto-updater release. Its
+   `latest.json` changes only through the manual promotion workflow.
+
+### Promote an OSS desktop release to auto-update
+
+After installing and testing the published `desktop-v<version>` artifacts, run
+**Promote OSS Desktop Auto-Update** from the `main` branch and enter the exact
+stable `X.Y.Z` version. The workflow validates the immutable tag and release,
+the retained manifest and every referenced updater asset, and requires the
+version to be newer than the currently promoted version before replacing
+`buzz-desktop-latest/latest.json`. Same-version retries succeed only when the
+manifest is identical; downgrades are rejected.
+
+Withholding promotion leaves existing clients on the previous version. If a
+promoted release is bad, ship and promote a higher patch version; changing the
+manifest to an older version does not downgrade clients that already updated.
 
 Mobile publishes only annotated `mobile-vX.Y.Z-rc.N` git tags. Store artifacts
 and rollout records retain the exact tag they used. Mobile does not publish a
@@ -256,8 +322,15 @@ Mobile candidate publication requires workflow-dispatch access and the existing
 release App because strict tag protection denies direct human creation. The App
 must be installed on `block/buzz`, have Contents write and Metadata read, and
 retain an `always` bypass on the immutable `mobile-v*` tag rules. It does not
-require GitHub Releases permissions, repository Administration permission, or a
-mobile release-branch ruleset. The publisher validates the App token's effective
+require GitHub Releases permissions or repository Administration permission.
+Stable sources additionally require active branch ruleset `19321162` covering
+`refs/heads/mobile-v*`, with no exclusions or bypass actors, deletion and
+force-push prevention, at least one approval, stale-approval dismissal, last-push
+approval, resolved review threads, and strict required `Mobile` and `DCO Check`
+checks. An administrator must configure and audit the empty bypass list; GitHub
+hides that list from non-admin tokens. Both operator and publisher verify the
+public policy and their effective lack of branch bypass on every publication.
+The publisher validates the App token's effective
 `current_user_can_bypass` value rather than reading the ruleset's hidden bypass
 actor list.
 
@@ -269,9 +342,9 @@ actor list.
 
 Do not update the branch manually and do not weaken the ruleset. Run
 `just release-desktop <version>` again from current `main`; this regenerates the
-candidate, reruns CI, and requires a fresh approval when using the review path.
-The post-merge verifier refuses to tag a squash whose parent differs from the
-recorded candidate base or whose tree differs from the validated PR head.
+candidate, reruns CI, and requires a fresh trusted approval on the new exact
+head. The post-merge verifier refuses to tag a squash whose parent differs from
+the recorded candidate base or whose tree differs from the validated PR head.
 
 ### Local `just release-desktop` fails with "must be on main branch"
 Switch to `main` and pull latest before running the release recipe.
@@ -282,18 +355,18 @@ Commit or stash your changes before running the release recipe.
 ### New commits land after publishing a mobile candidate
 
 Run `scripts/mobile-release.sh candidate <version>` again after the intended
-fix reaches remote `main`. It publishes a new immutable RC tag at the new exact
+fix reaches the intended remote source branch. Use the same `--source-branch`
+option for a stable release. The command publishes a new immutable RC tag at the new exact
 remote commit. Continue referring to each tested or shipped platform artifact by
 its own exact tag.
 
-### `scripts/mobile-release.sh candidate` fails because `main` moved during publication
+### The source branch advances during candidate publication
 
-The App-backed workflow may already have published the requested immutable RC
-at the prior `main` tip before the operator command detects the race. Do not
-move or delete that tag, and do not treat it as the candidate for current
-`main`. Inspect the run URL from the command output, then rerun
-`scripts/mobile-release.sh candidate <version>` to publish the next RC from the
-new current `main` tip.
+Publication remains pinned to the selected SHA. The publisher verifies that it
+is an ancestor of a resolved source-branch snapshot, then creates and verifies
+an immutable annotated tag for that exact SHA. The operator verifies the tag,
+not the branch's later tip. A newer commit does not require retrying or creating
+another candidate. Missing or unverifiable ancestry still fails closed.
 
 ### A mobile candidate command selects the wrong RC number
 

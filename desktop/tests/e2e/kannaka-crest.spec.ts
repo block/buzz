@@ -105,12 +105,10 @@ test("the crest is not injected twice across a re-render", async ({ page }) => {
 
   // Advancing the flow re-renders the landing subtree, which fires the
   // MutationObserver again. Exactly one crest must survive that.
+  // Upstream's flow now explains the key on a content card before creating
+  // it; reaching that card is the re-render this test is about.
   await page.getByRole("button", { name: "Create a new identity key" }).click();
-  await expect(
-    page.getByRole("heading", {
-      name: "Your unique identity key has been created",
-    }),
-  ).toBeVisible();
+  await expect(page.getByTestId("onboarding-content-card")).toBeVisible();
 
   await expect(page.locator(".kannaka-crest")).toHaveCount(
     await page.locator('img[src$="buzz-wordmark.png"]').count(),

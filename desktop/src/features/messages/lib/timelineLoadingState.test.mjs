@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { QueryClient, QueryObserver } from "@tanstack/react-query";
 
-import { selectTimelineLoadingState } from "./timelineLoadingState.ts";
+import {
+  resolveTimelineLoadingLatch,
+  resolveTimelineQueryLoadingState,
+  selectTimelineLoadingState,
+} from "./timelineLoadingState.ts";
 
 const settled = {
   isPending: false,
@@ -9,6 +14,27 @@ const settled = {
   isPlaceholderData: false,
   dataLength: null,
 };
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
+function resolveQueryLoading(result, settledChannelId = null) {
+  return resolveTimelineQueryLoadingState(settledChannelId, "chan-a", {
+    isEnabled: true,
+    isPending: result.isPending,
+    isFetching: result.isFetching,
+    isPlaceholderData: result.isPlaceholderData,
+    dataLength: result.data?.length ?? null,
+    isError: result.isError,
+  });
+}
 
 test("pending first fetch with no cache is loading", () => {
   assert.equal(
@@ -120,8 +146,6 @@ test("settled channel with rows mid-refetch is not loading", () => {
   );
 });
 
-import { resolveTimelineLoadingLatch } from "./timelineLoadingState.ts";
-
 test("latch: loading on first entry to a channel", () => {
   const r = resolveTimelineLoadingLatch(null, "chan-a", true);
   assert.equal(r.isLoading, true);
@@ -157,4 +181,81 @@ test("latch: no active channel passes loadingNow through untouched", () => {
     resolveTimelineLoadingLatch("chan-a", null, false).isLoading,
     false,
   );
+});
+
+test("query wiring: cold error retry stays loading until successful empty result", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const first = deferred();
+  const retry = deferred();
+  let attempt = 0;
+  const observer = new QueryObserver(client, {
+    queryKey: ["messages", "chan-a"],
+    queryFn: () => [first.promise, retry.promise][attempt++],
+  });
+  const unsubscribe = observer.subscribe(() => {});
+
+  try {
+    first.reject(new Error("history unavailable"));
+    await new Promise((resolve) => setImmediate(resolve));
+    let loading = resolveQueryLoading(observer.getCurrentResult());
+    assert.equal(observer.getCurrentResult().status, "error");
+    assert.deepEqual(loading, { settledChannelId: null, isLoading: false });
+
+    const retryResult = observer.refetch();
+    loading = resolveQueryLoading(observer.getCurrentResult());
+    assert.equal(observer.getCurrentResult().status, "pending");
+    assert.deepEqual(loading, { settledChannelId: null, isLoading: true });
+
+    retry.resolve([]);
+    await retryResult;
+    loading = resolveQueryLoading(observer.getCurrentResult());
+    assert.equal(observer.getCurrentResult().status, "success");
+    assert.deepEqual(loading, {
+      settledChannelId: "chan-a",
+      isLoading: false,
+    });
+  } finally {
+    unsubscribe();
+  }
+});
+
+test("query wiring: repeated cold retry failure never settles as empty", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const first = deferred();
+  const retry = deferred();
+  let attempt = 0;
+  const observer = new QueryObserver(client, {
+    queryKey: ["messages", "chan-a"],
+    queryFn: () => [first.promise, retry.promise][attempt++],
+  });
+  const unsubscribe = observer.subscribe(() => {});
+
+  try {
+    first.reject(new Error("history unavailable"));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(resolveQueryLoading(observer.getCurrentResult()), {
+      settledChannelId: null,
+      isLoading: false,
+    });
+
+    const retryResult = observer.refetch();
+    assert.deepEqual(resolveQueryLoading(observer.getCurrentResult()), {
+      settledChannelId: null,
+      isLoading: true,
+    });
+
+    retry.reject(new Error("still unavailable"));
+    await retryResult;
+    assert.equal(observer.getCurrentResult().status, "error");
+    assert.deepEqual(resolveQueryLoading(observer.getCurrentResult()), {
+      settledChannelId: null,
+      isLoading: false,
+    });
+  } finally {
+    unsubscribe();
+  }
 });

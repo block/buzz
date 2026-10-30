@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -49,6 +51,7 @@ void main() {
   }) {
     return ChannelSectionsManager(
       pubkey: keychain.public,
+      relayUrl: 'https://relay.example',
       prefs: prefs,
       crypto: crypto,
       relaySession: relaySession,
@@ -199,33 +202,124 @@ void main() {
     expect(relay.subscribeCalls, 1, reason: 'no re-subscribe after dispose');
   });
 
-  test('backoff resets after full recovery so later failures start from the '
-      'base delay', () async {
+  test(
+    'dispose while subscribe is pending closes the late subscription',
+    () async {
+      await setUpEnv();
+      final relay = _DelayedSubscribeRelaySession();
+      final manager = buildManager(relaySession: relay);
+
+      final initializing = manager.initialize();
+      await relay.subscribeStarted.future;
+      manager.dispose(flushPending: false);
+      relay.completeSubscribe();
+      await initializing;
+
+      expect(relay.activeListeners, 0);
+      expect(relay.unsubscribeCalls, 1);
+    },
+  );
+
+  test(
+    'a retry request during an in-flight sync does not overlap subscribe',
+    () async {
+      await setUpEnv();
+      final relay = _DelayedSubscribeRelaySession();
+      final manager = buildManager(relaySession: relay);
+
+      final initializing = manager.initialize();
+      await relay.subscribeStarted.future;
+      relay.closePendingSubscription('rate-limited: quota exceeded');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(relay.subscribeCalls, 1);
+      relay.completeSubscribe();
+      await initializing;
+      await _waitUntil(() => relay.subscribeCalls == 2);
+      expect(relay.maxConcurrentSubscribes, 1);
+      expect(relay.activeListeners, 1);
+      manager.dispose(flushPending: false);
+    },
+  );
+
+  test('tie_break_lower_id_wins_at_equal_second', () async {
+    // Relay retains `ORDER BY created_at DESC, id ASC` — the lower event ID
+    // wins at equal second. Pre-fix the manager kept the higher ID, which
+    // permanently disagreed with desktop post-#7805.
     await setUpEnv();
-    // Climb the failure counter: 5 rate-limited attempts before success.
-    // With a 5ms base, attempt 5 would wait 5<<5 = 160ms if the counter
-    // were never reset.
-    final relay = _RateLimitedRelaySession(failuresBeforeSuccess: 5);
+    final relay = _RateLimitedRelaySession(failuresBeforeSuccess: 0);
     final manager = buildManager(relaySession: relay);
     await manager.initialize();
-    await _waitUntil(() => relay.subscribeCalls > 5);
 
-    // Fully recovered. A later transient failure (late CLOSED) must retry
-    // from the base delay, not the climbed ceiling.
-    final subscribeCallsAfterRecovery = relay.subscribeCalls;
-    relay.closeLiveSubscription('rate-limited: quota exceeded');
-    final stopwatch = Stopwatch()..start();
-    await _waitUntil(() => relay.subscribeCalls > subscribeCallsAfterRecovery);
-    stopwatch.stop();
-
-    expect(
-      stopwatch.elapsedMilliseconds,
-      lessThan(100),
-      reason:
-          'retry after recovery must wait ~base delay (5ms), '
-          'not the pre-recovery backoff (160ms)',
+    // Deliver two equal-second events in higher-then-lower ID order via the
+    // live subscription and verify the lower-ID blob is the final state.
+    final higherIdEvent = sectionsEvent(
+      sections: [
+        {'id': 's-high', 'name': 'From Higher ID', 'order': 0},
+      ],
+      createdAt: 100,
+      id: 'zzzz',
     );
+    final lowerIdEvent = sectionsEvent(
+      sections: [
+        {'id': 's-low', 'name': 'From Lower ID', 'order': 0},
+      ],
+      createdAt: 100,
+      id: 'aaaa',
+    );
+
+    relay.emit(higherIdEvent);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(manager.store.sections.single.name, 'From Higher ID');
+
+    relay.emit(lowerIdEvent);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(
+      manager.store.sections.single.name,
+      'From Lower ID',
+      reason: 'lower-ID event must win at equal second (relay id ASC order)',
+    );
+
+    // Re-delivery of the higher-ID event must NOT roll back.
+    relay.emit(higherIdEvent);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(
+      manager.store.sections.single.name,
+      'From Lower ID',
+      reason: 'higher-ID event re-delivery must be rejected by tie-break guard',
+    );
+
     manager.dispose(flushPending: false);
+  });
+
+  test('backoff resets after full recovery so later failures start from the '
+      'base delay', () {
+    fakeAsync((async) {
+      setUpEnv();
+      async.flushMicrotasks();
+      // Climb the failure counter: 5 rate-limited attempts before success.
+      // With a 5ms base, attempt 5 would wait 5<<5 = 160ms if the counter
+      // were never reset.
+      final relay = _RateLimitedRelaySession(failuresBeforeSuccess: 5);
+      final manager = buildManager(relaySession: relay);
+      manager.initialize();
+      async.elapse(const Duration(seconds: 1));
+      expect(relay.subscribeCalls, greaterThan(5));
+
+      // Fully recovered. A later transient failure (late CLOSED) must retry
+      // from the base delay, not the climbed ceiling.
+      final subscribeCallsAfterRecovery = relay.subscribeCalls;
+      relay.closeLiveSubscription('rate-limited: quota exceeded');
+      async.elapse(const Duration(milliseconds: 6));
+      expect(
+        relay.subscribeCalls,
+        greaterThan(subscribeCallsAfterRecovery),
+        reason:
+            'retry after recovery must wait ~base delay (5ms), '
+            'not the pre-recovery backoff (160ms)',
+      );
+      manager.dispose(flushPending: false);
+    });
   });
 }
 
@@ -239,6 +333,60 @@ Future<void> _waitUntil(
       fail('condition not met within $timeout');
     }
     await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
+}
+
+class _DelayedSubscribeRelaySession extends RelaySessionNotifier {
+  final subscribeStarted = Completer<void>();
+  Completer<void Function()>? _pendingSubscribe;
+  void Function(String)? _pendingOnClosed;
+  int subscribeCalls = 0;
+  int concurrentSubscribes = 0;
+  int maxConcurrentSubscribes = 0;
+  int activeListeners = 0;
+  int unsubscribeCalls = 0;
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => const [];
+
+  @override
+  Future<void Function()> subscribe(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+  }) {
+    subscribeCalls++;
+    concurrentSubscribes++;
+    if (concurrentSubscribes > maxConcurrentSubscribes) {
+      maxConcurrentSubscribes = concurrentSubscribes;
+    }
+    if (!subscribeStarted.isCompleted) subscribeStarted.complete();
+    _pendingOnClosed = onClosed;
+    if (subscribeCalls > 1) {
+      concurrentSubscribes--;
+      activeListeners++;
+      return Future.value(_unsubscribe);
+    }
+    _pendingSubscribe = Completer<void Function()>();
+    return _pendingSubscribe!.future.whenComplete(() {
+      concurrentSubscribes--;
+    });
+  }
+
+  void closePendingSubscription(String message) =>
+      _pendingOnClosed?.call(message);
+
+  void completeSubscribe() {
+    activeListeners++;
+    _pendingSubscribe!.complete(_unsubscribe);
+  }
+
+  void _unsubscribe() {
+    activeListeners--;
+    unsubscribeCalls++;
   }
 }
 

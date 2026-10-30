@@ -78,7 +78,81 @@ async function pickDropdownOption(
   await page.getByRole("menuitemradio", { name: optionName }).click();
 }
 
+test.describe("agent definition dialog", () => {
+  test("owner-only-access build shows disabled agent access with an explanation", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      ownerOnlyAccessBuild: true,
+      bakedBuildEnv: BAKED_DEFAULTS,
+    });
+    await page.goto("/");
+    await page.getByTestId("open-agents-view").click();
+    await page.getByTestId("new-agent-card").click();
+
+    const dialog = page.getByRole("dialog");
+    await dialog.getByRole("button", { name: "Advanced", exact: true }).click();
+
+    await expect(dialog.getByTestId("agent-respond-to")).toBeVisible();
+    await expect(dialog.locator("#agent-respond-to")).toBeDisabled();
+    await expect(dialog.locator("#agent-respond-to")).toContainText(
+      "Only me (default)",
+    );
+    await expect(
+      dialog.getByTestId("agent-respond-to-disabled-reason"),
+    ).toHaveText("This build disallows changing this setting.");
+  });
+});
+
 test.describe("edit agent dialog", () => {
+  test("owner-only-access build shows a disabled owner-only access control with an explanation", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      ownerOnlyAccessBuild: true,
+      bakedBuildEnv: BAKED_DEFAULTS,
+      managedAgents: [
+        {
+          pubkey: AGENT_PUBKEY,
+          name: AGENT_NAME,
+          status: "stopped",
+          channelNames: ["agents"],
+          respondTo: "anyone",
+        },
+      ],
+    });
+
+    await openEditDialog(page);
+
+    const accessControl = page.getByTestId("agent-respond-to");
+    await expect(accessControl).toBeVisible();
+    await expect(page.locator("#agent-respond-to")).toBeDisabled();
+    await expect(page.locator("#agent-respond-to")).toContainText(
+      "Only me (default)",
+    );
+    await expect(
+      page.getByTestId("agent-respond-to-disabled-reason"),
+    ).toHaveText("This build disallows changing this setting.");
+  });
+
+  test("OSS build keeps the managed-agent access control", async ({ page }) => {
+    await installMockBridge(page, {
+      bakedBuildEnv: BAKED_DEFAULTS,
+      managedAgents: [
+        {
+          pubkey: AGENT_PUBKEY,
+          name: AGENT_NAME,
+          status: "stopped",
+          channelNames: ["agents"],
+        },
+      ],
+    });
+
+    await openEditDialog(page);
+
+    await expect(page.getByTestId("agent-respond-to")).toBeVisible();
+  });
+
   test("edits the agent name and persists it across a dialog reopen", async ({
     page,
   }) => {
@@ -149,6 +223,82 @@ test.describe("edit agent dialog", () => {
     // input (the discovered-model lists don't contain it).
     await expect(page.locator("#edit-agent-custom-model")).toHaveValue(
       "claude-opus-4-5",
+      { timeout: 10_000 },
+    );
+  });
+
+  test("tells colliding Databricks model names apart and persists the chosen id", async ({
+    page,
+  }) => {
+    const goosePathId = "data_workflow_tools.goose.gpt-6-astra";
+    const systemAiId = "system.ai.gpt-6-astra";
+    await installMockBridge(page, {
+      managedAgents: [
+        {
+          pubkey: AGENT_PUBKEY,
+          name: AGENT_NAME,
+          status: "stopped",
+          channelNames: ["agents"],
+          envVars: { DATABRICKS_HOST: "https://databricks.example.test" },
+        },
+      ],
+      // The agent inherits Databricks from the global defaults; the mock's
+      // update_managed_agent does not echo a per-agent provider.
+      globalAgentConfig: {
+        preferred_runtime: "goose",
+        provider: "databricks_v2",
+        model: null,
+        env_vars: {},
+      },
+      discoverAgentModels: {
+        models: [
+          { id: goosePathId, name: goosePathId },
+          { id: systemAiId, name: systemAiId },
+        ],
+        supportsSwitching: true,
+        selectedModel: null,
+      },
+    });
+
+    await openEditDialog(page);
+
+    await page.locator("#edit-agent-model").click();
+    await expect(
+      page.getByRole("menuitemradio", {
+        name: "GPT-6 Astra (data_workflow_tools.goose)",
+      }),
+    ).toBeVisible();
+    await page
+      .getByRole("menuitemradio", { name: "GPT-6 Astra (system.ai)" })
+      .click();
+    await expect(page.locator("#edit-agent-model")).toHaveText(
+      "GPT-6 Astra (system.ai)",
+    );
+
+    const submit = page.getByTestId("edit-agent-dialog-submit");
+    await expect(submit).toBeEnabled({ timeout: 10_000 });
+    await submit.click();
+    await expect(page.getByTestId("edit-agent-dialog")).not.toBeVisible();
+
+    const persistedModel = () =>
+      page.evaluate(async (pubkey) => {
+        const agents = (await (
+          window as typeof window & {
+            __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+              command: string,
+              payload: unknown,
+            ) => Promise<unknown>;
+          }
+        ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("list_managed_agents", null)) as
+          | Array<{ pubkey: string; model: string | null }>
+          | undefined;
+        return agents?.find((agent) => agent.pubkey === pubkey)?.model;
+      }, AGENT_PUBKEY);
+    await expect.poll(persistedModel).toBe(systemAiId);
+
+    await page.getByTestId("user-profile-edit-agent").click();
+    await expect(page.locator("#edit-agent-model")).toHaveText(
+      "GPT-6 Astra (system.ai)",
       { timeout: 10_000 },
     );
   });
@@ -278,16 +428,61 @@ test.describe("edit agent dialog", () => {
     ).toBeVisible();
   });
 
-  test("profile Edit routes persona-linked agents to the definition editor", async ({
+  test("discovers, selects, and persists an ACP command from the agent profile", async ({
     page,
   }) => {
-    // Routing pin for handleEditAgent (UserProfilePanel): when the agent has
-    // a resolvable non-built-in persona, the Edit quick action opens the
-    // DEFINITION editor (persona dialog), not EditAgentDialog. The instance
-    // editor (and its inherit-runtime toggle) is reachable for persona-linked
-    // agents only via the requestOpenEditAgent event (ConfigNudgeCard) — no
-    // plain UI path — so its inherit-toggle behavior is covered by B3b's
-    // component-level pinning test, not e2e.
+    await installMockBridge(page, {
+      acpCommands: [
+        {
+          command: "buzz-janet-acp",
+          binaryPath: "/usr/local/bin/buzz-janet-acp",
+        },
+      ],
+      managedAgents: [
+        {
+          pubkey: AGENT_PUBKEY,
+          name: AGENT_NAME,
+          status: "stopped",
+          channelNames: ["agents"],
+        },
+      ],
+    });
+
+    await openEditDialog(page);
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+
+    const acpPicker = page.locator("#edit-agent-acp-command");
+    await expect(acpPicker).toBeVisible();
+    await acpPicker.click();
+    await expect(
+      page.getByRole("menuitemradio", { name: "buzz-janet-acp" }),
+    ).toBeVisible();
+    await page.getByRole("menuitemradio", { name: "buzz-janet-acp" }).click();
+    await expect(acpPicker).toContainText("buzz-janet-acp");
+    await page.screenshot({
+      path: test.info().outputPath("acp-command-selected.png"),
+      fullPage: true,
+    });
+
+    await page.getByTestId("edit-agent-dialog-submit").click();
+    await expect(page.getByTestId("edit-agent-dialog")).not.toBeVisible();
+
+    await page.getByTestId("user-profile-edit-agent").click();
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    await expect(page.locator("#edit-agent-acp-command")).toContainText(
+      "buzz-janet-acp",
+    );
+    await page.screenshot({
+      path: test.info().outputPath("acp-command-persisted.png"),
+      fullPage: true,
+    });
+  });
+
+  test("profile Edit opens the persona editor for a persona-linked agent", async ({
+    page,
+  }) => {
+    // A persona-linked agent inherits ACP transport from its definition, so the
+    // profile Edit action must open the persona editor.
     await installMockBridge(page, {
       managedAgents: [
         {
@@ -322,14 +517,12 @@ test.describe("edit agent dialog", () => {
     });
     await page.getByTestId("user-profile-edit-agent").click();
 
-    // Definition editor opens; the instance editor does not.
+    // Persona editor opens with the definition-owned ACP command field.
     await expect(page.getByTestId("persona-dialog")).toBeVisible({
       timeout: 10_000,
     });
     await expect(page.getByTestId("edit-agent-dialog")).not.toBeVisible();
-    // And it is the persona's record that's being edited.
-    await expect(page.locator("#persona-display-name")).toHaveValue(
-      "Edit E2E Persona",
-    );
+    await page.getByRole("tab", { name: "Customize for this agent" }).click();
+    await expect(page.locator("#persona-acp-command")).toBeVisible();
   });
 });

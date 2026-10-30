@@ -15,6 +15,23 @@ const CLOSE_QUOTE = "”";
 export type ChannelTextField = "topic" | "purpose";
 
 /**
+ * The reader is the recipient of an add, while every other member is the
+ * subject of one. Keep that distinction in the caption: "You were added by"
+ * rather than the ungrammatical "You added by".
+ */
+export function addedByActionPrefix(isCurrentUser: boolean): string {
+  return isCurrentUser ? "were added by" : "added by";
+}
+
+/**
+ * Generic add caption when the timeline should state that someone was added
+ * without attributing the action to a single actor.
+ */
+export function addedActionPrefix(isCurrentUser: boolean): string {
+  return isCurrentUser ? "were added" : "was added";
+}
+
+/**
  * Caption for a channel topic or purpose change.
  *
  * Bare "the topic" rather than "the channel topic": this row only ever renders

@@ -15,12 +15,16 @@ export function CopyTextButton({
   text: string;
 }) {
   const [copied, setCopied] = React.useState(false);
-  const handleCopy = React.useCallback(() => {
-    void writeTextToClipboard(text).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2_000);
-    });
-  }, [text]);
+  const handleCopy = React.useCallback(
+    (event: React.MouseEvent<HTMLButtonElement>) => {
+      event.stopPropagation();
+      void writeTextToClipboard(text).then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2_000);
+      });
+    },
+    [text],
+  );
 
   return (
     <button
@@ -30,6 +34,7 @@ export function CopyTextButton({
         className,
       )}
       onClick={handleCopy}
+      onKeyDown={(event) => event.stopPropagation()}
       type="button"
     >
       {copied ? (

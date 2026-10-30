@@ -4,11 +4,13 @@ class _PhotoGalleryPicker extends StatelessWidget {
   final VoidCallback onBack;
   final Future<List<XFile>> Function() onPickAllPhotos;
   final Future<void> Function(List<XFile> photos) onChoosePhotos;
+  final Future<void> Function(List<XFile> photos) onChooseAllPhotos;
 
   const _PhotoGalleryPicker({
     required this.onBack,
     required this.onPickAllPhotos,
     required this.onChoosePhotos,
+    required this.onChooseAllPhotos,
   });
 
   @override
@@ -17,12 +19,14 @@ class _PhotoGalleryPicker extends StatelessWidget {
       onBack: onBack,
       onPickAllPhotos: onPickAllPhotos,
       onChoosePhotos: onChoosePhotos,
+      onChooseAllPhotos: onChooseAllPhotos,
     );
     if (defaultTargetPlatform != TargetPlatform.iOS) return fallback;
     return _IOSInlinePhotoPicker(
       onBack: onBack,
       onPickAllPhotos: onPickAllPhotos,
       onChoosePhotos: onChoosePhotos,
+      onChooseAllPhotos: onChooseAllPhotos,
       fallback: fallback,
     );
   }
@@ -32,11 +36,13 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
   final VoidCallback onBack;
   final Future<List<XFile>> Function() onPickAllPhotos;
   final Future<void> Function(List<XFile> photos) onChoosePhotos;
+  final Future<void> Function(List<XFile> photos) onChooseAllPhotos;
 
   const _RecentPhotoGalleryPicker({
     required this.onBack,
     required this.onPickAllPhotos,
     required this.onChoosePhotos,
+    required this.onChooseAllPhotos,
   });
 
   @override
@@ -73,7 +79,9 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
                   .read(photoLibraryProvider)
                   .resolveSelectedPhotos(selection.value);
         if (photos.isNotEmpty && context.mounted) {
-          await onChoosePhotos(photos);
+          await (selection.value.isEmpty ? onChooseAllPhotos : onChoosePhotos)(
+            photos,
+          );
         }
       } catch (_) {
         if (context.mounted) {
@@ -104,7 +112,7 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
       }
       if (recentSnapshot.hasError) {
         return const _PhotoGalleryMessage(
-          icon: LucideIcons.images,
+          icon: BuzzIcons.images,
           title: 'Recent photos aren’t available',
           message: 'Use All photos to choose with the system photo picker.',
         );
@@ -113,7 +121,7 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
       final photos = recentSnapshot.data ?? const <RecentPhoto>[];
       if (photos.isEmpty) {
         return const _PhotoGalleryMessage(
-          icon: LucideIcons.images,
+          icon: BuzzIcons.images,
           title: 'No recent photos',
           message: 'Use All photos to browse your photo library.',
         );
@@ -136,7 +144,7 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
             photo: photo,
             selectionIndex: selectionIndex,
             reducedMotion: reducedMotion,
-            onTap: () => togglePhoto(photo),
+            onTap: () => _runComposerAction(() => togglePhoto(photo)),
           );
         },
       );
@@ -152,13 +160,27 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
             height: 40,
             child: Row(
               children: [
-                IconButton(
-                  key: const ValueKey('photo-gallery-back'),
-                  onPressed: isResolving.value ? null : onBack,
-                  tooltip: 'Back to attachment options',
-                  visualDensity: VisualDensity.compact,
-                  icon: const Icon(LucideIcons.arrowLeft, size: 20),
-                ),
+                if (Theme.of(context).platform == TargetPlatform.iOS)
+                  IosGlassNavigationButton(
+                    key: const ValueKey('photo-gallery-back'),
+                    icon: IosGlassNavigationIcon.back,
+                    semanticLabel: 'Back to attachment options',
+                    onPressed: isResolving.value
+                        ? null
+                        : () => _runComposerAction(onBack),
+                    width: 40,
+                    height: 40,
+                  )
+                else
+                  IconButton(
+                    key: const ValueKey('photo-gallery-back'),
+                    onPressed: isResolving.value
+                        ? null
+                        : () => _runComposerAction(onBack),
+                    tooltip: 'Back to attachment options',
+                    visualDensity: VisualDensity.compact,
+                    icon: const Icon(BuzzIcons.arrowLeft, size: 24),
+                  ),
                 const SizedBox(width: Grid.quarter),
                 Expanded(
                   child: Text(
@@ -212,26 +234,34 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
             child: selectedCount == 0
                 ? OutlinedButton.icon(
                     key: const ValueKey('photo-gallery-action'),
-                    onPressed: isResolving.value ? null : choosePhotos,
+                    onPressed: isResolving.value
+                        ? null
+                        : () => _runComposerAction(
+                            () => unawaited(choosePhotos()),
+                          ),
                     icon: isResolving.value
                         ? BuzzLoadingIndicator(
                             size: 22,
                             color: context.colors.primary,
                             semanticLabel: 'Opening all photos',
                           )
-                        : const Icon(LucideIcons.images, size: 18),
+                        : const Icon(BuzzIcons.images, size: 18),
                     label: Text(actionLabel),
                   )
                 : FilledButton.icon(
                     key: const ValueKey('photo-gallery-action'),
-                    onPressed: isResolving.value ? null : choosePhotos,
+                    onPressed: isResolving.value
+                        ? null
+                        : () => _runComposerAction(
+                            () => unawaited(choosePhotos()),
+                          ),
                     icon: isResolving.value
                         ? const BuzzLoadingIndicator(
                             size: 22,
                             color: Colors.white,
                             semanticLabel: 'Preparing selected photos',
                           )
-                        : const Icon(LucideIcons.plus, size: 18),
+                        : const Icon(BuzzIcons.plus, size: 18),
                     label: Text(actionLabel),
                   ),
           ),

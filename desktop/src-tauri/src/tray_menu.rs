@@ -3,6 +3,11 @@
 //! The webview owns the live agent-turn state. It sends the small display
 //! projection here so the native menu can remain useful while Buzz is hidden.
 
+// Mouse back/forward (X1/X2 buttons and swipe) is also macOS-only native I/O;
+// group it here so both platform-layer init paths share one call site in lib.rs.
+#[path = "mouse_nav.rs"]
+pub(crate) mod mouse_nav;
+
 use std::{
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
@@ -208,7 +213,9 @@ struct TrayMenuState<R: Runtime> {
 pub enum TrayAction {
     NewChannel,
     OpenChannel {
+        #[serde(rename = "channelId")]
         channel_id: String,
+        #[serde(rename = "communityGeneration")]
         community_generation: u64,
     },
 }
@@ -488,6 +495,7 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     if let Err(error) = apply_activity_presentation(&tray, activities, recent_activities) {
         eprintln!("buzz-desktop: failed to apply tray menu presentation: {error}");
     }
+    mouse_nav::init(app);
     Ok(())
 }
 
@@ -607,6 +615,23 @@ pub fn update_tray_agent_activity<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::{requeue_actions, TrayAction, TrayActionQueue};
+
+    #[test]
+    fn open_channel_action_serializes_with_frontend_field_names() {
+        let action = TrayAction::OpenChannel {
+            channel_id: "channel-123".into(),
+            community_generation: 7,
+        };
+
+        assert_eq!(
+            serde_json::to_value(action).expect("tray action should serialize"),
+            serde_json::json!({
+                "kind": "openChannel",
+                "channelId": "channel-123",
+                "communityGeneration": 7,
+            })
+        );
+    }
 
     #[test]
     fn stale_channel_actions_are_not_requeued_after_community_change() {

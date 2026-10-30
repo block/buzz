@@ -1,5 +1,9 @@
 import 'package:flutter/material.dart';
 
+import 'accent_colors.dart';
+import 'app_colors.dart';
+import 'theme_extensions.dart';
+
 /// Name of the first-party Buzz theme. Buzz reuses the GitHub Light palette for
 /// every base color; the one thing that sets it apart is a branded gradient
 /// painted across the app's top section. Mirrors desktop, where the same
@@ -16,6 +20,55 @@ const buzzDarkThemeName = 'buzz-dark';
 /// gradient so System mode keeps it on across an OS light/dark switch.
 bool isBuzzTheme(String themeName) =>
     themeName == buzzThemeName || themeName == buzzDarkThemeName;
+
+/// Whether the current widget tree is using the first-party Buzz treatment.
+bool isBuzzThemeContext(BuildContext context) =>
+    Theme.of(context).extension<AppColors>()?.topSectionGradient != null;
+
+/// Primary foreground for the mobile top navigation.
+///
+/// Every theme uses its own [ColorScheme.onSurface]. Buzz is the exception:
+/// its desktop-matching top gradient needs a neutral black or white foreground
+/// rather than the accent-derived color scheme foreground.
+Color navigationPrimaryForeground(BuildContext context) {
+  final scheme = Theme.of(context).colorScheme;
+  if (!isBuzzThemeContext(context)) return scheme.onSurface;
+  return scheme.brightness == Brightness.dark ? Colors.white : Colors.black;
+}
+
+/// Secondary label and placeholder foreground for the mobile top navigation.
+Color navigationSecondaryForeground(BuildContext context) {
+  final scheme = Theme.of(context).colorScheme;
+  if (!isBuzzThemeContext(context)) return scheme.onSurfaceVariant;
+  return navigationPrimaryForeground(context).withValues(alpha: 0.4);
+}
+
+/// Channel-section label and icon foreground for the mobile side navigation.
+///
+/// Section labels need more hierarchy than a placeholder. Buzz therefore uses
+/// a stronger neutral over its gradient, while all other themes preserve their
+/// established secondary foreground token.
+Color navigationSectionForeground(BuildContext context) {
+  final scheme = Theme.of(context).colorScheme;
+  if (!isBuzzThemeContext(context)) return scheme.onSurfaceVariant;
+  return navigationPrimaryForeground(context).withValues(alpha: 0.8);
+}
+
+/// Search-field surface for the mobile top navigation.
+Color navigationSearchSurface(BuildContext context) {
+  return context.controlSurface;
+}
+
+/// A low-contrast navigation divider derived from the active theme foreground.
+Color navigationDivider(BuildContext context, double opacity) =>
+    navigationPrimaryForeground(context).withValues(alpha: opacity);
+
+/// Buzz renders with its fixed neutral foreground while preserving the stored
+/// wire accent so the user's choice returns on another theme.
+int effectiveAccentIndex(String themeName, String storedAccent) {
+  if (isBuzzTheme(themeName)) return neutralAccentIndex;
+  return accentIndexForWireValue(storedAccent) ?? defaultAccentIndex;
+}
 
 /// Gradient stops, matching desktop's `--buzz-gradient-*` custom properties.
 const _lightTop = Color(0xFFE6E6B6);
@@ -47,3 +100,23 @@ LinearGradient? buzzTopSectionGradient(
     ],
   );
 }
+
+/// Desktop navigation ink distinguishes read destinations from unread labels.
+Color channelNavigationForeground(BuildContext context, {bool unread = false}) {
+  if (unread || Theme.of(context).brightness != Brightness.dark) {
+    return navigationPrimaryForeground(context);
+  }
+  return Theme.of(context).colorScheme.onSurfaceVariant;
+}
+
+/// Metadata ink used by Home section headings and muted destinations.
+Color navigationMetadataForeground(BuildContext context) =>
+    Theme.of(context).brightness == Brightness.dark
+    ? const Color(0xFFA4A4A4)
+    : const Color(0xFF5F5F5F);
+
+/// Quieter ink for section disclosure and overflow controls.
+Color navigationAccessoryForeground(BuildContext context) =>
+    navigationMetadataForeground(
+      context,
+    ).withValues(alpha: MediaQuery.highContrastOf(context) ? 1 : 0.8);

@@ -3,10 +3,16 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 function git(args, cwd, options = {}) {
+  // Git hooks export repository-local GIT_* variables. Child commands that
+  // intentionally target `cwd` must not be redirected back to the hook's repo.
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
+  );
   return execFileSync("git", args, {
     cwd,
     encoding: "utf8",
     maxBuffer: 10 * 1024 * 1024,
+    env,
     ...options,
   });
 }

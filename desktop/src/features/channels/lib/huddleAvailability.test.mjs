@@ -87,11 +87,9 @@ test("canStartHuddleInChannel blocks non-participant DMs", () => {
 });
 
 test("canStartHuddleInChannel keeps private channels member-gated", () => {
-  const privateChannel = channel({ visibility: "private" });
-
   assert.equal(
     canStartHuddleInChannel({
-      channel: privateChannel,
+      channel: channel({ visibility: "private", isMember: false }),
       currentPubkey: SELF,
       selfMember: null,
     }),
@@ -100,9 +98,22 @@ test("canStartHuddleInChannel keeps private channels member-gated", () => {
 
   assert.equal(
     canStartHuddleInChannel({
-      channel: privateChannel,
+      channel: channel({ visibility: "private", isMember: false }),
       currentPubkey: SELF,
       selfMember: member(),
+    }),
+    true,
+  );
+});
+
+test("canStartHuddleInChannel accepts channel-level membership without a roster", () => {
+  // The roster is fetched lazily; `channel.isMember` derives from the same
+  // kind:39002 event, so it must satisfy the private-channel gate on its own.
+  assert.equal(
+    canStartHuddleInChannel({
+      channel: channel({ visibility: "private", isMember: true }),
+      currentPubkey: SELF,
+      selfMember: null,
     }),
     true,
   );

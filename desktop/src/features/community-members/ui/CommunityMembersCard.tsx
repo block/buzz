@@ -3,7 +3,7 @@ import { MoreHorizontal, Plus, Shield, ShieldCheck, User } from "lucide-react";
 import { toast } from "sonner";
 
 import { useUsersBatchQuery } from "@/features/profile/hooks";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { truncateNpub } from "@/shared/lib/pubkey";
 import { PubKey } from "@/shared/ui/PubKey";
 import {
   useChangeRelayMemberRoleMutation,
@@ -101,7 +101,7 @@ function MemberRow({
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span className="truncate text-sm font-medium">
-              {displayName || truncatePubkey(member.pubkey)}
+              {displayName || truncateNpub(member.pubkey)}
             </span>
             <RoleBadge role={member.role} />
             {isSelf ? (

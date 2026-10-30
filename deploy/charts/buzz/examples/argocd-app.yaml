@@ -16,9 +16,14 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: oci://ghcr.io/block/buzz/charts
-    chart: buzz
-    targetRevision: 0.1.0
+    # Argo CD >= 3.1 native OCI sources: repoURL must be the FULL chart
+    # artifact path — with the `repoURL: …/charts` + `chart: buzz` split
+    # form, the `chart` field is ignored for oci:// URLs and the fetch
+    # fails with a 403 (`repository:block/buzz/charts:pull` denied). The
+    # spec validator still requires `path`; use "." for OCI sources.
+    repoURL: oci://ghcr.io/block/buzz/charts/buzz
+    path: .
+    targetRevision: 0.1.7
     helm:
       releaseName: buzz
       values: |

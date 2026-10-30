@@ -127,8 +127,10 @@ export async function listRelayMembers(): Promise<RelayMember[]> {
   return event ? relayMembersFromEvent(event) : [];
 }
 
-async function relayRequiresMembership(): Promise<boolean> {
-  return invokeTauri<boolean>("relay_requires_membership");
+export async function relayRequiresMembership(
+  relayUrl?: string,
+): Promise<boolean> {
+  return invokeTauri<boolean>("relay_requires_membership", { relayUrl });
 }
 
 export async function getMyRelayMembershipLookup(): Promise<RelayMembershipLookup> {

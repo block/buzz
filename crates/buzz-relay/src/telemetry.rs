@@ -33,10 +33,12 @@ use opentelemetry_otlp::ExporterBuildError;
 use opentelemetry_sdk::{resource::EnvResourceDetector, trace::SdkTracerProvider, Resource};
 use tracing::{Event, Subscriber};
 use tracing_subscriber::{
+    filter::Targets,
     fmt::{
         format::{Format, FormatEvent, FormatFields, Json, Writer},
         FmtContext,
     },
+    layer::Filter,
     registry::LookupSpan,
     EnvFilter, Layer,
 };
@@ -180,8 +182,44 @@ where
 /// This is intentionally independent from `RUST_LOG`: changing stdout log
 /// verbosity must not remove parent spans from exported traces. Set
 /// `BUZZ_OTEL_FILTER` to override the default targets.
-pub fn otel_env_filter(configured: Option<&str>) -> EnvFilter {
-    EnvFilter::new(configured.unwrap_or("buzz_relay=info,buzz_datastore=info"))
+pub fn otel_filter<S>(configured: Option<&str>) -> DirectiveFilter<S> {
+    directive_filter(configured.unwrap_or("buzz_relay=info,buzz_datastore=info"))
+}
+
+/// A per-layer filter built from `RUST_LOG`-style directives.
+pub type DirectiveFilter<S> = Box<dyn Filter<S> + Send + Sync>;
+
+/// Builds a per-layer filter from `RUST_LOG`-style directives.
+///
+/// A plain list of `target=level` directives filters through [`Targets`],
+/// which keeps no per-span state. [`EnvFilter`] takes a shared lock on every
+/// span enter and exit even when no directive names a span, and every poll
+/// of an instrumented future enters its span, so under a connection burst
+/// that lock is contended on every worker. Directives naming spans or fields
+/// keep `EnvFilter`, which alone understands them.
+pub fn directive_filter<S>(directives: &str) -> DirectiveFilter<S> {
+    match plain_targets(directives) {
+        Some(targets) => Box::new(targets),
+        None => Box::new(EnvFilter::new(directives)),
+    }
+}
+
+/// `directives` as [`Targets`] when each one is a bare level, a bare target
+/// or `target=level`. `Targets` would read a span directive such as
+/// `[conn]=debug` as a target name, so anything else is not plain.
+fn plain_targets(directives: &str) -> Option<Targets> {
+    let plain = directives.split(',').all(|directive| {
+        // `Targets` reads `=debug` as an empty target prefix that matches
+        // everything; `EnvFilter` rejects it. `EnvFilter` reads an empty
+        // level (`buzz_relay=`) as TRACE; `Targets` reads it as ERROR.
+        !directive.is_empty()
+            && !directive.starts_with('=')
+            && !directive.ends_with('=')
+            && directive
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '-' | '='))
+    });
+    plain.then(|| directives.parse().ok()).flatten()
 }
 
 /// Build the OTEL [`Resource`] used by the trace provider.
@@ -223,9 +261,9 @@ pub enum TracerInit {
     Enabled(SdkTracerProvider),
     /// `OTEL_EXPORTER_OTLP_ENDPOINT` was unset — no-op, no connection.
     Disabled,
-    /// Endpoint was set but the exporter failed to build.  The inner error
-    /// string is suitable for a `tracing::warn!` call made by the caller
-    /// **after** `tracing_subscriber::registry()…init()`.
+    /// Endpoint was set but the exporter failed to build. The inner error is
+    /// diagnostic data only and must not be logged: exporter errors can
+    /// include credential-bearing endpoint URLs.
     ExporterBuildFailed(String),
 }
 
@@ -234,7 +272,8 @@ pub enum TracerInit {
 ///
 /// Deliberately does **not** call `tracing::warn!` internally — the subscriber
 /// may not be installed yet at call time, which would silently drop the event.
-/// Callers are responsible for logging [`TracerInit::ExporterBuildFailed`].
+/// Callers may log a fixed, credential-free message for
+/// [`TracerInit::ExporterBuildFailed`], but must not log its inner error.
 pub fn try_init_tracer(resource: Resource) -> TracerInit {
     if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_err() {
         return TracerInit::Disabled;
@@ -278,6 +317,32 @@ mod tests {
     };
     use tracing_subscriber::prelude::*;
 
+    #[test]
+    fn only_plain_target_level_directives_use_targets() {
+        for plain in [
+            "warn",
+            "buzz_relay",
+            "buzz_relay=info,buzz_db::store=DEBUG,off",
+        ] {
+            assert!(plain_targets(plain).is_some(), "{plain}");
+        }
+        for env in [
+            "",
+            "buzz_relay=info,",
+            "buzz_relay=info, sqlx=warn",
+            "[conn]=debug",
+            "buzz_relay[conn{id=1}]=trace",
+            "buzz_relay[{peer}]=debug",
+            "buzz_relay=loud",
+            "=debug",
+            "buzz_relay=info,=debug",
+            "buzz_relay=",
+            "buzz_relay=info,buzz_datastore=",
+        ] {
+            assert!(plain_targets(env).is_none(), "{env}");
+        }
+    }
+
     // Env vars are process-global — serialize tests that mutate them to prevent
     // cross-test races when the suite runs with multiple threads.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -306,6 +371,7 @@ mod tests {
 
     #[test]
     fn trace_context_json_correlates_nested_span_logs() {
+        let _tracing = crate::test_support::tracing_dispatch_lock();
         let output = Arc::new(Mutex::new(Vec::new()));
         let output_writer = Arc::clone(&output);
         let exporter = InMemorySpanExporter::default();
@@ -473,6 +539,7 @@ mod tests {
 
     #[test]
     fn trace_context_lookup_does_not_enable_callsites() {
+        let _tracing = crate::test_support::tracing_dispatch_lock();
         let context_lookup = TraceContextLookup::default();
         let subscriber = tracing_subscriber::registry().with(
             context_lookup

@@ -1,0 +1,58 @@
+-- ── Covering index for channel-id → community lookups ───────────────────────
+-- `channels` is keyed PRIMARY KEY (community_id, id), and every secondary index
+-- leads with community_id:
+--
+--   idx_channels_nip29_group        (community_id, nip29_group_id)
+--   idx_channels_dm_hash           (community_id, participant_hash)
+--   idx_channels_community_type    (community_id, channel_type)
+--   idx_channels_community_visibility (community_id, visibility)
+--   idx_channels_created_by        (community_id, created_by)
+--
+-- The tenant-independent lookups in buzz-db resolve a channel's owning
+-- community *without* a community_id predicate — that independence is the
+-- point (buzz-db/src/lib.rs: the read-seam projects a row's true label
+-- regardless of the fetch query's WHERE clause, which is what makes
+-- Inv_NonInterference non-vacuous):
+--
+--   Db::communities_of_channels  SELECT id, community_id FROM channels
+--                                WHERE id = ANY($1) AND deleted_at IS NULL
+--   Db::community_of_channel     SELECT community_id FROM channels
+--                                WHERE id = $1 AND deleted_at IS NULL
+--
+-- A composite btree is only usable when its leading column is constrained, so
+-- neither query can use the primary key and no other index leads with `id`.
+-- Both therefore sequentially scan `channels` on every call. Observed as the
+-- top "Load by waits (AAS)" on the staging writer (db.r8g.8xlarge, ~53% CPU).
+--
+-- INCLUDE (community_id): both queries select only (id, community_id), so the
+-- index is covering and the planner can serve them index-only, with no heap
+-- fetch for visible rows.
+--
+-- Partial on deleted_at IS NULL: matches both predicates exactly, keeps the
+-- index off soft-deleted history, and lets Postgres skip re-checking the
+-- predicate.
+--
+-- NOT UNIQUE, deliberately. `id` alone is not unique in this table —
+-- handlers/command_executor.rs documents that community_of_channel(channel_id)
+-- is ambiguous because the same channel id can appear under more than one
+-- community. A unique index would encode a false constraint and would fail to
+-- build on any database that already holds such a pair.
+--
+-- Lock note: built without CONCURRENTLY, matching migration 0004's precedent —
+-- sqlx runs each migration inside a transaction and CREATE INDEX CONCURRENTLY
+-- cannot run in one. This takes a SHARE lock on `channels` (blocking writes,
+-- not reads) for the duration of the build. `channels` is a small table
+-- relative to `events`, so this is expected to be brief, but on a large
+-- brownfield database an operator may prefer to pre-build it by hand:
+--
+--   CREATE INDEX CONCURRENTLY idx_channels_id_live
+--       ON channels (id) INCLUDE (community_id)
+--       WHERE deleted_at IS NULL;
+--
+-- IF NOT EXISTS then makes this migration a no-op on that database.
+--
+-- Additive migration: previously applied files must not change checksum.
+
+CREATE INDEX IF NOT EXISTS idx_channels_id_live
+    ON channels (id) INCLUDE (community_id)
+    WHERE deleted_at IS NULL;

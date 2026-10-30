@@ -32,7 +32,7 @@ export function estimateVirtualizedTimelineItemHeight(
 ): number {
   if (item.kind === "bottom-spacer") return 96;
   if (item.kind === "leading-content") return 60;
-  if (item.kind === "day-divider") return 32;
+  if (item.kind === "day-divider") return 56;
   return estimateTimelineItemHeight(item.item);
 }
 
@@ -64,11 +64,12 @@ export function buildVirtualizedItems(
   dayGroups: readonly TimelineDayGroup[],
   leadingContent: React.ReactNode | undefined,
   historyExhausted: boolean,
+  showDayDividers = true,
 ): VirtualizedTimelineItem[] {
   const timelineItems = dayGroups.flatMap((group, groupIndex) => {
     const boundaryProven = groupIndex > 0 || historyExhausted;
     const divider =
-      group.headingTimestamp !== null && boundaryProven
+      showDayDividers && group.headingTimestamp !== null && boundaryProven
         ? [
             {
               kind: "day-divider" as const,
@@ -106,11 +107,18 @@ export function didPrependVirtualizedTimeline(
   previousKeys: readonly string[],
   keys: readonly string[],
 ): boolean {
-  const prependedCount = keys.length - previousKeys.length;
+  const delta = keys.length - previousKeys.length;
   // Virtua shifts its positional size cache by the length delta, so enable
   // `shift` only when every previous slot is the exact suffix it expects.
+  if (delta > 0) {
+    return previousKeys.every((key, index) => key === keys[index + delta]);
+  }
+  // A channel-window refresh drops older pages from the start of the list.
+  // Without `shift` the rows above the reader vanish uncompensated and carry
+  // the reading position away, so a pure head trim shifts too.
   return (
-    prependedCount > 0 &&
-    previousKeys.every((key, index) => key === keys[index + prependedCount])
+    delta < 0 &&
+    keys.length > 0 &&
+    keys.every((key, index) => key === previousKeys[index - delta])
   );
 }

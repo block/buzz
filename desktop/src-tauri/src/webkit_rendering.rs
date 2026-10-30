@@ -2,9 +2,14 @@
 //!
 //! WebKitGTK's dmabuf renderer aborts the web process during startup on some
 //! GPU/driver/compositor combinations, so Buzz comes up with no window at all
-//! and the user has no way to fix it (#2338, upstream tauri#9394). Setting
-//! `WEBKIT_DISABLE_DMABUF_RENDERER=1` avoids the abort by falling back to the
-//! shared-memory buffer path.
+//! and the user has no way to fix it (#2338, upstream tauri#9394).
+//!
+//! Historically Buzz set `WEBKIT_DISABLE_DMABUF_RENDERER=1`, which used to fall
+//! back to shared-memory buffers. On current WebKitGTK that variable leaves the
+//! transport mode empty, so `AcceleratedBackingStore::create()` returns null
+//! and the UI SIGSEGVs the first time compositing is needed (#3654).
+//! `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` is the documented replacement: it keeps
+//! SharedMemory in the transport set and still avoids the hardware dmabuf path.
 //!
 //! WebKit reads each of these variables exactly once per process, so the choice
 //! has to be made before anything initializes — there is no runtime toggle and
@@ -20,7 +25,7 @@
 //!
 //! This is the shape the Tauri ecosystem converged on: clash-verge-rev's
 //! `utils/linux/workarounds.rs` and screenpipe's `linux_webkit_env.rs` both set
-//! the same variable from the same signals at the same point in startup.
+//! WebKit dmabuf env vars from the same signals at the same point in startup.
 
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
@@ -34,21 +39,30 @@ const NVIDIA_PCI_VENDOR: &str = "0x10de";
 /// Where DRM devices advertise their PCI vendor.
 const DRM_ROOT: &str = "/sys/class/drm";
 
-/// Drops the zero-copy dmabuf buffer path. The workaround for #2338.
+/// Prefer shared-memory dmabuf transport. The #3654 replacement for
+/// `WEBKIT_DISABLE_DMABUF_RENDERER` on current WebKitGTK.
+const FORCE_SHM: &str = "WEBKIT_DMABUF_RENDERER_FORCE_SHM";
+/// Legacy kill-switch. Still owned so operators can set `=0` / `=1` and take
+/// the decision away from this module, but never written by the heuristic
+/// (it crashes modern WebKitGTK — see #3654).
 const DISABLE_DMABUF: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
 /// Drops accelerated compositing as well. `--safe-rendering` only.
 const DISABLE_COMPOSITING: &str = "WEBKIT_DISABLE_COMPOSITING_MODE";
 
-/// What the heuristic applies: the #2338 workaround alone, matching the
-/// ecosystem precedents. `DISABLE_COMPOSITING` is deliberately not here — no
-/// report has isolated it as necessary, and it costs more rendering than this.
-const HEURISTIC: [&str; 1] = [DISABLE_DMABUF];
+/// What the heuristic applies: force shared-memory transport without emptying
+/// the buffer mode set (#3654).
+const HEURISTIC: [&str; 1] = [FORCE_SHM];
 
-/// What `--safe-rendering` applies, which is also every variable this module may
-/// set and therefore every variable a user assignment takes away from it. Being
-/// the same list is the invariant: nothing outside it is ever written, so a user
-/// value for any other WebKit variable is not a conflict.
-const OWNED: [&str; 2] = [DISABLE_DMABUF, DISABLE_COMPOSITING];
+/// What `--safe-rendering` applies: FORCE_SHM plus compositing off. Deliberately
+/// omits DISABLE_DMABUF — that variable is the #3654 crash on current WebKit.
+const SAFE_VARS: [&str; 2] = [FORCE_SHM, DISABLE_COMPOSITING];
+
+/// Every variable this module may set, and therefore every variable a user
+/// assignment takes away from it. Being the same list is the invariant: nothing
+/// outside it is ever written, so a user value for any other WebKit variable is
+/// not a conflict. DISABLE_DMABUF stays owned so `=0` still stands the heuristic
+/// down for operators who need the old path or an explicit override.
+const OWNED: [&str; 3] = [FORCE_SHM, DISABLE_DMABUF, DISABLE_COMPOSITING];
 
 /// Reads one environment variable. Injected so the decision is testable without
 /// mutating the process environment. `OsString` rather than `String` because
@@ -124,15 +138,29 @@ fn plan(
             true => Plan::Fatal {
                 diagnostic: conflict(&user_set),
             },
-            false => Plan::Leave {
-                why: format!("{} set in the environment", describe(&user_set)),
-            },
+            false => {
+                let mut why = format!("{} set in the environment", describe(&user_set));
+                // Older docs told people to export DISABLE_DMABUF=1; on current
+                // WebKitGTK that empties the transport and SIGSEGVs (#3654).
+                // Leave the takeover alone, but point survivors at FORCE_SHM.
+                if user_set
+                    .iter()
+                    .any(|(key, value)| *key == DISABLE_DMABUF && value.as_os_str() != "0")
+                {
+                    why.push_str(&format!(
+                        "; warning: {DISABLE_DMABUF} (other than =0) empties the \
+                         transport on current WebKitGTK and SIGSEGVs — prefer \
+                         {FORCE_SHM}=1 (see #3654)"
+                    ));
+                }
+                Plan::Leave { why }
+            }
         };
     }
 
     if safe_rendering {
         return Plan::Apply {
-            vars: &OWNED,
+            vars: &SAFE_VARS,
             why: format!("{SAFE_RENDERING} requested, this launch only"),
         };
     }

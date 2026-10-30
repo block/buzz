@@ -1,0 +1,30 @@
+# Render-only fixture proving Datadog Autodiscovery can scrape the private
+# metrics listener without installing prometheus-operator CRDs. Deployment
+# repositories must replace these illustrative selectors with their agent's
+# actual namespace and pod labels.
+podAnnotations:
+  ad.datadoghq.com/gateway.checks: |
+    {
+      "openmetrics": {
+        "init_config": {},
+        "instances": [
+          {
+            "openmetrics_endpoint": "http://%%host%%:8081/metrics",
+            "service": "buzz-push-gateway",
+            "namespace": "block.buzz_push_gateway",
+            "metrics": ["push_gateway_.*"],
+            "histogram_buckets_as_distributions": true,
+            "send_distribution_buckets": true,
+            "send_monotonic_counter": true,
+            "collect_counters_with_distributions": true
+          }
+        ]
+      }
+    }
+networkPolicy:
+  monitoring:
+    enabled: true
+    namespaceSelector:
+      kubernetes.io/metadata.name: datadog
+    podSelector:
+      app.kubernetes.io/name: datadog-agent

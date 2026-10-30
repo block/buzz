@@ -33,6 +33,7 @@ import {
   sortPersonaRuntimes,
 } from "@/features/agents/ui/agentConfigOptions";
 import { AgentDropdownSelect } from "@/features/agents/ui/agentConfigControls";
+import { HarnessCatalogRetryNotice } from "@/features/agents/ui/HarnessCatalogRetryNotice";
 import {
   AgentConfigFields,
   EMPTY_GLOBAL_CONFIG,
@@ -171,10 +172,12 @@ export function AgentDefaultsEditor({
     [sortedRuntimes],
   );
   const configSurfaceLoading = isLoading || runtimesQuery.isLoading;
-  const configSurfaceError =
-    loadError ||
+  // The runtime catalog failing to warm is retryable in-place (re-run the boot
+  // probe); a global-config load failure is not, so it keeps the restart copy.
+  const runtimeCatalogError =
     runtimesQuery.isError ||
-    (!configSurfaceLoading && sortedRuntimes.length === 0);
+    (!configSurfaceLoading && !loadError && sortedRuntimes.length === 0);
+  const configSurfaceError = loadError || runtimeCatalogError;
 
   function handleConfigChange(next: GlobalAgentConfig) {
     configRef.current = next;
@@ -268,10 +271,16 @@ export function AgentDefaultsEditor({
           Loading…
         </div>
       ) : configSurfaceError ? (
-        <div className="flex items-center gap-2 py-4 text-sm text-destructive">
-          <AlertCircle className="size-4" />
-          Couldn't load agent defaults. Restart the app to try again.
-        </div>
+        runtimeCatalogError && !loadError ? (
+          <div className="py-4">
+            <HarnessCatalogRetryNotice />
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 py-4 text-sm text-destructive">
+            <AlertCircle className="size-4" />
+            Couldn't load agent defaults. Restart the app to try again.
+          </div>
+        )
       ) : (
         <>
           <div className="space-y-1.5">

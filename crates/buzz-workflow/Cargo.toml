@@ -10,6 +10,7 @@ description = "YAML-as-code workflow engine for Buzz"
 [dependencies]
 buzz-core = { workspace = true }
 buzz-db   = { workspace = true }
+buzz-deletion = { workspace = true }
 buzz-kannaka = { path = "../buzz-kannaka" }
 hex         = { workspace = true }
 serde       = { workspace = true }
@@ -26,6 +27,9 @@ tokio       = { workspace = true }
 tracing     = { workspace = true }
 thiserror   = { workspace = true }
 reqwest     = { workspace = true, optional = true }
+
+[dev-dependencies]
+sqlx = { workspace = true }
 
 [features]
 reqwest = ["dep:reqwest"]

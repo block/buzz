@@ -1,9 +1,7 @@
 import type { ManagedAgent, RelayAgent } from "@/shared/api/types";
 
-export type ProfileActivityAgent = Pick<
-  ManagedAgent,
-  "pubkey" | "name" | "status"
-> & {
+export type ProfileActivityAgent = Pick<ManagedAgent, "pubkey" | "name"> & {
+  status: ManagedAgent["status"] | "unknown";
   avatarUrl?: string | null;
 };
 
@@ -39,6 +37,11 @@ export function resolveProfileActivityAgent({
     avatarUrl: profile?.avatarUrl ?? null,
     name: relayAgent?.name ?? profile?.displayName?.trim() ?? "Agent",
     pubkey: effectivePubkey,
-    status: relayAgent?.status === "offline" ? "stopped" : "deployed",
+    status:
+      !relayAgent || relayAgent.status === "unknown"
+        ? "unknown"
+        : relayAgent.status === "offline"
+          ? "stopped"
+          : "deployed",
   };
 }

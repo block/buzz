@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../theme/theme.dart';
-import '../widgets/sheet_divider.dart';
+import '../widgets/sheet_action_section.dart';
+import '../widgets/modal_presentation.dart';
 import 'reminder_service.dart';
 import 'reminder_time_presets.dart';
 
@@ -37,56 +38,57 @@ void showRemindMeLaterSheet({
     }
   }
 
-  showModalBottomSheet<void>(
+  showBuzzModalBottomSheet<void>(
     context: context,
+    title: 'Remind me about this message',
     showDragHandle: true,
     builder: (sheetContext) => SafeArea(
-      child: SingleChildScrollView(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(
-            Grid.gutter,
-            0,
-            Grid.gutter,
-            Grid.xs,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Padding(
-                padding: const EdgeInsets.only(
-                  left: Grid.half,
-                  bottom: Grid.xxs,
+      child: IconTheme.merge(
+        data: const IconThemeData(size: 22),
+        child: SingleChildScrollView(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(
+              Grid.gutter,
+              0,
+              Grid.gutter,
+              Grid.xs,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SheetActionSection(
+                  children: [
+                    for (final preset in reminderTimePresets)
+                      ListTile(
+                        leading: const Icon(BuzzIcons.clock),
+                        title: Text(preset.label),
+                        onTap: () {
+                          Navigator.of(sheetContext).pop();
+                          submit(preset.getTimestamp());
+                        },
+                      ),
+                  ],
                 ),
-                child: Text(
-                  'Remind me about this message',
-                  style: Theme.of(sheetContext).textTheme.titleSmall,
+                SheetActionSection(
+                  children: [
+                    ListTile(
+                      leading: const Icon(BuzzIcons.calendarClock),
+                      title: const Text('Pick a date & time'),
+                      onTap: () async {
+                        final navigator = Navigator.of(sheetContext);
+                        final timestamp = await _pickCustomDateTime(context);
+                        // Cancelled or not-in-the-future: keep the preset sheet
+                        // open so retrying doesn't mean long-pressing again.
+                        if (timestamp == null) return;
+                        if (navigator.mounted) navigator.pop();
+                        await submit(timestamp);
+                      },
+                    ),
+                  ],
                 ),
-              ),
-              for (final preset in reminderTimePresets)
-                ListTile(
-                  leading: const Icon(LucideIcons.clock),
-                  title: Text(preset.label),
-                  onTap: () {
-                    Navigator.of(sheetContext).pop();
-                    submit(preset.getTimestamp());
-                  },
-                ),
-              const SheetDivider(),
-              ListTile(
-                leading: const Icon(LucideIcons.calendarClock),
-                title: const Text('Pick a date & time'),
-                onTap: () async {
-                  final navigator = Navigator.of(sheetContext);
-                  final timestamp = await _pickCustomDateTime(context);
-                  // Cancelled or not-in-the-future: keep the preset sheet
-                  // open so retrying doesn't mean long-pressing again.
-                  if (timestamp == null) return;
-                  if (navigator.mounted) navigator.pop();
-                  await submit(timestamp);
-                },
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -98,17 +100,20 @@ void showRemindMeLaterSheet({
 /// timestamp in seconds, or null when cancelled or not in the future.
 Future<int?> _pickCustomDateTime(BuildContext context) async {
   final now = DateTime.now();
-  final date = await showDatePicker(
+  final date = await showBuzzDialog<DateTime>(
     context: context,
-    initialDate: now,
-    firstDate: DateTime(now.year, now.month, now.day),
-    lastDate: now.add(const Duration(days: 365 * 2)),
+    builder: (_) => DatePickerDialog(
+      initialDate: now,
+      firstDate: DateTime(now.year, now.month, now.day),
+      lastDate: now.add(const Duration(days: 365 * 2)),
+    ),
   );
   if (date == null || !context.mounted) return null;
 
-  final time = await showTimePicker(
+  final time = await showBuzzDialog<TimeOfDay>(
     context: context,
-    initialTime: const TimeOfDay(hour: 9, minute: 0),
+    builder: (_) =>
+        const TimePickerDialog(initialTime: TimeOfDay(hour: 9, minute: 0)),
   );
   if (time == null) return null;
 

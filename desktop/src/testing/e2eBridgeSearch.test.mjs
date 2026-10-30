@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mockSearchHitMatches } from "./e2eBridge.ts";
+import { mockSearchHitMatches } from "./e2eBridgeSearch.ts";
 
 const NO_FILTERS = { query: "", authorSet: null };
 

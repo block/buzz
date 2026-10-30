@@ -358,7 +358,6 @@ export function ChannelGroupSection({
   onSortModeChange,
   actionsTestId,
   title,
-  unreadChannelCounts,
   unreadChannelIds,
   sections,
   assignments,
@@ -406,7 +405,6 @@ export function ChannelGroupSection({
   onSortModeChange?: (mode: ChannelSortMode) => void;
   actionsTestId?: string;
   title: string;
-  unreadChannelCounts: ReadonlyMap<string, number>;
   unreadChannelIds: ReadonlySet<string>;
   hasUnread?: boolean;
   onMarkAllRead?: () => void;
@@ -440,7 +438,6 @@ export function ChannelGroupSection({
                       channel={channel}
                       activeWorking={activeWorkingByChannelId?.get(channel.id)}
                       hasUnread={unreadChannelIds.has(channel.id)}
-                      unreadCount={unreadChannelCounts.get(channel.id) ?? 0}
                       isMuted={mutedChannelIds?.has(channel.id)}
                       isActive={
                         isActiveChannel && selectedChannelId === channel.id
@@ -453,7 +450,6 @@ export function ChannelGroupSection({
                     channel={channel}
                     activeWorking={activeWorkingByChannelId?.get(channel.id)}
                     hasUnread={unreadChannelIds.has(channel.id)}
-                    unreadCount={unreadChannelCounts.get(channel.id) ?? 0}
                     isMuted={mutedChannelIds?.has(channel.id)}
                     isActive={
                       isActiveChannel && selectedChannelId === channel.id
@@ -548,7 +544,6 @@ export function CustomChannelSection({
   isActiveChannel,
   activeWorkingByChannelId,
   selectedChannelId,
-  unreadChannelCounts,
   unreadChannelIds,
   sections,
   assignments,
@@ -585,7 +580,6 @@ export function CustomChannelSection({
   isActiveChannel: boolean;
   activeWorkingByChannelId?: ReadonlyMap<string, ActiveChannelTurnSummary>;
   selectedChannelId: string | null;
-  unreadChannelCounts: ReadonlyMap<string, number>;
   unreadChannelIds: ReadonlySet<string>;
   sections: ChannelSection[];
   assignments: Record<string, string>;
@@ -627,10 +621,11 @@ export function CustomChannelSection({
         <DroppableSectionBody sectionId={section.id}>
           <SidebarGroup
             className={cn(
-              "group/sidebar-section select-none",
+              "group/sidebar-section select-none transition-[opacity,transform] duration-100 ease-out motion-reduce:transition-none",
               isDragging && "opacity-30",
             )}
             data-section-actions-open={actionsMenuOpen || undefined}
+            data-sidebar-drag-state={isDragging ? "dragging" : undefined}
           >
             <ContextMenu>
               <ContextMenuTrigger asChild>
@@ -743,9 +738,6 @@ export function CustomChannelSection({
                                   channel.id,
                                 )}
                                 hasUnread={unreadChannelIds.has(channel.id)}
-                                unreadCount={
-                                  unreadChannelCounts.get(channel.id) ?? 0
-                                }
                                 isMuted={mutedChannelIds?.has(channel.id)}
                                 isActive={
                                   isActiveChannel &&

@@ -1,6 +1,7 @@
 use std::cmp::Reverse;
 
 use crate::client::{normalize_events, BuzzClient};
+use crate::commands::event_output::format_events;
 use crate::error::CliError;
 
 const VALID_FEED_TYPES: &[&str] = &["mentions", "needs_action", "activity", "agent_activity"];
@@ -42,25 +43,7 @@ pub async fn cmd_get_feed(
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     events.sort_by_key(|e| Reverse(e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0)));
     let normalized = normalize_events(&events);
-    let output = match format {
-        crate::OutputFormat::Compact => {
-            let evts: Vec<serde_json::Value> =
-                serde_json::from_str(&normalized).unwrap_or_default();
-            let compact: Vec<serde_json::Value> = evts
-                .iter()
-                .map(|e| {
-                    serde_json::json!({
-                        "id": e.get("id").cloned().unwrap_or_default(),
-                        "content": e.get("content").cloned().unwrap_or_default(),
-                        "created_at": e.get("created_at").cloned().unwrap_or_default(),
-                    })
-                })
-                .collect();
-            serde_json::to_string(&compact).unwrap_or_default()
-        }
-        crate::OutputFormat::Json => normalized,
-    };
-    println!("{output}");
+    println!("{}", format_events(&normalized, format));
     Ok(())
 }
 

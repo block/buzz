@@ -1,17 +1,16 @@
 import { AgentDefaultsEditor } from "@/features/agents/ui/AgentDefaultsEditor";
-import { SectionHeader } from "@/shared/ui/PageHeader";
+import { SettingsOptionGroup } from "./SettingsOptionGroup";
 
 export function AgentDefaultsSettingsCard() {
   return (
-    <section
-      className="min-w-0 space-y-4"
+    <SettingsOptionGroup
       data-testid="settings-global-agent-config"
+      description="Provider, model, effort, and environment settings inherited by local agents. Agent-specific settings always take priority."
+      title="Agent defaults"
     >
-      <SectionHeader
-        title="Agent defaults"
-        description="Provider, model, effort, and environment settings inherited by local agents. Agent-specific settings always take priority."
-      />
-      <AgentDefaultsEditor />
-    </section>
+      <div className="px-4 py-4">
+        <AgentDefaultsEditor layout="flat" />
+      </div>
+    </SettingsOptionGroup>
   );
 }

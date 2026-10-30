@@ -1,4 +1,4 @@
-//! Native (Linux) desktop-notification helper.
+//! Native desktop-notification helpers.
 //!
 //! `tauri-plugin-notification` posts a notification by calling `notify_rust`'s
 //! `show()` and then immediately dropping the returned `NotificationHandle`.
@@ -13,13 +13,15 @@
 //! action, which we forward to the frontend so it can focus the window and
 //! route to the notification target.
 
+pub(crate) const NATIVE_NOTIFICATION_ACTIVATED_EVENT: &str = "native-notification-activated";
+
 /// Show a desktop notification natively.
 ///
-/// On Linux this uses the connection-preserving path described above. On other
-/// platforms the bundled notification plugin already works correctly, so the
-/// frontend never calls this and we simply report that it is unused.
+/// Linux uses the connection-preserving D-Bus path described above. macOS uses
+/// one application-lifetime `UNUserNotificationCenterDelegate`; it does not
+/// allocate a listener or waiter for each notification.
 #[tauri::command]
-pub fn show_native_notification(
+pub async fn show_native_notification(
     app: tauri::AppHandle,
     title: String,
     body: Option<String>,
@@ -31,20 +33,23 @@ pub fn show_native_notification(
         Ok(())
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app;
+        crate::macos_notifications::show(title, body, target).await
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = (&app, &title, &body, &target);
-        Err("show_native_notification is only supported on Linux".to_string())
+        Err("show_native_notification is only supported on Linux and macOS".to_string())
     }
 }
 
 #[cfg(target_os = "linux")]
 mod linux {
+    use super::NATIVE_NOTIFICATION_ACTIVATED_EVENT;
     use tauri::Emitter;
-
-    /// Emitted to the frontend when the user clicks a native notification. The
-    /// payload is the opaque target object the frontend passed in.
-    const ACTIVATE_EVENT: &str = "native-notification-activated";
 
     pub fn show(
         app: tauri::AppHandle,
@@ -96,7 +101,7 @@ mod linux {
 
                 // The frontend focuses the window on activation (the same path
                 // every other platform uses), so we only forward the target.
-                let _ = app.emit(ACTIVATE_EVENT, target);
+                let _ = app.emit(NATIVE_NOTIFICATION_ACTIVATED_EVENT, target);
             });
         });
     }

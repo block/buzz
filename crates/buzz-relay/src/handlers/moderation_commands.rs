@@ -72,6 +72,7 @@ use crate::handlers::moderation_authz::{
     authorize_moderation_action, ModerationAction, ModerationTarget,
 };
 use crate::handlers::moderation_notices::{send_moderation_notice, ModerationNotice};
+use crate::handlers::report_resolution::{enforcement_audit_action, resolve_report_decision_only};
 use crate::state::AppState;
 use buzz_db::moderation::NewAction;
 
@@ -92,9 +93,11 @@ pub async fn handle_moderation_command(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     event: &Event,
-) -> Result<(), String> {
-    let kind = event.kind.as_u16() as u32;
+) -> Result<(), super::ingest::IngestError> {
+    use super::ingest::{BanRefusal, IngestError};
     let actor = event.pubkey.to_bytes().to_vec();
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_command_ban_check(tenant.community()).await;
 
     // A ban is an admission boundary, not only a WebSocket-auth check. HTTP
     // NIP-98 requests and already-authenticated sockets can reach this handler
@@ -104,8 +107,29 @@ pub async fn handle_moderation_command(
         .db
         .moderation_restriction_state(tenant.community(), &actor)
         .await
-        .map_err(|e| error(format!("database error checking restriction state: {e}")))?;
-    ensure_actor_not_banned(&restriction)?;
+        .map_err(|e| {
+            IngestError::ban(
+                BanRefusal::Unavailable,
+                IngestError::Rejected(error(format!(
+                    "database error checking restriction state: {e}"
+                ))),
+            )
+        })?;
+    ensure_actor_not_banned(&restriction)
+        .map_err(|e| IngestError::ban(BanRefusal::Banned, IngestError::Rejected(e)))?;
+    execute_moderation_command(tenant, state, event, &actor)
+        .await
+        .map_err(IngestError::Rejected)
+}
+
+/// Run an admitted moderation command.
+async fn execute_moderation_command(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+    actor: &[u8],
+) -> Result<(), String> {
+    let kind = event.kind.as_u16() as u32;
 
     // Freshness: reject stale/replayed commands (they are never stored).
     let event_ts = event.created_at.as_secs() as i64;
@@ -121,11 +145,11 @@ pub async fn handle_moderation_command(
     }
 
     match kind {
-        KIND_MODERATION_BAN => handle_ban(tenant, state, event, &actor).await,
-        KIND_MODERATION_UNBAN => handle_unban(tenant, state, event, &actor).await,
-        KIND_MODERATION_TIMEOUT => handle_timeout(tenant, state, event, &actor).await,
-        KIND_MODERATION_UNTIMEOUT => handle_untimeout(tenant, state, event, &actor).await,
-        KIND_MODERATION_RESOLVE_REPORT => handle_resolve(tenant, state, event, &actor).await,
+        KIND_MODERATION_BAN => handle_ban(tenant, state, event, actor).await,
+        KIND_MODERATION_UNBAN => handle_unban(tenant, state, event, actor).await,
+        KIND_MODERATION_TIMEOUT => handle_timeout(tenant, state, event, actor).await,
+        KIND_MODERATION_UNTIMEOUT => handle_untimeout(tenant, state, event, actor).await,
+        KIND_MODERATION_RESOLVE_REPORT => handle_resolve(tenant, state, event, actor).await,
         other => Err(invalid(format!(
             "unexpected moderation command kind: {other}"
         ))),
@@ -175,6 +199,24 @@ async fn handle_ban(
         )
         .await
         .map_err(|e| error(format!("database error: {e}")))?;
+    state.invalidate_restriction_cache(tenant.community(), &target);
+
+    // Live enforcement: close open sessions for the banned principal now —
+    // this pod's sockets synchronously (fenced to this community) and every
+    // other pod's via the fire-and-forget cross-pod fan-out. The paired helper
+    // makes "close locally but forget the Redis publish" unrepresentable, so a
+    // live ban takes effect immediately, everywhere (decision 4).
+    // This runs before the audit insert, so an audit failure cannot leave the
+    // banned member connected. A failed owned-agent lookup is still reported
+    // (after the notice below) instead of claiming success.
+    let revoked = state
+        .revoke_live_access(
+            tenant,
+            &target,
+            &event.id.to_hex(),
+            "blocked: you are banned from this community",
+        )
+        .await;
 
     let action_id = insert_audit(
         state,
@@ -187,18 +229,6 @@ async fn handle_ban(
     )
     .await?;
 
-    // Live enforcement: close open sessions for the banned principal now —
-    // this pod's sockets synchronously (fenced to this community) and every
-    // other pod's via the fire-and-forget cross-pod fan-out. The paired helper
-    // makes "close locally but forget the Redis publish" unrepresentable, so a
-    // live ban takes effect immediately, everywhere (decision 4).
-    state.disconnect_pubkey_clusterwide(
-        tenant,
-        &target,
-        &event.id.to_hex(),
-        "blocked: you are banned from this community",
-    );
-
     // Notice DM: tell the banned user the terms of the restriction.
     let public_reason = reason.clone().unwrap_or_default();
     if let Err(e) = send_moderation_notice(
@@ -209,7 +239,9 @@ async fn handle_ban(
             action_id,
             kind: "ban".to_string(),
             public_reason,
+            timeout_until: None,
         },
+        chrono::Utc::now(),
     )
     .await
     {
@@ -219,7 +251,9 @@ async fn handle_ban(
     }
 
     info!(target = %hex::encode(&target), "community ban applied");
-    Ok(())
+    revoked
+        .map(|_| ())
+        .map_err(|e| format!("error: ban applied but live revoke incomplete: {e}"))
 }
 
 // ── 9041: unban ──────────────────────────────────────────────────────────────
@@ -251,6 +285,7 @@ async fn handle_unban(
     if !lifted {
         return Err(invalid("member is not banned"));
     }
+    state.invalidate_restriction_cache(tenant.community(), &target);
 
     insert_audit(state, tenant, actor, "unban", Some(&target), None, None).await?;
 
@@ -293,6 +328,7 @@ async fn handle_timeout(
         )
         .await
         .map_err(|e| error(format!("database error: {e}")))?;
+    state.invalidate_restriction_cache(tenant.community(), &target);
 
     let action_id = insert_audit(
         state,
@@ -314,7 +350,9 @@ async fn handle_timeout(
             action_id,
             kind: "timeout".to_string(),
             public_reason,
+            timeout_until: Some(muted_until),
         },
+        chrono::Utc::now(),
     )
     .await
     {
@@ -354,6 +392,7 @@ async fn handle_untimeout(
     if !cleared {
         return Err(invalid("member is not timed out"));
     }
+    state.invalidate_restriction_cache(tenant.community(), &target);
 
     insert_audit(state, tenant, actor, "untimeout", Some(&target), None, None).await?;
 
@@ -363,7 +402,11 @@ async fn handle_untimeout(
 
 // ── 9044: resolve report ─────────────────────────────────────────────────────
 
-async fn handle_resolve(
+/// Re-drive a 9044 resolve command through the atomic decision helper.
+/// Made `pub(crate)` for integration tests — allows tests to call through the
+/// real `handle_resolve → resolve_report_decision_only` path without all the
+/// NIP-42/freshness boilerplate that `handle_moderation_command` adds.
+pub(crate) async fn handle_resolve(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     event: &Event,
@@ -416,19 +459,6 @@ async fn handle_resolve(
         .map_err(|e| error(format!("database error: {e}")))?
         .ok_or_else(|| invalid("report not found in this community"))?;
 
-    // Don't write an audit row for a report someone else already closed. The
-    // DB's `WHERE status='open'` on resolve_moderation_report below is the real
-    // guard; this early check keeps a lost-race resolve (two mods on the same
-    // report) from leaving an orphan audit row behind the failed resolve. A tiny
-    // residual race remains — the row can flip to closed between this read and
-    // the DB write — but that window yields only an audit row plus a failed
-    // resolve, which is tolerated.
-    if report.status != "open" {
-        return Err(invalid(
-            "report is not open (already resolved or dismissed)",
-        ));
-    }
-
     // Carry the report's own target into the audit row so `delete`/`kick`/`ban`
     // resolutions record what they acted on.
     let (target_pubkey, target_event_id) = match &report.target {
@@ -437,68 +467,46 @@ async fn handle_resolve(
         buzz_db::moderation::ReportTarget::Blob(_) => (None, None),
     };
 
-    // Distinguish a resolution *decision* from the actual *enforcement* row.
-    // A one-click resolve with action=ban records the moderator's decision; the
-    // client then composes the real 9040, which writes its own "ban" enforcement
-    // row. `resolve:*` decision rows are part of the moderation_actions DB
-    // vocabulary so audit consumers can tell the two apart and don't double-count.
-    // `dismiss_report` and `escalate` stay unprefixed — escalate especially must
-    // remain queryable for the platform-safety lane.
-    let audit_action = resolution_audit_action(&action);
-    let action_id = insert_audit(
+    // Route through the shared atomic orchestration:
+    // - CAS `open → terminal` AND decision audit row in ONE transaction.
+    // - No orphan audit row on concurrent close (transaction rolls back both).
+    // - Preserves the event's signed `status` field verbatim (resolved|dismissed).
+    // - `actor_authority = "community"` marks this as a 9044 community-path resolution.
+    let audit_action = enforcement_audit_action(&action);
+    let reporter_pubkey = report.reporter_pubkey.clone();
+    let report_id = report.id;
+    match resolve_report_decision_only(
         state,
         tenant,
-        actor,
+        report_id,
+        &status,
         audit_action,
+        actor,
+        "community",
         target_pubkey,
         target_event_id,
+        report.channel_id,
         reason.as_deref(),
-    )
-    .await?;
-
-    let resolved = state
-        .db
-        .resolve_moderation_report(
-            tenant.community(),
-            report.id,
-            &status,
-            actor,
-            Some(action_id),
-        )
-        .await
-        .map_err(|e| error(format!("database error: {e}")))?;
-    if !resolved {
-        return Err(invalid(
-            "report is not open (already resolved or dismissed)",
-        ));
-    }
-
-    // Close the loop: DM the reporter that their report was reviewed.
-    let summary = reason.clone().unwrap_or_else(|| match status.as_str() {
-        "dismissed" => "Your report was reviewed and dismissed.".to_string(),
-        _ => "Your report was reviewed and acted on.".to_string(),
-    });
-    if let Err(e) = send_moderation_notice(
-        tenant,
-        state,
-        &report.reporter_pubkey,
-        ModerationNotice::ReportResolved {
-            report_id: report.id,
-            status: status.clone(),
-            summary,
-        },
+        &reporter_pubkey,
     )
     .await
     {
-        info!(error = %e, "report-resolution notice DM delivery failed (report still resolved)");
+        Ok(_) => {
+            info!(report_id = %report_id, status = %status, action = %action, "report resolved via 9044");
+            Ok(())
+        }
+        Err(crate::handlers::report_resolution::ResolutionError::NotOpen(_)) => Err(invalid(
+            "report is not open (already resolved or dismissed)",
+        )),
+        Err(e) => Err(error(format!("resolution failed: {e:?}"))),
     }
-
-    info!(report_id = %report.id, status = %status, action = %action, "report resolved");
-    Ok(())
 }
 
 // ── shared helpers ────────────────────────────────────────────────────────────
 
+/// Map a 9044 action to the audit-row action string (used in tests to verify
+/// DB vocabulary compliance).
+#[cfg_attr(not(test), allow(dead_code))]
 fn resolution_audit_action(action: &str) -> &'static str {
     match action {
         "dismiss" => "dismiss_report",
@@ -538,6 +546,7 @@ async fn insert_audit(
                 public_reason,
                 private_reason: None,
                 matched_principal: None,
+                actor_authority: None, // community path
             },
         )
         .await

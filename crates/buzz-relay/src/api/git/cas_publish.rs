@@ -1371,6 +1371,15 @@ mod tests {
     }
 
     #[test]
+    fn published_head_moves_to_surviving_branch_after_current_branch_deletion() {
+        let refs = BTreeMap::from([("refs/heads/master".to_string(), "1".repeat(40))]);
+        assert_eq!(
+            resolve_published_head(&refs, "refs/heads/main".to_string(), "refs/heads/main"),
+            "refs/heads/master"
+        );
+    }
+
+    #[test]
     fn digest_from_key_strips_prefix() {
         let k = format!("manifests/{}", "a".repeat(64));
         let d = digest_from_manifest_key(&k).unwrap();

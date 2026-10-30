@@ -37,8 +37,10 @@ class Provisioner:
     def healthcheck(self):
         self.healthchecked = True
 
-    def create_trial(self, run_id, trial_id, manifest, channel_label=None):
-        self.created = (run_id, trial_id, manifest, channel_label)
+    def create_trial(
+        self, run_id, trial_id, manifest, channel_label=None, task_name=None
+    ):
+        self.created = (run_id, trial_id, manifest, channel_label, task_name)
         return TrialHandle(
             run_id,
             trial_id,
@@ -91,6 +93,7 @@ async def test_agent_lifecycle_and_context(tmp_path, manifest_data):
     assert provisioner.created[:2] == ("run-1", str(context_id))
     # The task short name labels the trial channel for spectator GUIs.
     assert provisioner.created[3] == "hello-world"
+    assert provisioner.created[4] == "hello-world"
     assert provisioner.torn_down.channel_id == "channel-1"
     assert runtime.called["instruction"] == "solve it"
     assert (

@@ -156,7 +156,7 @@ export function estimateRowHeight(
 
 // Dividers are short, fixed-height rows; reserving their true height keeps the
 // estimate honest without a content scan.
-const DIVIDER_HEIGHT = 32;
+const DIVIDER_HEIGHT = 56;
 const SYSTEM_GROUP_HEIGHT = 80;
 
 /**

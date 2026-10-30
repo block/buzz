@@ -150,12 +150,36 @@ fn reserved_keys_include_respond_to_gate() {
     // Respond-to mode + allowlist control who the agent answers.
     // Overriding via env_vars would let the running agent answer
     // anyone even when the UI/record says owner-only.
-    for key in ["BUZZ_ACP_RESPOND_TO", "BUZZ_ACP_RESPOND_TO_ALLOWLIST"] {
+    for key in [
+        "BUZZ_ACP_RESPOND_TO",
+        "BUZZ_ACP_RESPOND_TO_ALLOWLIST",
+        "BUZZ_ACP_ALLOWED_RESPOND_TO",
+    ] {
         assert!(is_reserved_env_key(key), "{key} should be reserved");
         let agent = map(&[(key, "anyone")]);
         let merged = merged_user_env(&BTreeMap::new(), &agent);
         assert!(merged.is_empty(), "{key} should be stripped");
     }
+}
+
+#[test]
+fn reserved_keys_include_remote_lifetime_policy() {
+    for key in [
+        "BUZZ_ACP_EXIT_AFTER_INACTIVITY",
+        "BUZZ_ACP_IDLE_POOL_SLEEP",
+        "BUZZ_ACP_NO_PRESENCE",
+    ] {
+        assert!(is_reserved_env_key(key), "{key} should be reserved");
+        let agent = map(&[(key, "0")]);
+        assert!(merged_user_env(&BTreeMap::new(), &agent).is_empty());
+    }
+}
+
+#[test]
+fn reserved_keys_include_desktop_acp_session_policy() {
+    assert!(is_reserved_env_key("BUZZ_ACP_SESSION_POLICY"));
+    let agent = map(&[("BUZZ_ACP_SESSION_POLICY", "thread")]);
+    assert!(merged_user_env(&BTreeMap::new(), &agent).is_empty());
 }
 
 #[test]
@@ -166,6 +190,7 @@ fn reserved_keys_include_code_execution_surface() {
         "BUZZ_ACP_AGENT_COMMAND",
         "BUZZ_ACP_AGENT_ARGS",
         "BUZZ_ACP_MCP_COMMAND",
+        "BUZZ_ACP_LAUNCH_PREFIX",
     ] {
         assert!(is_reserved_env_key(key), "{key} should be reserved");
     }
@@ -179,6 +204,50 @@ fn reserved_keys_include_relay_url() {
     let agent = map(&[("BUZZ_RELAY_URL", "ws://attacker.example")]);
     let merged = merged_user_env(&BTreeMap::new(), &agent);
     assert!(merged.is_empty());
+}
+
+#[test]
+fn reserved_keys_include_git_config_family() {
+    // Buzz stages the relay credential helper and the agent identity/signing
+    // config into the child through the GIT_CONFIG_* indexed env family. A
+    // user override lands after the helper on the spawn command, so a single
+    // GIT_CONFIG_COUNT=0 (or any index collision) silently orphans it. The
+    // whole family — the bare name and every GIT_CONFIG_* var — must be
+    // stripped from persona/agent/global overrides.
+    for key in [
+        "GIT_CONFIG",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_CONFIG_PARAMETERS",
+        // Case-insensitive: the shape the child getenv resolves is uppercase,
+        // but the validator/filter must not be fooled by a lowercased key.
+        "git_config_count",
+    ] {
+        assert!(is_reserved_env_key(key), "{key} should be reserved");
+        let agent = map(&[(key, "0")]);
+        assert!(
+            merged_user_env(&BTreeMap::new(), &agent).is_empty(),
+            "{key} should be stripped from overrides"
+        );
+        assert!(
+            validate_user_env_keys(&map(&[(key, "0")])).is_err(),
+            "{key} should be rejected at save time"
+        );
+    }
+}
+
+#[test]
+fn git_config_reservation_does_not_catch_unrelated_names() {
+    // The prefix rule matches `GIT_CONFIG` and `GIT_CONFIG_*` only — a name
+    // that merely starts with those letters but is a distinct identifier
+    // (no underscore boundary) stays user-overridable.
+    for key in ["GIT_CONFIGURATION", "GIT_CONFIGX", "MY_GIT_CONFIG"] {
+        assert!(!is_reserved_env_key(key), "{key} must not be reserved");
+    }
 }
 
 // ── validate_user_env_keys ─────────────────────────────────────────
@@ -487,4 +556,20 @@ fn deploy_model_precedence_none_when_both_absent() {
 
     let effective = persona_model.clone().or(record_model.clone());
     assert_eq!(effective, None);
+}
+
+#[test]
+fn launch_prefix_cannot_be_saved_or_merged_from_user_environment() {
+    for key in [
+        "BUZZ_ACP_LAUNCH_PREFIX",
+        "buzz_acp_launch_prefix",
+        "Buzz_Acp_Launch_Prefix",
+    ] {
+        let env = map(&[(key, r#"["/usr/bin/env"]"#)]);
+        assert!(validate_user_env_keys(&env)
+            .unwrap_err()
+            .contains("reserved"));
+        assert!(merged_user_env(&env, &BTreeMap::new()).is_empty());
+        assert!(merged_user_env(&BTreeMap::new(), &env).is_empty());
+    }
 }

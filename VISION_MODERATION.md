@@ -14,7 +14,7 @@ Moderation splits the way it does on every serious platform:
 
 **Community moderation** — subjective, per-community rule enforcement. Your owners and admins decide what's spam in *your* community, what crosses *your* line, who gets a second chance. This layer belongs to the community and never reaches past it: an admin's authority ends at the community boundary, structurally, because every moderation decision is scoped to the tenant it was made in.
 
-**Platform safety** — the severe class: illegal content, network-level abuse, legal reporting obligations. That is never delegated to community admins. A community owner or admin can **escalate** a report upward, and the escalation is recorded durably for the platform operator's safety process. The community layer is the front line; the platform layer is the backstop.
+**Platform safety** — the severe class: illegal content, network-level abuse, legal reporting obligations. That is never delegated to community admins. A community owner or admin can **escalate** a report upward, and the escalation is recorded durably for the platform operator's safety process. The platform-safety layer belongs to whoever operates the relay. In a hosted multi-community deployment, that means the hosting platform's safety process; in a self-hosted deployment, it means the operator themselves, because the party hosting the content carries the legal accountability. The community layer is the front line; the platform layer is the backstop.
 
 This document is about the first layer. The second has its own lane.
 
@@ -54,7 +54,7 @@ This document is about the first layer. The second has its own lane.
 
 **Escalation is a hook today, not a pipeline.** Escalating writes a durable, queryable record for the platform operator — but the platform-side inbox that consumes it is a separate build. The substrate is there; the tooling above it comes next.
 
-**Two roles, not three.** Owners and admins moderate. There is no volunteer-moderator tier yet — deliberately. Authority is structured as capabilities, so adding a moderator tier later is a policy change, not a rewrite. We'd rather ship a loop that works and grow the org chart when communities ask for it.
+**Two roles, not three.** Owners and admins moderate. There is no volunteer-moderator tier yet — deliberately. Authority is structured as capabilities, so adding a moderator tier later is a policy change, not a rewrite. The relay/platform layer has its own operator-and-moderator roster, distinct from community owner and admin roles. We'd rather ship a loop that works and grow the org chart when communities ask for it.
 
 **Notices are best-effort.** The DMs that close the loop never block enforcement — a ban lands even if the notice fails. Enforcement is the promise; notification is the courtesy. A later platform-escalation pass should also make escalated reports say exactly that, instead of reusing the generic handled message.
 
