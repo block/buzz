@@ -1,4 +1,5 @@
 import '../hosted/hosted_relay_auth.dart';
+
 import 'dart:async';
 import 'dart:developer' as developer;
 import 'dart:math';
@@ -110,7 +111,22 @@ typedef CommunityPushLeaseRevocationEnqueuer =
 
 final communityPushLeaseRevocationEnqueuerProvider =
     Provider<CommunityPushLeaseRevocationEnqueuer>((ref) {
-      return ref.watch(buzzPushLeaseRevocationOutboxProvider).enqueueCommunity;
+      final outbox = ref.watch(buzzPushLeaseRevocationOutboxProvider);
+      return (community) => outbox.enqueueCommunity(
+        community,
+        remainingCommunities: ref.read(communityListProvider).value ?? const [],
+      );
+    });
+
+/// Journals gateway opt-out independently of the community's relay tombstone.
+final communityPushGatewayCleanupEnqueuerProvider =
+    Provider<CommunityPushLeaseRevocationEnqueuer>((ref) {
+      final outbox = ref.watch(buzzPushLeaseRevocationOutboxProvider);
+      return (community) => outbox.enqueueCommunity(
+        community,
+        gatewayOnly: true,
+        remainingCommunities: ref.read(communityListProvider).value ?? const [],
+      );
     });
 
 typedef CommunityPushLeaseRevocationTrigger = Future<void> Function();
@@ -509,6 +525,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
 
   Future<void> setPushNotificationsEnabled(String id, bool enabled) async {
     var shouldDeactivate = false;
+    var gatewayCleanupJournaled = false;
     await _serializePushMutation(() async {
       final storage = ref.read(communityStorageProvider);
       final current = state.value ?? await storage.loadAll();
@@ -532,10 +549,20 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       await storage.save(updated);
       final updatedList = [...current]..[index] = updated;
       state = AsyncData(updatedList);
-      await syncCommunitySnapshot(ref, updatedList);
       shouldDeactivate =
           !enabled && pushState.pendingTombstoneGeneration != null;
+      if (!enabled) {
+        // Save local opt-out first, then journal the exact gateway target before
+        // any native revoke can blank the inventory needed for recovery.
+        gatewayCleanupJournaled = await ref.read(
+          communityPushGatewayCleanupEnqueuerProvider,
+        )(updated);
+      }
+      await syncCommunitySnapshot(ref, updatedList);
     });
+    if (gatewayCleanupJournaled) {
+      unawaited(ref.read(communityPushLeaseRevocationTriggerProvider)());
+    }
     if (shouldDeactivate) {
       try {
         await retryPendingPushLeaseTombstone(id);
@@ -608,6 +635,15 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     final generation = pendingGeneration;
     if (community == null || generation == null) return;
     try {
+      final current =
+          state.value ?? await ref.read(communityStorageProvider).loadAll();
+      final pending = current.where((candidate) => candidate.id == id);
+      if (pending.isEmpty ||
+          pending.single.pushNotificationsEnabled ||
+          pending.single.pushSubscriptionState.pendingTombstoneGeneration !=
+              generation) {
+        return;
+      }
       await ref.read(communityPushLeaseDeactivatorProvider)(
         community,
         generation: generation,

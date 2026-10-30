@@ -270,8 +270,13 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     useListenable(apnsDeviceToken);
+    useListenable(pushEndpointGrants);
     final publicationAttempt = useMemoized(BuzzPushAttemptGate.new);
     final tombstoneAttempt = useMemoized(BuzzPushAttemptGate.new);
+    final otherOriginsAttempt = useMemoized(BuzzPushAttemptGate.new);
+    final otherOriginsBusy = useRef(false);
+    final latestOtherOriginsAttempt = useRef('');
+    final otherOriginsRetry = useState(0);
     final publicationRetry = useState(0);
     final tombstoneRetry = useState(0);
     final (
@@ -313,6 +318,7 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
       () => () {
         publicationAttempt.dispose();
         tombstoneAttempt.dispose();
+        otherOriginsAttempt.dispose();
       },
       const [],
     );
@@ -377,6 +383,58 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
     );
 
     final token = apnsDeviceToken.value;
+    final nativeCleanupKey = [
+      for (final grant in pushEndpointGrants.value)
+        '${grant.relayOrigin}|${grant.relayPubkey}|${grant.gatewayInstallationHandle}|'
+            '${grant.generation}|${grant.endpointEpoch}|${grant.endpointGrant.isEmpty}|${grant.pending}',
+    ].join(';');
+    final allOriginsKey =
+        '$nativeCleanupKey|${[for (final value in communities) '${value.id}|${value.pushNotificationsEnabled}|'
+              '${buzzPushSubscriptionsFingerprint(value.pushSubscriptionState.desired)}'].join(';')}';
+    latestOtherOriginsAttempt.value = allOriginsKey;
+    useEffect(() {
+      if (!Env.pushGatewayConfigured ||
+          otherOriginsBusy.value ||
+          !otherOriginsAttempt.tryBegin(allOriginsKey)) {
+        return null;
+      }
+      otherOriginsBusy.value = true;
+      unawaited(() async {
+        var succeeded = false;
+        try {
+          if (!ref.read(communityListProvider).hasValue) {
+            throw StateError('Push community storage is still loading.');
+          }
+          final grants = await readBuzzPushEndpointGrants();
+          if (!context.mounted) return;
+          await revocationOutbox.reconcileGatewayCleanup(
+            ref.read(communityListProvider).value!,
+            readGrants: () async => grants,
+          );
+          succeeded = true;
+        } catch (error, stack) {
+          if (context.mounted) {
+            otherOriginsAttempt.failed(
+              allOriginsKey,
+              retry: () {
+                if (context.mounted) otherOriginsRetry.value += 1;
+              },
+            );
+          }
+          reportPushSetupError('gateway cleanup', error, stack);
+        } finally {
+          otherOriginsBusy.value = false;
+          if (succeeded &&
+              context.mounted &&
+              latestOtherOriginsAttempt.value != allOriginsKey) {
+            otherOriginsAttempt.complete(allOriginsKey);
+            otherOriginsRetry.value += 1;
+          }
+        }
+      }());
+      return null;
+    }, [allOriginsKey, otherOriginsRetry.value]);
+
     useEffect(
       () {
         if (!_ready(session, config, community, memberPubkey) ||
@@ -497,12 +555,49 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
       config.baseUrl,
     );
     validateBuzzPushChannelGrammar(descriptor, desired);
-    final grant = await enrollBuzzPush(
-      config.wsUrl,
-      Env.pushGatewayUrl,
-      communitiesForSnapshotRefresh:
-          ref.read(communityListProvider).value ?? [community],
-    );
+    bool currentIntent() {
+      if (!ref.context.mounted) return false;
+      final current = ref
+          .read(communityListProvider)
+          .value
+          ?.where((value) => value.id == community.id)
+          .firstOrNull;
+      return current != null &&
+          current.pushNotificationsEnabled &&
+          current.nsec?.trim() == config.nsec &&
+          current.relayUrl == community.relayUrl &&
+          buzzPushSubscriptionsFingerprint(
+                current.pushSubscriptionState.desired,
+              ) ==
+              buzzPushSubscriptionsFingerprint(desired);
+    }
+
+    if (!currentIntent()) throw StateError('Push setup was superseded.');
+
+    late final BuzzPushEndpointGrant grant;
+    try {
+      grant = await enrollBuzzPush(
+        config.wsUrl,
+        Env.pushGatewayUrl,
+        communitiesForSnapshotRefresh:
+            ref.read(communityListProvider).value ?? [community],
+      );
+    } catch (error, stack) {
+      try {
+        await readBuzzPushEndpointGrants();
+      } catch (readError, readStack) {
+        reportPushSetupError('pending gateway cleanup', readError, readStack);
+      }
+      Error.throwWithStackTrace(error, stack);
+    }
+    if (!currentIntent()) {
+      if (ref.context.mounted && ref.read(communityListProvider).hasValue) {
+        await ref
+            .read(buzzPushLeaseRevocationOutboxProvider)
+            .reconcileGatewayCleanup(ref.read(communityListProvider).value!);
+      }
+      throw StateError('Push setup was superseded.');
+    }
     // Relay lease replacement and gateway delegation are independent state
     // machines. Subscription changes advance only the kind-30350 generation;
     // the opaque grant remains reusable until its own authority changes.
