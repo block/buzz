@@ -27,6 +27,7 @@ import 'package:buzz/features/channels/voice_note_waveform.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
+import 'package:buzz/shared/mentions/remember_mentioned_agents.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
@@ -204,6 +205,7 @@ Widget _buildComposeBar({
   AppLifecycleNotifier Function()? appLifecycle,
   String composeBarKey = 'compose-bar',
   String? threadHeadId,
+  bool remembersAgents = true,
   VoiceNoteRecorder Function()? voiceNoteRecorderFactory,
   VoiceNotePlayerController Function()? voiceNotePlayerFactory,
   Future<List<UserProfile>> Function(String query)? searchPeople,
@@ -280,6 +282,7 @@ Widget _buildComposeBar({
                   key: ValueKey(composeBarKey),
                   channelId: 'channel-1',
                   threadHeadId: threadHeadId,
+                  remembersAgents: remembersAgents,
                   focusNode: focusNode,
                   onFocusRestorerChanged: onFocusRestorerChanged,
                   onFocusRequested: onFocusRequested,
@@ -4484,6 +4487,143 @@ void main() {
       ]);
     });
 
+    testWidgets('keeps notified agents mentioned in the next draft', (
+      tester,
+    ) async {
+      final agentPubkey = 'c' * 64;
+      final humanPubkey = 'd' * 64;
+      final signer = nostr.Keys.generate();
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: signer.nsec,
+        pickGalleryImage: () async => null,
+        pickGalleryVideo: () async => null,
+      );
+      final sent = <(String, List<String>)>[];
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          currentPubkey: signer.public,
+          members: [
+            ChannelMember(
+              pubkey: agentPubkey,
+              role: 'bot',
+              joinedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+              displayName: 'Helper Bot',
+            ),
+            ChannelMember(
+              pubkey: humanPubkey,
+              role: 'member',
+              joinedAt: DateTime.fromMillisecondsSinceEpoch(2000),
+              displayName: 'Dana',
+            ),
+          ],
+          relayAgents: [
+            AgentDirectoryEntry(
+              pubkey: agentPubkey,
+              displayName: 'Helper Bot',
+              respondTo: 'anyone',
+              channelIds: const ['channel-1'],
+            ),
+          ],
+          channels: [_makeCurrentChannel()],
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async => sent.add((content, mentionPubkeys)),
+        ),
+      );
+      String draft() =>
+          tester.widget<TextField>(find.byType(TextField)).controller!.text;
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), '@hel');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Helper Bot'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), '${draft()}@dan');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Dana'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), '${draft()}hello');
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pumpAndSettle();
+
+      expect(sent.single.$2, unorderedEquals([agentPubkey, humanPubkey]));
+      expect(draft(), '@Helper Bot ');
+      expect(
+        find.byKey(const ValueKey('composer-agent-mention-chip')),
+        findsOneWidget,
+      );
+
+      await tester.enterText(find.byType(TextField), '${draft()}again');
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pumpAndSettle();
+
+      expect(sent.last.$1, '@Helper Bot again');
+      expect(sent.last.$2, [agentPubkey]);
+    });
+
+    for (final (name, remembering, remembersAgents) in [
+      ('remembering is off', false, true),
+      ('the chat already remembers its agent', true, false),
+    ]) {
+      testWidgets('forgets mentioned agents when $name', (tester) async {
+        final agentPubkey = 'c' * 64;
+        final signer = nostr.Keys.generate();
+        final sent = <List<String>>[];
+
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(signer.nsec),
+            currentPubkey: signer.public,
+            members: [
+              ChannelMember(
+                pubkey: agentPubkey,
+                role: 'bot',
+                joinedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+                displayName: 'Helper Bot',
+              ),
+            ],
+            relayAgents: [
+              AgentDirectoryEntry(
+                pubkey: agentPubkey,
+                displayName: 'Helper Bot',
+                respondTo: 'anyone',
+                channelIds: const ['channel-1'],
+              ),
+            ],
+            channels: [_makeCurrentChannel()],
+            remembersAgents: remembersAgents,
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async => sent.add(mentionPubkeys),
+          ),
+        );
+        ProviderScope.containerOf(tester.element(find.byType(ComposeBar)))
+            .read(rememberMentionedAgentsProvider.notifier)
+            .setEnabled(remembering);
+        final field = find.byType(TextField);
+
+        await _expandComposer(tester);
+        await tester.enterText(field, '@hel');
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Helper Bot'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+        await tester.pumpAndSettle();
+
+        expect(sent.single, [agentPubkey]);
+        expect(tester.widget<TextField>(field).controller!.text, isEmpty);
+      });
+    }
+
     testWidgets('keeps edits made while a mentioned agent is being added', (
       tester,
     ) async {
@@ -5006,6 +5146,9 @@ void main() {
 
       expect(didSend, isTrue);
       expect(publishedEvents.where((event) => event['kind'] == 9000), isEmpty);
+      // The retained agent keeps the composer open, so no closing animation
+      // outlasts the earlier `@hel` search debounce.
+      await tester.pump(mentionSearchDebounce);
     });
 
     testWidgets(
