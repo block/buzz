@@ -208,18 +208,35 @@ mod tests {
 
     #[tokio::test]
     async fn deployment_url_keeps_nondefault_port_for_lookup() {
-        let r = resolver_with("localhost:3000", 42);
+        // `localhost` folds to the canonical `127.0.0.1` (normalize_host), so
+        // the seeded key and the derived authority agree on the folded form.
+        let r = resolver_with("127.0.0.1:3000", 42);
         let ctx = bind_deployment_community(&r, "ws://localhost:3000")
             .await
             .expect("deployment host should bind with non-default port");
         assert_eq!(ctx.community().as_uuid(), &Uuid::from_u128(42));
-        assert_eq!(ctx.host(), "localhost:3000");
+        assert_eq!(ctx.host(), "127.0.0.1:3000");
 
-        let wrong = resolver_with("localhost", 42);
+        let wrong = resolver_with("127.0.0.1", 42);
         let err = bind_deployment_community(&wrong, "ws://localhost:3000")
             .await
             .unwrap_err();
         assert!(matches!(err, BindError::UnmappedHost));
+    }
+
+    #[tokio::test]
+    async fn deployment_loopback_spellings_bind_to_one_community() {
+        // A community seeded from any loopback RELAY_URL spelling must be
+        // reachable by clients that canonicalized the URL to 127.0.0.1 —
+        // this is the localhost-vs-127.0.0.1 agent 404 regression.
+        let r = resolver_with("127.0.0.1:3000", 42);
+        for url in ["ws://localhost:3000", "ws://127.0.0.1:3000", "ws://[::1]:3000"] {
+            let ctx = bind_deployment_community(&r, url)
+                .await
+                .unwrap_or_else(|_| panic!("url {url:?} should bind"));
+            assert_eq!(ctx.community().as_uuid(), &Uuid::from_u128(42), "url {url:?}");
+            assert_eq!(ctx.host(), "127.0.0.1:3000", "url {url:?}");
+        }
     }
 
     #[tokio::test]
@@ -236,8 +253,13 @@ mod tests {
 
     #[test]
     fn relay_url_authority_preserves_ipv6_brackets() {
-        assert_eq!(relay_url_authority("ws://[::1]:3000"), "[::1]:3000");
-        assert_eq!(relay_url_authority("wss://[::1]:443"), "[::1]");
+        assert_eq!(
+            relay_url_authority("ws://[2001:db8::1]:3000"),
+            "[2001:db8::1]:3000"
+        );
+        assert_eq!(relay_url_authority("wss://[2001:db8::1]:443"), "[2001:db8::1]");
+        // Loopback IPv6 folds with the other loopback spellings.
+        assert_eq!(relay_url_authority("ws://[::1]:3000"), "127.0.0.1:3000");
     }
 
     #[tokio::test]
