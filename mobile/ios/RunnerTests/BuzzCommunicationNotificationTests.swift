@@ -242,7 +242,12 @@ final class BuzzCommunicationNotificationTests: XCTestCase {
   }
 }
 
+/// Callbacks only record what they receive and assertions run after the wait,
+/// so a callback that lands after its test returned cannot fail a later test.
+/// The timeout is a cap; a passing test returns as soon as its callback runs.
 final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
+  private let callbackTimeout: TimeInterval = 10
+
   func testAgeSignalRequestDoesNotDependOnNotificationStorage() {
     let delegate = MissingAppGroupDelegate()
     var completed = false
@@ -268,28 +273,32 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
       BuzzAgeSignalPayload.sharing(exclusiveUpperBound: 18, lowerBound: 13)
     }
     let minor = expectation(description: "native minor response")
+    var minorValue: Any?
     delegate.handleAgeSignalMethodCall(
       FlutterMethodCall(methodName: "requestAgeSignal", arguments: nil),
       viewController: UIViewController()
     ) { value in
-      XCTAssertEqual((value as? [String: Any])?["status"] as? String, "signal")
-      XCTAssertEqual((value as? [String: Any])?["ageUpper"] as? Int, 17)
+      minorValue = value
       minor.fulfill()
     }
-    await fulfillment(of: [minor], timeout: 1)
+    await fulfillment(of: [minor], timeout: callbackTimeout)
+    XCTAssertEqual((minorValue as? [String: Any])?["status"] as? String, "signal")
+    XCTAssertEqual((minorValue as? [String: Any])?["ageUpper"] as? Int, 17)
 
     delegate.requestPlatformAgeSignal = { _ in
       throw NSError(domain: "InjectedAgeFailure", code: 1)
     }
     let failed = expectation(description: "native error response")
+    var failedValue: Any?
     delegate.handleAgeSignalMethodCall(
       FlutterMethodCall(methodName: "requestAgeSignal", arguments: nil),
       viewController: UIViewController()
     ) { value in
-      XCTAssertEqual((value as? FlutterError)?.code, "age_signal_unavailable")
+      failedValue = value
       failed.fulfill()
     }
-    await fulfillment(of: [failed], timeout: 1)
+    await fulfillment(of: [failed], timeout: callbackTimeout)
+    XCTAssertEqual((failedValue as? FlutterError)?.code, "age_signal_unavailable")
   }
 
   func testAllowedNotificationRestoreNeedsNoAppGroupStore() {
@@ -299,13 +308,15 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
       keychainAccessGroup: nil
     )
     let completed = expectation(description: "allowed without storage")
+    var received: Any?
     XCTAssertTrue(bridge.handle(
       FlutterMethodCall(methodName: "restoreAgeRestrictedNotifications", arguments: nil)
     ) { value in
-      XCTAssertNil(value)
+      received = value
       completed.fulfill()
     })
-    wait(for: [completed], timeout: 1)
+    wait(for: [completed], timeout: callbackTimeout)
+    XCTAssertNil(received)
   }
 
   func testRestrictionCleanupFailurePreservesSnapshotAndRestoreReleasesAuthority() throws {
@@ -335,25 +346,29 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
       )
     )
     let restricted = expectation(description: "restriction despite cleanup failure")
+    var purgeResult: Any?
     XCTAssertTrue(bridge.handle(
       FlutterMethodCall(methodName: "purgeAgeRestrictedNotifications", arguments: nil)
     ) { value in
-      XCTAssertEqual((value as? FlutterError)?.code, "age_restriction_purge_failed")
-      XCTAssertTrue(BuzzAgeRestrictionSession.isRestricted(containerURL: directory))
+      purgeResult = value
       restricted.fulfill()
     })
-    wait(for: [restricted], timeout: 1)
+    wait(for: [restricted], timeout: callbackTimeout)
+    XCTAssertEqual((purgeResult as? FlutterError)?.code, "age_restriction_purge_failed")
+    XCTAssertTrue(BuzzAgeRestrictionSession.isRestricted(containerURL: directory))
     XCTAssertEqual(try Data(contentsOf: snapshotURL), original)
 
     let restored = expectation(description: "allowed without restoring snapshot")
+    var restoreResult: Any?
     XCTAssertTrue(bridge.handle(
       FlutterMethodCall(methodName: "restoreAgeRestrictedNotifications", arguments: nil)
     ) { value in
-      XCTAssertNil(value)
-      XCTAssertFalse(BuzzAgeRestrictionSession.isRestricted(containerURL: directory))
+      restoreResult = value
       restored.fulfill()
     })
-    wait(for: [restored], timeout: 1)
+    wait(for: [restored], timeout: callbackTimeout)
+    XCTAssertNil(restoreResult)
+    XCTAssertFalse(BuzzAgeRestrictionSession.isRestricted(containerURL: directory))
     XCTAssertEqual(deletionCalls, 2)
     XCTAssertEqual(try Data(contentsOf: snapshotURL), original)
   }
@@ -365,9 +380,11 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
     let failure = NSError(domain: "InjectedCleanupFailure", code: 1)
     let deletion = BuzzInteractionDeletionDeadline(timeout: 5,
       deleteAllInteractions: { $0(failure) }, scheduleTimeout: { _, _ in })
+    var seedError: Error?
     BuzzInteractionCleanupRetry(containerURL: directory, deletion: deletion).request {
-      XCTAssertNotNil($0)
+      seedError = $0
     }
+    XCTAssertNotNil(seedError)
     let bridge = BuzzPushSnapshotBridge(
       appGroupIdentifier: nil,
       endpointGrantStore: BuzzPushEndpointGrantKeychainStore(accessGroup: nil),
@@ -375,14 +392,16 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
       interactionDeletionDeadline: deletion
     )
     let completed = expectation(description: "retry failure stays allowed")
+    var received: Any?
     XCTAssertTrue(bridge.handle(
       FlutterMethodCall(methodName: "restoreAgeRestrictedNotifications", arguments: nil)
     ) { value in
-      XCTAssertEqual((value as? FlutterError)?.code, "interaction_cleanup_retry_failed")
-      XCTAssertFalse(BuzzAgeRestrictionSession.isRestricted(containerURL: directory))
+      received = value
       completed.fulfill()
     })
-    wait(for: [completed], timeout: 1)
+    wait(for: [completed], timeout: callbackTimeout)
+    XCTAssertEqual((received as? FlutterError)?.code, "interaction_cleanup_retry_failed")
+    XCTAssertFalse(BuzzAgeRestrictionSession.isRestricted(containerURL: directory))
   }
 
   func testStrictAgeGateWriteFailsWhenAppGroupStoreIsUnavailable() {
@@ -392,6 +411,7 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
       keychainAccessGroup: nil
     )
     let completed = expectation(description: "strict write rejected")
+    var received: Any?
 
     XCTAssertTrue(
       bridge.handle(
@@ -405,12 +425,13 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
           ]
         )
       ) { value in
-        XCTAssertEqual((value as? FlutterError)?.code, "snapshot_sync_unavailable")
+        received = value
         completed.fulfill()
       }
     )
 
-    wait(for: [completed], timeout: 1)
+    wait(for: [completed], timeout: callbackTimeout)
+    XCTAssertEqual((received as? FlutterError)?.code, "snapshot_sync_unavailable")
   }
 
   func testMetadataAuthorityUsesNewestGrantForMatchingRelay() {

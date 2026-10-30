@@ -164,8 +164,9 @@ final class ProfileSetupRecoveryTests: XCTestCase {
         XCTAssertFalse(avatar.isHidden)
       }
       // UIKit releases popped controllers at the end of its autorelease turn.
+      // The cap absorbs a busy main thread; a leaked engine never becomes nil.
       let released = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in engine == nil }, object: nil)
-      await fulfillment(of: [released], timeout: 2)
+      await fulfillment(of: [released], timeout: 10)
     }
     XCTAssertEqual(watchdogs.count, 2)
     skip.sendActions(for: .touchUpInside)
@@ -179,7 +180,7 @@ final class ProfileSetupRecoveryTests: XCTestCase {
     XCTAssertTrue(notNow.isEnabled)
     notNow.sendActions(for: .touchUpInside)
     let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in parent.presentedViewController == nil }, object: nil)
-    await fulfillment(of: [dismissed], timeout: 2)
+    await fulfillment(of: [dismissed], timeout: 10)
     XCTAssertEqual(messenger.completionAction, "skip")
     withExtendedLifetime(coordinator) {}
     nav.dismiss(animated: false)

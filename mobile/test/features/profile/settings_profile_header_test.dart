@@ -128,15 +128,13 @@ void main() {
       containsAll([posterUrl, animationUrl]),
     );
     animationResponse.complete(http.Response.bytes(_transparentPng, 200));
-    await tester.runAsync(
-      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    final animationReady = find.byKey(
+      const ValueKey('progressive-animated-avatar-animation-ready'),
     );
+    await WidgetHelpers.pumpUntilFound(tester, animationReady);
     await tester.pumpAndSettle();
 
-    expect(
-      find.byKey(const ValueKey('progressive-animated-avatar-animation-ready')),
-      findsOneWidget,
-    );
+    expect(animationReady, findsOneWidget);
     expect(
       find.byKey(const ValueKey('progressive-animated-avatar-poster')),
       findsNothing,

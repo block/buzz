@@ -57,13 +57,12 @@ async function openNostrBind(
 ) {
   await installMockBridge(page, mock);
   await page.goto("/");
+  // The mocked emit drops events with no listener, and the app subscribes to
+  // deep links only after boot. Wait for that listener before emitting.
   await page.waitForFunction(
     () =>
-      typeof (
-        window as Window & {
-          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: unknown;
-        }
-      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__ === "function",
+      (window.__BUZZ_E2E_EVENT_LISTENER_COUNT__?.("deep-link-nostr-bind") ??
+        0) > 0,
   );
   await emitNostrBind(page, payload);
   await expect(page.getByTestId("nostr-bind-page")).toBeVisible();

@@ -530,8 +530,8 @@ void main() {
       isTrue,
     );
 
-    final previews = tester.widgetList<MessageContent>(
-      find.byType(MessageContent),
+    final previews = tester.widgetList<MessagePreview>(
+      find.byType(MessagePreview),
     );
     expect(previews, isNotEmpty);
     expect(
