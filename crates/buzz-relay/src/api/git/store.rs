@@ -1051,6 +1051,260 @@ mod tests {
 }
 
 #[cfg(test)]
+mod fault_probe {
+    //! `run_conformance_probe` against an in-process S3 fake that injects
+    //! racer faults at the HTTP boundary, so the responses go through
+    //! rust-s3's real `fail-on-err` mapping and retry before the race phases
+    //! classify them.
+
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    use axum::extract::State;
+    use axum::http::{HeaderMap, Method, StatusCode, Uri};
+    use axum::response::{IntoResponse, Response};
+
+    use super::*;
+
+    const BUCKET: &str = "buzz-git";
+
+    /// Which `if_none_match_race` PUTs the fake faults.
+    #[derive(Clone, Copy)]
+    enum InmFault {
+        None,
+        /// Every racer PUT.
+        All(u16),
+        /// The first PUT of each burst. Phase-3 racers send identical bytes,
+        /// so the fake can't single one out. rust-s3 retries every non-2xx
+        /// once after 1s, so the faulted slot recurs in the retry burst, and
+        /// the net effect is exactly one racer ending on this status.
+        FirstOfBurst(u16),
+    }
+
+    #[derive(Clone)]
+    struct Faults {
+        /// `if_match_race` racer indices answered with `if_match_status`.
+        /// Their bodies carry `racer=<i>`, so the fault survives the retry.
+        if_match_racers: Vec<usize>,
+        if_match_status: u16,
+        inm: InmFault,
+    }
+
+    #[derive(Default)]
+    struct Objects {
+        /// key → (body, ETag)
+        objects: HashMap<String, (Bytes, String)>,
+        versions: u64,
+        last_inm_put: HashMap<String, Instant>,
+    }
+
+    struct Fake {
+        faults: Faults,
+        state: Mutex<Objects>,
+    }
+
+    fn status(code: u16) -> Response {
+        let code = StatusCode::from_u16(code).expect("valid status");
+        (code, format!("<Error><Code>{code}</Code></Error>")).into_response()
+    }
+
+    impl Fake {
+        fn fault(&self, key: &str, body: &[u8], st: &mut Objects) -> Option<u16> {
+            if key.starts_with("probe/pointer-") {
+                let body = std::str::from_utf8(body).unwrap_or_default();
+                let hit = self
+                    .faults
+                    .if_match_racers
+                    .iter()
+                    .any(|i| body.contains(&format!(",racer={i},")));
+                return hit.then_some(self.faults.if_match_status);
+            }
+            if key.starts_with("probe/inm-race/") {
+                let now = Instant::now();
+                let new_burst = st
+                    .last_inm_put
+                    .insert(key.to_string(), now)
+                    .is_none_or(|prev| now - prev > Duration::from_millis(500));
+                return match self.faults.inm {
+                    InmFault::None => None,
+                    InmFault::All(code) => Some(code),
+                    InmFault::FirstOfBurst(code) => new_burst.then_some(code),
+                };
+            }
+            None
+        }
+
+        fn handle(&self, method: Method, key: String, headers: HeaderMap, body: Bytes) -> Response {
+            let mut st = self.state.lock().unwrap();
+            match method {
+                Method::GET => match st.objects.get(&key) {
+                    Some((bytes, etag)) => {
+                        ([("etag", etag.clone())], bytes.clone()).into_response()
+                    }
+                    None => status(404),
+                },
+                Method::DELETE => {
+                    st.objects.remove(&key);
+                    StatusCode::NO_CONTENT.into_response()
+                }
+                Method::PUT => {
+                    if let Some(code) = self.fault(&key, &body, &mut st) {
+                        return status(code);
+                    }
+                    let current = st.objects.get(&key).map(|(_, etag)| etag.as_str());
+                    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+                    let precondition_failed = match (header("if-none-match"), header("if-match")) {
+                        (Some("*"), _) => current.is_some(),
+                        (_, Some(tag)) => current != Some(tag),
+                        _ => false,
+                    };
+                    if precondition_failed {
+                        return status(412);
+                    }
+                    st.versions += 1;
+                    let etag = format!("\"v{}\"", st.versions);
+                    st.objects.insert(key, (body, etag.clone()));
+                    ([("etag", etag)], "").into_response()
+                }
+                _ => status(405),
+            }
+        }
+    }
+
+    async fn serve(
+        State(fake): State<Arc<Fake>>,
+        method: Method,
+        uri: Uri,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> Response {
+        let prefix = format!("/{BUCKET}/");
+        let Some(key) = uri.path().strip_prefix(&prefix) else {
+            return status(404);
+        };
+        fake.handle(method, key.to_string(), headers, body)
+    }
+
+    async fn run(faults: Faults) -> Result<ProbeReport, StoreError> {
+        let fake = Arc::new(Fake {
+            faults,
+            state: Mutex::default(),
+        });
+        let app = axum::Router::new().fallback(serve).with_state(fake);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let store = GitStore::new(
+            &format!("http://{addr}"),
+            "fake",
+            "fake",
+            BUCKET,
+            "us-east-1",
+            buzz_media::config::S3AddressingStyle::Path,
+        )
+        .expect("construct git store");
+        let result = store
+            .run_conformance_probe(ProbeConfig {
+                race_width: 3,
+                race_rounds: 1,
+            })
+            .await;
+        server.abort();
+        result
+    }
+
+    fn clean() -> Faults {
+        Faults {
+            if_match_racers: Vec::new(),
+            if_match_status: 500,
+            inm: InmFault::None,
+        }
+    }
+
+    fn assert_probe_failure(result: Result<ProbeReport, StoreError>, phase: &str, reason: &str) {
+        match result {
+            Err(StoreError::Probe(f)) => {
+                assert_eq!(f.phase, phase, "{f}");
+                assert!(f.reason.contains(reason), "{f}");
+            }
+            other => panic!("expected {phase} probe failure, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fake_backend_passes_clean_probe() {
+        let report = run(clean()).await.expect("clean probe passes");
+        assert_eq!(report.transport_drops, 0);
+    }
+
+    /// Regression: an S3 `500 InternalError` on one probe racer killed relay
+    /// startup. With a winner and a 412 still observed, each race phase drops
+    /// the 5xx racer and admits the backend.
+    #[tokio::test]
+    async fn one_5xx_racer_per_phase_is_dropped_and_admitted() {
+        for (phase, faults) in [
+            (
+                "if_match_race",
+                Faults {
+                    if_match_racers: vec![0],
+                    ..clean()
+                },
+            ),
+            (
+                "if_none_match_race",
+                Faults {
+                    inm: InmFault::FirstOfBurst(500),
+                    ..clean()
+                },
+            ),
+        ] {
+            let report = run(faults)
+                .await
+                .unwrap_or_else(|e| panic!("{phase}: one 5xx racer must not fail: {e}"));
+            assert_eq!(report.transport_drops, 1, "{phase}");
+        }
+    }
+
+    #[tokio::test]
+    async fn too_few_classified_observers_fail_closed() {
+        let one_observer = Faults {
+            if_match_racers: vec![0, 1],
+            ..clean()
+        };
+        assert_probe_failure(
+            run(one_observer).await,
+            "if_match_race",
+            "race not observed",
+        );
+        let all_5xx = Faults {
+            inm: InmFault::All(503),
+            ..clean()
+        };
+        assert_probe_failure(
+            run(all_5xx).await,
+            "if_none_match_race",
+            "race not observed",
+        );
+    }
+
+    #[tokio::test]
+    async fn unexpected_4xx_racer_fails_closed() {
+        let if_match = Faults {
+            if_match_racers: vec![0],
+            if_match_status: 403,
+            ..clean()
+        };
+        assert_probe_failure(run(if_match).await, "if_match_race", "racer 0");
+        let inm = Faults {
+            inm: InmFault::FirstOfBurst(403),
+            ..clean()
+        };
+        assert_probe_failure(run(inm).await, "if_none_match_race", "backend error");
+    }
+}
+
+#[cfg(test)]
 mod probe {
     //! Empirical probe of rust-s3 + `fail-on-err` + MinIO surfacing of 412.
     //!
