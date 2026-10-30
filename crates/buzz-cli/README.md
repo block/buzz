@@ -132,6 +132,15 @@ evict its own ids fails. Project addresses are `30621:<owner-pubkey>:<d-tag>`.
 Pass the same ids in any case; channel UUIDs and project owners are stored in
 lowercase. If the relay reports a newer update (exit 5), run the command again.
 
+`sidebar stars`, `sidebar mutes`, and `sidebar projects` edit the other synced
+sidebar lists the same way: one head read and one publish per command, and
+`"message": "unchanged"` when nothing changes. `remove` keeps a `false` entry
+(as desktop does) so the change syncs; removing an id that is not set changes
+nothing. Stars and mutes keep the newest 500 entries; a command that would
+evict its own ids fails. Project addresses are `30621:<owner-pubkey>:<d-tag>`.
+Pass the same ids in any case; channel UUIDs and project owners are stored in
+lowercase. If the relay reports a newer update (exit 5), run the command again.
+
 `protect set` replaces every existing rule for the exact ref pattern. Any
 constraint omitted from the command is removed. `protect list` reports malformed
 stored rules in `validation_error` so an owner can remove and repair them.
