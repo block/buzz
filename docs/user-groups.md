@@ -26,7 +26,7 @@ This gap blocks the move from Slack. Teams use user groups daily to page a team,
 
 ### 1. The event model: one addressable event for each group
 
-`kind:30181`, `d` is the handle, members are `p` tags, and the signer is a community member. The relay needs no new table and no migration. Storage, queries, `#p` lookup ("which groups am I in"), and live fan-out all use the generic addressable path.
+`kind:30182`, `d` is the handle, members are `p` tags, and the signer is a community member. The relay needs no new table and no migration. Storage, queries, `#p` lookup ("which groups am I in"), and live fan-out all use the generic addressable path.
 
 Alternatives that I rejected:
 
@@ -72,16 +72,16 @@ A handle is lowercase `[a-z0-9._-]`, up to 64 bytes. `channel`, `here`, `everyon
 
 | Piece | Status |
 |-------|--------|
-| `KIND_USER_GROUP` 30181 and `buzz_core::user_group` (parse, validate, authorization policy, mention helpers) | done, unit tested |
+| `KIND_USER_GROUP` 30182 and `buzz_core::user_group` (parse, validate, authorization policy, mention helpers) | done, unit tested |
 | SDK: `build_user_group`, `build_user_group_deletion`, `group_mention_tags` | done, unit tested |
-| Relay ingest: `UsersWrite` scope, global-only kind, structural validation, handle uniqueness, edit authorization, newer-than-head rule, removal of superseded heads (`handlers/ingest.rs`) | done; Postgres test written, not run |
-| Relay ingest: group-marked `p` tags checked against the group (`validate_group_mention_tags`) | done; Postgres test written, not run |
+| Relay ingest: `UsersWrite` scope, global-only kind, structural validation, handle uniqueness, edit authorization, newer-than-head rule, removal of superseded heads (`handlers/ingest.rs`) | done; Postgres test passes |
+| Relay ingest: group-marked `p` tags checked against the group (`validate_group_mention_tags`) | done; Postgres test passes |
 | Push matcher: hellthread gate counts a group once (`push_runtime.rs`) | done, unit tested |
 | CLI: `buzz groups list`, `get`, `members`, `create`, `update`, `add-member`, `remove-member`, `delete`, and `messages send --mention-group` | done, tested against a fake relay |
 
 ## Testing
 
-The relay changes that read the database need Postgres. The unit tests of the parser, the authorization policy, the mention check, and the hellthread weight run without it. The Postgres tests (`#[ignore = "requires Postgres"]`) cover the production ingest path. They compile in CI but could not run in the environment that wrote them. Run `./scripts/postgres-test-run.sh` before merge.
+The relay changes that read the database need Postgres. The unit tests of the parser, the authorization policy, the mention check, and the hellthread weight run without it. The Postgres test `user_group_ingest_authorizes_edits_and_validates_mentions` (`#[ignore = "requires Postgres"]`) covers the production ingest path. It passes against a migrated local Postgres: `BUZZ_TEST_DATABASE_URL=<url> cargo test -p buzz-relay --lib user_group_ingest -- --ignored`. Run `./scripts/postgres-test-run.sh` before merge.
 
 ## What is left
 
@@ -89,13 +89,13 @@ Relay:
 
 - **One transaction for the handle check and the write.** Today the relay reads the heads, decides, stores, and removes the old head in separate steps. Two creators of a new handle in the same instant can both succeed. Readers still agree on one head. Fix with an advisory lock on `(community, kind, d)` in `buzz-db`.
 - **Delete by an editor who is not the author.**
-- **Search.** Add `30181` to the full-text index so a client can search names. Today a client lists all heads (`limit: 500`) and filters locally.
+- **Search.** Add `30182` to the full-text index so a client can search names. Today a client lists all heads (`limit: 500`) and filters locally.
 - **A bound on groups for each community**, and a rate limit on edits.
 - **Membership check of members** against `relay_members` on write.
 
 Desktop (block/buzz-app, `src/bundled/mentions`) and `desktop/`:
 
-- Subscribe to `kinds: [30181]` and keep the newest head for each handle.
+- Subscribe to `kinds: [30182]` and keep the newest head for each handle.
 - Offer groups in the `@` picker next to people, agents, and teams. Show the group name, handle, and member count.
 - On send, expand the chosen group to `["p", key, "", "group:<handle>"]` tags. Do not apply the 32-recipient list cap or the "every recipient is a channel member" rule to those tags. Ask the sender before mentioning members who are outside the channel, as for other mentions.
 - Render a message that carries a marker as one `@handle` chip, not N people.
@@ -106,11 +106,11 @@ Mobile (`mobile/`):
 
 - The same picker, expansion, and chip rendering.
 - Count a group once in the hellthread check (`push_subscription.dart`, `BuzzPushKit/PushLease.swift:125`). The relay already does this.
-- Add kind 30181 to `lib/shared/relay/nostr_models.dart` and `desktop/src/shared/constants/kinds.ts`.
+- Add kind 30182 to `lib/shared/relay/nostr_models.dart` and `desktop/src/shared/constants/kinds.ts`.
 
 Product:
 
 - "Add a group to a channel": a client convenience that sends one put-user event for each member.
 - A group as a default member set for new channels.
 - Open question for the Buzz team: should the creator policy default to `open`, as Slack does, or `admins`? This change defaults to `admins`.
-- Open question: confirm that 30181 is free. Branch `bmcanally/emoji-relay-kind` uses 30180.
+- Kind number: 30182. Kind 30181 belongs to open PR block/buzz#6582 (NIP-AW), and 30180 to the emoji relay branch. Re-check that 30182 is free before merge.

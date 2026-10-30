@@ -127,7 +127,7 @@ pub const KIND_PRIVATE_MANAGED_AGENT: u32 = 30179;
 /// editors who are not the original author supersede the previous head, and the
 /// relay refuses a handle that another author already holds. See
 /// `docs/nips/NIP-UG.md` and [`crate::user_group`].
-pub const KIND_USER_GROUP: u32 = 30181;
+pub const KIND_USER_GROUP: u32 = 30182;
 
 /// Kinds whose stored events are readable only by their author.
 ///
@@ -928,7 +928,7 @@ const _: () = assert!(is_parameterized_replaceable(KIND_TEAM)); // 30176 ∈ 300
 const _: () = assert!(is_parameterized_replaceable(KIND_MANAGED_AGENT)); // 30177 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_TEAM_CATALOG)); // 30178 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_PRIVATE_MANAGED_AGENT)); // 30179 ∈ 30000–39999
-const _: () = assert!(is_parameterized_replaceable(KIND_USER_GROUP)); // 30181 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_USER_GROUP)); // 30182 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 30300 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999

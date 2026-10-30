@@ -2573,7 +2573,7 @@ pub fn build_delete_addressable(
     Ok(EventBuilder::new(Kind::Custom(KIND_DELETION as u16), "").tags(tags))
 }
 
-/// Build a user group head event (kind:30181, NIP-UG).
+/// Build a user group head event (kind:30182, NIP-UG).
 ///
 /// Validates every field with the same rules the relay applies, so a group the
 /// builder accepts is a group the relay parses. The caller signs. A write over
@@ -2596,7 +2596,8 @@ pub fn build_user_group(
         Kind::Custom(KIND_USER_GROUP as u16),
         group.description.clone(),
     )
-    .tags(tags))
+    .tags(tags)
+    .allow_self_tagging())
 }
 
 /// Build the NIP-09 deletion request for a user group head authored by `author`.
@@ -5765,11 +5766,23 @@ mod tests {
     }
 
     #[test]
+    fn user_group_keeps_a_signer_who_is_also_a_member() {
+        let signer = keys().public_key().to_hex();
+        let group = buzz_core::user_group::UserGroup {
+            members: vec!["22".repeat(32), signer.clone()],
+            ..sample_group()
+        };
+        let ev = sign(build_user_group(&group).unwrap());
+        let parsed = buzz_core::user_group::parse_user_group(&ev).unwrap();
+        assert!(parsed.members.contains(&signer), "{:?}", parsed.members);
+    }
+
+    #[test]
     fn user_group_deletion_names_the_coordinate() {
         let author = "ab".repeat(32);
         let ev = sign(build_user_group_deletion(&author, "@iOS-Team").unwrap());
         assert_eq!(ev.kind.as_u16(), 5);
-        assert!(has_tag(&ev, "a", &format!("30181:{author}:ios-team")));
+        assert!(has_tag(&ev, "a", &format!("30182:{author}:ios-team")));
         assert!(build_user_group_deletion("nope", "x").is_err());
     }
 

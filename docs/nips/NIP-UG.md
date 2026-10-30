@@ -6,17 +6,17 @@ User Groups
 
 `draft` `optional` `relay`
 
-This NIP defines `kind:30181`, an addressable event for a named, mentionable set of community members, like a Slack user group (`@ios-team`). It also defines how a message mentions a group.
+This NIP defines `kind:30182`, an addressable event for a named, mentionable set of community members, like a Slack user group (`@ios-team`). It also defines how a message mentions a group.
 
 A group is community-wide. One handle names one group in one community.
 
 ## Event
 
-`kind:30181` is an addressable event as defined in [NIP-01](01.md), with the rules below that differ from [NIP-33](33.md).
+`kind:30182` is an addressable event as defined in [NIP-01](01.md), with the rules below that differ from [NIP-33](33.md).
 
 ```jsonc
 {
-  "kind": 30181,
+  "kind": 30182,
   "content": "Builds and ships the iOS app",
   "tags": [
     ["d", "ios-team"],
@@ -73,15 +73,15 @@ An edit by another author MUST have a `created_at` later than the current head. 
 
 Heads by two authors can exist for a short time when two edits race. Readers MUST pick the head with the newest `created_at`, and the lowest event ID on a tie. This is the same rule as the custom emoji kind.
 
-To delete a group, its current author sends a [NIP-09](09.md) deletion with an `a` tag of `30181:<author>:<handle>`. A signer who is not the author of the head uses `status` `disabled` instead.
+To delete a group, its current author sends a [NIP-09](09.md) deletion with an `a` tag of `30182:<author>:<handle>`. A signer who is not the author of the head uses `status` `disabled` instead.
 
 ## Reading
 
 | Need | Filter |
 |------|--------|
-| One group | `{ "kinds": [30181], "#d": ["ios-team"] }` |
-| All groups | `{ "kinds": [30181], "limit": 500 }` |
-| Groups that a person is in | `{ "kinds": [30181], "#p": ["<pubkey>"] }` |
+| One group | `{ "kinds": [30182], "#d": ["ios-team"] }` |
+| All groups | `{ "kinds": [30182], "limit": 500 }` |
+| Groups that a person is in | `{ "kinds": [30182], "#p": ["<pubkey>"] }` |
 
 A client resolves duplicates as described above.
 

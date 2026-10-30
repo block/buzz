@@ -1,4 +1,4 @@
-//! `buzz groups` — community user groups (NIP-UG, kind:30181), the Buzz
+//! `buzz groups` — community user groups (NIP-UG, kind:30182), the Buzz
 //! equivalent of a Slack user group such as `@ios-team`.
 //!
 //! A group is one addressable event per handle. Every write is one strongly

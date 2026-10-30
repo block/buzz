@@ -179,7 +179,7 @@ async fn load_user_group_heads(
     Ok(stored.into_iter().map(|s| s.event).collect())
 }
 
-/// Authorize a kind:30181 write against the community-wide head of its handle
+/// Authorize a kind:30182 write against the community-wide head of its handle
 /// (see `docs/nips/NIP-UG.md`). Returns the authors of other live heads, which
 /// the caller removes once the new head is stored.
 async fn authorize_user_group_write(
@@ -8028,6 +8028,7 @@ mod postgres_tests {
         EventBuilder::new(Kind::Custom(KIND_USER_GROUP as u16), "")
             .tags(tags.into_iter().map(|t| nostr::Tag::parse(t).expect("tag")))
             .custom_created_at(nostr::Timestamp::from(created_at))
+            .allow_self_tagging()
             .sign_with_keys(keys)
             .expect("sign group")
     }
@@ -8063,7 +8064,7 @@ mod postgres_tests {
         assert!(!has_group_mention_tag(&build(&["p", &pk, "", "owner"])));
     }
 
-    /// Production-path regression for kind:30181 and group mentions: authorization
+    /// Production-path regression for kind:30182 and group mentions: authorization
     /// by creator, group admin, community admin, and the open policy; one live head
     /// after a cross-author edit; and mention validation against the head.
     /// Mutations: drop `authorize_user_group_write`, the cross-author cleanup, or
