@@ -10,6 +10,7 @@ const buzzPushChannelKinds = [9];
 const buzzPushChannelChunkSize = 50;
 const buzzPushMaxSubscriptions = 16;
 const buzzPushMaxIgnoreFilters = 8;
+const buzzPushMaxAuthorsPerFilter = 20;
 const buzzPushHellthreadParticipantLimit = 20;
 
 const _supportedNotificationClasses = {'default'};
@@ -451,6 +452,7 @@ List<BuzzPushSubscription> buildDesiredBuzzPushSubscriptions({
   required String myPubkey,
   Iterable<String> channelIds = const [],
   Iterable<String> mutedChannelIds = const [],
+  Iterable<String> mutedAuthorPubkeys = const [],
 }) {
   final normalizedPubkey = myPubkey.toLowerCase();
   if (!_exactHexPattern.hasMatch(normalizedPubkey)) {
@@ -474,11 +476,25 @@ List<BuzzPushSubscription> buildDesiredBuzzPushSubscriptions({
     throw const FormatException('Too many muted channels for a push lease.');
   }
 
+  // Muted authors take whatever ignore slots remain after the self and
+  // muted-channel filters. A muted author beyond that quota still notifies:
+  // refusing the lease would silence every notification instead.
+  final mutedAuthors = {
+    for (final pubkey in mutedAuthorPubkeys)
+      if (pubkey.toLowerCase() != normalizedPubkey &&
+          _exactHexPattern.hasMatch(pubkey.toLowerCase()))
+        pubkey.toLowerCase(),
+  }.toList()..sort();
+  final authorIgnoreFilters = [
+    for (final chunk in _chunks(mutedAuthors, buzzPushMaxAuthorsPerFilter))
+      BuzzPushFilter(kinds: buzzPushRenderableKinds, authors: chunk),
+  ].take(buzzPushMaxIgnoreFilters - 1 - mutedIgnoreFilters.length);
+
   final selfAuthored = BuzzPushFilter(
     kinds: buzzPushRenderableKinds,
     authors: [normalizedPubkey],
   );
-  final ignores = [selfAuthored, ...mutedIgnoreFilters];
+  final ignores = [selfAuthored, ...mutedIgnoreFilters, ...authorIgnoreFilters];
   const suppression = BuzzPushSuppression(
     pTagsMax: buzzPushHellthreadParticipantLimit,
   );

@@ -158,6 +158,65 @@ void main() {
     expect(subscriptions.last.filter.hTags, [channelA]);
   });
 
+  test('ignores muted authors in every subscription', () {
+    final agents = [
+      for (var i = 45; i > 0; i--) i.toRadixString(16).padLeft(64, '0'),
+    ];
+
+    final subscriptions = buildDesiredBuzzPushSubscriptions(
+      myPubkey: me,
+      channelIds: [channelA, channelB],
+      mutedChannelIds: [channelA],
+      mutedAuthorPubkeys: [...agents, me.toUpperCase(), agents.first],
+    );
+
+    final ignore = subscriptions.first.ignore;
+    expect(ignore.first.authors, [me]);
+    expect(ignore.skip(2).map((f) => f.authors!.length), [20, 20, 5]);
+    expect(ignore.skip(2).expand((f) => f.authors!), ([...agents]..sort()));
+    expect(
+      ignore.skip(2).map((f) => f.kinds),
+      everyElement(buzzPushRenderableKinds),
+    );
+    expect(subscriptions, hasLength(2));
+    expect(subscriptions.last.ignore, ignore);
+  });
+
+  test('muted authors yield to muted channels within the ignore quota', () {
+    final agents = [
+      for (var i = 1; i <= 200; i++) i.toRadixString(16).padLeft(64, '0'),
+    ];
+    final channels = [
+      for (var i = 0; i < 100; i++)
+        '00000000-0000-4000-8000-${i.toString().padLeft(12, '0')}',
+    ];
+
+    final subscriptions = buildDesiredBuzzPushSubscriptions(
+      myPubkey: me,
+      channelIds: channels,
+      mutedChannelIds: channels,
+      mutedAuthorPubkeys: agents,
+    );
+
+    final ignore = subscriptions.first.ignore;
+    expect(ignore, hasLength(buzzPushMaxIgnoreFilters));
+    expect(ignore.where((f) => f.hTags != null), hasLength(2));
+    expect(
+      ignore.where((f) => f.authors != null && f.authors!.first != me),
+      hasLength(5),
+    );
+  });
+
+  test('no muted authors leaves the ignore list unchanged', () {
+    expect(
+      buildDesiredBuzzPushSubscriptions(
+        myPubkey: me,
+        mutedAuthorPubkeys: const [],
+      ).single.ignore,
+      hasLength(1),
+    );
+  });
+
   test('chunks channel subscriptions to relay limits deterministically', () {
     final channels = [
       for (var i = 0; i < 51; i++)
