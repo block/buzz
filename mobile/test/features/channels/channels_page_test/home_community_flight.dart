@@ -90,7 +90,9 @@ void _homeCommunityFlightTests(
           }
         }
         if (!reduced) {
-          await tester.pump(const Duration(milliseconds: 260));
+          await tester.pump(const Duration(milliseconds: 65));
+          expect(tester.getCenter(avatar).dx, lessThan(195));
+          await tester.pump(const Duration(milliseconds: 195));
           expect(tester.getCenter(avatar).dy, lessThan(422));
           expect(tester.getCenter(avatar).dy, greaterThan(destination.dy));
           await tester.pump(const Duration(milliseconds: 260));

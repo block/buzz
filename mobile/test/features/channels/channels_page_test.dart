@@ -2426,7 +2426,7 @@ void main() {
           expect(progress.last, 0);
           if (!reduceMotion) {
             await tester.pump(const Duration(milliseconds: 65));
-            expect(tester.getCenter(flyingAvatar).dx, greaterThan(195));
+            expect(tester.getCenter(flyingAvatar).dx, lessThan(195));
             await tester.pump(const Duration(milliseconds: 195));
             expect(tester.getCenter(flyingAvatar).dy, lessThan(422));
             expect(

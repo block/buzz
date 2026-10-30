@@ -513,9 +513,9 @@ class _CommunityFlyingAvatar extends StatelessWidget {
     final end = destination.center;
     final delta = end - start;
     // A quadratic Bezier bends perpendicular to travel, like Motion's arc.
-    // Bow outward first, then settle into the header. Clamp the control point
+    // Bow left first, then settle into the header. Clamp the control point
     // so the larger avatar stays inside narrow screens throughout the swoop.
-    final bend = (start + end) / 2 + Offset(-delta.dy, delta.dx) * 0.75;
+    final bend = (start + end) / 2 + Offset(delta.dy, -delta.dx) * 0.75;
     final margin = _communityCenteredAvatarSize / 2 + Grid.xs;
     final width = screen.width;
     final control = Offset(
