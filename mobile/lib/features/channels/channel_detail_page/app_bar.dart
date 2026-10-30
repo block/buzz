@@ -186,3 +186,73 @@ class _ConversationAppBarTitle extends StatelessWidget {
     presenceLabel: presenceLabel,
   );
 }
+
+/// One-tap entry to a working agent's live transcript (#3907).
+///
+/// The members badge alone was easy to miss; this dedicated control opens
+/// [AgentActivitySheet] for the first typing bot without an extra hop through
+/// the members sheet. It is omitted unless an agent in this channel is working.
+class _AgentActivityButton extends ConsumerWidget {
+  const _AgentActivityButton({required this.channelId});
+
+  final String channelId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final action = _agentActivityNavigationAction(context, ref, channelId);
+    if (action == null) return const SizedBox.shrink();
+
+    return IconButton(
+      color: context.colors.primary,
+      onPressed: action.onPressed,
+      tooltip: action.label,
+      icon: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          const Icon(BuzzIcons.activity, size: 22),
+          Positioned(
+            top: -2,
+            right: -2,
+            child: Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(
+                color: context.appColors.success,
+                shape: BoxShape.circle,
+                border: Border.all(color: context.colors.surface, width: 1.5),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Header action for [channelId], or null when no agent there is working.
+///
+/// The native bar reads nativeActions and ignores the Flutter actions list
+/// when that list is set, so the shortcut has to be built for both.
+IosNavigationAction? _agentActivityNavigationAction(
+  BuildContext context,
+  WidgetRef ref,
+  String channelId,
+) {
+  final working = ref.watch(workingBotPubkeysProvider(channelId));
+  if (working.isEmpty) return null;
+  final agentPubkey = working.first;
+  return IosNavigationAction(
+    label: 'View agent activity',
+    symbol: 'waveform.path.ecg',
+    icon: BuzzIcons.activity,
+    activityColor: context.appColors.success,
+    activityLabel: 'Agent working',
+    onPressed: () {
+      showAgentActivitySheet(
+        context: context,
+        channelId: channelId,
+        agentPubkey: agentPubkey,
+      );
+    },
+  );
+}
