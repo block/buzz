@@ -13,6 +13,12 @@ It demonstrates two identity paths:
 
 See [`countdown-bot/README.md`](countdown-bot/README.md) for usage.
 
+## `last30days-agent/`
+
+A provider-agnostic multi-worker research example that implements `/last30days` semantics on top of existing ACP slash pass-through ([#919](https://github.com/block/buzz/pull/919)). Default model slug is DeepSeek V4 Pro; adopters supply their own API key and may point base URL, model, worker count, and evidence command anywhere OpenAI-compatible. No core routing changes.
+
+See [`last30days-agent/README.md`](last30days-agent/README.md) for config, security notes, offline tests, and manual smoke steps. Proposed in [#4158](https://github.com/block/buzz/issues/4158).
+
 ## `meadow-core/`
 
 A persona-pack example for Buzz agents.
