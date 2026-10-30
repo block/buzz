@@ -239,11 +239,13 @@ class BrowserAuth {
           throw BrowserAuthFailure.storage;
         }
         final intent = Map<String, String>.from(record['intent'] as Map);
+        // Claimed before the saved attempt disappears, so a peer checking
+        // ownership concurrently never sees neither.
+        _consumedState = expectedState;
         await _storage.delete(key: _attemptKey);
         if (await _storage.read(key: _attemptKey) != null) {
           throw BrowserAuthFailure.storage;
         }
-        _consumedState = expectedState;
         _activeState = null;
         _consumedCallbackHash = callbackHash;
         if (!_disposed && generation == _generation) {
@@ -286,6 +288,8 @@ class BrowserAuth {
             (jsonDecode(saved) as Map<String, dynamic>)['state'] == state) {
           return true;
         }
+        // The peer may have consumed its attempt during the read.
+        if (peer._consumedState == state) return true;
       } catch (_) {
         // An unreadable peer attempt is that owner's failure to report.
       }
