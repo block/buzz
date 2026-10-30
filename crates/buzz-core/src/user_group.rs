@@ -397,6 +397,18 @@ pub fn validate_group_mentions(
     event: &Event,
     lookup: impl Fn(&str) -> Option<UserGroup>,
 ) -> Result<(), UserGroupError> {
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        let Some(raw_handle) = group_mention_handle(parts) else {
+            continue;
+        };
+        if normalize_handle(raw_handle).map_or(true, |h| h != raw_handle) {
+            return invalid(format!(
+                "group marker {raw_handle:?} must be a normalized handle"
+            ));
+        }
+        normalize_pubkey(&parts[1])?;
+    }
     let marked = group_marked_p_tags(event);
     if marked.len() > MAX_GROUP_MENTIONS_PER_EVENT {
         return invalid(format!(
@@ -826,5 +838,26 @@ mod tests {
                 .to_string()
                 .contains("at most 5")
         );
+    }
+
+    #[test]
+    fn mention_markers_must_be_normalized_and_name_a_real_pubkey() {
+        let mut g = group(&pk(9), &[], EditPolicy::Admins);
+        g.members = vec![pk(1)];
+        let lookup = |_: &str| Some(g.clone());
+        for marker in [
+            "group:iOS-Team",
+            "group:@ios-team",
+            "group:",
+            "group:bad handle",
+        ] {
+            let ev = message(&[&["p", &pk(1), "", marker]]);
+            assert!(
+                validate_group_mentions(&ev, lookup).is_err(),
+                "{marker} must be rejected"
+            );
+        }
+        let bad_key = message(&[&["p", "zz", "", "group:ios-team"]]);
+        assert!(validate_group_mentions(&bad_key, lookup).is_err());
     }
 }

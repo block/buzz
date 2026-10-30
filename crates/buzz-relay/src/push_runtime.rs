@@ -321,16 +321,9 @@ fn match_job(
                 serde_json::from_value::<Filter>(serde_json::Value::Object(raw.clone()))
                     .is_ok_and(|f| filters_match(&[f], &job.event))
             });
-            let p_count = job
-                .event
-                .event
-                .tags
-                .iter()
-                .filter(|t| {
-                    t.kind().to_string() == "p"
-                        && !is_workflow_owner_attribution(&job.event.event, t)
-                })
-                .count() as u64;
+            let p_count = buzz_core::user_group::weighted_p_count(&job.event.event, |t| {
+                is_workflow_owner_attribution(&job.event.event, t)
+            });
             if ignored
                 || sub
                     .suppress
@@ -956,7 +949,7 @@ mod tests {
         );
         // The hellthread gate counts mentions, not the attribution: one
         // mention passes `p_tags_max: 1`, two do not.
-        let gated = |mentioned: &[&nostr::Keys]| {
+        let gated = |mentioned: &[&nostr::Keys], extra: &[Tag]| {
             let me = agent.public_key().to_hex();
             let context = MatchContext {
                 leases: vec![buzz_db::push::MatchLease {
@@ -979,6 +972,7 @@ mod tests {
                         .iter()
                         .map(|keys| Tag::public_key(keys.public_key())),
                 )
+                .tags(extra.iter().cloned())
                 .sign_with_keys(&relay)
                 .unwrap();
             let job = buzz_db::push::BatchedMatch {
@@ -987,8 +981,29 @@ mod tests {
             };
             match_job(&job, &context).unwrap().len()
         };
-        assert_eq!(gated(&[&agent]), 1, "one mention under the gate");
-        assert_eq!(gated(&[&agent, &owner]), 0, "two mentions over the gate");
+        assert_eq!(gated(&[&agent], &[]), 1, "one mention under the gate");
+        assert_eq!(
+            gated(&[&agent, &owner], &[]),
+            0,
+            "two mentions over the gate"
+        );
+
+        let member = |hex: &str| Tag::parse(["p", hex, "", "group:ios-team"]).unwrap();
+        let group = [
+            member(&agent.public_key().to_hex()),
+            member(&owner.public_key().to_hex()),
+            member(&"ab".repeat(32)),
+        ];
+        assert_eq!(
+            gated(&[], &group),
+            1,
+            "a group of three counts as one mention"
+        );
+        assert_eq!(
+            gated(&[&agent], &group),
+            0,
+            "a group plus a plain mention is two mentions"
+        );
     }
 
     async fn capture(
