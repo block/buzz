@@ -158,6 +158,21 @@ pub fn run() -> i32 {
     let req = parse_stdin();
 
     if !req.has_authtype_capability {
+        // No `capability[]=authtype` means the client does not speak the
+        // `authtype` credential extension (git < 2.46). It cannot use the
+        // credential we would return: git silently discards response fields it
+        // does not understand, so the request ends in a username prompt that
+        // fails under `GIT_TERMINAL_PROMPT=0`. Keep stdout empty and exit 0 so
+        // git falls through, but when the server did issue a `Nostr` challenge,
+        // say why on stderr — otherwise a silent no-auth looks like a missing
+        // or broken helper.
+        if req.wwwauth.is_some() {
+            eprintln!(
+                "git-credential-nostr: the git client did not announce the `authtype` \
+                 capability, so it cannot use a Nostr credential. This remote needs \
+                 git 2.46 or newer; upgrade git."
+            );
+        }
         println!();
         let _ = io::stdout().flush();
         return 0;
