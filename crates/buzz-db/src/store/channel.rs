@@ -89,6 +89,10 @@ pub struct ChannelRecord {
     /// join an unlisted open channel by naming it, and private channels are
     /// never listed to non-members.
     pub unlisted: bool,
+    /// Whether the relay joins new community members into this channel. Only
+    /// effective while the channel is open and unarchived; see
+    /// [`group_metadata_tags`] and [`list_auto_join_channels`].
+    pub auto_join: bool,
 }
 
 impl ChannelRecord {
@@ -183,7 +187,7 @@ pub async fn create_channel(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role, unlisted
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -246,7 +250,7 @@ pub async fn create_channel_with_id(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role, unlisted
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -490,7 +494,7 @@ async fn get_channel_with_operation(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role, unlisted
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
         FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
     )
@@ -579,7 +583,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline, labels, join_role, unlisted
+                   ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL AND visibility::text = $2
             ORDER BY created_at DESC
@@ -599,7 +603,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline, labels, join_role, unlisted
+                   ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL
             ORDER BY created_at DESC
@@ -611,6 +615,45 @@ async fn list_channels_with_operation(
         .await?
     };
 
+    rows.into_iter().map(row_to_channel_record).collect()
+}
+
+/// Lists the channels whose `auto_join` is effective: set on a stream channel
+/// that is open, unarchived and not deleted. Oldest first, so the first
+/// default channel a member sees is the one that was flagged first.
+///
+/// Every effective channel, not a page of them: kind:9002 accepts the flag on
+/// any number of channels, and the kind:39000 `auto_join` tag promises the
+/// relay joins new members there, so a cap here would silently break that
+/// promise for the channels past it. The set is bounded by the community's
+/// channels, each flagged by a relay owner or admin.
+pub async fn list_auto_join_channels(
+    pool: &PgPool,
+    community_id: CommunityId,
+) -> Result<Vec<ChannelRecord>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
+               description, canvas,
+               created_by, created_at, updated_at, archived_at, deleted_at,
+               nip29_group_id, topic_required, max_members,
+               topic, topic_set_by, topic_set_at,
+               purpose, purpose_set_by, purpose_set_at,
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
+        FROM channels
+        WHERE community_id = $1 AND auto_join AND channel_type = 'stream'
+          AND visibility = 'open' AND archived_at IS NULL AND deleted_at IS NULL
+        ORDER BY created_at ASC
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .fetch_all(&mut *connection)
+    .await?;
     rows.into_iter().map(row_to_channel_record).collect()
 }
 
@@ -669,6 +712,7 @@ pub(crate) fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<Channe
         join_role: row.try_get("join_role")?,
         // Selected by every channel-record query, like `join_role`.
         unlisted: row.try_get("unlisted")?,
+        auto_join: row.try_get("auto_join")?,
     })
 }
 
@@ -688,10 +732,14 @@ pub(crate) fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<Channe
 ///
 /// Buzz also publishes the explicit `["join_role", ...]` value, so clients
 /// can tell what joining gives (show Join or Follow) without inferring it
-/// from the flags, and a bare `["unlisted"]` flag when the channel is
-/// unlisted. The flag is published as stored, whatever the visibility, so
-/// clients see the setting; it only changes listings while the channel is
-/// open.
+/// from the flags, a bare `["unlisted"]` flag when the channel is
+/// unlisted, and a bare `auto_join` tag while the relay joins new
+/// community members into the channel. The `unlisted` flag is published as
+/// stored, whatever the visibility, so clients see the setting; it only
+/// changes listings while the channel is open. `auto_join` is published only
+/// while the column is set and the channel is open and unarchived: a stale
+/// `true` on a private or archived channel is not published, so what
+/// kind:39000 says is what the relay does.
 pub fn group_metadata_tags(channel: &ChannelRecord, members: &[MemberRecord]) -> Vec<Vec<String>> {
     let tag = |parts: &[&str]| parts.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>();
     let mut tags = vec![
@@ -748,6 +796,9 @@ pub fn group_metadata_tags(channel: &ChannelRecord, members: &[MemberRecord]) ->
         &channel.created_at.timestamp().to_string(),
     ]));
     tags.push(tag(&["join_role", join_role.as_str()]));
+    if channel.auto_join && open && channel.archived_at.is_none() {
+        tags.push(tag(&["auto_join"]));
+    }
     // Optional topic / purpose for richer client UX
     if let Some(topic) = channel.topic.as_deref().filter(|t| !t.is_empty()) {
         tags.push(tag(&["topic", topic]));
@@ -791,6 +842,10 @@ pub struct ChannelUpdate {
     /// New unlisted flag, or `None` to leave unchanged. It decides listing,
     /// not admission, so it does not take the membership lock.
     pub unlisted: Option<bool>,
+    /// Whether the relay joins new community members into the channel, or
+    /// `None` to leave unchanged. `Some(true)` needs an open, unarchived
+    /// channel; `apply_channel_metadata_event` refuses it otherwise.
+    pub auto_join: Option<bool>,
 }
 
 impl ChannelUpdate {
@@ -803,6 +858,7 @@ impl ChannelUpdate {
             && self.labels.is_none()
             && self.join_role.is_none()
             && self.unlisted.is_none()
+            && self.auto_join.is_none()
     }
 
     /// True when the update changes a setting that decides admission:
@@ -934,9 +990,11 @@ impl ChannelSettingsWriter<'_> {
 /// 3. the channel row, `FOR NO KEY UPDATE`.
 ///
 /// Roster publication holds the membership lock and then, at commit, takes
-/// the TTL lock and updates the row. A huddle join takes the membership
-/// lock, then the TTL lock, then the row. A writer that took these locks in
-/// any other order could wait for one of them while it waits for this one.
+/// the TTL lock and updates the row. A huddle join and a `put_members`
+/// membership write take the membership lock, then the TTL lock, then the
+/// row; the row lock is what orders them against an archive, which does not
+/// take the membership lock. A writer that took these locks in any other
+/// order could wait for one of them while it waits for this one.
 ///
 /// Returns `ChannelNotFound` when the channel is missing or deleted.
 pub(crate) async fn lock_channel_for_settings_write<'tx>(
@@ -1043,6 +1101,10 @@ async fn update_channel_on(
         set_parts.push(format!("unlisted = ${param_idx}"));
         param_idx += 1;
     }
+    if updates.auto_join.is_some() {
+        set_parts.push(format!("auto_join = ${param_idx}"));
+        param_idx += 1;
+    }
     if let Some(ref ttl) = updates.ttl_seconds {
         // Set ttl_seconds, then reset the deadline from now (or clear both).
         set_parts.push(format!("ttl_seconds = ${param_idx}"));
@@ -1080,6 +1142,9 @@ async fn update_channel_on(
     }
     if let Some(unlisted) = updates.unlisted {
         q = q.bind(unlisted);
+    }
+    if let Some(auto_join) = updates.auto_join {
+        q = q.bind(auto_join);
     }
     if let Some(ref ttl) = updates.ttl_seconds {
         q = q.bind(*ttl);
@@ -1297,7 +1362,7 @@ async fn set_archived_on(w: &mut ChannelSettingsWriter<'_>, archive: bool) -> Re
 /// unchanged.
 #[derive(Default)]
 pub struct ChannelMetadataEdit {
-    /// Name, description, visibility, TTL and labels.
+    /// Name, description, visibility, TTL, labels, `join_role` and `auto_join`.
     pub columns: ChannelUpdate,
     /// New topic, recorded as set by the event's author.
     pub topic: Option<String>,
@@ -1365,6 +1430,29 @@ pub(crate) async fn apply_channel_metadata_event(
         (true, _) => return Err(DbError::AccessDenied("channel is archived".to_string())),
         (false, Some(false)) => {
             return Err(DbError::AccessDenied("channel is not archived".to_string()));
+        }
+    }
+    // `auto_join` only makes sense where a kind:9021 self-join would work:
+    // an open, unarchived channel. Decide it here, under the row lock and
+    // after the archive decision, on the state this event leaves behind, so
+    // one event may open a channel and flag it, and a concurrent archive
+    // cannot slip past a check made before the lock. Either value needs the
+    // event to leave the channel open: the relay role that authorizes
+    // `auto_join` needs no channel membership, so a `false` on a private
+    // channel would store and fan out an event, with its mentions and
+    // notice, in a channel its sender cannot read. One refusal for both
+    // values also keeps the response from telling them apart.
+    if let Some(auto_join) = edit.columns.auto_join {
+        let visibility = edit
+            .columns
+            .visibility
+            .as_deref()
+            .unwrap_or(locked.previous_visibility());
+        let archived = edit.archived.unwrap_or(locked.archived());
+        if visibility != ChannelVisibility::Open.as_str() || (auto_join && archived) {
+            return Err(DbError::AccessDenied(
+                "auto_join requires an open, unarchived channel".to_string(),
+            ));
         }
     }
     crate::insert_mentions_in_transaction(locked.tx(), event, Some(channel_id)).await?;
@@ -1721,6 +1809,16 @@ impl Db {
         list_channels(&self.pool, community_id, visibility).await
     }
 
+    /// Lists the channels the relay joins new community members into:
+    /// `auto_join` set, open, unarchived and not deleted; oldest first.
+    #[datastore_span(name = "list_auto_join_channels", system = "postgresql")]
+    pub async fn list_auto_join_channels(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<Vec<ChannelRecord>> {
+        list_auto_join_channels(&self.pool, community_id).await
+    }
+
     /// Lists channels during startup reconciliation.
     #[datastore_span(name = "list_channels_for_bootstrap", system = "postgresql")]
     pub async fn list_channels_for_bootstrap(
@@ -1845,6 +1943,7 @@ mod group_metadata_tag_tests {
             labels: Vec::new(),
             join_role: join_role.into(),
             unlisted: false,
+            auto_join: false,
         }
     }
 
@@ -1886,6 +1985,26 @@ mod group_metadata_tag_tests {
         // An unknown stored value is published as the value the relay enforces.
         let tags = group_metadata_tags(&channel("open", "bogus"), &[]);
         assert!(tags.contains(&vec!["join_role".to_string(), "guest".to_string()]));
+    }
+
+    /// The bare `auto_join` tag is effective-state: published only while the
+    /// column is set and the channel is open and unarchived.
+    #[test]
+    fn publishes_auto_join_only_while_effective() {
+        let has_tag = |channel: &ChannelRecord| {
+            group_metadata_tags(channel, &[]).contains(&vec!["auto_join".to_string()])
+        };
+        let mut flagged = channel("open", "member");
+        assert!(!has_tag(&flagged), "unset");
+        flagged.auto_join = true;
+        assert!(has_tag(&flagged), "open, unarchived");
+        let mut archived = channel("open", "member");
+        archived.auto_join = true;
+        archived.archived_at = Some(Utc::now());
+        assert!(!has_tag(&archived), "archived");
+        let mut private = channel("private", "member");
+        private.auto_join = true;
+        assert!(!has_tag(&private), "private");
     }
 
     /// The type `t` tag comes first among `t` tags, then the creator `P`,
