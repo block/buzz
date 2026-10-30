@@ -60,6 +60,25 @@ function memberLeftMessage({ actor, createdAt = 1, id, reactions = [] }) {
   };
 }
 
+function memberRemovedMessage({
+  actor,
+  createdAt = 1,
+  id,
+  reactions = [],
+  target,
+}) {
+  return {
+    author: "System",
+    body: JSON.stringify({ type: "member_removed", actor, target }),
+    createdAt,
+    depth: 0,
+    id,
+    kind: 40099,
+    reactions,
+    time: "12:00 PM",
+  };
+}
+
 function reaction(emoji, { reactedByCurrentUser = false } = {}) {
   return {
     emoji,
@@ -384,6 +403,39 @@ test("grouped duplicate mixed-mechanism arrivals render singular neutral copy", 
 
   const row = screen.getByTestId("system-message-row");
   assert.equal(normalizeText(row.textContent ?? ""), "Elrond arrived");
+});
+
+test("grouped arrivals and departures render both membership changes", async () => {
+  const { screen } = await import("@testing-library/react");
+  const admin = "10".repeat(32);
+  const astra = "11".repeat(32);
+  const clerk = "12".repeat(32);
+  const verifier = "13".repeat(32);
+  const groupedMessages = [
+    systemMessage({ actor: admin, createdAt: 1, id: "a", target: astra }),
+    systemMessage({ actor: admin, createdAt: 2, id: "b", target: clerk }),
+    memberRemovedMessage({
+      actor: admin,
+      createdAt: 3,
+      id: "c",
+      target: verifier,
+    }),
+  ];
+
+  await renderSystemMessageRow({
+    groupedMessages,
+    profiles: {
+      ...profileFor(astra, "Astra"),
+      ...profileFor(clerk, "Clerk"),
+      ...profileFor(verifier, "Verifier"),
+    },
+  });
+
+  const row = screen.getByTestId("system-message-row");
+  assert.equal(
+    normalizeText(row.textContent ?? ""),
+    "Astra and Clerk added; Verifier removed",
+  );
 });
 
 // --- joined-then-left lifecycle groups ---------------------------------------
