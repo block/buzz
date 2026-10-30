@@ -30,6 +30,21 @@ later. Once its upper bound is at or before the start of the current month, it i
 historical. It remains in the per-child report as `legacy_leaf` but no longer
 degrades the table.
 
+## Reader grants on new partitions
+
+When maintenance creates a monthly partition or replaces the empty catch-all,
+it copies explicit table-level `SELECT` grants from that parent to the new
+children before committing. Group roles and explicit `PUBLIC` grants are
+included; the owner's ACL entry, column-only grants, writes, and grant options
+are not copied. No additional relay setting is needed. A grant failure rolls
+back that table's entire maintenance transaction.
+
+Existing children and manually created or attached partitions still need their
+own grants. Maintenance does not reconcile grants on existing tables or revoke
+old grants when the parent ACL changes. Keep those permissions aligned through
+the database's provisioning process. Initial schema bootstrap runs before
+deployment-specific reader grants are provisioned.
+
 ## Metrics
 
 Per-table gauges are set only by a successful audit of that table:
