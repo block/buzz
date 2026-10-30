@@ -68,18 +68,20 @@ class ReplySummaryLink extends ConsumerWidget {
       child: Stack(
         clipBehavior: Clip.none,
         children: [
-          Positioned.fill(
-            top: connectorTop,
-            child: IgnorePointer(
-              child: CustomPaint(
-                painter: _ReplyConnector(
-                  context.colors.outlineVariant,
-                  mirrored ? TextDirection.rtl : TextDirection.ltr,
-                  connectorTop,
+          // As on desktop, the branch joins existing replies only.
+          if (summary != null)
+            Positioned.fill(
+              top: connectorTop,
+              child: IgnorePointer(
+                child: CustomPaint(
+                  painter: _ReplyConnector(
+                    context.colors.outlineVariant,
+                    mirrored ? TextDirection.rtl : TextDirection.ltr,
+                    connectorTop,
+                  ),
                 ),
               ),
             ),
-          ),
           Padding(
             padding: EdgeInsets.only(
               left: mirrored ? 0 : Grid.twelve,
@@ -105,7 +107,11 @@ class ReplySummaryLink extends ConsumerWidget {
                           const SizedBox(width: Grid.half),
                         ],
                         if (shownWorking.isNotEmpty) ...[
-                          _AvatarStack(shownWorking, userCache),
+                          // Working agents sit side by side, as on desktop.
+                          for (final (i, pubkey) in shownWorking.indexed) ...[
+                            if (i > 0) const SizedBox(width: Grid.xxs),
+                            SmallAvatar(pubkey: pubkey, userCache: userCache),
+                          ],
                           if (hiddenWorking > 0) ...[
                             const SizedBox(width: Grid.xxs),
                             Text(

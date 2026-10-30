@@ -11231,6 +11231,20 @@ void main() {
       );
       await tester.pumpAndSettle();
       final row = find.byKey(ValueKey('thread-summary-$threadIdRoot'));
+      List<String> rowAvatars() => [
+        for (final avatar in tester.widgetList<SmallAvatar>(
+          find.descendant(of: row, matching: find.byType(SmallAvatar)),
+        ))
+          avatar.pubkey,
+      ];
+      final connector = find.descendant(
+        of: row,
+        matching: find.byWidgetPredicate(
+          (widget) =>
+              widget is CustomPaint &&
+              widget.painter.runtimeType.toString() == '_ReplyConnector',
+        ),
+      );
       expect(row, findsNothing);
 
       // As on desktop, people and other owners' agents typing in the thread
@@ -11260,10 +11274,9 @@ void main() {
         find.bySemanticsLabel('View thread: 3 agents are working'),
         findsOneWidget,
       );
-      expect(
-        find.descendant(of: row, matching: find.byType(SmallAvatar)),
-        findsNWidgets(2),
-      );
+      expect(rowAvatars(), ['morty', 'summer']);
+      // As on desktop, the reply branch waits for a reply.
+      expect(connector, findsNothing);
       expect(
         find.descendant(of: row, matching: find.text('+1')),
         findsOneWidget,
@@ -11331,6 +11344,9 @@ void main() {
         find.bySemanticsLabel('View thread: 1 reply. Morty working'),
         findsOneWidget,
       );
+      // Morty shows once, in the working group, not also as a participant.
+      expect(rowAvatars(), ['morty']);
+      expect(connector, findsOneWidget);
 
       typing.setEntries(const []);
       await tester.pumpAndSettle();
