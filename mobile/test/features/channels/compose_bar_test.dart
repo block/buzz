@@ -205,6 +205,7 @@ Widget _buildComposeBar({
   AppLifecycleNotifier Function()? appLifecycle,
   String composeBarKey = 'compose-bar',
   String? threadHeadId,
+  bool remembersAgents = true,
   VoiceNoteRecorder Function()? voiceNoteRecorderFactory,
   VoiceNotePlayerController Function()? voiceNotePlayerFactory,
   Future<List<UserProfile>> Function(String query)? searchPeople,
@@ -281,6 +282,7 @@ Widget _buildComposeBar({
                   key: ValueKey(composeBarKey),
                   channelId: 'channel-1',
                   threadHeadId: threadHeadId,
+                  remembersAgents: remembersAgents,
                   focusNode: focusNode,
                   onFocusRestorerChanged: onFocusRestorerChanged,
                   onFocusRequested: onFocusRequested,
@@ -4565,58 +4567,62 @@ void main() {
       expect(sent.last.$2, [agentPubkey]);
     });
 
-    testWidgets('forgets mentioned agents when remembering is off', (
-      tester,
-    ) async {
-      final agentPubkey = 'c' * 64;
-      final signer = nostr.Keys.generate();
-      final sent = <List<String>>[];
+    for (final (name, remembering, remembersAgents) in [
+      ('remembering is off', false, true),
+      ('the chat already remembers its agent', true, false),
+    ]) {
+      testWidgets('forgets mentioned agents when $name', (tester) async {
+        final agentPubkey = 'c' * 64;
+        final signer = nostr.Keys.generate();
+        final sent = <List<String>>[];
 
-      await tester.pumpWidget(
-        _buildComposeBar(
-          uploadService: _testUploadService(signer.nsec),
-          currentPubkey: signer.public,
-          members: [
-            ChannelMember(
-              pubkey: agentPubkey,
-              role: 'bot',
-              joinedAt: DateTime.fromMillisecondsSinceEpoch(1000),
-              displayName: 'Helper Bot',
-            ),
-          ],
-          relayAgents: [
-            AgentDirectoryEntry(
-              pubkey: agentPubkey,
-              displayName: 'Helper Bot',
-              respondTo: 'anyone',
-              channelIds: const ['channel-1'],
-            ),
-          ],
-          channels: [_makeCurrentChannel()],
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async => sent.add(mentionPubkeys),
-        ),
-      );
-      ProviderScope.containerOf(
-        tester.element(find.byType(ComposeBar)),
-      ).read(rememberMentionedAgentsProvider.notifier).setEnabled(false);
-      final field = find.byType(TextField);
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(signer.nsec),
+            currentPubkey: signer.public,
+            members: [
+              ChannelMember(
+                pubkey: agentPubkey,
+                role: 'bot',
+                joinedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+                displayName: 'Helper Bot',
+              ),
+            ],
+            relayAgents: [
+              AgentDirectoryEntry(
+                pubkey: agentPubkey,
+                displayName: 'Helper Bot',
+                respondTo: 'anyone',
+                channelIds: const ['channel-1'],
+              ),
+            ],
+            channels: [_makeCurrentChannel()],
+            remembersAgents: remembersAgents,
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async => sent.add(mentionPubkeys),
+          ),
+        );
+        ProviderScope.containerOf(tester.element(find.byType(ComposeBar)))
+            .read(rememberMentionedAgentsProvider.notifier)
+            .setEnabled(remembering);
+        final field = find.byType(TextField);
 
-      await _expandComposer(tester);
-      await tester.enterText(field, '@hel');
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Helper Bot'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
-      await tester.pumpAndSettle();
+        await _expandComposer(tester);
+        await tester.enterText(field, '@hel');
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Helper Bot'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+        await tester.pumpAndSettle();
 
-      expect(sent.single, [agentPubkey]);
-      expect(tester.widget<TextField>(field).controller!.text, isEmpty);
-    });
+        expect(sent.single, [agentPubkey]);
+        expect(tester.widget<TextField>(field).controller!.text, isEmpty);
+      });
+    }
 
     testWidgets('keeps edits made while a mentioned agent is being added', (
       tester,

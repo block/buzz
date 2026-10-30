@@ -18,6 +18,10 @@ class ComposeBar extends HookConsumerWidget {
   /// Optional thread IDs for thread-scoped typing indicators.
   final String? threadHeadId;
   final String? rootId;
+
+  /// Off where the conversation already remembers its agent, as a Solo chat's
+  /// header does; a carried-over mention would override a header change.
+  final bool remembersAgents;
   const ComposeBar({
     super.key,
     required this.channelId,
@@ -25,6 +29,7 @@ class ComposeBar extends HookConsumerWidget {
     this.hintText,
     this.threadHeadId,
     this.rootId,
+    this.remembersAgents = true,
     this.focusNode,
     this.onFocusRestorerChanged,
     this.onFocusRequested,
@@ -567,7 +572,9 @@ class ComposeBar extends HookConsumerWidget {
       final outgoing = _OutgoingMentions(selectedMentions);
       // A prefill is not typing: skip typing indicators and the mention picker.
       void rememberNotifiedAgents(Map<String, MentionCandidate> sent) {
-        if (!ref.read(rememberMentionedAgentsProvider)) return;
+        if (!remembersAgents || !ref.read(rememberMentionedAgentsProvider)) {
+          return;
+        }
         isModifyingText.value = true;
         try {
           _prefillAgentMentions(
