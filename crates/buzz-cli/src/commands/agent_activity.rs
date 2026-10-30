@@ -162,7 +162,7 @@ pub(crate) fn decode_activity(
     })
 }
 
-fn is_agent_telemetry(event: &Event, agent_hex: &str) -> bool {
+pub(super) fn is_agent_telemetry(event: &Event, agent_hex: &str) -> bool {
     let tag = |name: &str| {
         event
             .tags
@@ -176,7 +176,7 @@ fn is_agent_telemetry(event: &Event, agent_hex: &str) -> bool {
         && tag(OBSERVER_FRAME_TAG) == Some(OBSERVER_FRAME_TELEMETRY)
 }
 
-fn unwrap_batch(frame: &Value) -> Vec<&Value> {
+pub(super) fn unwrap_batch(frame: &Value) -> Vec<&Value> {
     if frame.get("kind").and_then(Value::as_str) != Some(BATCH_KIND) {
         return vec![frame];
     }
