@@ -3,6 +3,10 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:buzz/shared/crypto/event_signing.dart';
+import 'package:buzz/shared/hosted/builderlab_account.dart';
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
+import 'package:buzz/shared/hosted/hosted_environment.dart';
+import 'package:buzz/shared/relay/relay_provider.dart';
 import 'package:buzz/shared/hosted/saved_identity_profile.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -16,6 +20,61 @@ void main() {
   final secret = '1'.padLeft(64, '0');
   final keys = nostr.Keys(secret);
   final other = nostr.Keys('2'.padLeft(64, '0'));
+
+  test(
+    'inactive profile auth failure preserves active reconnect recovery',
+    () async {
+      final account = _SignedOutAccount();
+      final container = ProviderContainer(
+        overrides: [
+          builderlabAccountProvider.overrideWithValue(account),
+          savedIdentityProfileClientProvider.overrideWithValue(
+            () => MockClient((_) async {
+              fail('Signed-out hosted lookup must not reach the relay');
+            }),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      addTearDown(account.dispose);
+      final active = RelayConfig(
+        baseUrl: 'wss://active.${HostedEnvironment.communitySuffix}',
+        nsec: keys.nsec,
+      );
+      final inactive = 'wss://inactive.${HostedEnvironment.communitySuffix}';
+      FlutterSecureStorage.setMockInitialValues({
+        'buzz_communities': jsonEncode([
+          {
+            'name': 'Inactive',
+            'relayUrl': inactive,
+            'pubkey': other.public,
+            'nsec': other.nsec,
+          },
+        ]),
+      });
+      final auth = container.read(hostedRelayAuthProvider);
+      expect(auth.protects(active), isTrue);
+      await expectLater(
+        auth.headers(active),
+        throwsA(AccountFailure.signedOut),
+      );
+      final previous = (auth.failedRelay, auth.failedPubkey, auth.failure);
+      var notifications = 0;
+      auth.addListener(() {
+        notifications++;
+      });
+      expect(
+        await container.read(savedIdentityProfileProvider(other.public).future),
+        isNull,
+      );
+      expect(account.restores, 2);
+      expect((auth.failedRelay, auth.failedPubkey, auth.failure), previous);
+      expect(notifications, 0);
+    },
+    skip:
+        !const bool.fromEnvironment('BUZZ_HOSTED_RELAY_AUTH') ||
+        !HostedEnvironment.enabled,
+  );
 
   for (final failure in ['oversized', 'stalled body', 'stalled headers']) {
     testWidgets('closes $failure before trying another saved relay', (
@@ -183,5 +242,14 @@ class _ProfileClient extends http.BaseClient {
   @override
   void close() {
     closed = true;
+  }
+}
+
+class _SignedOutAccount extends BuilderlabAccountClient {
+  int restores = 0;
+  @override
+  Future<BuilderlabAccount?> restore() async {
+    restores++;
+    return null;
   }
 }

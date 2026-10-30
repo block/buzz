@@ -28,7 +28,8 @@ final savedIdentityProfileProvider = FutureProvider.autoDispose
       if (ref.watch(ageSignalProvider) == AgeSignalState.restricted) {
         return null;
       }
-      final auth = ref.read(hostedRelayAuthProvider);
+      final account = ref.read(builderlabAccountProvider);
+      HostedRelayAuth? auth;
       final createTransport = ref.read(savedIdentityProfileClientProvider);
       final slot = ref.read(_profileQueueProvider).request();
       http.Client? transport;
@@ -37,12 +38,17 @@ final savedIdentityProfileProvider = FutureProvider.autoDispose
       ref.onDispose(() {
         active = false;
         slot.cancelQueued();
+        auth?.dispose();
         if (chunks != null) unawaited(chunks!.cancel());
         transport?.close();
       });
       if (!await slot.ready.future) return null;
       try {
         if (!active) return null;
+        // Optional metadata reads must not clear or replace active reconnect
+        // failures. Share the account session, but own assertion/recovery state.
+        final profileAuth = HostedRelayAuth(account);
+        auth = profileAuth;
         return await DeviceIdentitySource().loadProfile(pubkey, (config) async {
           if (!active) return null;
           final uri = Uri.parse(config.baseUrl).resolve('/query');
@@ -60,7 +66,7 @@ final savedIdentityProfileProvider = FutureProvider.autoDispose
           var requesting = true;
           chunks = null;
           final client = HostedRelayHttpClient(
-            auth,
+            profileAuth,
             config,
             inner: attemptTransport,
             canSend: () => active && requesting,
