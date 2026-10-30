@@ -405,6 +405,10 @@ steps:
     action: send_message
     text: "Updated"' | jq .
 
+# workflows secret set (webhook workflows only; owner only)
+printf '%s' 'caller-supplied-secret' | buzz workflows secret set --workflow "$WF_ID" --secret - | jq .
+# Expected: accepted=true; a non-owner or non-webhook workflow is rejected (relay 400, exit 2)
+
 # workflows trigger
 # NOTE: May return 400 "workflow not found" — the relay indexes workflow
 # definitions into a DB table asynchronously. If the definition event hasn't

@@ -202,6 +202,23 @@ pub async fn cmd_trigger_workflow(
     Ok(())
 }
 
+/// Replace a webhook workflow's stored secret — sign and submit a kind:46021 event.
+pub async fn cmd_set_workflow_secret(
+    client: &BuzzClient,
+    workflow_id: &str,
+    secret: &str,
+) -> Result<(), CliError> {
+    let wf_uuid = parse_uuid(workflow_id)?;
+    let secret = read_or_stdin(secret)?;
+    // `<<<` and `echo` append a newline that the sender never signs with.
+    let secret = secret.trim_end_matches(['\n', '\r']);
+    let builder = buzz_sdk::build_workflow_secret_set(wf_uuid, secret).map_err(sdk_err)?;
+    let event = client.sign_event(builder)?;
+    let resp = client.submit_event(event).await?;
+    println!("{}", normalize_write_response(&resp));
+    Ok(())
+}
+
 /// Approve or deny a workflow step — sign and submit a kind:46030 (grant) or 46031 (deny) event.
 pub async fn cmd_approve_step(
     client: &BuzzClient,
@@ -240,6 +257,9 @@ pub async fn dispatch(cmd: crate::WorkflowsCmd, client: &BuzzClient) -> Result<(
         WorkflowsCmd::Delete { workflow } => cmd_delete_workflow(client, &workflow).await,
         WorkflowsCmd::Trigger { workflow, inputs } => {
             cmd_trigger_workflow(client, &workflow, inputs.as_deref()).await
+        }
+        WorkflowsCmd::Secret(crate::WorkflowSecretCmd::Set { workflow, secret }) => {
+            cmd_set_workflow_secret(client, &workflow, &secret).await
         }
         WorkflowsCmd::Runs { workflow, limit } => {
             cmd_get_workflow_runs(client, &workflow, limit).await

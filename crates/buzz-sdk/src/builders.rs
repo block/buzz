@@ -12,7 +12,7 @@ use buzz_core::{
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
         KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_PROJECT,
-        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_SECRET_SET, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -1888,6 +1888,18 @@ pub fn build_workflow_delete(
 pub fn build_workflow_trigger(workflow_id: Uuid) -> Result<EventBuilder, SdkError> {
     let tags = vec![tag(&["d", &workflow_id.to_string()])?];
     Ok(EventBuilder::new(Kind::Custom(KIND_WORKFLOW_TRIGGER as u16), "").tags(tags))
+}
+
+/// Build a workflow secret-set event (kind 46021). The content is the secret.
+pub fn build_workflow_secret_set(
+    workflow_id: Uuid,
+    secret: &str,
+) -> Result<EventBuilder, SdkError> {
+    if secret.is_empty() {
+        return Err(SdkError::InvalidInput("secret must not be empty".into()));
+    }
+    let tags = vec![tag(&["d", &workflow_id.to_string()])?];
+    Ok(EventBuilder::new(Kind::Custom(KIND_WORKFLOW_SECRET_SET as u16), secret).tags(tags))
 }
 
 /// Build a workflow approval event — kind 46030 (grant) or 46031 (deny).
@@ -4815,6 +4827,21 @@ mod tests {
         let ev = sign(build_workflow_trigger(wid).unwrap());
         assert_eq!(ev.kind.as_u16(), 46020);
         assert!(has_tag(&ev, "d", &wid.to_string()));
+    }
+
+    #[test]
+    fn workflow_secret_set_happy_path() {
+        let wid = uuid();
+        let ev = sign(build_workflow_secret_set(wid, "wake-secret").unwrap());
+        assert_eq!(ev.kind.as_u16(), 46021);
+        assert!(has_tag(&ev, "d", &wid.to_string()));
+        assert_eq!(ev.content, "wake-secret");
+    }
+
+    #[test]
+    fn workflow_secret_set_rejects_empty_secret() {
+        let err = build_workflow_secret_set(uuid(), "").unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
     }
 
     #[test]

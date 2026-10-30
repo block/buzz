@@ -80,6 +80,7 @@ buzz dms list
 # Workflows
 buzz workflows list --channel <uuid>
 buzz workflows trigger --workflow <uuid>
+printf '%s' "$SECRET" | buzz workflows secret set --workflow <uuid> --secret -
 buzz workflows approve --token <uuid>
 buzz workflows approve --token <uuid> --approved false --note "needs revision"
 
@@ -163,6 +164,7 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `update` | Update a workflow |
 | | `delete` | Delete a workflow |
 | | `trigger` | Trigger a workflow |
+| | `secret set` | Replace a webhook workflow's secret (for `verify: hmac_sha256`) |
 | | `runs` | Get workflow run history |
 | | `approve` | Approve/deny a workflow step |
 | `feed` | `get` | Get your activity feed |

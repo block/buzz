@@ -666,7 +666,8 @@ pub async fn prune_scheduled_workflow_fires_before(
 /// NOTE: the relay's `WorkflowEngine` caches enabled workflows per
 /// `(community_id, channel_id)`; a caller mutating trigger behavior must
 /// invalidate via `WorkflowEngine::invalidate_channel_workflows` or trigger
-/// matching lags the change by up to the cache TTL. (No current callers.)
+/// matching lags the change by up to the cache TTL. Its one caller, webhook
+/// secret replacement, leaves trigger behavior unchanged.
 pub async fn update_workflow(
     pool: &PgPool,
     community_id: CommunityId,

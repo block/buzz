@@ -68,6 +68,7 @@ pub async fn handle_command(
         KIND_DM_HIDE => handle_dm_hide(tenant, state, &event, &auth).await,
         KIND_WORKFLOW_DEF => handle_workflow_def(tenant, state, &event, &auth).await,
         KIND_WORKFLOW_TRIGGER => handle_workflow_trigger(tenant, state, &event, &auth).await,
+        KIND_WORKFLOW_SECRET_SET => handle_workflow_secret_set(tenant, state, &event, &auth).await,
         KIND_APPROVAL_GRANT => handle_approval_grant(tenant, state, &event, &auth).await,
         KIND_APPROVAL_DENY => handle_approval_deny(tenant, state, &event, &auth).await,
         _ => Err(IngestError::Rejected(format!(
@@ -821,6 +822,87 @@ async fn handle_workflow_def(
         event_id: event.id.to_hex(),
         accepted: true,
         message: format!("response:{}", resp),
+    })
+}
+
+/// Longest accepted caller-supplied webhook secret.
+const MAX_WEBHOOK_SECRET_BYTES: usize = 1024;
+
+/// Replace a webhook workflow's stored secret with the event content.
+///
+/// Lets a sender that issues its own secret (e.g. CoPlan `wake_secret`) sign
+/// webhook bodies for `verify: hmac_sha256`. Unlike the other command kinds,
+/// this event is never persisted: its content is the secret, and stored
+/// events are readable.
+async fn handle_workflow_secret_set(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+    auth: &IngestAuth,
+) -> Result<IngestResult, IngestError> {
+    let self_bytes = auth.pubkey().to_bytes().to_vec();
+
+    let workflow_id_str = extract_d_tag(event)
+        .ok_or_else(|| IngestError::Rejected("invalid: missing d tag (workflow_id)".into()))?;
+    let workflow_id = Uuid::parse_str(&workflow_id_str)
+        .map_err(|_| IngestError::Rejected("invalid: bad workflow_id format".into()))?;
+    let secret = event.content.as_str();
+    if secret.is_empty() || secret.len() > MAX_WEBHOOK_SECRET_BYTES {
+        return Err(IngestError::Rejected(format!(
+            "invalid: secret must be 1-{MAX_WEBHOOK_SECRET_BYTES} bytes"
+        )));
+    }
+
+    // Anyone but the owner is told the workflow is not found, so the response
+    // never reveals whether a workflow ID exists.
+    let community_id = tenant.community();
+    let workflow = state
+        .db
+        .get_workflow(community_id, workflow_id)
+        .await
+        .map_err(|_| IngestError::Rejected(WORKFLOW_NOT_FOUND.into()))?;
+    let channel_in_token_scope = match auth.channel_ids() {
+        Some(channel_ids) => workflow
+            .channel_id
+            .is_some_and(|channel_id| channel_ids.contains(&channel_id)),
+        None => true,
+    };
+    if workflow.owner_pubkey != self_bytes || !channel_in_token_scope {
+        return Err(IngestError::Rejected(WORKFLOW_NOT_FOUND.into()));
+    }
+
+    let def: buzz_workflow::WorkflowDef = serde_json::from_value(workflow.definition.clone())
+        .map_err(|e| IngestError::Internal(format!("error: corrupt workflow definition: {e}")))?;
+    if !matches!(def.trigger, buzz_workflow::TriggerDef::Webhook { .. }) {
+        return Err(IngestError::Rejected(
+            "invalid: workflow does not have a webhook trigger".into(),
+        ));
+    }
+
+    let mut definition_json = workflow.definition.clone();
+    webhook_secret::inject_secret(&mut definition_json, secret);
+    let definition_json_final = serde_json::to_string(&definition_json)
+        .map_err(|e| IngestError::Internal(format!("error: json serialize: {e}")))?;
+    let hash = compute_definition_hash(&definition_json_final);
+    state
+        .db
+        .update_workflow(
+            community_id,
+            workflow_id,
+            &workflow.name,
+            &definition_json_final,
+            &hash,
+        )
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: db update_workflow: {e}")))?;
+
+    Ok(IngestResult {
+        event_id: event.id.to_hex(),
+        accepted: true,
+        message: format!(
+            "response:{}",
+            serde_json::json!({ "workflow_id": workflow_id.to_string() })
+        ),
     })
 }
 

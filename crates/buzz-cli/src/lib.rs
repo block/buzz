@@ -1051,6 +1051,22 @@ pub enum UsersCmd {
 }
 
 #[derive(Subcommand)]
+pub enum WorkflowSecretCmd {
+    /// Replace the stored secret with a caller-supplied value
+    #[command(
+        after_help = "Use when the sender issues its own secret, e.g. for `verify: hmac_sha256`.\n\nExamples:\n  printf '%s' \"$WAKE_SECRET\" | buzz workflows secret set --workflow <UUID> --secret -"
+    )]
+    Set {
+        /// Workflow UUID
+        #[arg(long)]
+        workflow: String,
+        /// The secret; use '-' to read from stdin (keeps it out of shell history)
+        #[arg(long)]
+        secret: String,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum WorkflowsCmd {
     /// List workflows in a channel
     List {
@@ -1103,6 +1119,9 @@ pub enum WorkflowsCmd {
         #[arg(long)]
         inputs: Option<String>,
     },
+    /// Manage a webhook workflow's secret
+    #[command(subcommand)]
+    Secret(WorkflowSecretCmd),
     /// List runs for a workflow
     Runs {
         /// Workflow UUID
@@ -2362,6 +2381,31 @@ mod tests {
     }
 
     #[test]
+    fn workflows_secret_set_requires_workflow_and_secret() {
+        let workflow = "123e4567-e89b-12d3-a456-426614174000";
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "workflows",
+            "secret",
+            "set",
+            "--workflow",
+            workflow,
+            "--secret",
+            "-",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "workflows",
+            "secret",
+            "set",
+            "--workflow",
+            workflow
+        ])
+        .is_err());
+    }
+
+    #[test]
     fn messages_thread_accepts_link_or_explicit_identifiers() {
         let channel = "123e4567-e89b-12d3-a456-426614174000";
         let event = "a".repeat(64);
@@ -2585,7 +2629,9 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "workflows"),
-            vec!["approve", "create", "delete", "get", "list", "runs", "trigger", "update"]
+            vec![
+                "approve", "create", "delete", "get", "list", "runs", "secret", "trigger", "update"
+            ]
         );
         assert_eq!(names(&cmd, "feed"), vec!["get"]);
         assert_eq!(
@@ -2684,7 +2730,7 @@ mod tests {
             ("social", 7),
             ("upload", 1),
             ("users", 5),
-            ("workflows", 8),
+            ("workflows", 9),
         ];
 
         let cmd = Cli::command();

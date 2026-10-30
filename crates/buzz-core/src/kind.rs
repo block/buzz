@@ -608,6 +608,11 @@ pub const KIND_FORUM_COMMENT: u32 = 45003;
 // Workflow engine (46000–46999)
 /// Trigger workflow execution.
 pub const KIND_WORKFLOW_TRIGGER: u32 = 46020;
+/// Replace a webhook workflow's stored secret with a caller-supplied value.
+///
+/// The relay handles it as a sidecar: the event, whose content is the secret,
+/// is never stored or fanned out.
+pub const KIND_WORKFLOW_SECRET_SET: u32 = 46021;
 /// Grant pending approval.
 pub const KIND_APPROVAL_GRANT: u32 = 46030;
 /// Deny pending approval.
@@ -792,6 +797,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_FORUM_VOTE,
     KIND_FORUM_COMMENT,
     KIND_WORKFLOW_TRIGGER,
+    KIND_WORKFLOW_SECRET_SET,
     KIND_APPROVAL_GRANT,
     KIND_APPROVAL_DENY,
     KIND_WORKFLOW_TRIGGERED,
@@ -880,6 +886,7 @@ pub const fn is_command_kind(kind: u32) -> bool {
             | KIND_DM_ADD_MEMBER
             | KIND_DM_HIDE
             | KIND_WORKFLOW_TRIGGER
+            | KIND_WORKFLOW_SECRET_SET
             | KIND_APPROVAL_GRANT
             | KIND_APPROVAL_DENY
     )
