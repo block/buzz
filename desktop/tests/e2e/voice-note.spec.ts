@@ -910,7 +910,7 @@ test("starting a duplicate voice-note player pauses the other instance", async (
   await page.getByTestId("channel-general").click();
   await waitForMockLiveSubscription(page, "general");
 
-  await page.evaluate(
+  const [firstId, secondId] = await page.evaluate(
     ({ audioUrl }) => {
       const emit = (
         window as Window & {
@@ -918,7 +918,7 @@ test("starting a duplicate voice-note player pauses the other instance", async (
             channelName: string;
             content: string;
             extraTags: string[][];
-          }) => unknown;
+          }) => { id: string };
         }
       ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
       if (!emit) throw new Error("Mock message emitter is unavailable.");
@@ -935,8 +935,7 @@ test("starting a duplicate voice-note player pauses the other instance", async (
           ],
         ],
       };
-      emit(input);
-      emit(input);
+      return [emit(input).id, emit(input).id];
     },
     { audioUrl: AUDIO_URL },
   );
@@ -948,12 +947,19 @@ test("starting a duplicate voice-note player pauses the other instance", async (
   await cards.locator("audio").evaluateAll((audios) => {
     for (const audio of audios) (audio as HTMLAudioElement).loop = true;
   });
-  const firstAudio = cards.nth(0).locator("audio");
-  const secondAudio = cards.nth(1).locator("audio");
+  // Keep each player bound to its message when live/history merges reorder rows.
+  const firstCard = page
+    .locator(`[data-message-id="${firstId}"]`)
+    .getByTestId("audio-message-attachment");
+  const secondCard = page
+    .locator(`[data-message-id="${secondId}"]`)
+    .getByTestId("audio-message-attachment");
+  const firstAudio = firstCard.locator("audio");
+  const secondAudio = secondCard.locator("audio");
 
-  await cards.nth(0).getByRole("button", { name: "Play voice note" }).click();
+  await firstCard.getByRole("button", { name: "Play voice note" }).click();
   await expect(firstAudio).toHaveJSProperty("paused", false);
-  await cards.nth(1).getByRole("button", { name: "Play voice note" }).click();
+  await secondCard.getByRole("button", { name: "Play voice note" }).click();
   await expect(firstAudio).toHaveJSProperty("paused", true);
   await expect(secondAudio).toHaveJSProperty("paused", false);
 });
