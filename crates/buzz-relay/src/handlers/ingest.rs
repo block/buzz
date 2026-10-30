@@ -3212,8 +3212,9 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    // A kind:9007 with an `h` tag creates its channel when it is stored, in the
-    // same transaction (see the storage dispatch below).
+    // A kind:9007 must carry the new channel's id in its `h` tag. It creates
+    // its channel when it is stored, in the same transaction (see the storage
+    // dispatch below).
     let mut channel_create: Option<ChannelCreateRequest> = None;
 
     if kind_u32 == KIND_NIP29_CREATE_GROUP {
@@ -3290,6 +3291,12 @@ async fn ingest_event_inner(
                 unlisted,
                 members,
             });
+        } else {
+            // The channel is created in the same commit as its event, so a
+            // refused create (a taken name, for example) reaches the client.
+            return Err(IngestError::Rejected(
+                "invalid: create-group must include an h tag with the new channel id".into(),
+            ));
         }
     }
 

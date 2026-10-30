@@ -1,29 +1,32 @@
-//! scripts/maintenance/rename_duplicate_listed_channel_names.sql leaves no two
-//! listed channels in a community with one name, ignoring case. It keeps the
-//! name on the oldest unarchived channel, picks a new name that is free, and
-//! leaves alone a row that a relay changed while the script waited for it.
+//! scripts/maintenance/plan_duplicate_listed_channel_renames.sql lists the
+//! renames that leave no two listed channels in a community with one name,
+//! ignoring case. It keeps the name on the oldest unarchived channel and picks
+//! a new name that no other listed channel has.
 
 use super::*;
 
-const REPAIR_SCRIPT: &str =
-    include_str!("../../../../../scripts/maintenance/rename_duplicate_listed_channel_names.sql");
+const PLAN_SQL: &str =
+    include_str!("../../../../../scripts/maintenance/plan_duplicate_listed_channel_renames.sql");
 
 struct Seed {
     community: Uuid,
+    host: String,
     created_by: Vec<u8>,
 }
 
 impl Seed {
     async fn new(pool: &PgPool) -> Self {
         let community = Uuid::new_v4();
+        let host = format!("listed-name-{}.example", community.simple());
         sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
             .bind(community)
-            .bind(format!("listed-name-{}.example", community.simple()))
+            .bind(&host)
             .execute(pool)
             .await
             .expect("insert community");
         Self {
             community,
+            host,
             created_by: nostr::Keys::generate().public_key().to_bytes().to_vec(),
         }
     }
@@ -59,39 +62,43 @@ fn renamed(id: Uuid, name: &str) -> (Uuid, String) {
     (id, format!("{name}-{}", &id.to_string()[..8]))
 }
 
-/// Runs the repair the way `psql -f` does: the `DO` block as its own
-/// statement, so that its per-batch COMMITs run outside a transaction block.
-/// A repair that stops making progress fails at the statement timeout.
-/// Returns the number of rows the script's validation query reports.
-pub(super) async fn run_repair(pool: &PgPool) -> i64 {
-    let (repair, validation) = REPAIR_SCRIPT
-        .split_once("\n-- Validation.")
-        .expect("script has a validation query");
-    let mut conn = pool.acquire().await.expect("acquire repair connection");
-    sqlx::query("SET statement_timeout = '30s'")
-        .execute(&mut *conn)
-        .await
-        .expect("bound the repair");
-    sqlx::raw_sql(sqlx::AssertSqlSafe(repair))
-        .execute(&mut *conn)
-        .await
-        .expect("run repair");
-    drop(conn);
-    let (_, query) = validation.split_once("\nSELECT").expect("validation query");
-    sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
-        "SELECT count(*) FROM (SELECT{}) AS remaining",
-        query.trim_end().trim_end_matches(';')
+/// The plan for `host`: (channel, current name, new name), as the rename
+/// script reads it.
+pub(super) async fn rename_plan(pool: &PgPool, host: &str) -> Vec<(Uuid, String, String)> {
+    let (_, query) = PLAN_SQL.split_once("\nWITH").expect("plan query");
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "WITH{}",
+        query
+            .trim_end()
+            .trim_end_matches(';')
+            .replace(":'host'", "$1")
     )))
-    .fetch_one(pool)
+    .bind(host)
+    .fetch_all(pool)
     .await
-    .expect("run validation")
+    .expect("run the rename plan")
+}
+
+/// Applies the plan the way the relay applies each rename the script sends,
+/// and returns how many channels it renamed.
+pub(super) async fn rename_duplicates(pool: &PgPool, host: &str) -> usize {
+    let plan = rename_plan(pool, host).await;
+    for (channel, _, new_name) in &plan {
+        sqlx::query("UPDATE channels SET name = $2 WHERE id = $1")
+            .bind(channel)
+            .bind(new_name)
+            .execute(pool)
+            .await
+            .expect("rename channel");
+    }
+    plan.len()
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn repair_keeps_each_listed_name_on_its_oldest_unarchived_channel() {
+async fn plan_keeps_each_listed_name_on_its_oldest_unarchived_channel() {
     let admin = PgPool::connect(&admin_url().await).await.unwrap();
-    let (pool, name) = create_scratch_db(&admin, "listed_name_repair").await;
+    let (pool, name) = create_scratch_db(&admin, "listed_name_plan").await;
     let seed = Seed::new(&pool).await;
     let [kept, archived, newer, private, deleted] = [(); 5].map(|_| Uuid::new_v4());
     seed.open(&pool, kept, "square-ios", 30).await;
@@ -113,37 +120,58 @@ async fn repair_keeps_each_listed_name_on_its_oldest_unarchived_channel() {
     .execute(&pool)
     .await
     .unwrap();
-    // A community with no duplicates is not touched.
+    // Another community's channel with the same name is not a duplicate.
     let other = Seed::new(&pool).await;
     other.open(&pool, Uuid::new_v4(), "square-ios", 0).await;
-    let other_before = other.names(&pool).await;
+    // A community that is not active is left alone.
+    let inactive = Seed::new(&pool).await;
+    inactive.open(&pool, Uuid::new_v4(), "payments", 20).await;
+    inactive.open(&pool, Uuid::new_v4(), "payments", 10).await;
+    crate::test_support::quiesce_community_for_tests(
+        &pool,
+        buzz_core::CommunityId::from_uuid(inactive.community),
+    )
+    .await;
 
-    assert_eq!(run_repair(&pool).await, 0, "no duplicates remain");
     let mut expected = vec![
+        (
+            archived,
+            "Square-iOS".to_owned(),
+            renamed(archived, "Square-iOS").1,
+        ),
+        (
+            newer,
+            "SQUARE-IOS".to_owned(),
+            renamed(newer, "SQUARE-IOS").1,
+        ),
+    ];
+    expected.sort();
+    assert_eq!(rename_plan(&pool, &seed.host).await, expected);
+    assert!(rename_plan(&pool, &other.host).await.is_empty());
+    assert!(rename_plan(&pool, &inactive.host).await.is_empty());
+
+    assert_eq!(rename_duplicates(&pool, &seed.host).await, 2);
+    assert!(
+        rename_plan(&pool, &seed.host).await.is_empty(),
+        "nothing is left to rename"
+    );
+    let mut names = vec![
         (kept, "square-ios".to_owned()),
         renamed(archived, "Square-iOS"),
         renamed(newer, "SQUARE-IOS"),
         (private, "square-ios".to_owned()),
         (deleted, "square-ios".to_owned()),
     ];
-    expected.sort();
-    assert_eq!(seed.names(&pool).await, expected);
-    assert_eq!(other.names(&pool).await, other_before);
-
-    assert_eq!(run_repair(&pool).await, 0);
-    assert_eq!(
-        seed.names(&pool).await,
-        expected,
-        "a second run changes nothing"
-    );
+    names.sort();
+    assert_eq!(seed.names(&pool).await, names);
     drop_scratch_db(&admin, pool, &name).await;
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn repair_picks_a_free_name_when_the_short_one_is_taken() {
+async fn plan_picks_a_free_name_when_the_short_one_is_taken() {
     let admin = PgPool::connect(&admin_url().await).await.unwrap();
-    let (pool, name) = create_scratch_db(&admin, "listed_name_repair_taken").await;
+    let (pool, name) = create_scratch_db(&admin, "listed_name_plan_taken").await;
     let seed = Seed::new(&pool).await;
     // The longest name the column holds, so the new name must truncate it.
     let long = "a".repeat(255);
@@ -155,72 +183,89 @@ async fn repair_picks_a_free_name_when_the_short_one_is_taken() {
     let short = format!("{}-20000000", "A".repeat(246));
     seed.open(&pool, squatter, &short, 60).await;
 
-    assert_eq!(run_repair(&pool).await, 0, "no duplicates remain");
-    let mut expected = vec![
-        (kept, long.clone()),
-        (duplicate, format!("{}-{duplicate}", "a".repeat(218))),
-        (squatter, short),
-    ];
-    expected.sort();
-    assert_eq!(seed.names(&pool).await, expected);
-    assert!(expected.iter().all(|(_, name)| name.chars().count() <= 255));
+    let new_name = format!("{}-{duplicate}", "a".repeat(218));
+    assert_eq!(
+        rename_plan(&pool, &seed.host).await,
+        vec![(duplicate, long.clone(), new_name.clone())]
+    );
+    assert!(new_name.chars().count() <= 255);
     drop_scratch_db(&admin, pool, &name).await;
 }
 
+/// The real script, with a stand-in CLI that logs each call and applies the
+/// rename. A name may hold any character but NUL, so a name holding control
+/// characters must still yield exactly one rename, of its own channel.
+#[cfg(unix)]
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn repair_leaves_a_row_that_stopped_being_a_duplicate_while_it_waited() {
+async fn script_renames_each_planned_channel_once_whatever_its_name() {
     let admin = PgPool::connect(&admin_url().await).await.unwrap();
-    let (pool, name) = create_scratch_db(&admin, "listed_name_repair_wait").await;
+    let (pool, name) = create_scratch_db(&admin, "listed_name_script").await;
     let seed = Seed::new(&pool).await;
-    let (kept, duplicate) = (Uuid::new_v4(), Uuid::new_v4());
-    seed.open(&pool, kept, "payments", 30).await;
-    seed.open(&pool, duplicate, "payments", 10).await;
+    let [kept, duplicate, other] = [(); 3].map(|_| Uuid::new_v4());
+    let tricky = format!("ops\x1e{other}\x1fowned\x1f\n\t\"$(x)");
+    seed.open(&pool, kept, &tricky, 30).await;
+    seed.open(&pool, duplicate, &tricky, 10).await;
+    seed.open(&pool, other, "other", 20).await;
 
-    // A relay write holds the duplicate's row while the script starts.
-    let mut relay = pool.begin().await.unwrap();
-    sqlx::query("SELECT 1 FROM channels WHERE community_id = $1 AND id = $2 FOR NO KEY UPDATE")
-        .bind(seed.community)
-        .bind(duplicate)
-        .execute(&mut *relay)
-        .await
-        .unwrap();
-    let repair_pool = PgPool::connect_with(
-        (*pool.connect_options())
-            .clone()
-            .application_name("listed-name-repair"),
+    let dir = std::env::temp_dir().join(format!("listed-name-script-{}", Uuid::new_v4().simple()));
+    std::fs::create_dir(&dir).unwrap();
+    let (cli, log) = (dir.join("buzz"), dir.join("calls"));
+    std::fs::write(
+        &cli,
+        "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\0' \"$@\" >>\"$STUB_LOG\"\n\
+         psql \"$DATABASE_URL\" -X -q -v ON_ERROR_STOP=1 -v id=\"$4\" -v name=\"$6\" <<'SQL'\n\
+         UPDATE channels SET name = :'name' WHERE id = :'id';\nSQL\n",
     )
-    .await
     .unwrap();
-    let repair = tokio::spawn({
-        let repair_pool = repair_pool.clone();
-        async move { run_repair(&repair_pool).await }
-    });
-    crate::test_support::wait_for_lock_wait(&pool, "listed-name-repair").await;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    // The relay makes the channel private and renames it, then commits.
-    sqlx::query(
-        "UPDATE channels SET name = 'payments-private', visibility = 'private' \
-         WHERE community_id = $1 AND id = $2",
-    )
-    .bind(seed.community)
-    .bind(duplicate)
-    .execute(&mut *relay)
-    .await
-    .unwrap();
-    relay.commit().await.unwrap();
-
-    assert_eq!(repair.await.unwrap(), 0);
-    let mut expected = vec![
-        (kept, "payments".to_owned()),
-        (duplicate, "payments-private".to_owned()),
-    ];
-    expected.sort();
-    assert_eq!(
-        seed.names(&pool).await,
-        expected,
-        "the private row is not renamed"
+    let base = admin_url().await;
+    let database_url = format!("{}/{}", &base[..base.rfind('/').unwrap()], name);
+    let mut path = std::env::var("PATH").unwrap_or_default();
+    if let Ok(bin) = std::env::var("PG_BIN_DIR") {
+        path = format!("{bin}:{path}");
+    }
+    let output = std::process::Command::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../scripts/maintenance/rename_duplicate_listed_channel_names.sh"
+    ))
+    .arg(&seed.host)
+    .env("PATH", path)
+    .env("DATABASE_URL", &database_url)
+    .env("BUZZ_PRIVATE_KEY", "unused")
+    .env("BUZZ_CLI", &cli)
+    .env("STUB_LOG", &log)
+    .output()
+    .expect("run the rename script");
+    assert!(
+        output.status.success(),
+        "script failed: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    repair_pool.close().await;
+
+    let new_name = renamed(duplicate, &tricky).1;
+    let calls = std::fs::read(&log).unwrap();
+    let args: Vec<&[u8]> = calls.split(|b| *b == 0).collect();
+    let channel = duplicate.to_string();
+    let expected: Vec<&[u8]> = vec![
+        b"channels",
+        b"update",
+        b"--channel",
+        channel.as_bytes(),
+        b"--name",
+        new_name.as_bytes(),
+        b"",
+    ];
+    assert_eq!(args, expected, "one call, for the duplicate only");
+    let mut names = vec![
+        (kept, tricky.clone()),
+        (duplicate, new_name.clone()),
+        (other, "other".to_owned()),
+    ];
+    names.sort();
+    assert_eq!(seed.names(&pool).await, names);
+    std::fs::remove_dir_all(&dir).unwrap();
     drop_scratch_db(&admin, pool, &name).await;
 }

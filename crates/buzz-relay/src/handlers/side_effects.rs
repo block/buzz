@@ -803,6 +803,16 @@ pub async fn validate_admin_event(
                         {
                             return Ok(());
                         }
+                        // A relay operator may rename any channel, so that
+                        // duplicate names can be repaired through this path
+                        // (scripts/maintenance/rename_duplicate_listed_channel_names.sh).
+                        // Every other privileged change still needs a channel
+                        // owner or admin.
+                        if is_rename_only(event)
+                            && actor_is_relay_operator(state, event.pubkey.to_bytes()).await?
+                        {
+                            return Ok(());
+                        }
                         Err(anyhow::anyhow!(
                             "actor not authorized for name/about/archived/visibility/ttl/label/join_role/unlisted changes"
                         ))
@@ -1231,6 +1241,39 @@ async fn emit_typed_membership_notification(
         "membership notification emitted"
     );
     Ok(())
+}
+
+/// True when the only metadata a kind:9002 changes is the channel name.
+fn is_rename_only(event: &Event) -> bool {
+    const METADATA_TAGS: &[&str] = &[
+        "name",
+        "about",
+        "archived",
+        "topic",
+        "purpose",
+        "visibility",
+        "ttl",
+        "t",
+        "join_role",
+        "unlisted",
+    ];
+    let mut changes = event
+        .tags
+        .iter()
+        .map(|t| t.kind().to_string())
+        .filter(|kind| METADATA_TAGS.contains(&kind.as_str()));
+    changes.all(|kind| kind == "name") && event.tags.iter().any(|t| t.kind().to_string() == "name")
+}
+
+/// True when `pubkey` holds the relay operator role. A roster lookup failure
+/// is an error, never "not an operator".
+async fn actor_is_relay_operator(
+    state: &crate::state::AppState,
+    pubkey: [u8; 32],
+) -> anyhow::Result<bool> {
+    crate::api::admin::is_relay_operator(state, pubkey)
+        .await
+        .map_err(|e| anyhow::anyhow!("relay staff lookup failed: {}", e.message))
 }
 
 /// Sign, store (replacing previous), and fan-out a single addressable discovery event.
@@ -2430,17 +2473,14 @@ async fn handle_create_group(
         .unwrap_or_default();
     let unlisted = create_unlisted_from_tags(event)?;
 
-    // If the event has an h-tag UUID, ingest_event() already created the channel
-    // via create_channel_with_id(). Fetch it rather than creating a duplicate.
-    // If no h-tag, fall back to the original auto-UUID creation path.
+    // Ingest already created the channel named by the h tag, in the same
+    // commit as this event. Fetch it rather than creating a duplicate.
     //
-    // Double-count analysis (C5): the counter increments below do NOT
-    // double-count vs. ingest.rs. For the h-tag path, ingest increments on
-    // was_created=true and this handler only reaches create_channel() on a DB
-    // lookup Err — an error recovery path where ingest's channel is
-    // inaccessible, so the counter correctly records a new creation. For the
-    // no-h-tag path, ingest never creates the channel, so this is the sole
-    // increment.
+    // Double-count analysis (C5): the counter increment below does NOT
+    // double-count vs. ingest.rs. Ingest increments on was_created=true and
+    // this handler only reaches create_channel() on a DB lookup Err — an
+    // error recovery path where ingest's channel is inaccessible, so the
+    // counter correctly records a new creation.
     // `members_added`: ingest's create also added the event's `p` tags.
     let (channel, members_added) = if let Some(client_uuid) = extract_h_tag_channel(event) {
         match state
@@ -2476,27 +2516,8 @@ async fn handle_create_group(
             }
         }
     } else {
-        let ch = state
-            .db
-            .create_labeled_channel(
-                tenant.community(),
-                &name,
-                channel_type,
-                visibility,
-                description.as_deref(),
-                &actor_bytes,
-                ttl_seconds,
-                &labels,
-                unlisted,
-            )
-            .await?;
-        metrics::counter!(
-            "buzz_channels_created_total",
-            "community" => tenant.host().to_owned(),
-            "type" => channel_type.to_string()
-        )
-        .increment(1);
-        (ch, false)
+        // Ingest refuses a kind:9007 without an `h` tag before storing it.
+        anyhow::bail!("missing or invalid h tag");
     };
 
     // Creator becomes owner — evict any stale negative membership lookup.
