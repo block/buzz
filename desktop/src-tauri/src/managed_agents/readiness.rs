@@ -453,8 +453,14 @@ fn collect_missing_requirements(
             &["claude", "auth", "status"],
             "complete Claude Code authentication by running the Claude CLI",
             rt,
+            &effective.env,
         ),
-        "codex" => cli_login::requirements(&["codex", "login", "status"], "run `codex login`", rt),
+        "codex" => cli_login::requirements(
+            &["codex", "login", "status"],
+            "run `codex login`",
+            rt,
+            &effective.env,
+        ),
         _ => vec![],
     }
 }
@@ -668,6 +674,8 @@ fn goose_requirements(
 
 #[cfg(test)]
 mod tests {
+    mod auth_env_tests;
+
     use std::collections::BTreeMap;
 
     use super::*;
@@ -1004,31 +1012,6 @@ mod tests {
         );
     }
 
-    // ── codex tests ───────────────────────────────────────────────────────
-
-    #[test]
-    fn codex_not_ready_copy_does_not_mention_openai_api_key() {
-        // codex uses its own credential store via `codex login` (OAuth or API key).
-        // The nudge copy must NOT say "set OPENAI_API_KEY".
-        // Use a not-installed runtime so the requirement is always emitted
-        // regardless of whether codex is on the test machine's PATH.
-        let rt = make_cli_runtime(&["__buzz_nonexistent_adapter_xyz789__"], None);
-        let reqs = cli_login::requirements(&["codex", "login", "status"], "run `codex login`", &rt);
-        // Whether codex is installed or not, the copy (if any) must not mention OPENAI_API_KEY.
-        for req in &reqs {
-            if let Requirement::CliLogin { setup_copy, .. } = req {
-                assert!(
-                    !setup_copy.contains("OPENAI_API_KEY"),
-                    "codex nudge copy must not mention OPENAI_API_KEY; got: {setup_copy:?}"
-                );
-                assert!(
-                    setup_copy.contains("codex login"),
-                    "codex nudge copy should mention `codex login`; got: {setup_copy:?}"
-                );
-            }
-        }
-    }
-
     // ── cli_login_requirements: resolve_command integration ─────────────
 
     /// Construct a minimal `KnownAcpRuntime` stub for testing cli_login_requirements.
@@ -1099,6 +1082,7 @@ mod tests {
             &["__buzz_nonexistent_binary_abc123__", "status"],
             "install the tool first",
             &rt,
+            &BTreeMap::new(),
         );
         assert!(
             !reqs.is_empty(),
@@ -1129,7 +1113,12 @@ mod tests {
         // → AdapterMissing state → no probe run → CliLogin{AdapterMissing}.
         let exe = present_binary_str();
         let rt = make_cli_runtime(&["__buzz_nonexistent_adapter_xyz789__"], Some(exe));
-        let reqs = cli_login::requirements(&[exe, "--list"], "install the adapter", &rt);
+        let reqs = cli_login::requirements(
+            &[exe, "--list"],
+            "install the adapter",
+            &rt,
+            &BTreeMap::new(),
+        );
         assert!(
             !reqs.is_empty(),
             "adapter missing must produce a CliLogin requirement"
@@ -1156,7 +1145,8 @@ mod tests {
             static_commands(vec![exe]),              // adapter found via absolute path
             Some("__buzz_nonexistent_cli_abc123__"), // underlying CLI missing
         );
-        let reqs = cli_login::requirements(&[exe, "--list"], "install the CLI", &rt);
+        let reqs =
+            cli_login::requirements(&[exe, "--list"], "install the CLI", &rt, &BTreeMap::new());
         assert!(
             !reqs.is_empty(),
             "CLI missing must produce a CliLogin requirement"
@@ -1185,6 +1175,7 @@ mod tests {
             &[exe, "--list"],
             "this should not show (probe exits 0)",
             &rt,
+            &BTreeMap::new(),
         );
         assert!(
             reqs.is_empty(),
@@ -1202,8 +1193,12 @@ mod tests {
         // → CliLogin{Available} (tooling installed, needs login).
         let exe = present_binary_str();
         let rt = make_cli_runtime(static_commands(vec![exe]), Some(exe));
-        let reqs =
-            cli_login::requirements(&[exe, "--buzz-probe-fail-xyz"], "run `tool login`", &rt);
+        let reqs = cli_login::requirements(
+            &[exe, "--buzz-probe-fail-xyz"],
+            "run `tool login`",
+            &rt,
+            &BTreeMap::new(),
+        );
         assert!(
             !reqs.is_empty(),
             "non-zero probe must produce a CliLogin requirement (logged out)"
@@ -1322,6 +1317,7 @@ mod tests {
             &[exe, "--buzz-probe-must-not-run-xyz"],
             "run `codex login`",
             &rt,
+            &BTreeMap::new(),
         );
 
         restore_path(&orig);
@@ -1362,6 +1358,7 @@ mod tests {
             &[exe, "--buzz-probe-must-not-run-xyz"],
             "run `codex login`",
             &rt,
+            &BTreeMap::new(),
         );
 
         restore_path(&orig);
