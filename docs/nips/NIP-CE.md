@@ -55,7 +55,7 @@ A member can only replace their own entries. Another member who publishes the sa
 
 When clients see several entries for one `d`, they MUST pick the entry with the newest `created_at` across all authors. Clients SHOULD report the conflict to the user. Clients MUST apply the same tie-break as the relay.
 
-To remove an entry, the author sends a [NIP-09](09.md) deletion request.
+To remove an entry, the author sends a [NIP-09](09.md) deletion request with exactly one `a` tag, `30180:<author pubkey>:<d>`. A deletion request names one entry, so removing many entries takes one request each. The relay removes the versions of that entry created at or before the request's `created_at`, so a later replacement stays.
 
 ## Reading
 
