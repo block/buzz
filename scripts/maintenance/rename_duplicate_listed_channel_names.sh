@@ -62,10 +62,11 @@ renamed=0
 failed=0
 while IFS= read -r -d '' channel && IFS= read -r -d '' name &&
     IFS= read -r -d '' new_name; do
+    # --name=value, so a name that starts with "-" is not read as a flag.
     if $dry_run; then
         printf 'would rename %s from %q to %q\n' "$channel" "$name" "$new_name"
     elif BUZZ_RELAY_URL=$relay_url "$buzz" channels update \
-        --channel "$channel" --name "$new_name" </dev/null >/dev/null; then
+        --channel="$channel" --name="$new_name" </dev/null >/dev/null; then
         printf 'renamed %s from %q to %q\n' "$channel" "$name" "$new_name"
         renamed=$((renamed + 1))
     else

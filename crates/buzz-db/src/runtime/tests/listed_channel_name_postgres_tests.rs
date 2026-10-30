@@ -194,7 +194,8 @@ async fn plan_picks_a_free_name_when_the_short_one_is_taken() {
 
 /// The real script, with a stand-in CLI that logs each call and applies the
 /// rename. A name may hold any character but NUL, so a name holding control
-/// characters must still yield exactly one rename, of its own channel.
+/// characters must still yield exactly one rename, of its own channel. Like
+/// clap, the stand-in takes a value that starts with "-" only as `--name=`.
 #[cfg(unix)]
 #[tokio::test]
 #[ignore = "requires Postgres"]
@@ -203,7 +204,7 @@ async fn script_renames_each_planned_channel_once_whatever_its_name() {
     let (pool, name) = create_scratch_db(&admin, "listed_name_script").await;
     let seed = Seed::new(&pool).await;
     let [kept, duplicate, other] = [(); 3].map(|_| Uuid::new_v4());
-    let tricky = format!("ops\x1e{other}\x1fowned\x1f\n\t\"$(x)");
+    let tricky = format!("-ops\x1e{other}\x1fowned\x1f\n\t\"$(x)");
     seed.open(&pool, kept, &tricky, 30).await;
     seed.open(&pool, duplicate, &tricky, 10).await;
     seed.open(&pool, other, "other", 20).await;
@@ -214,7 +215,8 @@ async fn script_renames_each_planned_channel_once_whatever_its_name() {
     std::fs::write(
         &cli,
         "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\0' \"$@\" >>\"$STUB_LOG\"\n\
-         psql \"$DATABASE_URL\" -X -q -v ON_ERROR_STOP=1 -v id=\"$4\" -v name=\"$6\" <<'SQL'\n\
+         [[ $3 == --channel=* && $4 == --name=* ]] || exit 2\n\
+         psql \"$DATABASE_URL\" -X -q -v ON_ERROR_STOP=1 -v id=\"${3#*=}\" -v name=\"${4#*=}\" <<'SQL'\n\
          UPDATE channels SET name = :'name' WHERE id = :'id';\nSQL\n",
     )
     .unwrap();
@@ -248,14 +250,13 @@ async fn script_renames_each_planned_channel_once_whatever_its_name() {
     let new_name = renamed(duplicate, &tricky).1;
     let calls = std::fs::read(&log).unwrap();
     let args: Vec<&[u8]> = calls.split(|b| *b == 0).collect();
-    let channel = duplicate.to_string();
+    let channel = format!("--channel={duplicate}");
+    let name_arg = format!("--name={new_name}");
     let expected: Vec<&[u8]> = vec![
         b"channels",
         b"update",
-        b"--channel",
         channel.as_bytes(),
-        b"--name",
-        new_name.as_bytes(),
+        name_arg.as_bytes(),
         b"",
     ];
     assert_eq!(args, expected, "one call, for the duplicate only");
