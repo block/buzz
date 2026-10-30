@@ -32,6 +32,7 @@ import {
   VALID_HOSTED_COMMUNITY_NAME as VALID_NAME,
 } from "@/features/communities/hostedCommunityApi";
 import { CommunityIconSettingsCard } from "@/features/communities/ui/CommunityIconSettingsCard";
+import { CommunityThreadPolicySettingsCard } from "@/features/communities/ui/CommunityThreadPolicySettingsCard";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import { safeNpub } from "@/shared/lib/nostrUtils";
@@ -924,6 +925,11 @@ function CommunityRow({
           />
         </div>
       )}
+      {showIconPicker && !archived ? (
+        <div className="basis-full">
+          <CommunityThreadPolicySettingsCard />
+        </div>
+      ) : null}
     </li>
   );
 }

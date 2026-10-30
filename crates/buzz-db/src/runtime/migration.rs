@@ -776,7 +776,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 75);
+        assert_eq!(migrations.len(), 76);
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }
@@ -820,6 +820,17 @@ mod postgres_tests {
             .to_ascii_uppercase()
             .contains("CREATE FUNCTION"));
         assert!(!desired_schema.contains("invite_admission_lock"));
+        assert_eq!(migrations[75].version, 76);
+        let thread_policy_migration = strip_sql_comments(migrations[75].sql.as_str());
+        assert!(thread_policy_migration.contains("SET LOCAL lock_timeout = '5s'"));
+        assert!(thread_policy_migration
+            .contains("ADD COLUMN thread_policy TEXT NOT NULL DEFAULT 'nested'"));
+        assert!(!thread_policy_migration
+            .to_ascii_uppercase()
+            .contains("UPDATE "));
+        assert!(desired_schema.contains(
+            "thread_policy   TEXT NOT NULL DEFAULT 'nested' CHECK (thread_policy IN ('nested', 'flat'))"
+        ));
 
         assert_eq!(migrations[58].version, 59);
         assert!(migrations[58].sql.as_str().contains("buzz.push_enabled"));
@@ -2944,6 +2955,14 @@ mod postgres_tests {
             columns(&migrated, "channels").await,
             "column parity mismatch for channels: schema.sql desired state has drifted \
              from the migrations; update schema/tables/public/channels.sql to match"
+        );
+        // `communities` columns only: its additive ALTER migrations (0003,
+        // 0029, 0076) are mirrored inline in schema.sql.
+        assert_eq!(
+            columns(&desired, "communities").await,
+            columns(&migrated, "communities").await,
+            "column parity mismatch for communities: schema.sql desired state has drifted \
+             from the migrations; update schema/tables/public/communities.sql to match"
         );
         assert_eq!(
             events_key_defs(&desired).await,

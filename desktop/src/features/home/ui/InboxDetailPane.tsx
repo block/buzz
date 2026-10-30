@@ -18,6 +18,7 @@ import { getProjectInboxReference } from "@/features/home/lib/projectInbox";
 import { ProjectInboxDetail } from "@/features/home/ui/ProjectInboxDetail";
 import { ChannelMembersBar } from "@/features/channels/ui/ChannelMembersBar";
 import { useCommunities } from "@/features/communities/useCommunities";
+import { useCommunityThreadPolicy } from "@/features/communities/useCommunityThreadPolicy";
 import { formatInboxTypeLabel } from "@/features/home/lib/inbox";
 import {
   hasInboxThreadContext,
@@ -201,6 +202,9 @@ function InboxMessageDetailPane({
 }: InboxDetailPaneProps) {
   const detailPaneRef = React.useRef<HTMLElement | null>(null);
   const { activeCommunity } = useCommunities();
+  // NIP-TP flat: replies always target the conversation root, so no message
+  // can be picked as a reply target.
+  const isFlatThreads = useCommunityThreadPolicy() === "flat";
   // Refs for the shared anchored-scroll hook's container and content roots.
   const scrollContainerRef = React.useRef<HTMLDivElement | null>(null);
   const contentRef = React.useRef<HTMLDivElement | null>(null);
@@ -475,14 +479,17 @@ function InboxMessageDetailPane({
         ...editMentionState,
       }
     : null;
-  // Explicit sub-message reply wins. Otherwise use the captured default parent
+  // Flat threads always reply to the conversation root. Otherwise an
+  // explicit sub-message reply wins. Otherwise use the captured default parent
   // (derived from the selected-event anchor at conversation entry), which does
   // not change when a live incoming message advances the representative item.
-  const composerParentEventId =
-    replyTarget?.id ??
-    (isDirectMessage ? null : (capturedDefaultParentId ?? item.id));
+  const composerParentEventId = isDirectMessage
+    ? (replyTarget?.id ?? null)
+    : isFlatThreads
+      ? (getThreadReference(item.item.tags ?? []).rootId ?? item.id)
+      : (replyTarget?.id ?? capturedDefaultParentId ?? item.id);
   const composerReplyTarget =
-    replyTarget && replyTarget.id !== item.id
+    !isFlatThreads && replyTarget && replyTarget.id !== item.id
       ? {
           author: replyTarget.authorLabel,
           body: replyTarget.content,
@@ -774,7 +781,9 @@ function InboxMessageDetailPane({
                       : undefined
                   }
                   onEdit={canEditMessage ? handleSelectEditTarget : undefined}
-                  onSelectReplyTarget={handleSelectReplyTarget}
+                  onSelectReplyTarget={
+                    isFlatThreads ? undefined : handleSelectReplyTarget
+                  }
                   onToggleReaction={onToggleReaction}
                   profiles={profiles}
                   showUnreadBoundary={hasUnreadBoundary}

@@ -42,6 +42,7 @@ class _MessageBubble extends HookConsumerWidget {
     final messageSnapshotKey = useMemoized(GlobalKey.new, const []);
     final swipeContentKey = useMemoized(GlobalKey.new, const []);
     final mediaOffset = useMessageMediaOffset(message.content, message.tags);
+    final threadPolicy = ref.watch(activeThreadPolicyProvider);
     final hasLocalReplies = ref.watch(
       threadLocalRepliesProvider(
         ThreadRepliesArgs(
@@ -366,7 +367,12 @@ class _MessageBubble extends HookConsumerWidget {
                                       scaleEmojiOnly: true,
                                       mediaCarouselTrailingOverflow:
                                           Grid.gutter,
-                                      onMediaReply: allMessages == null
+                                      onMediaReply:
+                                          allMessages == null ||
+                                              !canStartThreadFrom(
+                                                message,
+                                                threadPolicy,
+                                              )
                                           ? null
                                           : () {
                                               if (!context.mounted) return;

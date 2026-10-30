@@ -18,6 +18,9 @@ abstract final class EventKind {
   /// Kind:9030 event requesting that the relay add a community member.
   static const relayAdminAddMember = 9030;
 
+  /// Kind:9034 NIP-TP admin command setting the community thread policy.
+  static const setThreadPolicy = 9034;
+
   /// Kind:13534 event containing the current relay-community membership.
   static const relayMembership = 13534;
   static const streamMessage = 9;

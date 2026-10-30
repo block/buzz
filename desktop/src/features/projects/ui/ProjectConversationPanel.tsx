@@ -6,6 +6,7 @@ import {
   useChannelMembersQuery,
   useChannelsQuery,
 } from "@/features/channels/hooks";
+import { useCommunityThreadPolicy } from "@/features/communities/useCommunityThreadPolicy";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
 import {
   useChannelSubscription,
@@ -59,6 +60,7 @@ export function ProjectConversationPanel({
   const channelLabel = activeChannel?.name ?? hit.channelName ?? null;
   const identityQuery = useIdentityQuery();
   const profileQuery = useProfileQuery();
+  const threadPolicy = useCommunityThreadPolicy();
   const membersQuery = useChannelMembersQuery(activeChannel?.id ?? null);
   const targetQuery = useQuery({
     queryKey: ["project-conversation-target", hit.eventId],
@@ -156,6 +158,7 @@ export function ProjectConversationPanel({
     personaLookup: EMPTY_PERSONA_LOOKUP,
     respondToLookup: EMPTY_RESPOND_TO_LOOKUP,
     relaySelfPubkey: null,
+    threadPolicy,
   });
   const sendMessageMutation = useSendMessageMutation(
     activeChannel,

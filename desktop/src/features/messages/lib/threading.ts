@@ -1,3 +1,4 @@
+import type { ThreadPolicy } from "@/shared/api/communityProfile";
 import type { RelayEvent } from "@/shared/api/types";
 
 export type ThreadReference = {
@@ -49,6 +50,22 @@ export function getThreadReference(tags: string[][]): ThreadReference {
     parentId,
     rootId: rootTag?.[1] ?? parentId,
   };
+}
+
+/**
+ * The thread reference a reply is presented with under a NIP-TP policy. Under
+ * `flat` every reply's effective parent is its thread root, whatever parent it
+ * was sent to; `nested` returns the signed tags' reference unchanged.
+ */
+export function getEffectiveThreadReference(
+  tags: string[][],
+  threadPolicy: ThreadPolicy,
+): ThreadReference {
+  const reference = getThreadReference(tags);
+  if (threadPolicy !== "flat" || reference.rootId === null) {
+    return reference;
+  }
+  return { parentId: reference.rootId, rootId: reference.rootId };
 }
 
 /**

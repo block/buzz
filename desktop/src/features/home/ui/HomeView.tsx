@@ -4,6 +4,7 @@ import { RefreshCcw } from "lucide-react";
 import { useAppShell } from "@/app/AppShellContext";
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { useChannelsQuery } from "@/features/channels/hooks";
+import { useCommunityThreadPolicy } from "@/features/communities/useCommunityThreadPolicy";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
 import { ChannelManagementSheet } from "@/features/channels/ui/ChannelManagementSheet";
 import {
@@ -108,6 +109,7 @@ export function HomeView({
   onRefresh,
 }: HomeViewProps) {
   const relaySelfPubkey = useRelaySelfQuery().data;
+  const threadPolicy = useCommunityThreadPolicy();
   const [homeInboxRef, homeInboxWidthPx] = useElementWidth<HTMLDivElement>();
   const isNarrowHomeViewport =
     homeInboxWidthPx > 0 &&
@@ -512,6 +514,7 @@ export function HomeView({
     selectedEventId,
     selectedItem,
     structuralEvents: threadContext.structuralEvents,
+    threadPolicy,
   });
   const selectedItemReplies = React.useMemo<InboxReply[]>(() => {
     if (!selectedItem) return [];

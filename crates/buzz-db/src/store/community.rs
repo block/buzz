@@ -1,6 +1,6 @@
 //! Community lifecycle and host-map persistence.
 
-use buzz_core::CommunityId;
+use buzz_core::{thread_policy::ThreadPolicy, CommunityId};
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use sqlx::Row;
@@ -474,6 +474,48 @@ impl Db {
         Ok(())
     }
 
+    /// Returns the community's thread policy (NIP-TP), served as the NIP-11
+    /// `thread_policy` field. A community without a row reads as the NIP-TP
+    /// default, `nested`.
+    #[datastore_span(name = "get_community_thread_policy", system = "postgresql")]
+    pub async fn get_community_thread_policy(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<ThreadPolicy> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::TenantResolution,
+        )
+        .await?;
+        thread_policy_on(&mut connection, community_id).await
+    }
+
+    /// Sets the community's thread policy (NIP-TP kind:9034).
+    #[datastore_span(name = "set_community_thread_policy", system = "postgresql")]
+    pub async fn set_community_thread_policy(
+        &self,
+        community_id: CommunityId,
+        policy: ThreadPolicy,
+    ) -> Result<()> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        sqlx::query(
+            r#"
+            UPDATE communities
+            SET thread_policy = $2
+            WHERE id = $1
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .bind(policy.as_str())
+        .execute(&mut *connection)
+        .await?;
+        Ok(())
+    }
+
     /// Ensure a configured community host exists and return its row.
     ///
     /// This is the startup/config seeding path for N=1 deployments. Migrations
@@ -920,6 +962,25 @@ impl Db {
     }
 }
 
+/// Reads the community's thread policy on `conn`, so a derived thread read
+/// applies the policy from the same session that serves its rows. A missing
+/// community row reads as the NIP-TP default, `nested`.
+pub(crate) async fn thread_policy_on(
+    conn: &mut sqlx::PgConnection,
+    community_id: CommunityId,
+) -> Result<ThreadPolicy> {
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT thread_policy FROM communities WHERE id = $1")
+            .bind(community_id.as_uuid())
+            .fetch_optional(&mut *conn)
+            .await?;
+    match stored {
+        None => Ok(ThreadPolicy::default()),
+        Some(value) => ThreadPolicy::parse(&value)
+            .ok_or_else(|| DbError::InvalidData(format!("invalid thread_policy {value:?}"))),
+    }
+}
+
 #[cfg(test)]
 mod postgres_tests {
     //! Pin the load-bearing contract for `Db::communities_of_channels`:
@@ -985,6 +1046,8 @@ mod postgres_tests {
             "lookup_community_host",
             "get_community_icon",
             "set_community_icon",
+            "get_community_thread_policy",
+            "set_community_thread_policy",
             "ensure_configured_community",
             "create_community_with_owner",
             "archive_community_owned_by",

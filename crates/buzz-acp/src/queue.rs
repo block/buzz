@@ -22,6 +22,7 @@ use uuid::Uuid;
 use crate::prompt_project::PromptProjectInfo;
 
 use crate::config::DedupMode;
+pub use crate::relay::ThreadPolicy;
 use crate::scope::SessionScope;
 
 /// Maximum events queued per session scope before oldest events are dropped.
@@ -1755,35 +1756,37 @@ fn turn_is_human_facing(
 /// Agent↔agent turns may nest (intentional for agent coordination):
 ///   - in a thread → the triggering event id, so the reply stays in the thread
 ///   - top-level   → `None`, leaving the destination to the agent
+///
+/// Under [`ThreadPolicy::Flat`] (NIP-TP) no turn nests: an agent↔agent turn
+/// in a thread anchors to the thread ROOT too.
 fn resolve_reply_anchor(
     sender_pubkey: &str,
     thread_tags: &ThreadTags,
     triggering_event_id: &str,
     profile_lookup: Option<&PromptProfileLookup>,
+    thread_policy: ThreadPolicy,
 ) -> Option<String> {
-    if !turn_is_human_facing(sender_pubkey, thread_tags, profile_lookup) {
-        return thread_tags
-            .root_event_id
-            .is_some()
-            .then(|| triggering_event_id.to_string());
+    let agent_only = !turn_is_human_facing(sender_pubkey, thread_tags, profile_lookup);
+    match &thread_tags.root_event_id {
+        Some(_) if agent_only && thread_policy == ThreadPolicy::Nested => {
+            Some(triggering_event_id.to_string())
+        }
+        Some(root) => Some(root.clone()),
+        None if agent_only => None,
+        None => Some(triggering_event_id.to_string()),
     }
-    Some(
-        thread_tags
-            .root_event_id
-            .clone()
-            .unwrap_or_else(|| triggering_event_id.to_string()),
-    )
 }
 
 /// Whether `format_prompt` anchors `batch`'s ordinary replies to its
 /// triggering message instead of the thread every same-thread message
-/// shares: an agent↔agent turn inside a channel thread (see
-/// [`resolve_reply_anchor`]). The prompt task records this for the
-/// native-steer guard (see [`EventQueue::in_flight_accepts_steer`]).
+/// shares: an agent↔agent turn inside a channel thread of a nested
+/// community (see [`resolve_reply_anchor`]). The prompt task records this
+/// for the native-steer guard (see [`EventQueue::in_flight_accepts_steer`]).
 pub fn reply_anchor_is_trigger(
     batch: &FlushBatch,
     is_dm: bool,
     profile_lookup: Option<&PromptProfileLookup>,
+    thread_policy: ThreadPolicy,
 ) -> bool {
     let Some(last_event) = batch.events.last() else {
         return false;
@@ -1797,6 +1800,7 @@ pub fn reply_anchor_is_trigger(
             &thread_tags,
             &routing_event_id,
             profile_lookup,
+            thread_policy,
         )
         .as_deref()
             == Some(routing_event_id.as_str())
@@ -1955,6 +1959,7 @@ fn format_context_hints(
     is_dm: bool,
     conversation_context_status: ConversationContextStatus,
     reply_anchor: Option<&str>,
+    thread_policy: ThreadPolicy,
 ) -> String {
     let channel_id = scope.channel_id();
     let channel_display = match channel_info {
@@ -2011,6 +2016,7 @@ fn format_context_hints(
                 append_reply_instruction(&mut s, event_id);
             }
         }
+        append_flat_thread_policy(&mut s, thread_policy);
         crate::prompt_framing::semantic_section("context", &s)
     } else if let Some(root) = scope
         .root_event_id()
@@ -2051,6 +2057,7 @@ fn format_context_hints(
                 append_new_thread_reply_instruction(&mut s, event_id);
             }
         }
+        append_flat_thread_policy(&mut s, thread_policy);
         crate::prompt_framing::semantic_section("context", &s)
     } else {
         let mut s = format!(
@@ -2066,7 +2073,19 @@ fn format_context_hints(
         if let Some(event_id) = reply_anchor {
             append_new_thread_reply_instruction(&mut s, event_id);
         }
+        append_flat_thread_policy(&mut s, thread_policy);
         crate::prompt_framing::semantic_section("context", &s)
+    }
+}
+
+/// Tell the agent the community shows threads flat (NIP-TP), so it never
+/// replies to a reply.
+fn append_flat_thread_policy(s: &mut String, thread_policy: ThreadPolicy) {
+    if thread_policy == ThreadPolicy::Flat {
+        s.push_str(
+            "\nThread policy: flat. Every thread reply goes directly under its thread root; \
+             never use a reply's event id as `--reply-to`.",
+        );
     }
 }
 
@@ -2231,6 +2250,9 @@ pub struct FormatPromptArgs<'a> {
     /// Defaults to `false` so a caller that never sets it behaves as if this
     /// were the session's first message.
     pub standing_context_sent: bool,
+    /// Community thread policy (NIP-TP) that decides whether in-thread
+    /// replies may nest. Defaults to [`ThreadPolicy::Nested`].
+    pub thread_policy: ThreadPolicy,
 }
 
 /// The prompt sections that do not change for the life of a session: base
@@ -2382,23 +2404,30 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     //   - in a thread  → anchor to the thread ROOT (no depth-2 nesting)
     //   - top-level     → anchor to the triggering event (it becomes the root)
     // Agent↔agent turns in a thread anchor to the triggering event — deep
-    // nesting is intentional there — and top-level ones get no anchor.
+    // nesting is intentional there, unless the community thread policy is
+    // flat — and top-level ones get no anchor.
     // DMs are always 1:1 with a human, so they always anchor.
     // `ReplyRoute::accepts_steer` mirrors this DM rule, and
     // `reply_anchor_is_trigger` reports the agent↔agent thread anchor to the
     // native-steer guard; keep them in sync.
+    // Under the flat thread policy every in-thread anchor is the thread root,
+    // DMs included.
     let sender_pubkey = last_event.event.pubkey.to_hex();
     let reply_anchor = if is_dm {
         thread_tags
             .root_event_id
-            .is_some()
-            .then(|| routing_event_id.clone())
+            .as_ref()
+            .map(|root| match args.thread_policy {
+                ThreadPolicy::Flat => root.clone(),
+                ThreadPolicy::Nested => routing_event_id.clone(),
+            })
     } else {
         resolve_reply_anchor(
             &sender_pubkey,
             &thread_tags,
             &routing_event_id,
             args.profile_lookup,
+            args.thread_policy,
         )
     };
     sections.push(format_context_hints(
@@ -2412,6 +2441,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
             args.conversation_context_had_session_events,
         ),
         reply_anchor.as_deref(),
+        args.thread_policy,
     ));
 
     // 3. Conversation context (thread or DM).
@@ -5008,7 +5038,13 @@ mod tests {
     fn test_anchor_human_in_thread_uses_root() {
         // Human asks inside a thread → anchor to the thread ROOT (flat at L1).
         let tags = thread_tags(Some(ROOT_ID), &[AGENT_A_PK]);
-        let anchor = resolve_reply_anchor(HUMAN_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        let anchor = resolve_reply_anchor(
+            HUMAN_PK,
+            &tags,
+            TRIGGER_ID,
+            Some(&id_lookup()),
+            ThreadPolicy::Nested,
+        );
         assert_eq!(anchor.as_deref(), Some(ROOT_ID));
     }
 
@@ -5016,7 +5052,13 @@ mod tests {
     fn test_anchor_human_top_level_uses_triggering_event() {
         // Human top-level mention (no thread tags) → triggering event is root.
         let tags = thread_tags(None, &[AGENT_A_PK]);
-        let anchor = resolve_reply_anchor(HUMAN_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        let anchor = resolve_reply_anchor(
+            HUMAN_PK,
+            &tags,
+            TRIGGER_ID,
+            Some(&id_lookup()),
+            ThreadPolicy::Nested,
+        );
         assert_eq!(anchor.as_deref(), Some(TRIGGER_ID));
     }
 
@@ -5025,14 +5067,26 @@ mod tests {
         // Agent pings agent inside a thread → reply to the triggering event:
         // stays in the thread, nesting allowed.
         let tags = thread_tags(Some(ROOT_ID), &[AGENT_B_PK]);
-        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        let anchor = resolve_reply_anchor(
+            AGENT_A_PK,
+            &tags,
+            TRIGGER_ID,
+            Some(&id_lookup()),
+            ThreadPolicy::Nested,
+        );
         assert_eq!(anchor.as_deref(), Some(TRIGGER_ID));
     }
 
     #[test]
     fn test_anchor_agent_to_agent_top_level_is_none() {
         let tags = thread_tags(None, &[AGENT_B_PK]);
-        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        let anchor = resolve_reply_anchor(
+            AGENT_A_PK,
+            &tags,
+            TRIGGER_ID,
+            Some(&id_lookup()),
+            ThreadPolicy::Nested,
+        );
         assert_eq!(anchor, None);
     }
 
@@ -5040,7 +5094,13 @@ mod tests {
     fn test_anchor_agent_sender_but_human_tagged_flattens() {
         // Agent-authored, but a human is tagged → human-facing → anchor to root.
         let tags = thread_tags(Some(ROOT_ID), &[AGENT_B_PK, HUMAN_PK]);
-        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        let anchor = resolve_reply_anchor(
+            AGENT_A_PK,
+            &tags,
+            TRIGGER_ID,
+            Some(&id_lookup()),
+            ThreadPolicy::Nested,
+        );
         assert_eq!(anchor.as_deref(), Some(ROOT_ID));
     }
 
@@ -5048,7 +5108,8 @@ mod tests {
     fn test_anchor_unknown_identity_treated_as_human() {
         // No profile lookup → fail open (treat as human so visibility is kept).
         let tags = thread_tags(Some(ROOT_ID), &[]);
-        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, None);
+        let anchor =
+            resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, None, ThreadPolicy::Nested);
         assert_eq!(anchor.as_deref(), Some(ROOT_ID));
     }
 
@@ -5057,7 +5118,13 @@ mod tests {
         // Raw p-tag presence must NOT flatten when every tagged pubkey is an
         // agent — this is the regression Pinky flagged.
         let tags = thread_tags(Some(ROOT_ID), &[AGENT_A_PK, AGENT_B_PK]);
-        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        let anchor = resolve_reply_anchor(
+            AGENT_A_PK,
+            &tags,
+            TRIGGER_ID,
+            Some(&id_lookup()),
+            ThreadPolicy::Nested,
+        );
         assert_eq!(anchor.as_deref(), Some(TRIGGER_ID));
     }
 
@@ -5102,7 +5169,12 @@ mod tests {
         let agent_event_id = agent_event.event.id.to_hex();
 
         let agent_only = batch(vec![agent_event.clone()]);
-        assert!(reply_anchor_is_trigger(&agent_only, false, Some(&lookup)));
+        assert!(reply_anchor_is_trigger(
+            &agent_only,
+            false,
+            Some(&lookup),
+            ThreadPolicy::Nested
+        ));
         let prompt = format_prompt(&agent_only, &args).join("\n\n");
         assert!(
             prompt.contains(&format!("--reply-to {agent_event_id}")),
@@ -5110,7 +5182,12 @@ mod tests {
         );
 
         let merged = batch(vec![agent_event, in_thread(&human, "human asks")]);
-        assert!(!reply_anchor_is_trigger(&merged, false, Some(&lookup)));
+        assert!(!reply_anchor_is_trigger(
+            &merged,
+            false,
+            Some(&lookup),
+            ThreadPolicy::Nested
+        ));
         let prompt = format_prompt(&merged, &args).join("\n\n");
         assert!(prompt.contains(&format!("--reply-to {root}")), "{prompt}");
         assert!(
@@ -5120,7 +5197,115 @@ mod tests {
 
         // A DM renders its own anchor rule, which the steer guard handles
         // separately.
-        assert!(!reply_anchor_is_trigger(&agent_only, true, Some(&lookup)));
+        assert!(!reply_anchor_is_trigger(
+            &agent_only,
+            true,
+            Some(&lookup),
+            ThreadPolicy::Nested
+        ));
+    }
+
+    #[test]
+    fn test_flat_policy_anchors_agent_thread_turn_to_root() {
+        // Under the flat thread policy an agent↔agent turn in a thread
+        // anchors to the root like a human-facing one, even when its trigger
+        // was sent as a nested reply, and the steer guard sees the shared
+        // thread anchor.
+        let ch = Uuid::new_v4();
+        let root = "a".repeat(64);
+        let parent = "b".repeat(64);
+        let agent = Keys::generate();
+        let other_agent = Keys::generate().public_key().to_hex();
+        let lookup = HashMap::from([
+            (agent.public_key().to_hex(), profile(true)),
+            (other_agent.clone(), profile(true)),
+        ]);
+        let event = EventBuilder::new(Kind::Custom(9), "agent asks")
+            .tags([
+                nostr::Tag::parse(["e", root.as_str(), "", "root"]).unwrap(),
+                nostr::Tag::parse(["e", parent.as_str(), "", "reply"]).unwrap(),
+                nostr::Tag::parse(["p", other_agent.as_str()]).unwrap(),
+            ])
+            .sign_with_keys(&agent)
+            .unwrap();
+        let trigger_id = event.id.to_hex();
+        let batch = FlushBatch {
+            channel_id: ch,
+            scope: conv(ch),
+            events: vec![BatchEvent {
+                edit: None,
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let prompt = |thread_policy| {
+            format_prompt(
+                &batch,
+                &FormatPromptArgs {
+                    profile_lookup: Some(&lookup),
+                    thread_policy,
+                    ..Default::default()
+                },
+            )
+            .join("\n\n")
+        };
+
+        let nested = prompt(ThreadPolicy::Nested);
+        assert!(
+            nested.contains(&format!("--reply-to {trigger_id}")),
+            "{nested}"
+        );
+        assert!(!nested.contains("Thread policy: flat"), "{nested}");
+        assert!(reply_anchor_is_trigger(
+            &batch,
+            false,
+            Some(&lookup),
+            ThreadPolicy::Nested
+        ));
+
+        let flat = prompt(ThreadPolicy::Flat);
+        assert!(flat.contains(&format!("--reply-to {root}")), "{flat}");
+        assert!(
+            !flat.contains(&format!("--reply-to {trigger_id}")),
+            "{flat}"
+        );
+        assert!(flat.contains("Thread policy: flat"), "{flat}");
+        assert!(!reply_anchor_is_trigger(
+            &batch,
+            false,
+            Some(&lookup),
+            ThreadPolicy::Flat
+        ));
+
+        // A DM thread reply anchors to its trigger when nested and to the
+        // root when flat.
+        let dm = PromptChannelInfo {
+            name: "DM".into(),
+            channel_type: "dm".into(),
+            description: None,
+            project: None,
+        };
+        let dm_prompt = |thread_policy| {
+            format_prompt(
+                &batch,
+                &FormatPromptArgs {
+                    channel_info: Some(&dm),
+                    thread_policy,
+                    ..Default::default()
+                },
+            )
+            .join("\n\n")
+        };
+        let nested_dm = dm_prompt(ThreadPolicy::Nested);
+        assert!(
+            nested_dm.contains(&format!("--reply-to {trigger_id}")),
+            "{nested_dm}"
+        );
+        let flat_dm = dm_prompt(ThreadPolicy::Flat);
+        assert!(flat_dm.contains(&format!("--reply-to {root}")), "{flat_dm}");
     }
 
     #[test]

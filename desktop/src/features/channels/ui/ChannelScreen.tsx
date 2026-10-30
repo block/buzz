@@ -33,6 +33,7 @@ import { useWelcomeKickoffEntrance } from "@/features/onboarding/useWelcomeKicko
 import { useWelcomeKickoffStagePresence } from "@/features/onboarding/useWelcomeKickoffStagePresence";
 import { useWelcomeAgentCreate } from "@/features/channels/useWelcomeAgentCreate";
 import { useCommunities } from "@/features/communities/useCommunities";
+import { useCommunityThreadPolicy } from "@/features/communities/useCommunityThreadPolicy";
 import {
   useChannelMessagesQuery,
   useChannelSubscription,
@@ -104,6 +105,7 @@ export function ChannelScreen({
   const queryClient = useQueryClient();
   const { goHome } = useAppNavigation();
   const { activeCommunity } = useCommunities();
+  const threadPolicy = useCommunityThreadPolicy();
   const {
     clearChannelUnreadSource,
     markChannelRead,
@@ -413,6 +415,7 @@ export function ChannelScreen({
         respondToLookup,
         relaySelfPubkey,
         messageOwnerProfiles,
+        threadPolicy,
       ),
     [
       activeChannel,
@@ -425,6 +428,7 @@ export function ChannelScreen({
       relaySelfPubkey,
       respondToLookup,
       resolvedMessages,
+      threadPolicy,
     ],
   );
   const threadPanelData = useIndependentThreadPanel({
@@ -442,6 +446,7 @@ export function ChannelScreen({
     personaLookup,
     respondToLookup,
     relaySelfPubkey,
+    threadPolicy,
   });
   const {
     firstUnreadMessageId,
@@ -576,7 +581,7 @@ export function ChannelScreen({
     closeAgentSession: handleCloseAgentSession,
     hasAgentSessionReturnTarget,
     openAgentSession: handleOpenAgentSession,
-    openThreadAndCloseAgentSession: handleOpenThreadAndCloseAgentSession,
+    openThreadAndCloseAgentSession,
   } = useChannelAgentSessions({
     activeChannel,
     activeChannelId,
@@ -600,6 +605,18 @@ export function ChannelScreen({
     setThreadReplyTargetId,
     setThreadScrollTargetId,
   });
+  // NIP-TP flat: a reply (e.g. one broadcast to the channel) has no thread of
+  // its own, so opening its thread opens its root's thread.
+  const handleOpenThreadAndCloseAgentSession = React.useCallback(
+    (message: TimelineMessage) => {
+      const root =
+        threadPolicy === "flat" && message.rootId
+          ? timelineMessages.find((candidate) => candidate.id === message.rootId)
+          : undefined;
+      openThreadAndCloseAgentSession(root ?? message);
+    },
+    [openThreadAndCloseAgentSession, threadPolicy, timelineMessages],
+  );
   const { handleOpenProfilePanel, handleCloseProfilePanel, handleOpenDm } =
     useChannelProfilePanel({
       closeAgentSession: handleCloseAgentSession,

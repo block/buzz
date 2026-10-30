@@ -12,6 +12,7 @@ import 'package:photo_manager/photo_manager.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../../shared/clipboard_utils.dart';
+import '../../shared/community/thread_policy_provider.dart';
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
@@ -595,9 +596,13 @@ class _MessageQuickActionsRow extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final messages = allMessages;
     final canRemind = ref.watch(reminderServiceProvider) != null;
+    final canReply = canStartThreadFrom(
+      message,
+      ref.watch(activeThreadPolicyProvider),
+    );
 
     final tiles = <Widget>[
-      if (messages != null)
+      if (messages != null && canReply)
         _MessageQuickActionTile(
           icon: BuzzIcons.messageSquareReply,
           label: 'Reply',

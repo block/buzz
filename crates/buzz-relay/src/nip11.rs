@@ -31,6 +31,11 @@ pub struct RelayInfo {
     /// admins/owners via the kind:9033 command. Omitted when no icon is set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// Community thread policy (NIP-TP): `"nested"` or `"flat"`, set by relay
+    /// admins/owners via the kind:9034 command. Omitted for unmapped hosts or
+    /// when the lookup fails; clients read a missing field as `nested`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_policy: Option<String>,
     /// Host-bound atomic read-state snapshot capability; absent on unresolved hosts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_state_snapshot: Option<serde_json::Value>,
@@ -281,6 +286,7 @@ impl RelayInfo {
             name: "Buzz Relay".to_string(),
             description: "Buzz — private team communication relay".to_string(),
             icon: icon.filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            thread_policy: None,
             read_state_snapshot: None,
             buzz_v1: None,
             artifacts: serde_json::json!({
@@ -372,7 +378,8 @@ fn push_descriptor(
 /// Centralised so the content-negotiated root handler and the dedicated
 /// `/info` endpoint can't drift apart. Every input to `RelayInfo::build`
 /// stays a pre-derived scalar: [`nip11_facts`] (config + keypair) plus the
-/// host-scoped workspace icon. Optional provider capabilities are passed as
+/// host-scoped workspace icon; the host-scoped thread policy is set on the
+/// built document from the same `bind_community` binding. Optional provider capabilities are passed as
 /// config-derived scalar identifiers; no provider credential enters NIP-11.
 pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &str) -> RelayInfo {
     let (relay_self, advertise_nip43) = nip11_facts(state);
@@ -403,6 +410,15 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
                 eligible_kinds: ELIGIBLE_KINDS,
             });
         }
+        // Host-scoped scalar, like `icon`: bound through `bind_community`, so
+        // it only ever reports the requesting host's own community. Fails open
+        // to an absent field (NIP-TP default `nested`).
+        info.thread_policy = state
+            .db
+            .get_community_thread_policy(tenant.community())
+            .await
+            .ok()
+            .map(|policy| policy.as_str().to_owned());
         info.read_state_snapshot = Some(serde_json::json!({
             "version": 1,
             "community_id": tenant.community().as_uuid(),

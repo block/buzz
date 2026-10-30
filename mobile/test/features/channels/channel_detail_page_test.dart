@@ -73,6 +73,7 @@ import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/features/profile/user_profile_sheet.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';
+import 'package:buzz/shared/community/thread_policy_provider.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/emoji/emoji_burst.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
@@ -294,6 +295,7 @@ Widget _buildTestable({
   SendMessage? sender,
   SendMessage? soloSender,
   ChannelRoutePlacement placement = ChannelRoutePlacement.ordinary,
+  ThreadPolicy? threadPolicy,
 }) {
   final resolvedChannel = channel ?? _testChannel;
   final navigatorKey = GlobalKey<NavigatorState>();
@@ -434,6 +436,10 @@ Widget _buildTestable({
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
       ),
+      if (threadPolicy != null)
+        communityThreadPolicyProvider.overrideWith(
+          (ref, relayUrl) async => threadPolicy,
+        ),
       if (mediaClient != null) ...[
         mediaGetAuthServiceProvider.overrideWithValue(
           MediaGetAuthService(baseUrl: 'https://relay.example', nsec: null),
@@ -13320,101 +13326,132 @@ void main() {
       );
     }
 
-    testWidgets('opens a nested reply in its direct-parent thread', (
-      tester,
-    ) async {
-      final root = _textMsg(
-        id: threadIdRoot,
-        pubkey: 'alice',
-        content: 'Outer root',
-        createdAt: 1000,
-      );
-      final parent = _textMsg(
-        id: threadIdParent,
-        pubkey: 'bob',
-        content: 'Nested thread head',
-        createdAt: 1100,
-        extraTags: const [
-          ['e', threadIdRoot, '', 'reply'],
-        ],
-      );
-      final target = _textMsg(
-        id: 'target',
-        pubkey: 'carol',
-        content: 'Deeply nested target',
-        createdAt: 1200,
-        extraTags: const [
-          ['e', threadIdRoot, '', 'root'],
-          ['e', threadIdParent, '', 'reply'],
-        ],
-      );
+    for (final flat in [false, true]) {
+      testWidgets('opens a nested reply in its direct-parent thread '
+          '(${flat ? 'flat' : 'nested'} policy)', (tester) async {
+        final sender = _RecordingOrdinarySender();
+        final root = _textMsg(
+          id: threadIdRoot,
+          pubkey: 'alice',
+          content: 'Outer root',
+          createdAt: 1000,
+        );
+        final parent = _textMsg(
+          id: threadIdParent,
+          pubkey: 'bob',
+          content: 'Nested thread head',
+          createdAt: 1100,
+          extraTags: const [
+            ['e', threadIdRoot, '', 'reply'],
+          ],
+        );
+        final target = _textMsg(
+          id: 'target',
+          pubkey: 'carol',
+          content: 'Deeply nested target',
+          createdAt: 1200,
+          extraTags: const [
+            ['e', threadIdRoot, '', 'root'],
+            ['e', threadIdParent, '', 'reply'],
+          ],
+        );
 
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: [root, parent, target],
-          initialMessageId: 'target',
-          initialThreadRootId: threadIdParent,
-          threadReplies: {
-            // Relay subtree filtering is keyed by thread_metadata.root_event_id,
-            // so nested replies are returned by the outer-root query.
-            threadIdRoot: [parent, target],
-          },
-          users: const {
-            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
-            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
-            'carol': UserProfile(pubkey: 'carol', displayName: 'Carol'),
-          },
-        ),
-      );
-      await tester.pumpAndSettle();
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [root, parent, target],
+            initialMessageId: 'target',
+            initialThreadRootId: threadIdParent,
+            sender: sender,
+            threadPolicy: flat ? ThreadPolicy.flat : null,
+            threadReplies: {
+              // Relay subtree filtering is keyed by thread_metadata.root_event_id,
+              // so nested replies are returned by the outer-root query.
+              threadIdRoot: [parent, target],
+            },
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+              'carol': UserProfile(pubkey: 'carol', displayName: 'Carol'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
 
-      final threadPage = tester.widget<ThreadDetailPage>(
-        find.byType(ThreadDetailPage),
-      );
-      expect(threadPage.threadHead.id, threadIdParent);
-      expect(threadPage.initialMessageId, 'target');
+        final threadPage = tester.widget<ThreadDetailPage>(
+          find.byType(ThreadDetailPage),
+        );
+        expect(threadPage.threadHead.id, threadIdParent);
+        expect(threadPage.initialMessageId, 'target');
+        // NIP-TP flat presents every reply directly under the outer root, so the
+        // nested head becomes a sibling of its own reply and offers no branch.
+        expect(find.text('Outer root'), flat ? findsOneWidget : findsNothing);
+        expect(find.text(flat ? '2 replies' : '1 reply'), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('nested-thread-summary-$threadIdParent')),
+          findsNothing,
+        );
 
-      final highlighted = tester.widget<DecoratedBox>(
-        find.byKey(const ValueKey('thread-message-target')),
-      );
-      final decoration = highlighted.decoration as BoxDecoration;
-      final initialHighlight = decoration.color!;
-      expect(initialHighlight, isNot(Colors.transparent));
-      expect(initialHighlight.a, closeTo(0.12, 0.001));
+        final highlighted = tester.widget<DecoratedBox>(
+          find.byKey(const ValueKey('thread-message-target')),
+        );
+        final decoration = highlighted.decoration as BoxDecoration;
+        final initialHighlight = decoration.color!;
+        expect(initialHighlight, isNot(Colors.transparent));
+        expect(initialHighlight.a, closeTo(0.12, 0.001));
 
-      await tester.pump(const Duration(milliseconds: 2999));
-      final heldDecoration =
-          tester
-                  .widget<DecoratedBox>(
-                    find.byKey(const ValueKey('thread-message-target')),
-                  )
-                  .decoration
-              as BoxDecoration;
-      expect(heldDecoration.color, initialHighlight);
+        await tester.pump(const Duration(milliseconds: 2999));
+        final heldDecoration =
+            tester
+                    .widget<DecoratedBox>(
+                      find.byKey(const ValueKey('thread-message-target')),
+                    )
+                    .decoration
+                as BoxDecoration;
+        expect(heldDecoration.color, initialHighlight);
 
-      await tester.pump(const Duration(milliseconds: 1));
-      await tester.pump(const Duration(milliseconds: 150));
+        await tester.pump(const Duration(milliseconds: 1));
+        await tester.pump(const Duration(milliseconds: 150));
 
-      final fadingDecoration =
-          tester
-                  .widget<DecoratedBox>(
-                    find.byKey(const ValueKey('thread-message-target')),
-                  )
-                  .decoration
-              as BoxDecoration;
-      expect(fadingDecoration.color!.a, greaterThan(0));
-      expect(fadingDecoration.color!.a, lessThan(initialHighlight.a));
+        final fadingDecoration =
+            tester
+                    .widget<DecoratedBox>(
+                      find.byKey(const ValueKey('thread-message-target')),
+                    )
+                    .decoration
+                as BoxDecoration;
+        expect(fadingDecoration.color!.a, greaterThan(0));
+        expect(fadingDecoration.color!.a, lessThan(initialHighlight.a));
 
-      await tester.pump(const Duration(milliseconds: 150));
-      final dismissedDecoration =
-          tester
-                  .widget<DecoratedBox>(
-                    find.byKey(const ValueKey('thread-message-target')),
-                  )
-                  .decoration
-              as BoxDecoration;
-      expect(dismissedDecoration.color, Colors.transparent);
-    });
+        await tester.pump(const Duration(milliseconds: 150));
+        final dismissedDecoration =
+            tester
+                    .widget<DecoratedBox>(
+                      find.byKey(const ValueKey('thread-message-target')),
+                    )
+                    .decoration
+                as BoxDecoration;
+        expect(dismissedDecoration.color, Colors.transparent);
+
+        await tester
+            .widget<ComposeBar>(find.byType(ComposeBar))
+            .onSend('Composer reply', []);
+        expect(sender.replyTargets.single, (
+          parent: flat ? threadIdRoot : threadIdParent,
+          root: threadIdRoot,
+        ));
+
+        // Swipe-to-reply on a reply opens its branch only when nesting is on.
+        await tester.drag(
+          find.text('Deeply nested target'),
+          const Offset(120, 0),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.byType(ThreadDetailPage, skipOffstage: false),
+          flat ? findsOneWidget : findsNWidgets(2),
+        );
+      });
+    }
 
     testWidgets('does not replace a newer route after delayed hydration', (
       tester,
@@ -18103,6 +18140,7 @@ class _MutableColorProfileNotifier extends ProfileNotifier {
 class _RecordingOrdinarySender implements SendMessage {
   final sent = <String>[];
   final channels = <Channel?>[];
+  final replyTargets = <({String? parent, String? root})>[];
   @override
   Future<void> call({
     required String channelId,
@@ -18115,6 +18153,7 @@ class _RecordingOrdinarySender implements SendMessage {
   }) async {
     sent.add(content);
     channels.add(channel);
+    replyTargets.add((parent: parentEventId, root: rootEventId));
   }
 }
 

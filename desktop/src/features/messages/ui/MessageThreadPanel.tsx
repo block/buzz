@@ -1,6 +1,7 @@
 import * as React from "react";
 import { ArrowDown } from "lucide-react";
 
+import { useCommunityThreadPolicy } from "@/features/communities/useCommunityThreadPolicy";
 import { HuddleTranscriptIntro } from "@/features/huddle/components/HuddleTranscriptIntro";
 import {
   buildThreadSummaryFromVisibleEntries,
@@ -223,6 +224,9 @@ export function MessageThreadPanel({
   >(null);
   const isOverlay = useIsThreadPanelOverlay();
   const threadHeadId = threadHead?.id ?? null;
+  // NIP-TP flat: every new reply targets the thread head, so no reply can be
+  // picked as a parent and no "replying to" bar is shown.
+  const isFlatThreads = useCommunityThreadPolicy() === "flat";
   useEscapeKey(
     onClose,
     !isHuddleTranscript && (isOverlay || isSinglePanelView || isFocusMode),
@@ -240,10 +244,12 @@ export function MessageThreadPanel({
 
   const onCaptureSendContext = React.useCallback(
     () => ({
-      parentEventId: replyTargetMessageRef.current?.id ?? threadHeadId,
+      parentEventId: isFlatThreads
+        ? threadHeadId
+        : (replyTargetMessageRef.current?.id ?? threadHeadId),
       threadHeadId,
     }),
-    [threadHeadId],
+    [isFlatThreads, threadHeadId],
   );
 
   const collapseThreadHeadReplies = React.useCallback(() => {
@@ -283,7 +289,10 @@ export function MessageThreadPanel({
   );
 
   const composerReplyTarget =
-    replyTargetMessage && threadHead && replyTargetMessage.id !== threadHead.id
+    !isFlatThreads &&
+    replyTargetMessage &&
+    threadHead &&
+    replyTargetMessage.id !== threadHead.id
       ? {
           author: replyTargetMessage.author,
           body: replyTargetMessage.body,
@@ -736,7 +745,9 @@ export function MessageThreadPanel({
                           }
                           onMarkUnread={onMarkUnread}
                           onMarkRead={onMarkRead}
-                          onReply={onSelectReplyTarget}
+                          onReply={
+                            isFlatThreads ? undefined : onSelectReplyTarget
+                          }
                           onSendToChannel={stableSendToChannel}
                           onToggleReaction={onToggleReaction}
                           profiles={profiles}

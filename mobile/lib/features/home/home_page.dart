@@ -28,6 +28,7 @@ class HomePage extends HookConsumerWidget {
     this.mePageBuilder,
     this.profilePageBuilder,
     this.communityAppearancePageBuilder,
+    this.communityThreadPolicyPageBuilder,
     required this.hasUnreadInbox,
     this.hasUnreadSolo = false,
     super.key,
@@ -47,6 +48,9 @@ class HomePage extends HookConsumerWidget {
   mePageBuilder;
   final WidgetBuilder? communityInvitePageBuilder;
   final WidgetBuilder? communityAppearancePageBuilder;
+
+  /// Builds the admin-only community thread policy page.
+  final WidgetBuilder? communityThreadPolicyPageBuilder;
   final bool hasUnreadInbox;
   final bool hasUnreadSolo;
 
@@ -117,6 +121,13 @@ class HomePage extends HookConsumerWidget {
               label: 'Appearance',
               symbol: 'circle.lefthalf.filled',
               onPressed: () => openPage(communityAppearancePageBuilder!),
+            ),
+          if (canManageCommunityInvites(role.value) &&
+              communityThreadPolicyPageBuilder != null)
+            (
+              label: 'Thread replies',
+              symbol: 'arrowshape.turn.up.left',
+              onPressed: () => openPage(communityThreadPolicyPageBuilder!),
             ),
           (
             label: 'Agents',

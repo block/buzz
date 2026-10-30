@@ -1496,6 +1496,10 @@ mod tests {
         let _ = writer_db
             .set_community_icon(test_scope, Some("pool-operation-matrix"))
             .await;
+        let _ = writer_db.get_community_thread_policy(test_scope).await;
+        let _ = writer_db
+            .set_community_thread_policy(test_scope, buzz_core::thread_policy::ThreadPolicy::Flat)
+            .await;
         let _ = writer_db
             .create_community_with_owner(
                 &format!("pool-operation-matrix-{}.invalid", Uuid::new_v4().simple()),

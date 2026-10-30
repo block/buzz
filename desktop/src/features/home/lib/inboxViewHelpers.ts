@@ -7,10 +7,12 @@ import {
 import { isProjectInboxItem } from "@/features/home/lib/projectInbox";
 import {
   getChannelIdFromTags,
+  getEffectiveThreadReference,
   getThreadReference,
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
 import type { TimelineMessage } from "@/features/messages/types";
+import type { ThreadPolicy } from "@/shared/api/communityProfile";
 import type {
   FeedItem,
   RelayEvent,
@@ -104,15 +106,19 @@ export function matchesInboxAllView(
 export function getContextMessageDepth(
   event: RelayEvent,
   eventById: ReadonlyMap<string, RelayEvent>,
+  threadPolicy: ThreadPolicy = "nested",
 ): number {
   let depth = 0;
-  let parentId = getThreadReference(event.tags).parentId;
+  let parentId = getEffectiveThreadReference(event.tags, threadPolicy).parentId;
   const seen = new Set<string>([event.id]);
 
   while (parentId && eventById.has(parentId) && !seen.has(parentId)) {
     depth += 1;
     seen.add(parentId);
-    parentId = getThreadReference(eventById.get(parentId)?.tags ?? []).parentId;
+    parentId = getEffectiveThreadReference(
+      eventById.get(parentId)?.tags ?? [],
+      threadPolicy,
+    ).parentId;
   }
 
   return depth;
@@ -185,6 +191,7 @@ export function toInboxContextMessage(
     fallbackAuthorPubkey: string;
     profiles: Record<string, UserProfileSummary> | undefined;
     selectedItemId: string;
+    threadPolicy?: ThreadPolicy;
   },
 ): InboxContextMessage {
   const event = context.eventById.get(message.id);
@@ -206,7 +213,7 @@ export function toInboxContextMessage(
     content: message.body,
     createdAt: message.createdAt,
     depth: event
-      ? getContextMessageDepth(event, context.eventById)
+      ? getContextMessageDepth(event, context.eventById, context.threadPolicy)
       : message.depth,
     fullTimestampLabel: formatInboxFullTimestamp(message.createdAt),
     isSelected: message.id === context.selectedItemId,

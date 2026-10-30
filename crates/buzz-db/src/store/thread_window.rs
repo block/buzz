@@ -100,6 +100,7 @@ async fn select_window(
             root_in_channel,
         });
     }
+    let policy = crate::community::thread_policy_on(&mut *conn, community).await?;
     // Order metadata before event lookups. With stale statistics a root-wide
     // sort can otherwise execute one lateral lookup for every reply first.
     // OFFSET 0 keeps this boundary without limiting candidates prematurely.
@@ -114,8 +115,12 @@ async fn select_window(
         .push_bind(root)
         .push(" AND tm.channel_id = ")
         .push_bind(request.channel)
-        .push(" AND tm.depth BETWEEN 1 AND ")
-        .push_bind(request.depth as i32);
+        .push(" AND tm.depth >= 1");
+    // NIP-TP: under `flat` every reply has effective depth 1, so the request
+    // depth (validated as >= 1 above) bounds nothing.
+    if let Some(depth) = policy.depth_limit(Some(request.depth)) {
+        q.push(" AND tm.depth <= ").push_bind(depth as i32);
+    }
     if let Some(cursor) = &request.cursor {
         let (ts, id) = cursor_key(cursor)?;
         // The redundant upper timestamp bound gives PostgreSQL an index range

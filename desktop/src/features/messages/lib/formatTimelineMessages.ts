@@ -10,9 +10,11 @@ import type {
   TimelineReaction,
 } from "@/features/messages/types";
 import {
+  getEffectiveThreadReference,
   getThreadReference,
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
+import type { ThreadPolicy } from "@/shared/api/communityProfile";
 import {
   formatOwnerLabel,
   resolveUserLabel,
@@ -229,6 +231,8 @@ export function formatTimelineMessages(
   relaySelfPubkey?: string | null,
   /** Profiles for verified agent owners, fetched in one batch by the surface. */
   ownerProfiles?: UserProfileLookup,
+  /** NIP-TP community thread policy; `flat` presents every reply under its root. */
+  threadPolicy: ThreadPolicy = "nested",
 ): TimelineMessage[] {
   const currentPubkeyLower = currentPubkey?.toLowerCase();
   // Identity-cached: rosters can be 10k+ members and this formatter re-runs
@@ -438,7 +442,7 @@ export function formatTimelineMessages(
       return 0;
     }
 
-    const thread = getThreadReference(event.tags);
+    const thread = getEffectiveThreadReference(event.tags, threadPolicy);
     if (!thread.parentId) {
       depthByEventId.set(event.id, 0);
       return 0;
@@ -469,7 +473,7 @@ export function formatTimelineMessages(
         relaySelfPubkey,
         requireChannelTagForPTags: true,
       });
-    const thread = getThreadReference(event.tags);
+    const thread = getEffectiveThreadReference(event.tags, threadPolicy);
     const edit = editsByTargetId.get(event.id);
     const role = roleByPubkey.get(authorPubkey.toLowerCase());
     const authorProfile = profiles?.[authorPubkey.toLowerCase()];

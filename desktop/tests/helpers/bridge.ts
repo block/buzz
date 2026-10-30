@@ -159,6 +159,8 @@ type MockBridgeOptions = {
   projectHeadBranch?: string;
   /** Relay NIP-11 identity used to sign authoritative repository state. */
   relaySelf?: string | null;
+  /** NIP-11 `thread_policy` returned by `fetch_thread_policy`. Defaults to nested. */
+  threadPolicy?: "flat" | "nested";
   /** Native-like huddle state seeded from authoritative role-bearing membership. */
   huddle?: MockHuddleSeed;
   /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */

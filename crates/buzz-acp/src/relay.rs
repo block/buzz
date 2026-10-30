@@ -289,6 +289,43 @@ fn unix_now_secs() -> u64 {
         .as_secs()
 }
 
+/// NIP-11 document locations: the standard relay root, then Buzz's `/info`
+/// compatibility alias.
+const NIP11_PATHS: [&str; 2] = ["/", "/info"];
+
+fn nip11_unavailable(failures: &[String]) -> RelayError {
+    RelayError::Http(format!(
+        "failed to fetch a usable NIP-11 document: {}",
+        failures.join("; ")
+    ))
+}
+
+/// Community thread policy (NIP-TP), served as the NIP-11 `thread_policy`
+/// field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThreadPolicy {
+    /// Replies keep the parent they were sent to.
+    #[default]
+    Nested,
+    /// Every reply is presented as a direct reply to its thread root.
+    Flat,
+}
+
+impl ThreadPolicy {
+    /// Read the policy from a NIP-11 document. Only `"flat"` selects
+    /// [`Flat`](Self::Flat); a missing field (older relay) or any other value
+    /// keeps the NIP-TP default, [`Nested`](Self::Nested).
+    pub fn from_nip11(document: &serde_json::Value) -> Self {
+        match document
+            .get("thread_policy")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("flat") => Self::Flat,
+            _ => Self::Nested,
+        }
+    }
+}
+
 impl RestClient {
     /// Fetch the relay's stable signing identity from its NIP-11 document.
     ///
@@ -301,31 +338,11 @@ impl RestClient {
         let mut failures = Vec::new();
         let mut saw_document_without_self = false;
 
-        for path in ["/", "/info"] {
-            let url = format!("{}{path}", self.base_url);
-            let response = match self
-                .http
-                .get(&url)
-                .header(reqwest::header::ACCEPT, "application/nostr+json")
-                .send()
-                .await
-            {
-                Ok(response) => response,
-                Err(error) => {
-                    failures.push(format!("GET {path} failed: {error}"));
-                    continue;
-                }
-            };
-
-            if !response.status().is_success() {
-                failures.push(format!("GET {path} returned HTTP {}", response.status()));
-                continue;
-            }
-
-            let document: serde_json::Value = match response.json().await {
+        for path in NIP11_PATHS {
+            let document = match self.nip11_document(path).await {
                 Ok(document) => document,
-                Err(error) => {
-                    failures.push(format!("GET {path} returned invalid NIP-11 JSON: {error}"));
+                Err(failure) => {
+                    failures.push(failure);
                     continue;
                 }
             };
@@ -352,11 +369,44 @@ impl RestClient {
         if saw_document_without_self {
             Ok(None)
         } else {
-            Err(RelayError::Http(format!(
-                "failed to fetch a usable NIP-11 document: {}",
-                failures.join("; ")
-            )))
+            Err(nip11_unavailable(&failures))
         }
+    }
+
+    /// Fetch the community thread policy from the relay's NIP-11 document
+    /// (NIP-TP `thread_policy`).
+    ///
+    /// A document without the field (an older relay) means
+    /// [`ThreadPolicy::Nested`]. An error means no usable document was
+    /// fetched; the caller decides what the last known policy is.
+    pub async fn thread_policy(&self) -> Result<ThreadPolicy, RelayError> {
+        let mut failures = Vec::new();
+        for path in NIP11_PATHS {
+            match self.nip11_document(path).await {
+                Ok(document) => return Ok(ThreadPolicy::from_nip11(&document)),
+                Err(failure) => failures.push(failure),
+            }
+        }
+        Err(nip11_unavailable(&failures))
+    }
+
+    /// GET one NIP-11 document candidate; `Err` describes why it is unusable.
+    async fn nip11_document(&self, path: &str) -> Result<serde_json::Value, String> {
+        let url = format!("{}{path}", self.base_url);
+        let response = self
+            .http
+            .get(&url)
+            .header(reqwest::header::ACCEPT, "application/nostr+json")
+            .send()
+            .await
+            .map_err(|error| format!("GET {path} failed: {error}"))?;
+        if !response.status().is_success() {
+            return Err(format!("GET {path} returned HTTP {}", response.status()));
+        }
+        response
+            .json()
+            .await
+            .map_err(|error| format!("GET {path} returned invalid NIP-11 JSON: {error}"))
     }
 
     /// Sign a NIP-98 HTTP Auth event (kind:27235) for the given method/URL/body.
@@ -4524,6 +4574,51 @@ mod tests {
             *requests.lock().expect("lock recorded requests"),
             vec![("/".to_string(), true), ("/info".to_string(), true)]
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn thread_policy_reads_nip11_and_defaults_to_nested() {
+        for (document, expected) in [
+            (
+                serde_json::json!({ "thread_policy": "flat" }),
+                ThreadPolicy::Flat,
+            ),
+            (
+                serde_json::json!({ "thread_policy": "nested" }),
+                ThreadPolicy::Nested,
+            ),
+            (
+                serde_json::json!({ "name": "older relay" }),
+                ThreadPolicy::Nested,
+            ),
+        ] {
+            let responses = HashMap::from([("/".to_string(), (200, document.to_string()))]);
+            let (client, _requests, server) = nip11_test_client(responses).await;
+            assert_eq!(
+                client.thread_policy().await.expect("fetch thread policy"),
+                expected,
+                "{document}"
+            );
+            server.abort();
+        }
+
+        // `/info` is the fallback; with neither document there is no answer.
+        let responses = HashMap::from([(
+            "/info".to_string(),
+            (
+                200,
+                serde_json::json!({ "thread_policy": "flat" }).to_string(),
+            ),
+        )]);
+        let (client, _requests, server) = nip11_test_client(responses).await;
+        assert_eq!(
+            client.thread_policy().await.expect("fetch thread policy"),
+            ThreadPolicy::Flat
+        );
+        server.abort();
+        let (client, _requests, server) = nip11_test_client(HashMap::new()).await;
+        assert!(client.thread_policy().await.is_err());
         server.abort();
     }
 

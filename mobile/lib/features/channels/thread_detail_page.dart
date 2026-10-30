@@ -2,6 +2,7 @@ import 'message_swipe_reply.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
 import 'message_footer_layout.dart';
 import 'reply_summary_link.dart';
+
 import 'dart:async';
 import 'dart:math' as math;
 
@@ -15,6 +16,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
+import '../../shared/community/thread_policy_provider.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
@@ -134,6 +136,29 @@ class ThreadDetailPage extends HookConsumerWidget {
     // page displays a nested branch. Query that root, then select this head's
     // direct children from the returned subtree below.
     final queryRootId = threadHead.rootId ?? threadHead.id;
+    final threadPolicy = ref.watch(activeThreadPolicyProvider);
+    // NIP-TP flat: a reply has no replies of its own, so a route opened on one
+    // (a stale link, or a route opened before the policy loaded) shows its
+    // root's thread instead.
+    final headId = threadPolicy == ThreadPolicy.flat
+        ? queryRootId
+        : threadHead.id;
+    final routeHead = headId == threadHead.id
+        ? threadHead
+        : allMessages.where((m) => m.id == headId).firstOrNull;
+    useEffect(() {
+      if (headId == threadHead.id) return null;
+      // The root may be outside the loaded channel window; pin it until the
+      // page closes so the head can render.
+      final notifier = ref.read(channelMessagesProvider(channelId).notifier);
+      final ids = {headId};
+      unawaited(
+        notifier.loadEventsById(ids).catchError((Object error) {
+          debugPrint('thread: failed to load flat thread root: $error');
+        }),
+      );
+      return () => notifier.releaseDeepLinkEvents(ids);
+    }, [channelId, headId]);
     final repliesArgs = ThreadRepliesArgs(
       channelId: channelId,
       rootId: queryRootId,
@@ -157,6 +182,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         : formatTimeline(
             mergeThreadEvents(replyEvents, liveChannelEvents),
             currentPubkey: currentPubkey,
+            threadPolicy: threadPolicy,
           );
     final hasFetchedReplies = fetchedReplies != null;
     // A terminal query error cannot produce a more authoritative list. Keep
@@ -165,15 +191,16 @@ class ThreadDetailPage extends HookConsumerWidget {
     final canUseMessagesForInitialTarget =
         relayReplyState.value != null ||
         (relayReplyState.hasError && !relayReplyState.retrying);
-    final liveDeletionHidesHead = _isDeletedBy(
-      liveChannelEvents,
-      threadHead.id,
-    );
+    final liveDeletionHidesHead = _isDeletedBy(liveChannelEvents, headId);
     final allMsgs = fetchedReplies == null || !relayRepliesAvailable
         ? _provisionalThreadMessages(
             allMessages,
             fetchedReplies ??
-                formatTimeline(liveChannelEvents, currentPubkey: currentPubkey),
+                formatTimeline(
+                  liveChannelEvents,
+                  currentPubkey: currentPubkey,
+                  threadPolicy: threadPolicy,
+                ),
             liveChannelEvents,
           )
         : [
@@ -182,8 +209,9 @@ class ThreadDetailPage extends HookConsumerWidget {
             // keeps a temporarily unavailable head visible without restoring
             // a head that was deleted while this page was open.
             if (!liveDeletionHidesHead &&
-                !fetchedReplies.any((message) => message.id == threadHead.id))
-              threadHead,
+                routeHead != null &&
+                !fetchedReplies.any((message) => message.id == headId))
+              routeHead,
             ...fetchedReplies,
           ];
     final routeAnimation = ModalRoute.of(context)?.animation;
@@ -258,9 +286,11 @@ class ThreadDetailPage extends HookConsumerWidget {
       childrenByParent.putIfAbsent(pid, () => []).add(msg);
     }
 
-    final replies = childrenByParent[threadHead.id] ?? const [];
+    final replies = childrenByParent[headId] ?? const [];
     final liveHead =
-        allMsgs.where((m) => m.id == threadHead.id).firstOrNull ?? threadHead;
+        allMsgs.where((m) => m.id == headId).firstOrNull ??
+        routeHead ??
+        threadHead;
     final itemScrollController = useMemoized(ItemScrollController.new);
     final itemPositionsListener = useMemoized(ItemPositionsListener.create);
     final listViewport = useMemoized(LaidOutViewport.new);
@@ -494,7 +524,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       stickyDateHeaderState.value = StickyDateHeaderState.hidden;
       stickyDayTimestamp.value = null;
       return null;
-    }, [threadHead.id]);
+    }, [headId]);
 
     void scrollToThreadLatest() {
       if (!itemScrollController.isAttached) return;
@@ -547,7 +577,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         final chronologicalIndex = replies.indexWhere(
           (reply) => reply.id == messageId,
         );
-        final targetIndex = messageId == threadHead.id
+        final targetIndex = messageId == headId
             ? headIndex
             : chronologicalIndex < 0
             ? null
@@ -758,7 +788,7 @@ class ThreadDetailPage extends HookConsumerWidget {
             ? replies.last
             : null,
         threadRootId: queryRootId,
-        isRootThread: threadHead.parentId == null,
+        isRootThread: liveHead.parentId == null,
       );
       final notifier = ref.read(readStateProvider.notifier);
       for (final mark in marks.entries) {
@@ -780,7 +810,7 @@ class ThreadDetailPage extends HookConsumerWidget {
           appInUse &&
           (ModalRoute.of(context)?.isCurrent ?? true),
       onDwell: readVisibleReplies,
-      keys: [threadHead.id, readingContentKey(allMsgs), navigationBottomInset],
+      keys: [headId, readingContentKey(allMsgs), navigationBottomInset],
     );
 
     // Thread-scoped typing indicators (exclude self).
@@ -789,14 +819,14 @@ class ThreadDetailPage extends HookConsumerWidget {
           visibleTypingProvider(
             channelId,
             selfPubkey: currentPubkey,
-            include: (e) => e.threadHeadId == threadHead.id,
+            include: (e) => e.threadHeadId == headId,
           ),
         )
         .entries;
 
     // The root of the entire thread chain. If the current thread head is
     // itself a root message its rootId is null, so fall back to its own id.
-    final effectiveRootId = threadHead.rootId ?? threadHead.id;
+    final effectiveRootId = liveHead.rootId ?? headId;
 
     // Composer size changes and keyboard metrics changes are independent:
     // the dock grows first, then the Scaffold's viewport shrinks once the
@@ -1015,7 +1045,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                         onFocusRestorerChanged: (restoreFocus) =>
                             restoreComposerFocus.value = restoreFocus,
                         hintText: 'Reply in thread\u2026',
-                        threadHeadId: threadHead.id,
+                        threadHeadId: headId,
                         rootId: effectiveRootId,
                         onFocusRequested: followThreadTailFromComposer,
                         onSend:
@@ -1028,7 +1058,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                               content: content,
                               mentionPubkeys: mentionPubkeys,
                               channel: channel,
-                              parentEventId: threadHead.id,
+                              parentEventId: headId,
                               rootEventId: effectiveRootId,
                               mediaTags: mediaTags,
                             ),

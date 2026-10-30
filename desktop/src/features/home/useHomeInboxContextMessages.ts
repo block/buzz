@@ -7,6 +7,7 @@ import {
 } from "@/features/home/lib/inboxViewHelpers";
 import { formatTimelineMessages } from "@/features/messages/lib/formatTimelineMessages";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import type { ThreadPolicy } from "@/shared/api/communityProfile";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import { KIND_REACTION } from "@/shared/constants/kinds";
 
@@ -22,6 +23,7 @@ type UseHomeInboxContextMessagesOptions = {
   selectedEventId: string | null;
   selectedItem: InboxItem | null;
   structuralEvents?: RelayEvent[];
+  threadPolicy?: ThreadPolicy;
 };
 
 export function useHomeInboxContextMessages({
@@ -36,6 +38,7 @@ export function useHomeInboxContextMessages({
   selectedEventId,
   selectedItem,
   structuralEvents = [],
+  threadPolicy = "nested",
 }: UseHomeInboxContextMessagesOptions): InboxContextMessage[] {
   return React.useMemo(() => {
     if (!selectedItem) return [];
@@ -64,6 +67,7 @@ export function useHomeInboxContextMessages({
       undefined,
       relaySelfPubkey,
       ownerProfiles,
+      threadPolicy,
     );
 
     return timelineMessages.map((message) =>
@@ -72,6 +76,7 @@ export function useHomeInboxContextMessages({
         fallbackAuthorPubkey: selectedItem.item.pubkey,
         profiles,
         selectedItemId: selectedEventId ?? selectedItem.id,
+        threadPolicy,
       }),
     );
   }, [
@@ -86,5 +91,6 @@ export function useHomeInboxContextMessages({
     selectedEventId,
     selectedItem,
     structuralEvents,
+    threadPolicy,
   ]);
 }

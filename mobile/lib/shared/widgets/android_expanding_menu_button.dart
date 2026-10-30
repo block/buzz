@@ -289,6 +289,8 @@ class _CreateMenuRoute extends PopupRoute<int> {
                                                         BuzzIcons.userPlus,
                                                       'circle.lefthalf.filled' =>
                                                         BuzzIcons.sunMoon,
+                                                      'arrowshape.turn.up.left' =>
+                                                        BuzzIcons.cornerUpLeft,
                                                       'person.2' =>
                                                         BuzzIcons.users,
                                                       'gearshape' =>

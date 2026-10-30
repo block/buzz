@@ -998,6 +998,8 @@ export const MessageRow = React.memo(
     prev.onSendToChannel === next.onSendToChannel &&
     prev.profiles === next.profiles &&
     prev.searchQuery === next.searchQuery &&
+    // Presence, not identity: a thread-policy change adds or removes Reply.
+    Boolean(prev.onReply) === Boolean(next.onReply) &&
     prev.videoReviewCommentRootId === next.videoReviewCommentRootId &&
     prev.videoReviewContext === next.videoReviewContext,
 );

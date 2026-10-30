@@ -41,6 +41,7 @@ import 'features/profile/profile_edit_page.dart';
 import 'features/profile/profile_text_editor.dart';
 import 'features/settings/settings_page.dart';
 import 'features/settings/theme_picker_page.dart';
+import 'features/settings/thread_policy_page.dart';
 import 'shared/auth/auth.dart';
 import 'shared/deeplink/pending_deep_link_provider.dart';
 import 'shared/emoji/emoji_burst.dart';
@@ -431,6 +432,7 @@ class App extends HookConsumerWidget {
                   const _SettingsPageContent(embedded: true),
               communityInvitePageBuilder: (_) => const CommunityInvitePage(),
               communityAppearancePageBuilder: (_) => const ThemePickerPage(),
+              communityThreadPolicyPageBuilder: (_) => const ThreadPolicyPage(),
               hasUnreadInbox: hasUnreadInbox,
               hasUnreadSolo: hasUnreadSolo,
             ),

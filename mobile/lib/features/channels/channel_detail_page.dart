@@ -5,6 +5,7 @@ import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
 import 'message_footer_layout.dart';
 import 'reply_summary_link.dart';
+
 import 'dart:async';
 import 'dart:math' show cos, max, min, pi;
 import 'dart:ui' show ImageFilter, lerpDouble;
@@ -24,6 +25,7 @@ import '../../shared/me/me_search_placement.dart';
 import 'me/me_assistant_picker.dart';
 import 'me/me_chat_assistant.dart';
 import 'me/me_messages_provider.dart';
+import '../../shared/community/thread_policy_provider.dart';
 import '../../shared/huddle/huddle.dart';
 import '../../shared/identity_names/identity_names.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
@@ -635,11 +637,13 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
         ? dmHeader?.presenceLabel
         : headerMemberLabel;
 
+    final threadPolicy = ref.watch(activeThreadPolicyProvider);
     final timelineMessages = resolvedChannel.isForum
         ? <TimelineMessage>[]
         : formatTimeline(
             messagesState.value ?? const [],
             currentPubkey: currentPubkey,
+            threadPolicy: threadPolicy,
           );
     final timelineEntries = buildMainTimelineEntries(
       // End events still update the original card through allMessages.
@@ -650,6 +654,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
           .toList(),
       flat: personalChat,
       relaySummaries: ref.read(messagesProvider.notifier).threadSummaries,
+      threadPolicy: threadPolicy,
     );
 
     return FrostedScaffold(

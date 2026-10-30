@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
+import '../../shared/community/thread_policy_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/mentions/mention_tags.dart';
@@ -377,9 +378,12 @@ VoidCallback? debugOnFormatTimeline;
 ///
 /// Mirrors the desktop's `formatTimelineMessages` logic.
 /// [currentPubkey] is used to determine if the current user has reacted.
+/// Under [ThreadPolicy.flat] every reply's [TimelineMessage.parentId] is its
+/// thread root (NIP-TP), whatever parent its signed tags name.
 List<TimelineMessage> formatTimeline(
   List<NostrEvent> events, {
   String? currentPubkey,
+  ThreadPolicy threadPolicy = ThreadPolicy.nested,
 }) {
   assert(() {
     debugOnFormatTimeline?.call();
@@ -541,7 +545,9 @@ List<TimelineMessage> formatTimeline(
           edited: edit != null,
           mentionPubkeys: mentions,
           reactions: reactionsFor(event.id),
-          parentId: threadRef.parentId,
+          parentId: threadPolicy == ThreadPolicy.flat
+              ? threadRef.rootId
+              : threadRef.parentId,
           rootId: threadRef.rootId,
         ),
       );
@@ -555,10 +561,14 @@ List<TimelineMessage> formatTimeline(
 /// each with an optional [ThreadSummary] when replies exist.
 ///
 /// Mirrors the desktop's `buildMainTimelineEntries`.
+///
+/// Under [ThreadPolicy.flat] a broadcast reply has no replies of its own, so it
+/// gets no summary even when the relay counted replies sent to it.
 List<MainTimelineEntry> buildMainTimelineEntries(
   List<TimelineMessage> messages, {
   Map<String, ChannelWindowThreadSummary>? relaySummaries,
   bool flat = false,
+  ThreadPolicy threadPolicy = ThreadPolicy.nested,
 }) {
   if (flat) {
     return [
@@ -574,14 +584,17 @@ List<MainTimelineEntry> buildMainTimelineEntries(
       if (msg.parentId == null || _isBroadcastReply(msg))
         MainTimelineEntry(
           message: msg,
-          summary: _buildSummary(
-            msg.id,
-            descendantStats,
-            relaySummaries?[msg.id],
-          ),
+          summary: threadPolicy == ThreadPolicy.flat && msg.parentId != null
+              ? null
+              : _buildSummary(msg.id, descendantStats, relaySummaries?[msg.id]),
         ),
   ];
 }
+
+/// Whether [message] offers "reply in thread". Under [ThreadPolicy.flat] a
+/// reply cannot have replies of its own (NIP-TP), so only roots offer it.
+bool canStartThreadFrom(TimelineMessage message, ThreadPolicy threadPolicy) =>
+    threadPolicy == ThreadPolicy.nested || message.parentId == null;
 
 bool _isBroadcastReply(TimelineMessage message) {
   return message.tags.any(

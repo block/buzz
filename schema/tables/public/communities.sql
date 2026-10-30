@@ -19,6 +19,9 @@ CREATE TABLE communities (
     -- Per-community workspace icon (NIP-11 `icon`), set via kind:9033.
     -- Added by migration 0003; kept here so desired-state applies match.
     icon            TEXT,
+    -- Community thread policy (NIP-TP), set via kind:9034. Added by migration
+    -- 0076; kept here so desired-state applies match.
+    thread_policy   TEXT NOT NULL DEFAULT 'nested' CHECK (thread_policy IN ('nested', 'flat')),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     archived_at     TIMESTAMPTZ,
     deletion_state  TEXT NOT NULL DEFAULT 'active' CHECK (deletion_state IN ('active', 'quiescing', 'fenced', 'tombstone')),

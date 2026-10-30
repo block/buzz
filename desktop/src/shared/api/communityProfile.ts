@@ -14,6 +14,7 @@
 
 import { relayClient } from "@/shared/api/relayClient";
 import { invokeTauri, signRelayEvent } from "@/shared/api/tauri";
+import { KIND_SET_THREAD_POLICY } from "@/shared/constants/kinds";
 
 /** Buzz: admin command to set the community profile (icon). */
 export const KIND_SET_COMMUNITY_PROFILE = 9033;
@@ -47,5 +48,45 @@ export async function setCommunityIcon(icon: string): Promise<void> {
     event,
     "Timed out while updating the community icon.",
     "Failed to update the community icon.",
+  );
+}
+
+/**
+ * NIP-TP community thread policy. `nested` keeps each reply under the parent
+ * it was sent to; `flat` presents every reply as a direct reply to the thread
+ * root.
+ */
+export type ThreadPolicy = "flat" | "nested";
+
+/**
+ * Fetch a community's thread policy from its relay's NIP-11 document. The
+ * backend maps a missing or unknown value to `nested`; an unreachable relay
+ * rejects so the query can retry.
+ */
+export async function fetchCommunityThreadPolicy(
+  relayUrl: string,
+): Promise<ThreadPolicy> {
+  const policy = await invokeTauri<string>("fetch_thread_policy", {
+    relayUrl,
+  });
+  return policy === "flat" ? "flat" : "nested";
+}
+
+/**
+ * Publish a kind:9034 command setting the active community's thread policy.
+ * Requires relay admin/owner role — the relay rejects the command otherwise.
+ */
+export async function setCommunityThreadPolicy(
+  policy: ThreadPolicy,
+): Promise<void> {
+  const event = await signRelayEvent({
+    kind: KIND_SET_THREAD_POLICY,
+    content: "",
+    tags: [["thread_policy", policy]],
+  });
+  await relayClient.publishEvent(
+    event,
+    "Timed out while updating thread replies.",
+    "Failed to update thread replies.",
   );
 }

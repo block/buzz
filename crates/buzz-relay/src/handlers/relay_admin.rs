@@ -1,4 +1,5 @@
-//! NIP-43 relay membership admin command handler (kinds 9030–9032).
+//! NIP-43 relay membership admin command handler (kinds 9030–9032), plus the
+//! community setting commands 9033 (workspace icon) and 9034 (thread policy).
 //!
 //! These events are processed directly — they mutate the `relay_members` table
 //! and return without being stored as regular Nostr events.
@@ -11,6 +12,7 @@
 //! | 9031 | Remove member   | admin or owner       |
 //! | 9032 | Change role     | owner only           |
 //! | 9033 | Set workspace profile (icon) | admin or owner; on an open relay whose community has no admin/owner row at all, any authenticated sender (see [`may_set_workspace_profile`]) |
+//! | 9034 | Set thread policy (NIP-TP) | same as 9033 |
 
 use std::sync::Arc;
 
@@ -19,9 +21,10 @@ use tracing::{info, warn};
 
 use buzz_core::kind::{
     RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
-    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    RELAY_ADMIN_SET_THREAD_POLICY, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
+use buzz_core::thread_policy::ThreadPolicy;
 use buzz_db::relay_members::RemoveResult;
 
 use crate::handlers::side_effects::{
@@ -94,7 +97,25 @@ fn validate_workspace_icon(icon: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether `sender_role` may set the workspace profile (kind:9033).
+/// Parse a kind:9034 command's policy: exactly one `thread_policy` tag whose
+/// value is `flat` or `nested` (NIP-TP). Anything else is rejected.
+fn parse_thread_policy_command(event: &Event) -> Result<ThreadPolicy, String> {
+    let mut values = event
+        .tags
+        .iter()
+        .map(|tag| tag.as_slice())
+        .filter(|parts| parts.first().map(String::as_str) == Some("thread_policy"));
+    match (values.next(), values.next()) {
+        (Some(parts), None) => parts
+            .get(1)
+            .and_then(|value| ThreadPolicy::parse(value))
+            .ok_or_else(|| "thread_policy must be \"flat\" or \"nested\"".to_string()),
+        _ => Err("expected exactly one thread_policy tag".to_string()),
+    }
+}
+
+/// Whether `sender_role` may set the workspace profile (kind:9033) or the
+/// thread policy (kind:9034, NIP-TP), which shares this authorization.
 ///
 /// Closed relays (`membership_enforced == true`) require an `admin`/`owner`
 /// row in `relay_members` — the enforced roster is the authority. Open relays
@@ -166,7 +187,7 @@ fn admits_relay_admin_command(
     Ok(())
 }
 
-/// Validate and execute a relay admin command (kinds 9030–9033).
+/// Validate and execute a relay admin command (kinds 9030–9034).
 ///
 /// Admission: rejects a sender under a durable community ban before any
 /// command runs. The command itself is executed by
@@ -258,9 +279,10 @@ async fn execute_relay_admin_command(
         .map(|m| m.role.as_str())
         .unwrap_or("");
 
-    // kind:9033 — Set workspace profile (icon). Handled before p-tag
-    // extraction: it targets the relay itself, not a member pubkey.
-    if kind == RELAY_ADMIN_SET_WORKSPACE_PROFILE {
+    // kind:9033 — Set workspace profile (icon) and kind:9034 — Set thread
+    // policy. Handled before p-tag extraction: they target the community
+    // itself, not a member pubkey.
+    if kind == RELAY_ADMIN_SET_WORKSPACE_PROFILE || kind == RELAY_ADMIN_SET_THREAD_POLICY {
         // Steward detection only matters on open relays (closed relays gate on
         // the sender's own role either way), so skip the extra query there.
         let community_has_steward = if state.config.require_relay_membership {
@@ -280,13 +302,25 @@ async fn execute_relay_admin_command(
             return Err("actor not authorized: must be admin or owner".to_string());
         }
         if sender_role != "admin" && sender_role != "owner" {
-            // Rosterless-open-relay admit: 9033 writes no audit row and
-            // publishes no announcement event (unlike 9030/9031), so this warn
-            // is the only durable attribution of who changed the icon.
+            // Rosterless-open-relay admit: 9033/9034 write no audit row and
+            // publish no announcement event (unlike 9030/9031), so this warn
+            // is the only durable attribution of who changed the setting.
             warn!(
                 sender = %sender_hex,
-                "workspace profile change admitted without a roster role (open relay, no steward)"
+                kind,
+                "workspace setting change admitted without a roster role (open relay, no steward)"
             );
+        }
+
+        if kind == RELAY_ADMIN_SET_THREAD_POLICY {
+            let policy = parse_thread_policy_command(event)?;
+            state
+                .db
+                .set_community_thread_policy(tenant.community(), policy)
+                .await
+                .map_err(|e| format!("failed to store thread policy: {e}"))?;
+            info!(sender = %sender_hex, policy = policy.as_str(), "thread policy updated");
+            return Ok(());
         }
 
         // Empty or missing icon tag clears the workspace icon.
@@ -640,6 +674,39 @@ mod postgres_tests {
         assert_eq!(extract_tag_value(&event, "p"), None);
     }
 
+    /// NIP-TP: a 9034 carries exactly one `thread_policy` tag valued `flat`
+    /// or `nested`; a missing, duplicated, empty, or unknown value is refused.
+    #[test]
+    fn thread_policy_command_requires_exactly_one_valid_tag() {
+        let flat = make_test_event(9034, vec![vec!["thread_policy", "flat"]]);
+        assert_eq!(parse_thread_policy_command(&flat), Ok(ThreadPolicy::Flat));
+        let nested = make_test_event(9034, vec![vec!["thread_policy", "nested"]]);
+        assert_eq!(
+            parse_thread_policy_command(&nested),
+            Ok(ThreadPolicy::Nested)
+        );
+
+        for tags in [
+            vec![],
+            vec![vec!["thread_policy"]],
+            vec![vec!["thread_policy", ""]],
+            vec![vec!["thread_policy", "Flat"]],
+            vec![vec!["thread_policy", "tree"]],
+            vec![vec!["policy", "flat"]],
+            vec![vec!["thread_policy", "flat"], vec!["thread_policy", "flat"]],
+            vec![
+                vec!["thread_policy", "flat"],
+                vec!["thread_policy", "nested"],
+            ],
+        ] {
+            let event = make_test_event(9034, tags.clone());
+            assert!(
+                parse_thread_policy_command(&event).is_err(),
+                "must refuse {tags:?}"
+            );
+        }
+    }
+
     #[test]
     fn workspace_icon_empty_ok() {
         assert!(validate_workspace_icon("").is_ok());
@@ -931,6 +998,132 @@ mod postgres_tests {
             stored_icon(&state, &tenant).await.as_deref(),
             Some("https://example.com/closed.png")
         );
+    }
+
+    async fn submit_9034(
+        state: &Arc<AppState>,
+        tenant: &TenantContext,
+        keys: &Keys,
+        policy: &str,
+    ) -> Result<(), RelayAdminError> {
+        let event = EventBuilder::new(Kind::Custom(9034), "")
+            .tags(vec![
+                Tag::parse(["thread_policy", policy]).expect("policy tag")
+            ])
+            .sign_with_keys(keys)
+            .expect("sign 9034");
+        handle_relay_admin_event(tenant, state, &event).await
+    }
+
+    async fn stored_policy(state: &Arc<AppState>, tenant: &TenantContext) -> ThreadPolicy {
+        state
+            .db
+            .get_community_thread_policy(tenant.community())
+            .await
+            .expect("read thread policy")
+    }
+
+    /// kind:9034 round trip on a closed relay: the default is `nested`, an
+    /// admin sets `flat` and back, the served NIP-11 document follows, and a
+    /// member or an invalid value never changes it. On an open relay the
+    /// rosterless rule matches 9033.
+    ///
+    /// Discriminating: fails if 9034 skips the steward gate, is routed to the
+    /// icon path, or the NIP-11 prefetch drops the stored policy.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn thread_policy_9034_round_trips_through_nip11() {
+        let host = format!("thread-policy-{}.example", uuid::Uuid::new_v4().simple());
+        let (state, tenant) = workspace_profile_test_state(&host, true).await;
+        let member = Keys::generate();
+        let admin = Keys::generate();
+        for (keys, role) in [(&member, "member"), (&admin, "admin")] {
+            state
+                .db
+                .add_relay_member(
+                    tenant.community(),
+                    &keys.public_key().to_hex(),
+                    role,
+                    None,
+                    &nostr::Keys::generate(),
+                )
+                .await
+                .map(|write| write.outcome)
+                .expect("seed roster");
+        }
+        let served_policy = |state: Arc<AppState>, host: String| async move {
+            crate::nip11::nip11_document(&state, &host)
+                .await
+                .thread_policy
+        };
+
+        assert_eq!(stored_policy(&state, &tenant).await, ThreadPolicy::Nested);
+        assert_eq!(
+            served_policy(state.clone(), host.clone()).await.as_deref(),
+            Some("nested")
+        );
+
+        assert_eq!(
+            submit_9034(&state, &tenant, &member, "flat").await,
+            Err(RelayAdminError::Rejected(
+                "actor not authorized: must be admin or owner".to_string()
+            )),
+            "a closed relay must refuse a plain member"
+        );
+        assert_eq!(stored_policy(&state, &tenant).await, ThreadPolicy::Nested);
+
+        submit_9034(&state, &tenant, &admin, "flat")
+            .await
+            .expect("admin sets flat");
+        assert_eq!(stored_policy(&state, &tenant).await, ThreadPolicy::Flat);
+        assert_eq!(
+            served_policy(state.clone(), host.clone()).await.as_deref(),
+            Some("flat")
+        );
+        assert_eq!(
+            stored_icon(&state, &tenant).await,
+            None,
+            "9034 must not touch the workspace icon"
+        );
+
+        assert!(submit_9034(&state, &tenant, &admin, "tree").await.is_err());
+        assert_eq!(
+            stored_policy(&state, &tenant).await,
+            ThreadPolicy::Flat,
+            "an invalid value must not change the policy"
+        );
+
+        submit_9034(&state, &tenant, &admin, "nested")
+            .await
+            .expect("admin sets nested");
+        assert_eq!(stored_policy(&state, &tenant).await, ThreadPolicy::Nested);
+
+        // Open relay: rosterless admits any sender, a steward closes it.
+        let open_host = format!(
+            "thread-policy-open-{}.example",
+            uuid::Uuid::new_v4().simple()
+        );
+        let (open, open_tenant) = workspace_profile_test_state(&open_host, false).await;
+        let roleless = Keys::generate();
+        submit_9034(&open, &open_tenant, &roleless, "flat")
+            .await
+            .expect("rosterless open relay admits any sender");
+        assert_eq!(stored_policy(&open, &open_tenant).await, ThreadPolicy::Flat);
+        open.db
+            .add_relay_member(
+                open_tenant.community(),
+                &admin.public_key().to_hex(),
+                "owner",
+                None,
+                &nostr::Keys::generate(),
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("seed owner");
+        assert!(submit_9034(&open, &open_tenant, &roleless, "nested")
+            .await
+            .is_err());
+        assert_eq!(stored_policy(&open, &open_tenant).await, ThreadPolicy::Flat);
     }
 
     /// Member removal (kind 9031) ends the removed member's live sessions,

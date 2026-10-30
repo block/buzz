@@ -4,7 +4,7 @@
 //! nested threads. The `thread_metadata` table is populated when events are
 //! ingested and updated as replies arrive or are deleted.
 
-use buzz_core::StoredEvent;
+use buzz_core::{thread_policy::ThreadPolicy, StoredEvent};
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
@@ -374,6 +374,11 @@ pub(crate) async fn get_thread_replies_on(
         _ => None,
     };
 
+    // NIP-TP: derived thread structure follows the community thread policy,
+    // read on the same session that serves the page.
+    let policy = crate::community::thread_policy_on(&mut *conn, community_id).await?;
+    let depth_limit = policy.depth_limit(depth_limit);
+
     let mut replies = Vec::new();
     // Damaged rows must not cause unbounded work on a held writer connection.
     // Fail explicitly rather than exposing a partial page as authoritative EOF.
@@ -488,6 +493,8 @@ pub(crate) async fn get_thread_replies_on(
                 None => continue,
             };
 
+            let (parent_event_id, depth) =
+                policy.position(parent_event_id, root_event_id_col.clone(), depth);
             replies.push(ThreadReply {
                 event_id,
                 parent_event_id,
@@ -523,8 +530,9 @@ pub async fn get_thread_summary(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    let policy = crate::community::thread_policy_on(&mut connection, community_id).await?;
     let row = sqlx::query(concat!(
-        "SELECT root.reply_count, root.descendant_count, root.last_reply_at, ",
+        "SELECT root.depth, root.reply_count, root.descendant_count, root.last_reply_at, ",
         recent_thread_participants_sql!(""),
         r#" AS participants
         FROM thread_metadata root
@@ -538,9 +546,14 @@ pub async fn get_thread_summary(
     .await?;
 
     row.map(|row| {
+        let (reply_count, descendant_count) = policy.counts(
+            row.try_get("depth")?,
+            row.try_get("reply_count")?,
+            row.try_get("descendant_count")?,
+        );
         Ok(ThreadSummary {
-            reply_count: row.try_get("reply_count")?,
-            descendant_count: row.try_get("descendant_count")?,
+            reply_count,
+            descendant_count,
             last_reply_at: row.try_get("last_reply_at")?,
             participants: row.try_get("participants")?,
         })
@@ -610,6 +623,7 @@ pub(crate) async fn get_channel_window_on(
             e.sig,
             e.received_at,
             e.channel_id,
+            tm.depth,
             tm.reply_count,
             tm.descendant_count,
             tm.last_reply_at
@@ -625,9 +639,15 @@ pub(crate) async fn get_channel_window_on(
                 tm.depth IS NULL
              OR tm.depth = 0
              OR (tm.depth = 1 AND tm.broadcast = true)
-          )
         "#,
     );
+    // NIP-TP: under `flat` every reply has effective depth 1, so a broadcast
+    // reply sent to a nested parent is a timeline row too.
+    let policy = crate::community::thread_policy_on(&mut *conn, community_id).await?;
+    if policy == ThreadPolicy::Flat {
+        sql.push_str(" OR (tm.depth > 0 AND tm.broadcast = true)");
+    }
+    sql.push(')');
 
     if cursor.is_some() {
         // Composite keyset: with ORDER BY created_at DESC, id ASC, the page
@@ -686,9 +706,19 @@ pub(crate) async fn get_channel_window_on(
 
     let mut rows = Vec::with_capacity(db_rows.len());
     for row in db_rows {
+        let depth: Option<i32> = row.try_get("depth")?;
         let reply_count: Option<i32> = row.try_get("reply_count")?;
         let descendant_count: Option<i32> = row.try_get("descendant_count")?;
         let last_reply_at: Option<DateTime<Utc>> = row.try_get("last_reply_at")?;
+        // A broadcast depth-1 reply is a timeline row too; under `flat` it has
+        // no replies of its own, so it carries no summary.
+        let (reply_count, descendant_count) = match (depth, reply_count) {
+            (Some(depth), Some(rc)) => {
+                let (rc, dc) = policy.counts(depth, rc, descendant_count.unwrap_or(0));
+                (Some(rc), Some(dc))
+            }
+            _ => (reply_count, descendant_count),
+        };
 
         // Skip rows that fail event reconstruction rather than failing the
         // window, matching get_thread_replies' skip-and-continue semantics.
@@ -984,8 +1014,10 @@ impl Db {
             crate::observability::WriterOperation::SubscriptionHistory,
         )
         .await?;
+        let policy = crate::community::thread_policy_on(&mut connection, community_id).await?;
         let rows = sqlx::query(concat!(
-            "SELECT root.event_id, root.reply_count, root.descendant_count, root.last_reply_at, ",
+            "SELECT root.event_id, root.depth, root.reply_count, root.descendant_count, \
+             root.last_reply_at, ",
             recent_thread_participants_sql!("AND tm.channel_id = root.channel_id"),
             r#" AS participants
             FROM thread_metadata root
@@ -1005,11 +1037,16 @@ impl Db {
         .await?;
         rows.into_iter()
             .map(|row| {
+                let (reply_count, descendant_count) = policy.counts(
+                    row.try_get("depth")?,
+                    row.try_get("reply_count")?,
+                    row.try_get("descendant_count")?,
+                );
                 Ok((
                     row.try_get("event_id")?,
                     ThreadSummary {
-                        reply_count: row.try_get("reply_count")?,
-                        descendant_count: row.try_get("descendant_count")?,
+                        reply_count,
+                        descendant_count,
                         last_reply_at: row.try_get("last_reply_at")?,
                         participants: row.try_get("participants")?,
                     },
@@ -2143,6 +2180,156 @@ mod postgres_tests {
         );
         assert!(!window.has_more);
         assert!(window.next_cursor.is_none());
+    }
+
+    /// NIP-TP journey over every derived thread read in this module: a root,
+    /// a direct reply, and a broadcast grandchild sent to that reply. Under
+    /// `flat` the grandchild is a depth-1 reply to the root in the replies
+    /// read, the window, and the summaries; switching back to `nested`
+    /// restores the stored tree, because ingest data never changed.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn thread_policy_flattens_derived_reads_and_restores_on_nested() {
+        let pool = setup_pool().await;
+        let db = Db::from_pool(pool.clone());
+        let author = Keys::generate();
+        let (channel, community) = create_test_channel(
+            &pool,
+            &format!("thread-policy-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        let root = make_stream_event(&author, "root");
+        insert_root(&pool, community, channel.id, &root).await;
+        let child = make_stream_event(&author, "child");
+        insert_reply(&pool, community, channel.id, &root, &child, false).await;
+        let grandchild = make_stream_event(&author, "grandchild");
+        insert_event_with_thread_metadata(
+            &pool,
+            community,
+            &grandchild,
+            Some(channel.id),
+            Some(ThreadMetadataParams {
+                event_id: grandchild.id.as_bytes(),
+                event_created_at: event_created_at(&grandchild),
+                channel_id: channel.id,
+                parent_event_id: Some(child.id.as_bytes()),
+                parent_event_created_at: Some(event_created_at(&child)),
+                root_event_id: Some(root.id.as_bytes()),
+                root_event_created_at: Some(event_created_at(&root)),
+                depth: 2,
+                broadcast: true,
+            }),
+        )
+        .await
+        .expect("insert broadcast grandchild");
+
+        let root_id = root.id.as_bytes().to_vec();
+        let child_id = child.id.as_bytes().to_vec();
+        let grandchild_id = grandchild.id.as_bytes().to_vec();
+        // (replies at depth_limit 1 as (id, parent, depth), root counts,
+        //  child counts, window row ids, window root counts)
+        let observe = || async {
+            let mut replies: Vec<(Vec<u8>, Option<Vec<u8>>, i32)> =
+                get_thread_replies(&pool, community, &root_id, Some(1), 100, None)
+                    .await
+                    .expect("replies")
+                    .into_iter()
+                    .map(|r| (r.event_id, r.parent_event_id, r.depth))
+                    .collect();
+            replies.sort();
+            let counts = |s: ThreadSummary| (s.reply_count, s.descendant_count);
+            let root_summary = get_thread_summary(&pool, community, &root_id)
+                .await
+                .expect("root summary")
+                .map(counts);
+            let child_summary = get_thread_summary(&pool, community, &child_id)
+                .await
+                .expect("child summary")
+                .map(counts);
+            let resolved: Vec<(i32, i32)> = db
+                .resolve_thread_root_summaries(
+                    community,
+                    channel.id,
+                    std::slice::from_ref(&grandchild_id),
+                )
+                .await
+                .expect("resolve root summaries")
+                .into_iter()
+                .map(|(_, s)| counts(s))
+                .collect();
+            let window = get_channel_window(&pool, community, channel.id, 50, None, None)
+                .await
+                .expect("window");
+            let mut window_ids: Vec<Vec<u8>> = window
+                .rows
+                .iter()
+                .map(|r| r.stored_event.event.id.as_bytes().to_vec())
+                .collect();
+            window_ids.sort();
+            let window_root = window
+                .rows
+                .iter()
+                .find(|r| r.stored_event.event.id == root.id)
+                .and_then(|r| r.thread_summary.clone())
+                .map(counts);
+            (
+                replies,
+                root_summary,
+                child_summary,
+                resolved,
+                window_ids,
+                window_root,
+            )
+        };
+
+        let nested = observe().await;
+        let mut flat_window = vec![root_id.clone(), grandchild_id.clone()];
+        flat_window.sort();
+        let mut flat_replies = vec![
+            (child_id.clone(), Some(root_id.clone()), 1),
+            (grandchild_id.clone(), Some(root_id.clone()), 1),
+        ];
+        flat_replies.sort();
+        assert_eq!(
+            nested,
+            (
+                vec![(child_id.clone(), Some(root_id.clone()), 1)],
+                Some((1, 2)),
+                Some((1, 0)),
+                vec![(1, 2)],
+                vec![root_id.clone()],
+                Some((1, 2)),
+            ),
+            "nested presents the stored tree"
+        );
+
+        db.set_community_thread_policy(community, ThreadPolicy::Flat)
+            .await
+            .expect("set flat");
+        assert_eq!(
+            observe().await,
+            (
+                flat_replies,
+                Some((2, 2)),
+                Some((0, 0)),
+                vec![(2, 2)],
+                flat_window,
+                Some((2, 2)),
+            ),
+            "flat presents every reply under the root"
+        );
+
+        db.set_community_thread_policy(community, ThreadPolicy::Nested)
+            .await
+            .expect("set nested");
+        assert_eq!(observe().await, nested, "nested restores the stored tree");
     }
 
     /// Same-second top-level rows must paginate by the composite

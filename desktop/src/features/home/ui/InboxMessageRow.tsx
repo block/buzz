@@ -39,7 +39,8 @@ type InboxMessageRowProps = {
   message: InboxDisplayMessage;
   onDelete?: (message: InboxDisplayMessage) => void;
   onEdit?: (message: InboxDisplayMessage) => void;
-  onSelectReplyTarget: (message: InboxDisplayMessage) => void;
+  /** Omitted when replies cannot pick a parent (NIP-TP flat threads). */
+  onSelectReplyTarget?: (message: InboxDisplayMessage) => void;
   onToggleReaction?: (
     message: TimelineMessage,
     emoji: string,
@@ -172,7 +173,9 @@ export function InboxMessageRow({
                 reactionPending ? undefined : setBadgeBurstEmoji
               }
               onReply={
-                canReply ? () => onSelectReplyTarget(message) : undefined
+                canReply && onSelectReplyTarget
+                  ? () => onSelectReplyTarget(message)
+                  : undefined
               }
               profiles={profiles}
               reactionErrorMessage={reactionErrorMessage}

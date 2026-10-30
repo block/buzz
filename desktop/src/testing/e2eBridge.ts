@@ -517,6 +517,8 @@ type E2eConfig = {
     // equals this is treated as a moderation DM (composer disabled). Absent →
     // fail open (no mod-DM detection), matching the Rust command's contract.
     relaySelf?: string | null;
+    /** NIP-11 `thread_policy` returned by `fetch_thread_policy`. Defaults to nested. */
+    threadPolicy?: "flat" | "nested";
     oaOwnerIsMe?: boolean;
     /** Whether the mock relay advertises NIP-43 membership support. Defaults to false. */
     relayRequiresMembership?: boolean;
@@ -12920,6 +12922,8 @@ export function maybeInstallE2eTauriMocks() {
         return;
       case "fetch_join_policy":
         return activeConfig?.mock?.joinPolicy ?? null;
+      case "fetch_thread_policy":
+        return activeConfig?.mock?.threadPolicy ?? "nested";
       case "fetch_link_preview_metadata": {
         if (activeConfig?.mock?.deferLinkPreviewMetadata) {
           await new Promise<void>((resolve) => {

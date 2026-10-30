@@ -59,7 +59,7 @@ Use the reply destination supplied in the `<context>` block for ordinary replies
 
 For human-facing work, keep the conversation flat and easy to read. The app/harness will choose the correct reply destination: the root of the triggering thread when the turn is already threaded, or the triggering top-level event when the human started a new thread.
 
-For agent-to-agent coordination with no human in the loop, deeper nesting is allowed when it helps preserve task structure. Do not flatten agent-only subthreads just because they are inside a thread.
+For agent-to-agent coordination with no human in the loop, deeper nesting is allowed when it helps preserve task structure, unless `<context>` says the thread policy is flat. Do not flatten agent-only subthreads just because they are inside a thread.
 
 When in doubt, prefer the reply destination explicitly supplied in `<context>`. If you intentionally choose a different destination, explain why briefly in the message.
 

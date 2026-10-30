@@ -98,6 +98,49 @@ pub async fn fetch_workspace_icon(
     Ok(doc.icon.filter(|icon| !icon.is_empty()))
 }
 
+#[derive(Deserialize)]
+struct RelayInfoThreadPolicy {
+    #[serde(default)]
+    thread_policy: Option<serde_json::Value>,
+}
+
+/// NIP-TP: the policy named by a NIP-11 `thread_policy` value. Only the exact
+/// string `"flat"` selects flat; a missing or unknown value means nested.
+fn thread_policy_from_nip11(value: Option<&serde_json::Value>) -> &'static str {
+    match value.and_then(serde_json::Value::as_str) {
+        Some("flat") => "flat",
+        _ => "nested",
+    }
+}
+
+/// Fetch a relay's NIP-TP thread policy (`"flat"` or `"nested"`) from its
+/// NIP-11 relay information document.
+///
+/// A document without a recognised `thread_policy` (older relay) is
+/// `"nested"`. An unreachable relay, a non-2xx status or a malformed document
+/// is an error, so the caller can retry instead of caching a wrong answer.
+#[tauri::command]
+pub async fn fetch_thread_policy(
+    relay_url: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let response = state
+        .http_client
+        .get(relay::relay_http_base_url(&relay_url))
+        .header("Accept", "application/nostr+json")
+        .send()
+        .await
+        .map_err(|error| relay::classify_request_error(&error))?;
+    if !response.status().is_success() {
+        return Err(format!("relay returned {}", response.status()));
+    }
+    let doc = response
+        .json::<RelayInfoThreadPolicy>()
+        .await
+        .map_err(|error| format!("invalid NIP-11 document from relay: {error}"))?;
+    Ok(thread_policy_from_nip11(doc.thread_policy.as_ref()).to_string())
+}
+
 #[derive(Serialize)]
 pub struct ActiveWorkspaceInfo {
     relay_url: String,
@@ -421,7 +464,30 @@ mod tests {
         Arc,
     };
 
-    use super::{assert_current_apply_generation, begin_workspace_apply, next_apply_generation};
+    use super::{
+        assert_current_apply_generation, begin_workspace_apply, next_apply_generation,
+        thread_policy_from_nip11,
+    };
+
+    #[test]
+    fn thread_policy_is_flat_only_for_the_exact_flat_value() {
+        let cases = [
+            (Some(serde_json::json!("flat")), "flat"),
+            (Some(serde_json::json!("nested")), "nested"),
+            (Some(serde_json::json!("FLAT")), "nested"),
+            (Some(serde_json::json!("slack")), "nested"),
+            (Some(serde_json::json!(true)), "nested"),
+            (Some(serde_json::Value::Null), "nested"),
+            (None, "nested"),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(
+                thread_policy_from_nip11(value.as_ref()),
+                expected,
+                "{value:?}"
+            );
+        }
+    }
 
     #[test]
     fn explicit_newer_generation_supersedes_older_ticket() {

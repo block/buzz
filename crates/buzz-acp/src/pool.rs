@@ -912,6 +912,8 @@ pub struct PromptContext {
     pub rest_client: RestClient,
     /// Shared channel metadata for startup-known and dynamically joined channels.
     pub channel_info: ChannelInfoResolver,
+    /// Community thread policy (NIP-TP), shared by every prompt task.
+    pub thread_policy: crate::thread_policy::ThreadPolicyResolver,
     /// Max messages to include in thread/DM context. 0 = disabled.
     pub context_message_limit: u32,
     /// Max turns per session before proactive rotation. 0 = disabled.
@@ -3104,10 +3106,12 @@ pub async fn run_prompt_task(
 
         let profile_lookup =
             fetch_prompt_profile_lookup(b, conversation_context.as_ref(), &ctx.rest_client).await;
+        let thread_policy = ctx.thread_policy.resolve().await;
         prompt_routing.record_trigger_anchor(crate::queue::reply_anchor_is_trigger(
             b,
             is_dm,
             profile_lookup.as_ref(),
+            thread_policy,
         ));
 
         let known_names: Vec<&str> = profile_lookup
@@ -3141,6 +3145,7 @@ pub async fn run_prompt_task(
                 team_instructions: standing.team_instructions,
                 agent_canvas: standing.agent_canvas,
                 standing_context_sent,
+                thread_policy,
             },
         )
     } else {
@@ -10475,6 +10480,12 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                     auth_tag_json: None,
                 },
             ),
+            thread_policy: crate::thread_policy::ThreadPolicyResolver::new(RestClient {
+                http: reqwest::Client::new(),
+                base_url: "http://127.0.0.1:0".to_string(),
+                keys: agent_keys.clone(),
+                auth_tag_json: None,
+            }),
             context_message_limit: 0,
             max_turns_per_session: 0,
             permission_mode: PermissionMode::Default,

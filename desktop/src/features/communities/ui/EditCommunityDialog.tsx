@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { CommunityIconSettingsCard } from "@/features/communities/ui/CommunityIconSettingsCard";
+import { CommunityThreadPolicySettingsCard } from "@/features/communities/ui/CommunityThreadPolicySettingsCard";
 import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
 import type { Community } from "@/features/communities/types";
 import {
@@ -146,6 +147,7 @@ export function EditCommunityDialog({
               <CommunityIconSettingsCard compact />
             </div>
           ) : null}
+          {canEditIcon ? <CommunityThreadPolicySettingsCard /> : null}
           <div className="flex flex-col gap-1.5">
             <label
               className="text-sm font-medium text-foreground"

@@ -44,15 +44,12 @@ final communityIconProvider = FutureProvider.autoDispose
         cancelled.complete();
       });
       try {
-        final response = await _download(
+        final document = await fetchRelayInformationDocument(
           client,
-          uri,
+          relayUrl,
           cancelled.future,
-          metadata: true,
         );
-        if (response == null || disposed) return saved;
-        final document = jsonDecode(utf8.decode(response.bytes));
-        if (document is! Map<String, dynamic>) return saved;
+        if (document == null || disposed) return saved;
         final value = document['icon'];
         if (value == null || (value is String && value.trim().isEmpty)) {
           await cache.remember(key, null);
@@ -89,6 +86,24 @@ final communityIconProvider = FutureProvider.autoDispose
         return saved;
       }
     });
+
+/// Fetches [relayUrl]'s public NIP-11 relay information document.
+///
+/// Returns null when the relay URL is invalid or the document cannot be
+/// fetched within the size and time bounds. Throws when the body is not JSON.
+/// Completing [cancelled] aborts the request.
+Future<Map<String, dynamic>?> fetchRelayInformationDocument(
+  http.Client client,
+  String relayUrl,
+  Future<void> cancelled,
+) async {
+  final uri = _relayInfoUri(relayUrl);
+  if (uri == null) return null;
+  final response = await _download(client, uri, cancelled, metadata: true);
+  if (response == null) return null;
+  final document = jsonDecode(utf8.decode(response.bytes));
+  return document is Map<String, dynamic> ? document : null;
+}
 
 Future<({List<int> bytes, String mimeType})?> _download(
   http.Client client,

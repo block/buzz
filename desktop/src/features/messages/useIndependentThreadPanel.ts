@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { buildIndependentThreadPanel } from "@/features/messages/lib/independentThreadPanel";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import type { ThreadPolicy } from "@/shared/api/communityProfile";
 import type {
   Channel,
   ChannelMember,
@@ -24,6 +25,7 @@ export function useIndependentThreadPanel(args: {
   personaLookup: Map<string, string>;
   respondToLookup: Map<string, RespondToMode>;
   relaySelfPubkey: string | null | undefined;
+  threadPolicy: ThreadPolicy;
 }) {
   // Depend on the individual fields, NOT the `args` object — callers pass a
   // fresh object literal every render, so `[args]` never memoizes and the
@@ -50,6 +52,7 @@ export function useIndependentThreadPanel(args: {
         args.respondToLookup,
         args.relaySelfPubkey,
         args.ownerProfiles,
+        args.threadPolicy,
       ),
     [
       args.channelEvents,
@@ -66,6 +69,7 @@ export function useIndependentThreadPanel(args: {
       args.personaLookup,
       args.respondToLookup,
       args.relaySelfPubkey,
+      args.threadPolicy,
     ],
   );
 }

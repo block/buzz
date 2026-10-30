@@ -319,6 +319,39 @@ async fn thread_window_predicates_corruption_and_legacy() {
         .all(|p| (p[0].created_at, &p[0].event_id) < (p[1].created_at, &p[1].event_id)));
 }
 
+/// NIP-TP rule 4: under `flat` a NIP-CW `depth` of 1 includes every reply in
+/// the thread, whatever stored depth it was sent at; `nested` keeps the bound.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn thread_window_depth_follows_thread_policy() {
+    let (db, cid, ch, keys, root) = fixture().await;
+    let rows = replies(&db, cid, ch, &keys, &root, 3).await;
+    let deep = rows[0].id.to_bytes().to_vec();
+    sqlx::query("UPDATE thread_metadata SET depth=3 WHERE community_id=$1 AND event_id=$2")
+        .bind(cid.as_uuid())
+        .bind(deep)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let mut req = request(ch, &root, 50);
+    req.depth = 1;
+    let page = |req: Request| {
+        let db = db.clone();
+        async move {
+            let (window, _) = db
+                .get_thread_window_with_session(cid, &req, &mut ScanBudget::default())
+                .await
+                .unwrap();
+            window.rows.len()
+        }
+    };
+    assert_eq!(page(req.clone()).await, 2, "nested bounds stored depth");
+    db.set_community_thread_policy(cid, buzz_core::thread_policy::ThreadPolicy::Flat)
+        .await
+        .unwrap();
+    assert_eq!(page(req.clone()).await, 3, "flat includes every reply");
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn thread_aux_tombstone_ids_and_raw_cursor_survive_damaged_payload() {

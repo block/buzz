@@ -848,6 +848,7 @@ pub fn run() {
             validate_repos_dir,
             get_active_workspace,
             fetch_workspace_icon,
+            fetch_thread_policy,
             fetch_join_policy,
             set_prevent_sleep_active,
             get_agent_memory,

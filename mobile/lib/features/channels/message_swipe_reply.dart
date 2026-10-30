@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/community/thread_policy_provider.dart';
 import '../../shared/theme/buzz_icons.dart';
 import '../../shared/theme/theme.dart';
 import 'thread_detail_page.dart';
@@ -49,7 +50,11 @@ class MessageSwipeReply extends HookConsumerWidget {
     final cancelled = useRef(false);
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final messages = allMessages;
-    if (messages == null || message.isSystem) return child;
+    final canReply = canStartThreadFrom(
+      message,
+      ref.watch(activeThreadPolicyProvider),
+    );
+    if (messages == null || message.isSystem || !canReply) return child;
 
     void reset() {
       pulse.stop();
