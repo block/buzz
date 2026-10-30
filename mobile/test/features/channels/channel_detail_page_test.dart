@@ -404,8 +404,8 @@ Widget _buildTestable({
       ),
       if (knownAgentPubkeys != null)
         knownAgentPubkeysProvider.overrideWithValue(knownAgentPubkeys),
-      meAgentInventoryProvider.overrideWith(
-        (ref) async => {...inventoryAgents},
+      meAgentInventoryReadProvider.overrideWithValue(
+        () async => {...inventoryAgents},
       ),
       if (directoryUsers != null)
         relayDirectoryUsersProvider.overrideWith((ref) async => directoryUsers),
@@ -11364,18 +11364,24 @@ void main() {
       expect(find.byKey(const ValueKey('thread-working-dots')), findsNothing);
       expect(find.bySemanticsLabel('View thread: 1 reply'), findsOneWidget);
 
-      // The inventory is read again when thread typing resumes, so an agent
-      // removed from it no longer counts.
+      // While Summer keeps typing, the inventory is still read again, so
+      // Morty stops counting once removed from it.
       inventory.remove('morty');
       typing.setEntries([
-        TypingEntry(
-          pubkey: 'morty',
-          threadHeadId: threadIdRoot,
-          expiresAtMs: (now + 8) * 1000,
-        ),
+        for (final pubkey in ['summer', 'morty'])
+          TypingEntry(
+            pubkey: pubkey,
+            threadHeadId: threadIdRoot,
+            expiresAtMs: (now + 60) * 1000,
+          ),
       ]);
       await tester.pumpAndSettle();
-      expect(find.byKey(const ValueKey('thread-working-dots')), findsNothing);
+      await tester.pump(meAgentInventoryMaxAge);
+      await tester.pumpAndSettle();
+      expect(
+        find.bySemanticsLabel('View thread: 1 reply. Summer working'),
+        findsOneWidget,
+      );
     });
 
     testWidgets('shows single typer', (tester) async {
