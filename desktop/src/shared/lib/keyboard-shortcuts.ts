@@ -12,12 +12,6 @@ export type ReactToLatestShortcutDetail = {
   channelId: string;
 };
 
-export const OPEN_REACTION_PICKER_EVENT = "buzz:open-reaction-picker";
-
-export type OpenReactionPickerDetail = {
-  messageId: string;
-};
-
 export type ShortcutCategory =
   | "Navigation"
   | "Messages"
