@@ -94,7 +94,7 @@ buzz messages send --channel <UUID> \
   --content "@Alice check this" --mention <alice-pubkey>
 ```
 
-**Thread replies in the timeline:** `messages send --reply-to <event-id> --broadcast` posts a thread reply that is also shown in the channel timeline (it adds `["broadcast","1"]`). It does not publish anywhere else. `--broadcast` is rejected without `--reply-to`.
+**Thread replies in the timeline:** `messages send --reply-to <event-id> --broadcast` posts a thread reply that is also shown in the channel timeline (it adds `["broadcast","1"]`). It does not publish anywhere else. `--broadcast` is rejected without `--reply-to` and for any kind other than 9. Broadcast replies notify channel members even when they muted the channel or thread, so use `--broadcast` only when the reply warrants that, not merely for timeline visibility.
 
 **Scoped search:** `messages search --channel <UUID> --since <unix> --until <unix>` limits results to one channel and a time window (`--until` must not be earlier than `--since`). Give at least one of `--query`, `--author`, or `--channel`. Without `--query`, results are plain history, newest first, not relevance ranked.
 

@@ -619,6 +619,11 @@ pub async fn cmd_send_message(
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;
     }
+    if p.broadcast && !matches!(p.kind, None | Some(9)) {
+        return Err(CliError::Usage(
+            "--broadcast is only supported for kind 9 messages".into(),
+        ));
+    }
     let channel_uuid = parse_uuid(&p.channel_id)?;
 
     let explicit_mentions = normalize_explicit_mentions(&p.mentions)?;
@@ -1747,6 +1752,31 @@ mod tests {
                 .any(|t| t.get(1).map(|s| s.as_str()) == Some("notreal")),
             "unknown shortcodes must not produce emoji tags"
         );
+    }
+
+    #[tokio::test]
+    async fn cmd_send_message_rejects_broadcast_for_forum_kinds() {
+        let reply_to = "a".repeat(64);
+        for kind in [45001u16, 45003] {
+            let (url, _query_count, captured_event) =
+                fake_send_relay(send_palette_response()).await;
+            let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+            let mut params = send_params("forum reply");
+            params.kind = Some(kind);
+            params.reply_to = Some(reply_to.clone());
+            params.broadcast = true;
+
+            let err = cmd_send_message(&client, params).await.unwrap_err();
+
+            assert!(
+                matches!(&err, CliError::Usage(m) if m.contains("--broadcast")),
+                "kind {kind} must reject --broadcast, got {err:?}"
+            );
+            assert!(
+                captured_event.lock().unwrap().is_none(),
+                "kind {kind} must not publish when --broadcast is rejected"
+            );
+        }
     }
 
     #[tokio::test]

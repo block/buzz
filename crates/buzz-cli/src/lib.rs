@@ -475,7 +475,7 @@ pub enum MessagesCmd {
         /// Event ID to reply to (creates a thread)
         #[arg(long)]
         reply_to: Option<String>,
-        /// Also show this thread reply in the channel timeline (requires --reply-to)
+        /// Also show this thread reply in the channel timeline (requires --reply-to; kind 9 only)
         #[arg(long, default_value_t = false, requires = "reply_to")]
         broadcast: bool,
         /// Attach file(s) — uploads and includes as imeta tags
