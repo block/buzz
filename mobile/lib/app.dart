@@ -1,3 +1,4 @@
+import 'features/activity/activity_provider.dart';
 import 'features/channels/default_agent_launcher.dart';
 import 'features/agents/agents_page.dart';
 import 'dart:async';
@@ -308,6 +309,8 @@ class App extends HookConsumerWidget {
       ref.listen(observerRelayProvider, (_, _) {});
       ref.watch(appLifecycleProvider);
       ref.listen(userStatusCacheProvider, (_, _) {});
+      // Activity owns hidden-DM recovery even when Inbox is never opened.
+      ref.listen(activityProvider, (_, _) {});
       // Preserve initial read seeding even while Solo is hidden.
       ref.listen(meUnreadChannelIdsProvider, (_, _) {});
     }

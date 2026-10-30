@@ -520,7 +520,7 @@ class _CommunityFlyingAvatar extends StatelessWidget {
     final width = screen.width;
     final control = Offset(
       bend.dx.clamp(margin, max(margin, width - margin)),
-      bend.dy,
+      bend.dy.clamp(margin, max(margin, screen.height - margin)),
     );
     final t = departure;
     final position =
