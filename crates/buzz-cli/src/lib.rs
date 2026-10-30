@@ -10,6 +10,7 @@ use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use client::BuzzClient;
 use error::CliError;
 use nostr::Keys;
+use std::path::PathBuf;
 use uuid::Uuid;
 
 /// Run the Buzz CLI from raw arguments (including `argv[0]`).
@@ -320,6 +321,9 @@ enum Cmd {
     /// Upload files to the relay's Blossom store
     #[command(subcommand)]
     Upload(UploadCmd),
+    /// Local speech-to-text and text-to-speech for voice notes and audio files
+    #[command(subcommand)]
+    Voice(VoiceCmd),
     /// Agent engram management — persistent memory per NIP-AE
     #[command(subcommand)]
     Mem(MemCmd),
@@ -1983,6 +1987,73 @@ pub enum MediaCmd {
     },
 }
 
+/// Speech model families the local transcriber supports.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum VoiceModelType {
+    /// Whisper — the same family Hermes' `faster-whisper` uses.
+    Whisper,
+    /// Paraformer.
+    Paraformer,
+    /// Zipformer transducer.
+    Transducer,
+    /// NeMo Parakeet TDT (encoder/decoder/joiner triple).
+    Parakeet,
+    /// NeMo Parakeet TDT-CTC (single model file) — the layout the Buzz desktop
+    /// ships as `parakeet-tdt-ctc-110m-en`.
+    ParakeetCtc,
+}
+
+impl VoiceModelType {
+    /// The `buzz-voice` model family this maps to.
+    pub fn as_model_type(self) -> buzz_voice::ModelType {
+        match self {
+            Self::Whisper => buzz_voice::ModelType::Whisper,
+            Self::Paraformer => buzz_voice::ModelType::Paraformer,
+            Self::Transducer => buzz_voice::ModelType::Transducer,
+            Self::Parakeet => buzz_voice::ModelType::Parakeet,
+            Self::ParakeetCtc => buzz_voice::ModelType::ParakeetCtc,
+        }
+    }
+}
+
+/// Subcommands for `buzz voice`.
+#[derive(Subcommand, Clone)]
+pub enum VoiceCmd {
+    /// Transcribe a local audio file or Buzz voice note to text (offline)
+    Transcribe {
+        /// Path to a WAV file, or any media file ffmpeg can read
+        input: String,
+        /// Directory holding the speech model files
+        #[arg(long)]
+        model_dir: Option<PathBuf>,
+        /// Speech model family
+        ///
+        /// Defaults to `parakeet-ctc`: the layout the Buzz desktop ships as
+        /// `parakeet-tdt-ctc-110m-en` (a single `model.int8.onnx` plus
+        /// `tokens.txt`), so the same model directory works for the CLI and
+        /// the ACP harness without a second download.
+        #[arg(long, value_enum, default_value = "parakeet-ctc")]
+        model_type: VoiceModelType,
+    },
+    /// Synthesize text into a Buzz voice note (offline)
+    Speak {
+        /// The text to speak
+        text: String,
+        /// Output path (a Buzz voice note mp4, unless `--wav` is given)
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Directory holding the Pocket TTS model files
+        #[arg(long)]
+        model_dir: Option<PathBuf>,
+        /// Reference voice WAV (defaults to reference_sample.wav in the model dir)
+        #[arg(long)]
+        voice: Option<PathBuf>,
+        /// Write raw PCM as a WAV instead of packaging a voice note mp4
+        #[arg(long, default_value_t = false)]
+        wav: bool,
+    },
+}
+
 /// Subcommands for `buzz mem`.
 #[derive(Subcommand)]
 pub enum MemCmd {
@@ -2223,6 +2294,12 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         };
     }
 
+    // Voice transcription is local-only — it reads a local model and needs
+    // neither a relay connection nor a private key.
+    if let Cmd::Voice(ref sub) = cli.command {
+        return commands::voice::dispatch(sub.clone()).await;
+    }
+
     // Auth: private key is required for all relay operations.
     // The keypair IS the identity — no tokens, no other auth.
     let private_key_str = cli.private_key.ok_or_else(|| {
@@ -2284,6 +2361,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
         Cmd::Pack(_) => unreachable!("handled above"),
+        Cmd::Voice(_) => unreachable!("handled above"),
     }
 }
 
@@ -2291,6 +2369,40 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    /// The CLI's default speech model family must match the ACP harness's
+    /// default.
+    ///
+    /// The Buzz desktop ships `parakeet-tdt-ctc-110m-en`: a single
+    /// `model.int8.onnx` plus `tokens.txt`. If the CLI defaults to a
+    /// different family than the harness, the same model directory silently
+    /// works in one place and fails in the other with
+    /// "encoder.onnx is missing". Both defaults are pinned to the CTC layout
+    /// the desktop ships.
+    #[test]
+    fn the_cli_default_model_family_is_the_ctc_layout_the_desktop_ships() {
+        let mut command = Cli::command();
+        let voice = command
+            .get_subcommands_mut()
+            .find(|sub| sub.get_name() == "voice")
+            .expect("the voice command must exist");
+        let subcommand = voice
+            .get_subcommands_mut()
+            .find(|s| s.get_name() == "transcribe")
+            .expect("the voice transcribe command must exist");
+
+        let default = subcommand
+            .get_arguments()
+            .find(|arg| arg.get_id() == "model_type")
+            .and_then(|arg| arg.get_default_values().first())
+            .and_then(|value| value.to_str())
+            .expect("model_type must have a default");
+
+        assert_eq!(
+            default, "parakeet-ctc",
+            "the CLI default must be the CTC layout the Buzz desktop ships"
+        );
+    }
 
     /// Raw shorthand `[auth,hex,,hex]` normalizes to strict JSON; the empty
     /// conditions field becomes `""`.
@@ -2474,6 +2586,7 @@ mod tests {
             "social",
             "upload",
             "users",
+            "voice",
             "workflows",
         ];
 
