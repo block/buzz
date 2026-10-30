@@ -130,9 +130,20 @@ fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
     AcpError::AgentError { code, message }
 }
 
-fn build_initialize_params() -> serde_json::Value {
+/// Protocol version Buzz asks for first: buzz-agent and goose use v2 to take
+/// the system-role delivery path.
+const PREFERRED_PROTOCOL_VERSION: u64 = 2;
+
+/// Protocol version Buzz actually implements end to end.
+const FALLBACK_PROTOCOL_VERSION: u64 = 1;
+
+/// JSON-RPC "Invalid params" — what upstream ACP v2 adapters return when they
+/// validate Buzz's v1-shaped `initialize` body against the v2 schema.
+const JSONRPC_INVALID_PARAMS: i64 = -32602;
+
+fn build_initialize_params(protocol_version: u64) -> serde_json::Value {
     serde_json::json!({
-        "protocolVersion": 2,
+        "protocolVersion": protocol_version,
         "clientCapabilities": build_client_capabilities(),
         "clientInfo": {
             "name": "buzz-acp",
@@ -207,6 +218,9 @@ pub struct AcpClient {
     /// a JSON-RPC *success*, not `-32601` — which the main loop would read as
     /// a delivered steer and drop the user's message from the queue.
     steering_supported: bool,
+    /// How this process was launched, so [`initialize`](Self::initialize) can
+    /// relaunch it for the v1 fallback.
+    launch_spec: LaunchSpec,
     /// Per-turn channel for receiving goose-native non-cancelling steer
     /// requests from the main loop. Installed by
     /// [`install_steer_rx`](Self::install_steer_rx) at dispatch and
@@ -225,6 +239,16 @@ pub struct AcpClient {
     /// readable thinking unless asked; set only when the CLI the adapter runs
     /// is new enough to accept `--thinking-display`.
     claude_thinking_summaries: bool,
+}
+
+/// Arguments to [`AcpClient::spawn_with_env`], kept for relaunching.
+#[derive(Clone)]
+struct LaunchSpec {
+    command: String,
+    args: Vec<String>,
+    extra_env: Vec<(String, String)>,
+    has_generated_codex_config: bool,
+    launch_env: Vec<(String, String)>,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -629,6 +653,13 @@ impl AcpClient {
             observer_context: ObserverContext::default(),
             active_run_id: None,
             steering_supported: false,
+            launch_spec: LaunchSpec {
+                command: command.to_string(),
+                args: args.to_vec(),
+                extra_env: extra_env.to_vec(),
+                has_generated_codex_config,
+                launch_env: launch_env.to_vec(),
+            },
             steer_rx: None,
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
@@ -679,17 +710,59 @@ impl AcpClient {
     /// [`steering_supported`](Self::steering_supported) so the read loop's steer
     /// arm can choose [`ACP_STEER_METHOD`] for adapters that implement it.
     /// Parsed here rather than at each call site so no caller can forget it.
+    ///
+    /// Asks for v2 first. Adapters built on the upstream ACP v2 SDK reject
+    /// Buzz's v1-shaped body with `-32602` and stop answering on that
+    /// connection, so on that error the agent is relaunched and asked for v1,
+    /// the protocol Buzz implements (block/buzz#4728).
     pub async fn initialize(&mut self) -> Result<serde_json::Value, AcpError> {
         // Requesting version 2 is an intentional temporary pin — we are squatting
         // on ACP v2 ahead of the upstream ACP RFD. Revisit when that RFD merges.
-        let params = build_initialize_params();
-        let result = self.send_request("initialize", params).await?;
+        // The v1 fallback below only covers adapters that implement upstream v2
+        // and therefore reject this body; it goes away with the pin.
+        let params = build_initialize_params(PREFERRED_PROTOCOL_VERSION);
+        let result = match self.send_request("initialize", params).await {
+            Err(AcpError::AgentError { code, message }) if code == JSONRPC_INVALID_PARAMS => {
+                tracing::warn!(
+                    command = %self.launch_spec.command,
+                    "agent rejected ACP v{PREFERRED_PROTOCOL_VERSION} initialize ({message}); \
+                     relaunching with v{FALLBACK_PROTOCOL_VERSION}"
+                );
+                self.relaunch().await?;
+                let params = build_initialize_params(FALLBACK_PROTOCOL_VERSION);
+                self.send_request("initialize", params).await?
+            }
+            other => other?,
+        };
         self.steering_supported = result
             .pointer("/_meta/steering/supported")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         tracing::debug!(target: "acp::init", "initialize response: {result}");
         Ok(result)
+    }
+
+    /// Reap the agent process and replace it with a fresh one launched the
+    /// same way. Only the process-owned fields change, so any client state
+    /// set before `initialize` (observer wiring, etc.) carries over.
+    async fn relaunch(&mut self) -> Result<(), AcpError> {
+        // Reap first so two adapter process trees never run side by side.
+        self.shutdown().await;
+        let spec = self.launch_spec.clone();
+        let mut fresh = Self::spawn_with_env(
+            &spec.command,
+            &spec.args,
+            &spec.extra_env,
+            spec.has_generated_codex_config,
+            &spec.launch_env,
+        )
+        .await?;
+        std::mem::swap(&mut self.child, &mut fresh.child);
+        std::mem::swap(&mut self.stdin, &mut fresh.stdin);
+        std::mem::swap(&mut self.reader, &mut fresh.reader);
+        self.next_id = 0;
+        // `fresh` now owns the already-reaped process; dropping it is a no-op.
+        Ok(())
     }
 
     /// Send the ACP `authenticate` request for an adapter-advertised method.
@@ -3768,6 +3841,74 @@ mod tests {
                 .await,
             Err(AcpError::AgentError { code: -32602, .. })
         ));
+    }
+
+    /// An upstream-v2 adapter rejects the v2 body with -32602 and then stops
+    /// answering; `initialize` must relaunch it and settle on v1.
+    #[tokio::test]
+    async fn initialize_relaunches_with_v1_when_v2_is_rejected() {
+        let script = r#"
+            read -t 5 REQ
+            case "$REQ" in
+              *'"protocolVersion":2'*)
+                echo '{"jsonrpc":"2.0","id":0,"error":{"code":-32602,"message":"Invalid params"}}'
+                sleep 30 ;;
+              *)
+                echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{},"_receivedRequest":'"$REQ"'}}'
+                sleep 1 ;;
+            esac
+        "#;
+        let mut client = AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
+            .await
+            .expect("failed to spawn test script");
+        client.set_observer(None, 7);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), client.initialize())
+            .await
+            .expect("fallback should not hang on the rejecting process")
+            .expect("initialize should succeed after the v1 fallback");
+        assert_eq!(result["protocolVersion"], serde_json::json!(1));
+        assert_eq!(
+            result["_receivedRequest"]["params"]["protocolVersion"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            client.observer_agent_index(),
+            Some(7),
+            "relaunch must keep client state set before initialize"
+        );
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn initialize_does_not_relaunch_on_other_errors() {
+        let launches = std::env::temp_dir().join(format!(
+            "buzz-acp-init-launches-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let script = format!(
+            r#"
+            echo launch >> '{}'
+            read -t 5 _REQ
+            echo '{{"jsonrpc":"2.0","id":0,"error":{{"code":-32603,"message":"Internal error"}}}}'
+            sleep 1
+        "#,
+            launches.display()
+        );
+        let mut client = AcpClient::spawn("bash", &["-c".into(), script], &[], false)
+            .await
+            .expect("failed to spawn test script");
+        assert!(matches!(
+            client.initialize().await,
+            Err(AcpError::AgentError { code: -32603, .. })
+        ));
+        let launch_count = std::fs::read_to_string(&launches)
+            .expect("script should record its launch")
+            .lines()
+            .count();
+        let _ = std::fs::remove_file(&launches);
+        assert_eq!(launch_count, 1, "only -32602 may trigger a relaunch");
+        client.shutdown().await;
     }
 
     #[tokio::test]
