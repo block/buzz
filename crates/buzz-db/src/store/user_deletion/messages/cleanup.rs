@@ -1,5 +1,7 @@
 use super::*;
 
+const MAX_AFFECTED_THREADS: usize = 32;
+
 pub(super) async fn remove(
     tx: &mut AdmittedTx,
     community: CommunityId,
@@ -60,6 +62,28 @@ pub(super) async fn remove(
         ids.extend(frontier.iter().cloned());
         ids.sort();
         ids.dedup();
+    }
+
+    // A vote/edit's target can differ from its stored reply parent. Capture
+    // every affected stored thread before deleting its source event, plus the
+    // seed for legacy events without metadata. Repair all of them atomically.
+    let mut threads: Vec<(Option<Uuid>, Vec<u8>)> = sqlx::query_as(
+        "SELECT DISTINCT channel_id,COALESCE(root_event_id,event_id) AS root_id
+         FROM thread_metadata WHERE community_id=$1 AND event_id=ANY($2)
+         ORDER BY channel_id,root_id LIMIT $3",
+    )
+    .bind(community.as_uuid())
+    .bind(&ids)
+    .bind((MAX_AFFECTED_THREADS + 1) as i64)
+    .fetch_all(tx.conn())
+    .await?;
+    threads.push((thread.channel_id, thread.root_id.clone()));
+    threads.sort();
+    threads.dedup();
+    if threads.len() > MAX_AFFECTED_THREADS {
+        return Err(safety(
+            "too many affected threads in one message batch; reduce the batch size",
+        ));
     }
 
     // A worker may already have fetched the payload even though the user is
@@ -130,13 +154,17 @@ pub(super) async fn remove(
         .execute(tx.conn())
         .await?
         .rows_affected();
-    repair_thread(tx, community, thread).await
+    for (channel, root) in threads {
+        repair_thread(tx, community, channel, &root).await?;
+    }
+    Ok(())
 }
 
 async fn repair_thread(
     tx: &mut AdmittedTx,
     community: CommunityId,
-    thread: &Candidate,
+    channel: Option<Uuid>,
+    root: &[u8],
 ) -> Result<()> {
     // Preserve only the ancestry needed by retained events. The missing event
     // rows carry no content, author, tags or signature; metadata keeps replies
@@ -153,9 +181,10 @@ async fn repair_thread(
         ) DELETE FROM thread_metadata tm WHERE tm.community_id=$1 AND tm.channel_id=$2
           AND (tm.event_id=$3 OR tm.root_event_id=$3)
           AND NOT EXISTS (SELECT 1 FROM needed n WHERE n.event_id=tm.event_id AND n.event_created_at=tm.event_created_at)",
-    ).bind(community.as_uuid()).bind(thread.channel_id).bind(&thread.root_id).execute(tx.conn()).await?;
+    ).bind(community.as_uuid()).bind(channel).bind(root).execute(tx.conn()).await?;
     // Recompute, never subtract old counts. Already-soft-deleted messages do
     // not count; received_at matches the server-arrival activity clock.
+    // Like live writes, last_reply_at tracks direct replies, not descendants.
     sqlx::query(
         "WITH visible AS MATERIALIZED (
           SELECT tm.parent_event_id,tm.root_event_id,e.received_at FROM thread_metadata tm
@@ -164,16 +193,16 @@ async fn repair_thread(
         ), direct AS (
           SELECT parent_event_id,count(*)::int AS n,max(received_at) AS last_at FROM visible GROUP BY parent_event_id
         ), descendants AS (
-          SELECT root_event_id,count(*)::int AS n,max(received_at) AS last_at FROM visible GROUP BY root_event_id
+          SELECT root_event_id,count(*)::int AS n FROM visible GROUP BY root_event_id
         ), counts AS (
           SELECT tm.event_id,tm.event_created_at,COALESCE(d.n,0) AS replies,COALESCE(r.n,0) AS descendants,
-            GREATEST(d.last_at,r.last_at) AS last_at
+            d.last_at
           FROM thread_metadata tm LEFT JOIN direct d ON d.parent_event_id=tm.event_id
           LEFT JOIN descendants r ON r.root_event_id=tm.event_id
           WHERE tm.community_id=$1 AND tm.channel_id=$2 AND (tm.event_id=$3 OR tm.root_event_id=$3)
         ) UPDATE thread_metadata tm SET reply_count=c.replies,descendant_count=c.descendants,last_reply_at=c.last_at
           FROM counts c WHERE tm.community_id=$1 AND tm.event_id=c.event_id AND tm.event_created_at=c.event_created_at",
-    ).bind(community.as_uuid()).bind(thread.channel_id).bind(&thread.root_id).execute(tx.conn()).await?;
+    ).bind(community.as_uuid()).bind(channel).bind(root).execute(tx.conn()).await?;
     Ok(())
 }
 

@@ -6,9 +6,9 @@ WITH authored AS (
     WHERE e.community_id = $1 AND e.pubkey IN ($2, $3)
       AND e.kind IN (9, 40001, 40002, 45001, 45003, 7, 45002, 40003, 40004, 40005, 40006, 40007, 40008)
       AND CASE WHEN e.pubkey = $3 THEN COALESCE(
-        -- Match effective_message_author: first actor, then first valid p.
+        -- Match effective_message_author: first actor with a value, then first valid p.
         (SELECT CASE WHEN t->>1 ~ '^[0-9a-fA-F]{64}$' THEN decode(t->>1, 'hex') END
-         FROM jsonb_array_elements(e.tags) t WHERE t->>0 = 'actor' LIMIT 1),
+         FROM jsonb_array_elements(e.tags) t WHERE t->>0 = 'actor' AND t->>1 IS NOT NULL LIMIT 1),
         (SELECT decode(t->>1, 'hex') FROM jsonb_array_elements(e.tags) t
          WHERE t->>0 = 'p' AND t->>1 ~ '^[0-9a-fA-F]{64}$' LIMIT 1), e.pubkey)
         ELSE e.pubkey END = $2

@@ -11,6 +11,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 mod safety_postgres_tests;
+mod thread_repair_postgres_tests;
 
 struct Fixture {
     db: Db,
@@ -129,7 +130,7 @@ impl Fixture {
             .tags(tags)
             .sign_with_keys(who)
             .unwrap();
-        let metadata = if [9, 40002, 45001, 45003].contains(&kind) {
+        let metadata = if thread.is_some() || [9, 40002, 45001, 45003].contains(&kind) {
             Some(ThreadMetadataParams {
                 event_id: event.id.as_bytes(),
                 event_created_at: timestamp(&event),

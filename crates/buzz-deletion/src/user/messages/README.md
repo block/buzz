@@ -41,7 +41,8 @@ heartbeat waiting on that lock cannot revive a lease that has expired. Expiry
 rolls back the batch. If the lease has actually expired, the old worker also
 cannot save a failure: the current running stage remains durable and a new
 worker can reclaim it with a higher generation. Reduce batch size if repeated
-expiry prevents progress; this handler does not impose a new lease duration.
+expiry prevents progress, but note the scan limitation below; this handler
+does not impose a new lease duration.
 
 ## What one batch removes
 
@@ -51,7 +52,8 @@ expiry prevents progress; this handler does not impose a new lease duration.
   Old soft-deleted rows are included. Community-global private reminders,
   personal lists and other account state belong to later handlers.
 - Relay-signed attributed messages only when the signer is the trusted relay
-  key. Attribution follows the existing first-actor/first-valid-p rules. An
+  key. Attribution uses the first actor tag with a value, skipping valueless
+  actor tags, then falls back to the first valid p tag if that value is invalid. An
   arbitrary author's actor or mention tags never confer authorship.
 - Dependent edits, votes and reactions on removed events, including reactions
   from other people. The first valid e tag selects an edit/vote target; the
@@ -70,6 +72,12 @@ past 16 levels, never commits an incomplete traversal. A smaller batch can
 resolve a fan-out limit; a single over-limit message requires further work.
 Only IDs and flags are loaded, not message bodies or workflow traces.
 
+Before deleting events, collect their stored thread roots as well as the selected
+thread. A vote or edit can target one post while its stored reply parent belongs
+to another thread. Both threads must be repaired. At most 32 distinct threads
+are repaired in a batch; exceeding that limit fails before deleting anything.
+A single event that exceeds the limit requires further work, even at batch size 1.
+
 All deletions and thread repairs commit together. Any SQL failure or lease
 expiry rolls back the batch. Re-running after a successful commit cannot
 subtract counts twice. A final bounded sweep removes orphan materialized
@@ -81,7 +89,9 @@ author when their source event is already missing; active runs block completion.
 
 Thread metadata retains only ancestry needed by remaining events. It has no
 message body, tags, author or signature. Counts are recomputed from visible
-remaining messages using the server-arrival clock. Thread-window reads recognize
+remaining messages using the server-arrival clock. `last_reply_at` is the
+latest direct reply, matching normal writes; a newer nested reply only changes
+its immediate parent's timestamp. Thread-window reads recognize
 a missing root through trusted metadata and still return original signed
 replies. No fake signed tombstone is manufactured. Posting new replies to a
 physically missing parent and client refresh/notification behavior are separate
@@ -105,6 +115,21 @@ This deliberately also blocks some ordinary links. The source events remain avai
 once file cleanup exists; the handler never drops file references and reports
 success. This PR does not add a bypass or a pretend storage adapter.
 
+## Performance to measure before integration
+
+The batch size bounds deleted authored events, not all database work. Candidate
+selection can scan many authored events and inspect their tags; repairing a
+thread scans its remaining messages. Even a batch size of one can time out for
+a large account or thread. The 32-thread limit bounds the number of repairs,
+not the size of each repair. Repeated retries may therefore make no progress.
+
+Before integrating this handler, measure query plans and batch duration with
+large accounts, large threads and dependent events spread across threads.
+Compare these timings with statement timeouts and the caller's lease budget.
+These workloads have not been benchmarked here; smaller batches alone are not
+a demonstrated solution. Query optimization or different batching should be
+based on those measurements.
+
 ## Local tests
 
 Use the repository's isolated PostgreSQL lane:
@@ -126,3 +151,7 @@ asserts that source/dependent records survive and retry state is saved. A
 replacement-worker case expires the lease between committed batches, reclaims
 through the real API, rejects the old worker/heartbeat, and finishes with the
 new generation. This does not simulate heartbeat contention inside a live batch.
+
+Regression cases also cover votes/edits stored under a different thread,
+rollback during another thread's repair, the affected-thread limit, direct-reply
+timestamps and valueless actor tags.
