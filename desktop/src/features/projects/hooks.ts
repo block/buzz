@@ -66,6 +66,10 @@ import {
   type Project,
   type Repository,
 } from "./projectModels";
+import {
+  enumerateProjectEvents,
+  PROJECT_ENUMERATION_PAGE_SIZE,
+} from "./projectEnumeration";
 import { fetchProjectHomeForChannel, fetchProjects } from "./projectFetch";
 import {
   markProjectCollectionAuthoritative,
@@ -85,6 +89,8 @@ export type {
   Repository,
 };
 export type ProjectPullRequestCommentDecision = "request-changes";
+
+type FetchEventsInput = Parameters<(typeof relayClient)["fetchEvents"]>[0];
 
 export type RepoState = {
   branches: Array<{ name: string; commit: string }>;
@@ -200,30 +206,40 @@ export async function fetchRepoState(
   return events.length > 0 ? eventToRepoState(events[0]) : null;
 }
 
-async function fetchProjectIssues(
+export async function fetchProjectIssues(
   project: Repository,
+  fetchEvents: (
+    filter: FetchEventsInput,
+  ) => Promise<RelayEvent[]> = relayClient.fetchEvents.bind(relayClient),
 ): Promise<ProjectIssue[]> {
-  const issuePromise = relayClient.fetchEvents({
-    kinds: [KIND_GIT_ISSUE],
-    "#a": [project.repoAddress],
-    limit: 200,
-  });
+  const repoScope = { "#a": [project.repoAddress] };
+  // Task counters reduce over the complete issue set, not the newest window a
+  // fixed `limit` happens to return: a bounded fetch made `Completed` fall as
+  // newer roots evicted older closed ones. Roots and their statuses both have
+  // to be exhaustive for the reduction to hold.
+  const issuePromise = enumerateProjectEvents(
+    fetchEvents,
+    [KIND_GIT_ISSUE],
+    PROJECT_ENUMERATION_PAGE_SIZE,
+    repoScope,
+  );
   const [issueEvents, statusEvents, commentEvents, assignmentEvents] =
     await Promise.all([
       issuePromise,
-      relayClient.fetchEvents({
-        kinds: [
+      enumerateProjectEvents(
+        fetchEvents,
+        [
           KIND_GIT_STATUS_OPEN,
           KIND_GIT_STATUS_MERGED,
           KIND_GIT_STATUS_CLOSED,
           KIND_GIT_STATUS_DRAFT,
         ],
-        "#a": [project.repoAddress],
-        limit: 500,
-      }),
-      relayClient.fetchEvents({
+        PROJECT_ENUMERATION_PAGE_SIZE,
+        repoScope,
+      ),
+      fetchEvents({
         kinds: [KIND_TEXT_NOTE],
-        "#a": [project.repoAddress],
+        ...repoScope,
         limit: 500,
       }),
       // Assignment state must reduce over the complete operation history, not
@@ -231,7 +247,10 @@ async function fetchProjectIssues(
       // (`#e`) because that is the only tag constraint the relay applies
       // before its SQL LIMIT — see fetchAssignmentOperationEvents.
       issuePromise.then((events) =>
-        fetchAssignmentOperationEvents(events.map((event) => event.id)),
+        fetchAssignmentOperationEvents(
+          events.map((event) => event.id),
+          fetchEvents,
+        ),
       ),
     ]);
 
