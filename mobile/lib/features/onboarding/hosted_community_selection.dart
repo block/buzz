@@ -28,15 +28,19 @@ class HostedCommunitySelection extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     useListenable(flow);
-    Future<void> addCommunity() async {
+    void addCommunity() {
+      if (flow.stage != HostedFlowStage.chooseCommunities) return;
+      final choices = flow.captureCommunityChoices();
+      if (choices == null) return;
       final navigator = Navigator.of(context, rootNavigator: true);
-      if (!await flow.prepareToAddCommunity() || !navigator.mounted) return;
       late final MaterialPageRoute<void> route;
       var exiting = false;
       Future<void> exit() async {
         if (exiting) return;
         exiting = true;
-        await flow.signInAccount();
+        if (!flow.restoreCommunityChoices(choices)) {
+          await flow.signInAccount();
+        }
         if (flow.stage == HostedFlowStage.signIn ||
             flow.stage == HostedFlowStage.idle) {
           exiting = false;
