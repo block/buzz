@@ -1,7 +1,10 @@
 import * as React from "react";
 
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
-import { canDeleteProject } from "@/features/projects/projectDeletion";
+import {
+  canDeleteProject,
+  canDeleteRepository,
+} from "@/features/projects/projectDeletion";
 import { FolderGit2, Folders } from "lucide-react";
 import type {
   Project,
@@ -304,7 +307,9 @@ export function ProjectsOverviewProjectItems({
 
 export function ProjectsOverviewRepositoryItems({
   currentPubkey,
+  deleteDisabled,
   localRepoNames,
+  onDelete,
   onOpen,
   onOpenTerminal,
   profiles,
@@ -313,7 +318,9 @@ export function ProjectsOverviewRepositoryItems({
   visibleRepositories,
 }: {
   currentPubkey: string | undefined;
+  deleteDisabled?: boolean;
   localRepoNames: Set<string>;
+  onDelete?: (repository: Repository) => void;
   onOpen: (project: Project, repository: Repository) => void;
   onOpenTerminal: (repository: Repository) => void;
   profiles?: UserProfileLookup;
@@ -393,10 +400,17 @@ export function ProjectsOverviewRepositoryItems({
                     key={repository.repoAddress}
                   >
                     <RepositoryGridCard
+                      canDelete={canDeleteRepository(
+                        repository,
+                        currentPubkey,
+                        profiles,
+                      )}
+                      deleteDisabled={deleteDisabled}
                       hasLocal={hasLocalRepositoryCheckout(
                         repository,
                         localRepoNames,
                       )}
+                      onDelete={onDelete}
                       onOpen={onOpen}
                       onOpenTerminal={onOpenTerminal}
                       profiles={profiles}
@@ -428,10 +442,17 @@ export function ProjectsOverviewRepositoryItems({
                 key={repository.repoAddress}
               >
                 <RepositoryListRow
+                  canDelete={canDeleteRepository(
+                    repository,
+                    currentPubkey,
+                    profiles,
+                  )}
+                  deleteDisabled={deleteDisabled}
                   hasLocal={hasLocalRepositoryCheckout(
                     repository,
                     localRepoNames,
                   )}
+                  onDelete={onDelete}
                   onOpen={onOpen}
                   onOpenTerminal={onOpenTerminal}
                   profiles={profiles}

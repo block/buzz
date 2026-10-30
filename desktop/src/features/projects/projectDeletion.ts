@@ -9,7 +9,7 @@ import {
   KIND_REPO_ANNOUNCEMENT,
 } from "@/shared/constants/kinds";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import type { Project } from "./projectModels";
+import type { Project, Repository } from "./projectModels";
 
 export type DeleteProjectEventTemplate = {
   kind: number;
@@ -37,6 +37,24 @@ export function canDeleteProject(
   );
 }
 
+/**
+ * Buzz lets a human owner manage content authored by their NIP-OA agent, just
+ * as it does for projects and agent-owned channels.
+ */
+export function canDeleteRepository(
+  repository: Pick<Repository, "owner">,
+  currentPubkey: string | undefined,
+  profiles: UserProfileLookup | undefined,
+): boolean {
+  if (!currentPubkey) return false;
+
+  const owner = normalizePubkey(repository.owner);
+  return (
+    owner === normalizePubkey(currentPubkey) ||
+    ownsAuthorAgent(profiles?.[owner], currentPubkey)
+  );
+}
+
 /** Build a tombstone that dominates the exact live coordinate head. */
 export function buildProjectDeletionTemplate(
   project: Pick<Project, "name" | "projectAddress">,
@@ -48,6 +66,20 @@ export function buildProjectDeletionTemplate(
     content: `Delete project ${project.name}`,
     createdAt: Math.max(nowSeconds, liveHead.created_at + 1),
     tags: [["a", project.projectAddress]],
+  };
+}
+
+/** Build a tombstone that dominates the exact live repository coordinate head. */
+export function buildRepositoryDeletionTemplate(
+  repository: Pick<Repository, "name" | "repoAddress">,
+  liveHead: Pick<RelayEvent, "created_at">,
+  nowSeconds = Math.floor(Date.now() / 1_000),
+): DeleteProjectEventTemplate {
+  return {
+    kind: KIND_DELETION,
+    content: `Delete repository ${repository.name}`,
+    createdAt: Math.max(nowSeconds, liveHead.created_at + 1),
+    tags: [["a", repository.repoAddress]],
   };
 }
 
@@ -107,6 +139,46 @@ export async function deleteProject(
   if ((await fetchEvents(filter)).length > 0) {
     throw new Error(
       "This project was updated while it was being deleted. Refresh and try again.",
+    );
+  }
+}
+
+/** Delete the exact live repository coordinate and detect a concurrent replacement. */
+export async function deleteRepository(
+  repository: Repository,
+  deps?: Partial<ProjectDeletionDeps>,
+): Promise<void> {
+  const {
+    fetchEvents = relayClient.fetchEvents.bind(relayClient),
+    nowSeconds = () => Math.floor(Date.now() / 1_000),
+    publishEvent = relayClient.publishEvent.bind(relayClient),
+    signEvent = signRelayEvent,
+  } = deps ?? {};
+  const filter = {
+    kinds: [KIND_REPO_ANNOUNCEMENT],
+    authors: [repository.owner.toLowerCase()],
+    "#d": [repository.dtag],
+    limit: 1,
+  };
+  const [liveHead] = await fetchEvents(filter);
+  if (!liveHead) {
+    throw new Error(
+      "Could not find this repository on the relay. Refresh and try again.",
+    );
+  }
+
+  const event = await signEvent(
+    buildRepositoryDeletionTemplate(repository, liveHead, nowSeconds()),
+  );
+  await publishEvent(
+    event,
+    "Could not confirm whether the repository was deleted. Repositories were refreshed.",
+    "Failed to delete repository.",
+  );
+
+  if ((await fetchEvents(filter)).length > 0) {
+    throw new Error(
+      "This repository was updated while it was being deleted. Refresh and try again.",
     );
   }
 }
