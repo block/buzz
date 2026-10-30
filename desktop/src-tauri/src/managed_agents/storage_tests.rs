@@ -830,3 +830,426 @@ fn install_log_filename_accepts_ordinary_runtime_ids() {
         );
     }
 }
+
+// ── #7184 community sharding ────────────────────────────────────────────────
+
+fn scoped_record(pubkey: &str, relay: &str) -> ManagedAgentRecord {
+    serde_json::from_str(&format!(
+        r#"{{
+            "pubkey": "{pubkey}",
+            "name": "agent-{pubkey}",
+            "relay_url": "{relay}",
+            "acp_command": "buzz-acp",
+            "agent_command": "goose",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }}"#
+    ))
+    .unwrap()
+}
+
+fn definition_record(slug: &str) -> ManagedAgentRecord {
+    let mut record = scoped_record("", "");
+    record.slug = Some(slug.to_string());
+    record.name = format!("definition-{slug}");
+    record
+}
+
+/// Every store file in `dir` (legacy + shards), name → contents.
+fn store_files(dir: &Path) -> Vec<(String, String)> {
+    let mut files: Vec<(String, String)> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_str()?.to_string();
+            (name.starts_with("managed-agents") && name.ends_with(".json"))
+                .then(|| (name, std::fs::read_to_string(entry.path()).unwrap()))
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+fn pubkeys(records: &[ManagedAgentRecord]) -> Vec<String> {
+    let mut keys: Vec<String> = records
+        .iter()
+        .filter(|record| !record.pubkey.is_empty())
+        .map(|record| record.pubkey.clone())
+        .collect();
+    keys.sort();
+    keys
+}
+
+fn save_in(dir: &Path, records: Vec<ManagedAgentRecord>) -> Result<(), String> {
+    let store = FakeKeyStore::reachable();
+    let (definitions, instances): (Vec<_>, Vec<_>) = records
+        .into_iter()
+        .partition(|record| record.pubkey.is_empty());
+    super::write_agent_store_in_dir(dir, definitions, instances, |records| {
+        persist_agent_keys_with(&store, records)
+    })
+}
+
+#[test]
+fn community_key_keeps_ports_apart_and_folds_equivalent_spellings() {
+    let key = |url: &str| super::community_key_of(url);
+    let three = key("ws://localhost:3000").unwrap();
+    let thirty = key("ws://localhost:3030").unwrap();
+    assert_ne!(three, thirty, "two ports on one host are two communities");
+    assert_eq!(key("ws://localhost:3000/"), Some(three.clone()));
+    assert_eq!(key("ws://127.0.0.1:3000"), Some(three.clone()));
+    assert_ne!(
+        key("wss://localhost:3000"),
+        Some(three.clone()),
+        "scheme matters"
+    );
+    assert_ne!(
+        key("wss://relay.example/a"),
+        key("wss://relay.example/b"),
+        "path matters"
+    );
+    assert_eq!(
+        key("WSS://Relay.Example:443/"),
+        key("wss://relay.example"),
+        "case and default port do not"
+    );
+    assert!(
+        three.starts_with("127.0.0.1-3000."),
+        "readable label: {three}"
+    );
+}
+
+#[test]
+fn community_key_rejects_non_relays_and_is_always_filename_safe() {
+    for bad in [
+        "",
+        "   ",
+        "wss://",
+        "localhost:3000",
+        "https://relay.example.com",
+    ] {
+        assert_eq!(super::community_key_of(bad), None, "{bad:?}");
+    }
+    for url in [
+        "wss://bookd.communities.buzz.xyz",
+        "ws://localhost:3000",
+        "wss://[2001:db8::1]:7777/x?y=1",
+        "wss://../evil",
+        "wss://host/slash",
+    ] {
+        let Some(key) = super::community_key_of(url) else {
+            continue;
+        };
+        assert!(
+            key.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.'),
+            "{url} -> {key}"
+        );
+        assert!(
+            !key.starts_with('.') && !key.contains(".."),
+            "{url} -> {key}"
+        );
+        assert!(!key.contains('/'), "{url} -> {key}");
+    }
+}
+
+#[test]
+fn partition_routes_by_relay_and_fails_open() {
+    let instances = vec![
+        scoped_record("aa", "wss://bookd.communities.buzz.xyz"),
+        scoped_record("bb", "wss://av0.communities.buzz.xyz"),
+        scoped_record("cc", ""), // legacy unpinned
+    ];
+    let (legacy, shards) = super::partition_by_community(instances);
+    assert_eq!(legacy.len(), 1, "unpinned stays in the legacy store");
+    assert_eq!(legacy[0].pubkey, "cc");
+    assert_eq!(shards.len(), 2, "one shard per community");
+    let bookd = super::community_key_of("wss://bookd.communities.buzz.xyz").unwrap();
+    let av0 = super::community_key_of("wss://av0.communities.buzz.xyz").unwrap();
+    assert_eq!(shards[&bookd][0].pubkey, "aa");
+    assert_eq!(shards[&av0][0].pubkey, "bb");
+}
+
+#[test]
+fn community_shard_paths_ignores_non_shard_files() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in [
+        "managed-agents.json",
+        "managed-agents.json.backup-20260901",
+        "managed-agents.brightops.json", // hand-made Copilot-style copy
+        "managed-agents.json.invalid",
+    ] {
+        std::fs::write(dir.path().join(name), "[]").unwrap();
+    }
+    let key = super::community_key_of("wss://bookd.communities.buzz.xyz").unwrap();
+    std::fs::write(
+        dir.path().join(super::community_shard_file_name(&key)),
+        "[]",
+    )
+    .unwrap();
+
+    let shards = super::community_shard_paths(dir.path());
+    assert_eq!(shards.len(), 1, "only real shards are enumerated");
+    assert_eq!(
+        super::community_key_of_shard_path(&shards[0]),
+        Some(key),
+        "the shard's key round-trips through its filename"
+    );
+}
+
+/// Issue 1: every keyed record lands in exactly one file, so a reload never
+/// shows duplicates and repeated saves never multiply them.
+#[test]
+fn save_writes_each_record_to_exactly_one_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let roster = vec![
+        definition_record("writer"),
+        scoped_record("aa", "wss://bookd.communities.buzz.xyz"),
+        scoped_record("bb", "wss://av0.communities.buzz.xyz"),
+        scoped_record("cc", ""),
+    ];
+    save_in(dir.path(), roster).unwrap();
+    for _ in 0..3 {
+        let loaded = super::load_agent_store_in_dir(dir.path()).unwrap();
+        assert_eq!(pubkeys(&loaded), ["aa", "bb", "cc"]);
+        save_in(dir.path(), loaded).unwrap();
+    }
+
+    let mut occurrences: HashMap<String, usize> = HashMap::new();
+    for (_, contents) in store_files(dir.path()) {
+        let records: Vec<ManagedAgentRecord> = serde_json::from_str(&contents).unwrap();
+        for record in records.into_iter().filter(|r| !r.pubkey.is_empty()) {
+            *occurrences.entry(record.pubkey).or_default() += 1;
+        }
+    }
+    assert_eq!(occurrences.len(), 3);
+    assert!(
+        occurrences.values().all(|&count| count == 1),
+        "{occurrences:?}"
+    );
+
+    let legacy: Vec<ManagedAgentRecord> = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("managed-agents.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        pubkeys(&legacy),
+        ["cc"],
+        "legacy holds only unpinned instances"
+    );
+    assert!(legacy.iter().any(|r| r.slug.as_deref() == Some("writer")));
+}
+
+/// Stores written by the earlier revision of this change carried each scoped
+/// record in BOTH files. Load collapses them (keeping the copy in the
+/// record's own shard) and the next save rewrites them once.
+#[test]
+fn load_collapses_duplicates_left_by_earlier_saves() {
+    let dir = tempfile::tempdir().unwrap();
+    let relay = "wss://bookd.communities.buzz.xyz";
+    let mut stale = scoped_record("aa", relay);
+    stale.name = "stale-legacy-copy".to_string();
+    let fresh = scoped_record("aa", relay);
+    std::fs::write(
+        dir.path().join("managed-agents.json"),
+        serde_json::to_vec(&vec![stale]).unwrap(),
+    )
+    .unwrap();
+    let key = super::community_key_of(relay).unwrap();
+    std::fs::write(
+        dir.path().join(super::community_shard_file_name(&key)),
+        serde_json::to_vec(&vec![fresh]).unwrap(),
+    )
+    .unwrap();
+
+    let loaded = super::load_agent_store_in_dir(dir.path()).unwrap();
+    assert_eq!(pubkeys(&loaded), ["aa"]);
+    assert_eq!(loaded[0].name, "agent-aa", "the shard (home) copy wins");
+
+    save_in(dir.path(), loaded).unwrap();
+    let legacy = std::fs::read_to_string(dir.path().join("managed-agents.json")).unwrap();
+    assert!(!legacy.contains("\"aa\""), "legacy copy removed: {legacy}");
+}
+
+/// Issue 2: deleting a community's last agent clears its shard, so the agent
+/// does not come back on the next load.
+#[test]
+fn deleting_last_agent_in_a_community_clears_its_shard() {
+    let dir = tempfile::tempdir().unwrap();
+    save_in(
+        dir.path(),
+        vec![
+            scoped_record("aa", "wss://bookd.communities.buzz.xyz"),
+            scoped_record("bb", "wss://av0.communities.buzz.xyz"),
+        ],
+    )
+    .unwrap();
+
+    // Delete "aa" — the only agent in bookd.
+    let mut roster = super::load_agent_store_in_dir(dir.path()).unwrap();
+    roster.retain(|record| record.pubkey != "aa");
+    save_in(dir.path(), roster).unwrap();
+
+    let reloaded = super::load_agent_store_in_dir(dir.path()).unwrap();
+    assert_eq!(pubkeys(&reloaded), ["bb"], "deleted agent stays deleted");
+    let key = super::community_key_of("wss://bookd.communities.buzz.xyz").unwrap();
+    let shard: Vec<ManagedAgentRecord> = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join(super::community_shard_file_name(&key))).unwrap(),
+    )
+    .unwrap();
+    assert!(shard.is_empty(), "emptied shard is rewritten as []");
+
+    // Deleting the last agent anywhere clears everything.
+    save_in(dir.path(), Vec::new()).unwrap();
+    assert!(pubkeys(&super::load_agent_store_in_dir(dir.path()).unwrap()).is_empty());
+}
+
+/// Issue 3: two relays on one host with different ports get separate files
+/// and separate visibility.
+#[test]
+fn communities_on_one_host_with_different_ports_stay_separate() {
+    let dir = tempfile::tempdir().unwrap();
+    save_in(
+        dir.path(),
+        vec![
+            scoped_record("aa", "ws://localhost:3000"),
+            scoped_record("bb", "ws://localhost:3030"),
+            scoped_record("cc", ""),
+        ],
+    )
+    .unwrap();
+    let shard_count = super::community_shard_paths(dir.path()).len();
+    assert_eq!(shard_count, 2, "one shard per port");
+
+    let all = super::load_agent_store_in_dir(dir.path()).unwrap();
+    let mut on_3000 = all.clone();
+    super::retain_visible_in_community(
+        &mut on_3000,
+        &super::community_key_of("ws://127.0.0.1:3000/").unwrap(),
+    );
+    assert_eq!(pubkeys(&on_3000), ["aa", "cc"], "unpinned stays visible");
+    let mut on_3030 = all;
+    super::retain_visible_in_community(
+        &mut on_3030,
+        &super::community_key_of("ws://localhost:3030").unwrap(),
+    );
+    assert_eq!(pubkeys(&on_3030), ["bb", "cc"]);
+}
+
+/// Issue 4: a failure part-way through a save restores every file it had
+/// already written, so the store is never left half-updated.
+#[cfg(unix)]
+#[test]
+fn failed_save_restores_files_already_written() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let bookd = "wss://bookd.communities.buzz.xyz";
+    save_in(dir.path(), vec![scoped_record("aa", bookd)]).unwrap();
+
+    // Point the legacy store at a file inside a read-only directory (writes
+    // follow symlinks): it can still be snapshotted, but its atomic write
+    // fails. Shards are written before the legacy store, so the failure comes
+    // AFTER the bookd shard (and a brand-new av0 shard) were already written.
+    let locked = dir.path().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    let legacy = dir.path().join("managed-agents.json");
+    std::fs::rename(&legacy, locked.join("managed-agents.json")).unwrap();
+    std::os::unix::fs::symlink(locked.join("managed-agents.json"), &legacy).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::write(locked.join("probe"), b"x").is_ok() {
+        // Running as root: permissions are not enforced, nothing to test.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+    let before = store_files(dir.path());
+
+    let mut renamed = scoped_record("aa", bookd);
+    renamed.name = "renamed".to_string();
+    let result = save_in(
+        dir.path(),
+        vec![
+            renamed,
+            scoped_record("bb", "wss://av0.communities.buzz.xyz"),
+            scoped_record("cc", ""),
+        ],
+    );
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let error = result.unwrap_err();
+    assert!(!error.contains("could not be restored"), "{error}");
+    assert_eq!(
+        store_files(dir.path()),
+        before,
+        "bookd shard rolled back, new av0 shard removed, legacy untouched"
+    );
+    let loaded = super::load_agent_store_in_dir(dir.path()).unwrap();
+    assert_eq!(pubkeys(&loaded), ["aa"]);
+    assert_eq!(loaded[0].name, "agent-aa");
+}
+
+/// Issue 5: keys that moved to the keyring are never written to ANY file —
+/// legacy or shard.
+#[test]
+fn migrated_keys_never_reach_any_store_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FakeKeyStore::reachable();
+    let mut scoped = scoped_record("aa", "wss://bookd.communities.buzz.xyz");
+    scoped.private_key_nsec = "nsec1scopedsecret".to_string();
+    let mut unpinned = scoped_record("cc", "");
+    unpinned.private_key_nsec = "nsec1unpinnedsecret".to_string();
+
+    super::write_agent_store_in_dir(dir.path(), Vec::new(), vec![scoped, unpinned], |records| {
+        persist_agent_keys_with(&store, records)
+    })
+    .unwrap();
+
+    for (name, contents) in store_files(dir.path()) {
+        assert!(
+            !contents.contains("nsec1"),
+            "{name} leaked a key: {contents}"
+        );
+    }
+    assert_eq!(
+        store
+            .stored
+            .borrow()
+            .get(&agent_keyring_name("aa"))
+            .map(String::as_str),
+        Some("nsec1scopedsecret"),
+        "the scoped key went to the keyring instead"
+    );
+}
+
+/// Keyringless fallback (unchanged behaviour): a key the keyring cannot take
+/// stays inline — in exactly one owner-only file, never duplicated.
+#[test]
+fn unreachable_keyring_keeps_key_inline_in_one_restricted_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FakeKeyStore::unreachable();
+    let mut scoped = scoped_record("aa", "wss://bookd.communities.buzz.xyz");
+    scoped.private_key_nsec = "nsec1fallback".to_string();
+    super::write_agent_store_in_dir(dir.path(), Vec::new(), vec![scoped], |records| {
+        persist_agent_keys_with(&store, records)
+    })
+    .unwrap();
+
+    let holders: Vec<String> = store_files(dir.path())
+        .into_iter()
+        .filter(|(_, contents)| contents.contains("nsec1fallback"))
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(holders.len(), 1, "{holders:?}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir.path().join(&holders[0]))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+}
