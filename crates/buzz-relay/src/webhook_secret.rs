@@ -19,6 +19,11 @@
 //! a definition that does *not* yet contain `_webhook_secret`, so every
 //! subsequent comparison fails.
 
+use hmac::{Hmac, KeyInit, Mac};
+use sha2::Sha256;
+
+type HmacSha256 = Hmac<Sha256>;
+
 /// Generate a new random webhook secret.
 ///
 /// The secret is a UUID v4 rendered as a hyphenated string, which gives 122
@@ -89,6 +94,31 @@ pub fn verify_secret(provided: &str, stored: &str) -> bool {
     result == 0
 }
 
+/// Verify an HMAC-SHA256 signature over the raw request `body`, keyed by the
+/// stored webhook `secret`.
+///
+/// `provided` is the signature header value. When `prefix` is set (e.g.
+/// `sha256=`), the header must start with it. The remainder is hex-decoded
+/// and compared in constant time; a missing prefix, bad hex, or mismatch all
+/// return `false`.
+pub fn verify_hmac_sha256(body: &[u8], provided: &str, prefix: Option<&str>, secret: &str) -> bool {
+    let signature_hex = match prefix {
+        Some(prefix) => match provided.strip_prefix(prefix) {
+            Some(rest) => rest,
+            None => return false,
+        },
+        None => provided,
+    };
+    let Ok(signature) = hex::decode(signature_hex) else {
+        return false;
+    };
+    let Ok(mut mac) = HmacSha256::new_from_slice(secret.as_bytes()) else {
+        return false;
+    };
+    mac.update(body);
+    mac.verify_slice(&signature).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,5 +187,93 @@ mod tests {
     #[test]
     fn verify_secret_empty_strings() {
         assert!(verify_secret("", ""));
+    }
+
+    fn hmac_hex(secret: &str, body: &[u8]) -> String {
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    #[test]
+    fn verify_hmac_sha256_accepts_valid_signature() {
+        let body = br#"{"event_id":"e1","event_type":"comment.created","plan_id":"p1"}"#;
+        let signature = format!("sha256={}", hmac_hex("wake-secret", body));
+        assert!(verify_hmac_sha256(
+            body,
+            &signature,
+            Some("sha256="),
+            "wake-secret"
+        ));
+    }
+
+    #[test]
+    fn verify_hmac_sha256_accepts_unprefixed_signature_without_prefix() {
+        let body = b"{}";
+        assert!(verify_hmac_sha256(
+            body,
+            &hmac_hex("wake-secret", body),
+            None,
+            "wake-secret"
+        ));
+    }
+
+    #[test]
+    fn verify_hmac_sha256_accepts_uppercase_hex() {
+        let body = b"{}";
+        let signature = hmac_hex("wake-secret", body).to_uppercase();
+        assert!(verify_hmac_sha256(body, &signature, None, "wake-secret"));
+    }
+
+    #[test]
+    fn verify_hmac_sha256_rejects_wrong_secret() {
+        let body = b"{}";
+        let signature = format!("sha256={}", hmac_hex("other-secret", body));
+        assert!(!verify_hmac_sha256(
+            body,
+            &signature,
+            Some("sha256="),
+            "wake-secret"
+        ));
+    }
+
+    #[test]
+    fn verify_hmac_sha256_rejects_tampered_body() {
+        let signature = format!("sha256={}", hmac_hex("wake-secret", br#"{"plan_id":"p1"}"#));
+        assert!(!verify_hmac_sha256(
+            br#"{"plan_id":"p2"}"#,
+            &signature,
+            Some("sha256="),
+            "wake-secret"
+        ));
+    }
+
+    #[test]
+    fn verify_hmac_sha256_rejects_missing_prefix() {
+        let body = b"{}";
+        assert!(!verify_hmac_sha256(
+            body,
+            &hmac_hex("wake-secret", body),
+            Some("sha256="),
+            "wake-secret"
+        ));
+    }
+
+    #[test]
+    fn verify_hmac_sha256_rejects_bad_hex() {
+        assert!(!verify_hmac_sha256(
+            b"{}",
+            "sha256=not-hex",
+            Some("sha256="),
+            "wake-secret"
+        ));
+    }
+
+    #[test]
+    fn verify_hmac_sha256_rejects_truncated_signature() {
+        let body = b"{}";
+        let full = hmac_hex("wake-secret", body);
+        assert!(!verify_hmac_sha256(body, &full[..32], None, "wake-secret"));
+        assert!(!verify_hmac_sha256(body, "", None, "wake-secret"));
     }
 }

@@ -67,7 +67,35 @@ pub enum TriggerDef {
         interval: Option<String>,
     },
     /// Fires when HTTP POST arrives at `/hooks/{id}`.
-    Webhook,
+    Webhook {
+        /// How the relay authenticates the caller. Defaults to `shared_secret`.
+        #[serde(default, skip_serializing_if = "WebhookVerify::is_shared_secret")]
+        verify: WebhookVerify,
+        /// Request header carrying the hex HMAC signature. Required for `hmac_sha256`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature_header: Option<String>,
+        /// Optional prefix (e.g. `sha256=`) stripped from the header before decoding.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature_prefix: Option<String>,
+    },
+}
+
+/// Caller authentication for a webhook trigger.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebhookVerify {
+    /// The caller sends the stored secret in `X-Webhook-Secret` (or `?secret=`).
+    #[default]
+    SharedSecret,
+    /// The caller signs the raw body with HMAC-SHA256 keyed by the stored secret,
+    /// for senders that generate their own secret and never send it.
+    HmacSha256,
+}
+
+impl WebhookVerify {
+    fn is_shared_secret(&self) -> bool {
+        *self == WebhookVerify::SharedSecret
+    }
 }
 
 /// A single step in a workflow definition.
@@ -238,6 +266,22 @@ impl WorkflowDef {
                         step.id
                     )));
                 }
+            }
+        }
+
+        if let TriggerDef::Webhook {
+            verify: WebhookVerify::HmacSha256,
+            signature_header,
+            ..
+        } = &self.trigger
+        {
+            if signature_header
+                .as_deref()
+                .is_none_or(|header| header.trim().is_empty())
+            {
+                return Err(WorkflowError::InvalidDefinition(
+                    "webhook trigger with verify: hmac_sha256 requires 'signature_header'".into(),
+                ));
             }
         }
 
@@ -997,5 +1041,64 @@ mod tests {
             trigger,
             TriggerDef::DiffPosted { filter: Some(_) }
         ));
+    }
+
+    #[test]
+    fn webhook_trigger_without_verify_defaults_to_shared_secret() {
+        let yaml = "name: Hook\ntrigger:\n  on: webhook\nsteps:\n  - id: s1\n    action: delay\n    duration: 1m\n";
+        let (def, json) = parse_yaml(yaml).expect("parse failed");
+        assert!(matches!(
+            def.trigger,
+            TriggerDef::Webhook {
+                verify: WebhookVerify::SharedSecret,
+                signature_header: None,
+                signature_prefix: None,
+            }
+        ));
+        // Existing shared-secret definitions must keep their canonical JSON.
+        let canonical: serde_json::Value = serde_json::from_str(&json).expect("canonical json");
+        assert_eq!(canonical["trigger"], serde_json::json!({"on": "webhook"}));
+    }
+
+    #[test]
+    fn webhook_trigger_parses_hmac_sha256_verification() {
+        let yaml = "name: Hook\ntrigger:\n  on: webhook\n  verify: hmac_sha256\n  signature_header: X-CoPlan-Signature\n  signature_prefix: 'sha256='\nsteps:\n  - id: s1\n    action: delay\n    duration: 1m\n";
+        let (def, json) = parse_yaml(yaml).expect("parse failed");
+        match &def.trigger {
+            TriggerDef::Webhook {
+                verify,
+                signature_header,
+                signature_prefix,
+            } => {
+                assert_eq!(*verify, WebhookVerify::HmacSha256);
+                assert_eq!(signature_header.as_deref(), Some("X-CoPlan-Signature"));
+                assert_eq!(signature_prefix.as_deref(), Some("sha256="));
+            }
+            other => panic!("unexpected trigger: {other:?}"),
+        }
+        let reparsed: WorkflowDef = serde_json::from_str(&json).expect("json round-trip");
+        assert!(matches!(
+            reparsed.trigger,
+            TriggerDef::Webhook {
+                verify: WebhookVerify::HmacSha256,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_hmac_sha256_without_signature_header() {
+        for header_line in ["", "  signature_header: '  '\n"] {
+            let yaml = format!(
+                "name: Hook\ntrigger:\n  on: webhook\n  verify: hmac_sha256\n{header_line}steps:\n  - id: s1\n    action: delay\n    duration: 1m\n"
+            );
+            match parse_yaml(&yaml).unwrap_err() {
+                WorkflowError::InvalidDefinition(msg) => assert!(
+                    msg.contains("signature_header"),
+                    "expected signature_header in: {msg}"
+                ),
+                other => panic!("expected InvalidDefinition, got: {other}"),
+            }
+        }
     }
 }

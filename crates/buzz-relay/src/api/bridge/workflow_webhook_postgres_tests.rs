@@ -75,6 +75,7 @@ struct WebhookWorkflowSeed<'a> {
     owner_role: &'a str,
     name: &'a str,
     secret: &'a str,
+    trigger: Value,
     steps: Value,
 }
 
@@ -109,7 +110,7 @@ async fn seed_webhook_workflow(pool: &PgPool, seed: WebhookWorkflowSeed<'_>) {
 
     let definition = json!({
         "name": seed.name,
-        "trigger": {"on": "webhook"},
+        "trigger": seed.trigger,
         "steps": seed.steps,
         "_webhook_secret": seed.secret
     });
@@ -136,27 +137,53 @@ async fn post_webhook(
     host: &str,
     secret: &str,
 ) -> (StatusCode, Value) {
+    post_webhook_with_headers(
+        state,
+        workflow_id,
+        host,
+        &[("x-webhook-secret", secret)],
+        Bytes::new(),
+    )
+    .await
+}
+
+async fn post_webhook_with_headers(
+    state: &Arc<AppState>,
+    workflow_id: Uuid,
+    host: &str,
+    extra_headers: &[(&'static str, &str)],
+    body: Bytes,
+) -> (StatusCode, Value) {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::HOST,
         HeaderValue::from_bytes(host.as_bytes()).expect("host header"),
     );
-    headers.insert(
-        "x-webhook-secret",
-        HeaderValue::from_bytes(secret.as_bytes()).expect("secret header"),
-    );
+    for (name, value) in extra_headers {
+        headers.insert(
+            *name,
+            HeaderValue::from_bytes(value.as_bytes()).expect("extra header"),
+        );
+    }
 
     match workflow_webhook(
         State(Arc::clone(state)),
         Path(workflow_id.to_string()),
         Query(WebhookQuery { secret: None }),
         headers,
-        Bytes::new(),
+        body,
     )
     .await
     {
         Ok((status, Json(body))) | Err((status, Json(body))) => (status, body),
     }
+}
+
+fn coplan_signature(secret: &str, body: &[u8]) -> String {
+    use hmac::{Hmac, KeyInit, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).expect("hmac key");
+    mac.update(body);
+    format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
 }
 
 async fn workflow_run_count(pool: &PgPool, community_id: Uuid, workflow_id: Uuid) -> i64 {
@@ -210,6 +237,7 @@ async fn webhook_admission_enforces_owner_ban_tenant_scope_and_lookup_failure() 
             owner_role: "owner",
             name: "owner-workflow-a",
             secret: &secret,
+            trigger: json!({"on": "webhook"}),
             steps: delay_step(),
         },
     )
@@ -224,6 +252,7 @@ async fn webhook_admission_enforces_owner_ban_tenant_scope_and_lookup_failure() 
             owner_role: "owner",
             name: "owner-workflow-b",
             secret: &secret,
+            trigger: json!({"on": "webhook"}),
             steps: delay_step(),
         },
     )
@@ -241,6 +270,7 @@ async fn webhook_admission_enforces_owner_ban_tenant_scope_and_lookup_failure() 
             owner_role: "member",
             name: "member-exfiltration-workflow",
             secret: &secret,
+            trigger: json!({"on": "webhook"}),
             steps: json!([{
                 "id": "send",
                 "action": "call_webhook",
@@ -356,4 +386,120 @@ async fn webhook_admission_enforces_owner_ban_tenant_scope_and_lookup_failure() 
         .execute(&admin_pool)
         .await
         .expect("drop restriction lookup failure schema");
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL and Redis"]
+async fn webhook_hmac_sha256_admits_only_correctly_signed_bodies() {
+    let pool = PgPool::connect(&database_url())
+        .await
+        .expect("connect to isolated PostgreSQL test database");
+    let db = buzz_db::Db::from_pool(pool.clone());
+
+    let community_id = Uuid::new_v4();
+    let host = format!("webhook-hmac-{}.test", Uuid::new_v4().simple());
+    let owner_pubkey = [0x44; 32];
+    let workflow_id = Uuid::new_v4();
+    let secret = format!("wake-secret-{}", Uuid::new_v4().simple());
+    seed_community(&pool, community_id, &host).await;
+    seed_webhook_workflow(
+        &pool,
+        WebhookWorkflowSeed {
+            community_id,
+            workflow_id,
+            channel_id: Uuid::new_v4(),
+            owner_pubkey: &owner_pubkey,
+            owner_role: "owner",
+            name: "coplan-wake",
+            secret: &secret,
+            trigger: json!({
+                "on": "webhook",
+                "verify": "hmac_sha256",
+                "signature_header": "X-CoPlan-Signature",
+                "signature_prefix": "sha256="
+            }),
+            steps: json!([{"id": "hold", "action": "delay", "duration": "1s"}]),
+        },
+    )
+    .await;
+    let (state, audit_shutdown) = app_state(db, &pool).await;
+
+    let body = br#"{"event_id":"e1","event_type":"comment.created","plan_id":"p1"}"#;
+    let valid = coplan_signature(&secret, body);
+    type DeniedCase<'a> = (&'a str, Vec<(&'static str, String)>, &'a [u8]);
+    let cases: [DeniedCase; 6] = [
+        (
+            "wrong secret",
+            vec![("x-coplan-signature", coplan_signature("other-secret", body))],
+            body,
+        ),
+        ("missing header", vec![], body),
+        (
+            "missing prefix",
+            vec![(
+                "x-coplan-signature",
+                valid.trim_start_matches("sha256=").to_owned(),
+            )],
+            body,
+        ),
+        (
+            "tampered body",
+            vec![("x-coplan-signature", valid.clone())],
+            br#"{"event_id":"e1","event_type":"comment.created","plan_id":"p2"}"#,
+        ),
+        (
+            "shared secret instead of signature",
+            vec![("x-webhook-secret", secret.clone())],
+            body,
+        ),
+        (
+            "signature in the shared-secret header",
+            vec![("x-webhook-secret", valid.clone())],
+            body,
+        ),
+    ];
+    for (label, case_headers, case_body) in cases {
+        let header_refs: Vec<(&'static str, &str)> = case_headers
+            .iter()
+            .map(|(name, value)| (*name, value.as_str()))
+            .collect();
+        let (status, response) = post_webhook_with_headers(
+            &state,
+            workflow_id,
+            &host,
+            &header_refs,
+            Bytes::copy_from_slice(case_body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{label} must be denied");
+        assert_eq!(response["error"], "workflow not found", "{label}");
+    }
+    assert_eq!(
+        workflow_run_count(&pool, community_id, workflow_id).await,
+        0,
+        "denied wakes must not enqueue a workflow run"
+    );
+
+    let (status, response) = post_webhook_with_headers(
+        &state,
+        workflow_id,
+        &host,
+        &[("x-coplan-signature", &valid)],
+        Bytes::from_static(body),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "a correctly signed body is admitted"
+    );
+    assert_eq!(response["workflow_id"], workflow_id.to_string());
+    assert_eq!(
+        workflow_run_count(&pool, community_id, workflow_id).await,
+        1
+    );
+
+    audit_shutdown
+        .drain(std::time::Duration::from_secs(1))
+        .await;
 }

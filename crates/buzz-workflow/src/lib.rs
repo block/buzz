@@ -38,7 +38,7 @@ pub mod schema;
 pub use action_sink::{ActionSink, ActionSinkError};
 pub use error::{PartialProgress, WorkflowError};
 pub use executor::ExecutionResult;
-pub use schema::{ActionDef, Step, TriggerDef, WorkflowDef};
+pub use schema::{ActionDef, Step, TriggerDef, WebhookVerify, WorkflowDef};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -981,7 +981,7 @@ async fn should_fire_workflow(
         TriggerDef::MessagePosted { filter }
         | TriggerDef::ReactionAdded { filter, .. }
         | TriggerDef::DiffPosted { filter } => filter.as_ref(),
-        TriggerDef::Schedule { .. } | TriggerDef::Webhook => None,
+        TriggerDef::Schedule { .. } | TriggerDef::Webhook { .. } => None,
     };
     if let Some(expr) = filter {
         match executor::evaluate_condition(expr, trigger_ctx, &HashMap::new()).await {
@@ -1123,7 +1123,7 @@ fn trigger_matches_event(trigger: &TriggerDef, kind_u32: u32) -> bool {
         TriggerDef::ReactionAdded { .. } => kind_u32 == KIND_REACTION,
         TriggerDef::DiffPosted { .. } => kind_u32 == KIND_STREAM_MESSAGE_DIFF,
         // Schedule and Webhook triggers are not fired by channel events.
-        TriggerDef::Schedule { .. } | TriggerDef::Webhook => false,
+        TriggerDef::Schedule { .. } | TriggerDef::Webhook { .. } => false,
     }
 }
 
@@ -1507,7 +1507,11 @@ steps:
 
     #[test]
     fn webhook_trigger_never_matches_events() {
-        let trigger = TriggerDef::Webhook;
+        let trigger = TriggerDef::Webhook {
+            verify: schema::WebhookVerify::SharedSecret,
+            signature_header: None,
+            signature_prefix: None,
+        };
         assert!(!trigger_matches_event(
             &trigger,
             buzz_core::kind::KIND_STREAM_MESSAGE
@@ -1602,7 +1606,11 @@ steps:
             cron: None,
             interval: Some("1h".to_owned()),
         };
-        let webhook_trigger = TriggerDef::Webhook;
+        let webhook_trigger = TriggerDef::Webhook {
+            verify: schema::WebhookVerify::SharedSecret,
+            signature_header: None,
+            signature_prefix: None,
+        };
 
         assert!(!trigger_matches_event(&msg_trigger, 0));
         assert!(!trigger_matches_event(&react_trigger, 0));

@@ -910,7 +910,8 @@ HTTP permits key substitution and issuer impersonation.
 
 ### Webhook Security
 
-- Workflow webhooks: constant-time XOR comparison of stored UUID secret (not HMAC — compares the secret directly, not a body MAC)
+- Workflow webhooks (default `verify: shared_secret`): constant-time XOR comparison of the stored secret sent in `X-Webhook-Secret` (not a body MAC)
+- Workflow webhooks with `verify: hmac_sha256`: the caller signs the raw body with HMAC-SHA256 keyed by the stored secret and sends the hex digest in the trigger's `signature_header` (optional `signature_prefix`, e.g. `sha256=`, is stripped first); constant-time MAC compare. Missing header, bad hex, or mismatch answer 404 like a bad secret. For senders that issue their own secret and never transmit it (e.g. CoPlan `wake_url`)
 - Outbound webhooks (CallWebhook): SSRF protection + redirects disabled + 1 MiB response cap
 
 ---

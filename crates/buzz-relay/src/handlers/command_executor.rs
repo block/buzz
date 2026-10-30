@@ -725,7 +725,7 @@ async fn handle_workflow_def(
 
     // Preserve the existing webhook secret across updates. A new secret is
     // returned only when the workflow first gains a webhook trigger.
-    let webhook_secret = if matches!(def.trigger, buzz_workflow::TriggerDef::Webhook) {
+    let webhook_secret = if matches!(def.trigger, buzz_workflow::TriggerDef::Webhook { .. }) {
         let existing_secret = existing_workflow
             .as_ref()
             .and_then(|workflow| webhook_secret::extract_secret(&workflow.definition));

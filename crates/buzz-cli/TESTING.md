@@ -373,6 +373,9 @@ buzz channels remove-member --channel "$CHANNEL_ID" \
 # workflows create
 # NOTE: trigger uses `on:` tag (serde internally tagged enum).
 # Valid triggers: message_posted, reaction_added, diff_posted, schedule, webhook
+# Webhook triggers accept optional `verify: hmac_sha256` with `signature_header`
+# (required) and `signature_prefix` (optional) to verify a body HMAC instead of
+# the `X-Webhook-Secret` header.
 # Steps use `action:` tag: send_message, send_dm, set_channel_topic, add_reaction, etc.
 WF=$(buzz workflows create --channel "$CHANNEL_ID" \
   --yaml 'name: test-wf

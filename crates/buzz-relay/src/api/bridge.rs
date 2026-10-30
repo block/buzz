@@ -2681,28 +2681,67 @@ pub async fn workflow_webhook(
         .await
         .map_err(|_| not_found("workflow not found"))?;
 
-    // Verify webhook secret. Prefer header (not logged by proxies); fall back to query param.
     // Until the caller proves the secret, every failure answers like a missing
     // workflow, so the response never reveals that the workflow exists, its
-    // trigger type, or whether a secret was configured.
+    // trigger type, or whether a secret was configured. A definition that
+    // fails to parse falls back to shared-secret verification so a corrupt row
+    // still answers 404 to an unauthenticated caller.
     let stored_secret = crate::webhook_secret::extract_secret(&workflow.definition);
-    let provided_secret = headers
-        .get("x-webhook-secret")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .or_else(|| query.secret.clone())
-        .unwrap_or_default();
-    if !stored_secret
-        .is_some_and(|secret| crate::webhook_secret::verify_secret(&provided_secret, &secret))
+    let parsed_def =
+        serde_json::from_value::<buzz_workflow::WorkflowDef>(workflow.definition.clone());
+    if let Ok(buzz_workflow::WorkflowDef {
+        trigger:
+            buzz_workflow::TriggerDef::Webhook {
+                verify: buzz_workflow::WebhookVerify::HmacSha256,
+                signature_header,
+                signature_prefix,
+            },
+        ..
+    }) = &parsed_def
     {
-        tracing::warn!("webhook: missing or invalid secret for workflow {id}");
-        return Err(not_found("workflow not found"));
+        let provided_signature = signature_header
+            .as_deref()
+            .and_then(|name| headers.get(name))
+            .and_then(|v| v.to_str().ok());
+        let result = match (provided_signature, stored_secret.as_deref()) {
+            (None, _) => "missing_header",
+            (Some(signature), Some(secret))
+                if crate::webhook_secret::verify_hmac_sha256(
+                    &body,
+                    signature,
+                    signature_prefix.as_deref(),
+                    secret,
+                ) =>
+            {
+                "ok"
+            }
+            (Some(_), _) => "bad_signature",
+        };
+        if result != "ok" {
+            tracing::warn!(workflow_id = %id, verify = "hmac_sha256", result, "webhook: rejected");
+            return Err(not_found("workflow not found"));
+        }
+        tracing::info!(workflow_id = %id, verify = "hmac_sha256", result, "webhook: verified");
+    } else {
+        // Prefer header (not logged by proxies); fall back to query param.
+        let provided_secret = headers
+            .get("x-webhook-secret")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .or_else(|| query.secret.clone())
+            .unwrap_or_default();
+        if !stored_secret
+            .is_some_and(|secret| crate::webhook_secret::verify_secret(&provided_secret, &secret))
+        {
+            tracing::warn!("webhook: missing or invalid secret for workflow {id}");
+            return Err(not_found("workflow not found"));
+        }
     }
 
-    let def: buzz_workflow::WorkflowDef = serde_json::from_value(workflow.definition.clone())
+    let def = parsed_def
         .map_err(|e| super::internal_error(&format!("corrupt workflow definition: {e}")))?;
 
-    if !matches!(def.trigger, buzz_workflow::TriggerDef::Webhook) {
+    if !matches!(def.trigger, buzz_workflow::TriggerDef::Webhook { .. }) {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "workflow does not have a webhook trigger",
