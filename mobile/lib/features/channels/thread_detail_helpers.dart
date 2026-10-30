@@ -152,18 +152,17 @@ class _ThreadTailIntent {
   }
 }
 
-/// Desktop's conversation activity for one thread, with optional size
-/// animation.
+/// Desktop's conversation activity above the thread composer, animated
+/// in size unless motion is reduced.
 class _ThreadTypingIndicator extends StatelessWidget {
   final ActivityScope scope;
-  final bool animated;
 
-  const _ThreadTypingIndicator({required this.scope, this.animated = true});
+  const _ThreadTypingIndicator({required this.scope});
 
   @override
   Widget build(BuildContext context) {
     final child = ConversationActivity(scope: scope);
-    if (!animated || MediaQuery.disableAnimationsOf(context)) return child;
+    if (MediaQuery.disableAnimationsOf(context)) return child;
     return AnimatedSize(
       duration: const Duration(milliseconds: 180),
       curve: Curves.easeOutCubic,

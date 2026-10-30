@@ -17,7 +17,7 @@ Future<void> showWorkingNowSheet(
   BuildContext context, {
   required ActivityScope scope,
   List<TimelineMessage> messages = const [],
-  void Function(TimelineMessage root)? onOpenThread,
+  void Function(String rootId)? onOpenThread,
 }) => showBuzzModalBottomSheet<void>(
   context: context,
   title: 'Working now',
@@ -27,6 +27,18 @@ Future<void> showWorkingNowSheet(
     messages: messages,
     onOpenThread: onOpenThread,
   ),
+);
+
+/// Opens what [pubkey] has been doing in [channelId].
+Future<void> showAgentActivity(
+  BuildContext context, {
+  required String channelId,
+  required String pubkey,
+}) => showBuzzModalBottomSheet<void>(
+  context: context,
+  isScrollControlled: true,
+  showDragHandle: true,
+  builder: (_) => AgentActivitySheet(channelId: channelId, agentPubkey: pubkey),
 );
 
 /// The user's agents working in [scope], where each works, and where each
@@ -40,8 +52,13 @@ class WorkingNowSheet extends HookConsumerWidget {
   });
 
   final ActivityScope scope;
+
+  /// Loaded messages, to name the threads agents work in.
   final List<TimelineMessage> messages;
-  final void Function(TimelineMessage root)? onOpenThread;
+
+  /// Opens a thread by its root, loaded or not. Null where threads do not
+  /// open, as in Me.
+  final void Function(String rootId)? onOpenThread;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -66,8 +83,10 @@ class WorkingNowSheet extends HookConsumerWidget {
     );
     final navigator = Navigator.of(context);
 
-    // Leave the sheet before the next page or sheet opens.
+    // Leave the sheet before the next page or sheet opens, once: a second
+    // tap in the same frame must not pop the page under it.
     void then(VoidCallback action) {
+      if (!(ModalRoute.of(context)?.isCurrent ?? false)) return;
       navigator.pop();
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (navigator.mounted) action();
@@ -75,12 +94,10 @@ class WorkingNowSheet extends HookConsumerWidget {
     }
 
     void viewActivity(String pubkey) => then(
-      () => showBuzzModalBottomSheet<void>(
-        context: navigator.context,
-        isScrollControlled: true,
-        showDragHandle: true,
-        builder: (_) =>
-            AgentActivitySheet(channelId: scope.channelId, agentPubkey: pubkey),
+      () => showAgentActivity(
+        navigator.context,
+        channelId: scope.channelId,
+        pubkey: pubkey,
       ),
     );
 
@@ -103,79 +120,67 @@ class WorkingNowSheet extends HookConsumerWidget {
 
     return SafeArea(
       top: false,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          for (final MapEntry(key: pubkey, value: roots) in agents.entries)
-            Builder(
-              builder: (context) {
-                final name = labels[pubkey] ?? pubkey.substring(0, 10);
-                final known = roots.whereType<String>().toList();
-                final root =
-                    scope.threadRootId ??
-                    (known.length == 1 ? known.single : null);
-                // Opening the conversation already shown would do nothing,
-                // so, as on desktop, the row opens the agent's activity.
-                final here = root == scope.threadRootId;
-                final rootMessage = root == null ? null : message(root);
-                final open = here
-                    ? () => viewActivity(pubkey)
-                    : rootMessage != null && onOpenThread != null
-                    ? () => then(() => onOpenThread!(rootMessage))
-                    : null;
-                final where = place(roots);
-                return Row(
-                  key: ValueKey('working-now-$pubkey'),
-                  children: [
-                    Expanded(
-                      child: Semantics(
-                        button: open != null,
-                        label: here
-                            ? 'View $name activity'
-                            : 'Open thread for $name',
-                        onTap: open,
-                        excludeSemantics: true,
-                        child: InkWell(
+      // The sheet's height is capped, so a long list scrolls.
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final MapEntry(key: pubkey, value: roots) in agents.entries)
+              Builder(
+                builder: (context) {
+                  final name = labels[pubkey] ?? pubkey.substring(0, 10);
+                  final known = roots.whereType<String>().toList();
+                  final root =
+                      scope.threadRootId ??
+                      (known.length == 1 ? known.single : null);
+                  // Opening the conversation already shown would do nothing,
+                  // so, as on desktop, the row opens the agent's activity.
+                  final opens = onOpenThread;
+                  final here = root == scope.threadRootId || opens == null;
+                  final open = here
+                      ? () => viewActivity(pubkey)
+                      : () => then(() => opens(root!));
+                  final where = place(roots);
+                  return Row(
+                    key: ValueKey('working-now-$pubkey'),
+                    children: [
+                      Expanded(
+                        child: Semantics(
+                          button: true,
+                          label: here
+                              ? 'View $name activity'
+                              : 'Open thread for $name',
                           onTap: open,
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: Grid.gutter,
-                              vertical: Grid.xxs,
-                            ),
-                            child: Row(
-                              children: [
-                                SmallAvatar(
-                                  pubkey: pubkey,
-                                  userCache: userCache,
-                                  size: Grid.lg,
-                                  agent: true,
-                                ),
-                                const SizedBox(width: Grid.twelve),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        name,
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: context.textTheme.titleSmall,
-                                      ),
-                                      Text(
-                                        'Working',
-                                        style: context.textTheme.bodySmall
-                                            ?.copyWith(
-                                              color: context
-                                                  .colors
-                                                  .onSurfaceVariant,
-                                            ),
-                                      ),
-                                      if (where != null)
+                          excludeSemantics: true,
+                          child: InkWell(
+                            onTap: open,
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: Grid.gutter,
+                                vertical: Grid.xxs,
+                              ),
+                              child: Row(
+                                children: [
+                                  SmallAvatar(
+                                    pubkey: pubkey,
+                                    userCache: userCache,
+                                    size: Grid.lg,
+                                    agent: true,
+                                  ),
+                                  const SizedBox(width: Grid.twelve),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
                                         Text(
-                                          where,
+                                          name,
                                           maxLines: 1,
                                           overflow: TextOverflow.ellipsis,
+                                          style: context.textTheme.titleSmall,
+                                        ),
+                                        Text(
+                                          'Working',
                                           style: context.textTheme.bodySmall
                                               ?.copyWith(
                                                 color: context
@@ -183,29 +188,42 @@ class WorkingNowSheet extends HookConsumerWidget {
                                                     .onSurfaceVariant,
                                               ),
                                         ),
-                                    ],
+                                        if (where != null)
+                                          Text(
+                                            where,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: context.textTheme.bodySmall
+                                                ?.copyWith(
+                                                  color: context
+                                                      .colors
+                                                      .onSurfaceVariant,
+                                                ),
+                                          ),
+                                      ],
+                                    ),
                                   ),
-                                ),
-                              ],
+                                ],
+                              ),
                             ),
                           ),
                         ),
                       ),
-                    ),
-                    if (!here)
-                      Padding(
-                        padding: const EdgeInsets.only(right: Grid.twelve),
-                        child: IconButton(
-                          icon: const Icon(BuzzIcons.activity, size: 18),
-                          tooltip: 'View $name activity',
-                          onPressed: () => viewActivity(pubkey),
+                      if (!here)
+                        Padding(
+                          padding: const EdgeInsets.only(right: Grid.twelve),
+                          child: IconButton(
+                            icon: const Icon(BuzzIcons.activity, size: 18),
+                            tooltip: 'View $name activity',
+                            onPressed: () => viewActivity(pubkey),
+                          ),
                         ),
-                      ),
-                  ],
-                );
-              },
-            ),
-        ],
+                    ],
+                  );
+                },
+              ),
+          ],
+        ),
       ),
     );
   }

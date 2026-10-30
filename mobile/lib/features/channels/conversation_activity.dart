@@ -22,9 +22,11 @@ class ConversationActivity extends ConsumerWidget {
 
   final ActivityScope scope;
 
-  /// Loaded messages, to name and open the threads agents work in.
+  /// Loaded messages, to name the threads agents work in.
   final List<TimelineMessage> messages;
-  final void Function(TimelineMessage root)? onOpenThread;
+
+  /// Opens a thread by its root. Null where threads do not open.
+  final void Function(String rootId)? onOpenThread;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -72,12 +74,20 @@ class ConversationActivity extends ConsumerWidget {
               label: agents.length == 1
                   ? 'Activity: ${name(agents.keys.single)} working'
                   : 'Activity: ${agents.length} agents working',
-              onTap: () => showWorkingNowSheet(
-                context,
-                scope: scope,
-                messages: messages,
-                onOpenThread: onOpenThread,
-              ),
+              // As in desktop's Solo chat, Me opens a lone agent's activity
+              // directly.
+              onTap: scope.allThreads && agents.length == 1
+                  ? () => showAgentActivity(
+                      context,
+                      channelId: scope.channelId,
+                      pubkey: agents.keys.single,
+                    )
+                  : () => showWorkingNowSheet(
+                      context,
+                      scope: scope,
+                      messages: messages,
+                      onOpenThread: onOpenThread,
+                    ),
             ),
         ],
       ),

@@ -37,7 +37,8 @@ const _idle = (agents: <String, List<String?>>{}, typers: <String>[]);
 /// Desktop's composer activity for [scope], from live typing only. As on
 /// desktop, the user's agents are their inventory, and a channel view counts
 /// those agents' thread work while a thread view does not. Null while the
-/// inventory first loads, so an agent never shows as a typing person.
+/// inventory first loads, so an agent does not show as a typing person
+/// before it is known.
 ConversationActivityState? watchConversationActivity(
   WidgetRef ref,
   ActivityScope scope,

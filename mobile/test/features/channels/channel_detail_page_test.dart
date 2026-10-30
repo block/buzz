@@ -59,7 +59,9 @@ import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/mobile_huddle_controller.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
 import 'package:buzz/features/channels/message_mention_pill.dart';
+import 'package:buzz/features/channels/agent_activity/agent_activity_sheet.dart';
 import 'package:buzz/features/channels/thread_detail_page.dart';
+import 'package:buzz/features/channels/working_now_sheet.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
@@ -11275,7 +11277,15 @@ void main() {
       expect(find.bySemanticsLabel('View Morty activity'), findsOneWidget);
       expect(find.bySemanticsLabel('Open thread for Morty'), findsNothing);
       expect(find.textContaining('Thread ·'), findsNothing);
-      Navigator.of(tester.element(find.text('Working now'))).pop();
+      await tester.tap(find.bySemanticsLabel('View Morty activity'));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<AgentActivitySheet>(find.byType(AgentActivitySheet))
+            .agentPubkey,
+        'morty',
+      );
+      Navigator.of(tester.element(find.byType(AgentActivitySheet))).pop();
       await tester.pumpAndSettle();
       await tester.pageBack();
       await tester.pumpAndSettle();
@@ -11402,6 +11412,172 @@ void main() {
         findsOneWidget,
       );
       expect(activityStatus('Summer is working'), findsOneWidget);
+    });
+
+    testWidgets('many agents in many places: every row acts', (tester) async {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      const unloaded = 'feedfacecafebeef';
+      final agents = [for (var i = 1; i <= 6; i++) 'a$i'];
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: threadIdRoot,
+              pubkey: 'self',
+              content: 'check   the\nbuild',
+              createdAt: now - 3,
+            ),
+          ],
+          typing: [
+            for (final pubkey in agents)
+              if (pubkey != 'a2' && pubkey != 'a3')
+                TypingEntry(
+                  pubkey: pubkey,
+                  threadHeadId: threadIdRoot,
+                  expiresAtMs: (now + 60) * 1000,
+                ),
+            // A thread whose root is not in the timeline.
+            TypingEntry(
+              pubkey: 'a2',
+              threadHeadId: unloaded,
+              expiresAtMs: (now + 60) * 1000,
+            ),
+            // Three places.
+            for (final root in [null, threadIdRoot, unloaded])
+              TypingEntry(
+                pubkey: 'a3',
+                threadHeadId: root,
+                expiresAtMs: (now + 60) * 1000,
+              ),
+          ],
+          disableAnimations: true,
+          inventoryAgents: agents.toSet(),
+          users: {
+            for (final pubkey in agents)
+              pubkey: UserProfile(
+                pubkey: pubkey,
+                displayName: 'Agent ${pubkey.substring(1)}',
+              ),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      // As on desktop, four avatars show, then a count.
+      final agentsButton = find.byKey(
+        const ValueKey('conversation-activity-agents'),
+      );
+      expect(
+        find.descendant(of: agentsButton, matching: find.byType(SmallAvatar)),
+        findsNWidgets(4),
+      );
+      expect(
+        find.descendant(of: agentsButton, matching: find.text('+2')),
+        findsOneWidget,
+      );
+      expect(
+        find.bySemanticsLabel('Activity: 6 agents working'),
+        findsOneWidget,
+      );
+
+      Future<void> openList() async {
+        await tester.tap(agentsButton);
+        await tester.pumpAndSettle();
+        expect(find.text('Working now'), findsOneWidget);
+      }
+
+      await openList();
+      expect(
+        find.text('Channel conversation / Thread · check the build / +1 more'),
+        findsOneWidget,
+      );
+      expect(find.text('Thread · feedface'), findsOneWidget);
+      // Several places open the agent's activity, as on desktop.
+      expect(find.bySemanticsLabel('View Agent 3 activity'), findsOneWidget);
+      expect(find.byTooltip('View Agent 3 activity'), findsNothing);
+
+      // The capped sheet scrolls to its last agent, whose row opens its
+      // thread.
+      final last = find.bySemanticsLabel('Open thread for Agent 6');
+      await tester.scrollUntilVisible(
+        last,
+        48,
+        scrollable: find.descendant(
+          of: find.byType(WorkingNowSheet),
+          matching: find.byType(Scrollable),
+        ),
+      );
+      await tester.tap(last);
+      await tester.pumpAndSettle();
+      expect(find.text('Working now'), findsNothing);
+      expect(
+        tester
+            .widget<ThreadDetailPage>(find.byType(ThreadDetailPage))
+            .threadHead
+            .id,
+        threadIdRoot,
+      );
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+
+      // A thread outside the timeline opens by its root, as a desktop link.
+      await openList();
+      await tester.tap(find.bySemanticsLabel('Open thread for Agent 2'));
+      await tester.pumpAndSettle();
+      expect(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is ChannelDetailPage &&
+              widget.initialThreadRootId == unloaded,
+        ),
+        findsOneWidget,
+      );
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+
+      // Each row's activity button opens that agent's activity.
+      await openList();
+      await tester.tap(find.byTooltip('View Agent 1 activity'));
+      await tester.pumpAndSettle();
+      expect(find.text('Working now'), findsNothing);
+      expect(
+        tester
+            .widget<AgentActivitySheet>(find.byType(AgentActivitySheet))
+            .agentPubkey,
+        'a1',
+      );
+    });
+
+    testWidgets("Me opens a lone agent's activity directly", (tester) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          personalChat: true,
+          messages: [_textMsg(id: 'prompt', pubkey: 'self', content: 'Hi')],
+          typing: [
+            TypingEntry(
+              pubkey: 'morty',
+              threadHeadId: 'prompt',
+              expiresAtMs: DateTime.now().millisecondsSinceEpoch + 60000,
+            ),
+          ],
+          disableAnimations: true,
+          inventoryAgents: const {'morty'},
+          users: const {
+            'morty': UserProfile(pubkey: 'morty', displayName: 'Morty'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('conversation-activity-agents')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Working now'), findsNothing);
+      expect(
+        tester
+            .widget<AgentActivitySheet>(find.byType(AgentActivitySheet))
+            .agentPubkey,
+        'morty',
+      );
     });
 
     for (final (count, text) in [
@@ -15425,7 +15601,11 @@ void main() {
               expect(tester.getTopLeft(head).dy, closeTo(initialHeadTop, 0.5));
             }
             if (!layout.isMember || layout.isArchived) {
-              expect(tester.getSize(list).height, lessThan(initialHeight));
+              // As on desktop, a thread without a composer has no activity.
+              expect(
+                find.byKey(const ValueKey('conversation-activity')),
+                findsNothing,
+              );
             }
             typingNotifier.setEntries(const []);
             await tester.pumpAndSettle();

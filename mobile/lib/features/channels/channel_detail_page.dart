@@ -894,9 +894,8 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                           selfPubkey: currentPubkey,
                           allThreads: personalChat,
                         ),
+                        channel: resolvedChannel,
                         messages: timelineMessages,
-                        isMember: resolvedChannel.isMember,
-                        isArchived: resolvedChannel.isArchived,
                       ),
                       ?assistant.pendingNotice,
                       ComposeBar(

@@ -983,8 +983,6 @@ class ThreadDetailPage extends HookConsumerWidget {
                   childrenByParent: childrenByParent,
                 ),
               ),
-              if (!isMember || isArchived)
-                _ThreadTypingIndicator(scope: activityScope, animated: false),
             ],
           ),
           if (isMember && !isArchived)
