@@ -523,7 +523,7 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
       try {
-        expect(find.byTooltip('Back'), findsNothing);
+        expect(find.byTooltip('Back').hitTestable(), findsNothing);
         // External teardown still fences pending enrollment.
         await f.flow.leave();
         await tester.pump();

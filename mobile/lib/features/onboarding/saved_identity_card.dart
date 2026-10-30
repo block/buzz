@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/hosted/device_identity_source.dart';
+import '../../shared/hosted/saved_identity_profile.dart';
 import '../../shared/hosted/hosted_environment.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/theme/theme.dart';
@@ -22,9 +23,12 @@ class SavedIdentityCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final profile = ref.watch(
+    final cachedProfile = ref.watch(
       userCacheProvider.select((profiles) => profiles[identity.pubkey]),
     );
+    final profile =
+        cachedProfile ??
+        ref.watch(savedIdentityProfileProvider(identity.pubkey)).asData?.value;
     final source = identity.label
         .split(', ')
         .map(
@@ -34,11 +38,11 @@ class SavedIdentityCard extends ConsumerWidget {
     final profileName = profile?.displayName;
     final name = profileName != null && profileName.trim().isNotEmpty
         ? profileName
-        : source;
+        : 'Saved identity';
     return Semantics(
       button: true,
       enabled: onSelect != null,
-      label: 'Use $name identity, ${shortPubkey(identity.pubkey)}',
+      label: 'Use $name, ${shortPubkey(identity.pubkey)}',
       onTap: onSelect,
       excludeSemantics: true,
       child: OutlinedButton(
@@ -69,7 +73,7 @@ class SavedIdentityCard extends ConsumerWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(name, style: context.textTheme.titleMedium),
-                  if (name != source)
+                  if (source != 'Saved identity')
                     Text('Used in $source', style: context.textTheme.bodySmall),
                   const SizedBox(height: Grid.half),
                   Text(

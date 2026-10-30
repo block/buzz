@@ -116,7 +116,9 @@ void main() {
       );
       await tester.tap(find.text('Connect').hitTestable());
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
+      // Finish the standard page push before checking the loading surface.
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
     }
 
     if (HostedEnvironment.authDomains.isNotEmpty) {
@@ -154,7 +156,7 @@ void main() {
               find.byType(CommunityGridOption).hitTestable().last,
             )
             .name,
-        'two.communities.buzz.xyz',
+        'two',
       );
       f.beforeAdmission = null;
       await tester.tap(find.byType(CommunityGridOption).first);

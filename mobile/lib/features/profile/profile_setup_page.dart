@@ -28,6 +28,7 @@ class ProfileSetupPage extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    useListenable(flow);
     final theme = Theme.of(context);
     final appearance = <String, Object>{
       'dark': theme.brightness == Brightness.dark,
@@ -214,7 +215,7 @@ class ProfileSetupPage extends HookConsumerWidget {
           }
         });
       };
-    }, [flow]);
+    }, [flow, flow.stage == HostedFlowStage.profile]);
     useEffect(() {
       if (defaultTargetPlatform != TargetPlatform.iOS) return null;
       WidgetsBinding.instance.addPostFrameCallback((_) {

@@ -4,6 +4,8 @@ import 'dart:async';
 import 'package:buzz/features/onboarding/self_hosted_entry_sheet.dart';
 import 'package:buzz/features/onboarding/saved_identity_card.dart';
 import 'package:buzz/shared/hosted/self_hosted_entry.dart';
+import 'package:buzz/shared/hosted/device_identity_source.dart';
+import 'package:buzz/shared/hosted/saved_identity_profile.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/utils/string_utils.dart';
@@ -17,6 +19,43 @@ import 'package:nostr/nostr.dart' as nostr;
 import '../../helpers/widget_helpers.dart';
 
 void main() {
+  testWidgets('loads name and avatar when the active profile cache is empty', (
+    tester,
+  ) async {
+    const pubkey =
+        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    final profile = Completer<UserProfile?>();
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          savedIdentityProfileProvider(
+            pubkey,
+          ).overrideWith((ref) => profile.future),
+        ],
+        child: SavedIdentityCard(
+          identity: const DeviceIdentityChoice(pubkey, 'Home'),
+          onSelect: () {},
+        ),
+      ),
+    );
+    expect(find.text('Saved identity'), findsOneWidget);
+    expect(find.text('Used in Home'), findsOneWidget);
+    profile.complete(
+      const UserProfile(
+        pubkey: pubkey,
+        displayName: 'Kenny',
+        avatarUrl: 'https://home.example/avatar.png',
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Kenny'), findsOneWidget);
+    expect(find.text('Saved identity'), findsNothing);
+    expect(
+      tester.widget<AvatarImage>(find.byType(AvatarImage)).imageUrl,
+      'https://home.example/avatar.png',
+    );
+  });
+
   testWidgets('identity card below subtitle joins with the selected key', (
     tester,
   ) async {
@@ -45,8 +84,8 @@ void main() {
           ),
         ],
         child: const SelfHostedEntrySheet(
-          relay: 'wss://honeycombstudios.communities.buzz.xyz',
-          name: 'honeycombstudios.communities.buzz.xyz',
+          relay: 'wss://honeycombstudios.example',
+          name: 'honeycombstudios.example',
           fullScreen: true,
         ),
       ),
@@ -55,11 +94,11 @@ void main() {
     expect(find.textContaining('honeycombstudios'), findsNothing);
     expect(find.text('Join community'), findsNothing);
     expect(find.text('You already have a saved identity'), findsOneWidget);
-    expect(find.text('mobile'), findsOneWidget);
+    expect(find.text('Used in mobile'), findsOneWidget);
     expect(find.text(shortPubkey(keys.public)), findsOneWidget);
     expect(find.text(fullNpub(keys.public)!), findsNothing);
     expect(
-      find.bySemanticsLabel('Use mobile identity, ${shortPubkey(keys.public)}'),
+      find.bySemanticsLabel('Use Saved identity, ${shortPubkey(keys.public)}'),
       findsOneWidget,
     );
 
