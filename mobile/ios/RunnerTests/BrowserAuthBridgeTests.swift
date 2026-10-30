@@ -12,7 +12,7 @@ final class BrowserAuthBridgeTests: XCTestCase {
     let bridge = BuzzBrowserAuthBridge(messenger: messenger, isActive: { active },
       startSession: { _ in starts += 1; return true })
     defer { withExtendedLifetime(bridge) {} }
-    let arguments = ["url": "https://app.builderlabstaging.xyz/api/goose/v1/auth/login"]
+    let arguments = ["url": "https://app.builderlabstaging.xyz/auth/native"]
     var results: [String] = []
     messenger.invoke("start", arguments: arguments) {
       results.append(($0 as? FlutterError)?.code ?? "success")
@@ -55,12 +55,15 @@ final class BrowserAuthBridgeTests: XCTestCase {
     for refused in [
       "http://block.builderlab.xyz/api/goose/v1/auth/login",
       "https://builderlab.xyz/auth/native",
-      "https://evilbuilderlab.xyz/auth/native",
-      "https://block.builderlab.xyz.example.com/auth/native",
+      "https://evilbuilderlab.xyz/api/goose/v1/auth/login",
+      "https://block.builderlab.xyz.example.com/api/goose/v1/auth/login",
       "https://block.builderlab.xyz/api/goose/v1/auth/me",
-      "https://block.builderlab.xyz:8443/auth/native",
-      "https://user@block.builderlab.xyz/auth/native",
-      "https://block.builderlab.xyz/auth/native#fragment",
+      "https://app.builderlab.xyz/api/goose/v1/auth/login",
+      "https://block.builderlab.xyz/auth/native",
+      "https://a.block.builderlab.xyz/api/goose/v1/auth/login",
+      "https://app.builderlab.xyz:8443/auth/native",
+      "https://user@app.builderlab.xyz/auth/native",
+      "https://app.builderlab.xyz/auth/native#fragment",
     ] {
       XCTAssertFalse(BuzzBrowserAuthBridge.allowsLogin(URL(string: refused)!), refused)
     }

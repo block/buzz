@@ -58,16 +58,19 @@ final class BuzzBrowserAuthBridge: NSObject, ASWebAuthenticationPresentationCont
     }
   }
 
-  /// Builderlab login pages only: the public account's `/auth/native` and a
-  /// tenant's CLI login, used by organization sign-in on its own host.
+  /// Builderlab login pages only: the public account's `/auth/native`, and a
+  /// tenant's CLI login on its own host for organization sign-in.
   static func allowsLogin(_ url: URL) -> Bool {
     guard url.scheme == "https", let host = url.host?.lowercased(),
       url.user == nil, url.password == nil, url.port == nil, url.fragment == nil
     else { return false }
-    let builderlab = ["builderlab.xyz", "builderlabstaging.xyz"].contains {
-      host.hasSuffix(".\($0)")
+    let publicHosts = ["app.builderlab.xyz", "app.builderlabstaging.xyz"]
+    if publicHosts.contains(host) { return url.path == "/auth/native" }
+    let tenant = ["builderlab.xyz", "builderlabstaging.xyz"].contains { domain in
+      let label = host.dropLast(domain.count + 1)
+      return host.hasSuffix(".\(domain)") && !label.isEmpty && !label.contains(".")
     }
-    return builderlab && ["/auth/native", "/api/goose/v1/auth/login"].contains(url.path)
+    return tenant && url.path == "/api/goose/v1/auth/login"
   }
 
   // Safari delivers a deep link before UIKit finishes activating our app.
