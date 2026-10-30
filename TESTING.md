@@ -31,6 +31,94 @@ combination space (PR #6807). Scope Playwright locators — unscoped
 `getByText` in a required smoke test is a strict-mode flake (PR #6980).
 (PRs #6807, #6980, #6996, #7013)
 
+### Community-ban route coverage
+
+`crates/buzz-test-client/tests/fixtures/community-ban-route-inventory.tsv`
+classifies the relay's production Axum routes by listener, method, path,
+authentication plane, membership behavior, and community-restriction behavior.
+The inventory guard finds direct `.route(...)` calls in production functions
+named `router` or `*_router`, resolves literal or module-qualified `&str`
+constant paths, and applies `.nest(...)` prefixes from `router::build_router`.
+It fails when one of those registrations is missing from the table or a stale
+row remains, and on any shape it cannot classify: `.route_service`,
+`.nest_service`, `.fallback_service`, or `.fallback` (except allow-listed
+registrations, each pinned to its builder and exact argument and allowed once),
+`.nest` outside `build_router`, a nest target that does not resolve to exactly
+one router builder, or a builder nested more than once. New or repeated
+`.merge(...)` registrations also fail; existing root aliases and the Git
+settings merge are pinned to their exact builder and argument. `scripts/check-community-ban-route-inventory.test.py`
+pins each of those shapes with a fixture. Run both directly with:
+
+```bash
+python3 scripts/check-community-ban-route-inventory.py
+python3 scripts/check-community-ban-route-inventory.test.py
+```
+
+`just test-unit` and `just test` run the guard; CI also runs the ignored HTTP
+and root-WebSocket behavior matrix in the Relay E2E lane:
+
+```bash
+cargo test -p buzz-test-client --test community_ban_routes -- --ignored --nocapture
+```
+
+Use a fresh disposable local relay, PostgreSQL, Redis, and MinIO stack for that
+command, and set `DATABASE_URL` or `BUZZ_TEST_DATABASE_URL` to the disposable
+PostgreSQL database. Start the relay with `BUZZ_V1_ENABLED=true` so the
+accessory-route cases exercise their production handlers. The matrix creates
+unique tenant hosts and identities. Unset `BUZZ_KLIPY_API_KEY`: GIF controls
+assert the exact provider-disabled response without contacting a provider.
+The malformed JPEG and invalid Git-push repository-name controls assert their
+validation responses; Git reads, workflow and media-read controls assert exact
+missing-resource responses. Successful reads
+and writes must return their expected JSON shape, not merely avoid a ban.
+Ordinary-member routes also run a clear delegated-agent control.
+Do not point these tests at a shared, development, or hosted database or relay.
+
+The inventory keeps membership separate from restriction policy. Public NIP-11,
+NIP-05, policy documents, and health probes have no authenticated community
+principal. Anonymous policy-receipt acceptance is pre-membership and has no
+principal to restrict. Invite claim is also pre-membership, but it carries a
+verified NIP-98 principal and is classified as restriction-enforced in the
+inventory. The integrated invitation regressions cover restricted nonmembers,
+verified owners and v1/v2 lifecycle behavior; see
+[Invitation compatibility and revocation](#invitation-compatibility-and-revocation)
+for the authoritative contract. Relay-operator APIs, deployment-admin APIs,
+NIP-FI commands, the localhost Git hook, and the gated mesh test endpoint use
+separate auth planes; each exemption is recorded in its route row.
+Secret-authenticated workflow webhooks recheck the saved workflow owner's
+community ban through the workflow engine. Their PostgreSQL regression covers
+owner bans, tenant scope and failed lookups. No sibling coverage remains pending.
+
+Root and huddle admission, final-admission races, fail-closed reads, owner-to-
+agent restriction, timeout behavior, and tenant-scoped eviction point to their
+existing regression tests in `community-ban-regressions.tsv`. The local socket
+eviction tests establish pod-local closure. Delivery to sessions on other pods
+depends on the Redis pub/sub path and is not inferred from those local tests.
+The moderation-read matrix also checks a moderator-privileged agent against a
+fresh signed owner proof and a stored owner link; the bridge harness verifies
+that the ban denial uses the NIP-98 signed creation time, with a clear-owner
+control that reaches the queue.
+
+This scanner is a source-level guard, not a Rust router interpreter. It reads
+direct `.route(...)` calls inside production functions named `router` or ending
+in `_router`; a `.route(...)` elsewhere is a scanner error. It resolves a
+`.nest(...)` prefix only when the relay's `build_router` passes a literal
+or a resolved string constant and a direct call to another recognized router function. It does not
+expand macros or interpret dynamic paths, prefixes or arbitrary router
+composition. Service-style calls and unsupported nesting or merging are errors,
+rather than silently omitted registrations. The existing root merge aliases and
+Git settings merge are explicit, single-use exceptions; their builders' direct
+routes remain inventoried. It also does not derive auth or
+restriction policy from handler code, or prove that the named regression
+function contains the expected assertions or is selected by CI. If production
+routes use an unrecognized registration shape, extend the scanner and bind
+that shape to the inventory before treating the table as complete.
+
+The method column records explicitly declared methods. Axum's `get(...)` helper
+also serves `HEAD` through the GET handler unless an explicit `.head(...)`
+handler is attached; the scanner does not add that implicit `HEAD` behavior as a
+separate inventory row or exercise it separately.
+
 ---
 
 ## Live Local Relay
