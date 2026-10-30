@@ -6,19 +6,36 @@ use axum::{routing::post, Json, Router};
 use nostr::Keys;
 use serde_json::json;
 
-#[tokio::test]
-async fn created_starter_channels_are_reported_when_metadata_is_unavailable() {
-    let _serial = crate::relay_admission::TEST_SERIAL.lock().await;
-    // The relay accepts every create, but its replica never serves metadata.
+type Submitted = std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
+
+/// A relay that accepts and records every submitted event but never serves
+/// any from `/query`.
+async fn accepting_relay() -> (String, Submitted, tokio::task::JoinHandle<()>) {
+    let submitted = Submitted::default();
+    let captured = submitted.clone();
     let router = Router::new()
         .route("/query", post(|| async { Json(json!([])) }))
         .route(
             "/events",
-            post(|| async { Json(json!({"event_id": "0", "accepted": true, "message": ""})) }),
+            post(move |Json(event): Json<serde_json::Value>| {
+                let captured = captured.clone();
+                async move {
+                    captured.lock().unwrap().push(event);
+                    Json(json!({"event_id": "0", "accepted": true, "message": ""}))
+                }
+            }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    (url, submitted, server)
+}
+
+#[tokio::test]
+async fn created_starter_channels_are_reported_when_metadata_is_unavailable() {
+    let _serial = crate::relay_admission::TEST_SERIAL.lock().await;
+    // The relay accepts every create, but its replica never serves metadata.
+    let (url, _submitted, server) = accepting_relay().await;
     let state = crate::app_state::build_app_state();
     *state.keys.lock().unwrap() = Keys::generate();
     *state.relay_url_override.lock().unwrap() = Some(url);
@@ -63,21 +80,7 @@ fn starter_test_channel(id: &str, name: &str, is_member: bool) -> ChannelInfo {
 #[tokio::test]
 async fn existing_join_only_starter_channel_is_joined_never_created() {
     let _serial = crate::relay_admission::TEST_SERIAL.lock().await;
-    let submitted = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
-    let captured = submitted.clone();
-    let router = Router::new().route(
-        "/events",
-        post(move |Json(event): Json<serde_json::Value>| {
-            let captured = captured.clone();
-            async move {
-                captured.lock().unwrap().push(event);
-                Json(json!({"event_id": "0", "accepted": true, "message": ""}))
-            }
-        }),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let (url, submitted, server) = accepting_relay().await;
     let state = crate::app_state::build_app_state();
     let keys = Keys::generate();
     *state.keys.lock().unwrap() = keys.clone();
