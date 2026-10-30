@@ -60,10 +60,11 @@ struct Membership {
     community_id: Uuid,
     host: String,
     role: Option<String>,
+    agents: Vec<String>,
 }
 
 impl UserDeletionStore {
-    /// Generate only community identities and relationships for demo or real input.
+    /// Generate community relationships and their currently owned agent keys.
     /// `demo` selects the existing fixture; other inputs accept hex or npub.
     pub async fn generate_inventory(&self, pubkey: &str) -> Result<Value> {
         let mut tx = self.pool.begin().await?;
@@ -101,7 +102,10 @@ pub(super) async fn generate_inventory_on(
                  SELECT community_id FROM relay_members WHERE pubkey = $1 \
                  UNION SELECT community_id FROM current_channels \
              ) \
-             SELECT c.id AS community_id, c.host, m.role \
+             SELECT c.id AS community_id, c.host, m.role, \
+                 ARRAY(SELECT encode(u.pubkey, 'hex') FROM users u \
+                       WHERE u.community_id = c.id AND u.agent_owner_pubkey = decode($1, 'hex') \
+                       ORDER BY u.pubkey LIMIT 1025) AS agents \
              FROM matched_communities matched \
              JOIN communities c ON c.id = matched.community_id \
              LEFT JOIN relay_members m ON m.community_id = c.id AND m.pubkey = $1 \
@@ -116,9 +120,15 @@ pub(super) async fn generate_inventory_on(
             "inventory exceeds {MAX_COMMUNITIES} communities; no partial inventory returned"
         )));
     }
+    let mut agent_count = 0;
     let communities = rows
         .into_iter()
         .map(|row| {
+            agent_count += row.agents.len();
+            if row.agents.len() > super::inventory::MAX_AGENTS_PER_COMMUNITY
+                || agent_count > super::inventory::MAX_INVENTORY_AGENTS {
+                return Err(DbError::DeletionSafety("agent inventory exceeds its bounded scope".into()));
+            }
             let relationship = match row.role.as_deref() {
                 Some("owner") => "owner",
                 Some("admin" | "member") | None => "participant",
@@ -132,6 +142,7 @@ pub(super) async fn generate_inventory_on(
                 "community_id": row.community_id,
                 "label": row.host,
                 "relationship": relationship,
+                "agents": row.agents.into_iter().map(|pubkey| json!({"pubkey": pubkey})).collect::<Vec<_>>(),
             }))
         })
         .collect::<Result<Vec<_>>>()?;
