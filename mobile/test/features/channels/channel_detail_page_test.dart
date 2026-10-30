@@ -11208,7 +11208,7 @@ void main() {
           typingNotifier: typing,
           disableAnimations: true,
           huddleCurrentPubkey: 'self',
-          knownAgentPubkeys: const {'morty', 'summer', 'jerry', 'rick'},
+          knownAgentPubkeys: const {'rick'},
           inventoryAgents: inventory,
           users: const {
             'morty': UserProfile(pubkey: 'morty', displayName: 'Morty'),
@@ -11240,9 +11240,10 @@ void main() {
               widget.painter.runtimeType.toString() == '_ReplyConnector',
         ),
       );
-      // The channel's typing row, by its spoken status.
-      Finder typingRow(String label) => find.byWidgetPredicate(
-        (widget) => widget is Semantics && widget.properties.label == label,
+      // The channel's typing row, by its line of the spoken status. The
+      // newest timeline item merges its day label into the same node.
+      Finder typingRow(String label) => find.bySemanticsLabel(
+        RegExp('^${RegExp.escape(label)}\$', multiLine: true),
       );
       expect(row, findsNothing);
 
@@ -11321,6 +11322,14 @@ void main() {
       );
       expect(typingRow('Morty is typing'), findsOneWidget);
       expect(
+        tester
+            .widget<AvatarImage>(
+              find.byKey(const ValueKey('inline-agent-typing-morty')),
+            )
+            .isAgent,
+        isTrue,
+      );
+      expect(
         find.bySemanticsLabel('View thread: Morty is working'),
         findsOneWidget,
       );
@@ -11361,6 +11370,8 @@ void main() {
         find.bySemanticsLabel('View thread: 1 reply. Morty working'),
         findsOneWidget,
       );
+      // The reply ends Morty's pending bubble in the channel.
+      expect(typingRow('Morty is typing'), findsNothing);
       // Morty shows once, in the working group, not also as a participant.
       expect(rowAvatars(), ['morty']);
       expect(connector, findsOneWidget);

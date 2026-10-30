@@ -55,6 +55,9 @@ class _MessageList extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final handoff = useAgentReplyHandoffs(channelId, inlineTyping, allMessages);
     final displayedTyping = handoff.typing;
+    final workingAgents = {
+      for (final agents in threadWorking.values) ...agents,
+    };
     final appView = View.of(context);
     final localSendAnimations = ref.watch(
       localMessageSendAnimationProvider(channelId),
@@ -818,6 +821,7 @@ class _MessageList extends HookConsumerWidget {
               : InlineAgentTyping(
                   channelId: channelId,
                   entries: displayedTyping,
+                  knownAgents: workingAgents,
                 ),
         ),
       );
@@ -1048,6 +1052,7 @@ class _MessageList extends HookConsumerWidget {
                             InlineAgentTyping(
                               channelId: channelId,
                               entries: displayedTyping,
+                              knownAgents: workingAgents,
                             ),
                       ],
                     ),
