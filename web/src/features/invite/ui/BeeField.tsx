@@ -126,7 +126,7 @@ export function BeeField({
     // the origin instead of spread across the field.
     const beeNodes = Array.from(el.children) as HTMLElement[];
     const bleedPx = Math.max(0, bleed);
-    const w = el.clientWidth + bleedPx * 2,
+    let w = el.clientWidth + bleedPx * 2,
       h = el.clientHeight + bleedPx * 2;
     let bees: Bee[] = spawnBees(n, w, h, bleedPx);
     const introFrom = bees.map((b, i) => {
@@ -170,9 +170,33 @@ export function BeeField({
           node.style.transform = `translate(${displayX - bleedPx}px, ${displayY - bleedPx}px) rotate(${rot[i]}deg) scale(${sizeScale})`;
         }
       });
+    let introProgress = reduce ? 1 : 0;
+    const observer = new ResizeObserver(() => {
+      const nextW = el.clientWidth + bleedPx * 2;
+      const nextH = el.clientHeight + bleedPx * 2;
+      if (nextW <= 0 || nextH <= 0 || (nextW === w && nextH === h)) return;
+      const scaleX = nextW / Math.max(1, w);
+      const scaleY = nextH / Math.max(1, h);
+      bees = bees.map((bee) => ({
+        ...bee,
+        x: bee.x * scaleX,
+        y: bee.y * scaleY,
+        homeX: (bee.homeX ?? w / 2) * scaleX,
+        homeY: (bee.homeY ?? h / 2) * scaleY,
+      }));
+      for (const from of introFrom) {
+        from.x *= scaleX;
+        from.y *= scaleY;
+      }
+      w = nextW;
+      h = nextH;
+      pointer = null;
+      paint(introProgress);
+    });
+    observer.observe(el);
     if (reduce) {
       paint();
-      return;
+      return () => observer.disconnect();
     } // freeze
     paint(0);
     let last = performance.now();
@@ -192,12 +216,14 @@ export function BeeField({
           rot[i] += diff * 0.18;
         }
       });
-      paint(Math.min(1, (t - t0) / INTRO_MS));
+      introProgress = Math.min(1, (t - t0) / INTRO_MS);
+      paint(introProgress);
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
     return () => {
       cancelAnimationFrame(raf);
+      observer.disconnect();
       window.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerleave", onLeave);
     };
