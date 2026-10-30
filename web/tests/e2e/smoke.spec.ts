@@ -18,7 +18,7 @@ test("home page shows repositories section", async ({ page }) => {
   await expect(page.getByText("Repositories")).toBeVisible();
 });
 
-test("invite requires age and legal consent before opening Buzz", async ({
+test("browser joining requires consent but app handoff does not", async ({
   page,
 }) => {
   await page.route("**/api/join-policy", async (route) => {
@@ -71,6 +71,14 @@ test("invite requires age and legal consent before opening Buzz", async ({
       ]),
     });
   });
+  await page.addInitScript(() => {
+    Object.assign(window, {
+      nostr: {
+        getPublicKey: async () => "ab".repeat(32),
+        signEvent: async (event: unknown) => event,
+      },
+    });
+  });
   await page.goto("/invite/demo-code");
 
   await expect(
@@ -87,9 +95,10 @@ test("invite requires age and legal consent before opening Buzz", async ({
   const agreementConfirmation = page.getByLabel(
     "I agree to the Buzz Terms of Service and Privacy Policy.",
   );
-  const acceptInvite = page.getByRole("button", {
-    name: "Accept invite in Buzz",
-  });
+  const acceptInvite = page.getByRole("button", { name: "Join in browser" });
+  await expect(
+    page.getByRole("link", { name: "Open invite in Buzz" }),
+  ).toHaveAttribute("href", /^buzz:\/\/join\?relay=.*&code=demo-code$/);
 
   await expect(ageConfirmation).toBeVisible();
   await expect(agreementConfirmation).toBeVisible();
@@ -127,6 +136,39 @@ test("invite requires age and legal consent before opening Buzz", async ({
   expect(consentBox?.y).toBeLessThan(acceptButtonBox?.y ?? 0);
   expect(consentBox?.width).toBe(acceptButtonBox?.width);
 });
+
+for (const policyStatus of [200, 503]) {
+  test(`app invite handoff needs no browser consent (policy HTTP ${policyStatus})`, async ({
+    page,
+  }) => {
+    let acceptanceRequests = 0;
+    await page.route("**/api/join-policy", (route) =>
+      route.fulfill({
+        status: policyStatus,
+        contentType: "application/json",
+        body: JSON.stringify({
+          policy: {
+            terms_markdown: "Terms",
+            age_attestation_required: true,
+            version: "v1",
+          },
+        }),
+      }),
+    );
+    await page.route("**/api/invites/accept-policy", (route) => {
+      acceptanceRequests++;
+      return route.fulfill({ status: 500 });
+    });
+    const loaded = page.waitForResponse("**/api/join-policy");
+    await page.goto("/invite/demo-code");
+    await loaded;
+    await expect(
+      page.getByRole("link", { name: "Open invite in Buzz" }),
+    ).toHaveAttribute("href", /^buzz:\/\/join\?relay=.*&code=demo-code$/);
+    await expect(page.getByRole("checkbox")).toHaveCount(0);
+    expect(acceptanceRequests).toBe(0);
+  });
+}
 
 test("invite can enroll a NIP-07 identity for browser access", async ({
   page,
