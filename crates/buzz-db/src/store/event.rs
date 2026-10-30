@@ -552,7 +552,7 @@ pub(crate) async fn query_events_with_operation(
         return answer;
     }
     let mut conn = crate::observability::acquire_writer(pool, operation).await?;
-    query_events_on(&mut conn, q).await
+    query_events_on(&mut conn, q, ReadDeadline::PerRead).await
 }
 
 /// [`query_events`] on a specific session — the replica-routing path runs
@@ -561,13 +561,14 @@ pub(crate) async fn query_events_with_operation(
 pub(crate) async fn query_events_on(
     conn: &mut sqlx::PgConnection,
     q: &EventQuery,
+    deadline: ReadDeadline,
 ) -> Result<Vec<StoredEvent>> {
     if let Some(answer) = answer_without_db(q) {
         return answer;
     }
 
     let mut qb = build_query_events_sql(q);
-    let rows = fetch_with_read_deadline(conn, &mut qb, !has_tag_values(q)).await?;
+    let rows = fetch_with_read_deadline(conn, &mut qb, !has_tag_values(q), deadline).await?;
 
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
@@ -877,6 +878,14 @@ fn push_mention_join(b: &mut QueryBuilder<sqlx::Postgres>, q: &EventQuery, p_hex
     }
 }
 
+/// [`READ_STATEMENT_TIMEOUT`] as a literal, so [`BEGIN_WITH_READ_DEADLINE_SQL`]
+/// can splice it into a static statement.
+macro_rules! read_statement_timeout {
+    () => {
+        "20s"
+    };
+}
+
 /// Server-side deadline for every generic event read ([`query_events_on`] and
 /// [`count_events_on`]: REQ history, `/query`, `/count`, aux closures), kept
 /// under the desktop's 30 s request timeout so a runaway query is cancelled
@@ -884,7 +893,7 @@ fn push_mention_join(b: &mut QueryBuilder<sqlx::Postgres>, q: &EventQuery, p_hex
 /// effective `statement_timeout`: a shorter operator or caller cap is kept,
 /// and a disabled (`0`) or longer one is lowered to 20 s. The limit is per
 /// statement, not per request.
-pub const READ_STATEMENT_TIMEOUT: &str = "20s";
+pub const READ_STATEMENT_TIMEOUT: &str = read_statement_timeout!();
 
 /// Lower `statement_timeout` to `$1` unless it is already tighter; `$2`
 /// selects transaction-local (`true`) or session (`false`) scope.
@@ -893,22 +902,63 @@ pub(crate) const TIGHTEN_STATEMENT_TIMEOUT_SQL: &str = "SELECT set_config('state
             OR current_setting('statement_timeout')::interval > $1::text::interval \
           THEN $1::text ELSE current_setting('statement_timeout') END, $2)";
 
+/// `BEGIN` plus the [`TIGHTEN_STATEMENT_TIMEOUT_SQL`] tighten to
+/// [`READ_STATEMENT_TIMEOUT`], transaction-local, as one simple-query message:
+/// one round trip instead of two.
+const BEGIN_WITH_READ_DEADLINE_SQL: &str = concat!(
+    "BEGIN; SELECT set_config('statement_timeout', \
+     CASE WHEN current_setting('statement_timeout')::interval = interval '0' \
+            OR current_setting('statement_timeout')::interval > interval '",
+    read_statement_timeout!(),
+    "' THEN '",
+    read_statement_timeout!(),
+    "' ELSE current_setting('statement_timeout') END, true)"
+);
+
+/// How an event read runs under [`READ_STATEMENT_TIMEOUT`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReadDeadline {
+    /// The session already runs under it: every reader-pool connection
+    /// tightens its session `statement_timeout` once, at connect (see
+    /// `Db::read_pool_options`), so the read skips the tighten.
+    Session,
+    /// Tighten it for this read only, as writer sessions run under a longer
+    /// timeout of their own.
+    PerRead,
+}
+
 /// Run an event read under [`READ_STATEMENT_TIMEOUT`] without changing the
-/// deadline for anything else on `conn`. `begin()` opens a transaction on an
-/// autocommit writer connection or a savepoint inside the replica's read
-/// transaction; rolling it back (the read has no writes to keep) reverts the
-/// transaction-local `set_config` in both cases.
+/// deadline for anything else on `conn`. Inside an open transaction the read
+/// takes a savepoint, so a failed or cancelled read leaves the transaction
+/// usable and the read's locks are released when it ends. With
+/// [`ReadDeadline::PerRead`] the savepoint tightens the deadline, and an
+/// autocommit connection opens a transaction whose `BEGIN` carries the
+/// transaction-local tighten. Rolling either back (the read has no writes to
+/// keep) reverts the tighten.
 async fn fetch_with_read_deadline(
     conn: &mut sqlx::PgConnection,
     qb: &mut QueryBuilder<sqlx::Postgres>,
     persistent: bool,
+    deadline: ReadDeadline,
 ) -> Result<Vec<sqlx::postgres::PgRow>> {
-    let mut tx = sqlx::Connection::begin(&mut *conn).await?;
-    sqlx::query(TIGHTEN_STATEMENT_TIMEOUT_SQL)
-        .bind(READ_STATEMENT_TIMEOUT)
-        .bind(true)
-        .execute(&mut *tx)
-        .await?;
+    use sqlx::Connection as _;
+    let mut tx = match (conn.is_in_transaction(), deadline) {
+        (false, ReadDeadline::Session) => {
+            return Ok(qb.build().persistent(persistent).fetch_all(conn).await?);
+        }
+        (false, ReadDeadline::PerRead) => conn.begin_with(BEGIN_WITH_READ_DEADLINE_SQL).await?,
+        (true, _) => {
+            let mut tx = conn.begin().await?;
+            if deadline == ReadDeadline::PerRead {
+                sqlx::query(TIGHTEN_STATEMENT_TIMEOUT_SQL)
+                    .bind(READ_STATEMENT_TIMEOUT)
+                    .bind(true)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            tx
+        }
+    };
     let rows = qb
         .build()
         .persistent(persistent)
@@ -1091,13 +1141,17 @@ pub async fn count_events(pool: &PgPool, q: &EventQuery) -> Result<i64> {
         crate::observability::WriterOperation::SubscriptionHistory,
     )
     .await?;
-    count_events_on(&mut conn, q).await
+    count_events_on(&mut conn, q, ReadDeadline::PerRead).await
 }
 
 /// [`count_events`] on a specific session — the replica-routing path runs
 /// the count on the exact reader connection whose heartbeat observation
 /// proved its predicate.
-pub(crate) async fn count_events_on(conn: &mut sqlx::PgConnection, q: &EventQuery) -> Result<i64> {
+pub(crate) async fn count_events_on(
+    conn: &mut sqlx::PgConnection,
+    q: &EventQuery,
+    deadline: ReadDeadline,
+) -> Result<i64> {
     // Empty list means "match nothing" — return 0 immediately.
     if q.kinds.as_deref().is_some_and(|k| k.is_empty()) {
         return Ok(0);
@@ -1115,7 +1169,7 @@ pub(crate) async fn count_events_on(conn: &mut sqlx::PgConnection, q: &EventQuer
     let mut qb = count_events_sql(q);
     // Same transaction-local deadline as `query_events_on`, so a COUNT cannot
     // stall indefinitely either.
-    let row = fetch_with_read_deadline(conn, &mut qb, !has_tag_values(q))
+    let row = fetch_with_read_deadline(conn, &mut qb, !has_tag_values(q), deadline)
         .await?
         .into_iter()
         .next()
@@ -2379,7 +2433,9 @@ impl Db {
             .await
         {
             crate::RouteDecision::Replica(mut tx, _entry, reason) => {
-                match crate::event::query_events_on(&mut tx, q).await {
+                match crate::event::query_events_on(&mut tx, q, crate::event::ReadDeadline::Session)
+                    .await
+                {
                     Ok(events) => {
                         Self::record_route(path, "replica", reason);
                         Ok(events)
@@ -2441,7 +2497,9 @@ impl Db {
             .await
         {
             crate::RouteDecision::Replica(mut tx, _entry, reason) => {
-                match crate::event::query_events_on(&mut tx, q).await {
+                match crate::event::query_events_on(&mut tx, q, crate::event::ReadDeadline::Session)
+                    .await
+                {
                     Ok(events) => {
                         Self::record_route(path, "replica", reason);
                         Ok(events)
@@ -2505,7 +2563,9 @@ impl Db {
             .await
         {
             crate::RouteDecision::Replica(mut tx, _entry, reason) => {
-                match crate::event::count_events_on(&mut tx, q).await {
+                match crate::event::count_events_on(&mut tx, q, crate::event::ReadDeadline::Session)
+                    .await
+                {
                     Ok(count) => {
                         Self::record_route(path, "replica", reason);
                         Ok(count)
@@ -3030,15 +3090,21 @@ mod postgres_tests {
         q.kinds = Some(vec![39000]);
         q.tag_values = vec![("t".to_owned(), vec!["for-you".to_owned()])];
         for _ in 0..6 {
-            query_events_on(&mut conn, &q).await.expect("label query");
-            count_events_on(&mut conn, &q).await.expect("label count");
+            query_events_on(&mut conn, &q, ReadDeadline::PerRead)
+                .await
+                .expect("label query");
+            count_events_on(&mut conn, &q, ReadDeadline::PerRead)
+                .await
+                .expect("label count");
         }
         assert_eq!(prepared_like(&mut conn, "%tags @> ANY(%").await, 0);
 
         // Control: the same query without a tag match stays a cached statement,
         // so the check above can see one.
         q.tag_values.clear();
-        query_events_on(&mut conn, &q).await.expect("plain query");
+        query_events_on(&mut conn, &q, ReadDeadline::PerRead)
+            .await
+            .expect("plain query");
         assert!(prepared_like(&mut conn, "%FROM events%").await > 0);
     }
 
@@ -3046,7 +3112,7 @@ mod postgres_tests {
     /// the value restored on `conn` afterwards.
     async fn deadline_inside_and_after(conn: &mut sqlx::PgConnection) -> (String, String) {
         let mut qb = QueryBuilder::new("SELECT current_setting('statement_timeout')");
-        let rows = fetch_with_read_deadline(conn, &mut qb, true)
+        let rows = fetch_with_read_deadline(conn, &mut qb, true, ReadDeadline::PerRead)
             .await
             .expect("deadline read");
         let inside: String = rows[0].get(0);
@@ -3243,7 +3309,7 @@ mod postgres_tests {
             .expect("set session timeout");
         // Autocommit connection (writer path).
         let mut qb = QueryBuilder::new("SELECT 1/0");
-        let err = fetch_with_read_deadline(&mut conn, &mut qb, true).await;
+        let err = fetch_with_read_deadline(&mut conn, &mut qb, true, ReadDeadline::PerRead).await;
         assert!(err.is_err(), "division by zero must fail");
         let after: String = sqlx::query_scalar("SHOW statement_timeout")
             .fetch_one(&mut *conn)
@@ -3255,7 +3321,7 @@ mod postgres_tests {
         // the failed savepoint must roll back and leave the outer tx usable.
         let mut tx = sqlx::Connection::begin(&mut *conn).await.expect("begin");
         let mut qb = QueryBuilder::new("SELECT 1/0");
-        let err = fetch_with_read_deadline(&mut tx, &mut qb, true).await;
+        let err = fetch_with_read_deadline(&mut tx, &mut qb, true, ReadDeadline::PerRead).await;
         assert!(err.is_err(), "division by zero must fail");
         let after: String = sqlx::query_scalar("SHOW statement_timeout")
             .fetch_one(&mut *tx)
@@ -3267,6 +3333,47 @@ mod postgres_tests {
             .execute(&mut *conn)
             .await
             .expect("reset");
+    }
+
+    /// Inside a replica read session's transaction, `ReadDeadline::Session`
+    /// skips the tighten (the reader pool installs the deadline at connect)
+    /// but still reads under a savepoint, so the read's locks end with it and
+    /// a later DDL on the replica is not blocked by an idle session.
+    /// `PerRead` in the same transaction still tightens.
+    /// Mutation: tighten for `Session`, or drop its savepoint → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn session_deadline_reads_skip_the_tighten_and_release_locks() {
+        let pool = setup_pool().await;
+        let mut tx = pool.begin().await.expect("begin session");
+        sqlx::query("SET LOCAL statement_timeout = '1min'")
+            .execute(&mut *tx)
+            .await
+            .expect("set session timeout");
+        let mut qb = QueryBuilder::new(
+            "SELECT current_setting('statement_timeout'), (SELECT count(*) FROM events)",
+        );
+        let rows = fetch_with_read_deadline(&mut tx, &mut qb, true, ReadDeadline::Session)
+            .await
+            .expect("session read");
+        let inside: String = rows[0].get(0);
+        assert_eq!(inside, "1min", "Session must not tighten");
+        let held: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_locks \
+             WHERE pid = pg_backend_pid() AND relation = 'events'::regclass",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .expect("count locks");
+        assert_eq!(held, 0, "a Session read must release its locks");
+
+        let mut qb = QueryBuilder::new("SELECT current_setting('statement_timeout')");
+        let rows = fetch_with_read_deadline(&mut tx, &mut qb, true, ReadDeadline::PerRead)
+            .await
+            .expect("per-read read");
+        let inside: String = rows[0].get(0);
+        assert_eq!(inside, READ_STATEMENT_TIMEOUT, "PerRead tightens");
+        tx.rollback().await.expect("rollback");
     }
 
     /// Pins the dispatch: a plain (non-`#e`) read — the agent `#p` + `#h` +
@@ -3297,7 +3404,7 @@ mod postgres_tests {
         let started = std::time::Instant::now();
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(40),
-            query_events_on(&mut conn, &q),
+            query_events_on(&mut conn, &q, ReadDeadline::PerRead),
         )
         .await
         .expect("deadline must fire before the 40 s guard");
@@ -3337,7 +3444,7 @@ mod postgres_tests {
         let started = std::time::Instant::now();
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(40),
-            count_events_on(&mut conn, &q),
+            count_events_on(&mut conn, &q, ReadDeadline::PerRead),
         )
         .await
         .expect("deadline must fire before the 40 s guard");

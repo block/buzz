@@ -355,7 +355,7 @@ impl ReadSession {
     pub async fn query_events(&mut self, q: &EventQuery) -> Result<Vec<StoredEvent>> {
         let degraded = match &mut self.inner {
             ReadSessionInner::Replica { tx, writer } => {
-                match event::query_events_on(tx, q).await {
+                match event::query_events_on(tx, q, event::ReadDeadline::Session).await {
                     Ok(rows) => return Ok(rows),
                     // Surface a cancel instead of re-running it on the writer; see
                     // `DbError::is_statement_cancelled` for the trade-off.

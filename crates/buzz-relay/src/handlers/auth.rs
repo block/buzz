@@ -63,9 +63,10 @@ fn classify_relay_membership(
 /// on the principal blocks it directly; if the principal is clear, a ban on
 /// its proven owner (extracted from the self-proving auth tag) blocks it too.
 ///
-/// `cached` reads the restriction rows through the 30-second ephemeral-path
-/// cache ([`AppState::restriction_state_cached`]); only per-pulse ephemeral
-/// traffic sets it. Socket auth and every other HTTP request read fresh.
+/// `cached` reads the restriction rows through
+/// [`AppState::restriction_state_cached`], for per-request gates whose grant
+/// ends with the request (HTTP requests, ephemeral pulses). Socket admission
+/// reads fresh: an admitted socket outlives the cache's staleness bound.
 pub(crate) async fn community_ban_outcome(
     state: &AppState,
     community: buzz_core::CommunityId,
