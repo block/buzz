@@ -7,7 +7,37 @@ use serde::Deserialize;
 
 use crate::client::{normalize_write_response, BuzzClient};
 use crate::error::CliError;
+use crate::limits::{truncation_notice, Paging, ReadLimits};
 use crate::validate::{parse_event_id, validate_hex64};
+
+/// `social notes` pages backwards with the composite `--before` +
+/// `--before-id` cursor, so a caller at the cap has a real next call to make.
+const NOTES_LIMITS: ReadLimits = ReadLimits {
+    default: 50,
+    max: 100,
+    paging: Paging::BeforeCursor,
+};
+
+/// Count the events in a relay query response.
+///
+/// `social notes` prints the relay's body verbatim, so the count and the
+/// output come from the same bytes. A body that is not a JSON array of events
+/// cannot be counted, and must not be silently treated as an empty page: that
+/// turns an unknown result set into "safely short" and suppresses the
+/// truncation notice altogether.
+fn count_events(body: &str) -> Result<usize, CliError> {
+    let unknown = |detail: String| {
+        CliError::Other(format!(
+            "relay returned a body that is not an event array, so the result count is unknown: {detail}"
+        ))
+    };
+    let events: Vec<serde_json::Value> =
+        serde_json::from_str(body).map_err(|e| unknown(e.to_string()))?;
+    if let Some(position) = events.iter().position(|event| !event.is_object()) {
+        return Err(unknown(format!("element {position} is not an object")));
+    }
+    Ok(events.len())
+}
 
 /// A single contact entry (CLI-local, not from buzz-sdk).
 #[derive(Debug, Deserialize)]
@@ -83,7 +113,7 @@ pub async fn cmd_get_event(client: &BuzzClient, event_id: &str) -> Result<(), Cl
 pub async fn cmd_get_user_notes(
     client: &BuzzClient,
     pubkey: &str,
-    limit: Option<u32>,
+    requested_limit: Option<u32>,
     before: Option<i64>,
     before_id: Option<&str>,
 ) -> Result<(), CliError> {
@@ -91,7 +121,7 @@ pub async fn cmd_get_user_notes(
     if let Some(bid) = before_id {
         validate_hex64(bid)?;
     }
-    let limit = limit.unwrap_or(50).min(100);
+    let limit = NOTES_LIMITS.effective(requested_limit);
 
     let mut filter = serde_json::json!({
         "kinds": [1],
@@ -107,7 +137,16 @@ pub async fn cmd_get_user_notes(
     }
 
     let resp = client.query(&filter).await?;
+    // Parse before printing. This command forwards the relay's body verbatim,
+    // so a body that is not an event array is both invalid machine-readable
+    // output and a result count we cannot determine — and an undeterminable
+    // count read as 0 would report a full page as safely short, which is the
+    // exact silence this notice exists to break.
+    let returned = count_events(&resp)?;
     println!("{resp}");
+    if let Some(notice) = truncation_notice(returned, requested_limit, NOTES_LIMITS) {
+        eprintln!("{notice}");
+    }
     Ok(())
 }
 
@@ -280,5 +319,40 @@ mod tests {
         assert!(is_parameterized_social_list_kind(KIND_FOLLOW_SET));
         assert!(is_parameterized_social_list_kind(KIND_BOOKMARK_SET));
         assert!(!is_parameterized_social_list_kind(KIND_MUTE_LIST));
+    }
+}
+
+#[cfg(test)]
+mod note_count_tests {
+    use super::{count_events, truncation_notice, NOTES_LIMITS};
+
+    #[test]
+    fn counts_the_events_in_an_array_body() {
+        assert_eq!(count_events("[]").unwrap(), 0);
+        assert_eq!(count_events(r#"[{"id":"a"},{"id":"b"}]"#).unwrap(), 2);
+    }
+
+    #[test]
+    fn a_body_that_is_not_an_event_array_is_an_error_not_a_zero() {
+        // Reading these as 0 results suppressed the notice entirely: a full
+        // page of notes would have been reported as safely short.
+        for body in [
+            r#"{"error":"rate limited"}"#,
+            "not json at all",
+            "",
+            r#"["a","b"]"#,
+        ] {
+            let err = count_events(body).unwrap_err();
+            assert!(
+                err.to_string().contains("result count is unknown"),
+                "body {body:?} produced: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_full_page_of_notes_advertises_the_cursor_it_really_has() {
+        let notice = truncation_notice(100, Some(100), NOTES_LIMITS).expect("full read must warn");
+        assert!(notice.contains("--before / --before-id"), "{notice}");
     }
 }
