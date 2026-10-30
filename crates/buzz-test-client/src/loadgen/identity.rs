@@ -13,6 +13,9 @@ pub enum Role {
     Human,
     Agent,
     HotAuthor,
+    /// Posts only hot-thread roots, so `run` finds them among its newest
+    /// posts however many other roots a channel has.
+    HotRoot,
 }
 
 impl Role {
@@ -22,6 +25,7 @@ impl Role {
             Role::Human => "human",
             Role::Agent => "agent",
             Role::HotAuthor => "hot-author",
+            Role::HotRoot => "hot-root",
         }
     }
 }

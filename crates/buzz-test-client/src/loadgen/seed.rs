@@ -19,6 +19,11 @@ pub const ROOT_PREFIX: &str = "lg-root";
 /// Content prefix of the seeded hot-thread root; `run` finds it by this.
 pub const HOT_ROOT_PREFIX: &str = "lg-hot";
 
+/// Author of every hot-thread root in run `run_id`.
+pub fn hot_root_keys(run_id: &str) -> Keys {
+    identity::keys(run_id, Role::HotRoot, 0)
+}
+
 /// Seeds every community. Idempotent for communities this run's fixture
 /// owner owns, and for channels; history and threads are appended on every
 /// call. Fails unless every planned post
@@ -320,10 +325,7 @@ impl Post {
                 tags.extend(reply_tags(root_id, parent));
                 (author, format!("lg-reply {}", self.seq))
             }
-            PostKind::HotRoot => (
-                identity::keys(&scenario.run_id, Role::Owner, self.community),
-                HOT_ROOT_PREFIX.to_string(),
-            ),
+            PostKind::HotRoot => (hot_root_keys(&scenario.run_id), HOT_ROOT_PREFIX.to_string()),
             PostKind::HotReply => {
                 let root_id = roots.get(&hot_key(scenario))?;
                 tags.extend(reply_tags(root_id, root_id));
