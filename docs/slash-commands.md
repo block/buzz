@@ -81,6 +81,8 @@ nothing is published and the draft and attachments stay.
   cannot run; a relay rejection still surfaces as an error.
 - A command reuses its existing action path, including any confirmation that
   path already shows (for example, archive). Commands add no new confirmations.
+  Cancelling that confirmation is neither success nor failure: the draft stays
+  and nothing is shown.
 - Success feedback uses the platform's existing toast or snackbar (for example
   "Status set"). Commands that navigate (`/dm`, `/join`, `/who`, `/gif`,
   `/huddle`) show no toast.
