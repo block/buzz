@@ -1,32 +1,20 @@
 use super::*;
 
 #[test]
-fn nest_dir_is_under_home() {
-    if let Some(dir) = nest_dir() {
-        // Accepts both .buzz (prod) and .buzz-dev (dev) depending on
-        // whether init_nest_dir was called before this test ran.
-        let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        assert!(
-            name == NEST_DIR_PROD || name == crate::build_identity::nest_name(true),
-            "nest_dir must end with .buzz or .buzz-dev, got {dir:?}"
-        );
-    }
+#[should_panic(expected = "nest_dir() is not pinned")]
+fn unpinned_nest_dir_panics_instead_of_using_the_real_nest() {
+    nest_dir();
 }
 
 #[test]
-fn init_nest_dir_prod_sets_buzz() {
-    // init_nest_dir is idempotent (OnceLock) — once set, subsequent calls
-    // are no-ops. We can only test the fallback path if the OnceLock is
-    // unset, which is only true in a fresh process. Instead, verify that
-    // nest_dir() always returns a path ending with a valid nest suffix.
-    let dir = nest_dir();
-    if let Some(d) = dir {
-        let name = d.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        assert!(
-            name == NEST_DIR_PROD || name == crate::build_identity::nest_name(true),
-            "nest_dir suffix must be .buzz or .buzz-dev, got {d:?}"
-        );
-    }
+fn thread_nest_pin_is_removed_with_its_temp_dir() {
+    let nest = pin_temp_nest_dir_for_thread();
+    let path = nest.path().to_path_buf();
+    assert_eq!(nest_dir(), Some(path.clone()));
+
+    drop(nest);
+    assert!(!path.exists(), "temp nest must be deleted");
+    assert!(THREAD_NEST_DIR.with(|pinned| pinned.borrow().is_none()));
 }
 
 #[test]
