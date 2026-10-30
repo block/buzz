@@ -1,3 +1,7 @@
+import 'package:buzz/shared/hosted/hosted_community_creation.dart';
+import 'package:buzz/shared/community/community_grid_option.dart';
+import 'package:buzz/shared/hosted/account_identity_store.dart';
+import 'package:buzz/shared/hosted/hosted_flow.dart';
 import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
@@ -13,7 +17,6 @@ import 'package:buzz/features/pairing/pairing_page.dart';
 import 'package:buzz/onboarding_app_entry.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
-import 'package:buzz/shared/hosted/account_identity_store.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/relay/relay_session.dart';
@@ -57,21 +60,116 @@ void main() {
     );
   }
 
-  journey('system Back leaves community creation', (tester, f) async {
+  for (final importing in [false, true]) {
+    journey(
+      'new account ${importing ? 'imports' : 'creates'} and keeps its identity on retry',
+      (tester, f) async {
+        await f.initialize(localIdentity: false);
+        f.bound = null;
+        f.offerProfile = false;
+        await f.mount(tester);
+        // Account restoration may resume independently of the Add choices.
+        await f.flow.signInAccount();
+        await f.settle(tester);
+        expect(f.flow.stage, HostedFlowStage.setupIdentity);
+        expect(f.probes, isEmpty);
+        expect(find.text('Create my Buzz identity'), findsOneWidget);
+        expect(find.text('Import existing identity'), findsOneWidget);
+        expect(await f.store.read(), isNull);
+        if (importing) {
+          await f.tap(tester, 'Import existing identity');
+          await tester.enterText(
+            find.byType(TextField).hitTestable(),
+            f.keys.nsec,
+          );
+          await f.tap(tester, 'Preview identity');
+          final started = Completer<void>();
+          final release = Completer<void>();
+          f.beforeStatusReturn = () async {
+            if (!started.isCompleted) started.complete();
+            await release.future;
+          };
+          await f.tap(tester, 'Import this identity');
+          await started.future;
+          // Dismiss while the real import is awaiting its external status response.
+          Navigator.of(
+            tester.element(find.byType(TextField).hitTestable()),
+          ).pop();
+          await f.settle(tester);
+          release.complete();
+          f.beforeStatusReturn = null;
+          await f.settle(tester);
+          expect(f.bound, f.keys.public);
+        } else {
+          await f.tap(tester, 'Create my Buzz identity');
+        }
+        final saved = await f.store.read();
+        expect(saved, isNotNull);
+        expect(f.bound, saved!.pubkey);
+        expect(saved.backup, isNotNull);
+        await f.flow.retry();
+        await f.settle(tester);
+        expect((await f.store.read())!.pubkey, saved.pubkey);
+      },
+    );
+  }
+
+  journey('linked account without backup imports its key without replacing it', (
+    tester,
+    f,
+  ) async {
+    await f.initialize(localIdentity: false);
+    f.offerProfile = false;
+    await f.mount(tester);
+    // Account restoration may resume independently of the Add choices.
+    await f.flow.signInAccount();
+    await f.settle(tester);
+    expect(f.flow.stage, HostedFlowStage.setupIdentity);
+    expect(f.probes, isEmpty);
+    expect(find.text('Create my Buzz identity'), findsNothing);
+    expect(find.text('Import existing identity'), findsOneWidget);
+    await f.tap(tester, 'Import existing identity');
+    await tester.enterText(
+      find.byType(TextField).hitTestable(),
+      f.secondKeys.nsec,
+    );
+    await f.tap(tester, 'Preview identity');
+    await f.tap(tester, 'Import this identity');
+    expect(
+      find.text(
+        'This key doesn’t match the identity linked to your Builderlab account.',
+      ),
+      findsOneWidget,
+    );
+    expect(await f.store.read(), isNull);
+    expect(f.bound, f.keys.public);
+    await tester.enterText(find.byType(TextField).hitTestable(), f.keys.nsec);
+    await f.tap(tester, 'Preview identity');
+    await f.tap(tester, 'Import this identity');
+    expect((await f.store.read())!.pubkey, f.keys.public);
+    expect((await f.store.read())!.backup, isNotNull);
+    expect(f.requests.where((r) => r.url.path.endsWith('/recovery')), isEmpty);
+  });
+
+  journey('system Back leaves community link entry', (tester, f) async {
     await f.initialize();
     await f.mount(tester);
-    await f.tap(tester, 'Create a community');
+    await f.tap(tester, 'Enter a community link');
     expect(
-      tester.widget<PairingPage>(find.byType(PairingPage)).creatingCommunity,
+      tester
+          .widget<PairingPage>(find.byType(PairingPage))
+          .enteringCommunityLink,
       isTrue,
     );
     await tester.binding.handlePopRoute();
     await f.settle(tester);
     expect(
-      tester.widget<PairingPage>(find.byType(PairingPage)).creatingCommunity,
+      tester
+          .widget<PairingPage>(find.byType(PairingPage))
+          .enteringCommunityLink,
       isFalse,
     );
-    expect(find.text('Create a community').hitTestable(), findsOneWidget);
+    expect(find.text('Enter a community link').hitTestable(), findsOneWidget);
   });
 
   journey('retiring profile setup removes both profile and avatar routes', (
@@ -81,7 +179,13 @@ void main() {
     await f.initialize();
     f.rows.add(f.row('one'));
     await f.mount(tester);
-    await f.tap(tester, 'Continue with Builderlab');
+    // Account restoration may resume independently of the Add choices.
+    await f.flow.signInAccount();
+    await f.settle(tester);
+    expect(f.flow.stage, HostedFlowStage.chooseCommunities);
+    expect(f.probes, isEmpty);
+    await tester.tap(find.byType(CommunityGridOption).first);
+    await f.settle(tester);
     await tester.tap(find.byTooltip('Add profile photo'));
     await f.settle(tester);
     expect(find.byType(ProfileSetupAvatarEditor), findsOneWidget);
@@ -101,7 +205,13 @@ void main() {
     await f.initialize();
     f.rows.add(f.row('one'));
     await f.mount(tester);
-    await f.tap(tester, 'Continue with Builderlab');
+    // Account restoration may resume independently of the Add choices.
+    await f.flow.signInAccount();
+    await f.settle(tester);
+    expect(f.flow.stage, HostedFlowStage.chooseCommunities);
+    expect(f.probes, isEmpty);
+    await tester.tap(find.byType(CommunityGridOption).first);
+    await f.settle(tester);
     await tester.tap(find.byTooltip('Add profile photo'));
     await f.settle(tester);
     final url = emojiAvatarDataUrl('🐝', 0xFFFFE75C);
@@ -150,7 +260,8 @@ void main() {
           findsOneWidget,
         );
         expect(f.activeFlow, isNull);
-        await f.tap(tester, 'Back');
+        await tester.tap(find.byTooltip('Back').hitTestable());
+        await f.settle(tester);
         expect(f.requests, isEmpty);
       }
       final notifier = f.container.read(pairingProvider.notifier);
@@ -331,7 +442,11 @@ void main() {
       expect((await f.storage.loadAll()).single.nsec, community.nsec);
       expect(await f.storage.loadActiveId(), community.id);
       expect((await f.store.read())!.pubkey, f.keys.public);
-      for (final path in ['/status', '/enrollment', '/communities/joined']) {
+      for (final path in [
+        '/status',
+        '/enrollment',
+        '/known-communities/list',
+      ]) {
         expect(
           f.sent(path),
           isEmpty,
@@ -402,10 +517,15 @@ void main() {
       } finally {
         browserReturn.complete();
       }
+      await f.settle(tester);
+      await tester.tap(find.text('Create my Buzz identity'));
       await enrollmentReached.future.timeout(const Duration(seconds: 5));
       await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
       try {
-        await tester.tap(find.text('Leave setup').hitTestable());
+        expect(find.byTooltip('Back'), findsNothing);
+        // External teardown still fences pending enrollment.
+        await f.flow.leave();
         await tester.pump();
       } finally {
         enrollmentReturn.complete();
@@ -500,7 +620,14 @@ void main() {
         f.subject = 'new-owner';
         f.bound = boundAccount ? f.secondKeys.public : null;
         if (boundAccount) f.cloudKeys.add(f.secondKeys);
-        await f.tap(tester, 'Continue with Builderlab');
+        // Account restoration may resume independently of the Add choices.
+        await f.flow.signInAccount();
+        await f.settle(tester);
+        expect(
+          f.flow.stage,
+          boundAccount ? HostedFlowStage.idle : HostedFlowStage.chooseIdentity,
+        );
+        expect(f.probes, isEmpty);
         if (!boundAccount) {
           expect(find.text('Saved identity'), findsOneWidget);
           expect(f.sent('/verify'), isEmpty);
@@ -536,7 +663,11 @@ void main() {
       await f.storage.save(legacy);
       await f.storage.saveActiveId(legacy.id);
       await f.mount(tester);
-      await f.tap(tester, 'Continue with Builderlab');
+      // Account restoration may resume independently of the Add choices.
+      await f.flow.signInAccount();
+      await f.settle(tester);
+      expect(f.flow.stage, HostedFlowStage.chooseIdentity);
+      expect(f.probes, isEmpty);
       expect(find.text('Use Builderlab identity'), findsNWidgets(2));
       await f.tap(tester, fullNpub(f.secondKeys.public)!);
       expect((await f.store.read())!.pubkey, f.secondKeys.public);
@@ -551,7 +682,9 @@ void main() {
         findsNothing,
       );
       f.rejectList = false;
-      await f.tap(tester, 'Continue with Builderlab');
+      await f.tap(tester, 'Try again');
+      expect(f.flow.stage, HostedFlowStage.idle);
+      expect(f.probes, isEmpty);
       expect(
         find.text(
           'No communities available to add. Scan a QR code or use an invite link.',
@@ -561,15 +694,21 @@ void main() {
       expect(find.text('Scan a QR code'), findsOneWidget);
       expect(find.text('Use pairing code'), findsNothing);
       f.rows.addAll([f.row('one'), f.row('two')]);
-      await f.tap(tester, 'Continue with Builderlab');
-      // Joined communities are added automatically after choosing the identity.
+      // Account restoration may resume independently of the Add choices.
+      await f.flow.signInAccount();
+      await f.settle(tester);
+      expect(f.flow.stage, HostedFlowStage.chooseCommunities);
+      expect(f.probes, isEmpty);
+      await tester.tap(find.byType(CommunityGridOption).first);
+      await f.settle(tester);
+      // Continue explicitly admits the selected communities.
       expect(find.byType(CheckboxListTile).hitTestable(), findsNothing);
       expect(
         find.byType(ProfileSetupPage, skipOffstage: false),
         findsOneWidget,
       );
       final firstSaved = (await f.storage.loadAll()).firstWhere(
-        (c) => c.name == 'one',
+        (c) => c.name == 'one.communities.buzz.xyz',
       );
       Navigator.of(
         tester.element(find.byType(ProfileSetupPage, skipOffstage: false)),
@@ -592,10 +731,19 @@ void main() {
             .every((c) => c.nsec == f.secondKeys.nsec),
         isTrue,
       );
-      expect(saved.singleWhere((c) => c.name == 'one').id, firstSaved.id);
+      expect(
+        saved.singleWhere((c) => c.name == 'one.communities.buzz.xyz').id,
+        firstSaved.id,
+      );
       expect(await f.storage.loadActiveId(), firstSaved.id);
-      expect(f.probes.where((c) => c.name == 'one'), hasLength(1));
-      expect(f.probes.where((c) => c.name == 'two'), hasLength(2));
+      expect(
+        f.probes.where((c) => c.name == 'one.communities.buzz.xyz'),
+        hasLength(1),
+      );
+      expect(
+        f.probes.where((c) => c.name == 'two.communities.buzz.xyz'),
+        hasLength(2),
+      );
       expect(find.byType(OnboardingAppEntry), findsNothing);
     },
   );
@@ -606,18 +754,32 @@ void main() {
       (tester, f) async {
         await f.initialize(localIdentity: false);
         f.cloudKeys.addAll([f.secondKeys, f.keys]);
-        f.rows.add(f.row('one'));
+        f.rows.addAll([f.row('one'), f.row('two')]);
         f.offerProfile = false;
         f.profileUnavailable = unreadableProfile;
         await f.mount(tester);
-        await f.tap(tester, 'Continue with Builderlab');
-        // One discovered community is admitted automatically.
+        // Account restoration may resume independently of the Add choices.
+        await f.flow.signInAccount();
+        await f.settle(tester);
+        expect(f.flow.stage, HostedFlowStage.chooseCommunities);
+        expect(f.probes, isEmpty);
+        await tester.tap(find.byType(CommunityGridOption).last);
+        await f.settle(tester);
+        // All memberships are restored; the second is the chosen destination.
         expect(f.profileWrites, isEmpty);
         expect(
           find.byType(ProfileSetupPage, skipOffstage: false),
           findsNothing,
         );
-        final saved = (await f.storage.loadAll()).single;
+        final communities = await f.storage.loadAll();
+        expect(communities, hasLength(2));
+        expect(
+          communities.map((c) => c.name),
+          containsAll(['one.communities.buzz.xyz', 'two.communities.buzz.xyz']),
+        );
+        final saved = communities.singleWhere(
+          (c) => c.name == 'two.communities.buzz.xyz',
+        );
         expect(saved.nsec, f.keys.nsec);
         expect(saved.pubkey, f.keys.public);
         expect((await f.store.read())!.pubkey, f.keys.public);
@@ -808,9 +970,9 @@ void main() {
       await f.initialize();
       f.loseCreateResponse = true;
       await f.mount(tester);
-      await f.tap(tester, 'Create a community');
-      await tester.enterText(find.byType(TextField).hitTestable(), 'new-home');
-      await f.tap(tester, 'Continue');
+      // Creation is entered elsewhere; retain its restart/persistence journey.
+      await f.flow.start(HostedCreateCommunity('new-home'));
+      await f.settle(tester);
       expect(find.text('Try again').hitTestable(), findsOneWidget);
       expect(f.owned, hasLength(1));
       expect(await f.storage.loadAll(), isEmpty);
@@ -835,11 +997,75 @@ void main() {
     },
   );
 
+  for (final (sentinel, guidance, retryable) in [
+    (
+      'invite_restricted',
+      'This account, or the account that owns it, is restricted in this community. Contact a community administrator. If the restriction is temporary, try again after it ends.',
+      true,
+    ),
+    (
+      'invite_owner_mismatch',
+      'This account does not match its recorded owner. Use the correct account or owner identity to join this community.',
+      false,
+    ),
+  ]) {
+    journey('$sentinel is rendered without discarding the hosted invite', (
+      tester,
+      f,
+    ) async {
+      await f.initialize();
+      f.offerProfile = false;
+      f.claimError = sentinel;
+      // Even recorded membership must not turn a current explicit denial
+      // into successful admission through lost-response reconciliation.
+      f.rows.add(f.row('one'));
+      await f.mount(tester);
+      await f.link(tester, 'one');
+      await tester.tap(find.byType(CheckboxListTile));
+      await f.settle(tester);
+      await f.tap(tester, 'Accept and join');
+      expect(find.text(guidance), findsOneWidget);
+      expect(await f.storage.loadAll(), isEmpty);
+      expect(f.probes, isEmpty);
+      expect(f.sent('/claim'), hasLength(1));
+      expect(f.sent('/communities/joined'), isEmpty);
+      expect(
+        find.text('Try again').hitTestable(),
+        retryable ? findsOneWidget : findsNothing,
+      );
+      await f.settle(tester);
+      expect(f.sent('/claim'), hasLength(1));
+      expect((await f.flow.browser.retainedIntent())!['code'], 'invite-one');
+      f.claimError = null;
+      if (retryable) {
+        await f.tap(tester, 'Try again');
+      } else {
+        // Owner mismatch requires the correct identity, not an automatic
+        // retry. Explicitly abandon setup, then reopen the same link after
+        // the server-side owner conflict has been corrected.
+        await tester.tap(find.byTooltip('Back').hitTestable());
+        await f.settle(tester);
+        expect((await f.store.read())!.pubkey, f.keys.public);
+        await f.link(tester, 'one');
+      }
+      await tester.tap(find.byType(CheckboxListTile));
+      await f.settle(tester);
+      await f.tap(tester, 'Accept and join');
+      expect(f.sent('/claim'), hasLength(2));
+      for (final request in f.sent('/claim')) {
+        expect(jsonDecode(request.body)['code'], 'invite-one');
+      }
+      expect((await f.storage.loadAll()).single.pubkey, f.keys.public);
+      expect(find.text('Community home').hitTestable(), findsOneWidget);
+    }, requiresAuthDomain: true);
+  }
+
   journey(
     'second invitation replaces pending consent and only joins the newer community',
     (tester, f) async {
       await f.initialize();
       f.offerProfile = false;
+      f.saveFailures = 1;
       // The first dispatched attempt ends; retry owns the pending consent.
       // A new incoming link must now invalidate that consent, not wait on it.
       f.policyResponses.addAll([
@@ -871,6 +1097,15 @@ void main() {
         f.sent('/accept-policy').single.url.host,
         'two.communities.buzz.xyz',
       );
+      // The remote add was accepted but its acknowledgement was lost. The
+      // saved community and pending intent survive; retry never reclaims it.
+      expect(find.text('Try again').hitTestable(), findsOneWidget);
+      expect(f.knownSaved, {'wss://two.communities.buzz.xyz'});
+      await f.restart(tester);
+      await f.tap(tester, 'Start login again');
+      expect((await f.storage.loadAll()).single.id, saved.id);
+      expect(f.sent('/claim'), hasLength(1));
+      expect(f.sent('/known-communities/add'), hasLength(2));
       expect(find.byType(OnboardingAppEntry), findsNothing);
     },
     requiresAuthDomain: true,

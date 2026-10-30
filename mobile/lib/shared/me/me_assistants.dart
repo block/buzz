@@ -1,16 +1,18 @@
 import 'dart:convert';
+import 'dart:isolate';
 
-import 'package:nostr/nostr.dart' as nostr;
+import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../crypto/nip_oa.dart';
 import '../mentions/agent_identity_provider.dart';
 import '../relay/relay.dart';
+import 'me_agent_inventory.dart';
+import 'me_archived_agents.dart';
 import 'me_sync.dart';
 
-/// Owned assistants from verified profiles, including agents without kind 10100.
-/// Agents inherit their owner's community access and need not be listed in the
-/// community's human membership snapshot.
+/// The owner's current inventory, with verified ownership and desktop's
+/// known-archived exclusion. Never scan the community's historical profiles.
 final meAssistantsProvider = FutureProvider<List<AgentDirectoryEntry>>((
   ref,
 ) async {
@@ -18,8 +20,32 @@ final meAssistantsProvider = FutureProvider<List<AgentDirectoryEntry>>((
   if (sync.connectionState != null) {
     ref.watch(relaySessionProvider.select((state) => state.status));
   }
-  final session = ref.watch(relaySessionProvider.notifier);
-  return _loadAssistants(sync, session);
+  // Refresh archive evidence with the inventory, including explicit retries.
+  // Ordinary sheet openings reuse this provider's completed directory.
+  final archivedRequest = ref.refresh(meArchivedAgentsProvider.future);
+  final inventory = await loadMeAgentInventory(sync);
+  sync.check();
+  final profiles = await _loadProfiles(sync, inventory.keys.toList());
+  final archived = await archivedRequest;
+  sync.check();
+  final choices = [
+    for (final profile in profiles)
+      if (!archived.contains(profile.pubkey))
+        AgentDirectoryEntry(
+          pubkey: profile.pubkey,
+          displayName: inventory[profile.pubkey],
+          avatarUrl: profile.avatarUrl,
+          respondTo: profile.respondTo,
+          respondToAllowlist: profile.respondToAllowlist,
+          channelIds: profile.channelIds,
+        ),
+  ];
+  choices.sort(
+    (a, b) => (a.displayName ?? '').toLowerCase().compareTo(
+      (b.displayName ?? '').toLowerCase(),
+    ),
+  );
+  return choices;
 }, retry: (_, _) => null);
 
 /// Freshness-controlled ownership check for one personal-chat recipient.
@@ -34,76 +60,63 @@ final meAssistantOwnershipProvider = FutureProvider.family<bool, String>((
   return isOwnedMeAssistant(sync, pubkey);
 });
 
-/// Revalidates only the chosen assistant before creating a chat.
+/// Revalidate the selected recipient, including existing chats whose agent may
+/// no longer be offered in the new-chat inventory. Discovery is not admission.
 Future<bool> isOwnedMeAssistant(MeSync sync, String pubkey) async =>
-    (await _loadAssistants(
-      sync,
-      sync.session,
-      pubkey: pubkey,
-    )).any((agent) => agent.pubkey == pubkey);
+    (await _loadProfiles(sync, [
+      pubkey,
+    ])).any((agent) => agent.pubkey == pubkey);
 
-Future<List<AgentDirectoryEntry>> _loadAssistants(
+Future<List<AgentDirectoryEntry>> _loadProfiles(
   MeSync sync,
-  RelaySessionNotifier session, {
-  String? pubkey,
-}) async {
-  final profiles = <String, NostrEvent>{};
-  final seen = <String>{};
-  const pageSize = 100;
-  // The current relay only indexes single-letter NIP-01 tag filters. It
-  // silently drops #auth, so owner-scoped discovery needs relay support.
-  // Until then fail visibly at this bound rather than drain the directory.
-  const maxPages = 10;
-  for (var page = 1; page <= maxPages; page++) {
+  List<String> pubkeys,
+) async {
+  final profiles = <NostrEvent>[];
+  const batchSize = 100;
+  for (var start = 0; start < pubkeys.length; start += batchSize) {
     sync.check();
-    final events = await session.queryRelay([
-      NostrFilter(
-        kinds: const [0],
-        authors: pubkey == null ? null : [pubkey],
-        limit: pageSize,
-        extensions: {'page': page},
-      ),
+    final batch = pubkeys.skip(start).take(batchSize).toList();
+    final events = await sync.session.queryRelay([
+      NostrFilter(kinds: const [0], authors: batch, limit: batchSize),
     ]);
     sync.check();
-    if (events.length > pageSize) {
-      throw StateError('Agent directory exceeded the requested page size.');
+    if (events.length > batchSize) {
+      throw StateError('Agent profiles exceeded the requested batch size.');
     }
-    var added = false;
-    for (final event in events) {
-      if (event.kind != 0 || (pubkey != null && event.pubkey != pubkey)) {
-        continue;
-      }
-      if (seen.contains(event.id)) continue;
-      try {
-        nostr.Event.fromJson(jsonEncode(event.toJson()));
-      } catch (_) {
-        continue;
-      }
-      if (!seen.add(event.id)) continue;
-      added = true;
-      final previous = profiles[event.pubkey];
-      if (previous == null ||
-          event.createdAt > previous.createdAt ||
-          (event.createdAt == previous.createdAt &&
-              event.id.compareTo(previous.id) < 0)) {
-        profiles[event.pubkey] = event;
-      }
-    }
-    if (events.length < pageSize) break;
-    if (!added || page == maxPages) {
-      throw StateError('Could not finish loading assistants. Try again.');
-    }
+    profiles.addAll(
+      events.where((e) => e.kind == 0 && batch.contains(e.pubkey)),
+    );
   }
-  final agents = <AgentDirectoryEntry>[];
-  for (final event in profiles.values) {
+  final owner = sync.pubkey;
+  final result = await _parseProfiles(profiles, owner);
+  sync.check();
+  return result;
+}
+
+Future<List<AgentDirectoryEntry>> _parseProfiles(
+  List<NostrEvent> events,
+  String owner,
+) => Isolate.run(() => _verifiedProfiles(events, owner));
+
+List<AgentDirectoryEntry> _verifiedProfiles(
+  List<NostrEvent> events,
+  String owner,
+) {
+  final latest = <String, NostrEvent>{};
+  for (final event in events) {
     try {
-      if (verifiedProfileOaOwnerPubkey(event) == sync.pubkey) {
-        agents.add(AgentDirectoryEntry.fromEvent(event));
-      }
+      verifiedNostrEventFromJson(jsonEncode(event.toJson()));
     } catch (_) {
-      // A malformed profile must not hide unrelated verified agents.
       continue;
     }
+    final previous = latest[event.pubkey];
+    if (previous == null || meEventIsNewer(event, previous)) {
+      latest[event.pubkey] = event;
+    }
   }
-  return agents;
+  return [
+    for (final event in latest.values)
+      if (verifiedProfileOaOwnerPubkey(event) == owner)
+        AgentDirectoryEntry.fromEvent(event),
+  ];
 }

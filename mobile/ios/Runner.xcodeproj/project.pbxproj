@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		BC0010000000000000000003 /* BrowserAuthBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC0010000000000000000004 /* BrowserAuthBridgeTests.swift */; };
+		BC0010000000000000000001 /* BuzzBrowserAuthBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC0010000000000000000002 /* BuzzBrowserAuthBridge.swift */; };
 		F84380010000000000000001 /* ProfileSetupRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F84380010000000000000002 /* ProfileSetupRecoveryTests.swift */; };
 		BBAA00000000000000000011 /* IdentityFilePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBAA00000000000000000012 /* IdentityFilePlugin.swift */; };
 		BBAA00000000000000000001 /* HostedHpkeBackup.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBAA00000000000000000002 /* HostedHpkeBackup.swift */; };
@@ -101,6 +103,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		BC0010000000000000000004 /* BrowserAuthBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserAuthBridgeTests.swift; sourceTree = "<group>"; };
+		BC0010000000000000000002 /* BuzzBrowserAuthBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuzzBrowserAuthBridge.swift; sourceTree = "<group>"; };
 		F84380010000000000000002 /* ProfileSetupRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileSetupRecoveryTests.swift; sourceTree = "<group>"; };
 		BBAA00000000000000000012 /* IdentityFilePlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentityFilePlugin.swift; sourceTree = "<group>"; };
 		BBAA00000000000000000002 /* HostedHpkeBackup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostedHpkeBackup.swift; sourceTree = "<group>"; };
@@ -208,6 +212,7 @@
 			isa = PBXGroup;
 			children = (
 				331C807B294A618700263BE5 /* RunnerTests.swift */,
+				BC0010000000000000000004 /* BrowserAuthBridgeTests.swift */,
 				F84380010000000000000002 /* ProfileSetupRecoveryTests.swift */,
 				AB1200132F40400100A17E01 /* NativeMessageImageLoaderTests.swift */,
 				AB1200132F40400100A17E09 /* IdentityFilePluginTests.swift */,
@@ -288,6 +293,7 @@
 				AB1200112F40400100A17E01 /* NativeMessageMenu.swift */,
 				AB1200122F40400100A17E01 /* NativeReactionDetails.swift */,
 				74858FAE1ED2DC5600515810 /* AppDelegate.swift */,
+				BC0010000000000000000002 /* BuzzBrowserAuthBridge.swift */,
 				BBAA00000000000000000002 /* HostedHpkeBackup.swift */,
 				BBAA00000000000000000012 /* IdentityFilePlugin.swift */,
 				BZZ00000000000000000024 /* PushNativeState.swift */,
@@ -618,6 +624,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				331C808B294A63AB00263BE5 /* RunnerTests.swift in Sources */,
+				BC0010000000000000000003 /* BrowserAuthBridgeTests.swift in Sources */,
 				F84380010000000000000001 /* ProfileSetupRecoveryTests.swift in Sources */,
 				AB1200032F40400100A17E01 /* NativeMessageImageLoaderTests.swift in Sources */,
 				AB1200032F40400100A17E09 /* IdentityFilePluginTests.swift in Sources */,
@@ -633,6 +640,7 @@
 				AB1200012F40400100A17E01 /* NativeMessageMenu.swift in Sources */,
 				AB1200022F40400100A17E01 /* NativeReactionDetails.swift in Sources */,
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
+				BC0010000000000000000001 /* BuzzBrowserAuthBridge.swift in Sources */,
 				BBAA00000000000000000001 /* HostedHpkeBackup.swift in Sources */,
 				BBAA00000000000000000011 /* IdentityFilePlugin.swift in Sources */,
 				BZZ00000000000000000023 /* PushNativeState.swift in Sources */,

@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/relay/relay_query_response.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/misc.dart';
 import 'package:http/http.dart' as http;
@@ -22,7 +24,9 @@ import 'package:nostr/nostr.dart' as nostr;
 /// recorded and fails the test at teardown, because app code often catches
 /// relay errors and falls back.
 class FakeRelay {
-  FakeRelay() {
+  /// [now] is the session's wall clock, so a test can model OS suspension:
+  /// time passes while no timer runs.
+  FakeRelay({DateTime Function()? now}) : _now = now {
     addTearDown(() {
       expect(unanswerable, isEmpty, reason: 'requests FakeRelay cannot answer');
     });
@@ -38,12 +42,23 @@ class FakeRelay {
   final _rejections = <({bool Function(NostrEvent) match, String message})>[];
   Completer<void>? _okHold;
   Completer<void>? _echoHold;
+  Completer<void>? _reqHold;
+  Completer<void>? _authHold;
+  final DateTime Function()? _now;
 
   String get pubkey => keys.public;
 
   late final session = RelaySessionNotifier(
     socketFactory: _openSocket,
     httpClient: MockClient(_handleHttp),
+    // The production decoder runs in an isolate, whose result `fakeAsync`
+    // cannot deliver. Parse inline with the same function instead.
+    queryDecoder: (response) async => parseRelayQueryEvents(
+      response.bodyBytes,
+      response.headers['content-type'],
+    ),
+    now: _now,
+    random: _MidpointRandom(),
   );
 
   List<Override> get overrides => [
@@ -92,6 +107,22 @@ class FakeRelay {
   /// The relay dispatches after commit, so echo and OK have no fixed order.
   Completer<void> holdEcho() => _echoHold = Completer<void>();
 
+  /// Holds new REQs until the completer completes, as a relay's access checks
+  /// would: they read stored events, start live fan-out and reach EOSE only
+  /// once admitted. Events committed meanwhile reach them only through replay.
+  Completer<void> holdReq() => _reqHold = Completer<void>();
+
+  /// Keeps the next connection unauthenticated until the completer completes.
+  /// Like the relay, it answers a REQ sent before AUTH with CLOSED.
+  Completer<void> holdAuth() => _authHold = Completer<void>();
+
+  /// REQs the relay rejected because they arrived before AUTH.
+  final reqsBeforeAuth = <List<dynamic>>[];
+
+  /// Filters of the live subscriptions open on the current connection.
+  Iterable<List<Map<String, dynamic>>> get liveFilters =>
+      sockets.isEmpty ? const [] : sockets.last._live.values;
+
   /// Drops the current connection, as a network loss would. Its live
   /// subscriptions and queued replies die with it; stored history survives.
   void drop([Object? error]) => sockets.last.drop(error);
@@ -116,18 +147,35 @@ class FakeRelay {
   void _receive(FakeRelaySocket socket, List<dynamic> message) {
     switch (message.first) {
       case 'REQ':
-        reqs.add(message);
         final subId = message[1] as String;
+        if (!socket._authenticated) {
+          reqsBeforeAuth.add(message);
+          scheduleMicrotask(
+            () => socket._reply([
+              'CLOSED',
+              subId,
+              'auth-required: not authenticated',
+            ]),
+          );
+          return;
+        }
+        reqs.add(message);
         final filters = message.skip(2).cast<Map<String, dynamic>>().toList();
-        final history = _query(filters);
-        if (history == null) return;
-        socket._live[subId] = filters;
-        scheduleMicrotask(() {
-          for (final event in history) {
-            socket._reply(['EVENT', subId, event.toJson()]);
-          }
-          socket._reply(['EOSE', subId]);
-        });
+        void admit() {
+          if (!socket._authenticated) return;
+          final history = _query(filters);
+          if (history == null) return;
+          socket._live[subId] = filters;
+          scheduleMicrotask(() {
+            for (final event in history) {
+              socket._reply(['EVENT', subId, event.toJson()]);
+            }
+            socket._reply(['EOSE', subId]);
+          });
+        }
+
+        final hold = _reqHold;
+        hold == null ? admit() : hold.future.then((_) => admit());
       case 'CLOSE':
         socket._live.remove(message[1]);
       case 'EVENT':
@@ -224,6 +272,13 @@ class FakeRelay {
     final until = filter['until'] as int?;
     if (since != null && event.createdAt < since) return false;
     if (until != null && event.createdAt > until) return false;
+    // Buzz pagination: strictly after the cursor in `created_at DESC, id ASC`.
+    final beforeId = filter['before_id'] as String?;
+    if (beforeId != null &&
+        event.createdAt == until &&
+        event.id.compareTo(beforeId) <= 0) {
+      return false;
+    }
     for (final MapEntry(:key, :value) in filter.entries) {
       if (!key.startsWith('#')) continue;
       final name = key.substring(1);
@@ -327,10 +382,16 @@ class FakeRelaySocket extends RelaySocket {
   final void Function(Object? error) _onDisconnected;
   final _live = <String, List<Map<String, dynamic>>>{};
   bool _open = false;
+  bool _authenticated = false;
 
   @override
   Future<void> connect() async {
     _open = true;
+    final hold = _relay._authHold;
+    _relay._authHold = null;
+    if (hold != null) await hold.future;
+    if (!_open) return;
+    _authenticated = true;
     _onConnected();
   }
 
@@ -345,6 +406,7 @@ class FakeRelaySocket extends RelaySocket {
   @override
   void dispose() {
     _open = false;
+    _authenticated = false;
     _live.clear();
   }
 
@@ -359,7 +421,15 @@ class FakeRelaySocket extends RelaySocket {
   }
 }
 
-const _filterKeys = {'ids', 'authors', 'kinds', 'since', 'until', 'limit'};
+const _filterKeys = {
+  'ids',
+  'authors',
+  'kinds',
+  'since',
+  'until',
+  'limit',
+  'before_id',
+};
 const _windowKeys = {
   'top_level',
   'include_summaries',
@@ -372,6 +442,19 @@ const _windowKeys = {
 int _newestFirst(NostrEvent a, NostrEvent b) => a.createdAt != b.createdAt
     ? b.createdAt.compareTo(a.createdAt)
     : a.id.compareTo(b.id);
+
+/// Always draws the midpoint, so reconnect jitter is exactly the backoff and
+/// tests can elapse a known delay.
+class _MidpointRandom implements Random {
+  @override
+  double nextDouble() => 0.5;
+
+  @override
+  bool nextBool() => false;
+
+  @override
+  int nextInt(int max) => max ~/ 2;
+}
 
 class _FixedRelayConfig extends RelayConfigNotifier {
   _FixedRelayConfig(this._nsec);

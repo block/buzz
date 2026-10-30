@@ -17,6 +17,7 @@ import 'media_auth.dart';
 import 'mp4_fast_start.dart';
 import 'relay_provider.dart';
 import '../hosted/hosted_relay_auth.dart';
+import 'package:buzz/shared/crypto/event_signing.dart';
 
 part 'media_upload/platform_bindings.dart';
 part 'media_upload/helpers.dart';
@@ -702,12 +703,11 @@ class MediaUploadService {
       ['server', serverAuthority],
     ];
 
-    return nostr.Event.from(
+    return signNostrEvent(
       kind: _uploadAuthKind,
       content: 'Upload buzz-media',
       tags: tags,
       secretKey: privkeyHex,
-      verify: false,
     );
   }
 

@@ -1461,7 +1461,7 @@ pub fn extract_slash_command(content: &str, known_names: &[&str]) -> Option<Stri
                         .unwrap_or(after_at.len());
                     (len > 0).then_some(len)
                 });
-            let len = name_len?; // bare '@' is not a mention
+            let len = name_len?; // bare '@' — not a mention
             rest = after_at[len..].trim_start();
         } else {
             break;

@@ -396,12 +396,11 @@ void _sendTypingIndicator(
         ['e', threadHeadId, '', 'reply'],
     ];
 
-    final event = nostr.Event.from(
+    final event = signNostrEvent(
       kind: EventKind.typingIndicator,
       content: '',
       tags: tags,
       secretKey: privkeyHex,
-      verify: false,
     );
 
     // Send directly over WebSocket — fire-and-forget, matching desktop.
@@ -525,9 +524,12 @@ Future<_NonMemberMentionScan> _scanNonMemberMentions(
   );
   if (selectedMentions.isEmpty) return none;
 
-  final channel = (await ref.read(
-    channelsProvider.future,
-  )).firstWhere((candidate) => candidate.id == channelId);
+  // A DM opened ahead of a reloading list is found without waiting for it.
+  final channel =
+      ref.read(channelsProvider.notifier).channelById(channelId) ??
+      (await ref.read(
+        channelsProvider.future,
+      )).firstWhere((candidate) => candidate.id == channelId);
 
   // A DM decides who is inside it the way its send does: by current
   // membership, or by the channel metadata when membership is unavailable.

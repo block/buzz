@@ -18,7 +18,7 @@ pub mod community;
 pub mod deletion;
 /// Direct message channel persistence.
 pub mod dm;
-/// Operator-global synthetic user-deletion request intake.
+/// Shared operator-global deletion workflow persistence.
 pub mod entity_deletion;
 /// Event storage and retrieval.
 pub mod event;
@@ -26,6 +26,10 @@ pub mod event;
 pub(crate) mod event_follow_up;
 /// Per-community NIP-FI issuer bindings.
 pub mod nip_fi_binding;
+/// User-specific deletion submission and inventory preparation.
+pub mod user_deletion;
+/// Operator-global user restrictions and identity-lock primitives.
+pub mod user_deletion_fences;
 
 #[cfg(test)]
 mod event_follow_up_postgres_tests;
@@ -85,6 +89,9 @@ mod artifact_postgres_tests;
 
 #[cfg(test)]
 mod legacy_channel_types_postgres_tests;
+
+#[cfg(test)]
+mod unlisted_channels_postgres_tests;
 
 #[cfg(test)]
 mod admission_postgres_tests;

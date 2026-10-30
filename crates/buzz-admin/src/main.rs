@@ -135,7 +135,7 @@ enum Command {
         #[command(subcommand)]
         command: deletions::DeletionsCommand,
     },
-    /// Submit and inspect synthetic user-deletion requests.
+    /// Preview real user memberships or manage synthetic user-deletion requests.
     UserDeletions {
         #[command(subcommand)]
         command: user_deletions::UserDeletionsCommand,

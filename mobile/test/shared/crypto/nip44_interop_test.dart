@@ -18,4 +18,22 @@ void main() {
       '{"version":1,"theme":"catppuccin-latte","accent":"#f97316","followSystem":false}',
     );
   });
+
+  test('predicts the encrypted payload length at every padding boundary', () {
+    final key = getConversationKey(
+      '0000000000000000000000000000000000000000000000000000000000000001',
+      '79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798',
+    );
+    for (final length in [
+      1, 32, 33, 256, 257, 4096, 4097, 32768, 32769, 65535, //
+    ]) {
+      expect(
+        nip44PayloadLength(length),
+        nip44Encrypt(key, 'x' * length).length,
+        reason: '$length bytes',
+      );
+    }
+    expect(nip44PayloadLength(0), isNull);
+    expect(nip44PayloadLength(65536), isNull);
+  });
 }

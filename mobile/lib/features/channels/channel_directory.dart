@@ -195,15 +195,15 @@ Future<T> _fenced<T>(_ChannelRefreshFence fence, Future<T> future) async {
 /// Lives in this part file because `channels_provider.dart` sits against the
 /// repository-wide 1200-line file ceiling enforced by `just file-size-check`.
 Future<Map<String, String>> _resolveDmDisplayNames(
-  RelaySessionNotifier session,
+  Ref ref,
   _ChannelRefreshFence fence,
-  Iterable<NostrEvent> dedupedMetas,
-  String myPk,
-) async {
+  Iterable<ChannelData> channelMetas,
+  String myPk, {
+  required bool refreshCached,
+}) async {
   final dmParticipants = <String>{};
   final myPkLower = myPk.toLowerCase();
-  for (final event in dedupedMetas) {
-    final data = ChannelData.fromEvent(event);
+  for (final data in channelMetas) {
     if (data.channelType != 'dm') continue;
     for (final pk in data.participantPubkeys) {
       final lower = pk.toLowerCase();
@@ -212,22 +212,42 @@ Future<Map<String, String>> _resolveDmDisplayNames(
   }
   if (dmParticipants.isEmpty) return const {};
 
-  final profileEvents = await _fenced(
+  final profiles = await _fenced(
     fence,
-    session.fetchHistory(NostrFilters.profilesBatch(dmParticipants.toList())),
+    ref
+        .read(userCacheProvider.notifier)
+        .resolve(dmParticipants.toList(), refreshCached: refreshCached),
   );
   final displayNames = <String, String>{};
-  for (final event in profileEvents) {
-    if (event.kind != 0) continue;
-    final profile = ProfileData.fromEvent(event);
+  for (final profile in profiles.values) {
     final label = profile.displayName?.trim().isNotEmpty == true
         ? profile.displayName!.trim()
-        : profile.nip05?.trim().isNotEmpty == true
-        ? profile.nip05!.trim()
+        : profile.nip05Handle?.trim().isNotEmpty == true
+        ? profile.nip05Handle!.trim()
         : shortPubkey(profile.pubkey);
     displayNames[profile.pubkey.toLowerCase()] = label;
   }
   return displayNames;
+}
+
+List<NostrEvent> _latestChannelEvents(
+  Iterable<NostrEvent> events, {
+  required int kind,
+}) {
+  final latestById = <String, NostrEvent>{};
+  for (final event in events) {
+    if (event.kind != kind) continue;
+    final id = event.getTagValue('d');
+    if (id == null) continue;
+    final current = latestById[id];
+    if (current == null ||
+        event.createdAt > current.createdAt ||
+        (event.createdAt == current.createdAt &&
+            event.id.compareTo(current.id) < 0)) {
+      latestById[id] = event;
+    }
+  }
+  return latestById.values.toList();
 }
 
 Future<Set<String>> _fetchHiddenDmIds(
@@ -235,19 +255,25 @@ Future<Set<String>> _fetchHiddenDmIds(
   String myPk,
 ) async {
   try {
-    final events = await session.fetchHistory(NostrFilters.hiddenDms(myPk));
-    if (events.isEmpty) return const {};
-    NostrEvent latest = events.first;
-    for (final event in events.skip(1)) {
-      if (event.createdAt > latest.createdAt) latest = event;
-    }
-    return {
-      for (final tag in latest.tags)
-        if (tag.length >= 2 && tag[0] == 'h') tag[1],
-    };
+    return hiddenDmIdsFromEvents(
+      await session.fetchHistory(NostrFilters.hiddenDms(myPk)),
+    );
   } catch (_) {
     return const {};
   }
+}
+
+/// The DM ids hidden by the newest of the caller's NIP-DV snapshots.
+Set<String> hiddenDmIdsFromEvents(List<NostrEvent> events) {
+  if (events.isEmpty) return const {};
+  NostrEvent latest = events.first;
+  for (final event in events.skip(1)) {
+    if (event.createdAt > latest.createdAt) latest = event;
+  }
+  return {
+    for (final tag in latest.tags)
+      if (tag.length >= 2 && tag[0] == 'h') tag[1],
+  };
 }
 
 Future<List<NostrEvent>> _fetchHuddleStarts(

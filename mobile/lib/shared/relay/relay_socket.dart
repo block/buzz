@@ -9,6 +9,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'nostr_models.dart';
 import 'relay_websocket.dart';
+import 'package:buzz/shared/crypto/event_signing.dart';
 
 /// Low-level websocket connection with NIP-42 authentication.
 ///
@@ -51,8 +52,13 @@ class RelaySocket {
   Completer<void>? _authCompleter;
   Timer? _authTimeout;
   String? _pendingAuthEventId;
+  int? _closeCode;
 
   SocketState get state => _state;
+
+  /// The WebSocket close code the relay sent, once it has closed the
+  /// connection; null if the connection failed without one.
+  int? get closeCode => _closeCode;
 
   /// Scoped assertion supplied by the connection owner before connecting.
   Map<String, String> headers = const {};
@@ -107,6 +113,7 @@ class RelaySocket {
         _onDisconnected(error);
       },
       onDone: () {
+        _closeCode = _channel?.closeCode;
         _failAuth(null);
         _resetConnection();
         _onDisconnected(null);
@@ -224,7 +231,7 @@ class RelaySocket {
       ];
 
       // Create and sign the kind:22242 AUTH event.
-      final event = nostr.Event.from(
+      final event = signNostrEvent(
         kind: EventKind.auth,
         content: '',
         tags: tags,

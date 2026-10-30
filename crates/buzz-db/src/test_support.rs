@@ -314,3 +314,124 @@ pub(crate) async fn wait_for_lock_wait(pool: &sqlx::PgPool, application_name: &s
     .await
     .expect("session reached a lock wait");
 }
+
+/// Loopback TCP proxy that can pause the upstream database, like
+/// `docker pause` on a replica. While paused, every session (established or
+/// new) holds the bytes it receives with both sockets open; on resume the
+/// held bytes are delivered in order and the sessions carry on.
+///
+/// [`PausingProxy::stall_established`] instead holds only the sessions open
+/// at that moment, for good, while later sessions relay normally: a failover
+/// whose old sockets stop answering without closing.
+/// [`PausingProxy::stall_from`] is the reverse: sessions from a given number
+/// on hold for good, so dials past that point stall mid-handshake.
+pub(crate) struct PausingProxy {
+    pub(crate) port: u16,
+    hold: tokio::sync::watch::Sender<ProxyHold>,
+    next_session: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// Which proxy sessions hold their bytes.
+#[derive(Clone, Copy, Default)]
+struct ProxyHold {
+    all: bool,
+    /// Sessions numbered below this hold their bytes.
+    below: u64,
+    /// Sessions numbered at or above this hold their bytes.
+    from: Option<u64>,
+}
+
+impl ProxyHold {
+    fn holds(self, session: u64) -> bool {
+        self.all || session < self.below || self.from.is_some_and(|from| session >= from)
+    }
+}
+
+impl PausingProxy {
+    pub(crate) async fn spawn(upstream_host: String, upstream_port: u16) -> Self {
+        use std::sync::atomic::Ordering;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn pump(
+            mut from: tokio::net::tcp::OwnedReadHalf,
+            mut to: tokio::net::tcp::OwnedWriteHalf,
+            mut hold: tokio::sync::watch::Receiver<ProxyHold>,
+            session: u64,
+        ) {
+            let mut buf = [0u8; 8192];
+            loop {
+                let Ok(n) = from.read(&mut buf).await else {
+                    return;
+                };
+                if n == 0 {
+                    return;
+                }
+                if hold.wait_for(|hold| !hold.holds(session)).await.is_err() {
+                    return;
+                }
+                if to.write_all(&buf[..n]).await.is_err() {
+                    return;
+                }
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind proxy");
+        let port = listener.local_addr().expect("proxy addr").port();
+        let (hold, _) = tokio::sync::watch::channel(ProxyHold::default());
+        let accept_hold = hold.subscribe();
+        let next_session = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let accept_next = next_session.clone();
+        tokio::spawn(async move {
+            while let Ok((client, _)) = listener.accept().await {
+                let session = accept_next.fetch_add(1, Ordering::SeqCst);
+                let Ok(server) =
+                    tokio::net::TcpStream::connect((upstream_host.as_str(), upstream_port)).await
+                else {
+                    continue;
+                };
+                let (client_read, client_write) = client.into_split();
+                let (server_read, server_write) = server.into_split();
+                tokio::spawn(pump(
+                    client_read,
+                    server_write,
+                    accept_hold.clone(),
+                    session,
+                ));
+                tokio::spawn(pump(
+                    server_read,
+                    client_write,
+                    accept_hold.clone(),
+                    session,
+                ));
+            }
+        });
+        Self {
+            port,
+            hold,
+            next_session,
+        }
+    }
+
+    pub(crate) fn set_paused(&self, paused: bool) {
+        self.hold.send_modify(|hold| hold.all = paused);
+    }
+
+    /// Hold every session open now, for good; later sessions relay normally.
+    pub(crate) fn stall_established(&self) {
+        let below = self.next_session.load(std::sync::atomic::Ordering::SeqCst);
+        self.hold.send_modify(|hold| hold.below = below);
+    }
+
+    /// Relay the first `from` sessions normally and hold every later one,
+    /// for good.
+    pub(crate) fn stall_from(&self, from: u64) {
+        self.hold.send_modify(|hold| hold.from = Some(from));
+    }
+
+    /// Sessions accepted so far.
+    pub(crate) fn sessions(&self) -> u64 {
+        self.next_session.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}

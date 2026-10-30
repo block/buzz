@@ -6,6 +6,9 @@ import 'package:flutter/services.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
+import 'package:buzz/shared/mentions/agent_identity_provider.dart';
+import 'package:buzz/shared/profile/user_cache_provider.dart';
+import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:flutter/material.dart';
@@ -234,7 +237,12 @@ void main() {
             ),
             meSyncProvider.overrideWithValue(sync),
             channelsProvider.overrideWith(FakeChannels.new),
-            meAssistantsProvider.overrideWith((ref) async => []),
+            meAssistantsProvider.overrideWith(
+              (ref) async => const [
+                AgentDirectoryEntry(pubkey: 'agent', displayName: 'Owner Name'),
+              ],
+            ),
+            userCacheProvider.overrideWith(_ConfusableProfiles.new),
           ],
           child: MaterialApp(
             theme: AppTheme.light(),
@@ -274,6 +282,21 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Enter a name and choose an agent.'), findsOneWidget);
       expect(find.text('Design session'), findsOneWidget);
+      // The owner's label and its initial outrank the agent's own profile.
+      await tester.tap(find.byKey(const ValueKey('new-session-assistant')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Owner Name').last);
+      await tester.pumpAndSettle();
+      final row = find.byKey(const ValueKey('new-session-assistant'));
+      expect(
+        find.descendant(of: row, matching: find.text('Owner Name')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: row, matching: find.text('O')),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Confusable'), findsNothing);
     },
   );
 
@@ -328,8 +351,11 @@ void main() {
           channelsProvider.overrideWith(FakeChannels.new),
           meAssistantsProvider.overrideWith((ref) async {
             directoryLoads++;
-            return [];
+            return const [
+              AgentDirectoryEntry(pubkey: 'agent', displayName: 'Owner Name'),
+            ];
           }),
+          userCacheProvider.overrideWith(_ConfusableProfiles.new),
         ],
         child: MaterialApp(theme: AppTheme.light(), home: const MePage()),
       ),
@@ -347,7 +373,14 @@ void main() {
     final args = calls.single.arguments as Map;
     expect(args['title'], 'New chat');
     expect(args['placeholder'], 'Chat name');
-    expect(args['assistants'], isEmpty);
+    expect(args['assistants'], [
+      {
+        'id': 'agent',
+        'name': 'Owner Name',
+        'artworkScale': '1',
+        'avatarUrl': '',
+      },
+    ]);
     expect(args['projects'], [
       {'id': 'mobile', 'name': 'Mobile app'},
     ]);
@@ -470,4 +503,11 @@ void main() {
     expect(find.text('Try again'), findsOneWidget);
     expect(find.text('A place to work with your agents'), findsNothing);
   });
+}
+
+class _ConfusableProfiles extends UserCacheNotifier {
+  @override
+  Map<String, UserProfile> build() => {
+    'agent': const UserProfile(pubkey: 'agent', displayName: 'Confusable Name'),
+  };
 }

@@ -25,6 +25,7 @@ enum HostedFlowStage {
   working,
   signIn,
   chooseIdentity,
+  setupIdentity,
   chooseCommunities,
   communityConflict,
   acceptPolicy,
@@ -52,6 +53,8 @@ enum HostedFlowProblem {
   inviteExpired,
   inviteExhausted,
   inviteInvalid,
+  inviteRestricted,
+  inviteOwnerMismatch,
   communityCreationRejected,
 }
 
@@ -74,6 +77,7 @@ class HostedFlow extends ChangeNotifier {
     required this.store,
     required this.identity,
     required this.enterCommunity,
+    this.openLandingCommunity,
     Future<bool> Function(Uri)? openWeb,
   }) : _openWeb =
            openWeb ??
@@ -83,29 +87,41 @@ class HostedFlow extends ChangeNotifier {
   final AccountIdentityStore store;
   final HostedIdentityService identity;
   final HostedCommunityAdmission enterCommunity;
+  final HostedCommunityAdmission? openLandingCommunity;
   bool get canRetry =>
       problem == null ||
       problem == HostedFlowProblem.retry ||
-      problem == HostedFlowProblem.invitePolicyRequired;
+      problem == HostedFlowProblem.invitePolicyRequired ||
+      problem == HostedFlowProblem.inviteRestricted;
   final Future<bool> Function(Uri) _openWeb;
   HostedFlowStage stage = HostedFlowStage.idle;
   HostedFlowProblem? problem;
   List<DeviceIdentityChoice> identityChoices = const [];
   BuzzDeepLink? _target;
   bool accountOnly = false;
+  bool canCreateIdentity = false;
+  String? requiredIdentityPubkey;
   String? _pairedPubkey;
   SensitiveActionPolicy? pairedSensitiveActionPolicy;
   List<AddCommunityDeepLink> communities = const [];
   Set<String> selectedRelays = const {};
+  String? landingRelay;
   final Set<String> _addedRelays = {};
   bool _addingCommunities = false;
+  Completer<bool>? _pendingAdd;
   String? _batchSubject;
   String? _conflictingRelay;
+  String? _failedRelay;
+  bool get canSkipFailedCommunity =>
+      canChangeCommunities &&
+      stage == HostedFlowStage.blocked &&
+      _failedRelay != null;
   bool get canChangeCommunities =>
       accountOnly &&
       account.account?.subject == _batchSubject &&
       (stage == HostedFlowStage.blocked ||
-          stage == HostedFlowStage.communityConflict) &&
+          stage == HostedFlowStage.communityConflict ||
+          (stage == HostedFlowStage.working && _addingCommunities)) &&
       communities.isNotEmpty;
   String? addingCommunityName;
   int get addedCommunityCount => _addedRelays.length;
@@ -116,6 +132,7 @@ class HostedFlow extends ChangeNotifier {
   int _generation = 0;
 
   int _nextGeneration() {
+    _failedRelay = null;
     _cancelPolicy();
     _cancelProfile();
     return ++_generation;
@@ -447,7 +464,39 @@ class HostedFlow extends ChangeNotifier {
     return _enqueue(() => _continue(generation, selectedPubkey: pubkey));
   }
 
-  Future<void> _continue(int generation, {String? selectedPubkey}) async {
+  /// A new identity is offered only after authoritative absence was established.
+  Future<void> createIdentity() {
+    if (stage != HostedFlowStage.setupIdentity || !canCreateIdentity) {
+      return Future.value();
+    }
+    final generation = _nextGeneration();
+    _set(HostedFlowStage.working);
+    return _enqueue(() => _continue(generation, createNew: true));
+  }
+
+  /// Import through the existing secure store, rechecking the account binding.
+  /// Errors propagate to the import sheet without discarding the setup choice.
+  Future<void> importIdentity(String nsec) {
+    final generation = _generation;
+    final subject = account.account?.subject;
+    if (stage != HostedFlowStage.setupIdentity || subject == null) {
+      throw AccountFailure.unavailable;
+    }
+    return _queue.run(() async {
+      bool current() =>
+          !_disposed &&
+          generation == _generation &&
+          account.account?.subject == subject;
+      if (!current()) throw AccountFailure.unavailable;
+      await identity.resolve(isCurrent: current, importNsec: nsec);
+    });
+  }
+
+  Future<void> _continue(
+    int generation, {
+    String? selectedPubkey,
+    bool createNew = false,
+  }) async {
     final target = _target;
     final session = account.account;
     if ((target == null && !accountOnly) || session == null) {
@@ -462,6 +511,7 @@ class HostedFlow extends ChangeNotifier {
     var resolved = await identity.resolve(
       isCurrent: _isCurrent(generation),
       selectedPubkey: selectedPubkey ?? _pairedPubkey,
+      createNew: createNew,
     );
     if (_pairedPubkey != null && resolved.pubkey != _pairedPubkey) {
       _set(HostedFlowStage.blocked, HostedFlowProblem.identityMismatch);
@@ -525,6 +575,12 @@ class HostedFlow extends ChangeNotifier {
       }
     }
     if (generation != _generation || _disposed) return;
+    if (resolved.state == HostedIdentityState.needsSetup) {
+      canCreateIdentity = resolved.canCreate;
+      requiredIdentityPubkey = resolved.pubkey;
+      _set(HostedFlowStage.setupIdentity);
+      return;
+    }
     if (resolved.state == HostedIdentityState.needsSelection) {
       identityChoices = List.unmodifiable(resolved.choices);
       _set(HostedFlowStage.chooseIdentity);
@@ -577,20 +633,42 @@ class HostedFlow extends ChangeNotifier {
       _isCurrent(generation),
     );
     if (generation != _generation || _disposed) return;
+    // Save only after admission/persistence succeeds. A failure keeps the
+    // existing intent for retry; add is idempotent after a lost response.
+    await account.rememberCommunity(
+      destination.relayUrl ?? (throw AccountFailure.invalidResponse),
+      expectedSubject: session.subject,
+    );
+    if (generation != _generation || _disposed) return;
     await browser.clearIntent();
     _set(HostedFlowStage.complete);
   }
 
-  void selectCommunity(String relay, bool selected) {
+  void chooseLandingCommunity(String relay) {
     if (stage != HostedFlowStage.chooseCommunities ||
         !communities.any((item) => item.relayUrl == relay)) {
       return;
     }
-    selectedRelays = Set.unmodifiable({
-      ...selectedRelays.where((item) => item != relay),
-      if (selected) relay,
-    });
+    selectedRelays = Set.unmodifiable({...selectedRelays, relay});
+    landingRelay = relay;
     notifyListeners();
+  }
+
+  /// Restore existing memberships before presenting a separate Add route.
+  Future<bool> prepareToAddCommunity() {
+    if (_pendingAdd != null || stage != HostedFlowStage.chooseCommunities) {
+      return Future.value(false);
+    }
+    if (selectedRelays.isEmpty) return Future.value(true);
+    final pending = _pendingAdd = Completer<bool>();
+    unawaited(addSelectedCommunities());
+    return pending.future;
+  }
+
+  void _finishPreparingAdd(bool ready) {
+    final pending = _pendingAdd;
+    _pendingAdd = null;
+    pending?.complete(ready);
   }
 
   Future<void> addSelectedCommunities() {
@@ -605,17 +683,27 @@ class HostedFlow extends ChangeNotifier {
     return _enqueue(() => _continue(generation));
   }
 
-  /// Keep completed additions and let the user omit a failing target.
+  /// Keep completed additions while allowing a different landing choice.
   void backToCommunityChoices() {
     if (!canChangeCommunities) return;
+    _finishPreparingAdd(false);
     _nextGeneration();
-    communities = List.unmodifiable(
-      communities.where((item) => !_addedRelays.contains(item.relayUrl)),
-    );
-    selectedRelays = Set.unmodifiable(selectedRelays.difference(_addedRelays));
     _conflictingRelay = null;
     addingCommunityName = null;
     _set(HostedFlowStage.chooseCommunities);
+  }
+
+  /// Omit only the failed membership for this restore attempt.
+  Future<void> skipFailedCommunity() {
+    if (!canSkipFailedCommunity) return Future.value();
+    final relay = _failedRelay!;
+    selectedRelays = Set.unmodifiable(
+      selectedRelays.where((item) => item != relay),
+    );
+    _failedRelay = null;
+    final generation = _nextGeneration();
+    _set(HostedFlowStage.working);
+    return _enqueue(() => _continue(generation));
   }
 
   Future<void> skipConflictingCommunity() {
@@ -642,7 +730,7 @@ class HostedFlow extends ChangeNotifier {
         generation == _generation &&
         account.account?.subject == subject;
     if (!_addingCommunities) {
-      final listed = await loadHostedCommunities(account);
+      final listed = await loadKnownHostedCommunities(account);
       if (!current()) return;
       communities = listed;
       selectedRelays = Set.unmodifiable(listed.map((item) => item.relayUrl));
@@ -650,11 +738,17 @@ class HostedFlow extends ChangeNotifier {
         await leave(noCommunities: true);
         return;
       }
-      // Direct account entry imports every joined community. The existing
-      // switcher handles choosing which community to enter after admission.
-      _addingCommunities = true;
+      landingRelay = listed.first.relayUrl;
+      // Choose where to land; every membership is restored.
+      _set(HostedFlowStage.chooseCommunities);
+      return;
     }
-    for (final community in communities) {
+    _failedRelay = null;
+    final ordered = [
+      ...communities.where((item) => item.relayUrl == landingRelay),
+      ...communities.where((item) => item.relayUrl != landingRelay),
+    ];
+    for (final community in ordered) {
       if (!current()) return;
       if (!selectedRelays.contains(community.relayUrl) ||
           _addedRelays.contains(community.relayUrl)) {
@@ -669,12 +763,20 @@ class HostedFlow extends ChangeNotifier {
         _conflictingRelay = community.relayUrl;
         _set(HostedFlowStage.communityConflict);
         return;
+      } catch (_) {
+        if (current()) _failedRelay = community.relayUrl;
+        rethrow;
       }
       if (!current()) return;
       _addedRelays.add(community.relayUrl);
     }
     if (!current()) return;
     addingCommunityName = null;
+    if (_pendingAdd != null) {
+      _set(HostedFlowStage.chooseCommunities);
+      _finishPreparingAdd(true);
+      return;
+    }
     if (_addedRelays.isEmpty) {
       communities = List.unmodifiable(
         communities.where((item) => selectedRelays.contains(item.relayUrl)),
@@ -682,6 +784,19 @@ class HostedFlow extends ChangeNotifier {
       await leave(noCommunities: true);
       return;
     }
+    final destination = _addedRelays.contains(landingRelay)
+        ? landingRelay!
+        : _addedRelays.first;
+    await openLandingCommunity?.call(
+      AddCommunityDeepLink(
+        relayUrl: destination,
+        name: Uri.parse(destination).host,
+      ),
+      subject,
+      pubkey,
+      current,
+    );
+    if (!current()) return;
     await browser.clearIntent();
     if (current()) _set(HostedFlowStage.complete);
   }
@@ -747,6 +862,8 @@ class HostedFlow extends ChangeNotifier {
     HostedInviteFailure.expired => HostedFlowProblem.inviteExpired,
     HostedInviteFailure.exhausted => HostedFlowProblem.inviteExhausted,
     HostedInviteFailure.invalid => HostedFlowProblem.inviteInvalid,
+    HostedInviteFailure.restricted => HostedFlowProblem.inviteRestricted,
+    HostedInviteFailure.ownerMismatch => HostedFlowProblem.inviteOwnerMismatch,
     AccountFailure.denied => HostedFlowProblem.denied,
     AccountFailure.accountSetupRequired =>
       HostedFlowProblem.accountSetupRequired,
@@ -781,9 +898,12 @@ class HostedFlow extends ChangeNotifier {
   bool noCommunitiesToAdd = false;
 
   void _clearCommunityBatch() {
+    _finishPreparingAdd(false);
     noCommunitiesToAdd = false;
     communities = const [];
     selectedRelays = const {};
+    landingRelay = null;
+    _failedRelay = null;
     _addedRelays.clear();
     _batchSubject = null;
     _conflictingRelay = null;
@@ -855,6 +975,7 @@ class HostedFlow extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _finishPreparingAdd(false);
     _cancelPolicy();
     _cancelProfile();
     _nextGeneration();

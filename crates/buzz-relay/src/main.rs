@@ -538,7 +538,8 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         info!("Postgres connected (writer + lazy read replica pool)");
         // Reader-down at boot must not crash or block the relay; this warn-only
         // ping is the sole boot-time visibility that the replica is unreachable
-        // (the lazy pool with min_connections=0 dials nothing until first use).
+        // (the lazy pool dials nothing at construction). On success it also
+        // fills the reader's warm floor in the background.
         db.spawn_read_pool_boot_ping();
     } else {
         info!("Postgres connected");
@@ -1112,24 +1113,8 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         );
     }
 
-    let step = StepTimer::start(StartupStep::ChannelRosterFence);
-    match state.db.verify_channel_roster_fence().await {
-        Ok(()) => {
-            info!("Channel roster fence verified");
-        }
-        Err(error) => {
-            error!(%error, "Channel roster fence validation failed");
-            return Err(anyhow::anyhow!(
-                "Channel roster fence is unsafe; apply or repair migration 0032 before starting this relay: {error}"
-            ));
-        }
-    }
-    step.finish();
-
     // Repair legacy NIP-29 channel rosters that were persisted while the
-    // canonical member query still truncated at 1,000 rows. Validation above
-    // makes migration 0032 a code/schema compatibility gate before the new
-    // replacement protocol or listener can serve traffic.
+    // canonical member query still truncated at 1,000 rows.
     let mut step = StepTimer::start(StartupStep::LargeRosterReconcile);
     match buzz_relay::handlers::side_effects::reconcile_large_channel_member_snapshots(&state).await
     {

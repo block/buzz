@@ -65,7 +65,9 @@ double _searchHeaderFiltersHeight(BuildContext context) {
 }
 
 class SearchPage extends HookConsumerWidget {
-  const SearchPage({this.tabReselection, super.key});
+  const SearchPage({this.tabReselection, this.embedded = false, super.key});
+
+  final bool embedded;
 
   /// Notifies this page when its already-selected tab is tapped again.
   final ValueListenable<int>? tabReselection;
@@ -142,30 +144,35 @@ class SearchPage extends HookConsumerWidget {
               ),
               child: Row(
                 children: [
-                  if (nativeIos)
-                    IosGlassNavigationButton(
-                      key: const Key('search-close'),
-                      icon: IosGlassNavigationIcon.close,
-                      semanticLabel: 'Close search',
-                      onPressed: closeSearch,
-                      controlSize: 48,
-                      foregroundColor: searchPrimaryColor,
-                    )
-                  else
-                    SizedBox.square(
-                      key: const Key('search-close'),
-                      dimension: 48,
-                      child: IconButton(
-                        tooltip: 'Close search',
+                  if (!embedded) ...[
+                    if (nativeIos)
+                      IosGlassNavigationButton(
+                        key: const Key('search-close'),
+                        icon: IosGlassNavigationIcon.close,
+                        semanticLabel: 'Close search',
                         onPressed: closeSearch,
-                        style: IconButton.styleFrom(
-                          backgroundColor: searchSurfaceColor,
-                          foregroundColor: searchPrimaryColor,
+                        controlSize: 48,
+                        foregroundColor: searchPrimaryColor,
+                      )
+                    else
+                      SizedBox.square(
+                        key: const Key('search-close'),
+                        dimension: 48,
+                        child: IconButton(
+                          tooltip: 'Close search',
+                          onPressed: closeSearch,
+                          style: IconButton.styleFrom(
+                            backgroundColor: searchSurfaceColor,
+                            foregroundColor: searchPrimaryColor,
+                          ),
+                          icon: const Icon(
+                            BuzzIcons.x,
+                            size: buzzSearchControlIconSize,
+                          ),
                         ),
-                        icon: const Icon(BuzzIcons.x),
                       ),
-                    ),
-                  const SizedBox(width: Grid.xxs),
+                    const SizedBox(width: Grid.xxs),
+                  ],
                   Expanded(
                     child: SizedBox(
                       key: const Key('search-field-container'),
@@ -583,11 +590,14 @@ class _PeopleSection extends ConsumerWidget {
             onResultSelected();
             final channel = await ref
                 .read(channelActionsProvider)
-                .openDm(pubkeys: [user.pubkey]);
+                .openDm(pubkeys: [user.pubkey], waitForChannelList: false);
             if (!context.mounted) return;
             await Navigator.of(context).push(
               MaterialPageRoute<void>(
-                builder: (_) => ChannelDetailPage(channel: channel),
+                builder: (_) => ChannelDetailPage(
+                  channel: channel,
+                  placement: ChannelRoutePlacement.ordinary,
+                ),
               ),
             );
           },

@@ -1,3 +1,9 @@
+import 'package:buzz/features/channels/default_agent_launcher.dart';
+import 'package:buzz/features/agents/agents_page.dart';
+import 'dart:convert';
+import 'package:nostr/nostr.dart' as nostr;
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
+import 'package:buzz/shared/read_state/read_state_storage.dart';
 import 'package:buzz/features/home/home_page.dart';
 import 'package:buzz/shared/widgets/app_route_observer.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
@@ -6,6 +12,7 @@ import 'package:buzz/shared/community/paired_community_landing.dart';
 import 'dart:async';
 
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:buzz/shared/channels/channel_list_snapshot.dart';
 
 import '../profile/presence_snapshot_test.dart'
     show PresenceTestRelay, presenceEvent;
@@ -47,13 +54,14 @@ import 'package:buzz/shared/utils/string_utils.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/community/community_icon_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/me/me_groups.dart';
+import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:buzz/shared/emoji/emoji_avatar.dart';
 import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
-import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 
 import '../../helpers/thread_ids.dart';
@@ -61,6 +69,7 @@ import '../../helpers/thread_ids.dart';
 part 'channels_page_test/presence_tests.dart';
 part 'channels_page_test/dm_recipient_layout_tests.dart';
 part 'channels_page_test/unread_readiness_tests.dart';
+part 'channels_page_test/read_seed_journey.dart';
 
 void main() {
   setUpAll(() async {
@@ -91,6 +100,7 @@ void main() {
     ValueListenable<int>? tabReselection,
     _FakeProfileNotifier? profile,
     bool realHome = false,
+    Widget? soloSliver,
   }) {
     return ProviderScope(
       overrides: [
@@ -126,6 +136,10 @@ void main() {
         ),
         home: realHome
             ? HomePage(
+                onAgents: showAgents,
+                defaultAgentBuilder: (context) => DefaultAgentLauncher(
+                  onChooseAgent: () => showAgents(context),
+                ),
                 settingsPageBuilder: _buildSettingsPage,
                 hasUnreadInbox: false,
               )
@@ -140,6 +154,7 @@ void main() {
                     onSettingsTransitionProgress:
                         onSettingsTransitionProgress ?? (_) {},
                     tabReselection: tabReselection,
+                    soloSliver: soloSliver,
                   ),
                   const Positioned.fill(
                     child: ChannelQuickActionsLauncher(
@@ -158,6 +173,8 @@ void main() {
   }
 
   _communityUnreadLandingTests(buildTestable);
+  _readSeedJourney(buildTestable);
+  _communityCachedLandingTests(buildTestable);
 
   final testChannels = [
     Channel(
@@ -332,7 +349,7 @@ void main() {
     await tester.pumpAndSettle();
     final ellipsis = find.descendant(
       of: find.byTooltip('Channels options'),
-      matching: find.byIcon(BuzzIcons.ellipsisVertical),
+      matching: find.byIcon(BuzzIcons.ellipsis),
     );
     expect(
       tester.getCenter(ellipsis).dx,
@@ -435,7 +452,7 @@ void main() {
     expect(find.text('Community'), findsNothing);
     expect(find.byTooltip('Create or start conversation'), findsOneWidget);
     expect(find.byTooltip('Channels options'), findsOneWidget);
-    expect(find.byIcon(BuzzIcons.ellipsisVertical), findsWidgets);
+    expect(find.byIcon(BuzzIcons.ellipsis), findsWidgets);
     expect(find.byIcon(BuzzIcons.arrowUpDown), findsNothing);
     expect(find.byTooltip('DMs options'), findsOneWidget);
 
@@ -464,11 +481,14 @@ void main() {
           .getTopRight(
             find.descendant(
               of: find.byTooltip('Channels options'),
-              matching: find.byIcon(BuzzIcons.ellipsisVertical),
+              matching: find.byIcon(BuzzIcons.ellipsis),
             ),
           )
           .dx,
-      closeTo(tester.getTopRight(find.byTooltip('Channels options')).dx, 0.01),
+      closeTo(
+        tester.getTopRight(find.byTooltip('Channels options')).dx - 3,
+        0.01,
+      ),
     );
     await tester.tap(find.byTooltip('Channels options'));
     await tester.pumpAndSettle();
@@ -489,8 +509,8 @@ void main() {
 
     for (final label in ['general', 'Alice']) {
       final text = tester.widget<Text>(find.text(label));
-      expect(text.style?.fontSize, contentListTitleTextStyle.fontSize);
-      expect(text.style?.height, contentListTitleTextStyle.height);
+      expect(text.style?.fontSize, navigationChatTitleTextStyle.fontSize);
+      expect(text.style?.height, navigationChatTitleTextStyle.height);
       expect(
         text.style?.color,
         Theme.of(tester.element(find.text(label))).colorScheme.onSurface,
@@ -498,8 +518,8 @@ void main() {
     }
     expect(find.byKey(const ValueKey('channel-icon-1')), findsOneWidget);
     final sectionTitle = tester.widget<Text>(find.text('Channels'));
-    expect(sectionTitle.style?.fontSize, contentListTitleTextStyle.fontSize);
-    expect(sectionTitle.style?.fontWeight, FontWeight.w400);
+    expect(sectionTitle.style?.fontSize, navigationSectionTextStyle.fontSize);
+    expect(sectionTitle.style?.fontWeight, FontWeight.w500);
   });
 
   testWidgets('keys DM tile fallback avatars to the non-self counterpart', (
@@ -686,53 +706,31 @@ void main() {
     await interruptingDrag.up();
   });
 
-  testWidgets('keeps the last channel above the floating tab bar', (
-    tester,
-  ) async {
-    const footerClearance = 102.0;
+  testWidgets('pull to refresh restarts the Solo reader', (tester) async {
+    var soloReads = 0;
     await tester.pumpWidget(
       buildTestable(
-        bottomPadding: footerClearance,
+        soloSliver: const SliverToBoxAdapter(child: Text('Solo inventory')),
         overrides: [
           channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          meGroupsProvider.overrideWith((ref) {
+            soloReads++;
+            return Stream.value(const MeGroups());
+          }),
         ],
       ),
     );
     await tester.pumpAndSettle();
+    final before = soloReads;
 
-    final padding = tester.widget<SliverPadding>(
-      find.descendant(
-        of: find.byType(CustomScrollView),
-        matching: find.byType(SliverPadding),
-      ),
-    );
-    expect((padding.padding as EdgeInsets).bottom, footerClearance);
-  });
-
-  testWidgets('balances an expanded section around its following divider', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      buildTestable(
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-        ],
-      ),
+    await tester.timedDrag(
+      find.byType(CustomScrollView),
+      const Offset(0, 320),
+      const Duration(milliseconds: 500),
     );
     await tester.pumpAndSettle();
 
-    final lastChannel = tester
-        .getRect(find.text('general'))
-        .expandToInclude(
-          tester.getRect(find.byKey(const ValueKey('channel-icon-1'))),
-        );
-    final divider = tester.getRect(find.byType(Divider).last);
-    final nextSectionHeader = tester.getRect(find.text('DMs'));
-
-    expect(
-      divider.top - lastChannel.bottom,
-      closeTo(nextSectionHeader.top - divider.bottom, 0.01),
-    );
+    expect(soloReads, before + 1);
   });
 
   testWidgets('keeps the Buzz background fixed behind the channels list', (
@@ -858,7 +856,7 @@ void main() {
     final offset = position.pixels;
     await tester.tap(find.byTooltip('Search'));
     await tester.pumpAndSettle();
-    tester.state<NavigatorState>(find.byType(Navigator).first).pop();
+    await tester.tap(find.byKey(const Key('search-close')));
     await tester.pumpAndSettle();
     expect(position.pixels, offset);
     expect(
@@ -867,99 +865,95 @@ void main() {
     );
   });
 
-  for (final routeKind in ['material', 'custom', 'settings']) {
-    testWidgets('Home replays native scroll state on return: route=$routeKind', (
-      tester,
-    ) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-      addTearDown(() => debugDefaultTargetPlatformOverride = null);
-      tester.view.physicalSize = const Size(390, 600);
-      tester.view.devicePixelRatio = 1;
-      addTearDown(tester.view.reset);
-      final messenger = tester.binding.defaultBinaryMessenger;
-      final calls = <int, List<MethodCall>>{};
-      messenger.setMockMethodCallHandler(SystemChannels.platform_views, (
-        call,
-      ) async {
-        if (call.method == 'create') {
-          final args = call.arguments as Map;
-          if (args['viewType'] == IosNavigationBar.viewType) {
-            final id = args['id'] as int;
-            calls[id] = [];
-            messenger.setMockMethodCallHandler(
-              MethodChannel('${IosNavigationBar.viewType}/$id'),
-              (call) async {
-                calls[id]!.add(call);
-                return null;
-              },
-            );
+  for (final routeKind in ['material', 'custom']) {
+    testWidgets(
+      'Channels replays native scroll state on return: route=$routeKind',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        tester.view.physicalSize = const Size(390, 600);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        final messenger = tester.binding.defaultBinaryMessenger;
+        final calls = <int, List<MethodCall>>{};
+        messenger.setMockMethodCallHandler(SystemChannels.platform_views, (
+          call,
+        ) async {
+          if (call.method == 'create') {
+            final args = call.arguments as Map;
+            if (args['viewType'] == IosNavigationBar.viewType) {
+              final id = args['id'] as int;
+              calls[id] = [];
+              messenger.setMockMethodCallHandler(
+                MethodChannel('${IosNavigationBar.viewType}/$id'),
+                (call) async {
+                  calls[id]!.add(call);
+                  return null;
+                },
+              );
+            }
           }
-        }
-        return null;
-      });
-      addTearDown(() {
-        messenger.setMockMethodCallHandler(SystemChannels.platform_views, null);
-        for (final id in calls.keys) {
+          return null;
+        });
+        addTearDown(() {
           messenger.setMockMethodCallHandler(
-            MethodChannel('${IosNavigationBar.viewType}/$id'),
+            SystemChannels.platform_views,
             null,
           );
-        }
-      });
-      await tester.pumpWidget(
-        buildTestable(
-          realHome: true,
-          overrides: [
-            channelsProvider.overrideWith(
-              () => _FakeNotifier(
-                List.generate(
-                  40,
-                  (i) => Channel(
-                    id: 'channel-$i',
-                    description: '',
-                    createdBy: 'test',
-                    createdAt: DateTime(2026),
-                    memberCount: 1,
-                    visibility: 'open',
-                    name: 'channel-$i',
-                    channelType: 'stream',
-                    isMember: true,
+          for (final id in calls.keys) {
+            messenger.setMockMethodCallHandler(
+              MethodChannel('${IosNavigationBar.viewType}/$id'),
+              null,
+            );
+          }
+        });
+        await tester.pumpWidget(
+          buildTestable(
+            realHome: false,
+            overrides: [
+              channelsProvider.overrideWith(
+                () => _FakeNotifier(
+                  List.generate(
+                    40,
+                    (i) => Channel(
+                      id: 'channel-$i',
+                      description: '',
+                      createdBy: 'test',
+                      createdAt: DateTime(2026),
+                      memberCount: 1,
+                      visibility: 'open',
+                      name: 'channel-$i',
+                      channelType: 'stream',
+                      isMember: true,
+                    ),
                   ),
                 ),
               ),
-            ),
-          ],
-        ),
-      );
-      await tester.pumpAndSettle();
-      final homeCalls = calls.values.single;
-      final position = tester
-          .state<ScrollableState>(
-            find
-                .descendant(
-                  of: find.byType(CustomScrollView),
-                  matching: find.byType(Scrollable),
-                )
-                .first,
-          )
-          .position;
-      position.jumpTo(200);
-      await tester.pumpAndSettle();
-      final scrolledOffset =
-          homeCalls.where((call) => call.method == 'scroll').last.arguments
-              as double;
-      expect(scrolledOffset, greaterThan(0));
-      final navigator = tester.state<NavigatorState>(
-        find.byType(Navigator).first,
-      );
-      void openCoveringRoute() {
-        if (routeKind == 'settings') {
-          tester
-              .widget<FrostedAppBar>(find.byType(FrostedAppBar))
-              .nativeActions!
-              .singleWhere((action) => action.label == 'Settings')
-              .onPressed!();
-        } else {
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+        final homeCalls = calls.values.single;
+        final position = tester
+            .state<ScrollableState>(
+              find
+                  .descendant(
+                    of: find.byType(CustomScrollView),
+                    matching: find.byType(Scrollable),
+                  )
+                  .first,
+            )
+            .position;
+        position.jumpTo(200);
+        await tester.pumpAndSettle();
+        final scrolledOffset =
+            homeCalls.where((call) => call.method == 'scroll').last.arguments
+                as double;
+        expect(scrolledOffset, greaterThan(0));
+        final navigator = tester.state<NavigatorState>(
+          find.byType(Navigator).first,
+        );
+        void openCoveringRoute() {
           unawaited(
             navigator.push<void>(
               routeKind == 'custom'
@@ -974,50 +968,50 @@ void main() {
             ),
           );
         }
-      }
 
-      openCoveringRoute();
-      await tester.pumpAndSettle();
-      homeCalls.clear();
-      navigator.pop();
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 40));
-      final earlyRestores = homeCalls
-          .where((call) => call.method == 'prepareForReveal')
-          .length;
-      expect(earlyRestores, greaterThan(0));
-      await tester.pumpAndSettle();
-      expect(
-        homeCalls.where((call) => call.method == 'prepareForReveal').length,
-        greaterThan(earlyRestores),
-        reason:
-            'Replay again after the outgoing route and Home transform settle.',
-      );
-      expect(position.pixels, 200);
-      expect(
-        homeCalls
-            .where((call) => call.method == 'scroll')
-            .map((call) => call.arguments),
-        contains(scrolledOffset),
-      );
-      expect(homeCalls.last.method, 'prepareForReveal');
-      // The replay must use the live offset, including returning at the top.
-      position.jumpTo(0);
-      await tester.pumpAndSettle();
-      openCoveringRoute();
-      await tester.pumpAndSettle();
-      homeCalls.clear();
-      navigator.pop();
-      await tester.pumpAndSettle();
-      expect(
-        homeCalls
-            .where((call) => call.method == 'scroll')
-            .map((call) => call.arguments),
-        contains(0.0),
-      );
-      await tester.pumpWidget(const SizedBox());
-      debugDefaultTargetPlatformOverride = null;
-    });
+        openCoveringRoute();
+        await tester.pumpAndSettle();
+        homeCalls.clear();
+        navigator.pop();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 40));
+        final earlyRestores = homeCalls
+            .where((call) => call.method == 'prepareForReveal')
+            .length;
+        expect(earlyRestores, greaterThan(0));
+        await tester.pumpAndSettle();
+        expect(
+          homeCalls.where((call) => call.method == 'prepareForReveal').length,
+          greaterThan(earlyRestores),
+          reason:
+              'Replay again after the outgoing route and Home transform settle.',
+        );
+        expect(position.pixels, 200);
+        expect(
+          homeCalls
+              .where((call) => call.method == 'scroll')
+              .map((call) => call.arguments),
+          contains(scrolledOffset),
+        );
+        expect(homeCalls.last.method, 'prepareForReveal');
+        // The replay must use the live offset, including returning at the top.
+        position.jumpTo(0);
+        await tester.pumpAndSettle();
+        openCoveringRoute();
+        await tester.pumpAndSettle();
+        homeCalls.clear();
+        navigator.pop();
+        await tester.pumpAndSettle();
+        expect(
+          homeCalls
+              .where((call) => call.method == 'scroll')
+              .map((call) => call.arguments),
+          contains(0.0),
+        );
+        await tester.pumpWidget(const SizedBox());
+        debugDefaultTargetPlatformOverride = null;
+      },
+    );
   }
 
   testWidgets('scrolls Home to the top when its tab is selected again', (
@@ -1140,12 +1134,13 @@ void main() {
           .getTopRight(
             find.descendant(
               of: find.byKey(const Key('section-menu-section-1')),
-              matching: find.byIcon(BuzzIcons.ellipsisVertical),
+              matching: find.byIcon(BuzzIcons.ellipsis),
             ),
           )
           .dx,
       closeTo(
-        tester.getTopRight(find.byKey(const Key('section-menu-section-1'))).dx,
+        tester.getTopRight(find.byKey(const Key('section-menu-section-1'))).dx -
+            3,
         0.01,
       ),
     );
@@ -1254,43 +1249,30 @@ void main() {
     expect(skeletonSectionLabelX, sectionLabelX);
   });
 
-  testWidgets('matches community and profile avatar sizes and gutters', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      buildTestable(
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    final appBar = find.byType(FrostedAppBar).last;
-    final communityAvatar = find.descendant(
-      of: appBar,
-      matching: find.byType(ClipRSuperellipse),
-    );
-    final profileAvatar = find.descendant(
-      of: appBar,
-      matching: find.byType(MaskedAvatarBadge),
-    );
-
-    expect(tester.getSize(communityAvatar), const Size.square(36));
-    expect(tester.getSize(profileAvatar), const Size.square(36));
-    expect(
-      tester.widget<MaskedAvatarBadge>(profileAvatar).badge,
-      isNull,
-      reason: 'The current user does not need an online dot on Home.',
-    );
-    final communityRect = tester.getRect(communityAvatar);
-    final profileRect = tester.getRect(profileAvatar);
-    expect(profileRect.center.dy, communityRect.center.dy);
-    expect(
-      communityRect.left,
-      tester.getSize(appBar).width - profileRect.right,
-    );
-  });
+  testWidgets(
+    'community avatar remains in Home while profile moves out of header',
+    (tester) async {
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      final appBar = find.byType(FrostedAppBar).last;
+      final community = find.descendant(
+        of: appBar,
+        matching: find.byType(ClipRSuperellipse),
+      );
+      expect(tester.getSize(community), const Size.square(36));
+      expect(
+        find.descendant(of: appBar, matching: find.byType(ProfileAvatar)),
+        findsNothing,
+      );
+      expect(find.byTooltip('Create'), findsOneWidget);
+    },
+  );
 
   testWidgets('keeps cached channels visible while reconnecting', (
     tester,
@@ -1379,97 +1361,6 @@ void main() {
           .label,
       'Loading',
     );
-  });
-
-  testWidgets('opens the settings page supplied by the app layer', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      buildTestable(
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.byType(Hero), findsNothing);
-    await tester.tap(find.byType(ProfileAvatar));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Injected settings'), findsOneWidget);
-    final route = ModalRoute.of(tester.element(find.text('Injected settings')));
-    expect(route, isNot(isA<MaterialPageRoute<void>>()));
-    expect(route?.opaque, isFalse);
-    expect(route?.allowSnapshotting, isFalse);
-    expect(route?.transitionDuration, const Duration(milliseconds: 260));
-    expect(route?.reverseTransitionDuration, const Duration(milliseconds: 220));
-  });
-
-  testWidgets('Settings slides up and down without scaling Home', (
-    tester,
-  ) async {
-    final progress = <double>[];
-    await tester.pumpWidget(
-      buildTestable(
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-        ],
-        onSettingsTransitionProgress: progress.add,
-      ),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.byType(ProfileAvatar));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
-    final settings = find.text('Injected settings');
-    expect(tester.getTopLeft(settings).dy, greaterThan(0));
-    expect(progress, everyElement(0));
-    await tester.pumpAndSettle();
-    final top = tester.getTopLeft(settings).dy;
-    Navigator.of(tester.element(settings)).pop();
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
-    expect(tester.getTopLeft(settings).dy, greaterThan(top));
-    await tester.pumpAndSettle();
-    expect(settings, findsNothing);
-  });
-
-  testWidgets('gives feedback for the profile and community controls', (
-    tester,
-  ) async {
-    final hapticCalls = <MethodCall>[];
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(SystemChannels.platform, (call) async {
-          if (call.method == 'HapticFeedback.vibrate') hapticCalls.add(call);
-          return null;
-        });
-    addTearDown(
-      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(SystemChannels.platform, null),
-    );
-    await tester.pumpWidget(
-      buildTestable(
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byType(ProfileAvatar));
-    await tester.pumpAndSettle();
-    expect(hapticCalls.single.arguments, 'HapticFeedbackType.lightImpact');
-
-    Navigator.of(tester.element(find.text('Injected settings'))).pop();
-    await tester.pumpAndSettle();
-    final communityAvatar = find.descendant(
-      of: find.byType(FrostedAppBar).last,
-      matching: find.byType(ClipRSuperellipse),
-    );
-    await tester.tap(communityAvatar);
-    await tester.pump();
-    expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
   });
 
   for (final brightness in Brightness.values) {
@@ -1831,10 +1722,7 @@ void main() {
 
     expect(find.text('Rename'), findsNothing);
     expect(
-      find.descendant(
-        of: options,
-        matching: find.byIcon(BuzzIcons.ellipsisVertical),
-      ),
+      find.descendant(of: options, matching: find.byIcon(BuzzIcons.ellipsis)),
       findsNothing,
     );
     expect(find.text('Edit'), findsOneWidget);
@@ -2375,7 +2263,8 @@ void main() {
           );
           await tester.pump();
           final flyingAvatar = find.byKey(const Key('community-flying-avatar'));
-          expect(notifier.switchedIds, reduceMotion ? ['bravo'] : isEmpty);
+          // The switch starts with the centering motion, not after it.
+          expect(notifier.switchedIds, ['bravo']);
           if (nativeHeader) {
             expect(
               tester
@@ -2388,7 +2277,6 @@ void main() {
           final origin = tester.getCenter(flyingAvatar);
           await tester.pump(const Duration(milliseconds: 105));
           if (!reduceMotion) {
-            expect(notifier.switchedIds, isEmpty);
             final inFlight = tester.getCenter(flyingAvatar);
             const center = Offset(195, 422);
             expect(
@@ -2864,7 +2752,7 @@ void main() {
     expect(find.byType(FallbackPairingQrScanner), findsNothing);
     expect(find.text('Scan a QR code'), findsOneWidget);
     expect(find.text('Use pairing code'), findsNothing);
-    expect(find.byKey(const Key('developer-pairing-trigger')), findsOneWidget);
+    expect(find.text('Use a pairing code'), findsNothing);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
@@ -3004,14 +2892,8 @@ void main() {
     );
 
     expect(find.text('Start a new stream channel'), findsNothing);
-    expect(
-      tester.widget<Text>(find.text('Create channel')).style?.fontSize,
-      16,
-    );
-    expect(
-      tester.widget<Text>(find.text('New direct message')).style?.fontSize,
-      16,
-    );
+    expect(tester.widget<Text>(find.text('New channel')).style?.fontSize, 16);
+    expect(tester.widget<Text>(find.text('New DM')).style?.fontSize, 16);
     expect(
       find.byKey(const Key('quick-action-browse-channels-card')),
       findsNothing,
@@ -3034,7 +2916,7 @@ void main() {
 
     await tester.tap(find.byTooltip('Create or start conversation'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Create channel'));
+    await tester.tap(find.text('New channel'));
     await tester.pumpAndSettle();
     final createSheetRect = tester.getRect(find.byType(BottomSheet).last);
     expect(createSheetRect.top, greaterThanOrEqualTo(24));
@@ -3115,6 +2997,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
+    final waits = <bool>[];
     const directoryUsers = [
       DirectoryUser(
         pubkey: 'alice',
@@ -3140,6 +3023,9 @@ void main() {
                 )
                 .toList();
           }),
+          channelActionsProvider.overrideWith(
+            (ref) => _PendingDmActions(waits),
+          ),
         ],
       ),
     );
@@ -3147,7 +3033,7 @@ void main() {
 
     await tester.tap(find.byTooltip('Create or start conversation'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('New direct message'));
+    await tester.tap(find.text('New DM'));
     await tester.pumpAndSettle();
 
     final dmSheetRect = tester.getRect(find.byType(BottomSheet).last);
@@ -3273,6 +3159,11 @@ void main() {
     );
     expect(searchField.textInputAction, TextInputAction.done);
     expect(searchField.onSubmitted, isNotNull);
+
+    // Done opens the DM at once instead of waiting on the full channel list.
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump();
+    expect(waits, [false]);
   });
 
   testWidgets('wraps many recipients without overflowing above the keyboard', (
@@ -3306,7 +3197,7 @@ void main() {
 
     await tester.tap(find.byTooltip('Create or start conversation'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('New direct message'));
+    await tester.tap(find.text('New DM'));
     await tester.pumpAndSettle();
 
     for (final user in directoryUsers.take(8)) {
@@ -3374,7 +3265,7 @@ void main() {
 
     await tester.tap(find.byTooltip('Create or start conversation'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('New direct message'));
+    await tester.tap(find.text('New DM'));
     await tester.pumpAndSettle();
 
     expect(find.text('Could not load people from this relay.'), findsNothing);
@@ -3557,9 +3448,12 @@ void main() {
     );
     final options = find.descendant(
       of: find.byTooltip('Channels options'),
-      matching: find.byIcon(BuzzIcons.ellipsisVertical),
+      matching: find.byIcon(BuzzIcons.ellipsis),
     );
-    expect(tester.widget<Icon>(options).color, const Color(0xFFC7C7C7));
+    expect(
+      tester.widget<Icon>(options).color,
+      const Color(0xFFA4A4A4).withValues(alpha: 0.8),
+    );
     expect(
       tester.widget<Icon>(find.byKey(const ValueKey('channel-icon-1'))).color,
       const Color(0xFFC7C7C7),
@@ -3569,7 +3463,7 @@ void main() {
 
     expect(
       tester.widget<Text>(find.text('general')).style?.fontWeight,
-      FontWeight.w400,
+      FontWeight.w500,
     );
     expect(
       tester.widget<Text>(find.text('general')).style?.color,
@@ -3710,55 +3604,10 @@ void main() {
 
       expect(
         tester.widget<Text>(find.text('general')).style?.fontWeight,
-        bold ? FontWeight.w700 : FontWeight.w400,
+        bold ? FontWeight.w700 : FontWeight.w500,
       );
     });
   }
-
-  testWidgets('seeds first loaded channels as read', (tester) async {
-    final channels = [
-      Channel(
-        id: '1',
-        name: 'general',
-        channelType: 'stream',
-        visibility: 'open',
-        description: 'General discussion',
-        createdBy: 'abc',
-        createdAt: DateTime(2025),
-        memberCount: 10,
-        lastMessageAt: DateTime.fromMillisecondsSinceEpoch(
-          20 * 1000,
-          isUtc: true,
-        ),
-        isMember: true,
-      ),
-    ];
-    final readState = _FakeReadStateNotifier(
-      const ReadStateState(
-        isReady: true,
-        pubkey: 'pk',
-        contexts: {},
-        version: 0,
-      ),
-    );
-
-    await tester.pumpWidget(
-      buildTestable(
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(channels)),
-          readStateProvider.overrideWith(() => readState),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(readState.seededContexts, {'1': 20});
-    expect(readState.markedContexts, isEmpty);
-    expect(
-      tester.widget<Text>(find.text('general')).style?.fontWeight,
-      FontWeight.w400,
-    );
-  });
 
   testWidgets('waits for read-state readiness before initial seeding', (
     tester,
@@ -3995,6 +3844,13 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
   }
 
   @override
+  void seedContextsRead(Map<String, int> contexts) {
+    for (final entry in contexts.entries) {
+      seedContextRead(entry.key, entry.value);
+    }
+  }
+
+  @override
   void seedContextRead(String contextId, int unixTimestamp) {
     seededContexts[contextId] = unixTimestamp;
     state = state.copyWithContext(contextId, unixTimestamp);
@@ -4071,4 +3927,22 @@ class _SwitchingUserCache extends UserCacheNotifier {
 class _CompletedPairingNotifier extends PairingNotifier {
   @override
   PairingState build() => const PairingState(status: PairingStatus.success);
+}
+
+class _PendingDmActions implements ChannelActions {
+  _PendingDmActions(this.waits);
+
+  final List<bool> waits;
+
+  @override
+  Future<Channel> openDm({
+    required List<String> pubkeys,
+    bool waitForChannelList = true,
+  }) {
+    waits.add(waitForChannelList);
+    return Completer<Channel>().future;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

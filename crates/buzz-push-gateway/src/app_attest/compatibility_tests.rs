@@ -132,6 +132,48 @@ fn shared_signed_certificate_constraint_corpus() {
 }
 
 #[test]
+fn certificate_rejections_name_the_failed_check() {
+    use super::error::CertificateCheck as Check;
+    use super::testing::{rejected_certificate_chains, test_root_der, valid_certificate_chain};
+    let root = test_root_der();
+    // A path rejection keeps webpki's full error, whose variant names the check.
+    let path = |variant: &str| Err(variant.to_owned());
+    let is = |check: Check| Ok(Error::InvalidCertificate(check));
+    let expected = [
+        ("wrong usage", is(Check::KeyUsage { index: 0 })),
+        ("expired", path("CertExpired {")),
+        ("unknown critical", path("UnsupportedCriticalExtension")),
+        ("duplicate nonce", is(Check::Encoding { index: 0 })),
+        ("trailing", path("TrailingData(Certificate)")),
+    ];
+    let cases = rejected_certificate_chains();
+    assert_eq!(cases.len(), expected.len());
+    for ((name, chain), (expected_name, expected)) in cases.iter().zip(expected) {
+        assert_eq!(*name, expected_name);
+        let error = super::certificate::verify_chain(chain, &root).unwrap_err();
+        match expected {
+            Ok(expected) => assert_eq!(error, expected, "{name}"),
+            Err(variant) => assert!(
+                matches!(&error, Error::InvalidCertificate(Check::Path(detail)) if detail.starts_with(&variant)),
+                "{name}: {error:?}"
+            ),
+        }
+    }
+    assert_eq!(
+        Error::InvalidCertificate(Check::Path("UnknownIssuer".into())).to_string(),
+        "invalid certificate path or structure (path rejected: UnknownIssuer)"
+    );
+    assert_eq!(
+        super::certificate::verify_chain(&[], &root),
+        Err(Error::InvalidCertificate(Check::Chain))
+    );
+    assert_eq!(
+        super::certificate::verify_chain(&valid_certificate_chain(), b"not a certificate"),
+        Err(Error::InvalidCertificate(Check::Root))
+    );
+}
+
+#[test]
 fn enrolled_key_verifies_following_assertion() {
     use super::testing::{build_test_assertion, build_test_attestation};
     use sha2::{Digest, Sha256};

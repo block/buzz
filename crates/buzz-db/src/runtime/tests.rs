@@ -1008,6 +1008,120 @@ async fn read_falls_back_to_writer_when_no_replica_configured() {
     assert!(db.read_pool_stats().is_none());
 }
 
+/// A match-nothing read is answered before any pool acquire, on every query
+/// entry point, and an invalid query that would also match nothing still
+/// returns its validation error. Replica routing is on and the fence is open,
+/// so a routed read that reached `route_read` would try the reader first. Both
+/// pools point at a closed port, and the `limit: 1` control proves that a real
+/// page does try to acquire, from the reader and then the writer.
+#[tokio::test]
+async fn match_nothing_reads_take_no_connection() {
+    use metrics_util::debugging::DebuggingRecorder;
+
+    let dead_pool = || {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgres://unused@127.0.0.1:1/unused") // sadscan:disable np.postgres.1
+            .expect("lazy pool")
+    };
+    let mut db = Db::from_pools(dead_pool(), dead_pool());
+    db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(3600)));
+    db.fence().force_open_for_tests(chrono::Utc::now());
+    let community = CommunityId::from_uuid(Uuid::new_v4());
+    let page = |limit| {
+        let mut q = EventQuery::for_community(community);
+        q.limit = Some(limit);
+        q
+    };
+    let with = |edit: fn(&mut EventQuery)| {
+        let mut q = page(10);
+        edit(&mut q);
+        q
+    };
+    let empty_pages = [
+        ("limit 0", page(0)),
+        ("max_limit 0", with(|q| q.max_limit = Some(0))),
+        ("empty kinds", with(|q| q.kinds = Some(vec![]))),
+        ("empty authors", with(|q| q.authors = Some(vec![]))),
+        ("empty ids", with(|q| q.ids = Some(vec![]))),
+        ("empty #e", with(|q| q.e_tags = Some(vec![]))),
+    ];
+    // Validation runs before the match-nothing check, so the error wins.
+    let invalid = [
+        (
+            "before_id without until",
+            with(|q| {
+                q.limit = Some(0);
+                q.before_id = Some(vec![0; 32]);
+            }),
+        ),
+        (
+            "global_only with channel_id",
+            with(|q| {
+                q.kinds = Some(vec![]);
+                q.global_only = true;
+                q.channel_id = Some(Uuid::nil());
+            }),
+        ),
+    ];
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    let acquiring_roles = || {
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, _, _, _)| key.key().name() == "buzz_db_pool_acquire_attempts_total")
+            .filter_map(|(key, _, _, _)| {
+                key.key()
+                    .labels()
+                    .find(|label| label.key() == "pool_role")
+                    .map(|label| label.value().to_owned())
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+
+    for (case, q) in &empty_pages {
+        let results = [
+            db.query_events(q).await,
+            db.query_events_routed("test", q).await,
+            db.query_events_routed_bounded("test", q).await,
+        ];
+        for (entry, result) in ["writer", "routed", "routed bounded"].iter().zip(results) {
+            let events = result.unwrap_or_else(|e| panic!("{case} via {entry}: {e}"));
+            assert!(events.is_empty(), "{case} via {entry} must match nothing");
+        }
+    }
+    for (case, q) in &invalid {
+        let results = [
+            db.query_events(q).await,
+            db.query_events_routed("test", q).await,
+            db.query_events_routed_bounded("test", q).await,
+        ];
+        for (entry, result) in ["writer", "routed", "routed bounded"].iter().zip(results) {
+            assert!(
+                matches!(result, Err(DbError::InvalidData(_))),
+                "{case} via {entry} must fail validation, got {result:?}"
+            );
+        }
+    }
+    assert!(
+        acquiring_roles().is_empty(),
+        "a match-nothing read must not try to acquire: {:?}",
+        acquiring_roles()
+    );
+
+    db.query_events_routed("test", &page(1))
+        .await
+        .expect_err("a real page needs the (unreachable) pools");
+    assert_eq!(
+        acquiring_roles(),
+        ["reader", "writer"].map(str::to_owned).into(),
+        "the control must have tried the reader, then the writer"
+    );
+}
+
 #[test]
 fn read_budget_zero_disables_and_large_values_clamp_to_staleness() {
     assert_eq!(read_budget_from_ms(0), None, "0 = bounded routing off");
@@ -1139,30 +1253,52 @@ async fn read_pool_stats_reports_reader_ceiling_not_writer() {
     );
 }
 
-/// D4 wiring: the reader pool is built lazily with `min_connections(0)`
-/// and the short reader acquire timeout — construction must succeed
-/// with no replica listening (reader-down at boot must not crash the
-/// relay), and `read_max_connections` must honour
-/// `DbConfig::read_max_connections` over the writer sizing.
+/// D4 wiring: the reader pool is built lazily with the short reader
+/// acquire timeout, a warm `min_connections` floor, and no pre-acquire
+/// ping — construction must succeed with no replica listening
+/// (reader-down at boot must not crash the relay), and
+/// `read_max_connections` must honour `DbConfig::read_max_connections`
+/// over the writer sizing.
 /// `#[tokio::test]` because `connect_lazy` spawns the pool reaper task,
 /// which needs a Tokio runtime even though nothing is dialed.
 #[tokio::test]
 async fn connect_read_pool_is_lazy_and_independently_sized() {
     let config = DbConfig {
         max_connections: 20,
-        read_max_connections: Some(7),
+        read_max_connections: Some(10),
         ..DbConfig::default()
     };
     // Unroutable per RFC 5737 TEST-NET-1: proves nothing is dialed at
     // construction time.
-    let pool = Db::connect_read_pool(&config, "postgres://user:pw@192.0.2.1:5432/none", 7)
+    let pool = Db::connect_read_pool(&config, "postgres://user:pw@192.0.2.1:5432/none", 10)
         .expect("lazy construction must not dial the replica");
-    assert_eq!(pool.options().get_max_connections(), 7);
-    assert_eq!(pool.options().get_min_connections(), 0);
+    assert_eq!(pool.options().get_max_connections(), 10);
+    assert_eq!(pool.options().get_min_connections(), 2);
+    assert!(
+        !pool.options().get_test_before_acquire(),
+        "the idle ping must not spend the 150ms reader acquire budget"
+    );
     assert_eq!(
         pool.options().get_acquire_timeout(),
         Db::READER_ACQUIRE_TIMEOUT
     );
+    // A nonzero floor must not turn construction into a dial: sqlx 0.9 only
+    // tops up the floor from the reaper or after a connection closes.
+    tokio::task::yield_now().await;
+    assert_eq!(pool.size(), 0, "construction must not dial the replica");
+}
+
+/// The reader warm floor is a fifth of the ceiling, never zero, and never
+/// above the ceiling.
+#[test]
+fn reader_min_connections_is_a_fifth_of_max_with_a_floor_of_one() {
+    for (max, min) in [(1, 1), (4, 1), (5, 1), (9, 1), (10, 2), (50, 10), (100, 20)] {
+        assert_eq!(
+            Db::reader_min_connections(max),
+            min,
+            "max_connections={max}"
+        );
+    }
 }
 
 /// Channel window: head fetch (no cursor) reads the WRITER; cursor pages
@@ -1967,7 +2103,7 @@ async fn routed_fallback_spends_one_acquire_budget_when_aurora_cache_is_cold() {
     };
 
     // `Db::new` so the writer arms the floor guard and the reader is the
-    // real lazy `connect_read_pool` pool (min_connections=0, 150ms
+    // real lazy `connect_read_pool` pool (warm floor of 1, 150ms
     // acquire timeout). Reader is sized 1 so holding one connection
     // saturates it.
     let mut db = Db::new(&DbConfig {
@@ -2282,7 +2418,7 @@ async fn routed_reads_are_confined_to_the_requested_community() {
     drop_scratch_db(&admin, writer, &wname).await;
 }
 
-/// D4: a LAZY reader pool (connect_lazy, min_connections=0, never yet
+/// D4: a LAZY reader pool (connect_lazy, never yet
 /// used) must still let [`Db::spawn_fence_probe`] verify the writer's
 /// floor guard and spawn — reader-down or reader-idle at boot must not
 /// disable fence probing.
@@ -4096,6 +4232,9 @@ async fn e_tag_any_runs_with_real_binds_on_p_join_and_count() {
 
 #[path = "tests/thread_window_postgres_tests.rs"]
 mod thread_window_postgres_tests;
+
+#[path = "tests/reader_pool_postgres_tests.rs"]
+mod reader_pool_postgres_tests;
 
 /// `insert_event_with_serving_write_guard` indexes mentions in the event's own
 /// transaction, and an indexing failure stays best-effort: the savepoint rolls

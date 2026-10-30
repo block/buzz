@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:math';
 
+import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:http/http.dart' as http;
 import 'package:nostr/nostr.dart' as nostr;
 
@@ -16,9 +17,57 @@ const _maxSafeJsonInteger = 9007199254740991;
 const _maxLeaseLifetimeSeconds = 2592000;
 const _lowercaseHex64Pattern = r'^[0-9a-f]{64}$';
 const _installationIdPattern = r'^[0-9a-f]{32}$';
+// The gateway's `<key id>.<base64url>` grant grammar, which JSON never escapes.
+const _endpointGrantPattern = r'^[A-Za-z0-9_.-]+$';
+
+/// Whether an active lease carrying [subscriptions] fits [descriptor]'s
+/// plaintext and content limits with any endpoint grant and generation it
+/// accepts. Sizes are computed, not built, since the limits come from the relay.
+bool buzzPushSubscriptionsFitLease(
+  BuzzPushLeaseDescriptor descriptor,
+  List<BuzzPushSubscription> subscriptions,
+) {
+  final withoutEndpoint = utf8
+      .encode(
+        _activeLeasePlaintext(
+          descriptor: descriptor,
+          endpoint: '',
+          generation: _maxSafeJsonInteger,
+          subscriptions: subscriptions,
+        ),
+      )
+      .length;
+  // Publication accepts only grants JSON never escapes, so one at the endpoint
+  // limit adds exactly it.
+  final plaintext = withoutEndpoint + descriptor.maxEndpointLength;
+  final content = nip44PayloadLength(plaintext);
+  return plaintext <= descriptor.maxPlaintextLength &&
+      content != null &&
+      content <= descriptor.maxContentLength;
+}
+
+String _activeLeasePlaintext({
+  required BuzzPushLeaseDescriptor descriptor,
+  required String endpoint,
+  required int generation,
+  required List<BuzzPushSubscription> subscriptions,
+}) => jsonEncode(<String, dynamic>{
+  'v': 1,
+  'origin': descriptor.origin,
+  'transport': descriptor.transport,
+  'endpoint': endpoint,
+  'generation': generation,
+  'active': true,
+  'subscriptions': [
+    for (final subscription in subscriptions) subscription.toJson(),
+  ],
+});
 
 class BuzzPushLeaseDescriptor {
   final String origin;
+
+  /// Canonical channel-ID grammar advertised by this relay.
+  final String hGrammar;
   final String executorKeyId;
   final String executorPubkey;
   final String transport;
@@ -30,6 +79,7 @@ class BuzzPushLeaseDescriptor {
 
   const BuzzPushLeaseDescriptor({
     required this.origin,
+    this.hGrammar = 'uuid-v4-lowercase',
     required this.executorKeyId,
     required this.executorPubkey,
     required this.transport,
@@ -115,7 +165,8 @@ class BuzzPushLeaseDescriptor {
       );
     }
     final hGrammar = _nonEmptyString(push['h_grammar'], name: 'h_grammar');
-    if (hGrammar != 'uuid-v4-lowercase') {
+    // Retain the advertised grammar so publication can enforce legacy limits.
+    if (hGrammar != 'uuid-lowercase' && hGrammar != 'uuid-v4-lowercase') {
       throw const FormatException('Unsupported push h_grammar');
     }
 
@@ -185,6 +236,7 @@ class BuzzPushLeaseDescriptor {
 
     return BuzzPushLeaseDescriptor(
       origin: origin,
+      hGrammar: hGrammar,
       executorKeyId: currentKey['id'] as String,
       executorPubkey: currentKey['pubkey'] as String,
       transport: transport,
@@ -194,6 +246,33 @@ class BuzzPushLeaseDescriptor {
       maxEndpointLength: limitation['max_endpoint_len'] as int,
       maxStringLength: maxStringLength,
     );
+  }
+}
+
+/// The desired lease requires channel IDs that this relay cannot accept yet.
+class BuzzPushChannelGrammarException implements Exception {
+  const BuzzPushChannelGrammarException();
+
+  @override
+  String toString() =>
+      'Push lease requires uuid-lowercase support from the relay';
+}
+
+/// Validate both positive and ignore filters without weakening mute semantics.
+void validateBuzzPushChannelGrammar(
+  BuzzPushLeaseDescriptor descriptor,
+  List<BuzzPushSubscription> subscriptions,
+) {
+  if (descriptor.hGrammar == 'uuid-lowercase') return;
+  for (final subscription in subscriptions) {
+    for (final filter in [subscription.filter, ...subscription.ignore]) {
+      for (final channel in filter.hTags ?? const <String>[]) {
+        // The legacy Rust validator checked version 4, not the UUID variant.
+        if (channel[14] != '4') {
+          throw const BuzzPushChannelGrammarException();
+        }
+      }
+    }
   }
 }
 
@@ -260,6 +339,7 @@ Future<BuzzPushLeasePublication> publishBuzzDevPushLease({
   required BuzzPushLeaseSubmit submit,
   DateTime Function() now = DateTime.now,
 }) async {
+  validateBuzzPushChannelGrammar(descriptor, subscriptions);
   _validateGrant(grant, descriptor);
   final effectiveLeaseInstallationId =
       leaseInstallationId ?? grant.installationId;
@@ -281,7 +361,7 @@ Future<BuzzPushLeasePublication> publishBuzzDevPushLease({
   if (decoded.prefix != nostr.Nip19Prefix.nsec || decoded.data.length != 64) {
     throw const FormatException('Signing key must be a 32-byte nsec');
   }
-  final signingPubkey = nostr.Keys(decoded.data).public;
+  final signingPubkey = derivePublicKeyHex(decoded.data);
   if (signingPubkey != normalizedMemberPubkey) {
     throw const FormatException(
       'Authenticated signing key does not match the lease member pubkey',
@@ -297,18 +377,12 @@ Future<BuzzPushLeasePublication> publishBuzzDevPushLease({
     throw const FormatException('Endpoint grant is already expired');
   }
 
-  final plaintextMap = <String, dynamic>{
-    'v': 1,
-    'origin': descriptor.origin,
-    'transport': descriptor.transport,
-    'endpoint': grant.endpointGrant,
-    'generation': effectiveLeaseGeneration,
-    'active': true,
-    'subscriptions': [
-      for (final subscription in subscriptions) subscription.toJson(),
-    ],
-  };
-  final plaintext = jsonEncode(plaintextMap);
+  final plaintext = _activeLeasePlaintext(
+    descriptor: descriptor,
+    endpoint: grant.endpointGrant,
+    generation: effectiveLeaseGeneration,
+    subscriptions: subscriptions,
+  );
   if (utf8.encode(plaintext).length > descriptor.maxPlaintextLength) {
     throw const FormatException('lease plaintext exceeds the advertised limit');
   }
@@ -393,7 +467,7 @@ Future<BuzzPushLeasePublication> publishBuzzPushLeaseTombstone({
   if (decoded.prefix != nostr.Nip19Prefix.nsec || decoded.data.length != 64) {
     throw const FormatException('Signing key must be a 32-byte nsec');
   }
-  if (nostr.Keys(decoded.data).public != normalizedMemberPubkey) {
+  if (derivePublicKeyHex(decoded.data) != normalizedMemberPubkey) {
     throw const FormatException(
       'Authenticated signing key does not match the lease member pubkey',
     );
@@ -478,6 +552,9 @@ void _validateGrant(
     throw const FormatException(
       'Endpoint grant violates the advertised endpoint limit',
     );
+  }
+  if (!RegExp(_endpointGrantPattern).hasMatch(grant.endpointGrant)) {
+    throw const FormatException('Endpoint grant is not a gateway grant');
   }
   if (grant.endpointEpoch <= 0) {
     throw const FormatException('Endpoint grant epoch is invalid');

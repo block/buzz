@@ -122,7 +122,7 @@ pub async fn handle_req(
             Ok(ids) => ids,
             Err(e) => {
                 warn!(conn_id = %conn_id, "Failed to get accessible channels: {e}");
-                conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                conn.send(RelayMessage::closed(&sub_id, DATABASE_ERROR_CLOSED));
                 return;
             }
         }
@@ -146,7 +146,7 @@ pub async fn handle_req(
         Ok(ids) => ids,
         Err(e) => {
             warn!(conn_id = %conn_id, "Failed to get readable named-only channels: {e}");
-            conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+            conn.send(RelayMessage::closed(&sub_id, DATABASE_ERROR_CLOSED));
             return;
         }
     };
@@ -185,7 +185,7 @@ pub async fn handle_req(
             Ok(confirmed) => confirmed,
             Err(e) => {
                 warn!(conn_id = %conn_id, "Channel membership confirmation failed: {e}");
-                conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                conn.send(RelayMessage::closed(&sub_id, DATABASE_ERROR_CLOSED));
                 return;
             }
         };
@@ -204,7 +204,7 @@ pub async fn handle_req(
         .await
         {
             warn!(conn_id = %conn_id, "Failed to classify repaired channels: {e}");
-            conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+            conn.send(RelayMessage::closed(&sub_id, DATABASE_ERROR_CLOSED));
             return;
         }
     }
@@ -401,8 +401,9 @@ pub async fn handle_req(
     // Registration above is one uncancellable unit; the history read below is
     // read-only delivery and races gate cancellation, so expiry drops it and
     // releases the permit without sending another EVENT or EOSE. It returns
-    // whether a statement timeout ended it: retirement then runs after the
-    // race, because a dropped retirement would leak its unreleased topics.
+    // the CLOSED reason when a failed read ended it: retirement then runs
+    // after the race, because a dropped retirement would leak its unreleased
+    // topics.
     let history = async {
         #[cfg(test)]
         crate::nip_fi_test_hooks::before_req_history(conn.tenant.community()).await;
@@ -489,11 +490,9 @@ pub async fn handle_req(
                 Ok(evs) => evs,
                 Err(e) => {
                     warn!(conn_id = %conn_id, sub_id = %sub_id, "Historical query failed: {e}");
-                    if e.is_statement_cancelled() {
-                        return true;
-                    }
-                    conn.send(RelayMessage::eose(&sub_id));
-                    return false;
+                    // CLOSED, never EOSE: EOSE tells the client it has every
+                    // stored event, so a resuming client would skip this history.
+                    return Some(history_read_closed_reason(&e));
                 }
             };
 
@@ -570,7 +569,7 @@ pub async fn handle_req(
 
                 let msg = RelayMessage::event(&sub_id, &stored.event);
                 if !conn.send(msg) {
-                    return false;
+                    return None;
                 }
                 total_sent += 1;
                 if total_sent.is_multiple_of(100) {
@@ -587,13 +586,15 @@ pub async fn handle_req(
             count = total_sent,
             "EOSE sent after historical delivery"
         );
-        false
+        None
     };
     let outcome = unless_cancelled(&conn, history).await;
     drop(_req_permit);
     match outcome {
-        Some(false) => {}
-        Some(true) => close_timed_out_subscription(&sub_id, owner, &conn, &state).await,
+        Some(None) => {}
+        Some(Some(reason)) => {
+            super::close::close_if_owner(&sub_id, owner, Some(reason), &conn, &state).await;
+        }
         None => {
             super::close::close_if_owner(&sub_id, owner, None, &conn, &state).await;
         }
@@ -1439,7 +1440,7 @@ async fn handle_huddle_liveness_req(
         Ok(links) => links,
         Err(error) => {
             warn!("Huddle liveness linkage batch failed: {error}");
-            conn.send(RelayMessage::closed(sub_id, "error: database error"));
+            conn.send(RelayMessage::closed(sub_id, DATABASE_ERROR_CLOSED));
             return;
         }
     };
@@ -1599,6 +1600,19 @@ async fn close_timed_out_subscription(
 /// Stable CLOSED reason for a read cancelled by its server statement deadline.
 /// Clients match it to skip retrying the same expensive query.
 pub(crate) const QUERY_TIMED_OUT_CLOSED: &str = "error: query timed out";
+
+/// CLOSED reason for any other failed DB read. Generic on purpose: the raw
+/// error stays in the relay log, and clients treat it as retryable.
+pub(crate) const DATABASE_ERROR_CLOSED: &str = "error: database error";
+
+/// CLOSED reason for a failed REQ history read.
+fn history_read_closed_reason(e: &buzz_db::DbError) -> &'static str {
+    if e.is_statement_cancelled() {
+        QUERY_TIMED_OUT_CLOSED
+    } else {
+        DATABASE_ERROR_CLOSED
+    }
+}
 
 /// CLOSED reason for a failed one-shot DB read (COUNT): a statement cancel gets
 /// the stable timeout reason; anything else keeps the raw error.

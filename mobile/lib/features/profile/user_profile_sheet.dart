@@ -14,6 +14,8 @@ import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/utils/string_utils.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/agent_artwork_panel.dart';
+import '../../shared/widgets/buzz_sheet_header.dart';
 import '../../shared/widgets/buzz_action_tile.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/progressive_animated_avatar.dart';
@@ -49,7 +51,10 @@ void showUserProfileSheet(
     if (channel == null || !context.mounted) return;
     Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => ChannelDetailPage(channel: channel),
+        builder: (_) => ChannelDetailPage(
+          channel: channel,
+          placement: ChannelRoutePlacement.ordinary,
+        ),
       ),
     );
   });
@@ -57,6 +62,11 @@ void showUserProfileSheet(
 
 class UserProfileSheet extends HookConsumerWidget {
   final String pubkey;
+
+  /// Agent artwork treatment within the profile sheet.
+  final bool agentPresentation;
+  final String? agentSubtitle;
+  final Widget? agentSubtitleIcon;
 
   /// The opening surface's comparison context. The sheet watches it, so its
   /// title follows profile and context changes while it is open. The caller
@@ -66,11 +76,26 @@ class UserProfileSheet extends HookConsumerWidget {
   /// Optional actions supplied by the opening surface, below the profile tiles.
   final WidgetBuilder? contextualActions;
 
+  /// Optional action opposite the sheet close control.
+  final Widget? headerLeading;
+
+  /// Space before the primary profile actions.
+  final double primaryActionsSpacing;
+
+  /// Space between primary actions and caller-supplied actions.
+  final double contextualActionsSpacing;
+
   const UserProfileSheet({
     super.key,
     required this.pubkey,
+    this.agentPresentation = false,
+    this.agentSubtitle,
+    this.agentSubtitleIcon,
     this.names,
     this.contextualActions,
+    this.headerLeading,
+    this.primaryActionsSpacing = Grid.xs + Grid.half,
+    this.contextualActionsSpacing = Grid.xs,
   });
 
   @override
@@ -82,7 +107,7 @@ class UserProfileSheet extends HookConsumerWidget {
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
-    final presenceMap = ref.watch(presenceCacheProvider);
+    final presenceMap = ref.watch(presentedPresenceProvider);
     final presence = presenceMap[pk];
     final statusCache = ref.watch(userStatusCacheProvider);
     final userStatus = statusCache[pk];
@@ -146,7 +171,7 @@ class UserProfileSheet extends HookConsumerWidget {
       try {
         final channel = await ref
             .read(channelActionsProvider)
-            .openDm(pubkeys: [pk]);
+            .openDm(pubkeys: [pk], waitForChannelList: false);
         if (!context.mounted) return;
         Navigator.of(context).pop(channel);
       } catch (_) {
@@ -155,7 +180,7 @@ class UserProfileSheet extends HookConsumerWidget {
       }
     }
 
-    return ConstrainedBox(
+    final content = ConstrainedBox(
       constraints: BoxConstraints(
         maxHeight: MediaQuery.sizeOf(context).height * 0.7,
       ),
@@ -214,6 +239,33 @@ class UserProfileSheet extends HookConsumerWidget {
                         ),
                       ),
                     ),
+                    if (agentSubtitle != null) ...[
+                      const SizedBox(height: Grid.xxs),
+                      Center(
+                        child: Wrap(
+                          alignment: WrapAlignment.center,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          spacing: Grid.half,
+                          children: [
+                            if (agentSubtitleIcon != null)
+                              ExcludeSemantics(
+                                child: IconTheme(
+                                  data: IconThemeData(
+                                    color: context.colors.onSurfaceVariant,
+                                  ),
+                                  child: agentSubtitleIcon!,
+                                ),
+                              ),
+                            Text(
+                              agentSubtitle!,
+                              style: context.textTheme.bodySmall?.copyWith(
+                                color: context.colors.onSurfaceVariant,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
                     if (about.trim().isNotEmpty) ...[
                       const SizedBox(height: Grid.xxs),
                       SizedBox(
@@ -264,7 +316,7 @@ class UserProfileSheet extends HookConsumerWidget {
                       ),
                     ],
 
-                    const SizedBox(height: Grid.xs + Grid.half),
+                    SizedBox(height: primaryActionsSpacing),
 
                     Row(
                       children: [
@@ -296,7 +348,7 @@ class UserProfileSheet extends HookConsumerWidget {
                         ),
                       ],
                     ),
-                    const SizedBox(height: Grid.xs),
+                    SizedBox(height: contextualActionsSpacing),
                     if (contextualActions != null)
                       Builder(builder: contextualActions!),
                   ],
@@ -304,6 +356,18 @@ class UserProfileSheet extends HookConsumerWidget {
               ),
             ),
           ),
+        ],
+      ),
+    );
+    if (!agentPresentation) return content;
+    return AgentArtworkPanel(
+      imageUrl: avatarUrl,
+      borderRadius: BorderRadius.zero,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          BuzzSheetHeader(leading: headerLeading),
+          Flexible(child: SafeArea(top: false, child: content)),
         ],
       ),
     );

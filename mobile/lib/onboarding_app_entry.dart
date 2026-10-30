@@ -4,7 +4,6 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import 'features/pairing/pairing_page.dart';
-import 'features/onboarding/hosted_connect_sheet.dart';
 import 'features/pairing/pairing_provider.dart';
 import 'shared/hosted/hosted_flow_provider.dart';
 import 'shared/hosted/hosted_flow.dart';
@@ -14,8 +13,15 @@ import 'shared/hosted/hosted_flow_problem_message.dart';
 
 /// Navigation over the existing branded welcome surface.
 class OnboardingAppEntry extends HookConsumerWidget {
-  const OnboardingAppEntry({super.key, this.addingCommunity = false});
+  const OnboardingAppEntry({
+    super.key,
+    this.addingCommunity = false,
+    this.restoreAccount = true,
+    this.onExit,
+  });
   final bool addingCommunity;
+  final bool restoreAccount;
+  final VoidCallback? onExit;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -27,7 +33,7 @@ class OnboardingAppEntry extends HookConsumerWidget {
         : null;
     useListenable(flow);
     useEffect(() {
-      if (flow == null) return null;
+      if (flow == null || !restoreAccount) return null;
       Future<void> restore() async {
         await flow.initialize();
         if (context.mounted) await flow.signInAccount(openBrowser: false);
@@ -63,6 +69,7 @@ class OnboardingAppEntry extends HookConsumerWidget {
         scheduleMicrotask(() {
           presentation.setActive(false);
           if (addingCommunity &&
+              onExit == null &&
               flow != null &&
               flow.stage != HostedFlowStage.complete) {
             unawaited(flow.leave());
@@ -70,19 +77,6 @@ class OnboardingAppEntry extends HookConsumerWidget {
         });
       };
     }, [flow]);
-    final inlineSetup =
-        flow != null &&
-        !flow.accountOnly &&
-        flow.stage != HostedFlowStage.signIn &&
-        !(flow.stage == HostedFlowStage.working &&
-            flow.account.account == null) &&
-        flow.stage != HostedFlowStage.idle &&
-        flow.stage != HostedFlowStage.complete &&
-        flow.stage != HostedFlowStage.profile &&
-        flow.stage != HostedFlowStage.chooseIdentity &&
-        flow.stage != HostedFlowStage.chooseCommunities &&
-        flow.stage != HostedFlowStage.communityConflict &&
-        !flow.canChangeCommunities;
     final signingIn = flow?.stage == HostedFlowStage.signIn;
     final busy =
         flow != null &&
@@ -102,7 +96,25 @@ class OnboardingAppEntry extends HookConsumerWidget {
         : connected
         ? 'Connected to Builderlab.'
         : null;
+    final handlingBack = useRef(false);
     void back() {
+      // Nested page and entry PopScopes receive the same system Back event.
+      if (handlingBack.value) return;
+      handlingBack.value = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        handlingBack.value = false;
+      });
+      if (!existingUser.value &&
+          !enteringCommunityLink.value &&
+          !creating.value &&
+          (onExit != null || addingCommunity)) {
+        if (onExit != null) {
+          onExit!();
+        } else {
+          Navigator.of(context).pop();
+        }
+        return;
+      }
       unawaited(flow?.leave());
       existingUser.value = false;
       creating.value = false;
@@ -113,16 +125,23 @@ class OnboardingAppEntry extends HookConsumerWidget {
 
     return PopScope(
       canPop:
+          onExit == null &&
           !existingUser.value &&
           !enteringCommunityLink.value &&
-          !creating.value &&
-          !inlineSetup,
+          !creating.value,
       onPopInvokedWithResult: (didPop, _) {
+        if (!didPop &&
+            onExit != null &&
+            !existingUser.value &&
+            !enteringCommunityLink.value &&
+            !creating.value) {
+          back();
+          return;
+        }
         if (!didPop &&
             (existingUser.value ||
                 creating.value ||
-                enteringCommunityLink.value ||
-                inlineSetup)) {
+                enteringCommunityLink.value)) {
           back();
         }
       },
@@ -153,22 +172,14 @@ class OnboardingAppEntry extends HookConsumerWidget {
             : () => unawaited(flow.signInAccount()),
         accountStatus: status,
         builderlabBusy: busy,
-        setupContent: flow != null && inlineSetup
-            ? Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  HostedConnectSheet(flow: flow),
-                  TextButton(onPressed: back, child: const Text('Leave setup')),
-                ],
-              )
-            : null,
+        signInPending: signingIn || busy,
         builderlabLabel: signingIn
             ? 'Cancel sign-in'
             : busy
             ? 'Connecting…'
             : connected
             ? 'Continue with Builderlab'
-            : 'Sign in with builderlab',
+            : 'Sign in with email',
         onWelcomeBack: back,
         onAlreadyUseBuzz: () => existingUser.value = true,
       ),

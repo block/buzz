@@ -42,6 +42,33 @@ private final class JumpToLatestGlassButton: UIButton {
 
 final class NavigationGlassButton: UIButton {
   var hitTargetInsets = UIEdgeInsets.zero
+  var pendingMenuAction: (() -> Void)?
+
+  override func contextMenuInteraction(
+    _ interaction: UIContextMenuInteraction,
+    willDisplayMenuFor configuration: UIContextMenuConfiguration,
+    animator: UIContextMenuInteractionAnimating?
+  ) {
+    super.contextMenuInteraction(interaction, willDisplayMenuFor: configuration, animator: animator)
+    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+  }
+
+  override func contextMenuInteraction(
+    _ interaction: UIContextMenuInteraction,
+    willEndFor configuration: UIContextMenuConfiguration,
+    animator: UIContextMenuInteractionAnimating?
+  ) {
+    super.contextMenuInteraction(interaction, willEndFor: configuration, animator: animator)
+    let action = pendingMenuAction
+    pendingMenuAction = nil
+    // Flutter routes must start after UIKit removes the glass menu and its
+    // source-button preview from the window's overlay hierarchy.
+    if let animator {
+      animator.addCompletion { action?() }
+    } else {
+      action?()
+    }
+  }
 
   override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
     guard isEnabled, isUserInteractionEnabled, !isHidden, alpha > 0.01 else {
@@ -171,6 +198,8 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
   private let activityIndicator = UIActivityIndicatorView(style: .medium)
   private let swatchView = UIView()
   private var labelForegroundColor: UIColor?
+  private var showIconWithLabel = false
+  private var labelFontSize: CGFloat?
   private var buttonLabel: String?
   private var buttonIconName = "chevron.backward"
   private var contentIcon = "back"
@@ -213,6 +242,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       configuration = .gray()
       configuration.baseBackgroundColor = UIColor.secondarySystemBackground
     }
+    if arguments?["plain"] as? Bool == true { configuration = .plain() }
     configuration.cornerStyle = .capsule
     button.configuration = configuration
     applyContent(from: arguments)
@@ -395,10 +425,37 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     let icon = arguments?["icon"] as? String
     contentIcon = icon ?? "back"
     buttonLabel = arguments?["label"] as? String
+    labelFontSize = (arguments?["labelFontSize"] as? NSNumber).map { CGFloat(truncating: $0) }
+    showIconWithLabel = arguments?["showIconWithLabel"] as? Bool == true
+    button.configuration?.imagePadding = showIconWithLabel ? 8 : 0
     if let accessibilityLabel = arguments?["accessibilityLabel"] as? String {
       button.accessibilityLabel = accessibilityLabel
     }
+    if let menu = arguments?["menu"] as? [[String: Any]] {
+      var groups: [[UIMenuElement]] = [[]]
+      for item in menu {
+        if item["dividerBefore"] as? Bool == true, !groups[groups.count - 1].isEmpty {
+          groups.append([])
+        }
+        let symbol = (item["symbol"] as? String).flatMap {
+          // A transparent image keeps the native menu's icon column aligned.
+          $0.isEmpty
+            ? UIGraphicsImageRenderer(size: CGSize(width: 24, height: 24)).image { _ in }
+            : NativeTabler.image($0, size: 24)
+        }
+        let action = UIAction(title: item["label"] as? String ?? "", image: symbol,
+                        attributes: item["enabled"] as? Bool == true ? [] : [.disabled]) { [weak self] _ in
+          self?.button.pendingMenuAction = { [weak self] in
+            self?.channel.invokeMethod("menuAction", arguments: item["id"])
+          }
+        }
+        groups[groups.count - 1].append(action)
+      }
+      button.menu = UIMenu(children: groups.map { UIMenu(options: .displayInline, children: $0) })
+      button.showsMenuAsPrimaryAction = !menu.isEmpty
+    }
     switch icon {
+    case "plus": buttonIconName = "plus"
     case "close": buttonIconName = "xmark"
     case "camera": buttonIconName = "camera"
     case "photoLibrary": buttonIconName = "photo.on.rectangle.angled"
@@ -411,6 +468,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     case "shutter": buttonIconName = "circle.fill"
     case "sun": buttonIconName = "sun.max"
     case "moon": buttonIconName = "moon"
+    case "trash": buttonIconName = "trash"
     case "more": buttonIconName = "ellipsis"
     case "reply": buttonIconName = "arrowshape.turn.up.left"
     case "systemAppearance": buttonIconName = "circle.lefthalf.filled"
@@ -418,7 +476,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     default: buttonIconName = "chevron.backward"
     }
     if buttonLabel != nil {
-      buttonImage = nil
+      buttonImage = showIconWithLabel ? NativeTabler.image(buttonIconName, size: 24) : nil
       button.configuration?.contentInsets = NSDirectionalEdgeInsets(
         top: 8,
         leading: 8,
@@ -434,7 +492,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
           }
           let preferred = UIFont.preferredFont(forTextStyle: .subheadline)
           outgoing.font = UIFont.systemFont(
-            ofSize: preferred.pointSize,
+            ofSize: self?.labelFontSize.map { UIFontMetrics(forTextStyle: .subheadline).scaledValue(for: $0) } ?? preferred.pointSize,
             weight: .semibold
           )
           return outgoing
@@ -453,7 +511,23 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       let pointSize: CGFloat = icon == "shutter"
         ? controlSize * Self.shutterIconRatio
         : 24
-      buttonImage = NativeTabler.image(buttonIconName, size: pointSize)
+      if icon == "shutter" {
+        // The shutter is a solid disc, not Tabler's outlined circle glyph.
+        buttonImage = UIGraphicsImageRenderer(size: CGSize(width: pointSize, height: pointSize)).image { _ in
+          UIColor.white.setFill()
+          UIBezierPath(ovalIn: CGRect(x: 0, y: 0, width: pointSize, height: pointSize)).fill()
+        }.withRenderingMode(.alwaysTemplate)
+      } else {
+        buttonImage = NativeTabler.image(buttonIconName, size: pointSize)
+      }
+    }
+    if let bytes = arguments?["imageBytes"] as? FlutterStandardTypedData,
+       let image = UIImage(data: bytes.data) {
+      let size = CGSize(width: 36, height: 36)
+      buttonImage = UIGraphicsImageRenderer(size: size).image { _ in
+        image.draw(in: CGRect(origin: .zero, size: size))
+      }.withRenderingMode(.alwaysOriginal)
+      button.configuration?.contentInsets = .zero
     }
     updateDisplayedContent()
     button.setNeedsUpdateConfiguration()
@@ -485,7 +559,10 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     } else {
       let displaysSwatch = contentIcon == "colorSwatch"
       button.configuration?.title = displaysSwatch ? nil : buttonLabel
-      button.configuration?.image = displaysSwatch || buttonLabel != nil ? nil : buttonImage
+      let image = button.isSelected
+        ? buttonImage?.withTintColor(labelForegroundColor ?? .label, renderingMode: .alwaysOriginal)
+        : buttonImage
+      button.configuration?.image = displaysSwatch || (buttonLabel != nil && !showIconWithLabel) ? nil : image
       swatchView.isHidden = !displaysSwatch
       activityIndicator.stopAnimating()
     }

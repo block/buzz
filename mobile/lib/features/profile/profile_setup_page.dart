@@ -18,7 +18,7 @@ import 'profile_avatar_draft.dart';
 import '../../shared/widgets/playing_avatar_image.dart';
 import 'profile_setup_avatar_editor.dart';
 
-/// One optional profile sheet for onboarding and existing-community entry.
+/// Profile setup for onboarding and existing-community entry, with a failure exit.
 class ProfileSetupPage extends HookConsumerWidget {
   const ProfileSetupPage({super.key, required this.flow});
   final HostedFlow flow;
@@ -28,8 +28,21 @@ class ProfileSetupPage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = utilitySurfaceThemeData(Theme.of(context));
+    final appearance = <String, Object>{
+      'dark': theme.brightness == Brightness.dark,
+      'pageBackgroundArgb': theme.colorScheme.surface.toARGB32(),
+      'containerBackgroundArgb': theme.colorScheme.surfaceContainerHighest
+          .toARGB32(),
+      'containerCornerRadius': Radii.container,
+      'primaryArgb': theme.colorScheme.primary.toARGB32(),
+      'onPrimaryArgb': theme.colorScheme.onPrimary.toARGB32(),
+      'subtitleArgb': theme.colorScheme.onSurfaceVariant.toARGB32(),
+    };
+    final currentAppearance = useRef(appearance)..value = appearance;
+    final nativeSession = useRef<int?>(null);
     useEffect(() {
       final session = ++_nextSession;
+      nativeSession.value = session;
       var active = true;
       var name = '';
       final avatar = ValueNotifier<ProfileAvatarDraft?>(null);
@@ -37,9 +50,9 @@ class ProfileSetupPage extends HookConsumerWidget {
       ModalRoute<dynamic>? editorRoute;
       bool current() =>
           active && context.mounted && flow.stage == HostedFlowStage.profile;
-      Future<void> save() async {
+      Future<void> save({bool skipAvatar = false}) async {
         if (!current()) return;
-        final draft = avatar.value;
+        final draft = skipAvatar ? null : avatar.value;
         final service = draft == null
             ? null
             : ref.read(mediaUploadServiceProvider);
@@ -91,7 +104,7 @@ class ProfileSetupPage extends HookConsumerWidget {
               onName: (value) => name = value,
               editAvatar: editAvatar,
               save: save,
-              skip: flow.finishProfile,
+              notNow: flow.finishProfile,
             );
           },
         );
@@ -134,7 +147,9 @@ class ProfileSetupPage extends HookConsumerWidget {
                 return {'saved': false};
               }
               try {
-                await save();
+                await save(
+                  skipAvatar: (call.arguments as Map)['skipAvatar'] == true,
+                );
                 return {'saved': true};
               } catch (_) {
                 return {'saved': false};
@@ -161,15 +176,7 @@ class ProfileSetupPage extends HookConsumerWidget {
               'avatar': bytes,
               'emoji': emoji?.emoji,
               'emojiColor': emoji?.colorValue,
-              'dark': theme.brightness == Brightness.dark,
-              'pageBackgroundArgb': theme.colorScheme.surface.toARGB32(),
-              'containerBackgroundArgb': theme
-                  .colorScheme
-                  .surfaceContainerHighest
-                  .toARGB32(),
-              'containerCornerRadius': Radii.container,
-
-              'primaryArgb': theme.colorScheme.primary.toARGB32(),
+              ...currentAppearance.value,
             });
             if (!current()) return;
             if (action != 'saved') flow.finishProfile();
@@ -189,6 +196,7 @@ class ProfileSetupPage extends HookConsumerWidget {
       });
       return () {
         active = false;
+        if (nativeSession.value == session) nativeSession.value = null;
         if (defaultTargetPlatform == TargetPlatform.iOS) {
           _channel.setMethodCallHandler(null);
           unawaited(
@@ -208,6 +216,22 @@ class ProfileSetupPage extends HookConsumerWidget {
         });
       };
     }, [flow]);
+    useEffect(() {
+      if (defaultTargetPlatform != TargetPlatform.iOS) return null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final session = nativeSession.value;
+        if (!context.mounted || session == null) return;
+        unawaited(
+          _channel
+              .invokeMethod<void>('appearance', {
+                'session': session,
+                ...currentAppearance.value,
+              })
+              .catchError((Object _) {}),
+        );
+      });
+      return null;
+    }, [theme]);
     return const SizedBox.shrink();
   }
 }
@@ -218,13 +242,13 @@ class _ProfileSetupForm extends HookWidget {
     required this.onName,
     required this.editAvatar,
     required this.save,
-    required this.skip,
+    required this.notNow,
   });
   final ValueNotifier<ProfileAvatarDraft?> avatar;
   final ValueChanged<String> onName;
   final Future<void> Function() editAvatar;
   final Future<void> Function() save;
-  final VoidCallback skip;
+  final VoidCallback notNow;
   @override
   Widget build(BuildContext context) {
     final draft = useValueListenable(avatar);
@@ -233,7 +257,7 @@ class _ProfileSetupForm extends HookWidget {
     final busy = useState(false);
     final error = useState(false);
     return PopScope(
-      canPop: !busy.value,
+      canPop: false,
       child: Padding(
         padding: EdgeInsets.fromLTRB(
           20,
@@ -274,7 +298,9 @@ class _ProfileSetupForm extends HookWidget {
               decoration: const InputDecoration(labelText: 'Display name'),
             ),
             if (error.value)
-              const Text('Could not save your profile. Try again or skip.'),
+              const Text(
+                'Could not save your profile. Try again or choose Not now to continue without saving.',
+              ),
             FilledButton(
               style: FilledButton.styleFrom(
                 minimumSize: const Size.fromHeight(52),
@@ -295,14 +321,11 @@ class _ProfileSetupForm extends HookWidget {
                     },
               child: Text(busy.value ? 'Saving…' : 'Continue'),
             ),
-            OutlinedButton(
-              style: OutlinedButton.styleFrom(
-                minimumSize: const Size.fromHeight(52),
-                shape: const StadiumBorder(),
+            if (error.value)
+              TextButton(
+                onPressed: busy.value ? null : notNow,
+                child: const Text('Not now'),
               ),
-              onPressed: busy.value ? null : skip,
-              child: const Text('Skip'),
-            ),
           ],
         ),
       ),

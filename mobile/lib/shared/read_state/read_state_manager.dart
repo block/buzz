@@ -64,6 +64,15 @@ class ReadStateManager {
   Timer? _debounceTimer;
   void Function()? _unsubscribeLive;
   bool _initialized = false;
+  // Pending first fetch and subscribe. A reconnect while it runs waits for it
+  // so two passes cannot each install a live subscription and leak one.
+  Future<void>? _initializing;
+  // The reconnect pass running now, and the one waiting to start after it.
+  Future<void>? _runningResync;
+  Future<void>? _queuedResync;
+  // Whether the first fetch and subscribe both succeeded. A connect that
+  // lands while they run (the cold-start connect) then has nothing to redo.
+  bool _initialSyncSucceeded = false;
   bool _disposed = false;
   bool _isPublishing = false;
   // Set when a publish is asked for while one is running. The running
@@ -111,8 +120,16 @@ class ReadStateManager {
       return;
     }
 
-    await _fetchAndMerge();
-    await _startLiveSubscription();
+    final initializing = Completer<void>();
+    _initializing = initializing.future;
+    try {
+      final fetched = await _fetchAndMerge();
+      final subscribed = await _startLiveSubscription();
+      _initialSyncSucceeded = fetched && subscribed;
+    } finally {
+      _initializing = null;
+      initializing.complete();
+    }
     if (!_isIdenticalToLastPublished(_currentContexts())) {
       _schedulePublish();
     }
@@ -131,11 +148,28 @@ class ReadStateManager {
       currentUnixSeconds(),
       _maxFetchedCreatedAt + 1,
     );
-    _advanceContext(contextId, unixTimestamp, publishable: true);
+    if (_advanceContext(contextId, unixTimestamp, publishable: true)) {
+      _persistLocalState();
+      _onChanged();
+      _schedulePublish();
+    }
   }
 
   void seedContextRead(String contextId, int unixTimestamp) {
-    _advanceContext(contextId, unixTimestamp, publishable: false);
+    seedContextsRead({contextId: unixTimestamp});
+  }
+
+  /// Advance local-only seeds together, saving and notifying once per batch.
+  void seedContextsRead(Map<String, int> contexts) {
+    var changed = false;
+    for (final entry in contexts.entries) {
+      if (_advanceContext(entry.key, entry.value, publishable: false)) {
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    _persistLocalState();
+    _onChanged();
   }
 
   Future<void> flush() async {
@@ -145,8 +179,43 @@ class ReadStateManager {
     await _publish();
   }
 
-  Future<void> reinitializeRemote() async {
-    if (_disposed || !_remoteEnabled || !_initialized) return;
+  /// Fetch and resubscribe after a reconnect. Passes run one at a time, so
+  /// each replaces the previous live subscription instead of leaking one.
+  /// Reconnects while a pass waits to start share that pass.
+  Future<void> reinitializeRemote() {
+    if (_disposed || !_remoteEnabled || !_initialized) return Future.value();
+    final queued = _queuedResync;
+    if (queued != null) return queued;
+    final running = _runningResync;
+    final initializing = _initializing;
+    final pass = Completer<void>();
+    _queuedResync = pass.future;
+    unawaited(() async {
+      try {
+        if (running != null) {
+          await running;
+        } else if (initializing != null) {
+          await initializing;
+          // Connected while the first sync ran: it already used this
+          // connection.
+          if (_initialSyncSucceeded) return;
+        }
+        if (_disposed) return;
+        if (identical(_queuedResync, pass.future)) _queuedResync = null;
+        _runningResync = pass.future;
+        await _resyncRemote();
+      } catch (e) {
+        debugPrint('[ReadStateManager] reinitializeRemote failed: $e');
+      } finally {
+        if (identical(_queuedResync, pass.future)) _queuedResync = null;
+        if (identical(_runningResync, pass.future)) _runningResync = null;
+        pass.complete();
+      }
+    }());
+    return pass.future;
+  }
+
+  Future<void> _resyncRemote() async {
     debugPrint('[ReadStateManager] reinitializeRemote');
     if (_isPublishing) {
       await _publishCompleter?.future;
@@ -180,38 +249,31 @@ class ReadStateManager {
     _unsubscribeLive = null;
   }
 
-  void _advanceContext(
+  bool _advanceContext(
     String contextId,
     int unixTimestamp, {
     required bool publishable,
   }) {
-    if (_disposed || unixTimestamp < 0) return;
+    if (_disposed || unixTimestamp < 0) return false;
 
     final current = _effectiveState[contextId] ?? 0;
     if (unixTimestamp <= current) {
       if (!publishable || _publishableContextIds.contains(contextId)) {
-        return;
+        return false;
       }
 
       _publishableContextIds.add(contextId);
-      _persistLocalState();
-      _onChanged();
-      _schedulePublish();
-      return;
+      return true;
     }
 
     _effectiveState[contextId] = unixTimestamp;
     if (publishable) {
       _publishableContextIds.add(contextId);
     }
-    _persistLocalState();
-    _onChanged();
-    if (publishable) {
-      _schedulePublish();
-    }
+    return true;
   }
 
-  Future<void> _fetchAndMerge() async {
+  Future<bool> _fetchAndMerge() async {
     try {
       final events = await _relaySession!.fetchHistory(
         NostrFilter(
@@ -227,8 +289,10 @@ class ReadStateManager {
       _mergeEvents(events);
       _persistLocalState();
       _onChanged();
+      return true;
     } catch (e) {
       debugPrint('[ReadStateManager] fetchAndMerge failed: $e');
+      return false;
     }
   }
 
@@ -300,7 +364,7 @@ class ReadStateManager {
     return changed;
   }
 
-  Future<void> _startLiveSubscription() async {
+  Future<bool> _startLiveSubscription() async {
     try {
       final unsub = await _relaySession!.subscribe(
         NostrFilter(
@@ -315,12 +379,14 @@ class ReadStateManager {
       );
       if (_disposed) {
         unsub.call();
-        return;
+        return false;
       }
       _unsubscribeLive = unsub;
       debugPrint('[ReadStateManager] live subscription established');
+      return true;
     } catch (e) {
       debugPrint('[ReadStateManager] live subscription FAILED: $e');
+      return false;
     }
   }
 

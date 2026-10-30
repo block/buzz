@@ -2,17 +2,7 @@ part of '../channels_page.dart';
 
 const int _defaultCreateChannelTtlSeconds = 7 * 24 * 60 * 60;
 
-class _CreateChannelMenuOption<T> {
-  final Key? key;
-  final String label;
-  final T value;
-
-  const _CreateChannelMenuOption({
-    this.key,
-    required this.label,
-    required this.value,
-  });
-}
+typedef _CreateChannelMenuOption<T> = BuzzSettingMenuOption<T>;
 
 const _createChannelTtlOptions = [
   _CreateChannelMenuOption(label: '30 minutes', value: 30 * 60),
@@ -174,7 +164,7 @@ class _CreateChannelSheet extends HookConsumerWidget {
               ),
               if (temporary.value) ...[
                 const SizedBox(height: Grid.xs),
-                _CreateChannelSettingMenu<int>(
+                BuzzSettingMenu<int>(
                   controlKey: const Key('create-channel-ttl'),
                   enabled: !isSubmitting.value,
                   label: 'Expires after',
@@ -349,90 +339,6 @@ class _CreateChannelRadioGroup<T> extends StatelessWidget {
   }
 }
 
-class _CreateChannelSettingMenu<T> extends StatelessWidget {
-  final Key controlKey;
-  final bool enabled;
-  final String label;
-  final ValueChanged<T> onSelected;
-  final List<_CreateChannelMenuOption<T>> options;
-  final T value;
-  final IconData? valueIcon;
-  final String valueLabel;
-
-  const _CreateChannelSettingMenu({
-    required this.controlKey,
-    required this.enabled,
-    required this.label,
-    required this.onSelected,
-    required this.options,
-    required this.value,
-    this.valueIcon,
-    required this.valueLabel,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: context.colors.surface,
-        border: Border.all(color: context.colors.outlineVariant),
-        borderRadius: BorderRadius.circular(Radii.container),
-      ),
-      child: PopupMenuButton<T>(
-        enabled: enabled,
-        initialValue: value,
-        onSelected: onSelected,
-        tooltip: '$label: $valueLabel',
-        itemBuilder: (context) => [
-          for (final option in options)
-            CheckedPopupMenuItem<T>(
-              checked: option.value == value,
-              value: option.value,
-              child: Text(option.label),
-            ),
-        ],
-        child: Padding(
-          key: controlKey,
-          padding: const EdgeInsets.symmetric(
-            horizontal: Grid.twelve,
-            vertical: Grid.xs,
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  label,
-                  style: context.textTheme.labelLarge?.copyWith(
-                    color: context.colors.onSurface,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-              if (valueIcon case final icon?) ...[
-                Icon(icon, size: 16, color: context.colors.onSurfaceVariant),
-                const SizedBox(width: Grid.half),
-              ],
-              Text(
-                valueLabel,
-                style: context.textTheme.bodyMedium?.copyWith(
-                  color: context.colors.onSurface,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-              const SizedBox(width: Grid.half),
-              Icon(
-                BuzzIcons.chevronDown,
-                size: 16,
-                color: context.colors.onSurfaceVariant,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _NewDirectMessageSheet extends HookConsumerWidget {
   final String? currentPubkey;
 
@@ -515,6 +421,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
             .read(channelActionsProvider)
             .openDm(
               pubkeys: selectedUsers.value.map((user) => user.pubkey).toList(),
+              waitForChannelList: false,
             );
         if (context.mounted) {
           Navigator.of(context).pop(channel);

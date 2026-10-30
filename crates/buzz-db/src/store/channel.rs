@@ -27,9 +27,9 @@ pub use crate::channel_members::{
     add_member, get_accessible_channel_ids, get_accessible_channels, get_bot_members,
     get_member_count, get_member_counts_bulk, get_member_role, get_members, get_members_bulk,
     get_users_bulk, is_member, list_large_channel_rosters_needing_reconciliation,
-    lock_member_snapshot, membership_pairs, remove_member, verify_channel_roster_fence_behavior,
-    verify_channel_roster_fence_catalog, AccessibleChannel, BotChannelEntry, BotMemberRecord,
-    ChannelIdentity, LargeChannelRoster, LockedMemberSnapshot, MemberRecord, UserRecord,
+    lock_member_snapshot, membership_pairs, remove_member, AccessibleChannel, BotChannelEntry,
+    BotMemberRecord, ChannelIdentity, LargeChannelRoster, LockedMemberSnapshot, MemberRecord,
+    UserRecord,
 };
 
 /// A channel row as returned from the database.
@@ -84,6 +84,11 @@ pub struct ChannelRecord {
     /// The role a new person gets (`"member"` or `"guest"`). Parse with
     /// [`buzz_core::channel::ChannelJoinRole::parse_fail_closed`].
     pub join_role: String,
+    /// Whether the channel is left out of channel listings for non-members.
+    /// It matters only while the channel is open: anyone can still read and
+    /// join an unlisted open channel by naming it, and private channels are
+    /// never listed to non-members.
+    pub unlisted: bool,
 }
 
 impl ChannelRecord {
@@ -109,6 +114,7 @@ pub async fn create_channel(
     created_by: &[u8],
     ttl_seconds: Option<i32>,
     labels: &[String],
+    unlisted: bool,
 ) -> Result<ChannelRecord> {
     if created_by.len() != 32 {
         return Err(DbError::InvalidData(format!(
@@ -133,9 +139,9 @@ pub async fn create_channel(
 
     sqlx::query(
         r#"
-        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline, labels)
+        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline, labels, unlisted)
         VALUES ($1, $2, $3, $4::channel_type, $5::channel_visibility, $6, $7, $8,
-                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END, $9)
+                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END, $9, $10)
         "#,
     )
     .bind(id)
@@ -147,6 +153,7 @@ pub async fn create_channel(
     .bind(created_by)
     .bind(ttl_seconds)
     .bind(labels)
+    .bind(unlisted)
     .execute(tx.conn())
     .await?;
 
@@ -175,7 +182,7 @@ pub async fn create_channel(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -224,6 +231,7 @@ pub async fn create_channel_with_id(
             created_by,
             ttl_seconds,
             labels,
+            unlisted: false,
             members: &[],
         },
     )
@@ -237,7 +245,7 @@ pub async fn create_channel_with_id(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -267,6 +275,8 @@ pub struct NewChannel<'a> {
     pub ttl_seconds: Option<i32>,
     /// Labels validated by `buzz_core::channel::parse_channel_labels`.
     pub labels: &'a [String],
+    /// Leave the channel out of listings for non-members from the start.
+    pub unlisted: bool,
     /// 32-byte pubkeys added as ordinary members invited by the creator. The
     /// caller has authorized each addition.
     pub members: &'a [Vec<u8>],
@@ -340,6 +350,7 @@ async fn insert_channel_rows(
         created_by,
         ttl_seconds,
         labels,
+        unlisted,
         members,
     } = channel;
     let community_id = tx.community();
@@ -363,9 +374,9 @@ async fn insert_channel_rows(
 
     let rows_affected = sqlx::query(
         r#"
-        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline, labels)
+        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline, labels, unlisted)
         VALUES ($1, $2, $3, $4::channel_type, $5::channel_visibility, $6, $7, $8,
-                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END, $9)
+                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END, $9, $10)
         ON CONFLICT (community_id, id) DO NOTHING
         "#,
     )
@@ -378,6 +389,7 @@ async fn insert_channel_rows(
     .bind(created_by)
     .bind(ttl_seconds)
     .bind(labels)
+    .bind(unlisted)
     .execute(tx.conn())
     .await?
     .rows_affected();
@@ -476,7 +488,7 @@ async fn get_channel_with_operation(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted
         FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
     )
@@ -565,7 +577,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline, labels, join_role
+                   ttl_seconds, ttl_deadline, labels, join_role, unlisted
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL AND visibility::text = $2
             ORDER BY created_at DESC
@@ -585,7 +597,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline, labels, join_role
+                   ttl_seconds, ttl_deadline, labels, join_role, unlisted
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL
             ORDER BY created_at DESC
@@ -653,6 +665,8 @@ pub(crate) fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<Channe
         // Selected by every channel-record query. A missing column is an
         // error, never a silent `member`: the write gate depends on it.
         join_role: row.try_get("join_role")?,
+        // Selected by every channel-record query, like `join_role`.
+        unlisted: row.try_get("unlisted")?,
     })
 }
 
@@ -672,7 +686,10 @@ pub(crate) fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<Channe
 ///
 /// Buzz also publishes the explicit `["join_role", ...]` value, so clients
 /// can tell what joining gives (show Join or Follow) without inferring it
-/// from the flags.
+/// from the flags, and a bare `["unlisted"]` flag when the channel is
+/// unlisted. The flag is published as stored, whatever the visibility, so
+/// clients see the setting; it only changes listings while the channel is
+/// open.
 pub fn group_metadata_tags(channel: &ChannelRecord, members: &[MemberRecord]) -> Vec<Vec<String>> {
     let tag = |parts: &[&str]| parts.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>();
     let mut tags = vec![
@@ -689,6 +706,9 @@ pub fn group_metadata_tags(channel: &ChannelRecord, members: &[MemberRecord]) ->
         tags.push(tag(&["public"]));
     } else {
         tags.push(tag(&["private"]));
+    }
+    if channel.unlisted {
+        tags.push(tag(&["unlisted"]));
     }
     let join_role = ChannelJoinRole::parse_fail_closed(&channel.join_role);
     if !open || join_role == ChannelJoinRole::Guest {
@@ -766,6 +786,9 @@ pub struct ChannelUpdate {
     pub labels: Option<Vec<String>>,
     /// New join role (`"member"`/`"guest"`), or `None` to leave unchanged.
     pub join_role: Option<String>,
+    /// New unlisted flag, or `None` to leave unchanged. It decides listing,
+    /// not admission, so it does not take the membership lock.
+    pub unlisted: Option<bool>,
 }
 
 impl ChannelUpdate {
@@ -777,6 +800,7 @@ impl ChannelUpdate {
             && self.ttl_seconds.is_none()
             && self.labels.is_none()
             && self.join_role.is_none()
+            && self.unlisted.is_none()
     }
 
     /// True when the update changes a setting that decides admission:
@@ -1013,6 +1037,10 @@ async fn update_channel_on(
         set_parts.push(format!("join_role = ${param_idx}"));
         param_idx += 1;
     }
+    if updates.unlisted.is_some() {
+        set_parts.push(format!("unlisted = ${param_idx}"));
+        param_idx += 1;
+    }
     if let Some(ref ttl) = updates.ttl_seconds {
         // Set ttl_seconds, then reset the deadline from now (or clear both).
         set_parts.push(format!("ttl_seconds = ${param_idx}"));
@@ -1047,6 +1075,9 @@ async fn update_channel_on(
     }
     if let Some(ref join_role) = updates.join_role {
         q = q.bind(join_role);
+    }
+    if let Some(unlisted) = updates.unlisted {
+        q = q.bind(unlisted);
     }
     if let Some(ref ttl) = updates.ttl_seconds {
         q = q.bind(*ttl);
@@ -1488,6 +1519,7 @@ impl Db {
             created_by,
             ttl_seconds,
             &[],
+            false,
         )
         .await
     }
@@ -1575,7 +1607,8 @@ impl Db {
         .await
     }
 
-    /// Creates a channel with a relay-chosen UUID and an initial label set.
+    /// Creates a channel with a relay-chosen UUID, an initial label set and
+    /// an initial unlisted flag.
     #[allow(clippy::too_many_arguments)]
     #[datastore_span(name = "create_labeled_channel", system = "postgresql")]
     pub async fn create_labeled_channel(
@@ -1588,6 +1621,7 @@ impl Db {
         created_by: &[u8],
         ttl_seconds: Option<i32>,
         labels: &[String],
+        unlisted: bool,
     ) -> Result<ChannelRecord> {
         create_channel(
             &self.pool,
@@ -1599,6 +1633,7 @@ impl Db {
             created_by,
             ttl_seconds,
             labels,
+            unlisted,
         )
         .await
     }
@@ -1784,6 +1819,7 @@ mod group_metadata_tag_tests {
             ttl_deadline: None,
             labels: Vec::new(),
             join_role: join_role.into(),
+            unlisted: false,
         }
     }
 
@@ -1865,6 +1901,23 @@ mod group_metadata_tag_tests {
         .map(|tag| tag.to_vec())
         .collect::<Vec<_>>();
         assert_eq!(identity, expected.iter().collect::<Vec<_>>());
+    }
+
+    /// `unlisted` is a bare flag, published as stored for either visibility,
+    /// and absent for a listed channel. It never adds NIP-29 `hidden`: an
+    /// unlisted channel's metadata stays readable by id.
+    #[test]
+    fn publishes_the_unlisted_flag_as_stored() {
+        let unlisted = vec!["unlisted".to_string()];
+        let hidden = vec!["hidden".to_string()];
+        for visibility in ["open", "private"] {
+            let mut channel = channel(visibility, "member");
+            assert!(!group_metadata_tags(&channel, &[]).contains(&unlisted));
+            channel.unlisted = true;
+            let tags = group_metadata_tags(&channel, &[]);
+            assert!(tags.contains(&unlisted), "{visibility}");
+            assert!(!tags.contains(&hidden), "{visibility}");
+        }
     }
 
     /// Private system channels are hidden, like DMs; open ones are not.
@@ -2218,6 +2271,7 @@ mod postgres_tests {
             created_by,
             ttl_seconds: None,
             labels: &[],
+            unlisted: false,
             members,
         }
     }

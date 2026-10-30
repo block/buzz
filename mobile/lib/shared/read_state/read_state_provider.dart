@@ -75,7 +75,10 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
     _forcedUnreadContexts.clear();
 
     final relayConfig = ref.watch(relayConfigProvider);
-    ref.watch(relaySessionProvider);
+    // Watch the session notifier, not its state: a status change (app resume,
+    // reconnect) must not rebuild the manager and drop session-local forced
+    // unread flags. The listener below re-syncs on reconnect instead.
+    ref.watch(relaySessionProvider.notifier);
     ref.watch(activeCommunityProvider);
 
     final nsec = relayConfig.nsec?.trim();
@@ -198,6 +201,11 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
 
   void seedContextRead(String contextId, int unixTimestamp) {
     _manager?.seedContextRead(contextId, unixTimestamp);
+  }
+
+  /// Seed a channel-list snapshot with one local save and state emission.
+  void seedContextsRead(Map<String, int> contexts) {
+    _manager?.seedContextsRead(contexts);
   }
 
   void _emitManagerState(ReadStateManager manager) {

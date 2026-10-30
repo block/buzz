@@ -5,7 +5,6 @@ import '../../features/profile/profile_provider.dart';
 import '../relay/relay_provider.dart';
 import '../relay/relay_session.dart';
 import '../auth/auth.dart';
-import '../community/paired_community_landing.dart';
 import '../deeplink/deep_link.dart';
 import 'account_identity_store.dart';
 import 'browser_auth.dart';
@@ -69,6 +68,25 @@ HostedFlow createHostedFlow(
     browser: browser,
     store: store,
     identity: HostedIdentityService(account: account, store: store),
+    openLandingCommunity: (link, subject, pubkey, isCurrent) async {
+      bool current() => isCurrent() && account.account?.subject == subject;
+      final storage = ref.read(communityStorageProvider);
+      final saved = await storage.loadAll();
+      if (!current()) return;
+      final destination = saved
+          .where(
+            (item) =>
+                relayIdentity(item.relayUrl) == relayIdentity(link.relayUrl!) &&
+                item.pubkey == pubkey,
+          )
+          .firstOrNull;
+      if (destination == null) throw AccountFailure.unavailable;
+      final active = await storage.loadActiveId();
+      if (!current() || active == destination.id) return;
+      await ref
+          .read(authProvider.notifier)
+          .authenticateWithCommunity(destination, shouldContinue: current);
+    },
     enterCommunity: (link, subject, pubkey, isCurrent) async {
       await connectHostedCommunity(
         link: link,
@@ -107,8 +125,6 @@ HostedFlow createHostedFlow(
   void onCompleted() {
     if (flow.reconnecting && flow.stage == HostedFlowStage.complete) {
       unawaited(ref.read(relaySessionProvider.notifier).reconnect());
-    } else if (flow.accountOnly && flow.stage == HostedFlowStage.complete) {
-      ref.read(communityGridLandingProvider.notifier).request();
     }
   }
 

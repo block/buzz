@@ -10,6 +10,7 @@ class _NotificationsSection extends ConsumerWidget {
     }
     final community = ref.watch(activeCommunityProvider).value;
     if (community == null) return const SizedBox.shrink();
+    final setup = ref.watch(buzzPushSetupStatusProvider);
     final capability = ref.watch(currentRelayPushDescriptorProvider);
     final hasCapability =
         !capability.isLoading &&
@@ -19,10 +20,14 @@ class _NotificationsSection extends ConsumerWidget {
         community.pushSubscriptionState.pendingTombstoneGeneration != null;
     if (!hasCapability &&
         !community.pushNotificationsEnabled &&
-        !optOutPending) {
+        !optOutPending &&
+        !setup.hasError) {
       return const SizedBox.shrink();
     }
     final canToggle = hasCapability || community.pushNotificationsEnabled;
+    final omittedSoloChats = community.pushNotificationsEnabled
+        ? ref.watch(pushSubscriptionSyncProvider).value ?? 0
+        : 0;
 
     void setEnabled(bool enabled) {
       unawaited(
@@ -35,6 +40,13 @@ class _NotificationsSection extends ConsumerWidget {
     return AppListCard(
       verticalPadding: Grid.twelve,
       children: [
+        if (setup.hasError)
+          AppListRow(
+            key: const ValueKey('push-setup-retry'),
+            title: 'Notification setup failed',
+            subtitle: 'You can keep using Buzz. Tap to retry notifications.',
+            onTap: () => retryBuzzPushSetup(ref),
+          ),
         MergeSemantics(
           key: const ValueKey('push-notifications-setting'),
           child: Stack(
@@ -63,6 +75,14 @@ class _NotificationsSection extends ConsumerWidget {
             ],
           ),
         ),
+        if (omittedSoloChats > 0)
+          AppListRow(
+            key: const ValueKey('push-solo-coverage'),
+            title: 'Older Solo chats notify only on mention',
+            subtitle: omittedSoloChats == 1
+                ? '1 chat is past this relay’s notification limit.'
+                : '$omittedSoloChats chats are past this relay’s notification limit.',
+          ),
       ],
     );
   }
