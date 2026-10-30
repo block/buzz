@@ -5,13 +5,13 @@ import { ChevronLeft, ChevronRight, Download } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { useOpenMessageLink } from "@/app/navigation/useOpenMessageLink";
 import { requestOpenSnapshotImport } from "@/features/agents/openSnapshotImportFromUrlEvent";
 import { parseChannelLink } from "@/features/messages/lib/channelLink";
 import { isAudioAttachment } from "@/features/messages/lib/audioAttachment";
 import {
   parseMessageLink,
   resolveMessageLinkRenderTarget,
-  type ParsedMessageLink,
 } from "@/features/messages/lib/messageLink";
 import { renderAudioMessageAttachment } from "@/features/messages/ui/AudioMessageAttachment";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
@@ -1706,18 +1706,7 @@ function MarkdownInner({
     [goChannel],
   );
   const onOpenEntityLink = useOpenEntityLink();
-  const onOpenMessageLink = React.useCallback(
-    (link: ParsedMessageLink) => {
-      // Always route through `goChannel` with `messageId` set: the navigation
-      // boundary guards every message-targeting caller before URL mutation.
-      // `useAnchoredScroll` + `getEventById` backfill, and works for
-      void goChannel(link.channelId, {
-        messageId: link.messageId,
-        threadRootId: link.threadRootId,
-      });
-    },
-    [goChannel],
-  );
+  const onOpenMessageLink = useOpenMessageLink();
   const relayOrigin = useRelayOrigin();
   const resolvedLinkPreviews = useMessageLinkPreviews({
     content,
