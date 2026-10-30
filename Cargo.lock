@@ -1113,6 +1113,7 @@ dependencies = [
  "clap",
  "diffy",
  "dirs",
+ "fs2",
  "hex",
  "infer",
  "nostr 0.44.7",

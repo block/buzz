@@ -56,13 +56,13 @@ pub(crate) struct Outcome {
     pub skipped_slots: Vec<read_state::SkippedSlot>,
 }
 
-struct Channel {
-    id: String,
+pub(super) struct Channel {
+    pub id: String,
     name: String,
-    is_dm: bool,
+    pub is_dm: bool,
 }
 
-fn message_kinds(is_dm: bool) -> Vec<u32> {
+pub(super) fn message_kinds(is_dm: bool) -> Vec<u32> {
     let mut kinds = vec![
         KIND_STREAM_MESSAGE,
         KIND_STREAM_MESSAGE_V2,
@@ -87,7 +87,7 @@ fn tags(event: &Value) -> impl Iterator<Item = Vec<&str>> {
 
 /// The thread root a reply counts against, as desktop's `getThreadReference`
 /// and `isBroadcastReply` resolve it. A broadcast reply has none.
-fn thread_root(event: &Value) -> Option<String> {
+pub(super) fn thread_root(event: &Value) -> Option<String> {
     let mut broadcast = false;
     let mut root = None;
     let mut reply = None;
@@ -186,7 +186,7 @@ fn is_archived(metadata: &Value) -> bool {
     tags(metadata).any(|t| t.as_slice() == ["archived", "true"])
 }
 
-async fn resolve_channels(
+pub(super) async fn resolve_channels(
     client: &BuzzClient,
     requested: &[String],
     limit: usize,
@@ -346,98 +346,9 @@ pub async fn cmd_unread(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::read_state::tests::{slot_event, snapshot_descriptor, snapshot_envelope};
-    use axum::{body::Bytes, extract::State, routing::get, routing::post, Json, Router};
+    use crate::commands::read_state::tests::slot_event;
+    use crate::commands::test_relay::{fake_relay, Shared};
     use nostr::Keys;
-    use std::sync::{Arc, Mutex};
-    use tokio::net::TcpListener;
-
-    #[derive(Default)]
-    struct Relay {
-        events: Vec<Value>,
-        filters: Vec<Value>,
-    }
-    type Shared = Arc<Mutex<Relay>>;
-
-    fn tag_values(filter: &Value, key: &str) -> Vec<String> {
-        filter[key]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    fn matches(event: &Value, filter: &Value) -> bool {
-        let kinds: Vec<u64> = filter["kinds"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(Value::as_u64)
-            .collect();
-        let has_tag = |name: &str, wanted: Vec<String>| {
-            wanted.is_empty()
-                || tags(event).any(|t| {
-                    t.first() == Some(&name) && wanted.iter().any(|w| t.get(1) == Some(&w.as_str()))
-                })
-        };
-        kinds.contains(&event["kind"].as_u64().unwrap())
-            && filter["authors"]
-                .as_array()
-                .is_none_or(|a| a.iter().any(|x| x == &event["pubkey"]))
-            && event["created_at"].as_u64().unwrap() >= filter["since"].as_u64().unwrap_or(0)
-            && has_tag("h", tag_values(filter, "#h"))
-            && has_tag("d", tag_values(filter, "#d"))
-            && has_tag("p", tag_values(filter, "#p"))
-            && has_tag("t", tag_values(filter, "#t"))
-    }
-
-    async fn fake_relay(relay: Shared) -> String {
-        let app = Router::new()
-            .route(
-                "/query",
-                post(|State(relay): State<Shared>, body: Bytes| async move {
-                    let filters: Vec<Value> = serde_json::from_slice(&body).unwrap();
-                    let [filter] = filters.as_slice() else {
-                        panic!("one filter expected")
-                    };
-                    let mut relay = relay.lock().unwrap();
-                    relay.filters.push(filter.clone());
-                    if filter.get("read_state_snapshot").is_some() {
-                        let own: Vec<Value> = relay
-                            .events
-                            .iter()
-                            .filter(|e| {
-                                e["kind"] == 30078 && filter["authors"] == json!([e["pubkey"]])
-                            })
-                            .cloned()
-                            .collect();
-                        let author = filter["authors"][0].as_str().unwrap();
-                        return Json(snapshot_envelope(author, own));
-                    }
-                    let mut hits: Vec<Value> = relay
-                        .events
-                        .iter()
-                        .filter(|e| matches(e, filter))
-                        .cloned()
-                        .collect();
-                    hits.sort_by_key(|e| std::cmp::Reverse(e["created_at"].as_u64().unwrap()));
-                    hits.truncate(filter["limit"].as_u64().unwrap() as usize);
-                    Json(json!(hits))
-                }),
-            )
-            .route(
-                "/info",
-                get(|| async { Json(json!({"read_state_snapshot": snapshot_descriptor()})) }),
-            )
-            .with_state(relay);
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        format!("http://{addr}")
-    }
 
     struct World {
         client: BuzzClient,
