@@ -74,11 +74,10 @@ A handle is lowercase `[a-z0-9._-]`, up to 64 bytes. `channel`, `here`, `everyon
 |-------|--------|
 | `KIND_USER_GROUP` 30181 and `buzz_core::user_group` (parse, validate, authorization policy, mention helpers) | done, unit tested |
 | SDK: `build_user_group`, `build_user_group_deletion`, `group_mention_tags` | done, unit tested |
-| Relay ingest: scope, global-only, structural validation | see commit log |
-| Relay ingest: handle uniqueness, edit authorization, removal of superseded heads | see commit log |
-| Relay ingest: group-marked `p` tags checked against the group | see commit log |
-| Push matcher: hellthread gate counts a group once | see commit log |
-| CLI: `buzz groups ...` | see commit log |
+| Relay ingest: `UsersWrite` scope, global-only kind, structural validation, handle uniqueness, edit authorization, newer-than-head rule, removal of superseded heads (`handlers/ingest.rs`) | done; Postgres test written, not run |
+| Relay ingest: group-marked `p` tags checked against the group (`validate_group_mention_tags`) | done; Postgres test written, not run |
+| Push matcher: hellthread gate counts a group once (`push_runtime.rs`) | done, unit tested |
+| CLI: `buzz groups list`, `get`, `members`, `create`, `update`, `add-member`, `remove-member`, `delete`, and `messages send --mention-group` | done, tested against a fake relay |
 
 ## Testing
 
