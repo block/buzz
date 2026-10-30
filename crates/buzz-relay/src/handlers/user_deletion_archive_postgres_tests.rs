@@ -81,6 +81,47 @@ async fn archive_and_unarchive_refusals_leave_no_state_or_notification_events() 
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn archive_replays_preserve_snapshot_identity_and_timestamp() {
+    for websocket in [false, true] {
+        let f = Fixture::new().await;
+        let archive = archive_request(&f.user, 9035);
+        let unarchive = archive_request(&f.user, 9036);
+        for event in [&archive, &unarchive] {
+            assert!(f.send(&f.user, event, websocket).await.0);
+            let before = archive_snapshot(&f).await;
+            for _ in 0..2 {
+                assert!(f.send(&f.user, event, websocket).await.0);
+                assert_eq!(
+                    archive_snapshot(&f).await,
+                    before,
+                    "duplicate must preserve every row, including snapshot id and created_at"
+                );
+            }
+        }
+        let before = archive_snapshot(&f).await;
+        assert!(f.send(&f.user, &archive, websocket).await.0);
+        assert_eq!(
+            archive_snapshot(&f).await,
+            before,
+            "old archive replay must not replace the newer unarchive snapshot"
+        );
+        assert!(
+            f.send(&f.user, &archive_request(&f.user, 9035), websocket)
+                .await
+                .0
+        );
+        let before = archive_snapshot(&f).await;
+        assert!(f.send(&f.user, &unarchive, websocket).await.0);
+        assert_eq!(
+            archive_snapshot(&f).await,
+            before,
+            "old unarchive replay must not replace the newer archive snapshot"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn archive_delta_failure_rolls_back_request_and_mutation() {
     let f = Fixture::new().await;
     sqlx::raw_sql(
@@ -142,8 +183,15 @@ async fn archive_delta_failure_rolls_back_request_and_mutation() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn archive_snapshot_failure_is_retryable_without_reapplying_mutation() {
-    for websocket in [false, true] {
+    for (websocket, seed_snapshot) in [(false, false), (false, true), (true, false), (true, true)] {
         let f = Fixture::new().await;
+        if seed_snapshot {
+            assert!(
+                f.send(&f.peer, &archive_request(&f.peer, 9035), websocket)
+                    .await
+                    .0
+            );
+        }
         let archive = archive_request(&f.user, 9035);
         sqlx::raw_sql(
             "CREATE FUNCTION fail_archive_snapshot() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -182,6 +230,26 @@ async fn archive_snapshot_failure_is_retryable_without_reapplying_mutation() {
             f.send(&f.user, &archive, websocket).await.0,
             "duplicate retry refreshes snapshot"
         );
+        let tags: Value = sqlx::query_scalar(
+            "SELECT tags FROM events WHERE community_id=$1 AND kind=13535 AND deleted_at IS NULL",
+        )
+        .bind(f.tenant.community().as_uuid())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert!(
+            tags.as_array()
+                .unwrap()
+                .contains(&serde_json::json!(["p", f.user.public_key().to_hex()])),
+            "retry must repair a missing or stale snapshot"
+        );
+        let repaired = archive_snapshot(&f).await;
+        assert!(f.send(&f.user, &archive, websocket).await.0);
+        assert_eq!(
+            archive_snapshot(&f).await,
+            repaired,
+            "retry after repair must leave the snapshot unchanged"
+        );
         let unarchive = archive_request(&f.user, 9036);
         assert!(f.send(&f.user, &unarchive, websocket).await.0);
         assert!(f.send(&f.user, &archive, websocket).await.0);
@@ -200,7 +268,11 @@ async fn archive_snapshot_failure_is_retryable_without_reapplying_mutation() {
         .fetch_one(&f.pool)
         .await
         .unwrap();
-        assert_eq!(count, 2, "retries must not create new deltas");
+        assert_eq!(
+            count,
+            if seed_snapshot { 3 } else { 2 },
+            "retries must not create new deltas"
+        );
         assert!(
             f.send(&f.user, &archive_request(&f.user, 9035), websocket)
                 .await
@@ -216,6 +288,52 @@ async fn archive_snapshot_failure_is_retryable_without_reapplying_mutation() {
             "replaying old unarchive must not undo later archive"
         );
     }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn archive_snapshot_noop_rechecks_concurrent_state_changes() {
+    let f = Fixture::new().await;
+    assert!(
+        f.send(&f.user, &archive_request(&f.user, 9035), false)
+            .await
+            .0
+    );
+    let (reached, release) = super::side_effects::publish_test_hooks::arm(f.tenant.community());
+    let state = f.state.clone();
+    let tenant = f.tenant.clone();
+    let publisher = tokio::spawn(async move {
+        super::side_effects::publish_nipia_archival_list(&tenant, &state).await
+    });
+    tokio::time::timeout(Duration::from_secs(10), reached)
+        .await
+        .unwrap()
+        .unwrap();
+    // Keep the old matching snapshot while changing canonical state. A stale
+    // no-op decision must not leave that snapshot in place.
+    f.state
+        .db
+        .unarchive(f.tenant.community(), &f.user.public_key().to_hex())
+        .await
+        .unwrap();
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), publisher)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let tags: Value = sqlx::query_scalar(
+        "SELECT tags FROM events WHERE community_id=$1 AND kind=13535 AND deleted_at IS NULL",
+    )
+    .bind(f.tenant.community().as_uuid())
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        tags,
+        serde_json::json!([["-"]]),
+        "publisher must repair the snapshot after detecting canonical drift"
+    );
 }
 
 #[tokio::test]

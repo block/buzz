@@ -45,7 +45,9 @@ Their persistence transaction stores the guarded request, changes
 back all three. Notifications are dispatched after commit. Duplicate requests
 do not reapply the archive change or create another delta.
 
-The archival snapshot (13535) is refreshed after commit. A refresh failure
+The archival snapshot (13535) is refreshed after commit only when missing or
+stale. An already-current snapshot retains its event ID and timestamp and is
+not published again, including on duplicate requests. A refresh failure
 propagates to the caller; retrying the request refreshes the snapshot without
 repeating the mutation. The committed request and delta remain available for
 query/replay. This is not a durable background retry queue: a process exit

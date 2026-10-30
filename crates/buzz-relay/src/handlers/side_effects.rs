@@ -4010,6 +4010,33 @@ pub async fn publish_nipia_archival_list(
                 ..buzz_db::event::EventQuery::for_community(tenant.community())
             })
             .await?;
+        // A retry may need to repair a failed publication, but a current
+        // snapshot must retain its id/timestamp and emit no new notification.
+        // Tag order is not meaningful for the protected set of archived keys.
+        if previous.first().is_some_and(|snapshot| {
+            snapshot.event.content.is_empty()
+                && snapshot
+                    .event
+                    .tags
+                    .iter()
+                    .map(Tag::as_slice)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    == tags.iter().map(Tag::as_slice).collect()
+        }) {
+            // The canonical read can become stale before we inspect the head.
+            // Keep the same drift protection as the publication path below.
+            let current_archived = state.db.list_archived(tenant.community()).await?;
+            if archived
+                .iter()
+                .map(|identity| identity.pubkey.as_str())
+                .eq(current_archived
+                    .iter()
+                    .map(|identity| identity.pubkey.as_str()))
+            {
+                return Ok(());
+            }
+            continue;
+        }
         let created_at = previous
             .first()
             .map(|event| (event.event.created_at.as_secs() + 1).max(now))
