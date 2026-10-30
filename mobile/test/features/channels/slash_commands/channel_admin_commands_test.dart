@@ -147,7 +147,7 @@ void main() {
     await expectToast('Renamed to #new-name');
     expect(draft(), isEmpty);
 
-    relay.rejectNext('blocked: not allowed');
+    relay.rejectNext('blocked: not allowed', match: (e) => e.kind == 9002);
     await type('/rename other');
     await send();
     expect(draft(), '/rename other');
@@ -168,6 +168,7 @@ void main() {
     expect(find.text('Archive #general?'), findsOneWidget);
     await tester.tap(find.text('Cancel'));
     await tester.pumpAndSettle();
+    expect(find.byType(SnackBar), findsNothing, reason: 'cancel is silent');
     expect(updates().length, before, reason: 'cancel publishes nothing');
     expect(find.text('/archive'), findsWidgets, reason: 'draft is kept');
     await tester.pump(const Duration(seconds: 6));

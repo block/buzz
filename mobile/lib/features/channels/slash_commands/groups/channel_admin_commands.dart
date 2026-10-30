@@ -33,7 +33,7 @@ Future<void> _archive(SlashCommandContext ctx) async {
     body: archiveChannelConfirmBody,
     confirmLabel: 'Archive',
   );
-  if (!confirmed) throw const SlashCommandFailure('Archive cancelled');
+  if (!confirmed) throw const SlashCommandCancelled();
   await actions.archiveChannel(ctx.channelId);
   if (ctx.context.mounted) {
     Navigator.of(ctx.context).popUntil((route) => route.isFirst);
