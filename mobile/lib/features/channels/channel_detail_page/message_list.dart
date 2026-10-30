@@ -920,6 +920,7 @@ class _MessageList extends HookConsumerWidget {
                     !message.isSystem &&
                     (message.hasAttachments ||
                         prevMessage?.hasAttachments == true ||
+                        prevMessage?.isAgentAudience == true ||
                         prevMessage == null ||
                         prevMessage.isSystem ||
                         showDayDivider ||
@@ -935,6 +936,7 @@ class _MessageList extends HookConsumerWidget {
                     nextMessage == null ||
                     nextMessage.isSystem ||
                     nextMessage.hasAttachments ||
+                    nextMessage.isAgentAudience ||
                     !isSameDay(message.createdAt, nextMessage.createdAt) ||
                     nextMessage.pubkey.toLowerCase() !=
                         message.pubkey.toLowerCase() ||

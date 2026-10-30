@@ -213,6 +213,11 @@ class TimelineMessage {
     this.rootId,
   });
 
+  /// Agent-to-agent messages collapse in the timeline, as on desktop.
+  bool get isAgentAudience => tags.any(
+    (tag) => tag.length > 1 && tag[0] == 'audience' && tag[1] == 'agents',
+  );
+
   /// Attachment messages stay visually distinct from surrounding messages,
   /// even when several are sent by the same author in quick succession.
   bool get hasAttachments =>

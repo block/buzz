@@ -714,6 +714,48 @@ void main() {
     );
   });
 
+  testWidgets('collapses messages between agents until tapped', (tester) async {
+    final scout = 'a' * 64, helper = 'b' * 64;
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: [
+          _textMsg(
+            id: 'm1',
+            pubkey: scout,
+            content: '@Helper Progress on the build',
+            extraTags: [
+              ['p', helper],
+              ['audience', 'agents'],
+            ],
+          ),
+          _textMsg(id: 'm2', pubkey: scout, content: 'Done', createdAt: 1001),
+        ],
+        users: {
+          scout: UserProfile(pubkey: scout, displayName: 'Scout'),
+          helper: UserProfile(pubkey: helper, displayName: 'Helper'),
+        },
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final fold = find.byKey(const ValueKey('agent-audience-m1'));
+    expect(fold, findsOneWidget);
+    expect(find.byKey(const ValueKey('message-row-m1')), findsNothing);
+    expect(
+      find.descendant(of: fold, matching: find.text('Scout → Helper')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: fold, matching: find.text('Progress on the build')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('message-author-m2')), findsOneWidget);
+
+    await tester.tap(fold);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('message-row-m1')), findsOneWidget);
+  });
+
   for (final thread in [false, true]) {
     for (final reverse in [false, true]) {
       testWidgets('signed qualified caller thread=$thread reverse=$reverse', (
