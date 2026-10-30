@@ -1496,6 +1496,9 @@ pub struct ChannelMetadataEdit {
     pub purpose: Option<String>,
     /// `Some(true)` archives the channel; `Some(false)` restores it.
     pub archived: Option<bool>,
+    /// Lets this edit change an archived channel, which stays archived. Only
+    /// a relay operator's name-only rename sets it.
+    pub keep_archived: bool,
 }
 
 /// The result of [`Db::apply_channel_metadata_event`].
@@ -1553,6 +1556,7 @@ pub(crate) async fn apply_channel_metadata_event(
     // channel already in the requested state.
     match (locked.archived(), edit.archived) {
         (true, Some(false)) | (false, None | Some(true)) => {}
+        (true, None) if edit.keep_archived => {}
         (true, _) => return Err(DbError::AccessDenied("channel is archived".to_string())),
         (false, Some(false)) => {
             return Err(DbError::AccessDenied("channel is not archived".to_string()));
@@ -1588,6 +1592,7 @@ pub(crate) async fn apply_channel_metadata_event(
         topic,
         purpose,
         archived,
+        keep_archived: _,
     } = edit;
     let actor = event.pubkey.to_bytes();
     if !columns.is_empty() {
