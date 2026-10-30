@@ -95,6 +95,25 @@ void main() {
     await tester.pump();
     expect(spinner, findsNothing);
     expect(find.text("No results for 'zzzz'"), findsOneWidget);
+
+    // Clearing and retyping the same text starts new lookups. Late replies to
+    // the first ones must not settle the second search's spinner.
+    await tester.enterText(find.byType(TextField), 'again');
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.enterText(find.byType(TextField), '');
+    await tester.pump();
+    await tester.enterText(find.byType(TextField), 'again');
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(session.searches, hasLength(2));
+    expect(actions.searches, hasLength(2));
+    session.searches.removeAt(0).complete(const []);
+    actions.searches.removeAt(0).complete(const []);
+    await tester.pump();
+    expect(spinner, findsOneWidget);
+    session.searches.removeAt(0).complete(const []);
+    actions.searches.removeAt(0).complete(const []);
+    await tester.pump();
+    expect(spinner, findsNothing);
   });
 }
 

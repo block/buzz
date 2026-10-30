@@ -106,10 +106,21 @@ class SearchNotifier extends Notifier<SearchState> {
   bool _usersPending = false;
   bool _directoryPending = false;
 
+  // Bumped by every new query, clear and rebuild. A lookup writes its result
+  // only while its generation is current, so a late reply to an earlier query,
+  // even one with the same text, cannot settle the current spinner.
+  int _generation = 0;
+
+  // Bumped by rebuild only. A directory load spans keystrokes, so it is
+  // fenced by community rather than by query.
+  int _directoryEpoch = 0;
+
   @override
   SearchState build() {
     // Watch relayConfig so search state resets on community switch.
     ref.watch(relayConfigProvider);
+    _generation++;
+    _directoryEpoch++;
     _messagesPending = false;
     _usersPending = false;
     _directoryPending = false;
@@ -135,25 +146,25 @@ class SearchNotifier extends Notifier<SearchState> {
       return;
     }
 
-    _messagesPending = false;
-    _usersPending = false;
+    final generation = ++_generation;
+    // Pending from the keystroke, so a channel-list change during the
+    // debounce cannot show "No results" before the lookups start.
+    _messagesPending = true;
+    _usersPending = true;
     state = SearchState(query: trimmed, isLoading: true);
 
     _debounce = Timer(const Duration(milliseconds: 300), () {
-      _executeSearch(trimmed);
+      _executeSearch(trimmed, generation);
     });
   }
 
-  Future<void> _executeSearch(String query) async {
-    // If the query changed while debouncing, bail out.
-    if (state.query != query) return;
+  void _executeSearch(String query, int generation) {
+    if (generation != _generation) return;
 
-    _messagesPending = true;
-    _usersPending = true;
     _loadDirectory();
     _refreshChannels();
-    _searchMessages(query);
-    _searchUsers(query);
+    _searchMessages(query, generation);
+    _searchUsers(query, generation);
   }
 
   bool get _isLoading =>
@@ -174,6 +185,7 @@ class SearchNotifier extends Notifier<SearchState> {
   void _loadDirectory() {
     if (_directoryPending) return;
     _directoryPending = true;
+    final epoch = _directoryEpoch;
     unawaited(
       ref
           .read(channelsProvider.notifier)
@@ -184,14 +196,15 @@ class SearchNotifier extends Notifier<SearchState> {
             );
           })
           .whenComplete(() {
-            if (!ref.mounted) return;
+            // A rebuild (community switch) already retired this load.
+            if (!ref.mounted || epoch != _directoryEpoch) return;
             _directoryPending = false;
             _refreshChannels();
           }),
     );
   }
 
-  Future<void> _searchMessages(String query) async {
+  Future<void> _searchMessages(String query, int generation) async {
     try {
       final session = ref.read(relaySessionProvider.notifier);
       final events = await session.fetchHistory(
@@ -227,17 +240,17 @@ class SearchNotifier extends Notifier<SearchState> {
           )
           .toList();
 
-      if (!ref.mounted || state.query != query) return;
+      if (!ref.mounted || generation != _generation) return;
       _messagesPending = false;
       state = state.copyWith(messageResults: hits, isLoading: _isLoading);
     } catch (e) {
-      if (!ref.mounted || state.query != query) return;
+      if (!ref.mounted || generation != _generation) return;
       _messagesPending = false;
       state = state.copyWith(isLoading: _isLoading, error: e.toString());
     }
   }
 
-  Future<void> _searchUsers(String query) async {
+  Future<void> _searchUsers(String query, int generation) async {
     List<DirectoryUser>? users;
     try {
       users = await ref
@@ -246,7 +259,7 @@ class SearchNotifier extends Notifier<SearchState> {
     } catch (_) {
       // User search failure is non-critical — keep existing results.
     }
-    if (!ref.mounted || state.query != query) return;
+    if (!ref.mounted || generation != _generation) return;
     _usersPending = false;
     state = state.copyWith(userResults: users, isLoading: _isLoading);
   }
@@ -292,6 +305,7 @@ class SearchNotifier extends Notifier<SearchState> {
 
   void clear() {
     _debounce?.cancel();
+    _generation++;
     _messagesPending = false;
     _usersPending = false;
     state = const SearchState.initial();
