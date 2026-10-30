@@ -7,8 +7,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use buzz_core::kind::{
-    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_REMINDER,
-    KIND_WORKFLOW_APPROVAL_REQUESTED,
+    KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_EDIT,
+    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use clap::Parser;
 use clap::ValueEnum;
@@ -1370,10 +1370,17 @@ pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, Confi
 /// Message edits are included because Desktop emits `p` tags only for
 /// recipients newly added by an edit. Receiving kind 40003 therefore wakes an
 /// agent once for a newly added mention without re-waking it for ordinary edits.
+///
+/// Forum posts (45001) and comments (45003) are the conversation in a forum
+/// channel, and kind 40002 is the second canonical stream message. Leaving
+/// them out makes the default subscription deaf to @mentions there.
 pub(crate) fn default_mention_kinds() -> Vec<u32> {
     vec![
         KIND_STREAM_MESSAGE,
+        KIND_STREAM_MESSAGE_V2,
         KIND_STREAM_MESSAGE_EDIT,
+        KIND_FORUM_POST,
+        KIND_FORUM_COMMENT,
         KIND_WORKFLOW_APPROVAL_REQUESTED,
         KIND_STREAM_REMINDER,
     ]
@@ -1650,7 +1657,10 @@ mod tests {
             assert!(f.require_mention, "mentions mode requires mention");
             let kinds = f.kinds.as_ref().expect("should have kinds");
             assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_MESSAGE));
+            assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_MESSAGE_V2));
             assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_MESSAGE_EDIT));
+            assert!(kinds.contains(&buzz_core::kind::KIND_FORUM_POST));
+            assert!(kinds.contains(&buzz_core::kind::KIND_FORUM_COMMENT));
             assert!(kinds.contains(&buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED));
             assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_REMINDER));
         }
