@@ -104,6 +104,13 @@ cargo clippy -p buzz-cli -- -D warnings
 # Expected: zero warnings
 ```
 
+When `desktop/src/features/huddle/lib/huddlePresence.ts` changes, also replay the huddle fixtures
+through desktop's tracker (run `pnpm install --frozen-lockfile` in `desktop/` first):
+
+```bash
+node --import ./desktop/test-loader.mjs --experimental-strip-types crates/buzz-cli/tests/huddle_interop.mjs
+```
+
 ---
 
 ## 6. Live Testing — Command by Command
