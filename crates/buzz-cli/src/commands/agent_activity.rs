@@ -82,6 +82,7 @@ pub(crate) async fn fetch_activity(
 
     let filter = json!({
         "kinds": [KIND_AGENT_OBSERVER_FRAME],
+        "authors": [agent_hex],
         "#p": [client.keys().public_key().to_hex()],
         "since": since,
         "limit": MAX_COLLECTED,
@@ -505,6 +506,7 @@ mod tests {
         let req = relay.lock().unwrap().reqs[0].clone();
         assert_eq!(req["kinds"], json!([24_200]));
         assert_eq!(req["#p"], json!([owner.public_key().to_hex()]));
+        assert_eq!(req["authors"], json!([agent.public_key().to_hex()]));
         assert_eq!(req["since"], NOW - DEFAULT_LOOKBACK_SECS);
         assert_eq!(req["limit"], MAX_COLLECTED);
     }
@@ -607,8 +609,8 @@ mod tests {
     async fn unreachable_relay_is_a_network_error() {
         let client =
             BuzzClient::new("http://127.0.0.1:1".into(), Keys::generate(), None, None).unwrap();
-        let error = client
-            .listen_events(&json!({"kinds": [24_200]}), Duration::from_secs(1), 10)
+        let agent = Keys::generate().public_key().to_hex();
+        let error = fetch_activity(&client, &agent, None, 50, 1, NOW)
             .await
             .unwrap_err();
         assert_eq!(crate::error::exit_code(&error), 2, "{error:?}");

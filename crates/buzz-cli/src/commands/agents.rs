@@ -405,10 +405,7 @@ async fn fetch_kind0(
     target_hex: &str,
 ) -> Result<Option<serde_json::Value>, CliError> {
     let filter = json!({"kinds": [0], "authors": [target_hex], "limit": 1});
-    let raw = client
-        .query(&filter)
-        .await
-        .map_err(|e| CliError::Other(format!("failed to fetch target kind:0: {e}")))?;
+    let raw = client.query(&filter).await?;
     let events: Vec<serde_json::Value> = serde_json::from_str(&raw)
         .map_err(|e| CliError::Other(format!("invalid kind:0 query response: {e}")))?;
     Ok(events.into_iter().next())
