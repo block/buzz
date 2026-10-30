@@ -514,19 +514,24 @@ void main() {
   });
 
   test('notices read apart keep their reactions', () async {
-    NostrEvent aux(String id, int kind, String target, {String content = ''}) =>
-        NostrEvent(
-          id: id,
-          pubkey: 'bob',
-          createdAt: 30,
-          kind: kind,
-          tags: [
-            ['h', _channelId],
-            ['e', target],
-          ],
-          content: content,
-          sig: 'sig',
-        );
+    NostrEvent aux(
+      String id,
+      int kind,
+      String target, {
+      String content = '',
+      bool inChannel = true,
+    }) => NostrEvent(
+      id: id,
+      pubkey: 'bob',
+      createdAt: 30,
+      kind: kind,
+      tags: [
+        if (inChannel) ['h', _channelId],
+        ['e', target],
+      ],
+      content: content,
+      sig: 'sig',
+    );
     final relaySession = _RecordingRelaySessionNotifier(
       queryResults: [
         [_event(id: 'message', createdAt: 10), _bounds()],
@@ -536,7 +541,9 @@ void main() {
     relaySession.auxEvents.addAll([
       aux('kept', EventKind.reaction, 'joined', content: '👍'),
       aux('removed', EventKind.reaction, 'joined', content: '🎉'),
+      aux('unreacted', EventKind.reaction, 'joined', content: '👀'),
       aux('removal', EventKind.deletion, 'removed'),
+      aux('channel-less', EventKind.deletion, 'unreacted', inChannel: false),
     ]);
     final container = _buildContainer(relaySession);
     addTearDown(container.dispose);
@@ -545,14 +552,26 @@ void main() {
     await relaySession.subscribed;
     await _pumpEventQueue();
 
-    // The reactions the page would have carried, then their deletions.
-    expect(relaySession.auxFilters, hasLength(2));
-    expect(relaySession.auxFilters[0].tags['#e'], ['joined']);
-    expect(relaySession.auxFilters[1].tags['#e'], ['kept', 'removed']);
-    expect(relaySession.auxFilters[1].kinds, [
-      EventKind.deletion,
-      EventKind.nip29DeleteEvent,
-    ]);
+    // The reactions the page would have carried, then their deletions: each
+    // read in the channel, and for deletions with no channel.
+    final reads = relaySession.auxFilters;
+    expect(
+      [for (final read in reads) read.tags['#h']],
+      [
+        [_channelId],
+        null,
+        [_channelId],
+        null,
+      ],
+    );
+    expect(reads[0].tags['#e'], ['joined']);
+    expect(
+      reads[2].tags['#e'],
+      unorderedEquals(['kept', 'removed', 'unreacted']),
+    );
+    for (final read in reads.skip(1)) {
+      expect(read.kinds, isNot(contains(EventKind.reaction)));
+    }
     final joined = formatTimeline(
       container.read(channelMessagesProvider(_channelId)).value!,
     ).singleWhere((message) => message.id == 'joined');
@@ -6076,6 +6095,10 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
         )) {
       final filter = filters.single;
       auxFilters.add(filter);
+      // As for a system channel (NIP-CL): a read sees the channel's events
+      // only when it names the channel in `#h`, and sees events with no
+      // channel only when it does not.
+      final named = filter.tags['#h'];
       final until = filter.until;
       final beforeId = filter.extensions['before_id'] as String?;
       // Newest first, below the cursor, up to the limit, as the relay reads.
@@ -6083,6 +6106,9 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
           [
             for (final event in auxEvents)
               if (filter.kinds.contains(event.kind) &&
+                  (named == null
+                      ? event.channelId == null
+                      : named.contains(event.channelId)) &&
                   (until == null ||
                       event.createdAt < until ||
                       (event.createdAt == until &&

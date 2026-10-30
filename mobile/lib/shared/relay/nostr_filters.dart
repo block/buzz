@@ -82,14 +82,23 @@ abstract final class NostrFilters {
   /// below the `until` + `before_id` cursor. Call again with the reaction ids,
   /// asking only for [EventKind.deletion] and [EventKind.nip29DeleteEvent],
   /// to read removed reactions.
+  ///
+  /// With [channelId], the read names the channel in `#h`: a system channel,
+  /// or an unlisted one for a non-member, shows its events only to a filter
+  /// that names it (NIP-CL). Without it, the read also finds deletions stored
+  /// with no channel.
   static NostrFilter channelAux(
     List<String> eventIds, {
+    String? channelId,
     List<int> kinds = channelAuxKinds,
     int? until,
     String? beforeId,
   }) => NostrFilter(
     kinds: kinds,
-    tags: {'#e': eventIds},
+    tags: {
+      '#e': eventIds,
+      if (channelId != null) '#h': [channelId],
+    },
     limit: channelAuxLimit,
     until: until,
     extensions: {'before_id': ?beforeId},

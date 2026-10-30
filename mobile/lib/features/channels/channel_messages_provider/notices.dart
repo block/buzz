@@ -8,6 +8,8 @@ const _maxNotices = 2000;
 /// `include_aux` does.
 const _maxAuxPages = 64;
 
+const _deletionKinds = [EventKind.deletion, EventKind.nip29DeleteEvent];
+
 /// Where the read after the full page [events] starts: its oldest event in
 /// relay order (by time, then the greatest id). Throws when the page did not
 /// move below [cursor].
@@ -127,7 +129,7 @@ extension _ChannelNotices on ChannelMessagesNotifier {
     List<NostrEvent> notices,
   ) async {
     if (notices.isEmpty) return const [];
-    final aux = await _readAllAux(session, [
+    final aux = await _readTargeting(session, [
       for (final event in notices) event.id,
     ], NostrFilters.channelAuxKinds);
     final reactions = [
@@ -135,11 +137,28 @@ extension _ChannelNotices on ChannelMessagesNotifier {
         if (event.kind == EventKind.reaction) event.id,
     ];
     if (reactions.isEmpty) return aux;
-    final removed = await _readAllAux(session, reactions, const [
-      EventKind.deletion,
-      EventKind.nip29DeleteEvent,
-    ]);
+    final removed = await _readTargeting(session, reactions, _deletionKinds);
     return [...aux, ...removed];
+  }
+
+  /// The events of [kinds] in this channel that target [eventIds], and the
+  /// deletions that target them with no channel. See
+  /// [NostrFilters.channelAux].
+  Future<List<NostrEvent>> _readTargeting(
+    RelaySessionNotifier session,
+    List<String> eventIds,
+    List<int> kinds,
+  ) async {
+    final inChannel = await _readAllAux(
+      session,
+      eventIds,
+      kinds,
+      channelId: channelId,
+    );
+    final deletions = await _readAllAux(session, eventIds, _deletionKinds);
+    return {
+      for (final event in [...inChannel, ...deletions]) event.id: event,
+    }.values.toList();
   }
 
   /// Every [NostrFilters.channelAux] event of [kinds] for [eventIds], page
@@ -147,14 +166,16 @@ extension _ChannelNotices on ChannelMessagesNotifier {
   Future<List<NostrEvent>> _readAllAux(
     RelaySessionNotifier session,
     List<String> eventIds,
-    List<int> kinds,
-  ) async {
+    List<int> kinds, {
+    String? channelId,
+  }) async {
     final events = <NostrEvent>[];
     ChannelPageCursor? cursor;
     for (var page = 0; page < _maxAuxPages; page++) {
       final read = await session.queryRelay([
         NostrFilters.channelAux(
           eventIds,
+          channelId: channelId,
           kinds: kinds,
           until: cursor?.createdAt,
           beforeId: cursor?.eventId,
