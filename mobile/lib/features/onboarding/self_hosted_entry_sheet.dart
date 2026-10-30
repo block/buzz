@@ -209,9 +209,12 @@ class SelfHostedEntrySheet extends HookConsumerWidget {
         : saved.length == 1
         ? 'You already have a saved identity'
         : 'You already have saved identities';
-    final identitySubtitle = saved.length == 1
-        ? 'Use this identity or import a Nostr key.'
-        : 'Choose an identity or import a Nostr key.';
+    final destination = HostedEnvironment.communityDisplayName(
+      name.isEmpty ? Uri.parse(relay).host : name,
+      relay,
+    );
+    final identitySubtitle =
+        'Join $destination. ${saved.length == 1 ? 'Use this identity or import a Nostr key.' : 'Choose an identity or import a Nostr key.'}';
     final identityCards = <Widget>[
       for (final identity in saved)
         SavedIdentityCard(

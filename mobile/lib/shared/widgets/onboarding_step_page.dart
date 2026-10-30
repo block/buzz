@@ -27,7 +27,7 @@ class OnboardingStepPage extends StatelessWidget {
   final VoidCallback? onConnectionOptions;
   final double foregroundProgress;
   final double keyboardBottomSpacing;
-  final VoidCallback onBack;
+  final VoidCallback? onBack;
   final Widget content;
   final List<Widget> actions;
 
@@ -55,7 +55,7 @@ class OnboardingStepPage extends StatelessWidget {
       child: PopScope(
         canPop: false,
         onPopInvokedWithResult: (didPop, _) {
-          if (!didPop) onBack();
+          if (!didPop) onBack?.call();
         },
         child: Scaffold(
           backgroundColor: theme.colorScheme.surface,
@@ -96,14 +96,16 @@ class OnboardingStepPage extends StatelessWidget {
                                     ).compactHeight,
                                 child: IosNavigationBar(
                                   title: '',
-                                  leading: IosNavigationAction(
-                                    label: 'Back',
-                                    symbol: 'chevron.backward',
-                                    onPressed: onBack,
-                                  ),
+                                  leading: onBack == null
+                                      ? null
+                                      : IosNavigationAction(
+                                          label: 'Back',
+                                          symbol: 'chevron.backward',
+                                          onPressed: onBack,
+                                        ),
                                 ),
                               )
-                            else
+                            else if (onBack != null)
                               Align(
                                 alignment: AlignmentDirectional.centerStart,
                                 child: Padding(

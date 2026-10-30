@@ -91,8 +91,10 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.textContaining('honeycombstudios'), findsNothing);
-    expect(find.text('Join community'), findsNothing);
+    expect(
+      find.textContaining('Join honeycombstudios.example.'),
+      findsOneWidget,
+    );
     expect(find.text('You already have a saved identity'), findsOneWidget);
     expect(find.text('Used in mobile'), findsNothing);
     expect(find.text(shortPubkey(keys.public)), findsOneWidget);
@@ -111,7 +113,7 @@ void main() {
       tester.getTopLeft(find.byType(SavedIdentityCard)).dy -
           tester
               .getBottomLeft(
-                find.text('Use this identity or import a Nostr key.'),
+                find.textContaining('Use this identity or import a Nostr key.'),
               )
               .dy,
       24,

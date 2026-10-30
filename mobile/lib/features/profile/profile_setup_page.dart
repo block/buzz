@@ -96,7 +96,7 @@ class ProfileSetupPage extends HookConsumerWidget {
               profileRoute = ModalRoute.of(sheetContext);
               return OnboardingStepPage(
                 title: 'Set up your profile',
-                onBack: flow.finishProfile,
+                onBack: null,
                 content: _ProfileSetupForm(
                   avatar: avatar,
                   onName: (value) => name = value,

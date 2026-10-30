@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import '../../shared/widgets/onboarding_route.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -31,7 +32,8 @@ class HostedConnectPage extends HookConsumerWidget {
       final stepsNavigator = GlobalKey<NavigatorState>();
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!active || !context.mounted) return;
-        route = MaterialPageRoute<void>(
+        route = onboardingRoute<void>(
+          context,
           settings: const RouteSettings(name: 'hosted-setup'),
           builder: (_) => PopScope(
             canPop: false,
@@ -110,7 +112,7 @@ class _HostedSteps extends HookWidget {
       key: navigatorKey,
       onDidRemovePage: (_) {},
       pages: [
-        MaterialPage<void>(
+        OnboardingPage<void>(
           key: ValueKey(pageStage.value),
           child: PopScope(
             canPop: false,
