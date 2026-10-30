@@ -4,6 +4,7 @@ import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/emoji/emoji_data.dart';
 import 'package:buzz/shared/emoji/emoji_data_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/theme/theme_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -114,6 +115,7 @@ void main() {
     final session = _ScriptedSession([
       Exception('relay down'),
       [_set('a', 'parrot')],
+      [_set('a', 'parrot')],
     ]);
     await tester.pumpWidget(
       WidgetHelpers.testable(
@@ -128,9 +130,10 @@ void main() {
         child: EmojiPickerSheet(onSelect: (_) {}),
       ),
     );
-    await tester.pumpAndSettle();
+    await tester.pump();
 
     expect(find.text('Retry'), findsOneWidget);
+    expect(session.fetches, 1);
     await tester.tap(find.byKey(const ValueKey('custom-emoji-retry')));
     await tester.pumpAndSettle();
     expect(_tile('parrot'), findsOneWidget);
