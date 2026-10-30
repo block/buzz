@@ -393,10 +393,11 @@ pub(crate) mod tests {
     /// timeout, so a path that reaches Postgres fails fast whether or not
     /// one runs locally.
     pub(crate) async fn shadow_state(denied: Option<PublicKey>) -> AppState {
-        let mut state =
-            (*crate::state::tests::test_state_with_database_url("postgres://127.0.0.1:1/none")
-                .await)
-                .clone();
+        let mut state = (*crate::state::tests::test_state_with_unreachable_database_url(
+            "postgres://127.0.0.1:1/none",
+        )
+        .await)
+            .clone();
         let capacity = vec![IssuerCapacity {
             issuer: "test-issuer".to_owned(),
             capacity: 8,

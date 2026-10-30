@@ -65,7 +65,7 @@ pub(crate) use runtime::{
     sweep_admitted_communities, ReadSessionInner, RouteDecision, RoutePredicate,
 };
 pub use store::{
-    admin_moderation, allowlist, api_token, archived_identities, artifact, channel,
+    admin_moderation, allowlist, api_token, archived_identities, artifact, artifact_sync, channel,
     channel_members, community, deletion, dm, entity_deletion, event, feed, git_repo, moderation,
     nip_fi_binding, operator_listener, partition, personal_read, product_feedback, push, reaction,
     read_state, relay_admin_actions, relay_invite, relay_members, relay_operators, reminder,

@@ -341,7 +341,7 @@ class _InboxRow extends HookConsumerWidget {
                                   ),
                                   const SizedBox(height: Grid.half),
                                   // Message preview.
-                                  MessageContent(
+                                  MessagePreview(
                                     content: item.item.displayContent,
                                     mentionNames: mentionNames,
                                     mentionLabels: contextualLabels,

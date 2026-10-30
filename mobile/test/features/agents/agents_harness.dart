@@ -119,7 +119,8 @@ class AgentsHarness {
   /// Fails agent profile fetches until the relay recovers.
   bool relayDown = false;
 
-  static Future<AgentsHarness> create() async {
+  /// [relayUrl] defaults to a hosted community that supports remote agents.
+  static Future<AgentsHarness> create({String? relayUrl}) async {
     FlutterSecureStorage.setMockInitialValues({});
     SharedPreferences.setMockInitialValues({});
     final registry = FakeRegistry(bound: fakeOwner.public);
@@ -137,7 +138,7 @@ class AgentsHarness {
       controller,
       Community.create(
         name: 'Test',
-        relayUrl: 'wss://test.${HostedEnvironment.communitySuffix}',
+        relayUrl: relayUrl ?? 'wss://test.${HostedEnvironment.communitySuffix}',
         pubkey: fakeOwner.public,
         nsec: fakeOwner.nsec,
       ),

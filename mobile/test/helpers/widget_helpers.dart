@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -23,5 +24,17 @@ class WidgetHelpers {
         ),
       ),
     );
+  }
+
+  /// Pumps until [finder] matches, letting real async work such as an image
+  /// decode run between frames. Gives up after about 5 s so the caller's
+  /// `expect` still reports a real regression.
+  static Future<void> pumpUntilFound(WidgetTester tester, Finder finder) async {
+    for (var i = 0; i < 500 && finder.evaluate().isEmpty; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      );
+      await tester.pump();
+    }
   }
 }

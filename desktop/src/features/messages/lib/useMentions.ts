@@ -696,13 +696,24 @@ export function useMentions(
         cursorPosition,
         searchableNamesLowerRef.current,
       );
+      if (debounceTimerRef.current !== null) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
       if (activeInlineMention) {
         mentionPickerOriginRef.current = "inline";
       } else if (mentionPickerOriginRef.current === "inline") {
         mentionPickerOriginRef.current = null;
-      }
-      if (debounceTimerRef.current !== null) {
-        clearTimeout(debounceTimerRef.current);
+        // A cleared draft closes now: an Enter inside the debounce would
+        // otherwise pick a stale suggestion instead of submitting. Any other
+        // trigger-less update keeps the debounce. Selecting a suggestion, or
+        // the Enter that selects it, edits the document before the keydown
+        // handler runs, and closing here would hide the open menu from that
+        // handler. A picker opened explicitly has no trigger to lose.
+        if (value.length === 0) {
+          setMentionQuery(null);
+          return;
+        }
       }
       debounceTimerRef.current = setTimeout(() => {
         debounceTimerRef.current = null;

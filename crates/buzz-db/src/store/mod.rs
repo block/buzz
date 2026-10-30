@@ -87,6 +87,8 @@ pub mod workflow;
 pub mod artifact;
 
 mod artifact_query;
+/// Timestamp-based incremental artifact reads.
+pub mod artifact_sync;
 
 #[cfg(test)]
 mod artifact_postgres_tests;

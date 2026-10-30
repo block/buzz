@@ -59,8 +59,6 @@ pub enum StartupStep {
     AuditConnect,
     /// Connect Redis commands and pub/sub.
     RedisConnect,
-    /// Connect the search database pool.
-    SearchConnect,
     /// Warm NIP-FI JWKS snapshots (only when NIP-FI is configured).
     NipFiJwksWarm,
     /// Load the first NIP-FI binding snapshot (only for the `database` source).
@@ -94,7 +92,6 @@ impl StartupStep {
         Self::MembershipBootstrap,
         Self::AuditConnect,
         Self::RedisConnect,
-        Self::SearchConnect,
         Self::NipFiJwksWarm,
         Self::NipFiSnapshotLoad,
         Self::MeshBoot,
@@ -118,7 +115,6 @@ impl StartupStep {
             Self::MembershipBootstrap => "membership_bootstrap",
             Self::AuditConnect => "audit_connect",
             Self::RedisConnect => "redis_connect",
-            Self::SearchConnect => "search_connect",
             Self::NipFiJwksWarm => "nip_fi_jwks_warm",
             Self::NipFiSnapshotLoad => "nip_fi_snapshot_load",
             Self::MeshBoot => "mesh_boot",

@@ -138,6 +138,98 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertEqual(URLProtocolStub.requests.count, 1)
   }
 
+  func testResolveRetriesStaleConnectionOnceWithFreshProof() throws {
+    let event = try JSONDecoder().decode(
+      VerifiedNostrEvent.self,
+      from: Data(Self.fixtureEvent.utf8)
+    )
+    for code in [URLError.Code.timedOut, .networkConnectionLost] {
+      URLProtocolStub.reset()
+      var failed = false
+      URLProtocolStub.handler = { request in
+        if !failed {
+          failed = true
+          throw URLError(code)
+        }
+        return Self.response(request, status: 200, data: try JSONEncoder().encode([event]))
+      }
+
+      var retrySessions = 0
+      let result = try XCTUnwrap(
+        resolve(
+          makeResolver(
+            communitiesData: try snapshotData([community()]),
+            makeRetrySession: {
+              retrySessions += 1
+              let configuration = URLSessionConfiguration.ephemeral
+              configuration.protocolClasses = [URLProtocolStub.self]
+              configuration.httpAdditionalHeaders = ["X-Test-Session": "retry"]
+              return URLSession(configuration: configuration)
+            })), "\(code)")
+
+      XCTAssertEqual(result.body, "Hello Buzz")
+      XCTAssertEqual(retrySessions, 1)
+      let queries = URLProtocolStub.requests.prefix(2)
+      XCTAssertEqual(queries.map { $0.url?.path }, ["/query", "/query"])
+      XCTAssertEqual(
+        queries.map { $0.value(forHTTPHeaderField: "X-Test-Session") }, [nil, "retry"],
+        "The retry must not reuse the session whose connection failed.")
+      XCTAssertNotEqual(
+        queries.first?.value(forHTTPHeaderField: "Authorization"),
+        queries.last?.value(forHTTPHeaderField: "Authorization"),
+        "The relay rejects a replayed NIP-98 proof.")
+    }
+  }
+
+  func testResolveRetriesStaleConnectionOnlyOnce() throws {
+    URLProtocolStub.handler = { _ in throw URLError(.timedOut) }
+
+    XCTAssertNil(resolve(makeResolver(communitiesData: try snapshotData([community()]))))
+    XCTAssertEqual(URLProtocolStub.requests.count, 2)
+  }
+
+  func testResolveDoesNotRetryAfterAccountKeyChanges() throws {
+    let data = try snapshotData([community()])
+    let lock = NSLock()
+    var key = Self.privateKey
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [URLProtocolStub.self]
+    URLProtocolStub.handler = { _ in
+      lock.lock()
+      key = Self.profilePrivateKey
+      lock.unlock()
+      throw URLError(.timedOut)
+    }
+    let resolver = BuzzPushNotificationResolver(
+      session: URLSession(configuration: configuration), loadCommunitiesData: { data },
+      loadPrivateKey: { _ in
+        lock.lock()
+        defer { lock.unlock() }
+        return key
+      })
+
+    XCTAssertNil(resolve(resolver))
+    XCTAssertEqual(URLProtocolStub.requests.count, 1)
+  }
+
+  func testCancelStopsAPendingRetry() throws {
+    let resolver = makeResolver(communitiesData: try snapshotData([community()]))
+    URLProtocolStub.handler = { _ in
+      resolver.cancel()
+      throw URLError(.timedOut)
+    }
+
+    XCTAssertNil(resolve(resolver))
+    XCTAssertEqual(URLProtocolStub.requests.count, 1)
+  }
+
+  func testResolveDoesNotRetryOtherTransportFailures() throws {
+    URLProtocolStub.handler = { _ in throw URLError(.notConnectedToInternet) }
+
+    XCTAssertNil(resolve(makeResolver(communitiesData: try snapshotData([community()]))))
+    XCTAssertEqual(URLProtocolStub.requests.count, 1)
+  }
+
   func testResolveReturnsNilForUndecodableRelayResponse() throws {
     URLProtocolStub.handler = { request in
       Self.response(request, status: 200, data: Data("not events".utf8))
@@ -898,7 +990,8 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     privateKeys: [String: String] = ["community-id": privateKey],
     presentationCacheData: Data? = nil,
     cacheOverride: BuzzNotificationCache? = nil,
-    now: Date = Date()
+    now: Date = Date(),
+    makeRetrySession: (() -> URLSession)? = nil
   ) -> BuzzPushNotificationResolver {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [URLProtocolStub.self]
@@ -907,7 +1000,8 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       loadCommunitiesData: { communitiesData },
       loadPrivateKey: { privateKeys[$0] },
       notificationCache: cacheOverride ?? makeNotificationCache(communitiesData: communitiesData, fixture: presentationCacheData, now: now),
-      now: { now }
+      now: { now },
+      makeRetrySession: makeRetrySession
     )
   }
 

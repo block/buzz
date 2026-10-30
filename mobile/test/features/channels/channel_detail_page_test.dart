@@ -90,6 +90,7 @@ import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../helpers/thread_ids.dart';
+import '../../helpers/widget_helpers.dart';
 
 part 'thread_reply_refresh_cases.dart';
 part 'thread_title_capsule_cases.dart';
@@ -10119,17 +10120,13 @@ void main() {
         );
 
         animationResponse.complete(http.Response.bytes(_transparentPng, 200));
-        await tester.runAsync(
-          () => Future<void>.delayed(const Duration(milliseconds: 50)),
+        final animationReady = find.byKey(
+          const ValueKey('progressive-animated-avatar-animation-ready'),
         );
+        await WidgetHelpers.pumpUntilFound(tester, animationReady);
         await tester.pumpAndSettle();
 
-        expect(
-          find.byKey(
-            const ValueKey('progressive-animated-avatar-animation-ready'),
-          ),
-          findsOneWidget,
-        );
+        expect(animationReady, findsOneWidget);
         expect(
           find.byKey(const ValueKey('progressive-animated-avatar-poster')),
           findsNothing,
@@ -11123,14 +11120,39 @@ void main() {
       expect(findRichText('Here is the reply'), findsOneWidget);
     });
 
-    for (final personal in [true, false]) {
-      testWidgets('reply-scoped typing is visible only in flat Me: $personal', (
+    for (final scenario in [
+      (personal: true, dm: false, agent: true, group: false, visible: true),
+      (personal: false, dm: false, agent: true, group: false, visible: false),
+      (personal: false, dm: true, agent: true, group: false, visible: true),
+      (personal: false, dm: true, agent: false, group: false, visible: false),
+      (personal: false, dm: true, agent: true, group: true, visible: true),
+    ]) {
+      testWidgets('reply-scoped typing follows conversation scope: $scenario', (
         tester,
       ) async {
         final typing = _FakeTypingNotifier(const []);
         await tester.pumpWidget(
           _buildTestable(
-            personalChat: personal,
+            personalChat: scenario.personal,
+            knownAgentPubkeys: scenario.agent ? {'alice'} : <String>{},
+            channel: scenario.dm
+                ? Channel(
+                    id: _channelId,
+                    name: 'DM',
+                    channelType: 'dm',
+                    visibility: 'private',
+                    description: '',
+                    createdBy: 'self',
+                    createdAt: DateTime(2025),
+                    memberCount: scenario.group ? 3 : 2,
+                    participantPubkeys: [
+                      'self',
+                      'alice',
+                      if (scenario.group) 'bob',
+                    ],
+                    isMember: true,
+                  )
+                : null,
             messages: [
               _textMsg(id: 'prompt', pubkey: 'self', content: 'Hello'),
             ],
@@ -11152,7 +11174,7 @@ void main() {
         await tester.pumpAndSettle();
         expect(
           find.byKey(const ValueKey('inline-agent-typing-alice')),
-          personal ? findsOneWidget : findsNothing,
+          scenario.visible ? findsOneWidget : findsNothing,
         );
         expect(find.text('Alice is typing…'), findsNothing);
         typing.setEntries(const []);

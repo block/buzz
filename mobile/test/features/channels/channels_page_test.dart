@@ -54,6 +54,8 @@ import 'package:buzz/shared/utils/string_utils.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/community/community_icon_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/me/me_groups.dart';
+import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:buzz/shared/emoji/emoji_avatar.dart';
@@ -98,6 +100,7 @@ void main() {
     ValueListenable<int>? tabReselection,
     _FakeProfileNotifier? profile,
     bool realHome = false,
+    Widget? soloSliver,
   }) {
     return ProviderScope(
       overrides: [
@@ -151,6 +154,7 @@ void main() {
                     onSettingsTransitionProgress:
                         onSettingsTransitionProgress ?? (_) {},
                     tabReselection: tabReselection,
+                    soloSliver: soloSliver,
                   ),
                   const Positioned.fill(
                     child: ChannelQuickActionsLauncher(
@@ -700,6 +704,33 @@ void main() {
 
     expect(scrollable.position.pixels, lessThan(ballisticOffset));
     await interruptingDrag.up();
+  });
+
+  testWidgets('pull to refresh restarts the Solo reader', (tester) async {
+    var soloReads = 0;
+    await tester.pumpWidget(
+      buildTestable(
+        soloSliver: const SliverToBoxAdapter(child: Text('Solo inventory')),
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          meGroupsProvider.overrideWith((ref) {
+            soloReads++;
+            return Stream.value(const MeGroups());
+          }),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    final before = soloReads;
+
+    await tester.timedDrag(
+      find.byType(CustomScrollView),
+      const Offset(0, 320),
+      const Duration(milliseconds: 500),
+    );
+    await tester.pumpAndSettle();
+
+    expect(soloReads, before + 1);
   });
 
   testWidgets('keeps the Buzz background fixed behind the channels list', (
