@@ -478,6 +478,12 @@ pub enum StepResult {
     Suspended {
         /// Token used to resume or reject this approval gate.
         approval_token: String,
+        /// ID of the step that requested approval.
+        step_id: String,
+        /// Approver spec from the `RequestApproval` action (`from`).
+        approver_spec: String,
+        /// Gate lifetime in seconds from suspension.
+        expires_in_secs: u64,
     },
     /// Step was skipped due to `if:` condition being false.
     Skipped,
@@ -734,12 +740,13 @@ pub async fn dispatch_action(
                     );
 
                     let token = generate_approval_token(run_id, step_id);
-
-                    // TODO (WF-08): create approval record in DB, emit kind:46010.
-                    // For now, return Suspended with the token so the caller can persist state.
+                    let expires_in_secs = parse_duration_secs(timeout_str).unwrap_or(86_400);
 
                     Ok(StepResult::Suspended {
                         approval_token: token,
+                        step_id: step_id.to_string(),
+                        approver_spec: from.clone(),
+                        expires_in_secs,
                     })
                 }
 
@@ -1036,6 +1043,12 @@ pub struct ExecutionResult {
     /// Set when execution suspended at a `RequestApproval` step.
     /// `None` means the run completed normally.
     pub approval_token: Option<String>,
+    /// Step ID that suspended (WF-08 gate context).
+    pub approval_step_id: Option<String>,
+    /// Approver spec from the `RequestApproval` action.
+    pub approver_spec: Option<String>,
+    /// Gate lifetime in seconds from suspension.
+    pub approval_expires_in_secs: Option<u64>,
     /// Index of the step that suspended (or the total step count on completion).
     pub step_index: usize,
     /// Accumulated step outputs at the point of suspension or completion.
@@ -1276,7 +1289,12 @@ async fn execute_steps(
                 }));
                 step_outputs.insert(step.id.clone(), output);
             }
-            StepResult::Suspended { approval_token } => {
+            StepResult::Suspended {
+                approval_token,
+                step_id,
+                approver_spec,
+                expires_in_secs,
+            } => {
                 info!(
                     run_id = %run_id, step = %step.id,
                     "Step suspended — awaiting approval (token: <redacted>)"
@@ -1285,6 +1303,9 @@ async fn execute_steps(
                 // approval record and update the run's execution trace.
                 return Ok(ExecutionResult {
                     approval_token: Some(approval_token),
+                    approval_step_id: Some(step_id),
+                    approver_spec: Some(approver_spec),
+                    approval_expires_in_secs: Some(expires_in_secs),
                     step_index: i,
                     step_outputs,
                     trace,
@@ -1303,6 +1324,9 @@ async fn execute_steps(
     info!(run_id = %run_id, "Workflow run completed");
     Ok(ExecutionResult {
         approval_token: None,
+        approval_step_id: None,
+        approver_spec: None,
+        approval_expires_in_secs: None,
         step_index: def.steps.len(),
         step_outputs,
         trace,
