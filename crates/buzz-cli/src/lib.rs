@@ -481,6 +481,64 @@ buzz agents activity --agent npub1... --since 1783497600 --limit 20 --wait 30"
         #[arg(long, default_value_t = commands::agent_activity::DEFAULT_WAIT_SECS)]
         wait: u64,
     },
+    /// Cancel an owned agent's in-flight turn in one channel
+    #[command(
+        after_help = "Sends one encrypted control frame signed by your key, which must be the \
+agent's owner key (exit 3 before sending when the agent's profile does not name you as owner), \
+then waits up to `--wait` seconds for the agent's answer to this request.\n\n\
+Output: {request_id, agent, channel_id, status, confirmed}.\n\
+  sent             exit 0  the cancel reached the in-flight turn\n\
+  no_active_turn   exit 1  nothing was running in that channel\n\
+  ambiguous_target exit 1  several sessions share the channel; nothing was cancelled\n\
+  unconfirmed      exit 2  no answer in time; the cancel may or may not have happened. \
+Do NOT retry blindly: run `buzz agents activity --agent <agent>` to check first.\n\n\
+The command never retries and sends exactly one frame. Run it only when your owner \
+asked you to stop this agent.\n\n\
+Examples:\n  \
+buzz agents cancel-turn --agent Scout --channel <UUID>\n  \
+buzz agents cancel-turn --agent npub1... --channel <UUID> --wait 15"
+    )]
+    CancelTurn {
+        /// Agent: 64-char hex pubkey, npub, or exact display name
+        #[arg(long)]
+        agent: String,
+        /// Channel UUID whose turn to cancel
+        #[arg(long)]
+        channel: String,
+        /// Seconds to wait for the agent's answer (1-30)
+        #[arg(long, default_value_t = commands::agent_control::DEFAULT_WAIT_SECS)]
+        wait: u64,
+    },
+    /// Switch an owned agent's model in one channel
+    #[command(
+        after_help = "Sends one encrypted control frame signed by your key, which must be the \
+agent's owner key (exit 3 before sending when the agent's profile does not name you as owner), then waits up to `--wait` \
+seconds for the agent's answer to this request.\n\n\
+Output: {request_id, agent, channel_id, model_id, status, confirmed}.\n\
+  switched          exit 0  the model was applied\n\
+  pending           exit 0  accepted by a running turn; applied when the turn restarts, \
+not yet confirmed (confirmed=false). Check with `buzz agents activity`.\n\
+  unsupported_model, failure, turn_ending, no_active_turn, ambiguous_target\n\
+                    exit 1  the model was not switched\n\
+  unconfirmed       exit 2  no answer in time; the outcome is unknown\n\n\
+One channel per command; the command never retries.\n\n\
+Examples:\n  \
+buzz agents set-model --agent Scout --channel <UUID> --model <MODEL_ID>"
+    )]
+    SetModel {
+        /// Agent: 64-char hex pubkey, npub, or exact display name
+        #[arg(long)]
+        agent: String,
+        /// Channel UUID to switch the model in
+        #[arg(long)]
+        channel: String,
+        /// Model id (1-200 characters)
+        #[arg(long)]
+        model: String,
+        /// Seconds to wait for the agent's answer (1-30)
+        #[arg(long, default_value_t = commands::agent_control::DEFAULT_WAIT_SECS)]
+        wait: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2549,8 +2607,10 @@ mod tests {
                 "activity",
                 "archive",
                 "archived",
+                "cancel-turn",
                 "draft-create",
                 "draft-update",
+                "set-model",
                 "unarchive"
             ]
         );
@@ -2694,7 +2754,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 6),
+            ("agents", 8),
             ("canvas", 4),
             ("channels", 16),
             ("dms", 4),
