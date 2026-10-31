@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -27,8 +28,12 @@ final ownedAgentDirectoryProvider =
       ref.watch(relayConfigProvider);
       final owner = ref.watch(myPubkeyProvider);
       final session = ref.watch(relaySessionProvider);
-      if (owner == null || session.status != SessionStatus.connected) {
-        return const [];
+      if (owner == null) return const [];
+      // Stay loading until connected: an empty list would read as "no
+      // listed agents" and hide the owner's agents from mentions. The
+      // provider rebuilds when the session status changes.
+      if (session.status != SessionStatus.connected) {
+        return Completer<List<OwnedAgentDirectoryEntry>>().future;
       }
       final relay = ref.read(relaySessionProvider.notifier);
       return loadOwnedAgentDirectory(

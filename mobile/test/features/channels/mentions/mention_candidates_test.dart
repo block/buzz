@@ -177,29 +177,31 @@ void main() {
         displayName: name,
         ownerPubkey: userPubkey,
       );
-      List<MentionCandidate> build({required bool offer}) =>
-          buildMentionCandidates(
-            members: [member(unlistedMember)],
-            relayAgents: [
-              AgentDirectoryEntry(
-                pubkey: unlisted,
-                respondTo: 'anyone',
-                channelIds: const ['chan-1'],
-              ),
-            ],
-            sharedChannelIds: const {'chan-1'},
-            userCache: {
-              unlisted: own(unlisted, 'old-app'),
-              unlistedMember: own(unlistedMember, 'old-member'),
-            },
-            ownerByAgentPubkey: const {},
-            searchResults: [own(listed, 'raccoon'), own(unlisted, 'old-app')],
-            currentPubkey: userPubkey,
-            ownedAgents: [
-              OwnedAgentDirectoryEntry(pubkey: listed, displayName: 'raccoon'),
-            ],
-            offerOwnedAgents: offer,
-          );
+      List<MentionCandidate> build({
+        required bool offer,
+        bool known = true,
+      }) => buildMentionCandidates(
+        members: [member(unlistedMember)],
+        relayAgents: [
+          AgentDirectoryEntry(
+            pubkey: unlisted,
+            respondTo: 'anyone',
+            channelIds: const ['chan-1'],
+          ),
+        ],
+        sharedChannelIds: const {'chan-1'},
+        userCache: {
+          unlisted: own(unlisted, 'old-app'),
+          unlistedMember: own(unlistedMember, 'old-member'),
+        },
+        ownerByAgentPubkey: const {},
+        searchResults: [own(listed, 'raccoon'), own(unlisted, 'old-app')],
+        currentPubkey: userPubkey,
+        ownedAgents: known
+            ? [OwnedAgentDirectoryEntry(pubkey: listed, displayName: 'raccoon')]
+            : null,
+        offerOwnedAgents: offer,
+      );
 
       // Members always stay; an earlier Buzz's agent outside the channel is
       // offered neither from the directory nor from search.
@@ -210,6 +212,13 @@ void main() {
         expect(candidates.last.isMember, isFalse);
         expect(candidates.last.ownerPubkey, userPubkey);
       }
+      // While the list is unknown (loading, failed or offline), no owned
+      // agent is held back as unlisted.
+      expect(build(offer: true, known: false).map((c) => c.pubkey), [
+        unlistedMember,
+        unlisted,
+        listed,
+      ]);
       // Streams and forums offer listed agents before anyone searches.
       final offered = buildMentionCandidates(
         members: const [],

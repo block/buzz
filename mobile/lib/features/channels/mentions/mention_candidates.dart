@@ -45,11 +45,12 @@ String? formatOwnerLabel(
 /// non-member relay agents, then global user-search results.
 ///
 /// [ownedAgents] are the viewer's agents as desktop's Agents tab lists them
-/// (`ownedAgentDirectoryProvider`). Outside the channel, an agent the viewer
-/// owns is offered only when it is one of these: one only an earlier Buzz
-/// runs cannot answer until desktop imports it, which mobile cannot do.
-/// [offerOwnedAgents] offers them unprompted, as desktop does in streams and
-/// forums.
+/// (`ownedAgentDirectoryProvider`), or null while that list is unknown.
+/// Outside the channel, an agent the viewer owns is offered only when it is
+/// listed. An unlisted one is an agent of an earlier Buzz, which cannot
+/// answer until desktop imports it, and mobile cannot import. While the list
+/// is unknown, owned agents are not held back. [offerOwnedAgents] offers the
+/// listed agents unprompted, as desktop does in streams and forums.
 List<MentionCandidate> buildMentionCandidates({
   required List<ChannelMember> members,
   required List<AgentDirectoryEntry> relayAgents,
@@ -58,14 +59,17 @@ List<MentionCandidate> buildMentionCandidates({
   required Map<String, String> ownerByAgentPubkey,
   List<UserProfile> searchResults = const [],
   String? currentPubkey,
-  List<OwnedAgentDirectoryEntry> ownedAgents = const [],
+  List<OwnedAgentDirectoryEntry>? ownedAgents,
   bool offerOwnedAgents = false,
 }) {
   final candidates = <MentionCandidate>[];
   final seen = <String>{};
   final currentLower = currentPubkey?.toLowerCase();
-  final listedOwned = {for (final agent in ownedAgents) agent.pubkey};
+  final listedOwned = ownedAgents == null
+      ? null
+      : {for (final agent in ownedAgents) agent.pubkey};
   bool unlistedOwnAgent(String pubkey, String? ownerPubkey) =>
+      listedOwned != null &&
       currentLower != null &&
       ownerPubkey?.toLowerCase() == currentLower &&
       !listedOwned.contains(pubkey);
@@ -93,7 +97,7 @@ List<MentionCandidate> buildMentionCandidates({
   }
 
   if (offerOwnedAgents) {
-    for (final agent in ownedAgents) {
+    for (final agent in ownedAgents ?? const <OwnedAgentDirectoryEntry>[]) {
       final pk = agent.pubkey;
       if (!seen.add(pk)) continue;
       final profile = userCache[pk];

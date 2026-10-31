@@ -1,6 +1,7 @@
 import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import '../../helpers/remote_agents_fixture.dart';
 
@@ -22,7 +23,67 @@ NostrEvent registration(
   ).toMap(),
 );
 
+class _Session extends RelaySessionNotifier {
+  _Session(this.registrations, this.profiles);
+  final List<NostrEvent> registrations;
+  final List<NostrEvent> profiles;
+
+  @override
+  SessionState build() =>
+      const SessionState(status: SessionStatus.disconnected);
+
+  void connect() => state = const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    final filter = filters.single;
+    if (filter.kinds.contains(30177)) {
+      return filter.extensions['page'] == 1 ? registrations : const [];
+    }
+    return profiles
+        .where((profile) => filter.authors!.contains(profile.pubkey))
+        .toList();
+  }
+}
+
+class _RelayConfig extends RelayConfigNotifier {
+  @override
+  RelayConfig build() =>
+      const RelayConfig(baseUrl: 'https://relay.example', nsec: null);
+}
+
 void main() {
+  test('stays unknown, not empty, until the session connects', () async {
+    final session = _Session(
+      [registration(fakeAgent)],
+      [signedAgentProfile(fakeAgentKeys, fakeOwner)],
+    );
+    final container = ProviderContainer(
+      overrides: [
+        relayConfigProvider.overrideWith(_RelayConfig.new),
+        myPubkeyProvider.overrideWithValue(fakeOwner.public),
+        relaySessionProvider.overrideWith(() => session),
+      ],
+    );
+    addTearDown(container.dispose);
+    final subscription = container.listen(
+      ownedAgentDirectoryProvider,
+      (_, _) {},
+    );
+    addTearDown(subscription.close);
+
+    await Future<void>.delayed(Duration.zero);
+    expect(container.read(ownedAgentDirectoryProvider).isLoading, isTrue);
+    expect(container.read(ownedAgentDirectoryProvider).asData, isNull);
+
+    session.connect();
+    final found = await container.read(ownedAgentDirectoryProvider.future);
+    expect(found.map((entry) => entry.pubkey), [fakeAgent]);
+  });
+
   test('lists owned agents as desktop does, without runtime directory '
       'entries or account sign-in', () async {
     final desktop = nostr.Keys('0' * 63 + '3');

@@ -552,7 +552,7 @@ class ComposeBar extends HookConsumerWidget {
             userCache: userCache,
             ownerByAgentPubkey: agentOwners ?? const {},
             currentPubkey: currentPubkey,
-            ownedAgents: ownedAgents ?? const [],
+            ownedAgents: ownedAgents,
             offerOwnedAgents:
                 composeChannel != null &&
                 (composeChannel.isStream || composeChannel.isForum),

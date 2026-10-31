@@ -145,8 +145,10 @@ class AgentsPage extends HookConsumerWidget {
     }, [flow.stage]);
     final community = ref.watch(activeCommunityProvider).asData?.value;
     final ownedDirectory = ref.watch(ownedAgentDirectoryProvider);
-    // Remote agents stay listed while a deletion that already removed their
-    // registration is retried; every other agent comes from its registration.
+    // The account's remote agents with a verified owner profile here are
+    // listed too, so one stays listed while a deletion that already removed
+    // its registration is retried. Every other agent comes from its listed
+    // registration.
     final candidates = {
       if (controller.owner == community?.pubkey)
         for (final agent in controller.agents) agent['agent_pubkey'] as String,
