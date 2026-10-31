@@ -112,6 +112,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   /// empty value returned while the relay is not yet connected.
   bool get hasLoadedMessages => _lastKnownMessages != null;
 
+  /// Whether a loaded timeline is resubscribing and fetching its newest
+  /// history, as after a reconnect, to become current again.
+  bool get isCatchingUp => _initInFlight && hasLoadedMessages;
+
   Map<String, ChannelWindowThreadSummary> get threadSummaries => {
     for (final entry in _baseThreadSummaries.entries)
       entry.key: _deletionSummaryUncertainty.containsKey(entry.key)
@@ -258,6 +262,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       _lastKnownMessages = merged;
       _reconcileRetainedSummaryPayloads(merged);
       _reconcileRetainedAggregates(historyVersion);
+      // Clear before publishing so the rebuild it triggers is no longer
+      // catching up.
+      _initInFlight = false;
       state = AsyncData(merged);
       _summaryRefreshes.resume();
       unawaited(_fillNotices());
@@ -268,9 +275,11 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         debugPrint(
           '[ChannelMessagesNotifier] history sync failed for $channelId: $e',
         );
+        _initInFlight = false;
         state = AsyncData(fallbackMessages);
         return;
       }
+      _initInFlight = false;
       state = AsyncError(e, st);
     } finally {
       if (_isCurrentInit(initVersion)) {

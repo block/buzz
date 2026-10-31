@@ -713,13 +713,13 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
           'offline' => context.colors.outline,
           _ => null,
         },
-        // Loaded content stays readable while it reconnects; the title
-        // capsule shows that it is catching up.
-        nativeTitleRefreshing:
-            isConnectionInProgress &&
-            (resolvedChannel.isForum
-                ? ref.watch(forumPostsProvider(channel.id)).value != null
-                : messagesNotifier.hasLoadedMessages),
+        // Loaded content stays readable while it reconnects and catches up;
+        // the title capsule shows that it is not current yet.
+        nativeTitleRefreshing: resolvedChannel.isForum
+            ? isConnectionInProgress &&
+                  ref.watch(forumPostsProvider(channel.id)).value != null
+            : (isConnectionInProgress && messagesNotifier.hasLoadedMessages) ||
+                  messagesNotifier.isCatchingUp,
         onNativeTitlePressed: openChannelDetails,
         nativeActions: [
           if (personalChat)

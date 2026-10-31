@@ -2146,6 +2146,51 @@ void main() {
     },
   );
 
+  test('a loaded timeline catches up after reconnecting', () async {
+    final reconnectPage = Completer<List<NostrEvent>>();
+    final session = _RecordingRelaySessionNotifier(
+      queryResults: [
+        [_event(id: 'first', createdAt: 10), _bounds()],
+        reconnectPage.future,
+      ],
+    );
+    final container = _buildContainer(session);
+    addTearDown(container.dispose);
+    container.listen(channelMessagesProvider(_channelId), (_, _) {});
+    await _pumpEventQueue();
+    final notifier = container.read(
+      channelMessagesProvider(_channelId).notifier,
+    );
+    expect(notifier.isCatchingUp, isFalse);
+
+    session.setConnected(false);
+    await _pumpEventQueue();
+    expect(notifier.isCatchingUp, isFalse);
+    session.setConnected(true);
+    await _pumpEventQueue();
+    expect(notifier.isCatchingUp, isTrue);
+
+    bool? catchingUpWhenPublished;
+    container.listen(channelMessagesProvider(_channelId), (_, _) {
+      catchingUpWhenPublished = notifier.isCatchingUp;
+    });
+    reconnectPage.complete([
+      _event(id: 'missed', createdAt: 20),
+      _event(id: 'first', createdAt: 10),
+      _bounds(),
+    ]);
+    await _pumpEventQueue();
+    expect(notifier.isCatchingUp, isFalse);
+    expect(catchingUpWhenPublished, isFalse);
+    expect(
+      container
+          .read(channelMessagesProvider(_channelId))
+          .value!
+          .map((event) => event.id),
+      contains('missed'),
+    );
+  });
+
   test('reconnect evicts reply evidence outside the newest window', () async {
     final session = _RecordingRelaySessionNotifier(
       queryResults: [

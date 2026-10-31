@@ -23,9 +23,11 @@ final class IosNavigationBarFactory: NSObject, FlutterPlatformViewFactory {
 }
 
 /// A thin bar along the bottom inner edge of the title capsule while the page
-/// refreshes. It eases toward the end, then completes and fades once the
-/// refresh ends. The navigation view owns it so it survives title rebuilds.
+/// reconnects or catches up. Its duration is unknown, so it sweeps in and then
+/// pulses until the refresh ends, then fades. The navigation view owns it so
+/// it survives title rebuilds.
 final class NavigationRefreshBar: UIView {
+  private static let pulseKey = "refresh-pulse"
   private let fill = UIView()
   private(set) var isRefreshing = false
 
@@ -54,29 +56,50 @@ final class NavigationRefreshBar: UIView {
     fill.transform = transform
   }
 
+  // Moving between title views drops layer animations; restart the pulse.
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    if window != nil, isRefreshing { startPulse() }
+  }
+
   func setRefreshing(_ refreshing: Bool) {
     guard refreshing != isRefreshing else { return }
     isRefreshing = refreshing
     let reduceMotion = UIAccessibility.isReduceMotionEnabled
-    fill.layer.removeAllAnimations()
     layer.removeAllAnimations()
+    fill.layer.removeAllAnimations()
     if refreshing {
       alpha = 1
-      fill.transform = CGAffineTransform(scaleX: reduceMotion ? 1 : 0.001, y: 1)
-      guard !reduceMotion else { return }
-      UIView.animate(withDuration: 2.5, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
-        self.fill.transform = CGAffineTransform(scaleX: 0.85, y: 1)
+      guard !reduceMotion else {
+        fill.transform = .identity
+        return
       }
-    } else {
-      UIView.animate(withDuration: reduceMotion ? 0 : 0.2, delay: 0, options: [.curveEaseIn, .beginFromCurrentState]) {
+      fill.transform = CGAffineTransform(scaleX: 0.001, y: 1)
+      UIView.animate(withDuration: 0.35, delay: 0, options: [.curveEaseOut]) {
         self.fill.transform = .identity
-      } completion: { _ in
-        guard !self.isRefreshing else { return }
-        UIView.animate(withDuration: 0.25, delay: 0, options: [.beginFromCurrentState]) {
-          self.alpha = self.isRefreshing ? 1 : 0
-        }
+      }
+      startPulse()
+    } else {
+      fill.transform = .identity
+      UIView.animate(withDuration: reduceMotion ? 0 : 0.25, delay: 0, options: [.beginFromCurrentState]) {
+        self.alpha = 0
       }
     }
+  }
+
+  private func startPulse() {
+    guard !UIAccessibility.isReduceMotionEnabled,
+          fill.layer.animation(forKey: Self.pulseKey) == nil else { return }
+    let pulse = CABasicAnimation(keyPath: "opacity")
+    pulse.fromValue = 1
+    pulse.toValue = 0.3
+    pulse.duration = 0.75
+    pulse.autoreverses = true
+    pulse.repeatCount = .infinity
+    pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+    pulse.beginTime = CACurrentMediaTime() + 0.35
+    pulse.fillMode = .backwards
+    fill.layer.add(pulse, forKey: Self.pulseKey)
   }
 }
 
