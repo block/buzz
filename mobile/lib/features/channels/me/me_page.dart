@@ -270,8 +270,18 @@ class MePage extends HookConsumerWidget {
             if (sliver && visible.isEmpty && organization.groups.isEmpty)
               SliverToBoxAdapter(
                 child: Padding(
-                  padding: const EdgeInsets.all(Grid.gutter),
-                  child: _MeEmptyState(onNewChat: newChat),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: Grid.gutter,
+                    vertical: Grid.half,
+                  ),
+                  child: Text(
+                    'No chats yet',
+                    style: contentListBodyTextStyle.copyWith(
+                      color: context.colors.onSurfaceVariant.withValues(
+                        alpha: 0.65,
+                      ),
+                    ),
+                  ),
                 ),
               ),
           ];
