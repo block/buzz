@@ -59,6 +59,22 @@ class HostedRelayAuth extends ChangeNotifier {
       HostedEnvironment.requiresAuth(Uri.parse(config.baseUrl).host) &&
       HostedEnvironment.supportsRelay(Uri.parse(config.baseUrl));
 
+  /// Headers for optional reads, without starting account work or changing
+  /// recovery state. Null means protected metadata must wait for active auth.
+  Map<String, String>? cachedHeaders(RelayConfig config) {
+    if (_disposed) return null;
+    if (!protects(config)) return const {};
+    final cached = _cached;
+    if (cached == null ||
+        cached.relay != Uri.parse(config.wsUrl).replace(path: '').toString() ||
+        cached.pubkey != pubkeyFromNsec(config.nsec) ||
+        !identical(cached.account, account.account) ||
+        !cached.expiry.isAfter(_now())) {
+      return null;
+    }
+    return {'Nostr-Federated-Identity': 'Bearer ${cached.token}'};
+  }
+
   Future<Map<String, String>> headers(RelayConfig config) async {
     if (!protects(config)) return const {};
     final relay = Uri.parse(config.wsUrl).replace(path: '').toString();

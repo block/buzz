@@ -112,7 +112,7 @@ class _ChannelsBody extends StatelessWidget {
                         Grid.gutter,
                         Grid.xs,
                         Grid.gutter,
-                        0,
+                        Grid.twelve,
                       ),
                       child: Semantics(
                         header: true,

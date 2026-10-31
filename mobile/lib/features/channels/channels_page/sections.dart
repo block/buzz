@@ -367,10 +367,15 @@ class _ChannelSection extends StatelessWidget {
                     top: Grid.half,
                     bottom: Grid.half,
                   ),
-                  child: Text(
-                    emptyLabel,
-                    style: contentListBodyTextStyle.copyWith(
-                      color: context.colors.onSurfaceVariant,
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      emptyLabel,
+                      style: contentListBodyTextStyle.copyWith(
+                        color: context.colors.onSurfaceVariant.withValues(
+                          alpha: 0.65,
+                        ),
+                      ),
                     ),
                   ),
                 )

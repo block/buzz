@@ -68,9 +68,17 @@ const NEST_DIR_PROD: &str = ".buzz";
 ///
 /// `None` inside the `OnceLock` means "home dir was unresolvable at init time".
 /// The outer `None` from `OnceLock::get` means "not initialized yet" —
-/// [`nest_dir`] falls back to the prod path in that case, ensuring test code
-/// that never calls [`init_nest_dir`] still works.
+/// [`nest_dir`] falls back to the prod path in that case, and panics instead
+/// in unit tests so they cannot reach the user's real nest.
 static NEST_DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+thread_local! {
+    /// Temp nest pinned for the current test thread by
+    /// [`pin_temp_nest_dir_for_thread`]. Checked before [`NEST_DIR`].
+    static THREAD_NEST_DIR: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 /// Initialize the process-lifetime nest directory.
 ///
@@ -81,8 +89,19 @@ static NEST_DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new
 /// `is_dev` should be `true` when the running binary is a dev build — i.e.
 /// when the Tauri app-data directory name starts with `"xyz.block.buzz.app.dev"`.
 /// Pass `false` for production (signed DMG) builds.
+///
+/// Unit tests panic here unless [`pin_nest_dir_for_test`] ran first, in which
+/// case the call is a no-op. A thread pin is not enough: this sets the nest for
+/// the whole test process.
 pub fn init_nest_dir(is_dev: bool) {
     let suffix = crate::build_identity::nest_name(is_dev);
+    #[cfg(test)]
+    assert!(
+        NEST_DIR.get().is_some(),
+        "init_nest_dir() would point the whole test process at the real ~/{suffix}. \
+         Pin it to a temp dir first with `pin_nest_dir_for_test(path)` in a \
+         child-process test (see commands/agents_tests.rs)"
+    );
     let path = dirs::home_dir().map(|h| h.join(suffix.as_ref()));
     // set() is a no-op when already initialized, which is correct: only the
     // first call (at boot, before any filesystem work) should win.
@@ -90,7 +109,7 @@ pub fn init_nest_dir(is_dev: bool) {
 }
 
 /// Pin the nest root for a child-process test so background nest work cannot
-/// reach the user's real nest.
+/// reach the user's real nest. Later [`init_nest_dir`] calls are no-ops.
 #[cfg(test)]
 pub(crate) fn pin_nest_dir_for_test(path: PathBuf) {
     NEST_DIR
@@ -98,16 +117,61 @@ pub(crate) fn pin_nest_dir_for_test(path: PathBuf) {
         .expect("nest dir pinned before first use");
 }
 
+/// A temp nest that [`nest_dir`] returns on the thread that pinned it.
+/// Dropping it unpins the thread and deletes the directory.
+#[cfg(test)]
+pub(crate) struct ThreadNestDir(tempfile::TempDir);
+
+#[cfg(test)]
+impl ThreadNestDir {
+    pub(crate) fn path(&self) -> &Path {
+        self.0.path()
+    }
+}
+
+#[cfg(test)]
+impl Drop for ThreadNestDir {
+    fn drop(&mut self) {
+        THREAD_NEST_DIR.with(|pinned| pinned.borrow_mut().take());
+    }
+}
+
+/// Pin the nest root to a fresh temp dir for an in-process test. Only nest
+/// work on the calling thread sees the pin; work on other threads still
+/// panics, so pin those tests in a child process with [`pin_nest_dir_for_test`].
+#[cfg(test)]
+pub(crate) fn pin_temp_nest_dir_for_thread() -> ThreadNestDir {
+    let dir = tempfile::tempdir().expect("create temp nest dir");
+    THREAD_NEST_DIR.with(|pinned| {
+        let previous = pinned.borrow_mut().replace(dir.path().to_path_buf());
+        assert!(previous.is_none(), "nest dir already pinned on this thread");
+    });
+    ThreadNestDir(dir)
+}
+
 /// Returns the nest root path (`~/.buzz` for prod, `~/.buzz-dev` for dev),
 /// or `None` if the home directory cannot be resolved.
 ///
-/// If [`init_nest_dir`] has not been called yet (e.g. in unit tests), falls
-/// back to the production path `~/.buzz`.
+/// If [`init_nest_dir`] has not been called yet, falls back to the production
+/// path `~/.buzz`. Unit tests panic there instead and must pin the nest first.
 pub fn nest_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(dir) = THREAD_NEST_DIR.with(|pinned| pinned.borrow().clone()) {
+        return Some(dir);
+    }
     match NEST_DIR.get() {
         Some(path) => path.clone(),
-        // Not yet initialized — fall back to prod path. Covers test code.
+        // Not yet initialized — fall back to prod path.
+        #[cfg(not(test))]
         None => dirs::home_dir().map(|h| h.join(NEST_DIR_PROD)),
+        #[cfg(test)]
+        None => panic!(
+            "nest_dir() is not pinned, so it would fall back to the real ~/{NEST_DIR_PROD}. \
+             Pin it to a temp dir first: `let _nest = \
+             crate::managed_agents::pin_temp_nest_dir_for_thread();` when the nest work \
+             runs on the test thread, or `pin_nest_dir_for_test(path)` in a child-process \
+             test (see commands/agents_tests.rs) when it runs on other threads"
+        ),
     }
 }
 

@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
+import { addSendMessageStep } from "../helpers/workflows";
 
 const ENGINEERING_CHANNEL_ID = "1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9";
 const WATERCOLOR_CHANNEL_ID = "a27e1ee9-76a6-5bdf-a5d5-1d85610dad11";
@@ -58,9 +59,7 @@ async function createWorkflow(
   await dialog.getByRole("textbox", { name: "Workflow name" }).fill(name);
   await dialog.getByRole("button", { name: "Save workflow name" }).click();
 
-  await dialog.getByRole("button", { name: "Add step", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Send Message" }).click();
-  await dialog.getByLabel("Message text").fill("Workflow notification");
+  await addSendMessageStep(dialog, "Workflow notification");
   await dialog.getByRole("button", { name: "Create" }).click();
   const activationConfirmation = page.getByRole("alertdialog", {
     name: "This workflow may run often",

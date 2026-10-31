@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
@@ -19,8 +20,9 @@ void showRemindMeLaterSheet({
   final service = ref.read(reminderServiceProvider);
   final messenger = ScaffoldMessenger.of(context);
   if (service == null) {
-    messenger.showSnackBar(
+    messenger.showFeedbackSnackBar(
       const SnackBar(content: Text('Sign in to set reminders')),
+      kind: ToastKind.generic,
     );
     return;
   }
@@ -28,12 +30,16 @@ void showRemindMeLaterSheet({
   Future<void> submit(int notBefore) async {
     try {
       await service.createReminder(target: target, notBefore: notBefore);
-      messenger.showSnackBar(const SnackBar(content: Text('Reminder set')));
+      messenger.showFeedbackSnackBar(
+        const SnackBar(content: Text('Reminder set')),
+        kind: ToastKind.success,
+      );
     } catch (error) {
       // Stable user-facing copy; the relay/crypto detail goes to the log.
       debugPrint('[RemindMeLater] createReminder failed: $error');
-      messenger.showSnackBar(
+      messenger.showFeedbackSnackBar(
         const SnackBar(content: Text('Couldn’t set reminder. Try again.')),
+        kind: ToastKind.error,
       );
     }
   }
@@ -119,9 +125,10 @@ Future<int?> _pickCustomDateTime(BuildContext context) async {
 
   final timestamp = combineCustomDateTime(date, time.hour, time.minute);
   if (timestamp == null && context.mounted) {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Pick a time in the future')));
+    ScaffoldMessenger.of(context).showFeedbackSnackBar(
+      const SnackBar(content: Text('Pick a time in the future')),
+      kind: ToastKind.error,
+    );
   }
   return timestamp;
 }

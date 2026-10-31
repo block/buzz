@@ -61,7 +61,7 @@ class ProfileTextEditSheet extends HookWidget {
         if (context.mounted) await closeAfterSave();
       } catch (_) {
         if (context.mounted) {
-          error.value = "We couldn't save this change. Try again.";
+          error.value = 'Couldn’t save changes';
         }
       } finally {
         if (context.mounted) isSaving.value = false;

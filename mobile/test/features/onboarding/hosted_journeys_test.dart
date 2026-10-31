@@ -1,3 +1,5 @@
+import 'package:buzz/shared/widgets/buzz_toast.dart';
+import 'package:buzz/features/onboarding/hosted_reconnect_banner.dart';
 import 'package:buzz/shared/hosted/hosted_community_creation.dart';
 import 'package:buzz/shared/community/community_grid_option.dart';
 import 'package:buzz/shared/hosted/account_identity_store.dart';
@@ -309,7 +311,7 @@ void main() {
       expect(f.sent('/exchange'), isEmpty);
       expect(f.sent('/current'), isEmpty);
       expect(f.sent('/nsec-backups/status'), isEmpty);
-      expect(find.text('Sign in to Builderlab to reconnect'), findsNothing);
+      expect(find.text('Reconnect to Builderlab'), findsNothing);
     },
     requiresBuilderlab: false,
   );
@@ -337,30 +339,52 @@ void main() {
       final session = f.container.read(relaySessionProvider.notifier);
       await f.settle(tester);
       if (!HostedEnvironment.requiresAuth(Uri.parse(community.relayUrl).host)) {
-        expect(find.text('Sign in to Builderlab to reconnect'), findsNothing);
+        expect(find.text('Reconnect to Builderlab'), findsNothing);
         expect(f.socketHeaders, isNotEmpty);
         expect(f.socketHeaders, everyElement(isEmpty));
         expect(f.sent('/assertions'), isEmpty);
         expect(f.container.read(relayConfigProvider).nsec, community.nsec);
         return;
       }
-      expect(find.text('Sign in to Builderlab to reconnect'), findsOneWidget);
+      expect(find.text('Reconnect to Builderlab'), findsOneWidget);
       expect(f.socketHeaders, isEmpty);
 
+      final feedbackContext = tester.element(
+        find.byType(HostedReconnectBanner),
+      );
+      showBuzzToast(feedbackContext, 'Copied');
+      await f.settle(tester);
+      expect(find.text('Copied'), findsOneWidget);
+      expect(find.text('Reconnect to Builderlab'), findsNothing);
+      expect(find.text('Sign in'), findsNothing);
+      var retried = false;
+      showBuzzToast(
+        feedbackContext,
+        'Couldn’t save changes',
+        onRetry: () {
+          retried = true;
+        },
+      );
+      await f.settle(tester);
+      expect(find.text('Copied'), findsNothing);
+      expect(find.text('Reconnect to Builderlab'), findsNothing);
+      await f.tap(tester, 'Retry');
+      expect(retried, isTrue);
+      expect(find.text('Reconnect to Builderlab'), findsOneWidget);
       final browser = Completer<void>();
       f.beforeBrowserReturn = () => browser.future;
       await f.tap(tester, 'Sign in');
       await f.tap(tester, 'Cancel sign-in');
       browser.complete();
       await f.settle(tester);
-      expect(find.text('Sign in to Builderlab to reconnect'), findsOneWidget);
+      expect(find.text('Reconnect to Builderlab'), findsOneWidget);
       expect(f.socketHeaders, isEmpty);
 
       f.beforeBrowserReturn = null;
       await f.tap(tester, 'Sign in');
       await f.settle(tester);
       expect(f.socketHeaders, isNotEmpty);
-      expect(find.text('Sign in to Builderlab to reconnect'), findsNothing);
+      expect(find.text('Reconnect to Builderlab'), findsNothing);
       await session.queryRelay(const []);
       expect(f.sent('/query'), hasLength(1));
       final proofRequest = f.sent('/identity/assertions').single;
@@ -416,7 +440,7 @@ void main() {
         throwsA(AccountFailure.signedOut),
       );
       await f.settle(tester);
-      expect(find.text('Sign in to Builderlab to reconnect'), findsOneWidget);
+      expect(find.text('Reconnect to Builderlab'), findsOneWidget);
       final beforeWrongAccount = f.sent('/identity/assertions').length;
       f.bound = f.secondKeys.public;
       f.subject = 'wrong-owner';
@@ -549,7 +573,7 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
       try {
-        expect(find.byTooltip('Back'), findsNothing);
+        expect(find.byTooltip('Back').hitTestable(), findsNothing);
         // External teardown still fences pending enrollment.
         await f.flow.leave();
         await tester.pump();
@@ -611,7 +635,7 @@ void main() {
           of: find.byType(TextField).hitTestable(),
           matching: find.byType(BottomSheet),
         ),
-        findsOneWidget,
+        findsNothing,
       );
       expect(f.sent('/claim'), hasLength(1));
       expect(f.recoveryScopes, hasLength(3));
@@ -911,10 +935,10 @@ void main() {
       await f.tap(tester, 'Continue');
       // A refused key must not pin the URL against an explicit allowed choice.
       f.refusedSelfHostedPubkey = f.keys.public;
-      await f.tap(tester, fullNpub(f.keys.public)!);
+      await f.tap(tester, shortPubkey(f.keys.public));
       expect(await f.storage.loadAll(), isEmpty);
       expect(find.textContaining('Could not join.'), findsOneWidget);
-      await f.tap(tester, fullNpub(f.secondKeys.public)!);
+      await f.tap(tester, shortPubkey(f.secondKeys.public));
       expect((await f.storage.loadAll()).single.nsec, f.secondKeys.nsec);
       expect(
         (await AccountIdentityStore().forPairing(f.keys.public).read())!.pubkey,

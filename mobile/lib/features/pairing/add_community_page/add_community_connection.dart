@@ -5,6 +5,9 @@ class _AddCommunityConnection extends HookWidget {
   const _AddCommunityConnection({
     super.key,
     required this.enteringLink,
+    required this.onboarding,
+    this.onFindCommunities,
+    this.onCreateCommunity,
     required this.scannerProgress,
     required this.onBack,
     required this.onCommunityLink,
@@ -19,6 +22,9 @@ class _AddCommunityConnection extends HookWidget {
   });
 
   final bool enteringLink;
+  final bool onboarding;
+  final VoidCallback? onFindCommunities;
+  final VoidCallback? onCreateCommunity;
   final double scannerProgress;
   final VoidCallback onBack;
   final VoidCallback? onCommunityLink;
@@ -71,6 +77,8 @@ class _AddCommunityConnection extends HookWidget {
           title: enteringLink ? 'Enter a community link' : 'Add a community',
           subtitle: enteringLink
               ? 'Paste an invite link or community address.'
+              : onboarding
+              ? 'Join your people or create a space of your own.'
               : accountStatus ?? 'Scan a QR code or enter a community link.',
           onBack: onBack,
           foregroundProgress: scannerProgress,
@@ -163,7 +171,7 @@ class _AddCommunityConnection extends HookWidget {
               key: const Key('add-community-link-action'),
               style: FilledButton.styleFrom(
                 backgroundColor: Color.lerp(
-                  context.colors.surface,
+                  context.controlSurface,
                   context.colors.primary,
                   progress,
                 ),
@@ -172,9 +180,7 @@ class _AddCommunityConnection extends HookWidget {
                   context.colors.onPrimary,
                   progress,
                 ),
-                side: BorderSide(
-                  color: context.colors.outline.withValues(alpha: 1 - progress),
-                ),
+                side: BorderSide.none,
               ),
               onPressed: busy || (enteringLink && !canSubmit)
                   ? null
@@ -190,13 +196,35 @@ class _AddCommunityConnection extends HookWidget {
                       ? busy
                             ? 'Connecting…'
                             : 'Continue'
+                      : onboarding
+                      ? 'Enter community link'
                       : 'Enter a community link',
                   key: ValueKey(enteringLink),
                 ),
               ),
             ),
+            if (onboarding && !enteringLink) ...[
+              if (onFindCommunities != null)
+                FilledButton(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: context.controlSurface,
+                    foregroundColor: context.colors.onSurface,
+                  ),
+                  onPressed: busy ? null : onFindCommunities,
+                  child: const Text('Find my communities'),
+                ),
+              if (onCreateCommunity != null)
+                FilledButton(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: context.controlSurface,
+                    foregroundColor: context.colors.onSurface,
+                  ),
+                  onPressed: busy ? null : onCreateCommunity,
+                  child: const Text('Create a community'),
+                ),
+            ],
             if (pairingVisible.value && !enteringLink)
-              OutlinedButton(
+              TextButton(
                 onPressed: busy ? null : onPairing,
                 child: const Text('Use a pairing code'),
               ),

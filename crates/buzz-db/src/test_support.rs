@@ -8,6 +8,174 @@ pub(crate) fn database_url() -> String {
         .unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_owned())
 }
 
+/// A uniquely named database on the test server that is dropped when the
+/// guard goes out of scope, including when the test panics.
+///
+/// The drop uses `WITH (FORCE)`, which ends every session still connected,
+/// so pools on the database need not be closed first. Bind the guard to a
+/// named variable for the whole test: `let (pool, _) = ScratchDb::migrated(..)`
+/// drops the database immediately.
+pub(crate) struct ScratchDb {
+    name: String,
+    url: String,
+    admin_url: String,
+}
+
+impl ScratchDb {
+    /// Create an empty database named `{prefix}_{uuid}` on the server
+    /// `admin_url` connects to.
+    pub(crate) async fn create(admin_url: &str, prefix: &str) -> Self {
+        use sqlx::Connection as _;
+
+        let name = format!("{prefix}_{}", uuid::Uuid::new_v4().simple());
+        let mut admin = sqlx::PgConnection::connect(admin_url)
+            .await
+            .expect("connect admin database");
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
+            .execute(&mut admin)
+            .await
+            .expect("create scratch database");
+        let _ = admin.close().await;
+        // Swap the database path segment of the admin URL for the scratch name.
+        let idx = admin_url.rfind('/').expect("db url has a path segment");
+        let url = format!("{}/{name}", &admin_url[..idx]);
+        Self {
+            name,
+            url,
+            admin_url: admin_url.to_owned(),
+        }
+    }
+
+    /// [`ScratchDb::create`], then connect a pool and run every migration.
+    pub(crate) async fn migrated(admin_url: &str, prefix: &str) -> (sqlx::PgPool, Self) {
+        let scratch = Self::create(admin_url, prefix).await;
+        let pool = scratch.connect().await;
+        crate::migration::run_migrations(&pool)
+            .await
+            .expect("migrate scratch db");
+        (pool, scratch)
+    }
+
+    /// [`ScratchDb::create`], then connect a pool and run migrations through
+    /// `target`.
+    pub(crate) async fn migrated_through(
+        admin_url: &str,
+        prefix: &str,
+        target: i64,
+    ) -> (sqlx::PgPool, Self) {
+        let scratch = Self::create(admin_url, prefix).await;
+        let pool = scratch.connect().await;
+        crate::migration::run_migrations_through(&pool, target)
+            .await
+            .expect("migrate scratch db through target");
+        (pool, scratch)
+    }
+
+    /// A default pool on this database.
+    pub(crate) async fn connect(&self) -> sqlx::PgPool {
+        sqlx::PgPool::connect(&self.url)
+            .await
+            .expect("connect scratch db")
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn url(&self) -> &str {
+        &self.url
+    }
+}
+
+impl Drop for ScratchDb {
+    fn drop(&mut self) {
+        drop_cluster_object(
+            &self.admin_url,
+            &format!("scratch database {}", self.name),
+            format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", self.name),
+        );
+    }
+}
+
+/// A uniquely named role on the test server that is dropped when the guard
+/// goes out of scope, including when the test panics. The role must not own
+/// objects or hold privileges by then, or the drop fails with a warning.
+pub(crate) struct ScratchRole {
+    name: String,
+    admin_url: String,
+}
+
+impl ScratchRole {
+    /// Create a role named `{prefix}_{uuid}` with `options` (for example
+    /// `LOGIN PASSWORD '...'`) on the server `admin_url` connects to.
+    pub(crate) async fn create(admin_url: &str, prefix: &str, options: &str) -> Self {
+        use sqlx::Connection as _;
+
+        let name = format!("{prefix}_{}", uuid::Uuid::new_v4().simple());
+        let mut admin = sqlx::PgConnection::connect(admin_url)
+            .await
+            .expect("connect admin database");
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE ROLE {name} {options}")))
+            .execute(&mut admin)
+            .await
+            .expect("create scratch role");
+        let _ = admin.close().await;
+        Self {
+            name,
+            admin_url: admin_url.to_owned(),
+        }
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl Drop for ScratchRole {
+    fn drop(&mut self) {
+        drop_cluster_object(
+            &self.admin_url,
+            &format!("scratch role {}", self.name),
+            format!("DROP ROLE IF EXISTS {}", self.name),
+        );
+    }
+}
+
+/// Run one cleanup statement from `Drop` over a fresh admin connection.
+///
+/// Drop runs on the test's runtime thread, which cannot drive the test's
+/// pools while it blocks here, so the statement runs on a thread with its
+/// own runtime. Failures are printed rather than raised: a panic in Drop
+/// while a failing test unwinds would abort the test binary.
+fn drop_cluster_object(admin_url: &str, object: &str, statement: String) {
+    use sqlx::Connection as _;
+
+    let url = admin_url.to_owned();
+    let cleanup = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?
+            .block_on(async {
+                let mut connection = sqlx::PgConnection::connect(&url)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let result = sqlx::query(sqlx::AssertSqlSafe(statement))
+                    .execute(&mut connection)
+                    .await;
+                let _ = connection.close().await;
+                result.map(drop).map_err(|error| error.to_string())
+            })
+    })
+    .join();
+    let error = match cleanup {
+        Ok(Ok(())) => return,
+        Ok(Err(error)) => error,
+        Err(_) => "cleanup thread panicked".to_owned(),
+    };
+    eprintln!("warning: failed to drop {object}: {error}");
+}
+
 /// One-session fixture that bypasses ordinary write-fence triggers while
 /// retaining application admission. Communities are active, quiescing, fenced.
 pub(crate) async fn admission_fixture() -> (crate::Db, [buzz_core::CommunityId; 3]) {

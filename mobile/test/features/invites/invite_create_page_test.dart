@@ -199,11 +199,14 @@ void main() {
     );
     await tester.tap(find.byKey(const Key('community-invite-copy-link')));
     await tester.pumpAndSettle();
-    expect(
-      hapticCalls.map((call) => call.arguments),
-      everyElement('HapticFeedbackType.lightImpact'),
-    );
-    expect(hapticCalls, hasLength(2));
+    expect(hapticCalls.map((call) => call.arguments), [
+      'HapticFeedbackType.mediumImpact',
+      'HapticFeedbackType.lightImpact',
+      'HapticFeedbackType.lightImpact',
+      'HapticFeedbackType.mediumImpact',
+    ]);
+    // Invite confirmation, Share tap, Copy tap, and Copy confirmation.
+    expect(hapticCalls, hasLength(4));
   });
 
   testWidgets('pasted npub remains inviteable without profile metadata', (

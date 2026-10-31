@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
 import '../../shared/widgets/ios_media_carousel.dart';
 import '../../shared/widgets/message_attachment_corners.dart';
@@ -715,8 +716,9 @@ class MessageContent extends HookConsumerWidget {
           );
         } catch (_) {
           if (!context.mounted) return;
-          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
             const SnackBar(content: Text('Could not open attachment')),
+            kind: ToastKind.error,
           );
         }
       },
@@ -914,7 +916,7 @@ class _MessageCodeBlock extends HookWidget {
     final isCopied = useState(false);
 
     Future<void> handleCopy() async {
-      await copyToClipboard(context, code, message: 'Copied code to clipboard');
+      await copyToClipboard(context, code, message: 'Code copied');
       if (!context.mounted) return;
       isCopied.value = true;
       Future.delayed(const Duration(seconds: 2), () {
