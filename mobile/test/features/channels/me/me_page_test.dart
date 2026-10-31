@@ -210,6 +210,7 @@ void main() {
   testWidgets(
     'new chat defaults to Bestie and preserves message and explicit agent choice',
     (tester) async {
+      final semantics = tester.ensureSemantics();
       final bestie = StreamController<String?>();
       addTearDown(bestie.close);
       final action = ValueNotifier<VoidCallback?>(null);
@@ -278,7 +279,10 @@ void main() {
       expect(find.text('Choose an agent'), findsOneWidget);
       bestie.add('bestie');
       await tester.pumpAndSettle();
-      expect(find.bySemanticsLabel('Message'), findsOneWidget);
+      expect(
+        find.bySemanticsLabel('Message\nWhat would you like to work on?'),
+        findsOneWidget,
+      );
       expect(find.text('Send'), findsOneWidget);
       expect(
         find.byKey(const ValueKey('new-session-name')).hitTestable(),
@@ -292,6 +296,7 @@ void main() {
         find.byKey(const ValueKey('new-session-name')),
         'x' * 8193,
       );
+      await tester.ensureVisible(find.text('Send'));
       await tester.tap(find.text('Send'));
       await tester.pumpAndSettle();
       expect(
@@ -340,6 +345,7 @@ void main() {
         findsOneWidget,
       );
       expect(find.textContaining('Confusable'), findsNothing);
+      semantics.dispose();
     },
   );
 
