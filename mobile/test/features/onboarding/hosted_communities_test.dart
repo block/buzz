@@ -249,7 +249,7 @@ void main() {
         await f.flow.signInAccount(openBrowser: false);
         await tester.pumpAndSettle();
         f.expired = true;
-        await tester.tap(find.text('Continue with Builderlab'));
+        await tester.tap(find.text('Find my communities'));
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 300));
         expect(f.flow.stage, HostedFlowStage.signIn);
@@ -265,9 +265,9 @@ void main() {
         await tester.pumpAndSettle();
         expect(f.flow.stage, HostedFlowStage.idle);
         await tester.pumpAndSettle();
-        expect(find.text('Continue with Builderlab'), findsOneWidget);
+        expect(find.text('Find my communities'), findsOneWidget);
         expect(find.byType(HostedConnectPage), findsNothing);
-        await tester.tap(find.text('Continue with Builderlab'));
+        await tester.tap(find.text('Find my communities'));
         await tester.pumpAndSettle();
         expect(f.flow.stage, HostedFlowStage.chooseCommunities);
         expect(find.byType(CommunityGridOption), findsWidgets);
@@ -285,7 +285,7 @@ void main() {
             throw const SavedCommunityIdentityConflict();
           }
         };
-        await tester.tap(find.text('Continue with Builderlab'));
+        await tester.tap(find.text('Find my communities'));
         await tester.pumpAndSettle();
         expect(f.flow.stage, HostedFlowStage.chooseCommunities);
         expect(find.byType(CommunityGridOption), findsWidgets);
@@ -301,7 +301,7 @@ void main() {
         f.beforeAdmission = (name) async {
           if (name == 'two.communities.buzz.xyz') throw AccountFailure.rejected;
         };
-        await tester.tap(find.text('Continue with Builderlab'));
+        await tester.tap(find.text('Find my communities'));
         await tester.pumpAndSettle();
         expect(f.flow.stage, HostedFlowStage.chooseCommunities);
         expect(find.byType(CommunityGridOption), findsWidgets);

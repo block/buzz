@@ -51,6 +51,8 @@ class PairingPage extends HookConsumerWidget {
   /// (user is already authenticated with at least one community).
   final bool addingCommunity;
   final bool identityRecoveryOnly;
+  final bool signedInOnboarding;
+  final bool hasKnownCommunities;
   final VoidCallback? onAlreadyUseBuzz;
   final VoidCallback? onWelcomeBack;
   final bool connectionLanding;
@@ -72,6 +74,8 @@ class PairingPage extends HookConsumerWidget {
     super.key,
     this.addingCommunity = false,
     this.identityRecoveryOnly = false,
+    this.signedInOnboarding = false,
+    this.hasKnownCommunities = false,
     this.onAlreadyUseBuzz,
     this.onWelcomeBack,
     this.connectionLanding = false,
@@ -290,11 +294,17 @@ class PairingPage extends HookConsumerWidget {
                     ),
                   ),
                 )
-        : addingCommunity && connectionLanding
+        : (addingCommunity || (signedInOnboarding && !creatingCommunity)) &&
+              connectionLanding
         ? ValueListenableBuilder<double>(
             valueListenable: islandScannerProgress,
             builder: (context, progress, _) => AddCommunityPage(
               scannerProgress: progress,
+              onboarding: signedInOnboarding,
+              onFindCommunities: signedInOnboarding && hasKnownCommunities
+                  ? onBuilderlab
+                  : null,
+              onCreateCommunity: signedInOnboarding ? onCreateCommunity : null,
               enteringCommunityLink: enteringCommunityLink,
               existingUser: existingUser,
               onBack: onWelcomeBack ?? () => Navigator.of(context).pop(),
@@ -306,7 +316,7 @@ class PairingPage extends HookConsumerWidget {
                 ref.read(pendingDeepLinkProvider.notifier).open(uri);
               },
               onSubmitPairing: (code) => unawaited(handleScannerResult(code)),
-              accountStatus: accountStatus,
+              accountStatus: signedInOnboarding ? null : accountStatus,
               busy:
                   isBusy ||
                   builderlabBusy ||
@@ -384,7 +394,7 @@ class PairingPage extends HookConsumerWidget {
                         ref.read(pendingDeepLinkProvider.notifier).open(uri);
                       },
                       onBuilderlab: onBuilderlab,
-                      accountStatus: accountStatus,
+                      accountStatus: signedInOnboarding ? null : accountStatus,
                       setupContent: setupContent,
                       builderlabLabel: builderlabLabel,
                       builderlabBusy: builderlabBusy,
