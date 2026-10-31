@@ -108,7 +108,7 @@ void main() {
 
     await type('/sh');
     expect(popover, findsOneWidget);
-    await type('/sh');
+    await type('/shr');
     final row = find.descendant(of: popover, matching: find.byType(ListTile));
     expect(row, findsOneWidget);
     expect(find.text('/shrug'), findsNothing, reason: 'name and hint are one');
