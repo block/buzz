@@ -485,7 +485,7 @@ pub async fn cmd_search(
 /// must match exactly one user (case-insensitive, on `display_name` or
 /// `name`) — ambiguity is an error listing the candidates rather than a
 /// silent mix of authors.
-async fn resolve_author(client: &BuzzClient, author: &str) -> Result<String, CliError> {
+pub(crate) async fn resolve_author(client: &BuzzClient, author: &str) -> Result<String, CliError> {
     let author = author.trim();
     if author.len() == 64 && author.chars().all(|c| c.is_ascii_hexdigit()) {
         return Ok(author.to_ascii_lowercase());
