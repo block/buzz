@@ -7,7 +7,7 @@ import {
   canForwardMessage,
   forwardPreview,
   forwardProvenanceFor,
-  forwardedFromAttribution,
+  requiresValidatedForwardTransport,
   FORWARDED_FROM_TAG,
   getForwardedFromReference,
 } from "./forwardedMessage.ts";
@@ -254,6 +254,18 @@ test("an unattributable message yields no forward payload", () => {
   assert.equal(buildForwardPayload(message(), undefined), null);
 });
 
+test("forwards require validated transport", () => {
+  assert.equal(requiresValidatedForwardTransport(null), false);
+  assert.equal(
+    requiresValidatedForwardTransport({
+      sourceEventId: SOURCE_EVENT,
+      sourceChannelId: SOURCE_CHANNEL,
+      authorPubkey: AUTHOR,
+      threadRootId: null,
+    }),
+    true,
+  );
+});
 test("the confirmation preview collapses whitespace and clips long bodies", () => {
   assert.equal(forwardPreview("  ship\n\n  it  "), "ship it");
   assert.equal(forwardPreview(undefined), "");
@@ -261,19 +273,4 @@ test("the confirmation preview collapses whitespace and clips long bodies", () =
   const long = forwardPreview("word ".repeat(60));
   assert.equal(long.endsWith("…"), true);
   assert.equal(Array.from(long).length <= 140, true);
-});
-
-test("an edited copy stops claiming whose words it carries", () => {
-  // The forwarder owns the copy and can rewrite it; nothing re-signs the
-  // provenance tag when they do, so the attribution must not keep presenting
-  // the edited text as the original author's.
-  assert.equal(forwardedFromAttribution("Alice"), "Forwarded from Alice:");
-  assert.equal(
-    forwardedFromAttribution("Alice", false),
-    "Forwarded from Alice:",
-  );
-
-  const edited = forwardedFromAttribution("Alice", true);
-  assert.equal(edited, "Forwarded and edited:");
-  assert.equal(edited.includes("Alice"), false);
 });

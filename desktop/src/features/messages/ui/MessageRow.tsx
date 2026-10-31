@@ -691,6 +691,7 @@ export const MessageRow = React.memo(
           currentPubkey={currentPubkey}
           edited={message.edited}
           profiles={profiles}
+          body={message.body}
           tags={message.tags}
         />
         {renderBody()}

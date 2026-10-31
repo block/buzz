@@ -19,6 +19,21 @@ test("startsNewMessageGroup: sent-from-thread messages start a fresh group", () 
   assert.equal(startsNewMessageGroup(undefined), false);
 });
 
+test("startsNewMessageGroup: forwarded messages start a fresh group", () => {
+  assert.equal(
+    startsNewMessageGroup({
+      tags: [
+        [
+          "buzz:forwarded-from",
+          "a".repeat(64),
+          "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+          "b".repeat(64),
+        ],
+      ],
+    }),
+    true,
+  );
+});
 test("hasSameMessageAuthor: matches case-insensitively and trims", () => {
   assert.equal(
     hasSameMessageAuthor({ pubkey: " ABC " }, { pubkey: "abc" }),

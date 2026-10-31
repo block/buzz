@@ -29,6 +29,7 @@ async function getMessageLinkEvent(messageId: string) {
 type MessageLinkMetadata = {
   author: string;
   authorPubkey: string;
+  content: string;
   createdAt: number;
   snippet: string;
 };
@@ -60,6 +61,7 @@ function fetchMetadata(
       .then(async (event) => {
         const eventChannelId = event.tags.find((tag) => tag[0] === "h")?.[1];
         if (
+          event.id !== link.messageId ||
           eventChannelId !== link.channelId ||
           !PREVIEWABLE_MESSAGE_KINDS.has(event.kind)
         ) {
@@ -73,6 +75,7 @@ function fetchMetadata(
             profile?.nip05Handle?.trim() ||
             truncateNpub(event.pubkey),
           authorPubkey: event.pubkey,
+          content: event.content,
           createdAt: event.created_at,
           snippet: summarizeMessageLinkContent(event.content),
         };

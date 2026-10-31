@@ -131,8 +131,15 @@ export function canForwardMessage(
   );
 }
 
+export function requiresValidatedForwardTransport(
+  forwardedFrom: ForwardedFromReference | null | undefined,
+): boolean {
+  return forwardedFrom !== null && forwardedFrom !== undefined;
+}
+
+/** The source body, verbatim. */
 export type ForwardPayload = {
-  /** The source body, verbatim. */ content: string;
+  content: string;
   /** Content tags that give the body meaning (imeta, emoji, mention, previews). */
   contentTags: string[][];
   forwardedFrom: ForwardedFromReference;
@@ -161,22 +168,6 @@ export function buildForwardPayload(
     contentTags: getSendToChannelSemantics(message).semanticTags,
     forwardedFrom,
   };
-}
-
-/**
- * The attribution line a forwarded copy may claim.
- *
- * An untouched copy is the original author's words, so it names them. The
- * forwarder can edit their own copy, and nothing re-signs the provenance tag
- * when they do, so an edited copy must stop asserting whose words these are:
- * it says only that it is an edited forward. The link to the original stays
- * either way, so the authoritative text remains one click away.
- */
-export function forwardedFromAttribution(
-  authorLabel: string,
-  edited = false,
-): string {
-  return edited ? "Forwarded and edited:" : `Forwarded from ${authorLabel}:`;
 }
 
 const PREVIEW_MAX_LENGTH = 140;

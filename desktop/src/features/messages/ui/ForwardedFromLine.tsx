@@ -27,12 +27,14 @@ import { MESSAGE_MARKDOWN_CLASS } from "@/shared/ui/mentionChip";
 export function ForwardedFromLine({
   currentPubkey,
   edited,
+  body,
   profiles,
   tags,
 }: {
   currentPubkey?: string;
   /** True when the forwarded copy itself was edited after being sent. */
   edited?: boolean;
+  body?: string;
   profiles?: UserProfileLookup;
   tags?: string[][];
 }) {
@@ -68,22 +70,22 @@ export function ForwardedFromLine({
   const sourceAuthorMatches =
     sourceMetadata.state.kind === "ready" &&
     sourceMetadata.state.authorPubkey.toLowerCase() ===
-      reference.authorPubkey.toLowerCase();
+      reference.authorPubkey.toLowerCase() &&
+    sourceMetadata.state.content.trim() === (body ?? "").trim();
   const author = sourceAuthorMatches
     ? resolveUserLabel({
         currentPubkey,
         profiles,
         pubkey: reference.authorPubkey,
       })
-    : "the original author";
-  const attribution =
-    sourceMetadata.state.kind === "deleted"
+    : null;
+  const attribution = edited
+    ? "Forwarded and edited:"
+    : sourceMetadata.state.kind === "deleted"
       ? "Forwarded message (original deleted):"
-      : edited
-        ? "Forwarded and edited:"
-        : sourceAuthorMatches
-          ? `Forwarded from ${author}:`
-          : "Forwarded message:";
+      : author
+        ? `Forwarded from ${author}:`
+        : "Forwarded message:";
 
   return (
     <div

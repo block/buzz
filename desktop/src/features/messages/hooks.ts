@@ -40,6 +40,7 @@ import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { messageMentionPubkeys } from "@/features/messages/lib/messageMentionPubkeys";
 import {
   buildForwardedFromTag,
+  requiresValidatedForwardTransport,
   type ForwardedFromReference,
 } from "@/features/messages/lib/forwardedMessage";
 import { buildSentFromThreadTag } from "@/features/messages/lib/sentFromThread";
@@ -598,7 +599,7 @@ export function useSendMessageMutation(
         forceRest ||
         transport === "http" ||
         parentEventId ||
-        forwardedFromTag ||
+        requiresValidatedForwardTransport(forwardedFrom) ||
         imetaTags.length > 0 ||
         emojiTags.length > 0 ||
         linkPreviewTags.length > 0

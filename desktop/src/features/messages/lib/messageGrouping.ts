@@ -1,3 +1,4 @@
+import { getForwardedFromReference } from "@/features/messages/lib/forwardedMessage";
 import { getSentFromThreadRootId } from "@/features/messages/lib/sentFromThread";
 
 type MessageAuthorCandidate = {
@@ -24,7 +25,10 @@ export const MESSAGE_GROUPING_WINDOW_SECONDS = 10 * 60;
 export function startsNewMessageGroup(
   message: MessageGroupingCandidate | null | undefined,
 ) {
-  return getSentFromThreadRootId(message?.tags) !== null;
+  return (
+    getSentFromThreadRootId(message?.tags) !== null ||
+    getForwardedFromReference(message?.tags) !== null
+  );
 }
 
 export function hasSameMessageAuthor(
