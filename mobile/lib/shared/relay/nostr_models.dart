@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
+import 'thread_reference.dart';
+
 /// Nostr event kind constants.
 ///
 /// Keep in sync with `desktop/src/shared/constants/kinds.ts`.
@@ -81,12 +83,14 @@ abstract final class EventKind {
     streamMessageEdit,
   ];
 
-  /// Visible content kinds requested by the NIP-CW channel-window path.
-  static const channelTimelineContentKinds = [
+  /// Row kinds a NIP-CW channel-window page reads. System notices (40099)
+  /// are read apart by [NostrFilters.channelNotices]: a page counts every row
+  /// kind against its limit, so a burst of joins would otherwise fill the
+  /// first page and hold the messages back.
+  static const channelWindowPageKinds = [
     streamMessage,
     streamMessageV2,
     streamMessageDiff,
-    systemMessage,
     jobRequest,
     jobAccepted,
     jobProgress,
@@ -95,6 +99,12 @@ abstract final class EventKind {
     jobError,
     huddleStarted,
     huddleEnded,
+  ];
+
+  /// Visible content kinds of the channel timeline.
+  static const channelTimelineContentKinds = [
+    ...channelWindowPageKinds,
+    systemMessage,
   ];
 }
 
@@ -156,36 +166,9 @@ class NostrEvent {
   /// The channel/group ID from the `h` tag (NIP-29).
   String? get channelId => getTagValue('h');
 
-  /// Extract thread parent and root IDs from `e` tags.
-  ///
-  /// Matches the desktop's `getThreadReference` logic:
-  /// - Tags with marker `"reply"` identify the direct parent.
-  /// - Tags with marker `"root"` identify the thread root.
-  /// - If no markers are present, falls back to null (top-level message).
-  ({String? parentId, String? rootId}) get threadReference {
-    final eTags = [
-      for (final tag in tags)
-        if (tag.length >= 2 && tag[0] == 'e') tag,
-    ];
-
-    if (eTags.isEmpty) return (parentId: null, rootId: null);
-
-    // Find tagged root and reply markers (desktop convention).
-    List<String>? rootTag;
-    List<String>? replyTag;
-    for (final tag in eTags) {
-      if (tag.length >= 4) {
-        if (tag[3] == 'root') rootTag = tag;
-        if (tag[3] == 'reply') replyTag = tag;
-      }
-    }
-
-    if (replyTag == null) return (parentId: null, rootId: null);
-
-    final parentId = replyTag[1];
-    final rootId = rootTag?[1] ?? parentId;
-    return (parentId: parentId, rootId: rootId);
-  }
+  /// Validated, lowercase thread IDs shared by timeline and Inbox navigation.
+  ({String? parentId, String? rootId}) get threadReference =>
+      parseThreadReference(tags);
 
   /// The parent event ID from the `e` tag.
   String? get parentEventId => threadReference.parentId;
@@ -301,6 +284,12 @@ class ChannelData {
   final String id;
   final String name;
   final String channelType;
+
+  /// NIP-CL labels in `t` tags after the leading channel-type tag.
+  final List<String> labels;
+
+  /// Original channel creator from the relay-authored uppercase `P` tag.
+  final String? creator;
   final String visibility;
   final String description;
   final String? topic;
@@ -316,6 +305,8 @@ class ChannelData {
     required this.visibility,
     required this.description,
     this.topic,
+    this.labels = const [],
+    this.creator,
     this.participantPubkeys = const [],
     this.ttlSeconds,
     this.ttlDeadline,
@@ -361,6 +352,12 @@ class ChannelData {
       id: id,
       name: name,
       channelType: channelType,
+      labels: event.tags
+          .where((t) => t.length >= 2 && t[0] == 't')
+          .skip(1)
+          .map((t) => t[1])
+          .toList(),
+      creator: event.getTagValue('P'),
       visibility: visibility,
       description: description,
       topic: topic,

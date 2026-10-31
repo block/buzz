@@ -1,23 +1,38 @@
+import 'package:buzz/features/channels/default_agent_launcher.dart';
+import 'package:buzz/features/agents/agents_page.dart';
+import 'package:buzz/features/channels/me/me_section.dart';
+import 'package:buzz/features/activity/activity_page.dart';
+import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/shared/me/default_agent.dart';
+import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/features/home/home_page.dart';
-import 'package:buzz/features/channels/channels_page.dart';
-import 'package:buzz/features/profile/profile_avatar.dart';
+import 'package:buzz/features/home/messages_filters.dart';
+import 'package:buzz/features/home/messages_navigation_bar.dart';
+import 'package:buzz/shared/widgets/ios_message_create_button.dart';
+import 'package:buzz/features/search/search_page.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   Future<Widget> buildHome({
-    int unreadInboxCount = 0,
+    bool longSolo = false,
     bool disableAnimations = false,
     Gradient? topSectionGradient,
+    ValueChanged<ValueNotifier<VoidCallback?>>? onNewChatAction,
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
     return ProviderScope(
-      overrides: [savedPrefsProvider.overrideWithValue(prefs)],
+      overrides: [
+        savedPrefsProvider.overrideWithValue(prefs),
+        defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
+        channelsProvider.overrideWith(_Channels.new),
+      ],
       child: MaterialApp(
         theme: AppTheme.light(topSectionGradient: topSectionGradient),
         builder: (context, child) => MediaQuery(
@@ -27,412 +42,292 @@ void main() {
           child: child!,
         ),
         home: HomePage(
+          onAgents: showAgents,
+          defaultAgentBuilder: (context) =>
+              DefaultAgentLauncher(onChooseAgent: () => showAgents(context)),
+          mePageBuilder: (_, action, workspace) {
+            onNewChatAction?.call(action);
+            return SliverToBoxAdapter(
+              child: MeSection(
+                label: 'Chats',
+                children: [
+                  const Text('Personal workspace'),
+                  if (longSolo) ...[
+                    const SizedBox(height: 1200),
+                    const SizedBox(height: 44, child: Text('Last solo chat')),
+                  ],
+                ],
+              ),
+            );
+          },
           settingsPageBuilder: _buildSettingsPage,
-          hasUnreadInbox: unreadInboxCount > 0,
         ),
       ),
     );
   }
 
-  testWidgets('shows icon-only navigation and an aligned quick action', (
+  testWidgets('feedback clears floating navigation and wraps large text', (
     tester,
   ) async {
-    await tester.pumpWidget(await buildHome());
-    await tester.pump();
-
-    expect(find.text('Home'), findsNothing);
-    expect(find.text('Activity'), findsNothing);
-    expect(find.text('Search'), findsNothing);
-    expect(find.bySemanticsLabel('Home'), findsOneWidget);
-    expect(find.bySemanticsLabel('Activity'), findsOneWidget);
-    expect(find.bySemanticsLabel('Search'), findsOneWidget);
-
-    final quickAction = find.byTooltip('Create or start conversation');
-    expect(quickAction, findsOneWidget);
-    final launcherSize = tester.getSize(
-      find.byType(ChannelQuickActionsLauncher),
-    );
-    expect(launcherSize.width, 800);
-    expect(launcherSize.height, greaterThan(0));
-    final motionRect = tester.getRect(
-      find.byKey(const Key('channel-quick-actions-motion')),
-    );
-    expect(motionRect.width, const Size.square(56).width);
-    expect(motionRect.left, greaterThanOrEqualTo(0));
-    expect(tester.getSize(quickAction), const Size.square(56));
-    final quickActionRect = tester.getRect(quickAction);
-    expect(quickActionRect.left, greaterThanOrEqualTo(0));
-    expect(quickActionRect.top, greaterThanOrEqualTo(0));
-    expect(quickActionRect.right, lessThanOrEqualTo(800));
-    expect(quickActionRect.bottom, lessThanOrEqualTo(600));
-    final homeDestinationRect = tester.getRect(find.bySemanticsLabel('Home'));
-    expect(
-      quickActionRect.center.dy,
-      closeTo(homeDestinationRect.center.dy, 0.01),
-    );
-  });
-
-  testWidgets('keeps the Buzz backdrop behind the scalable Home screen', (
-    tester,
-  ) async {
-    const gradient = LinearGradient(
-      begin: Alignment.topCenter,
-      end: Alignment.bottomCenter,
-      colors: [Colors.yellow, Colors.blue],
-    );
-    await tester.pumpWidget(await buildHome(topSectionGradient: gradient));
-    await tester.pump();
-
-    final backdrop = find.byKey(
-      const ValueKey('home-settings-transition-backdrop'),
-    );
-    final decoration =
-        tester.widget<DecoratedBox>(backdrop).decoration as BoxDecoration;
-    expect(decoration.gradient, gradient);
-    expect(
-      find.byKey(const ValueKey('home-settings-transition-scale')),
-      findsOneWidget,
-    );
-    expect(
-      tester
-          .widget<Transform>(
-            find.byKey(const ValueKey('home-settings-transition-scale')),
-          )
-          .transform
-          .getMaxScaleOnAxis(),
-      1,
-    );
-    expect(
-      tester
-          .widget<Opacity>(
-            find.byKey(const ValueKey('home-settings-transition-opacity')),
-          )
-          .opacity,
-      1,
-    );
-  });
-
-  testWidgets('keeps Home opaque beneath the Settings transition', (
-    tester,
-  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    tester.view.viewPadding = const FakeViewPadding(bottom: 34);
+    addTearDown(tester.view.reset);
     await tester.pumpWidget(await buildHome());
     await tester.pumpAndSettle();
-
-    await tester.tap(find.byType(ProfileAvatar));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 95));
-
-    double homeOpacity() => tester
-        .widget<Opacity>(
-          find.byKey(const ValueKey('home-settings-transition-opacity')),
-        )
-        .opacity;
-
-    expect(homeOpacity(), 1);
-
+    final navigation = find.byType(MessagesNavigationBar);
+    final originalTop = tester.getTopLeft(navigation).dy;
+    final context = tester.element(find.text('General'));
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(const SnackBar(content: Text('Copied')));
     await tester.pumpAndSettle();
-    Navigator.of(
-      tester.element(
-        find.byKey(
-          const ValueKey('settings-transition-opacity'),
-          skipOffstage: false,
+    expect(
+      tester.getBottomLeft(find.byType(SnackBar)).dy,
+      lessThanOrEqualTo(originalTop),
+    );
+    expect(tester.getTopLeft(navigation).dy, originalTop);
+    messenger.removeCurrentSnackBar();
+    messenger.showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Could not share this image. Please try again in a moment.',
+          textScaler: TextScaler.linear(2),
         ),
       ),
-    ).pop();
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 95));
-
-    expect(homeOpacity(), 1);
+    );
+    await tester.pumpAndSettle();
+    expect(
+      tester.getBottomLeft(find.byType(SnackBar)).dy,
+      lessThanOrEqualTo(tester.getTopLeft(navigation).dy),
+    );
+    expect(tester.takeException(), isNull);
+    messenger.removeCurrentSnackBar();
+    await tester.pumpAndSettle();
   });
 
-  testWidgets('uses one monotonic route animation for Settings and Home', (
-    tester,
-  ) async {
-    await tester.pumpWidget(await buildHome());
-    await tester.pumpAndSettle();
+  testWidgets(
+    'Messages filters its inventory and opens Search and Settings above it',
+    (tester) async {
+      await tester.pumpWidget(await buildHome());
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Messages'), findsNothing);
+      expect(find.byTooltip('Solo'), findsNothing);
+      expect(find.text('Personal workspace'), findsOneWidget);
+      expect(find.text('General'), findsOneWidget);
+      final header = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar));
+      expect(header.useNativeNavigation, isFalse);
+      expect(header.nativeLargeTitle, isFalse);
+      expect(header.alwaysFrosted, isTrue);
+      expect(header.titleStyle?.fontSize, 22);
+      expect(header.centerTitle, isFalse);
 
-    double homeScale() => tester
-        .widget<Transform>(
-          find.byKey(const ValueKey('home-settings-transition-scale')),
-        )
-        .transform
-        .storage[0];
-
-    await tester.tap(find.byType(ProfileAvatar));
-    await tester.pump();
-
-    final settingsTransition = find.byKey(
-      const ValueKey('settings-transition-opacity'),
-      skipOffstage: false,
-    );
-    final settingsRoute = ModalRoute.of(tester.element(settingsTransition));
-
-    final entranceScales = <double>[homeScale()];
-    final routeValues = <double>[settingsRoute!.animation!.value];
-    for (var frame = 0; frame < 15; frame++) {
-      await tester.pump(const Duration(milliseconds: 16));
-      entranceScales.add(homeScale());
-      routeValues.add(settingsRoute.animation!.value);
-    }
-    expect(entranceScales.first, closeTo(1, 0.000001));
-    final reversalFrames = <int>[];
-    for (var frame = 1; frame < entranceScales.length; frame++) {
-      if (entranceScales[frame] > entranceScales[frame - 1] + 0.000001) {
-        reversalFrames.add(frame);
+      await tester.tap(
+        find.descendant(
+          of: find.byType(MessagesFilters),
+          matching: find.text('Solo'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Personal workspace'), findsOneWidget);
+      expect(find.text('General'), findsNothing);
+      await tester.tap(
+        find.descendant(
+          of: find.byType(MessagesFilters),
+          matching: find.text('Team'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Personal workspace'), findsNothing);
+      expect(find.text('General'), findsOneWidget);
+      await tester.tap(find.text('All'));
+      await tester.pumpAndSettle();
+      expect(find.text('Personal workspace'), findsOneWidget);
+      await tester.tap(find.text('Chats'));
+      await tester.tap(find.text('Channels'));
+      await tester.pumpAndSettle();
+      for (final filter in ['Solo', 'Team', 'All']) {
+        await tester.tap(
+          find.descendant(
+            of: find.byType(MessagesFilters),
+            matching: find.text(filter),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Personal workspace').hitTestable(), findsNothing);
+        expect(find.text('General').hitTestable(), findsNothing);
       }
-    }
-    expect(
-      reversalFrames,
-      isEmpty,
-      reason:
-          'Home must scale down in one direction on entrance. '
-          'scales=$entranceScales route=$routeValues',
-    );
-    expect(entranceScales, everyElement(inInclusiveRange(0.97, 1)));
-    expect(entranceScales.last, closeTo(0.97, 0.001));
-
-    await tester.pumpAndSettle();
-    Navigator.of(tester.element(settingsTransition)).pop();
-    await tester.pumpAndSettle();
-  });
-
-  testWidgets('gives selection haptics only when the tab changes', (
-    tester,
-  ) async {
-    final hapticCalls = <MethodCall>[];
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(SystemChannels.platform, (call) async {
-          if (call.method == 'HapticFeedback.vibrate') {
-            hapticCalls.add(call);
-          }
-          return null;
-        });
-    addTearDown(
-      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(SystemChannels.platform, null),
-    );
-
-    await tester.pumpWidget(await buildHome());
-    await tester.pump();
-
-    await tester.tap(find.byTooltip('Home'));
-    await tester.pump();
-    expect(hapticCalls, isEmpty);
-
-    await tester.tap(find.byTooltip('Activity'));
-    await tester.pump();
-    expect(hapticCalls, hasLength(1));
-    expect(hapticCalls.single.arguments, 'HapticFeedbackType.selectionClick');
-
-    await tester.tap(find.byTooltip('Activity'));
-    await tester.pump();
-    expect(hapticCalls, hasLength(1));
-
-    await tester.tap(find.byTooltip('Search'));
-    await tester.pump();
-    expect(hapticCalls, hasLength(2));
-  });
-
-  testWidgets('gives a light impact when the Home quick action is pressed', (
-    tester,
-  ) async {
-    final hapticCalls = <MethodCall>[];
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(SystemChannels.platform, (call) async {
-          if (call.method == 'HapticFeedback.vibrate') {
-            hapticCalls.add(call);
-          }
-          return null;
-        });
-    addTearDown(
-      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(SystemChannels.platform, null),
-    );
-
-    await tester.pumpWidget(await buildHome());
-    await tester.pump();
-
-    await tester.tap(find.byTooltip('Create or start conversation'));
-    await tester.pump();
-
-    expect(hapticCalls, hasLength(1));
-    expect(hapticCalls.single.arguments, 'HapticFeedbackType.lightImpact');
-  });
-
-  testWidgets('badges the Inbox tab when it has unread rows', (tester) async {
-    await tester.pumpWidget(await buildHome(unreadInboxCount: 1));
-    await tester.pump();
-
-    expect(
-      find.byKey(const ValueKey('activity-tab-unread-dot')),
-      findsOneWidget,
-    );
-    final badge = tester.widget<Container>(
-      find.byKey(const ValueKey('activity-tab-unread-dot')),
-    );
-    expect(badge.constraints?.maxWidth, 12);
-    expect(badge.constraints?.maxHeight, 12);
-    expect(find.bySemanticsLabel('Activity, unread'), findsOneWidget);
-    AnimatedScale unreadDotScale() => tester.widget<AnimatedScale>(
-      find.byKey(const ValueKey('activity-tab-unread-dot-scale')),
-    );
-    expect(unreadDotScale().scale, 1);
-    expect(unreadDotScale().alignment, const Alignment(-0.5, 0.5));
-    expect(unreadDotScale().duration, const Duration(milliseconds: 220));
-
-    await tester.tap(find.byTooltip('Activity'));
-    await tester.pump();
-
-    expect(
-      find.byKey(const ValueKey('activity-tab-unread-dot')),
-      findsOneWidget,
-    );
-    expect(unreadDotScale().scale, 0);
-    expect(find.bySemanticsLabel('Activity, unread'), findsNothing);
-
-    await tester.tap(find.byTooltip('Home'));
-    await tester.pump();
-
-    expect(unreadDotScale().scale, 1);
-  });
-
-  testWidgets('fades and slides tab content in the selected direction', (
-    tester,
-  ) async {
-    await tester.pumpWidget(await buildHome());
-    await tester.pump();
-
-    Transform bodyTransform() => tester.widget<Transform>(
-      find.byKey(const ValueKey('frosted-scaffold-body-transition-transform')),
-    );
-    Opacity bodyOpacity() => tester.widget<Opacity>(
-      find.byKey(const ValueKey('frosted-scaffold-body-transition-opacity')),
-    );
-    Transform appBarTransform() => tester.widget<Transform>(
-      find.byKey(
-        const ValueKey('frosted-app-bar-content-transition-transform'),
-      ),
-    );
-    Opacity appBarOpacity() => tester.widget<Opacity>(
-      find.byKey(const ValueKey('frosted-app-bar-content-transition-opacity')),
-    );
-    double bodyOffset() => bodyTransform().transform.getTranslation().x;
-    double appBarOffset() => appBarTransform().transform.getTranslation().x;
-
-    expect(bodyOffset(), closeTo(0, 0.001));
-    expect(appBarOffset(), closeTo(0, 0.001));
-    expect(bodyOpacity().opacity, closeTo(1, 0.001));
-    expect(appBarOpacity().opacity, closeTo(1, 0.001));
-
-    await tester.tap(find.byTooltip('Activity'));
-    await tester.pump();
-
-    expect(bodyOffset(), closeTo(24, 0.001));
-    expect(appBarOffset(), closeTo(24, 0.001));
-    expect(bodyOpacity().opacity, closeTo(0, 0.001));
-    expect(appBarOpacity().opacity, closeTo(0, 0.001));
-    expect(
-      find.descendant(
-        of: find.byKey(const ValueKey('frosted-app-bar-background')),
-        matching: find.byKey(
-          const ValueKey('frosted-app-bar-content-transition-transform'),
+      await tester.tap(find.text('Chats'));
+      await tester.tap(find.text('Channels'));
+      await tester.pumpAndSettle();
+      expect(find.text('Personal workspace').hitTestable(), findsOneWidget);
+      expect(find.text('General').hitTestable(), findsOneWidget);
+      await tester.tap(find.text('Inbox'));
+      await tester.pumpAndSettle();
+      expect(find.byType(ActivityPage), findsOneWidget);
+      Navigator.of(tester.element(find.byType(ActivityPage))).pop();
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Search'));
+      await tester.pumpAndSettle();
+      expect(find.byType(SearchPage), findsOneWidget);
+      expect(find.byKey(const Key('search-close')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('search-close')));
+      await tester.pumpAndSettle();
+      expect(find.text('General'), findsOneWidget);
+      expect(find.byType(MessagesNavigationBar), findsOneWidget);
+      await tester.tap(find.byTooltip('Community menu'));
+      await tester.pumpAndSettle();
+      expect(find.text('Switch workspace'), findsOneWidget);
+      expect(find.text('Agents'), findsOneWidget);
+      expect(find.text('Settings'), findsOneWidget);
+      await tester.tap(find.text('Settings'));
+      await tester.pumpAndSettle();
+      expect(find.text('Your profile destination'), findsOneWidget);
+      Navigator.of(tester.element(find.text('Your profile destination'))).pop();
+      await tester.pumpAndSettle();
+      expect(find.text('General'), findsOneWidget);
+      await tester.pumpWidget(await buildHome(longSolo: true));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.descendant(
+          of: find.byType(MessagesFilters),
+          matching: find.text('Solo'),
         ),
-      ),
-      findsOneWidget,
-    );
+      );
+      await tester.pumpAndSettle();
+      await tester.drag(
+        find.byType(CustomScrollView).first,
+        const Offset(0, -2000),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester.getBottomLeft(find.text('Last solo chat')).dy,
+        lessThanOrEqualTo(
+          tester.getTopLeft(find.byType(MessagesNavigationBar)).dy,
+        ),
+      );
+    },
+  );
 
-    await tester.pump(const Duration(milliseconds: 120));
+  for (final reduced in [false, true]) {
+    testWidgets('New opens creation actions with reduced motion $reduced', (
+      tester,
+    ) async {
+      ValueNotifier<VoidCallback?>? chat;
+      var created = 0;
+      await tester.pumpWidget(
+        await buildHome(
+          disableAnimations: reduced,
+          onNewChatAction: (value) => chat = value,
+        ),
+      );
+      await tester.pumpAndSettle();
+      chat!.value = () => created++;
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('New'));
+      await tester.pumpAndSettle();
+      expect(find.text('New workspace'), findsOneWidget);
+      expect(find.text('New DM'), findsOneWidget);
+      expect(find.text('New channel'), findsOneWidget);
+      await tester.tap(find.text('New chat'));
+      await tester.pumpAndSettle();
+      expect(created, 1);
+    });
+  }
 
-    expect(bodyOffset(), inExclusiveRange(0, 24));
-    expect(appBarOffset(), inExclusiveRange(0, 24));
-    expect(bodyOpacity().opacity, inExclusiveRange(0, 1));
-    expect(appBarOpacity().opacity, inExclusiveRange(0, 1));
-
-    await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Home'));
-    await tester.pump();
-
-    expect(bodyOffset(), closeTo(-24, 0.001));
-    expect(appBarOffset(), closeTo(-24, 0.001));
-    expect(bodyOpacity().opacity, closeTo(0, 0.001));
-    expect(appBarOpacity().opacity, closeTo(0, 0.001));
-
-    await tester.pumpAndSettle();
-    expect(bodyOffset(), closeTo(0, 0.001));
-    expect(appBarOffset(), closeTo(0, 0.001));
-    expect(bodyOpacity().opacity, closeTo(1, 0.001));
-    expect(appBarOpacity().opacity, closeTo(1, 0.001));
-  });
-
-  testWidgets('switches tab content instantly with reduced motion', (
-    tester,
-  ) async {
-    await tester.pumpWidget(await buildHome(disableAnimations: true));
-    await tester.pump();
-
-    await tester.tap(find.byTooltip('Activity'));
-    await tester.pump();
-
-    final bodyTransform = tester.widget<Transform>(
-      find.byKey(const ValueKey('frosted-scaffold-body-transition-transform')),
-    );
-    final bodyOpacity = tester.widget<Opacity>(
-      find.byKey(const ValueKey('frosted-scaffold-body-transition-opacity')),
-    );
-    final appBarTransform = tester.widget<Transform>(
-      find.byKey(
-        const ValueKey('frosted-app-bar-content-transition-transform'),
-      ),
-    );
-    final appBarOpacity = tester.widget<Opacity>(
-      find.byKey(const ValueKey('frosted-app-bar-content-transition-opacity')),
-    );
-    expect(bodyTransform.transform.getTranslation().x, closeTo(0, 0.001));
-    expect(appBarTransform.transform.getTranslation().x, closeTo(0, 0.001));
-    expect(bodyOpacity.opacity, closeTo(1, 0.001));
-    expect(appBarOpacity.opacity, closeTo(1, 0.001));
-  });
-
-  testWidgets('scales and fades the quick action as tabs change', (
-    tester,
-  ) async {
-    await tester.pumpWidget(await buildHome());
-    await tester.pump();
-
-    double scale() => tester
-        .widget<Transform>(find.byKey(const Key('channel-quick-actions-scale')))
-        .transform
-        .storage
-        .first;
-    double opacity() => tester
-        .widget<Opacity>(find.byKey(const Key('channel-quick-actions-opacity')))
-        .opacity;
-
-    expect(scale(), closeTo(1, 0.001));
-    expect(opacity(), closeTo(1, 0.001));
-
-    await tester.tap(find.byTooltip('Activity'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 110));
-
-    expect(scale(), inExclusiveRange(0.8, 1));
-    expect(opacity(), inExclusiveRange(0, 1));
-
-    await tester.pumpAndSettle();
-    expect(scale(), closeTo(0.8, 0.001));
-    expect(opacity(), closeTo(0, 0.001));
-
-    await tester.tap(find.byTooltip('Home'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 110));
-
-    expect(scale(), inExclusiveRange(0.8, 1));
-    expect(opacity(), inExclusiveRange(0, 1));
-
-    await tester.pumpAndSettle();
-    expect(scale(), closeTo(1, 0.001));
-    expect(opacity(), closeTo(1, 0.001));
-  });
+  testWidgets(
+    'iOS shows Messages above filters with the native creation menu',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      await tester.pumpWidget(await buildHome());
+      await tester.pumpAndSettle();
+      final bar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar));
+      expect(bar.nativeTitle, '');
+      expect(find.text('Messages'), findsOneWidget);
+      expect(bar.nativeActions, isEmpty);
+      expect(bar.leading, isNull);
+      expect(find.byType(MessagesFilters), findsOneWidget);
+      expect(bar.bottomHeight, greaterThan(0));
+      expect(
+        tester
+            .widget<IosMessageCreateButton>(
+              find.byWidgetPredicate(
+                (w) => w is IosMessageCreateButton && w.label == 'New',
+              ),
+            )
+            .actions
+            .map((a) => a.label),
+        ['New chat', 'New workspace', 'New DM', 'New channel'],
+      );
+      final communityMenu = tester.widget<IosMessageCreateButton>(
+        find.byWidgetPredicate(
+          (w) =>
+              w is IosMessageCreateButton &&
+              w.accessibilityLabel == 'Community menu',
+        ),
+      );
+      communityMenu.actions.last.onPressed!();
+      await tester.pump();
+      expect(
+        find.descendant(
+          of: find.byType(IosMessageCreateButton, skipOffstage: false),
+          matching: find.byType(UiKitView, skipOffstage: false),
+        ),
+        findsNothing,
+      );
+      await tester.pumpAndSettle();
+      Navigator.of(tester.element(find.text('Your profile destination'))).pop();
+      await tester.pump();
+      expect(
+        find.descendant(
+          of: find.byType(IosMessageCreateButton, skipOffstage: false),
+          matching: find.byType(UiKitView, skipOffstage: false),
+        ),
+        findsNothing,
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.descendant(
+          of: find.byType(IosMessageCreateButton),
+          matching: find.byType(UiKitView),
+        ),
+        findsNWidgets(2),
+      );
+      communityMenu.actions.first.onPressed!();
+      await tester.pump();
+      // Finish the route entrance while the community inventory is loading.
+      await tester.pump(const Duration(milliseconds: 150));
+      expect(find.text('Switch Community'), findsOneWidget);
+      final homeOpacity = find.byKey(
+        const Key('home-community-surface-visibility'),
+      );
+      expect(tester.widget<Opacity>(homeOpacity).opacity, 0);
+      Navigator.of(tester.element(find.text('Switch Community'))).pop();
+      await tester.pumpAndSettle();
+      expect(tester.widget<Opacity>(homeOpacity).opacity, 1);
+      expect(find.text('Messages'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
 }
 
-Widget _buildSettingsPage(BuildContext context) => const SizedBox.shrink();
+Widget _buildSettingsPage(BuildContext context) =>
+    const Scaffold(body: Text('Your profile destination'));
+
+class _Channels extends ChannelsNotifier {
+  @override
+  Future<List<Channel>> build() async => [
+    Channel(
+      id: 'channel',
+      name: 'General',
+      description: '',
+      createdBy: 'owner',
+      createdAt: DateTime(2026),
+      memberCount: 1,
+      visibility: 'open',
+      channelType: 'stream',
+      isMember: true,
+    ),
+  ];
+}

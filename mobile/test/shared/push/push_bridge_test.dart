@@ -60,6 +60,52 @@ void main() {
     },
   );
 
+  test('strict age-gate snapshot requires a native handler', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_channel, null);
+
+    await expectLater(
+      registerBuzzPushCommunitySnapshotStrict(const [], settleFence: false),
+      throwsA(isA<MissingPluginException>()),
+    );
+  });
+
+  test(
+    'strict age-gate snapshot uses the acknowledged native method',
+    () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_channel, (call) async {
+            expect(call.method, 'syncAgeGatePushSnapshot');
+            expect(call.arguments, {
+              'section': 'communities',
+              'communities': <Object?>[],
+              'signingKeys': <String, String>{},
+              'settleFence': true,
+            });
+            return null;
+          });
+
+      await registerBuzzPushCommunitySnapshotStrict(
+        const [],
+        settleFence: true,
+      );
+    },
+  );
+
+  test('purges notifications delivered before age restriction', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_channel, (call) async {
+          expect(call.method, 'purgeAgeRestrictedNotifications');
+          expect(call.arguments, isNull);
+          return null;
+        });
+
+    await purgeAgeRestrictedBuzzNotifications();
+  });
+
   test('reads native notification authorization status', () async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -145,6 +191,7 @@ void main() {
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     messenger.setMockMethodCallHandler(_channel, (call) async {
       expect(call.method, 'endpointGrants');
+      expect(call.arguments, {'gatewayUrl': Env.pushGatewayUrl});
       return [_grantMap('opaque-grant')];
     });
 
@@ -156,7 +203,6 @@ void main() {
     expect(grants.single.installationId, 'c' * 32);
     expect(grants.single.endpointGrant, 'opaque-grant');
     expect(grants.single.endpointHash, 'b' * 64);
-    expect(grants.single.appProfile, 'buzz-ios-dogfood');
     expect(grants.single.endpointEpoch, 1);
     expect(grants.single.generation, 1);
     expect(grants.single.expiresAt, 1752624000);
@@ -294,6 +340,57 @@ void main() {
     );
   });
 
+  test(
+    'preserves the exact reply and containing thread on a warm tap',
+    () async {
+      final response = Completer<ByteData?>();
+      await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .handlePlatformMessage(
+            _channel.name,
+            _channel.codec.encodeMethodCall(
+              const MethodCall('notificationOpened', {
+                'eventId': 'older-reply',
+                'communityId': 'community-id',
+                'channelId': 'channel-id',
+                'threadRootId': 'direct-parent',
+              }),
+            ),
+            response.complete,
+          );
+      expect(
+        _channel.codec.decodeEnvelope((await response.future)!),
+        'handled',
+      );
+      expect(
+        pendingPushNotificationLink.value,
+        const MessageDeepLink(
+          communityId: 'community-id',
+          channelId: 'channel-id',
+          messageId: 'older-reply',
+          threadRootId: 'direct-parent',
+        ),
+      );
+    },
+  );
+
+  for (final invalidThread in ['', 42]) {
+    test('rejects malformed thread ID $invalidThread', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            _channel,
+            (_) async => {
+              'eventId': 'reply',
+              'communityId': 'community',
+              'channelId': 'channel',
+              'threadRootId': invalidThread,
+            },
+          );
+      await syncPendingBuzzPushNotificationResponse();
+      expect(pendingPushNotificationLink.value, isNull);
+    });
+  }
+
   test('rejects a notification response with an empty channel ID', () async {
     final response = Completer<ByteData?>();
     await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -366,6 +463,7 @@ void main() {
           expect(call.method, 'takePendingNotificationResponse');
           return {
             'eventId': 'b' * 64,
+            'threadRootId': 'a' * 64,
             'communityId': 'community-id',
             'channelId': '123e4567-e89b-42d3-a456-426614174000',
           };
@@ -379,6 +477,7 @@ void main() {
         communityId: 'community-id',
         channelId: '123e4567-e89b-42d3-a456-426614174000',
         messageId: 'b' * 64,
+        threadRootId: 'a' * 64,
       ),
     );
   });
@@ -410,7 +509,6 @@ Map<String, Object> _grantMap(String endpointGrant) => {
   'installationId': 'c' * 32,
   'endpointGrant': endpointGrant,
   'endpointHash': 'b' * 64,
-  'appProfile': 'buzz-ios-dogfood',
   'endpointEpoch': 1,
   'generation': 1,
   'expiresAt': 1752624000,

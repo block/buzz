@@ -1,10 +1,9 @@
 name: Sprig
 
 # Builds and publishes Sprig — one deploy-anywhere Linux multicall binary for:
-#   buzz-acp       ACP harness that bridges Buzz events to the LLM agent
+#   buzz-acp       ACP harness (multicall Git helpers) that bridges Buzz events to the LLM agent
 #   buzz-agent     ACP-compliant agent (spawns MCP, calls LLMs)
-#   buzz-dev-mcp   Developer MCP server (multicall: rg, tree, buzz,
-#                    git-credential-nostr, git-sign-nostr)
+#   buzz-dev-mcp   Developer MCP server (multicall: rg, tree, buzz)
 #
 # Targets: x86_64-unknown-linux-musl and aarch64-unknown-linux-musl (static
 # musl so the tarball runs on any modern Linux without libc surprises).

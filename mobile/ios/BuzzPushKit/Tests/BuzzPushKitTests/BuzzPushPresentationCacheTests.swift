@@ -1,6 +1,5 @@
 import CryptoKit
 import Foundation
-import P256K
 import Testing
 
 @testable import BuzzPushKit
@@ -327,6 +326,130 @@ struct BuzzPushPresentationCacheTests {
     )
   }
 
+  @Test("Retrying a partial batch prefix preserves newer state and original scope")
+  func partialBatchPrefixReplayIsIdempotent() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = BuzzPushPresentationCacheStore(
+      containerURL: directory,
+      now: { Date(timeIntervalSince1970: 1_700_000_100) }
+    )
+    let relayPubkey = try pubkey(for: relayKey)
+    let member = try pubkey(for: profileKey)
+    let addedMember = try pubkey(for: otherRelayKey)
+    let profiles = try [profileKey, otherRelayKey].map { key in
+      try signedEvent(privateKey: key, createdAt: 100, kind: 0, content: #"{"name":"Original"}"#)
+    }
+    let metadata = try ["prefix", "suffix"].map { channel in
+      try signedEvent(
+        privateKey: relayKey, createdAt: 100, kind: 39_000,
+        tags: [["d", channel], ["name", "Original"], ["t", "stream"]]
+      )
+    }
+    let memberships = try ["prefix", "suffix"].map { channel in
+      try signedEvent(
+        privateKey: relayKey, createdAt: 100, kind: 39_002,
+        tags: [["d", channel], ["p", member]]
+      )
+    }
+    func deliver(
+      _ index: Int, community: String = "original", origin: String = "https://relay.example"
+    ) throws {
+      try store.updateProfiles(
+        communityID: community, relayOrigin: origin,
+        updates: [BuzzPushProfileCacheUpdate(event: profiles[index])]
+      )
+      try store.updateChannels(
+        communityID: community, relayOrigin: origin, relayMetadataPubkey: relayPubkey,
+        metadataEvents: [metadata[index]], membershipEvents: [memberships[index]]
+      )
+    }
+
+    // Native storage accepts the prefix, but the caller loses its acknowledgement.
+    try deliver(0)
+    try deliver(0, community: "other-community")
+    try deliver(0, origin: "https://other-relay.example")
+    let beforeRetry = try loadSnapshot(directory)
+    let untouchedProfiles = beforeRetry.profiles.filter {
+      $0.communityID != "original" || $0.relayOrigin != "https://relay.example"
+    }
+    let untouchedChannels = beforeRetry.channels.filter {
+      $0.communityID != "original" || $0.relayOrigin != "https://relay.example"
+    }
+    let newerProfile = try signedEvent(
+      privateKey: profileKey, createdAt: 101, kind: 0, content: #"{"name":"Newest"}"#
+    )
+    let newerMetadata = try signedEvent(
+      privateKey: relayKey, createdAt: 101, kind: 39_000,
+      tags: [["d", "prefix"], ["name", "Newest"], ["t", "forum"]]
+    )
+    let newerMembership = try signedEvent(
+      privateKey: relayKey, createdAt: 101, kind: 39_002,
+      tags: [["d", "prefix"], ["p", member], ["p", addedMember]]
+    )
+    try store.updateProfiles(
+      communityID: "original", relayOrigin: "https://relay.example",
+      updates: [BuzzPushProfileCacheUpdate(event: newerProfile)]
+    )
+    try store.updateChannels(
+      communityID: "original", relayOrigin: "https://relay.example",
+      relayMetadataPubkey: relayPubkey,
+      metadataEvents: [newerMetadata], membershipEvents: [newerMembership]
+    )
+
+    // Replay exact events from the accepted prefix, then deliver the missing suffix.
+    try deliver(0)
+    try deliver(1)
+    let completed = try loadSnapshot(directory)
+    try deliver(0)
+    try deliver(1)
+    let replayed = try loadSnapshot(directory)
+    #expect(replayed.profiles == completed.profiles)
+    #expect(replayed.channels == completed.channels)
+    #expect(replayed.profiles.count == 4)
+    #expect(replayed.channels.count == 4)
+    #expect(
+      replayed.profiles.filter {
+        $0.communityID != "original" || $0.relayOrigin != "https://relay.example"
+      } == untouchedProfiles)
+    #expect(
+      replayed.channels.filter {
+        $0.communityID != "original" || $0.relayOrigin != "https://relay.example"
+      } == untouchedChannels)
+    let profile = try #require(
+      replayed.profile(
+        communityID: "original", relayOrigin: "https://relay.example", pubkey: member
+      ))
+    #expect(profile.eventID == newerProfile.id)
+    #expect(profile.displayName == "Newest")
+    let channel = try #require(
+      replayed.channel(
+        communityID: "original", relayOrigin: "https://relay.example", channelID: "prefix"
+      ))
+    #expect(channel.eventID == newerMetadata.id)
+    #expect(channel.displayName == "Newest")
+    #expect(channel.channelType == "forum")
+    #expect(channel.membershipEventID == newerMembership.id)
+    #expect(channel.memberCount == 2)
+    #expect(
+      channel.memberDigests
+        == [member, addedMember].map {
+          BuzzPushPresentationIdentity.channelMember(
+            communityID: "original", channelID: "prefix", pubkey: $0
+          )
+        }.sorted())
+    #expect(
+      replayed.profile(
+        communityID: "original", relayOrigin: "https://relay.example", pubkey: addedMember
+      )?.eventID == profiles[1].id)
+    let suffix = try #require(
+      replayed.channel(
+        communityID: "original", relayOrigin: "https://relay.example", channelID: "suffix"
+      ))
+    #expect(suffix.eventID == metadata[1].id)
+    #expect(suffix.membershipEventID == memberships[1].id)
+  }
+
   @Test("Channel authority rotation clears membership signed by the old authority")
   func channelAuthorityRotationClearsMembership() throws {
     let directory = try temporaryDirectory()
@@ -551,8 +674,8 @@ struct BuzzPushPresentationCacheTests {
     #expect(snapshot.channels.count == 1)
   }
 
-  @Test("Community removal prunes profile and channel state")
-  func communityPruning() throws {
+  @Test("Account sync discards old presentation exports even for a retained account")
+  func discardLegacyExports() throws {
     let directory = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = BuzzPushPresentationCacheStore(containerURL: directory)
@@ -563,12 +686,12 @@ struct BuzzPushPresentationCacheTests {
       tags: [["d", "opaque"], ["name", "General"]]
     )
     try store.updateProfiles(
-      communityID: "removed",
+      communityID: "retained",
       relayOrigin: "https://relay.example",
       updates: [BuzzPushProfileCacheUpdate(event: profile)]
     )
     try store.updateChannels(
-      communityID: "removed",
+      communityID: "retained",
       relayOrigin: "https://relay.example",
       relayMetadataPubkey: try pubkey(for: relayKey),
       metadataEvents: [channel],
@@ -710,8 +833,8 @@ struct BuzzPushPresentationCacheTests {
 
   private func pubkey(for privateKey: String) throws -> String {
     let bytes = try #require(VerifiedNostrEvent.hexBytes(privateKey))
-    let key = try P256K.Schnorr.PrivateKey(dataRepresentation: bytes)
-    return VerifiedNostrEvent.hex(key.xonly.bytes)
+    let key = bytes
+    return VerifiedNostrEvent.hex(try NostrSchnorr.publicKey(secret: key))
   }
 
   private func signedEvent(
@@ -722,8 +845,8 @@ struct BuzzPushPresentationCacheTests {
     content: String = ""
   ) throws -> VerifiedNostrEvent {
     let privateKeyBytes = try #require(VerifiedNostrEvent.hexBytes(privateKey))
-    let key = try P256K.Schnorr.PrivateKey(dataRepresentation: privateKeyBytes)
-    let pubkey = VerifiedNostrEvent.hex(key.xonly.bytes)
+    let key = privateKeyBytes
+    let pubkey = VerifiedNostrEvent.hex(try NostrSchnorr.publicKey(secret: key))
     let serialization = try VerifiedNostrEvent.canonicalSerialization(
       pubkey: pubkey,
       createdAt: createdAt,
@@ -732,9 +855,9 @@ struct BuzzPushPresentationCacheTests {
       content: content
     )
     let digest = Array(SHA256.hash(data: serialization))
-    var message = digest
-    var randomness = [UInt8](repeating: UInt8(truncatingIfNeeded: createdAt), count: 32)
-    let signature = try key.signature(message: &message, auxiliaryRand: &randomness)
+    let message = digest
+    let randomness = [UInt8](repeating: UInt8(truncatingIfNeeded: createdAt), count: 32)
+    let signature = try NostrSchnorr.sign(message: message, secret: key, auxiliaryRandomness: randomness)
     return VerifiedNostrEvent(
       id: VerifiedNostrEvent.hex(digest),
       pubkey: pubkey,
@@ -742,7 +865,7 @@ struct BuzzPushPresentationCacheTests {
       kind: kind,
       tags: tags,
       content: content,
-      sig: VerifiedNostrEvent.hex(signature.dataRepresentation)
+      sig: VerifiedNostrEvent.hex(signature)
     )
   }
 }

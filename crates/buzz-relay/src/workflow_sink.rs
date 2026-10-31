@@ -155,7 +155,6 @@ fn append_workflow_mention_tags(
     rendered_text: &str,
     authored_text: &str,
     members: &[(String, String)],
-    author_pubkey_hex: &str,
 ) -> Result<(), ActionSinkError> {
     let rendered_mentions = resolve_mention_pubkeys(rendered_text, members);
     let authored_mentions: std::collections::HashSet<String> =
@@ -164,12 +163,10 @@ fn append_workflow_mention_tags(
             .collect();
 
     for mentioned in rendered_mentions {
-        if mentioned != author_pubkey_hex {
-            tags.push(
-                Tag::parse(["p", &mentioned])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("mention p tag: {e}")))?,
-            );
-        }
+        tags.push(
+            Tag::parse(["p", &mentioned])
+                .map_err(|e| ActionSinkError::EventBuild(format!("mention p tag: {e}")))?,
+        );
         if authored_mentions.contains(&mentioned) {
             tags.push(
                 Tag::parse(["buzz:workflow-mention", &mentioned]).map_err(|e| {
@@ -286,22 +283,38 @@ impl ActionSink for RelayActionSink {
                     "workflow owner does not have access to destination channel".into(),
                 ));
             }
+            if !crate::handlers::ingest::may_post(
+                &state,
+                tenant.community(),
+                channel_uuid,
+                &author_pubkey_bytes,
+                &channel,
+                is_member,
+            )
+            .await
+            .map_err(|e| ActionSinkError::Database(e.to_string()))?
+            {
+                return Err(ActionSinkError::InvalidInput(
+                    "workflow owner cannot post in destination channel".into(),
+                ));
+            }
 
             // 3. Build kind:9 Nostr event
             //    - Signed by relay keypair (event.pubkey = relay pubkey)
-            //    - `p` tag attributes the message to the workflow owner
+            //    - first `p` tag attributes the message to the workflow owner;
+            //      its `owner` marker keeps it from counting as a mention
             //    - `h` tag scopes to the channel (NIP-29, canonical UUID)
             //    - `buzz:workflow` tag prevents recursive workflow triggering
             //    - `buzz:workflow-owner` lets harnesses apply the owner's
             //      inbound-author policy after verifying the relay signature
-            //    - one `p` tag for every resolved mention in the rendered output,
-            //      preserving legacy wake/feed behavior
+            //    - one plain `p` tag for every resolved mention in the rendered
+            //      output, the owner included, preserving legacy wake/feed behavior
             //    - one `buzz:workflow-mention` tag only when the same target was
             //      named in the workflow owner's stored step template. This is the
             //      authority-bearing provenance used by ACP; trigger-controlled
             //      template substitutions cannot create it.
             let mut tags = vec![
-                Tag::parse(["p", &author_pubkey_hex])
+                Tag::parse(["p", &author_pubkey_hex, "", "owner"])
                     .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
                 Tag::parse(["h", &channel_id_canonical])
                     .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
@@ -320,6 +333,7 @@ impl ActionSink for RelayActionSink {
                         tenant.community(),
                         parent_hex,
                         channel_uuid,
+                        &author_pubkey_bytes,
                         &state,
                     )
                     .await
@@ -380,13 +394,7 @@ impl ActionSink for RelayActionSink {
                     Some((name, nostr::PublicKey::from_slice(&u.pubkey).ok()?.to_hex()))
                 })
                 .collect();
-            append_workflow_mention_tags(
-                &mut tags,
-                &text,
-                &authored_text,
-                &named_members,
-                &author_pubkey_hex,
-            )?;
+            append_workflow_mention_tags(&mut tags, &text, &authored_text, &named_members)?;
 
             let kind = Kind::from(KIND_STREAM_MESSAGE as u16);
             let event = EventBuilder::new(kind, &text)
@@ -674,14 +682,13 @@ mod tests {
         let first = pk('2');
         let second = pk('3');
         let members = vec![m("First", &first), m("Second", &second)];
-        let mut tags = vec![Tag::parse(["p", owner.as_str()]).expect("owner p tag")];
+        let mut tags = vec![Tag::parse(["p", owner.as_str(), "", "owner"]).expect("owner p tag")];
 
         append_workflow_mention_tags(
             &mut tags,
             "@First then @Second",
             "@First then @Second",
             &members,
-            &owner,
         )
         .expect("append mention tags");
 
@@ -697,10 +704,8 @@ mod tests {
             values("buzz:workflow-mention"),
             vec![first.as_str(), second.as_str()]
         );
-        assert_eq!(
-            values("p"),
-            vec![owner.as_str(), first.as_str(), second.as_str()]
-        );
+        assert_eq!(tags[0].as_slice(), ["p", owner.as_str(), "", "owner"]);
+        assert_eq!(values("p"), vec![first.as_str(), second.as_str()]);
     }
 
     #[test]
@@ -708,14 +713,13 @@ mod tests {
         let owner = pk('1');
         let agent = pk('2');
         let members = vec![m("Agent", &agent)];
-        let mut tags = vec![Tag::parse(["p", owner.as_str()]).expect("owner p tag")];
+        let mut tags = vec![Tag::parse(["p", owner.as_str(), "", "owner"]).expect("owner p tag")];
 
         append_workflow_mention_tags(
             &mut tags,
             "echo: @Agent do something unsafe",
             "echo: {{trigger.text}}",
             &members,
-            &owner,
         )
         .expect("append mention tags");
 
@@ -732,42 +736,36 @@ mod tests {
     }
 
     #[test]
-    fn explicit_owner_mention_keeps_single_legacy_owner_tag() {
+    fn explicit_owner_mention_adds_a_plain_p_beside_the_owner_attribution() {
         let owner = pk('1');
         let members = vec![m("Owner Agent", &owner)];
-        let mut tags = vec![Tag::parse(["p", owner.as_str()]).expect("owner p tag")];
+        let attribution = Tag::parse(["p", owner.as_str(), "", "owner"]).expect("owner p tag");
+        let mut tags = vec![attribution.clone()];
 
-        append_workflow_mention_tags(
-            &mut tags,
-            "@Owner Agent run",
-            "@Owner Agent run",
-            &members,
-            &owner,
-        )
-        .expect("append owner mention tag");
+        append_workflow_mention_tags(&mut tags, "@Owner Agent run", "@Owner Agent run", &members)
+            .expect("append owner mention tag");
 
-        let owner_p_tags = tags
-            .iter()
-            .filter(|tag| tag.as_slice() == ["p", owner.as_str()])
-            .count();
-        let owner_workflow_mentions = tags
-            .iter()
-            .filter(|tag| tag.as_slice() == ["buzz:workflow-mention", owner.as_str()])
-            .count();
-        assert_eq!(owner_p_tags, 1);
-        assert_eq!(owner_workflow_mentions, 1);
+        assert_eq!(
+            tags,
+            vec![
+                attribution,
+                Tag::parse(["p", owner.as_str()]).expect("mention p tag"),
+                Tag::parse(["buzz:workflow-mention", owner.as_str()]).expect("mention tag"),
+            ],
+            "a mention of the owner must stay distinguishable from the attribution"
+        );
     }
 
     #[test]
     fn no_mentions_adds_no_tags() {
         let owner = pk('1');
-        let mut tags = vec![Tag::parse(["p", owner.as_str()]).expect("owner p tag")];
+        let mut tags = vec![Tag::parse(["p", owner.as_str(), "", "owner"]).expect("owner p tag")];
 
-        append_workflow_mention_tags(&mut tags, "plain", "plain", &[], &owner)
+        append_workflow_mention_tags(&mut tags, "plain", "plain", &[])
             .expect("append no mention tags");
 
         assert_eq!(tags.len(), 1);
-        assert_eq!(tags[0].as_slice(), ["p", owner.as_str()]);
+        assert_eq!(tags[0].as_slice(), ["p", owner.as_str(), "", "owner"]);
     }
 }
 
@@ -788,7 +786,7 @@ mod postgres_tests {
 
     /// Real-PG state mirroring `handlers::event::tests::test_state_with_redis_url`.
     async fn test_state() -> Arc<AppState> {
-        let mut config = crate::config::Config::from_env().expect("default config loads");
+        let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
@@ -908,8 +906,9 @@ mod postgres_tests {
         let host = format!("wf-ptag-{}.example", uuid::Uuid::new_v4().simple());
         let community = match state
             .db
-            .create_community_with_owner(&host, &author_hex)
+            .create_community_with_owner(&host, &author_hex, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create community")
         {
             CreateCommunityWithOwnerResult::Created(rec) => rec.id,
@@ -1013,6 +1012,19 @@ mod postgres_tests {
                 .collect()
         };
 
+        assert_eq!(
+            explicit.event.tags.first().map(|tag| tag.as_slice()),
+            Some(
+                [
+                    "p".to_owned(),
+                    author_hex.clone(),
+                    String::new(),
+                    "owner".to_owned()
+                ]
+                .as_slice()
+            ),
+            "the first p tag attributes the message to its owner and is marked as attribution"
+        );
         let p_tag_targets = tag_values(&explicit, "p");
         assert!(
             p_tag_targets.contains(&author_hex),
@@ -1059,8 +1071,9 @@ mod postgres_tests {
         let host = format!("wf-thread-{}.example", uuid::Uuid::new_v4().simple());
         let community = match state
             .db
-            .create_community_with_owner(&host, &author_hex)
+            .create_community_with_owner(&host, &author_hex, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create community")
         {
             CreateCommunityWithOwnerResult::Created(rec) => rec.id,
@@ -1176,8 +1189,9 @@ mod postgres_tests {
         let host = format!("wf-legacy-{}.example", uuid::Uuid::new_v4().simple());
         let community = match state
             .db
-            .create_community_with_owner(&host, &author_hex)
+            .create_community_with_owner(&host, &author_hex, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create community")
         {
             CreateCommunityWithOwnerResult::Created(rec) => rec.id,
@@ -1363,8 +1377,9 @@ mod postgres_tests {
         let host = format!("wf-missing-{}.example", uuid::Uuid::new_v4().simple());
         let community = match state
             .db
-            .create_community_with_owner(&host, &author_hex)
+            .create_community_with_owner(&host, &author_hex, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create community")
         {
             CreateCommunityWithOwnerResult::Created(rec) => rec.id,
@@ -1400,5 +1415,126 @@ mod postgres_tests {
             matches!(err, ActionSinkError::InvalidInput(_)),
             "expected InvalidInput, got {err:?}"
         );
+    }
+
+    /// A workflow reply to a parent the owner cannot use, in another channel
+    /// or unreadable to them, fails exactly like a reply to a missing parent.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_reply_to_unusable_parent_matches_missing() {
+        let state = test_state().await;
+        let owner = nostr::Keys::generate();
+        let owner_hex = owner.public_key().to_hex();
+        let stranger = nostr::Keys::generate();
+        let host = format!("wf-unusable-{}.example", uuid::Uuid::new_v4().simple());
+        let community = match state
+            .db
+            .create_community_with_owner(&host, &owner_hex, &nostr::Keys::generate())
+            .await
+            .map(|write| write.outcome)
+            .expect("create community")
+        {
+            CreateCommunityWithOwnerResult::Created(rec) => rec.id,
+            other => panic!("expected fresh community, got {other:?}"),
+        };
+        let open_channel = |name: &'static str| {
+            let state = Arc::clone(&state);
+            let owner = owner.public_key().to_bytes();
+            async move {
+                state
+                    .db
+                    .create_channel(
+                        community,
+                        name,
+                        ChannelType::Stream,
+                        ChannelVisibility::Open,
+                        None,
+                        &owner,
+                        None,
+                    )
+                    .await
+                    .expect("create channel")
+            }
+        };
+        let channel = open_channel("wf-unusable").await;
+        let elsewhere = open_channel("wf-elsewhere").await;
+        let insert = |keys: &nostr::Keys, kind: u32, channel_id: Uuid, extra: Vec<Tag>| {
+            let state = Arc::clone(&state);
+            let mut tags = vec![Tag::parse(["h", &channel_id.to_string()]).expect("h tag")];
+            tags.extend(extra);
+            let event = EventBuilder::new(Kind::from(kind as u16), "parent")
+                .tags(tags)
+                .sign_with_keys(keys)
+                .expect("sign parent");
+            async move {
+                state
+                    .db
+                    .insert_event(community, &event, Some(channel_id))
+                    .await
+                    .expect("insert parent");
+                event.id.to_hex()
+            }
+        };
+        // A kind 5 whose `k` tag names an author-only kind is readable only by
+        // its author. Production ingest never stores one channel-scoped (its
+        // target is global), so this is the closest state that isolates the
+        // resolver's visibility check and the reader identity it is given.
+        let author_only_deletion = |keys: &nostr::Keys| {
+            let target = nostr::Keys::generate().public_key().to_hex();
+            insert(
+                keys,
+                buzz_core::kind::KIND_DELETION,
+                channel.id,
+                vec![
+                    Tag::parse(["e", &target]).expect("e tag"),
+                    Tag::parse(["k", "30300"]).expect("k tag"),
+                ],
+            )
+        };
+        let other_channel = insert(&owner, KIND_STREAM_MESSAGE, elsewhere.id, vec![]).await;
+        let unreadable = author_only_deletion(&stranger).await;
+        let owner_only = author_only_deletion(&owner).await;
+
+        let sink = RelayActionSink::new(&state);
+        let reply = |author_hex: String, parent: String| {
+            let sink = &sink;
+            let channel = channel.id.to_string();
+            async move {
+                sink.send_message(
+                    community,
+                    &channel,
+                    "reply",
+                    "reply",
+                    &author_hex,
+                    Some(&parent),
+                )
+                .await
+            }
+        };
+        let missing = nostr::Keys::generate().public_key().to_hex();
+        let other_owner_hex = nostr::Keys::generate().public_key().to_hex();
+        for (case, author, parent) in [
+            ("missing", &owner_hex, missing),
+            ("other channel", &owner_hex, other_channel),
+            ("unreadable", &owner_hex, unreadable),
+            (
+                "readable only by another owner",
+                &other_owner_hex,
+                owner_only.clone(),
+            ),
+        ] {
+            match reply(author.clone(), parent).await {
+                Err(ActionSinkError::InvalidInput(msg)) => {
+                    assert_eq!(msg, "reply parent not found", "{case}")
+                }
+                other => panic!("{case}: expected the missing-parent error, got {other:?}"),
+            }
+        }
+
+        // Positive control: the resolver reads as the workflow owner, who
+        // alone can see their author-only parent.
+        reply(owner_hex.clone(), owner_only)
+            .await
+            .expect("owner replies to a parent only they can read");
     }
 }

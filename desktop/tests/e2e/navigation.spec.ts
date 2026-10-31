@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
+import { addSendMessageStep } from "../helpers/workflows";
 
 const ENGINEERING_CHANNEL_ID = "1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9";
 const WATERCOLOR_CHANNEL_ID = "a27e1ee9-76a6-5bdf-a5d5-1d85610dad11";
@@ -58,9 +59,7 @@ async function createWorkflow(
   await dialog.getByRole("textbox", { name: "Workflow name" }).fill(name);
   await dialog.getByRole("button", { name: "Save workflow name" }).click();
 
-  await dialog.getByRole("button", { name: "Add step", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Send Message" }).click();
-  await dialog.getByLabel("Message text").fill("Workflow notification");
+  await addSendMessageStep(dialog, "Workflow notification");
   await dialog.getByRole("button", { name: "Create" }).click();
   const activationConfirmation = page.getByRole("alertdialog", {
     name: "This workflow may run often",
@@ -275,6 +274,30 @@ test("open thread panels survive reload", async ({ page }) => {
 
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await expect(threadPanel).toBeVisible();
+});
+
+test("inbox unread-only choice survives navigation and reload", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const options = page.getByRole("button", { name: "Inbox options" });
+  const unreadOnly = page.getByRole("switch", { name: "Show unread only" });
+  await options.click();
+  await expect(unreadOnly).not.toBeChecked();
+
+  for (const enabled of [true, false]) {
+    await unreadOnly.setChecked(enabled);
+    await page.keyboard.press("Escape");
+    await page.getByTestId("open-agents-view").click();
+    await expect(page.getByTestId("home-inbox-list")).not.toBeVisible();
+    await page.getByTestId("global-back").click();
+    await options.click();
+    await expect(unreadOnly).toBeChecked({ checked: enabled });
+
+    await page.reload();
+    await options.click();
+    await expect(unreadOnly).toBeChecked({ checked: enabled });
+  }
 });
 
 test("home inbox selection survives reload and back restores it", async ({
@@ -577,21 +600,38 @@ test("composer Buzz chip labels wrap without orphaning their icons", async ({
     name: "Open repository relaytoolsobservabilityconsole-main",
   });
   await expect(sentChip).toBeVisible();
+  await expect(sentChip).toHaveClass(/wrapping-inline-chip/);
   await sentChip.evaluate((element) => {
     const container = element.parentElement;
     if (container) container.style.width = "220px";
   });
-  const fragmentRects = await sentChip.evaluate((element) =>
-    Array.from(element.getClientRects(), (rect) => ({
+  const fragmentMetrics = await sentChip.evaluate((element) => {
+    const chipStyle = getComputedStyle(element);
+    const rects = Array.from(element.getClientRects(), (rect) => ({
       bottom: rect.bottom,
       height: rect.height,
       left: rect.left,
       right: rect.right,
       top: rect.top,
       width: rect.width,
-    })).filter((rect) => rect.width > 0 && rect.height > 0),
-  );
-  expect(fragmentRects.length).toBeGreaterThanOrEqual(2);
+    })).filter((rect) => rect.width > 0 && rect.height > 0);
+    const fragmentTops = Array.from(
+      new Set(rects.map((rect) => Math.round(rect.top))),
+    ).sort((a, b) => a - b);
+    return {
+      boxDecorationBreak:
+        chipStyle.getPropertyValue("box-decoration-break") ||
+        chipStyle.getPropertyValue("-webkit-box-decoration-break"),
+      fragmentStep:
+        fragmentTops.length > 1 ? fragmentTops[1] - fragmentTops[0] : null,
+      lineHeight: Number.parseFloat(chipStyle.lineHeight),
+      rects,
+    };
+  });
+  expect(fragmentMetrics.boxDecorationBreak).toBe("clone");
+  expect(fragmentMetrics.lineHeight).toBe(22);
+  expect(fragmentMetrics.fragmentStep).toBe(22);
+  expect(fragmentMetrics.rects.length).toBeGreaterThanOrEqual(2);
 
   const tooltip = page.getByRole("tooltip");
   await sentChip.focus();
@@ -692,7 +732,15 @@ test("message links to visible root messages open the thread panel", async ({
     name: "Open message in channel general",
   });
   await expect(rootThreadLink).toHaveText("general");
-  const pendingChipBox = await rootThreadLink.boundingBox();
+  // The sent row can still be mounting here, and boundingBox() then reads
+  // null. Poll until the chip has laid out and keep that pending width.
+  let pendingChipWidth = 0;
+  await expect
+    .poll(async () => {
+      pendingChipWidth = (await rootThreadLink.boundingBox())?.width ?? 0;
+      return pendingChipWidth;
+    })
+    .toBeGreaterThan(0);
   await expect
     .poll(() =>
       page.evaluate(
@@ -735,9 +783,7 @@ test("message links to visible root messages open the thread panel", async ({
   // channel label at the exact width it had while the fetch was in flight, and
   // never the fetched snippet or the truncated event hash.
   await expect(rootThreadLink).toHaveText("general");
-  expect((await rootThreadLink.boundingBox())?.width).toBe(
-    pendingChipBox?.width,
-  );
+  expect((await rootThreadLink.boundingBox())?.width).toBe(pendingChipWidth);
   await expect(
     messageTooltip.locator('[data-buzz-tooltip-metadata-content=""]'),
   ).toHaveClass(/line-clamp-3/);

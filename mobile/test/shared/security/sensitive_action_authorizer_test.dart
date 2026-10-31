@@ -35,7 +35,7 @@ void main() {
     expect(result, DeviceAuthResult.success);
     verify(
       () => authentication.authenticate(
-        localizedReason: 'Confirm sending your Buzz identity to desktop',
+        localizedReason: 'Confirm exporting your Buzz identity',
         authMessages: any(named: 'authMessages'),
         biometricOnly: false,
         sensitiveTransaction: true,

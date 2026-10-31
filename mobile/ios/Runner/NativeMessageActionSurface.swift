@@ -135,7 +135,7 @@ final class NativeMessageActionRowControl: UIControl {
     compatibleWith traitCollection: UITraitCollection? = nil,
     onSelected: @escaping () -> Void
   ) {
-    actionImageView = UIImageView(image: UIImage(systemName: definition.symbol))
+    actionImageView = UIImageView(image: NativeTabler.image(definition.symbol))
     super.init(frame: .zero)
 
     let color = definition.isDestructive ? destructiveColor : foregroundColor
@@ -157,6 +157,8 @@ final class NativeMessageActionRowControl: UIControl {
     )
 
     let iconColumn = UIView()
+    // Decorative content must leave the entire row tappable.
+    iconColumn.isUserInteractionEnabled = false
     iconColumn.translatesAutoresizingMaskIntoConstraints = false
     actionImageView.translatesAutoresizingMaskIntoConstraints = false
     actionTitleLabel.translatesAutoresizingMaskIntoConstraints = false

@@ -6,8 +6,8 @@ import Security
 /// UserDefaults or logs. Dart can read the closed record through the push bridge.
 final class BuzzPushEndpointGrantKeychainStore: BuzzPushEndpointGrantStore {
   private static let service = "buzz.push.endpoint-grants"
-  private static let recordsAccount = "v1"
-  private static let pendingAccount = "pending-v1"
+  private static let recordsAccount = "records-buzz-push-v1"
+  private static let pendingAccount = "pending-buzz-push-v1"
 
   private let accessGroup: String?
 
@@ -39,36 +39,39 @@ final class BuzzPushEndpointGrantKeychainStore: BuzzPushEndpointGrantStore {
   func save(_ record: BuzzPushEndpointGrantRecord) throws {
     var all = try records()
     all.removeAll {
-      $0.relayOrigin == record.relayOrigin && $0.appProfile == record.appProfile
+      $0.gatewayOrigin == record.gatewayOrigin && $0.relayOrigin == record.relayOrigin
     }
     all.append(record)
-    try replace(all, account: Self.recordsAccount)
+    try replaceValue(all, account: Self.recordsAccount)
   }
 
   func pendingEnrollment(
-    relayOrigin: String,
-    appProfile: String
+    gatewayOrigin: String,
+    relayOrigin: String
   ) throws -> BuzzPushPendingEnrollmentRecord? {
     try pendingEnrollments().first {
-      $0.relayOrigin == relayOrigin && $0.appProfile == appProfile
+      $0.gatewayOrigin == gatewayOrigin && $0.relayOrigin == relayOrigin
     }
   }
 
   func savePendingEnrollment(_ record: BuzzPushPendingEnrollmentRecord) throws {
     var all = try pendingEnrollments()
     all.removeAll {
-      $0.relayOrigin == record.relayOrigin && $0.appProfile == record.appProfile
+      $0.gatewayOrigin == record.gatewayOrigin && $0.relayOrigin == record.relayOrigin
     }
     all.append(record)
-    try replace(all, account: Self.pendingAccount)
+    try replaceValue(all, account: Self.pendingAccount)
   }
 
-  func removePendingEnrollment(relayOrigin: String, appProfile: String) throws {
+  func removePendingEnrollment(
+    gatewayOrigin: String,
+    relayOrigin: String
+  ) throws {
     var all = try pendingEnrollments()
     all.removeAll {
-      $0.relayOrigin == relayOrigin && $0.appProfile == appProfile
+      $0.gatewayOrigin == gatewayOrigin && $0.relayOrigin == relayOrigin
     }
-    try replace(all, account: Self.pendingAccount)
+    try replaceValue(all, account: Self.pendingAccount)
   }
 
   private func pendingEnrollments() throws -> [BuzzPushPendingEnrollmentRecord] {
@@ -92,8 +95,8 @@ final class BuzzPushEndpointGrantKeychainStore: BuzzPushEndpointGrantStore {
     }
   }
 
-  private func replace<T: Encodable>(_ values: [T], account: String) throws {
-    let data = try JSONEncoder().encode(values)
+  private func replaceValue<T: Encodable>(_ value: T, account: String) throws {
+    let data = try JSONEncoder().encode(value)
     let updateStatus = SecItemUpdate(
       baseQuery(account: account) as CFDictionary,
       [kSecValueData as String: data] as CFDictionary
@@ -144,7 +147,6 @@ extension BuzzPushEndpointGrantRecord {
       "installationId": installationId,
       "endpointGrant": endpointGrant,
       "endpointHash": endpointHash,
-      "appProfile": appProfile,
       "endpointEpoch": endpointEpoch,
       "generation": generation,
       "expiresAt": expiresAt,

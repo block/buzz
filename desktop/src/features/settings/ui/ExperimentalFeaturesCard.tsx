@@ -1,7 +1,4 @@
-import {
-  setAgentManagedProfiles,
-  setThreadScopedAcpSessions,
-} from "@/shared/api/tauriWorkspace";
+import { setAgentManagedProfiles } from "@/shared/api/tauriWorkspace";
 import { desktopFeatures, useFeatureToggle } from "@/shared/features";
 import type { FeatureDefinition } from "@/shared/features";
 import { Switch } from "@/shared/ui/switch";
@@ -32,14 +29,6 @@ function FeatureRow({ feature }: { feature: FeatureDefinition }) {
             void setAgentManagedProfiles(value).catch((error) => {
               console.error(
                 "Failed to apply agent-managed profiles setting:",
-                error,
-              );
-            });
-          }
-          if (feature.id === "threadScopedAcpSessions") {
-            void setThreadScopedAcpSessions(value).catch((error) => {
-              console.error(
-                "Failed to apply thread-scoped ACP sessions setting:",
                 error,
               );
             });

@@ -53,6 +53,7 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
             );
           }
         });
+    _notifyUnreadReadinessChanged();
     return _liveSubscriptionQueue;
   }
 
@@ -160,13 +161,52 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     }
 
     fence.ensureCurrent();
-    unawaited(_catchUpUnreadEvents(channels, fence, subscriptionVersion));
+    _unreadCatchUp = _catchUpUnreadEvents(channels, fence, subscriptionVersion);
+    _notifyUnreadReadinessChanged();
+    unawaited(_unreadCatchUp);
 
-    _backstopTimer?.cancel();
-    _backstopTimer = Timer.periodic(
-      ChannelsNotifier._backstopInterval,
-      (_) => _backstopRefresh(),
-    );
+    _startBackstopTimer();
+  }
+
+  // Arm recovery before the first network load succeeds. A restored snapshot
+  // needs one full load; subsequent reconnects keep the metadata-only backstop.
+  void _startBackstopTimer() {
+    _backstopTimer ??= Timer.periodic(ChannelsNotifier._backstopInterval, (_) {
+      // After suspension, a missed tick can precede the resumed lifecycle
+      // event. Keep recovery armed, but never poll while backgrounded.
+      if (_lifecycleRef.read(appLifecycleProvider) ==
+          AppLifecycleState.resumed) {
+        unawaited(_refreshInBackground());
+      }
+    });
+  }
+
+  Future<void> _refreshInBackground({bool queueIfBusy = false}) async {
+    if (_lifecycleRef.read(relaySessionProvider).status !=
+        SessionStatus.connected) {
+      return;
+    }
+    if (_backgroundRefreshInFlight) {
+      if (queueIfBusy) _backgroundRefreshQueued = true;
+      return;
+    }
+    final generation = _buildGeneration;
+    _backgroundRefreshInFlight = true;
+    try {
+      if (_needsSnapshotRevalidation) {
+        await refresh();
+      } else {
+        await _backstopRefresh();
+      }
+    } finally {
+      if (generation == _buildGeneration) {
+        _backgroundRefreshInFlight = false;
+        if (_backgroundRefreshQueued) {
+          _backgroundRefreshQueued = false;
+          unawaited(_refreshInBackground());
+        }
+      }
+    }
   }
 
   void _handleLiveChunkClosed(String chunkKey, int generation, String message) {
@@ -237,6 +277,7 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
 
   void _clearLiveSubscriptions() {
     _subscriptionVersion++;
+    _notifyUnreadReadinessChanged();
     _desiredLiveChannelIds = const {};
     _terminallyClosedLiveChunks.clear();
     _clearRetainedLiveChunks();

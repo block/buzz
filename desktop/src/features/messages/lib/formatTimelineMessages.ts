@@ -45,7 +45,7 @@ import { formatTime } from "@/features/messages/lib/dateFormatters";
 // Pure overlay helper lives in a sibling .mjs so node:test (no TS loader)
 // can exercise the exact same source the renderer uses.
 import { applyEditTagOverlay } from "@/features/messages/lib/applyEditTagOverlay.mjs";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { truncateNpub } from "@/shared/lib/pubkey";
 
 const HEX_RE = /^[0-9a-f]+$/i;
 
@@ -387,7 +387,7 @@ export function formatTimelineMessages(
         ? "You"
         : profile?.displayName?.trim() ||
           profile?.nip05Handle?.trim() ||
-          truncatePubkey(actorPubkey);
+          truncateNpub(actorPubkey);
     existing.users.push({
       pubkey: actorPubkey,
       displayName,

@@ -326,3 +326,22 @@ test("isHighPriorityEventForUser returns false for event with no tags at all", (
   const event = makeEvent([]);
   assert.equal(isHighPriorityEventForUser(event, PUBKEY), false);
 });
+
+const workflowTag = () => ["buzz:workflow", "true"];
+const ownerTag = (pubkey) => ["p", pubkey, "", "owner"];
+
+for (const [name, tags, addressed] of [
+  ["workflow owner attribution", [ownerTag(PUBKEY), workflowTag()], false],
+  [
+    "workflow owner attribution plus a mention",
+    [ownerTag(PUBKEY), workflowTag(), pTag(PUBKEY)],
+    true,
+  ],
+  ["owner-marked p tag without the workflow marker", [ownerTag(PUBKEY)], true],
+]) {
+  test(`${name}: thread reply mention path and high priority`, () => {
+    const event = makeEvent([rootTag(ROOT_ID), replyTag(PARENT_ID), ...tags]);
+    assert.equal(shouldNotifyForEvent(event, PUBKEY, opts()), addressed);
+    assert.equal(isHighPriorityEventForUser(event, PUBKEY), addressed);
+  });
+}

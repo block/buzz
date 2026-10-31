@@ -8,6 +8,9 @@ class ObservedUnreadEvent {
   final bool countsTowardBadge;
   final bool countsTowardAppBadge;
 
+  /// `activity:<channel>` reads this event (see `readByChannelCatchUp`).
+  final bool channelCatchUp;
+
   const ObservedUnreadEvent({
     required this.id,
     required this.createdAt,
@@ -15,6 +18,7 @@ class ObservedUnreadEvent {
     required this.highPriority,
     required this.countsTowardBadge,
     required this.countsTowardAppBadge,
+    this.channelCatchUp = false,
   });
 }
 
@@ -34,6 +38,11 @@ ObservedUnreadEvent makeObservedUnreadEvent({
     highPriority: highPriority,
     countsTowardBadge: isDm || isThreadedReply || highPriority,
     countsTowardAppBadge: isDm || (!isThreadedReply && highPriority),
+    channelCatchUp: readByChannelCatchUp(
+      isDm: isDm,
+      isReply: isThreadedReply,
+      highPriority: highPriority,
+    ),
   );
 }
 
@@ -118,16 +127,21 @@ int countUnreadHighPriorityObservedEvents(
   return count;
 }
 
+/// The newest marker that reads `event` in `channelId`. `markerOf` looks up
+/// a read-state context by key.
 int? observedUnreadEventReadAt(
   ObservedUnreadEvent event,
-  int? channelReadAt,
-  int? Function(String rootId) getThreadOwnMarker,
-  int? Function(String messageId) getMessageOwnMarker,
+  String channelId,
+  int? Function(String contextId) markerOf,
 ) {
-  final markers = <int?>[channelReadAt, getMessageOwnMarker(event.id)];
   final rootId = event.rootId;
-  if (rootId != null) {
-    markers.add(getThreadOwnMarker(rootId));
-  }
-  return maxReadAt(markers);
+  return maxReadAt([
+    markerOf(channelId),
+    markerOf(msgContextKey(event.id)),
+    if (rootId != null) ...[
+      markerOf(threadContextKey(rootId)),
+      markerOf(threadActivityContextKey(rootId)),
+    ],
+    if (event.channelCatchUp) markerOf(activityContextKey(channelId)),
+  ]);
 }

@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
-import 'package:gpt_markdown/custom_widgets/markdown_config.dart';
 
 import '../relay/relay.dart';
 
@@ -65,6 +64,13 @@ class CustomEmojiMd extends InlineMd {
     required String content,
     this.size = kCustomEmojiInlineSize,
   }) : _urlByShortcode = _referencedUrls(palette, content);
+
+  /// Excluded from link labels: this component renders a [WidgetSpan], and a
+  /// placeholder nested inside the link's own placeholder does not paint on
+  /// iOS — an authored `[:emoji:](url)` renders as nothing. Link resolution
+  /// wins over token detection inside a label.
+  @override
+  Set<MarkdownScope> get scopes => MarkdownComponent.allScopesExceptLinkLabel;
 
   // Look ahead so adjacent tokens sharing a colon are both considered:
   // :unknown:known: must still allow the known token to match.

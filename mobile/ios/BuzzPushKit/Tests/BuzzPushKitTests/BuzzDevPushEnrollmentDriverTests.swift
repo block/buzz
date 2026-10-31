@@ -11,6 +11,7 @@ import XCTest
 
 final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
   private static let gatewayURL = URL(string: "http://push.example/")!
+  private static let gatewayOrigin = "http://push.example"
   private static let relayURL = URL(string: "wss://relay.example/")!
   private static let relayPubkey = String(repeating: "a", count: 64)
   private static let firstChallengeId = "11111111-1111-4111-8111-111111111111"
@@ -81,7 +82,7 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
         XCTAssertEqual(body["challenge"] as? String, Self.challenge)
         XCTAssertEqual(body["key_id"] as? String, Self.keyId)
         XCTAssertEqual(body["attestation"] as? String, Self.attestation)
-        XCTAssertEqual(body["app_profile"] as? String, "buzz-ios-dogfood")
+        XCTAssertNil(body["app_profile"])
         return Self.response(
           request,
           status: 201,
@@ -121,12 +122,16 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
     )
 
     XCTAssertEqual(appAttest.clientData.count, 2)
+    XCTAssertEqual(record.gatewayOrigin, Self.gatewayOrigin)
     XCTAssertEqual(record.relayOrigin, "wss://relay.example")
     try assertMatchesVector(
       "enroll",
       actual: appAttest.clientData[0],
-      expectedSHA256: "58274bd9e9a86489fe5bae36aecbe89618824433189405ff4de8b18b58384270",
-      fixture: makeFixtureTranscript(name: "enroll", replacements: [])
+      expectedSHA256: "792966649266bfcebdb79de54e8ed3880746f58efd77427a0f43e88c650d79d0",
+      fixture: makeFixtureTranscript(
+        name: "enroll",
+        replacements: []
+      )
     )
     try assertMatchesVector(
       "delegate",
@@ -142,14 +147,15 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
     XCTAssertEqual(
       record,
       BuzzPushEndpointGrantRecord(
+        gatewayOrigin: Self.gatewayOrigin,
         relayOrigin: "wss://relay.example",
         relayPubkey: Self.relayPubkey,
         relayMetadataPubkey: Self.relayPubkey,
         gatewayInstallationHandle: Self.installationHandle,
+        appAttestKeyId: Self.keyId,
         installationId: Self.installationId,
         endpointGrant: "opaque-grant",
         endpointHash: Self.hex(SHA256.hash(data: Data((1...32).map(UInt8.init)))),
-        appProfile: "buzz-ios-dogfood",
         endpointEpoch: 1,
         generation: 1,
         expiresAt: Self.expiresAt
@@ -316,6 +322,273 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
     XCTAssertTrue(store.pending.isEmpty)
   }
 
+  func testResponseLostEnrollmentSurvivesTokenRotationAndAnotherReplayFailure() async throws {
+    let store = MemoryGrantStore()
+    let driver = try makeDriver(store: store, appAttest: RecordingAppAttest())
+    let rotatedToken = Data(repeating: 42, count: 32)
+    let rotatedHandle = "44444444-4444-4444-8444-444444444444"
+    var oldRequests = 0
+    var newRequests = 0
+    var firstBody: [String: Any]?
+    var delegatedHandles: [String] = []
+    URLProtocolStub.handler = { request in
+      switch (request.httpMethod, request.url?.absoluteString) {
+      case ("GET", "https://relay.example/"):
+        return Self.response(request, status: 200, json: [
+          "push": ["keys": [["pubkey": Self.relayPubkey, "current": true]]]
+        ])
+      case ("POST", "http://push.example/v1/installations/challenges"):
+        return Self.response(request, status: 200, json: [
+          "challenge_id": Self.firstChallengeId,
+          "challenge": Self.challenge,
+          "expires_at": Self.now + 300,
+        ])
+      case ("POST", "http://push.example/v1/installations"):
+        let body = try Self.body(request)
+        let oldEndpoint = body["endpoint"] as? String == Self.endpoint
+        if oldEndpoint {
+          oldRequests += 1
+          if let firstBody {
+            XCTAssertTrue(NSDictionary(dictionary: body).isEqual(to: firstBody))
+          } else {
+            firstBody = body
+          }
+          if oldRequests <= 2 { throw URLError(.networkConnectionLost) }
+        } else {
+          newRequests += 1
+          XCTAssertEqual(body["endpoint"] as? String, Self.hex(rotatedToken))
+          XCTAssertEqual(delegatedHandles, [Self.installationHandle])
+        }
+        return Self.response(request, status: 201, json: [
+          "installation_handle": oldEndpoint ? Self.installationHandle : rotatedHandle,
+          "endpoint_epoch": 1,
+          "expires_at": Self.expiresAt,
+        ])
+      case ("POST", "http://push.example/v1/delegations"):
+        let handle = try XCTUnwrap(Self.body(request)["installation_handle"] as? String)
+        delegatedHandles.append(handle)
+        return Self.response(request, status: 201, json: ["endpoint_grant": "grant-\(handle)"])
+      default:
+        XCTFail("Unexpected request, including any migration/revocation route: \(request.url!)")
+        return Self.response(request, status: 500, json: [:])
+      }
+    }
+
+    for token in [Data((1...32).map(UInt8.init)), rotatedToken] {
+      do {
+        _ = try await driver.enroll(deviceToken: token, relayURL: Self.relayURL)
+        XCTFail("Expected response loss")
+      } catch {
+        XCTAssertEqual((error as NSError).domain, NSURLErrorDomain)
+      }
+      XCTAssertEqual(store.pending.first?.endpoint, Self.endpoint)
+      XCTAssertTrue(store.saved.isEmpty)
+    }
+    let grant = try await driver.enroll(deviceToken: rotatedToken, relayURL: Self.relayURL)
+    XCTAssertEqual(oldRequests, 3)
+    XCTAssertEqual(newRequests, 1)
+    XCTAssertEqual(delegatedHandles, [Self.installationHandle, rotatedHandle])
+    XCTAssertEqual(grant.endpointHash, Self.hex(SHA256.hash(data: rotatedToken)))
+    XCTAssertTrue(store.pending.isEmpty)
+  }
+
+  func testRejectedEnrollmentReplayIsReplacedOnlyOnTerminalStatus() async throws {
+    // A journaled request the gateway rejects must not be replayed for its whole
+    // lifetime, nor replaced (with a fresh App Attest key) on every retry; a
+    // transient failure, or a 400 that a later policy change could lift, must
+    // keep the journal. A fresh status of 0 drops the replacement request, whose
+    // replay then finds its challenge expired: an ordinary loss, not a
+    // rejection. A fresh 409 conflicts with a live installation for the same
+    // token, for example one whose request committed before its response was
+    // lost and was rejected once its attestation certificate expired; its
+    // consumed challenge then returns 404, as does a fresh 404's replay.
+    let interval = BuzzDevPushEnrollmentDriver.rejectedEnrollmentReplacementSeconds
+    let cases: [(replay: Int, fresh: Int?, elapsed: Int64, legacy: Bool, keys: Int)] = [
+      (400, nil, interval, false, 1), (401, 201, interval, false, 2),
+      (404, 201, 0, false, 2), (404, 0, 0, false, 3), (404, 404, 0, false, 2),
+      (404, 409, 0, false, 2), (401, 201, 0, true, 2),
+      (401, nil, interval - 1, false, 1), (401, 401, interval, false, 2),
+      (401, 409, interval, false, 2), (503, nil, interval, false, 1),
+    ]
+    for (replayStatus, freshStatus, elapsed, legacy, keys) in cases {
+      let fresh = freshStatus.map { $0 == 0 ? "dropped" : String($0) } ?? "none"
+      let label = "replay \(replayStatus), fresh \(fresh) after \(elapsed)s, legacy \(legacy)"
+      // Status for a later exact replay of a fresh request.
+      let freshReplayStatus = [0, 409].contains(freshStatus) ? 404 : freshStatus
+      let store = MemoryGrantStore()
+      let appAttest = RecordingAppAttest()
+      var clock = Self.now
+      let driver = try makeDriver(
+        store: store,
+        appAttest: appAttest,
+        now: { Date(timeIntervalSince1970: TimeInterval(clock)) },
+        lifetimeSeconds: 30 * 86_400
+      )
+      var challengeCount = 0
+      var replayRequests = 0
+      var sentChallenges = Set<String>()
+      URLProtocolStub.handler = { request in
+        switch (request.httpMethod, request.url?.absoluteString) {
+        case ("GET", "https://relay.example/"):
+          return Self.response(request, status: 200, json: [
+            "push": ["keys": [["pubkey": Self.relayPubkey, "current": true]]]
+          ])
+        case ("POST", "http://push.example/v1/installations/challenges"):
+          challengeCount += 1
+          return Self.response(request, status: 200, json: [
+            "challenge_id": [Self.firstChallengeId, Self.secondChallengeId].indices
+              .contains(challengeCount - 1)
+              ? [Self.firstChallengeId, Self.secondChallengeId][challengeCount - 1]
+              : UUID().uuidString.lowercased(),
+            "challenge": Self.challenge,
+            "expires_at": clock + 300,
+          ])
+        case ("POST", "http://push.example/v1/installations"):
+          let body = try Self.body(request)
+          if body["challenge_id"] as? String == Self.firstChallengeId {
+            replayRequests += 1
+            if replayRequests == 1 { throw URLError(.networkConnectionLost) }
+            return Self.response(request, status: replayStatus, json: ["error": "rejected"])
+          }
+          let challengeId = try XCTUnwrap(body["challenge_id"] as? String)
+          let isReplay = !sentChallenges.insert(challengeId).inserted
+          let status = try XCTUnwrap(
+            isReplay ? freshReplayStatus : freshStatus,
+            "\(label) must keep the journal"
+          )
+          if status == 0 { throw URLError(.networkConnectionLost) }
+          guard status == 201 else {
+            return Self.response(request, status: status, json: ["error": "rejected"])
+          }
+          return Self.response(request, status: 201, json: [
+            "installation_handle": Self.installationHandle,
+            "endpoint_epoch": 1,
+            "expires_at": try XCTUnwrap(body["expires_at"] as? Int64),
+          ])
+        case ("POST", "http://push.example/v1/delegations"):
+          return Self.response(request, status: 201, json: ["endpoint_grant": "opaque-grant"])
+        default:
+          XCTFail("Unexpected request \(request.url?.absoluteString ?? "nil")")
+          return Self.response(request, status: 500, json: [:])
+        }
+      }
+      let token = Data((1...32).map(UInt8.init))
+
+      do {
+        _ = try await driver.enroll(deviceToken: token, relayURL: Self.relayURL)
+        XCTFail("Expected the simulated lost installation response")
+      } catch {
+        XCTAssertEqual((error as NSError).domain, NSURLErrorDomain)
+      }
+      let journal = try XCTUnwrap(store.pending.first)
+      XCTAssertEqual(journal.preparedAt, Self.now)
+      if legacy {
+        store.pending = [Self.withoutPreparedAt(journal)]
+      }
+      clock += elapsed
+
+      // Two retries: the second must not replace a journal again.
+      for attempt in 0..<2 {
+        do {
+          let grant = try await driver.enroll(deviceToken: token, relayURL: Self.relayURL)
+          XCTAssertEqual(freshStatus, 201, label)
+          XCTAssertEqual(grant.endpointGrant, "opaque-grant")
+          XCTAssertTrue(store.pending.isEmpty)
+        } catch BuzzDevPushEnrollmentError.unexpectedStatus(
+          route: "v1/installations", _, let actual, _
+        ) {
+          // The failure stays visible and leaves a durable journal to retry.
+          XCTAssertEqual(
+            actual,
+            (attempt == 0 ? freshStatus : freshReplayStatus) ?? replayStatus,
+            label
+          )
+          let challengeId = try XCTUnwrap(store.pending.first?.challengeId, label)
+          if freshStatus == nil {
+            XCTAssertEqual(challengeId, Self.firstChallengeId, label)
+          } else {
+            XCTAssertNotEqual(challengeId, Self.firstChallengeId, label)
+          }
+        } catch let error as URLError where freshStatus == 0 {
+          // Each retry replaces the lost replacement at once and loses it again.
+          XCTAssertEqual(error.code, .networkConnectionLost, label)
+          XCTAssertNotEqual(store.pending.first?.challengeId, Self.firstChallengeId, label)
+        }
+      }
+      XCTAssertEqual(appAttest.preparedAttestations.count, keys, label)
+      if freshStatus == 0 {
+        XCTAssertEqual(store.pending.first?.rejectedReplacements ?? 0, 0, label)
+        // An ordinary replacement that fails after generating its key still
+        // records the attempt, so the next retry waits instead of generating
+        // another key, however old the journal was.
+        clock += 4 * interval
+        appAttest.failAttestation = true
+        do {
+          _ = try await driver.enroll(deviceToken: token, relayURL: Self.relayURL)
+          XCTFail("Expected the simulated attestation failure: \(label)")
+        } catch {
+          XCTAssertEqual((error as NSError).domain, NSURLErrorDomain, label)
+        }
+        await Self.assertEnrollmentStatus(driver, token, 404, label)
+        XCTAssertEqual(appAttest.preparedAttestations.count, keys + 1, label)
+      }
+
+      guard let freshStatus, let freshReplayStatus, [401, 404, 409].contains(freshStatus) else {
+        continue
+      }
+      // Each consecutive replacement doubles the wait before the next one.
+      XCTAssertEqual(store.pending.first?.rejectedReplacements, 1, label)
+      clock += interval
+      await Self.assertEnrollmentStatus(driver, token, freshReplayStatus, label)
+      XCTAssertEqual(appAttest.preparedAttestations.count, 2, label)
+
+      // A replacement that fails after generating its key keeps the rejected
+      // journal with the attempt recorded, so retries wait instead of
+      // generating more keys, even across a driver restart.
+      clock += interval
+      appAttest.failAttestation = true
+      do {
+        _ = try await driver.enroll(deviceToken: token, relayURL: Self.relayURL)
+        XCTFail("Expected the simulated attestation failure: \(label)")
+      } catch {
+        XCTAssertEqual((error as NSError).domain, NSURLErrorDomain, label)
+      }
+      XCTAssertEqual(appAttest.preparedAttestations.count, 3, label)
+      XCTAssertEqual(store.pending.first?.challengeId, Self.secondChallengeId, label)
+      XCTAssertEqual(store.pending.first?.rejectedReplacements, 2, label)
+      let restarted = try makeDriver(
+        store: store,
+        appAttest: appAttest,
+        now: { Date(timeIntervalSince1970: TimeInterval(clock)) },
+        lifetimeSeconds: 30 * 86_400
+      )
+      await Self.assertEnrollmentStatus(restarted, token, freshReplayStatus, label)
+      XCTAssertEqual(appAttest.preparedAttestations.count, 3, label)
+      clock += 4 * interval
+      await Self.assertEnrollmentStatus(restarted, token, freshStatus, label)
+      XCTAssertEqual(appAttest.preparedAttestations.count, 4, label)
+      XCTAssertEqual(store.pending.first?.rejectedReplacements, 3, label)
+    }
+  }
+
+  private static func assertEnrollmentStatus(
+    _ driver: BuzzDevPushEnrollmentDriver,
+    _ token: Data,
+    _ status: Int,
+    _ label: String
+  ) async {
+    do {
+      _ = try await driver.enroll(deviceToken: token, relayURL: relayURL)
+      XCTFail("Expected gateway status \(status): \(label)")
+    } catch BuzzDevPushEnrollmentError.unexpectedStatus(
+      route: "v1/installations", _, let actual, _
+    ) {
+      XCTAssertEqual(actual, status, label)
+    } catch {
+      XCTFail("Unexpected error \(error): \(label)")
+    }
+  }
+
   func testRelayOriginPreservesNonDefaultPortWithoutTrailingSlash() async throws {
     let relayURL = URL(string: "wss://relay.example:8443/")!
     let store = MemoryGrantStore()
@@ -373,16 +646,43 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
     XCTAssertEqual(record.relayOrigin, "wss://relay.example:8443")
   }
 
-  func testLegacyGrantDecodesWithoutMetadataAuthority() throws {
+  func testLegacyGrantWithoutGatewayOriginIsRejected() throws {
     let data = Data(
-      #"{"relayOrigin":"wss://relay.example","relayPubkey":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","installationId":"000102030405060708090a0b0c0d0e0f","endpointGrant":"opaque","endpointHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","appProfile":"buzz-ios-dogfood","endpointEpoch":1,"generation":1,"expiresAt":1752624000}"#
+      #"{"relayOrigin":"wss://relay.example","relayPubkey":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","installationId":"000102030405060708090a0b0c0d0e0f","endpointGrant":"opaque","endpointHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","endpointEpoch":1,"generation":1,"expiresAt":1752624000}"#
         .utf8
     )
 
-    let record = try JSONDecoder().decode(BuzzPushEndpointGrantRecord.self, from: data)
+    XCTAssertThrowsError(try JSONDecoder().decode(BuzzPushEndpointGrantRecord.self, from: data))
+  }
 
-    XCTAssertEqual(record.relayPubkey, Self.relayPubkey)
-    XCTAssertNil(record.relayMetadataPubkey)
+  func testGrantWithoutAppAttestKeyIsRejected() throws {
+    let data = Data(
+      #"{"gatewayOrigin":"https://push.example","relayOrigin":"wss://relay.example","relayPubkey":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","installationId":"000102030405060708090a0b0c0d0e0f","endpointGrant":"opaque","endpointHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","endpointEpoch":1,"generation":1,"expiresAt":1752624000}"#
+        .utf8
+    )
+
+    XCTAssertThrowsError(try JSONDecoder().decode(BuzzPushEndpointGrantRecord.self, from: data))
+  }
+
+  func testOtherGatewayGrantIsNeitherExportedNorMigrated() throws {
+    let other = BuzzPushEndpointGrantRecord(
+      gatewayOrigin: "https://other-push.example",
+      relayOrigin: "wss://relay.example",
+      relayPubkey: Self.relayPubkey,
+      appAttestKeyId: Self.keyId,
+      installationId: Self.installationId,
+      endpointGrant: "other-gateway-grant",
+      endpointHash: Self.hex(SHA256.hash(data: Data((1...32).map(UInt8.init)))),
+      endpointEpoch: 1,
+      generation: 1,
+      expiresAt: Self.expiresAt
+    )
+    let store = MemoryGrantStore(records: [other])
+    let driver = try makeDriver(store: store, appAttest: RecordingAppAttest())
+
+    XCTAssertEqual(try driver.endpointGrants(), [])
+    XCTAssertEqual(store.saved, [other])
+    XCTAssertTrue(URLProtocolStub.requests.isEmpty)
   }
 
   func testRealAppAttestFailsLoudlyWhenUnsupported() async throws {
@@ -424,13 +724,13 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
     )
   }
 
-  func testRealAppAttestAssertionReusesStoredKeyAndMapsObject() async throws {
+  func testRealAppAttestAssertionUsesRequestedKeyAndMapsObject() async throws {
     let service = RecordingDCAppAttestService(assertionObject: Data([0x04, 0x05, 0x06]))
     let keyIdStore = MemoryAppAttestKeyIdStore(keyId: Self.keyId)
     let provider = BuzzDCAppAttestProvider(service: service, keyIdStore: keyIdStore)
     let clientData = Data("delegation transcript".utf8)
 
-    let assertion = try await provider.assertion(clientData: clientData)
+    let assertion = try await provider.assertion(keyId: Self.keyId, clientData: clientData)
 
     XCTAssertEqual(assertion, Data([0x04, 0x05, 0x06]).base64EncodedString())
     XCTAssertEqual(service.assertedKeyIds, [Self.keyId])
@@ -439,6 +739,22 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
       [Data(SHA256.hash(data: clientData))]
     )
     XCTAssertEqual(service.generateKeyCallCount, 0)
+  }
+
+  func testRealAppAttestAssertionUsesInstallationKeyInsteadOfLatestStoredKey() async throws {
+    let installationKeyId = Data(repeating: 0xBB, count: 32).base64EncodedString()
+    let service = RecordingDCAppAttestService(assertionObject: Data([0x07]))
+    let provider = BuzzDCAppAttestProvider(
+      service: service,
+      keyIdStore: MemoryAppAttestKeyIdStore(keyId: Self.keyId)
+    )
+
+    _ = try await provider.assertion(
+      keyId: installationKeyId,
+      clientData: Data("retired installation transcript".utf8)
+    )
+
+    XCTAssertEqual(service.assertedKeyIds, [installationKeyId])
   }
 
   func testRealAppAttestRejectsInvalidGeneratedKeyBeforePersistence() async throws {
@@ -489,7 +805,10 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
     )
 
     do {
-      _ = try await provider.assertion(clientData: Data("delegation transcript".utf8))
+      _ = try await provider.assertion(
+        keyId: Self.keyId,
+        clientData: Data("delegation transcript".utf8)
+      )
       XCTFail("Expected the DeviceCheck error")
     } catch {
       XCTAssertEqual((error as NSError).domain, expected.domain)
@@ -616,56 +935,17 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
     }
   }
 
-  func testReusesPersistedUnexpiredGrant() async throws {
-    let existing = BuzzPushEndpointGrantRecord(
-      relayOrigin: "wss://relay.example",
-      relayPubkey: Self.relayPubkey,
-      relayMetadataPubkey: Self.relayPubkey,
-      installationId: Self.installationId,
-      endpointGrant: "existing-grant",
-      endpointHash: Self.hex(SHA256.hash(data: Data((1...32).map(UInt8.init)))),
-      appProfile: "buzz-ios-dogfood",
-      endpointEpoch: 1,
-      generation: 1,
-      expiresAt: Self.expiresAt
-    )
-    let store = MemoryGrantStore(records: [existing])
-    let driver = try makeDriver(store: store, appAttest: RecordingAppAttest())
-    URLProtocolStub.handler = { request in
-      guard request.httpMethod == "GET" else {
-        XCTFail("Persisted grant reuse must not call the gateway")
-        return Self.response(request, status: 500, json: [:])
-      }
-      return Self.response(
-        request,
-        status: 200,
-        json: [
-          "self": Self.relayPubkey,
-          "push": ["keys": [["pubkey": Self.relayPubkey, "current": true]]],
-        ]
-      )
-    }
-
-    let record = try await driver.enroll(
-      deviceToken: Data((1...32).map(UInt8.init)),
-      relayURL: Self.relayURL
-    )
-
-    XCTAssertEqual(record, existing)
-    XCTAssertEqual(store.saved, [existing])
-    XCTAssertEqual(URLProtocolStub.requests.count, 1)
-  }
-
   func testSecondOriginOnSameRelayKeyReusesGrantWithFreshLeaseAddress() async throws {
     let existing = BuzzPushEndpointGrantRecord(
+      gatewayOrigin: Self.gatewayOrigin,
       relayOrigin: "wss://first.example",
       relayPubkey: Self.relayPubkey,
       relayMetadataPubkey: Self.relayPubkey,
       gatewayInstallationHandle: Self.installationHandle,
+      appAttestKeyId: Self.keyId,
       installationId: String(repeating: "f", count: 32),
       endpointGrant: "existing-grant",
       endpointHash: Self.hex(SHA256.hash(data: Data((1...32).map(UInt8.init)))),
-      appProfile: "buzz-ios-dogfood",
       endpointEpoch: 1,
       generation: 4,
       expiresAt: Self.expiresAt
@@ -703,14 +983,15 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
   func testSecondRelayKeyReusesAttestedInstallationAndCreatesOnlyDelegation() async throws {
     let secondRelayPubkey = String(repeating: "b", count: 64)
     let existing = BuzzPushEndpointGrantRecord(
+      gatewayOrigin: Self.gatewayOrigin,
       relayOrigin: "wss://first.example",
       relayPubkey: Self.relayPubkey,
       relayMetadataPubkey: Self.relayPubkey,
       gatewayInstallationHandle: Self.installationHandle,
+      appAttestKeyId: Self.keyId,
       installationId: String(repeating: "f", count: 32),
       endpointGrant: "first-relay-grant",
       endpointHash: Self.hex(SHA256.hash(data: Data((1...32).map(UInt8.init)))),
-      appProfile: "buzz-ios-dogfood",
       endpointEpoch: 1,
       generation: 7,
       expiresAt: Self.expiresAt
@@ -773,14 +1054,15 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
 
   func testExpiringGrantRenewsExistingInstallationAndReusesRelayLeaseAddress() async throws {
     let existing = BuzzPushEndpointGrantRecord(
+      gatewayOrigin: Self.gatewayOrigin,
       relayOrigin: "wss://relay.example",
       relayPubkey: Self.relayPubkey,
       relayMetadataPubkey: Self.relayPubkey,
       gatewayInstallationHandle: Self.installationHandle,
+      appAttestKeyId: Self.keyId,
       installationId: Self.installationId,
       endpointGrant: "existing-grant",
       endpointHash: Self.hex(SHA256.hash(data: Data((1...32).map(UInt8.init)))),
-      appProfile: "buzz-ios-dogfood",
       endpointEpoch: 1,
       generation: 7,
       expiresAt: Self.now + 300
@@ -878,13 +1160,14 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
     let oldMetadataPubkey = String(repeating: "c", count: 64)
     let deviceToken = Data((1...32).map(UInt8.init))
     let existing = BuzzPushEndpointGrantRecord(
+      gatewayOrigin: Self.gatewayOrigin,
       relayOrigin: "wss://relay.example",
       relayPubkey: pushPubkey,
       relayMetadataPubkey: oldMetadataPubkey,
+      appAttestKeyId: Self.keyId,
       installationId: Self.installationId,
       endpointGrant: "existing-grant",
       endpointHash: Self.hex(SHA256.hash(data: deviceToken)),
-      appProfile: "buzz-ios-dogfood",
       endpointEpoch: 1,
       generation: 1,
       expiresAt: Self.expiresAt
@@ -919,13 +1202,14 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
   func testMissingRelayMetadataAuthorityDoesNotBlockExistingPushGrant() async throws {
     let deviceToken = Data((1...32).map(UInt8.init))
     let existing = BuzzPushEndpointGrantRecord(
+      gatewayOrigin: Self.gatewayOrigin,
       relayOrigin: "wss://relay.example",
       relayPubkey: Self.relayPubkey,
       relayMetadataPubkey: Self.relayPubkey,
+      appAttestKeyId: Self.keyId,
       installationId: Self.installationId,
       endpointGrant: "existing-grant",
       endpointHash: Self.hex(SHA256.hash(data: deviceToken)),
-      appProfile: "buzz-ios-dogfood",
       endpointEpoch: 1,
       generation: 1,
       expiresAt: Self.expiresAt
@@ -956,13 +1240,14 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
   func testMalformedRelayMetadataAuthorityDoesNotBlockExistingPushGrant() async throws {
     let deviceToken = Data((1...32).map(UInt8.init))
     let existing = BuzzPushEndpointGrantRecord(
+      gatewayOrigin: Self.gatewayOrigin,
       relayOrigin: "wss://relay.example",
       relayPubkey: Self.relayPubkey,
       relayMetadataPubkey: Self.relayPubkey,
+      appAttestKeyId: Self.keyId,
       installationId: Self.installationId,
       endpointGrant: "existing-grant",
       endpointHash: Self.hex(SHA256.hash(data: deviceToken)),
-      appProfile: "buzz-ios-dogfood",
       endpointEpoch: 1,
       generation: 1,
       expiresAt: Self.expiresAt
@@ -1024,21 +1309,27 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
   }
 
   private func makeDriver(
+    gatewayBaseURL: URL = BuzzDevPushEnrollmentDriverTests.gatewayURL,
     store: BuzzPushEndpointGrantStore,
     appAttest: BuzzDevAppAttesting,
     installationIdBytes: @escaping () throws -> Data = {
       Data(0..<16)
-    }
+    },
+    now: @escaping () -> Date = {
+      Date(timeIntervalSince1970: TimeInterval(BuzzDevPushEnrollmentDriverTests.now))
+    },
+    lifetimeSeconds: Int64 = BuzzDevPushEnrollmentDriverTests.expiresAt
+      - BuzzDevPushEnrollmentDriverTests.now
   ) throws -> BuzzDevPushEnrollmentDriver {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [URLProtocolStub.self]
     return try BuzzDevPushEnrollmentDriver(
-      gatewayBaseURL: Self.gatewayURL,
+      gatewayBaseURL: gatewayBaseURL,
       store: store,
       session: URLSession(configuration: configuration),
       appAttest: appAttest,
-      now: { Date(timeIntervalSince1970: TimeInterval(Self.now)) },
-      lifetimeSeconds: Self.expiresAt - Self.now,
+      now: now,
+      lifetimeSeconds: lifetimeSeconds,
       installationIdBytes: installationIdBytes
     )
   }
@@ -1101,6 +1392,26 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
     return try JSONDecoder().decode(Fixture.self, from: data)
   }
 
+  private static func withoutPreparedAt(
+    _ journal: BuzzPushPendingEnrollmentRecord
+  ) -> BuzzPushPendingEnrollmentRecord {
+    BuzzPushPendingEnrollmentRecord(
+      gatewayOrigin: journal.gatewayOrigin,
+      relayOrigin: journal.relayOrigin,
+      relayPubkey: journal.relayPubkey,
+      endpoint: journal.endpoint,
+      endpointHash: journal.endpointHash,
+      expiresAt: journal.expiresAt,
+      installationId: journal.installationId,
+      gatewayInstallationHandle: journal.gatewayInstallationHandle,
+      challengeId: journal.challengeId,
+      challenge: journal.challenge,
+      keyId: journal.keyId,
+      attestation: journal.attestation,
+      delegationGeneration: journal.delegationGeneration
+    )
+  }
+
   private static func body(_ request: URLRequest) throws -> [String: Any] {
     let data: Data
     if let httpBody = request.httpBody {
@@ -1148,12 +1459,17 @@ private final class MemoryGrantStore: BuzzPushEndpointGrantStore {
   var saved: [BuzzPushEndpointGrantRecord]
   var pending: [BuzzPushPendingEnrollmentRecord] = []
   var grantSaveFailuresRemaining: Int
+  var pendingRemoveFailuresRemaining: Int
   init(
     records: [BuzzPushEndpointGrantRecord] = [],
-    grantSaveFailuresRemaining: Int = 0
+    pending: [BuzzPushPendingEnrollmentRecord] = [],
+    grantSaveFailuresRemaining: Int = 0,
+    pendingRemoveFailuresRemaining: Int = 0
   ) {
     saved = records
+    self.pending = pending
     self.grantSaveFailuresRemaining = grantSaveFailuresRemaining
+    self.pendingRemoveFailuresRemaining = pendingRemoveFailuresRemaining
   }
   func records() throws -> [BuzzPushEndpointGrantRecord] { saved }
   func save(_ record: BuzzPushEndpointGrantRecord) throws {
@@ -1162,51 +1478,69 @@ private final class MemoryGrantStore: BuzzPushEndpointGrantStore {
       throw NSError(domain: "MemoryGrantStore", code: 1)
     }
     saved.removeAll {
-      $0.relayOrigin == record.relayOrigin && $0.appProfile == record.appProfile
+      $0.gatewayOrigin == record.gatewayOrigin && $0.relayOrigin == record.relayOrigin
     }
     saved.append(record)
   }
   func pendingEnrollment(
-    relayOrigin: String,
-    appProfile: String
+    gatewayOrigin: String,
+    relayOrigin: String
   ) throws -> BuzzPushPendingEnrollmentRecord? {
     pending.first {
-      $0.relayOrigin == relayOrigin && $0.appProfile == appProfile
+      $0.gatewayOrigin == gatewayOrigin && $0.relayOrigin == relayOrigin
     }
   }
   func savePendingEnrollment(_ record: BuzzPushPendingEnrollmentRecord) throws {
     pending.removeAll {
-      $0.relayOrigin == record.relayOrigin && $0.appProfile == record.appProfile
+      $0.gatewayOrigin == record.gatewayOrigin && $0.relayOrigin == record.relayOrigin
     }
     pending.append(record)
   }
-  func removePendingEnrollment(relayOrigin: String, appProfile: String) throws {
+  func removePendingEnrollment(
+    gatewayOrigin: String,
+    relayOrigin: String
+  ) throws {
+    if pendingRemoveFailuresRemaining > 0 {
+      pendingRemoveFailuresRemaining -= 1
+      throw NSError(domain: "MemoryGrantStore", code: 3)
+    }
     pending.removeAll {
-      $0.relayOrigin == relayOrigin && $0.appProfile == appProfile
+      $0.gatewayOrigin == gatewayOrigin && $0.relayOrigin == relayOrigin
     }
   }
 }
 
 private final class RecordingAppAttest: BuzzDevAppAttesting {
   var clientData: [Data] = []
+  var preparedAttestations: [BuzzDevAttestation] = []
+  var assertionKeyIds: [String] = []
+  /// Fails the next attestation after its key was generated.
+  var failAttestation = false
 
   func prepareAttestation() async throws -> BuzzDevAttestation {
-    BuzzDevAttestation(
+    let prepared = BuzzDevAttestation(
       keyId: BuzzDevPushEnrollmentDriverTests.keyId,
       attestation: BuzzDevPushEnrollmentDriverTests.attestation
     )
+    preparedAttestations.append(prepared)
+    return prepared
   }
 
   func attestation(
     _ prepared: BuzzDevAttestation,
     clientData: Data
   ) async throws -> BuzzDevAttestation {
+    if failAttestation {
+      failAttestation = false
+      throw URLError(.notConnectedToInternet)
+    }
     self.clientData.append(clientData)
     return prepared
   }
 
-  func assertion(clientData: Data) async throws -> String {
+  func assertion(keyId: String, clientData: Data) async throws -> String {
     self.clientData.append(clientData)
+    assertionKeyIds.append(keyId)
     return BuzzDevPushEnrollmentDriverTests.assertion
   }
 }

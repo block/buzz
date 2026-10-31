@@ -292,7 +292,7 @@ void main() {
       expect(authEvent['content'], 'Get buzz-media');
       expect(authEvent['tags'], contains(equals(['t', 'get'])));
       expect(authEvent['tags'], contains(equals(['server', 'relay.example'])));
-      expect(authEvent['tags'], contains(equals(['expiration', '1700000600'])));
+      expect(authEvent['tags'], contains(equals(['expiration', '1700000060'])));
     });
 
     test('does not sign non-relay or non-media URLs', () {
@@ -419,7 +419,7 @@ void main() {
           equals(<String>['x', capturedRequest!.headers['X-SHA-256']!]),
         ),
       );
-      expect(tags, anyElement(equals(<String>['expiration', '1700000300'])));
+      expect(tags, anyElement(equals(<String>['expiration', '1700000060'])));
       expect(
         tags,
         anyElement(equals(<String>['server', 'relay.example:8443'])),
@@ -1417,7 +1417,7 @@ void main() {
           pickGalleryImage: () async => null,
           transcodeVideoToMp4: (path) async {
             transcodeCalled = true;
-            final outDir = await Directory.systemTemp.createTemp('transcode_');
+            final outDir = await tempFile.parent.createTemp('transcode_');
             final outFile = File('${outDir.path}/out.mp4');
             await outFile.writeAsBytes(buildFtypHeader('isom'));
             return outFile.path;
@@ -1466,7 +1466,7 @@ void main() {
           transcodeVideoToMp4: (path) async {
             transcodeCalled = true;
             // Mock transcoding: write an "MP4" file
-            final outDir = await Directory.systemTemp.createTemp('transcode_');
+            final outDir = await tempFile.parent.createTemp('transcode_');
             final outFile = File('${outDir.path}/out.mp4');
             await outFile.writeAsBytes(buildFtypHeader('isom'));
             return outFile.path;
@@ -1576,9 +1576,7 @@ void main() {
             pickGalleryVideo: () async => xfile,
             pickGalleryImage: () async => null,
             transcodeVideoToMp4: (path) async {
-              final outDir = await Directory.systemTemp.createTemp(
-                'transcode_',
-              );
+              final outDir = await tempFile.parent.createTemp('transcode_');
               final outFile = File('${outDir.path}/out.mp4');
               await outFile.writeAsBytes(buildFtypHeader('isom'));
               return outFile.path;
@@ -1635,9 +1633,7 @@ void main() {
             pickGalleryVideo: () async => xfile,
             pickGalleryImage: () async => null,
             transcodeVideoToMp4: (path) async {
-              final outDir = await Directory.systemTemp.createTemp(
-                'transcode_',
-              );
+              final outDir = await tempFile.parent.createTemp('transcode_');
               final outFile = File('${outDir.path}/out.mp4');
               await outFile.writeAsBytes(buildFtypHeader('isom'));
               return outFile.path;

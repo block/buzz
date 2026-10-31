@@ -1,10 +1,8 @@
-use std::{
-    collections::BTreeMap,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::{collections::BTreeMap, sync::atomic::AtomicBool};
 
-use tauri::{AppHandle, Manager};
+use serde::{Deserialize, Deserializer, Serialize};
 
+use super::{AgentDefinition, ManagedAgentRecord};
 use crate::app_state::AppState;
 
 pub(crate) const ACP_SESSION_POLICY_ENV_VAR: &str = "BUZZ_ACP_SESSION_POLICY";
@@ -12,14 +10,12 @@ pub(crate) const ACP_SESSION_POLICY_ENV_VAR: &str = "BUZZ_ACP_SESSION_POLICY";
 /// Desktop experiment state that influences managed-agent lifecycle behavior.
 pub struct ManagedAgentExperimentState {
     pub(crate) profile_reconcile_enabled: AtomicBool,
-    pub(crate) thread_scoped_acp_sessions_enabled: AtomicBool,
 }
 
 impl Default for ManagedAgentExperimentState {
     fn default() -> Self {
         Self {
             profile_reconcile_enabled: AtomicBool::new(true),
-            thread_scoped_acp_sessions_enabled: AtomicBool::new(false),
         }
     }
 }
@@ -28,28 +24,35 @@ impl AppState {
     pub(crate) fn managed_agent_profile_reconcile_enabled(&self) -> &AtomicBool {
         &self.managed_agent_experiments.profile_reconcile_enabled
     }
-
-    pub(crate) fn thread_scoped_acp_sessions_enabled(&self) -> &AtomicBool {
-        &self
-            .managed_agent_experiments
-            .thread_scoped_acp_sessions_enabled
-    }
 }
 
-/// Desktop-owned ACP session policy applied to every managed-agent launch.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum AcpSessionPolicy {
+/// Defines whether one ACP conversation is shared by a channel or isolated per thread.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcpSessionPolicy {
+    /// Share one ACP conversation across all threads in a channel.
+    #[default]
     Channel,
+    /// Keep a separate ACP conversation for each channel thread.
     Thread,
 }
 
+impl<'de> Deserialize<'de> for AcpSessionPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            Some("thread") => Self::Thread,
+            _ => Self::Channel,
+        })
+    }
+}
+
 impl AcpSessionPolicy {
-    pub(crate) fn from_thread_scoped_enabled(enabled: bool) -> Self {
-        if enabled {
-            Self::Thread
-        } else {
-            Self::Channel
-        }
+    pub(crate) const fn is_channel(&self) -> bool {
+        matches!(self, Self::Channel)
     }
 
     pub(crate) const fn as_str(self) -> &'static str {
@@ -60,32 +63,11 @@ impl AcpSessionPolicy {
     }
 }
 
-/// Resolve the persisted experiment state at the shared launch boundary.
-pub(crate) fn acp_session_policy(state: &AppState) -> AcpSessionPolicy {
-    AcpSessionPolicy::from_thread_scoped_enabled(
-        state
-            .thread_scoped_acp_sessions_enabled()
-            .load(Ordering::Acquire),
-    )
-}
-
 pub(crate) fn apply_acp_session_policy_env(
     command: &mut std::process::Command,
     policy: AcpSessionPolicy,
 ) {
     command.env(ACP_SESSION_POLICY_ENV_VAR, policy.as_str());
-}
-
-/// Resolve the effective policy, apply it to `command`, and return it so the
-/// caller can stamp the same value onto the spawn snapshot (env and badge can
-/// never disagree about what the child launched with).
-pub(crate) fn apply_app_acp_session_policy_env(
-    app: &AppHandle,
-    command: &mut std::process::Command,
-) -> AcpSessionPolicy {
-    let policy = acp_session_policy(app.state::<AppState>().inner());
-    apply_acp_session_policy_env(command, policy);
-    policy
 }
 
 pub(crate) fn insert_acp_session_policy_env(
@@ -96,6 +78,22 @@ pub(crate) fn insert_acp_session_policy_env(
         ACP_SESSION_POLICY_ENV_VAR.to_string(),
         policy.as_str().to_string(),
     );
+}
+
+/// Resolve the policy that a launch would use. Linked instances inherit the
+/// current definition, so an edit takes effect on restart without rewriting
+/// already-deployed records. Orphaned and definition-less instances retain
+/// the last policy stored on their record.
+pub(crate) fn effective_acp_session_policy(
+    record: &ManagedAgentRecord,
+    definitions: &[AgentDefinition],
+) -> AcpSessionPolicy {
+    record
+        .persona_id
+        .as_deref()
+        .and_then(|id| definitions.iter().find(|definition| definition.id == id))
+        .map(|definition| definition.session_policy)
+        .unwrap_or(record.session_policy)
 }
 
 #[cfg(test)]
@@ -111,21 +109,29 @@ mod tests {
     }
 
     #[test]
-    fn absent_or_disabled_experiment_selects_channel_policy() {
-        assert_eq!(
-            AcpSessionPolicy::from_thread_scoped_enabled(false),
-            AcpSessionPolicy::Channel
-        );
+    fn default_policy_is_channel() {
+        assert_eq!(AcpSessionPolicy::default(), AcpSessionPolicy::Channel);
         assert_eq!(AcpSessionPolicy::Channel.as_str(), "channel");
     }
 
     #[test]
-    fn enabled_experiment_selects_thread_policy() {
+    fn policies_serialize_for_storage_and_ipc() {
         assert_eq!(
-            AcpSessionPolicy::from_thread_scoped_enabled(true),
-            AcpSessionPolicy::Thread
+            serde_json::to_string(&AcpSessionPolicy::Thread).unwrap_or_default(),
+            "\"thread\""
         );
         assert_eq!(AcpSessionPolicy::Thread.as_str(), "thread");
+    }
+
+    #[test]
+    fn unknown_or_null_policy_degrades_to_channel() {
+        for value in [serde_json::json!("conversation"), serde_json::Value::Null] {
+            assert_eq!(
+                serde_json::from_value::<AcpSessionPolicy>(value)
+                    .unwrap_or_else(|error| panic!("policy should degrade gracefully: {error}")),
+                AcpSessionPolicy::Channel
+            );
+        }
     }
 
     #[test]

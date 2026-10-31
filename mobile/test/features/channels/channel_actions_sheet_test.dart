@@ -10,6 +10,8 @@ import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -61,6 +63,8 @@ Widget _modalApp({
   required Channel channel,
   required Future<List<ChannelMember>> Function() loadMembers,
   required ChannelActions Function(Ref ref) createChannelActions,
+  String? canvasContent,
+  Future<ChannelCanvas>? pendingCanvas,
 }) => ProviderScope(
   overrides: [
     currentPubkeyProvider.overrideWith((ref) => _currentPubkey),
@@ -72,11 +76,13 @@ Widget _modalApp({
       const AsyncValue.data(<String, String>{}),
     ),
     channelCanvasProvider(channel.id).overrideWith(
-      (ref) async => const ChannelCanvas(
-        content: null,
-        updatedAt: null,
-        authorPubkey: null,
-      ),
+      (ref) =>
+          pendingCanvas ??
+          ChannelCanvas(
+            content: canvasContent,
+            updatedAt: null,
+            authorPubkey: null,
+          ),
     ),
     channelActionsProvider.overrideWith(createChannelActions),
   ],
@@ -350,7 +356,7 @@ void main() {
       findsOneWidget,
     );
     expect(
-      find.descendant(of: manageSheet, matching: find.text('Canvas')),
+      find.descendant(of: manageSheet, matching: find.text('Add Canvas')),
       findsOneWidget,
     );
     expect(
@@ -396,21 +402,365 @@ void main() {
     await tester.tap(find.text('Manage channel'));
     await tester.pumpAndSettle();
 
+    expect(
+      tester.getSize(find.byType(BottomSheet).last).height,
+      greaterThan(480),
+    );
     await tester.enterText(
       find.byKey(const ValueKey('manage-channel-name')),
       'renamed',
     );
+    await tester.pump();
     await tester.tap(find.byKey(const ValueKey('manage-channel-save-details')));
     await tester.pumpAndSettle();
-
-    expect(find.widgetWithText(ListTile, 'Manage channel'), findsOneWidget);
-    await tester.tap(find.widgetWithText(ListTile, 'Manage channel'));
+    await tester.tap(find.text('Manage channel'));
     await tester.pumpAndSettle();
     final nameField = tester.widget<TextField>(
       find.byKey(const ValueKey('manage-channel-name')),
     );
     expect(nameField.controller?.text, 'renamed');
   });
+
+  testWidgets(
+    'native channel editor shares the profile form and retains failed drafts',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      const bridge = MethodChannel('buzz/profile_text_editor');
+      final presentations = <Map<Object?, Object?>>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(bridge, (call) async {
+            presentations.add(
+              Map<Object?, Object?>.from(call.arguments as Map),
+            );
+            // Cancel instead of looping if a failed save keeps re-presenting.
+            if (call.method != 'presentChannel' || presentations.length > 2) {
+              return {'action': 'cancel'};
+            }
+            return {
+              'action': 'save',
+              'name': 'renamed',
+              'description': 'Updated description',
+            };
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(bridge, null),
+      );
+      final updates = <(String?, String?)>[];
+      await tester.pumpWidget(
+        _modalApp(
+          channel: _channel(),
+          loadMembers: () async => [
+            ChannelMember(
+              pubkey: _currentPubkey,
+              role: 'owner',
+              joinedAt: DateTime(2025),
+            ),
+          ],
+          // Record rather than assert here: the sheet catches update errors.
+          createChannelActions: (ref) => _FakeChannelActions(
+            ref,
+            onUpdateChannel: (_, name, description) async {
+              updates.add((name, description));
+              if (updates.length == 1) throw Exception('offline');
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Open actions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Manage channel'));
+      await tester.pumpAndSettle();
+      expect(updates, [
+        ('renamed', 'Updated description'),
+        ('renamed', 'Updated description'),
+      ]);
+      expect(presentations, hasLength(2));
+      expect(presentations.first['title'], 'Edit channel');
+      expect(presentations.first['multiline'], false);
+      expect(presentations.last['initialValue'], 'renamed');
+      expect(presentations.last['allowUnchangedSubmission'], true);
+      expect(presentations.last['description'], 'Updated description');
+      expect(find.byType(ManageChannelSheet), findsNothing);
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets('native metadata editor opens before a cold canvas finishes', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final canvas = Completer<ChannelCanvas>();
+    const bridge = MethodChannel('buzz/profile_text_editor');
+    final opened = <(bool, Object?)>[];
+    var saved = false;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(bridge, (call) async {
+          opened.add((
+            canvas.isCompleted,
+            (call.arguments as Map)['canvasLoaded'],
+          ));
+          if (opened.length > 1) return null;
+          return {
+            'action': 'save',
+            'name': 'renamed',
+            'description': 'New description',
+          };
+        });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(bridge, null),
+    );
+    await tester.pumpWidget(
+      _modalApp(
+        channel: _channel(),
+        pendingCanvas: canvas.future,
+        loadMembers: () async => [
+          ChannelMember(
+            pubkey: _currentPubkey,
+            role: 'owner',
+            joinedAt: DateTime(2025),
+          ),
+        ],
+        createChannelActions: (ref) => _FakeChannelActions(
+          ref,
+          onUpdateChannel: (_, name, description) async {
+            saved = true;
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Open actions'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Manage channel'));
+    await tester.pump();
+    // Presented once, before the canvas resolved, and marked not loaded.
+    expect(opened, [(false, false)]);
+    expect(saved, isTrue);
+    canvas.complete(
+      const ChannelCanvas(content: null, updatedAt: null, authorPubkey: null),
+    );
+    await tester.pumpAndSettle();
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('native canvas round trip retains both channel drafts', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    const bridge = MethodChannel('buzz/profile_text_editor');
+    final canvasPresentations = <Map<Object?, Object?>>[];
+    final channelPresentations = <Map<Object?, Object?>>[];
+    final updates = <(String?, String?)>[];
+    final canvases = <String>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(bridge, (call) async {
+          final args = Map<Object?, Object?>.from(call.arguments as Map);
+          if (call.method == 'present') {
+            canvasPresentations.add(args);
+            return 'New canvas';
+          }
+          channelPresentations.add(args);
+          // Cancel instead of looping if a failed save keeps re-presenting.
+          if (channelPresentations.length > 2) return {'action': 'cancel'};
+          return {
+            'action': channelPresentations.length == 1 ? 'canvas' : 'save',
+            'name': 'Draft name',
+            'description': 'Draft description',
+          };
+        });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(bridge, null),
+    );
+    await tester.pumpWidget(
+      _modalApp(
+        channel: _channel(),
+        loadMembers: () async => [
+          ChannelMember(
+            pubkey: _currentPubkey,
+            role: 'owner',
+            joinedAt: DateTime(2025),
+          ),
+        ],
+        createChannelActions: (ref) => _FakeChannelActions(
+          ref,
+          // Record rather than assert here: the sheet catches save errors.
+          onUpdateChannel: (_, name, description) async =>
+              updates.add((name, description)),
+          onSetCanvas: (content) async => canvases.add(content),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Open actions'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Manage channel'));
+    await tester.pumpAndSettle();
+    expect(canvasPresentations, [containsPair('title', 'Canvas')]);
+    expect(canvasPresentations.single['multiline'], true);
+    expect(channelPresentations, hasLength(2));
+    expect(channelPresentations.last, {
+      ...channelPresentations.last,
+      'canvasContent': 'New canvas',
+      'canvasLoaded': true,
+      'initialValue': 'Draft name',
+      'description': 'Draft description',
+      'originalName': 'general',
+      'originalDescription': '',
+    });
+    expect(updates, [('Draft name', 'Draft description')]);
+    expect(canvases, ['New canvas']);
+    expect(find.byType(ManageChannelSheet), findsNothing);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets(
+    'canvas preview opens its content and removal retries without losing drafts',
+    (tester) async {
+      final removals = <String>[];
+      await tester.pumpWidget(
+        _modalApp(
+          channel: _channel(),
+          canvasContent: 'Shared team notes',
+          loadMembers: () async => [
+            ChannelMember(
+              pubkey: _currentPubkey,
+              role: 'owner',
+              joinedAt: DateTime(2025),
+            ),
+          ],
+          createChannelActions: (ref) => _FakeChannelActions(
+            ref,
+            onSetCanvas: (content) async {
+              removals.add(content);
+              if (removals.length == 1) throw Exception('offline');
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Open actions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Manage channel'));
+      await tester.pumpAndSettle();
+      expect(find.text('Shared team notes'), findsOneWidget);
+      expect(find.text('Add Canvas'), findsNothing);
+      expect(find.text('Edit canvas'), findsNothing);
+      await tester.enterText(
+        find.byKey(const ValueKey('manage-channel-name')),
+        'Draft name',
+      );
+      await tester.tap(find.byKey(const ValueKey('manage-channel-canvas')));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const ValueKey('text-editor-input')))
+            .controller!
+            .text,
+        'Shared team notes',
+      );
+      Navigator.of(
+        tester.element(find.byKey(const ValueKey('text-editor-input'))),
+      ).pop();
+      await tester.pumpAndSettle();
+      for (var attempt = 0; attempt < 2; attempt++) {
+        await tester.ensureVisible(find.text('Remove Canvas'));
+        await tester.tap(find.text('Remove Canvas'));
+        await tester.pumpAndSettle();
+        expect(removals, List.filled(attempt, ''));
+        await tester.tap(find.text('Remove'));
+        await tester.pumpAndSettle();
+        if (attempt == 0) {
+          expect(find.text('Shared team notes'), findsOneWidget);
+          expect(
+            find.text("Couldn't remove the canvas. Try again."),
+            findsOneWidget,
+          );
+        }
+      }
+      expect(find.text('Add Canvas'), findsOneWidget);
+      expect(find.text('Remove Canvas'), findsNothing);
+      expect(
+        tester
+            .widget<TextField>(
+              find.byKey(const ValueKey('manage-channel-name')),
+            )
+            .controller!
+            .text,
+        'Draft name',
+      );
+    },
+  );
+
+  testWidgets(
+    'native removal retains canvas on failure and clears after retry',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      const bridge = MethodChannel('buzz/profile_text_editor');
+      final presentations = <(String, Map<Object?, Object?>)>[];
+      final attempts = <String>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(bridge, (call) async {
+            presentations.add((
+              call.method,
+              Map<Object?, Object?>.from(call.arguments as Map),
+            ));
+            if (presentations.length >= 3) return null;
+            return {
+              'action': 'removeCanvas',
+              'name': 'Draft name',
+              'description': 'Draft description',
+            };
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(bridge, null),
+      );
+      await tester.pumpWidget(
+        _modalApp(
+          channel: _channel(),
+          canvasContent: 'Existing canvas',
+          loadMembers: () async => [],
+          createChannelActions: (ref) => _FakeChannelActions(
+            ref,
+            onSetCanvas: (content) async {
+              attempts.add(content);
+              if (attempts.length == 1) throw Exception('offline');
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Open actions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Manage channel'));
+      await tester.pumpAndSettle();
+      expect(presentations.map((p) => p.$1), List.filled(3, 'presentChannel'));
+      expect(presentations.map((p) => p.$2['canvasLoaded']), [
+        true,
+        true,
+        true,
+      ]);
+      expect(presentations.map((p) => p.$2['canvasContent']), [
+        'Existing canvas',
+        'Existing canvas',
+        '',
+      ]);
+      for (final (_, args) in presentations.skip(1)) {
+        expect(args['initialValue'], 'Draft name');
+        expect(args['description'], 'Draft description');
+      }
+      expect(attempts, ['', '']);
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
 
   testWidgets('non-member cannot edit canvas from Manage channel', (
     tester,
@@ -428,7 +778,7 @@ void main() {
     await tester.tap(find.text('Manage channel'));
     await tester.pumpAndSettle();
 
-    final editCanvas = find.widgetWithText(FilledButton, 'Create canvas');
+    final editCanvas = find.byKey(const ValueKey('manage-channel-canvas'));
     expect(editCanvas, findsOneWidget);
     expect(tester.widget<FilledButton>(editCanvas).onPressed, isNull);
   });
@@ -466,15 +816,7 @@ void main() {
     expect(
       tester
           .widget<FilledButton>(
-            find.byKey(const ValueKey('manage-channel-save-details')),
-          )
-          .onPressed,
-      isNull,
-    );
-    expect(
-      tester
-          .widget<FilledButton>(
-            find.widgetWithText(FilledButton, 'Create canvas'),
+            find.byKey(const ValueKey('manage-channel-canvas')),
           )
           .onPressed,
       isNotNull,
@@ -539,7 +881,9 @@ class _FakeChannelActions extends ChannelActions {
   )?
   onUpdateChannel;
 
-  _FakeChannelActions(Ref ref, {this.onUpdateChannel})
+  final Future<void> Function(String)? onSetCanvas;
+
+  _FakeChannelActions(Ref ref, {this.onUpdateChannel, this.onSetCanvas})
     : super(
         ref: ref,
         session: ref.read(relaySessionProvider.notifier),
@@ -557,6 +901,14 @@ class _FakeChannelActions extends ChannelActions {
     String? description,
   }) async {
     await onUpdateChannel?.call(channelId, name, description);
+  }
+
+  @override
+  Future<void> setCanvas({
+    required String channelId,
+    required String content,
+  }) async {
+    await onSetCanvas?.call(content);
   }
 
   String? unarchivedChannelId;

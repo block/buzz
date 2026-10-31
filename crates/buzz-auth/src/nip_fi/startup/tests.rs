@@ -17,7 +17,7 @@ fn test_contract(issuer: &str) -> JwksSourceContract {
 fn make_offline_policy(issuer: &str) -> IssuerPolicy {
     IssuerPolicy::new(
         issuer.to_owned(),
-        vec![format!("https://relay.example/api")],
+        vec!["https://relay.example/api".to_string()],
         TokenClass::DedicatedNipFi,
         FreshnessClass::OfflineJwt,
         vec![JwtAlgorithm::ES256],
@@ -32,7 +32,7 @@ fn make_offline_policy(issuer: &str) -> IssuerPolicy {
 fn make_status_policy(issuer: &str) -> IssuerPolicy {
     IssuerPolicy::new(
         issuer.to_owned(),
-        vec![format!("https://relay.example/api")],
+        vec!["https://relay.example/api".to_string()],
         TokenClass::DedicatedNipFi,
         FreshnessClass::CurrentStatus,
         vec![JwtAlgorithm::ES256],
@@ -146,6 +146,35 @@ fn enforce_jwks_contract_mismatch_rejects() {
     );
 }
 
+#[test]
+fn enforce_policy_and_jwks_source_contract_mismatch_rejects() {
+    let issuer = "https://id.example";
+    let mesh_contract = JwksSourceContract::new_mesh(
+        "http://mesh.example.test/.well-known/jwks.json".to_owned(),
+        300,
+        3600,
+    )
+    .expect("valid mesh contract");
+    let mesh_policy = IssuerPolicy::new(
+        issuer.to_owned(),
+        vec!["https://relay.example/api".to_owned()],
+        TokenClass::DedicatedNipFi,
+        FreshnessClass::OfflineJwt,
+        vec![JwtAlgorithm::ES256],
+        0,
+        3600,
+        None,
+        mesh_contract,
+    )
+    .expect("valid mesh policy");
+    let mut registry = IssuerRegistry::new();
+    registry.insert(mesh_policy);
+
+    let error = validate_nip_fi_config(NipFiMode::Enforce, &registry, &[make_jwks_config(issuer)])
+        .expect_err("policy and JWKS source contracts must match");
+    assert_eq!(error, NipFiStartupError::JwksContractMismatch);
+}
+
 /// Rejected regardless of whether a JWKS config is present — the verifier
 /// has no status witness to satisfy the freshness guarantee.
 #[test]
@@ -177,4 +206,44 @@ fn enforce_duplicate_jwks_issuer_in_configs_rejects() {
         validate_nip_fi_config(NipFiMode::Enforce, &registry, &jwks).is_err(),
         "duplicate JWKS configs must not pass"
     );
+}
+
+#[test]
+fn shadow_mode_validates_like_enforce() {
+    let issuer = "https://id.example";
+    let mut registry = IssuerRegistry::new();
+    assert_eq!(
+        validate_nip_fi_config(NipFiMode::Shadow, &registry, &[]).unwrap_err(),
+        NipFiStartupError::EmptyRegistry
+    );
+    registry.insert(make_offline_policy(issuer));
+    assert_eq!(
+        validate_nip_fi_config(NipFiMode::Shadow, &registry, &[]).unwrap_err(),
+        NipFiStartupError::MissingJwksConfig
+    );
+    assert!(
+        validate_nip_fi_config(NipFiMode::Shadow, &registry, &[make_jwks_config(issuer)]).is_ok()
+    );
+}
+
+#[test]
+fn mode_predicates_separate_evaluation_from_authority() {
+    // (mode, restricts, evaluates): Shadow is the only mode that evaluates
+    // evidence without the verdict affecting admission.
+    for (mode, restricts, evaluates) in [
+        (NipFiMode::Off, false, false),
+        (NipFiMode::Enforce, true, true),
+        (NipFiMode::DenyProtected, true, false),
+        (NipFiMode::Shadow, false, true),
+    ] {
+        assert_eq!(mode.restricts(), restricts, "{mode:?} restricts");
+        assert_eq!(mode.evaluates(), evaluates, "{mode:?} evaluates");
+        assert_eq!(mode.enforces(), restricts && evaluates, "{mode:?} enforces");
+        assert_eq!(
+            mode.denies_unconditionally(),
+            restricts && !evaluates,
+            "{mode:?}"
+        );
+        assert_eq!(mode.observes_only(), evaluates && !restricts, "{mode:?}");
+    }
 }

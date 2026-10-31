@@ -1,3 +1,9 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
+import 'channel_unread.dart';
+import '../../shared/widgets/collapsible_section_body.dart';
+import '../../shared/widgets/compose_morph_icon.dart';
+import '../../shared/me/me_sync.dart';
+
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' show max, min, pi;
@@ -5,33 +11,45 @@ import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:flutter/physics.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/auth/auth.dart';
 import '../../shared/community/community_icon_provider.dart';
+import '../../shared/community/community_avatar.dart';
+import '../../shared/community/community_grid.dart';
+import '../../shared/community/community_grid_option.dart';
+import '../../shared/community/community_grid_add.dart';
+import '../../shared/community/paired_community_landing.dart';
+import '../../shared/community/community_membership_provider.dart';
+import '../../shared/widgets/app_list_card_item.dart';
+import '../../shared/widgets/app_list.dart';
+import '../../shared/widgets/app_list_card.dart';
+import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/anchored_popover_menu.dart';
 import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
-import '../../shared/widgets/buzz_titled_sheet_layout.dart';
+import '../../shared/widgets/buzz_setting_menu.dart';
+import '../../shared/widgets/concentric_sheet_surface.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
+import '../../shared/widgets/ios_navigation_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
+import '../../shared/widgets/mobile_tab_footer_backdrop.dart';
 import '../../shared/widgets/modal_presentation.dart';
+import '../../shared/widgets/confirmation_dialog.dart';
 import '../../shared/widgets/skeleton.dart';
-import '../../shared/custom_emoji/custom_emoji.dart';
-import '../../shared/custom_emoji/custom_emoji_provider.dart';
-import '../../shared/custom_emoji/custom_emoji_render.dart';
-import '../profile/profile_avatar.dart';
 import '../profile/profile_provider.dart';
 import '../profile/presence_cache_provider.dart';
+import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
-import '../pairing/pairing_page.dart';
+import '../../onboarding_app_entry.dart';
 import '../pairing/pairing_provider.dart';
 import 'channel.dart';
 import 'channel_actions_sheet.dart';
@@ -47,126 +65,87 @@ import 'channel_sort/channel_sort_storage.dart';
 import 'channel_stars/channel_stars_provider.dart';
 import 'channels_provider.dart';
 import '../../shared/read_state/deferred_read_state_update.dart';
-import '../../shared/read_state/read_state_format.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
-import 'unread_badge/observed_unread_event.dart';
 
 part 'channels_page/body.dart';
-part 'channels_page/browse_channels_sheet.dart';
 part 'channels_page/sections.dart';
 part 'channels_page/channel_tile.dart';
 part 'channels_page/sheets.dart';
 part 'channels_page/badges.dart';
 part 'channels_page/skeleton.dart';
 part 'channels_page/community.dart';
+part 'channels_page/community_switcher.dart';
+part 'channels_page/community_switcher_action.dart';
 part 'channels_page/quick_actions.dart';
 part 'channels_page/quick_actions_launcher.dart';
+part 'channels_page/header_actions.dart';
 
-enum _QuickAction { createChannel, newDm, browseChannels }
+enum _QuickAction { createChannel, newDm }
 
 const double _kChannelSectionInset = Grid.gutter;
-const double _kChannelLeadingWidth = 22.0;
-const double _kChannelIconSize = 18.0;
-const double _kChannelLabelGap = Grid.xxs;
-const double _kChannelRowVerticalPadding = Grid.xxs + Grid.quarter;
-const double _kSectionSpacingTightening = Grid.half;
-const double _kSectionHeaderVerticalPadding =
-    _kChannelRowVerticalPadding - _kSectionSpacingTightening;
-// Section headers include touch targets for their actions, so their visual
-// centre sits lower than a channel row's. This keeps an expanded section's
-// final row equally spaced from the following divider.
-const double _kExpandedSectionTrailingPadding =
-    11.0 - _kSectionSpacingTightening;
-const double _kChannelLabelInset =
-    _kChannelSectionInset + _kChannelLeadingWidth + _kChannelLabelGap;
+const double _kChannelLeadingWidth = 24.0;
+const double _kChannelIconSize = 20.0;
+const double _kChannelLabelGap = Grid.inventoryLabelGap;
+const double _kChannelRowVerticalPadding = Grid.inventoryRowInset;
+// Keep section controls at a full touch target without adding a second row
+// of vertical padding around their quiet desktop-style label.
+const double _kSectionHeaderVerticalPadding = 0;
+const double _kChannelLabelInset = _kChannelSectionInset;
 
-/// DM avatars are circles, so they fill their box edge to edge where a channel
-/// glyph leaves 4dp of slack inside the same 22dp leading column. Sizing them to
-/// the glyph's ink width keeps the icon-to-label distance identical across both
-/// sections while the labels stay on [_kChannelLabelInset].
+/// Compact avatars remain on direct-message rows.
 const double _kDmAvatarSize = _kChannelIconSize;
 
-const double _kTopSectionCommunityAvatarSize = 40.0;
 const double _kTopSectionProfileAvatarSize = 36.0;
 const double _kTopSectionBottomPadding = Grid.xxs;
 
-/// The top section's avatars are 40dp circles, which fill their box edge to
-/// edge; the channel rows below lead with an 18dp glyph left-aligned in a 22dp
-/// box at [_kChannelSectionInset]. Edge-aligning the two leaves the circles
-/// looking pushed outward, so the bar is pulled in to sit the avatar's centre
-/// near the channel-icon column.
+/// Inset for the community and profile avatar row.
 const double _kTopSectionInset = Grid.twelve;
-const Duration _kSectionExpandDuration = Duration(milliseconds: 220);
-const Duration _kSectionCollapseDuration = Duration(milliseconds: 170);
-const Curve _kSectionExpandCurve = Cubic(0.23, 1, 0.32, 1);
-const Curve _kSectionCollapseCurve = Curves.easeInCubic;
-const double _kSectionCollapsedScaleY = 0.98;
 const double _kHeaderFrostScrollDistance = Grid.xxl;
 const double _kHeaderFrostMaxBlurSigma = 23.12;
-
-class _UnreadChannelState {
-  final Set<String> ids;
-
-  const _UnreadChannelState({required this.ids});
-}
-
-_UnreadChannelState _computeUnreadChannelState({
-  required Iterable<Channel> channels,
-  required ReadStateState readState,
-  required ChannelsNotifier channelsNotifier,
-}) {
-  if (!readState.isReady) {
-    return const _UnreadChannelState(ids: {});
-  }
-
-  final latestObservedByChannel = channelsNotifier.latestObservedByChannel;
-  final observedEventsByChannel =
-      channelsNotifier.observedUnreadEventsByChannel;
-  final ids = <String>{};
-
-  for (final channel in channels) {
-    if (readState.locallyForcedChannelIds.contains(channel.id)) {
-      ids.add(channel.id);
-      continue;
-    }
-
-    final latestObserved = latestObservedByChannel[channel.id];
-    if (latestObserved == null) continue;
-
-    final channelReadAt = readState.effectiveTimestamp(channel.id);
-    if (channelReadAt != null && latestObserved <= channelReadAt) continue;
-
-    final observedEvents = observedEventsByChannel[channel.id];
-    int? readAtForObservedEvent(ObservedUnreadEvent event) =>
-        observedUnreadEventReadAt(
-          event,
-          channelReadAt,
-          (rootId) => readState.effectiveTimestamp(threadContextKey(rootId)),
-          (messageId) => readState.effectiveTimestamp(msgContextKey(messageId)),
-        );
-
-    final unreadCount = countUnreadObservedEvents(
-      observedEvents,
-      readAtForObservedEvent,
-    );
-    if (unreadCount == 0) continue;
-
-    ids.add(channel.id);
-  }
-
-  return _UnreadChannelState(ids: ids);
-}
 
 class ChannelsPage extends HookConsumerWidget {
   const ChannelsPage({
     required this.settingsPageBuilder,
+    this.onSearch,
+    this.messagesFilters,
+    this.messagesActionsBuilder,
+    this.soloSliver,
+    this.showTeam = true,
+    this.showTeamHeading = false,
+    this.newChannelAction,
+    this.newDmAction,
+    this.communityAction,
+    this.onInbox,
+    this.communityInvitePageBuilder,
+    this.communityAppearancePageBuilder,
     required this.onSettingsTransitionProgress,
     this.tabReselection,
     super.key,
   });
 
   final WidgetBuilder settingsPageBuilder;
+  final Widget? messagesFilters;
+  final List<Widget> Function(VoidCallback openSwitcher, GlobalKey avatarKey)?
+  messagesActionsBuilder;
+  final Widget? soloSliver;
+  final bool showTeam;
+  final bool showTeamHeading;
+  final ValueNotifier<VoidCallback?>? newChannelAction;
+  final ValueNotifier<VoidCallback?>? newDmAction;
+  final ValueNotifier<VoidCallback?>? communityAction;
+
+  /// Opens global search from the header.
+  final VoidCallback? onSearch;
+
+  /// Opens the conversation inbox above the channel sections.
+  final VoidCallback? onInbox;
+
+  /// Builds the invite destination opened from the community sheet.
+  final WidgetBuilder? communityInvitePageBuilder;
+
+  /// Builds the appearance destination opened from the community sheet.
+  final WidgetBuilder? communityAppearancePageBuilder;
 
   /// Reports Settings route progress so its foreground and Home's background
   /// render from the same timeline.
@@ -177,6 +156,10 @@ class ChannelsPage extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Resolve permissions before the community menu is opened.
+    if (communityInvitePageBuilder != null) {
+      ref.watch(currentCommunityRoleProvider);
+    }
     final channelsAsync = ref.watch(channelsProvider);
     final sessionState = ref.watch(relaySessionProvider);
     final currentPubkey = ref
@@ -188,30 +171,55 @@ class ChannelsPage extends HookConsumerWidget {
       fontWeight: FontWeight.w600,
       color: navigationPrimaryForeground(context),
     );
+    final filterContentHeight = messagesFilters == null
+        ? 0.0
+        : max(48.0, MediaQuery.textScalerOf(context).scale(16) * 1.4 + 16) +
+              Grid.xxs;
     final topSectionHeight = frostedAppBarHeight(
       context,
       titleStyle: headerTitleStyle,
-      bottomHeight: _kTopSectionBottomPadding,
+
+      bottomHeight: messagesFilters == null
+          ? _kTopSectionBottomPadding
+          : filterContentHeight,
+      useNativeNavigation: messagesFilters == null,
     );
+    final communityAvatarKey = useMemoized(GlobalKey.new);
+    final nativeCommunityAvatarBounds = useRef<Rect?>(null);
+    final headerKey = useMemoized(GlobalKey.new);
+    final nativeHeaderReady = useRef(false);
+    final bodyReady = useRef(false);
+    final communityFlightActive = useState(false);
     final channelsScrollController = useScrollController();
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final headerFrostProgress = useState(0.0);
-    useEffect(() {
-      void updateHeaderTreatment() {
-        final nextProgress = !channelsScrollController.hasClients
-            ? 0.0
-            : (channelsScrollController.offset / _kHeaderFrostScrollDistance)
-                  .clamp(0.0, 1.0)
-                  .toDouble();
-        if ((headerFrostProgress.value - nextProgress).abs() > 0.001) {
-          headerFrostProgress.value = nextProgress;
+    final headerCollapse = useState(0.0);
+    useEffect(
+      () {
+        void updateHeaderTreatment() {
+          final collapse =
+              messagesFilters == null || !channelsScrollController.hasClients
+              ? 0.0
+              : channelsScrollController.offset
+                    .clamp(0.0, filterContentHeight)
+                    .toDouble();
+          if (headerCollapse.value != collapse) headerCollapse.value = collapse;
+          final nextProgress = !channelsScrollController.hasClients
+              ? 0.0
+              : (channelsScrollController.offset / _kHeaderFrostScrollDistance)
+                    .clamp(0.0, 1.0)
+                    .toDouble();
+          if ((headerFrostProgress.value - nextProgress).abs() > 0.001) {
+            headerFrostProgress.value = nextProgress;
+          }
         }
-      }
 
-      channelsScrollController.addListener(updateHeaderTreatment);
-      return () =>
-          channelsScrollController.removeListener(updateHeaderTreatment);
-    }, [channelsScrollController]);
+        channelsScrollController.addListener(updateHeaderTreatment);
+        return () =>
+            channelsScrollController.removeListener(updateHeaderTreatment);
+      },
+      [channelsScrollController, messagesFilters != null, filterContentHeight],
+    );
     useEffect(() {
       final tabReselection = this.tabReselection;
       if (tabReselection == null) return null;
@@ -254,12 +262,20 @@ class ChannelsPage extends HookConsumerWidget {
     if (channelsAsync.asData?.value case final data?) {
       cachedChannels.value = data;
     }
-    final channels = cachedChannels.value;
+    final soloViewer = ref.watch(myPubkeyProvider);
+    final personalIds =
+        ref.watch(meGroupsProvider).asData?.value.channels ?? const <String>[];
+    final channels = cachedChannels.value
+        ?.where((channel) => !channel.isPersonalChat(soloViewer, personalIds))
+        .toList();
     Future<void> openChannel(Channel channel) async {
       if (!context.mounted) return;
       await Navigator.of(context).push(
         MaterialPageRoute<void>(
-          builder: (_) => ChannelDetailPage(channel: channel),
+          builder: (_) => ChannelDetailPage(
+            channel: channel,
+            placement: ChannelRoutePlacement.ordinary,
+          ),
         ),
       );
     }
@@ -284,37 +300,249 @@ class ChannelsPage extends HookConsumerWidget {
       return timer.cancel;
     }, [canSurfaceError]);
 
-    // Keep cached content steady through brief socket flaps. A sustained
-    // reconnect swaps to element-shaped skeletons that match desktop.
-    final showConnectionSkeleton = useState(false);
-    final isReconnectingWithContent =
-        channels != null &&
-        (sessionState.status == SessionStatus.connecting ||
-            sessionState.status == SessionStatus.reconnecting);
-    useEffect(() {
-      if (!isReconnectingWithContent) {
-        showConnectionSkeleton.value = false;
-        return null;
+    Rect? measureCommunityAvatar() {
+      if (messagesFilters == null &&
+          defaultTargetPlatform == TargetPlatform.iOS) {
+        final header = headerKey.currentContext?.findRenderObject();
+        final bounds = nativeCommunityAvatarBounds.value;
+        return header is RenderBox && bounds != null
+            ? MatrixUtils.transformRect(header.getTransformTo(null), bounds)
+            : null;
       }
-      final timer = Timer(const Duration(seconds: 2), () {
-        showConnectionSkeleton.value = true;
+      final avatar = communityAvatarKey.currentContext?.findRenderObject();
+      return avatar is RenderBox
+          ? MatrixUtils.transformRect(
+              avatar.getTransformTo(null),
+              // The menu keeps a larger touch target around its 36dp avatar.
+              messagesFilters != null
+                  ? Rect.fromCenter(
+                      center: avatar.size.center(Offset.zero),
+                      width: 36,
+                      height: 36,
+                    )
+                  : Offset.zero & avatar.size,
+            )
+          : null;
+    }
+
+    Future<Rect?> prepareCommunityLanding() async {
+      // The list snapshot precedes unread history and DM profile hydration.
+      // Both can still change weight, labels, and sorting behind the picker.
+      // A restored list is already usable offline. Refresh its unread state
+      // and participant profiles behind the page instead of gating navigation.
+      if (!ref.read(channelsProvider.notifier).hasCachedSnapshot) {
+        final channels = ref.read(channelsProvider).requireValue;
+        final dmPubkeys = {
+          for (final channel in channels)
+            if (channel.isMember && !channel.isArchived && channel.isDm)
+              ...channel.participantPubkeys,
+        };
+        await Future.wait([
+          ref.read(channelsProvider.notifier).waitForUnreadCatchUp(),
+          if (dmPubkeys.isNotEmpty)
+            ref.read(userCacheProvider.notifier).preload(dmPubkeys.toList()),
+        ]);
+      }
+      if (!context.mounted || !communityFlightActive.value) return null;
+      // Settle Home's scale and scroll while the loading backdrop is opaque.
+      onSettingsTransitionProgress(0);
+      if (channelsScrollController.hasClients) {
+        channelsScrollController.jumpTo(
+          channelsScrollController.position.minScrollExtent,
+        );
+      }
+      Rect? previous;
+      var stableFrames = 0;
+      while (context.mounted && communityFlightActive.value) {
+        await WidgetsBinding.instance.endOfFrame;
+        if (!context.mounted) return null;
+        final ready =
+            ref.read(_communityContentReadyProvider).value == true &&
+            bodyReady.value &&
+            (messagesFilters != null ||
+                defaultTargetPlatform != TargetPlatform.iOS ||
+                nativeHeaderReady.value);
+        final bounds = ready ? measureCommunityAvatar() : null;
+        stableFrames = ready && bounds == previous ? stableFrames + 1 : 0;
+        previous = bounds;
+        if (ready && stableFrames >= 2) return bounds;
+      }
+      return null;
+    }
+
+    final arrivingCommunity = ref.watch(pairedCommunityLandingProvider);
+    useEffect(() {
+      if (arrivingCommunity == null) return null;
+      var cancelled = false;
+      Future<void> revealPairedCommunity() async {
+        // Add-community pairing is a pushed route. Let it finish dismissing
+        // before placing the loading surface above the destination Home page.
+        do {
+          await WidgetsBinding.instance.endOfFrame;
+          if (cancelled || !context.mounted) return;
+        } while (ModalRoute.of(context)?.isCurrent == false);
+        if (ref.read(pairedCommunityLandingProvider)?.id !=
+            arrivingCommunity.id) {
+          return;
+        }
+        ref.read(pairedCommunityLandingProvider.notifier).clear();
+        communityFlightActive.value = true;
+        final completedPairing = ref.read(pairingProvider);
+        final navigator = Navigator.of(context, rootNavigator: true);
+        await navigator.push<void>(
+          PageRouteBuilder<void>(
+            opaque: false,
+            transitionDuration: Duration.zero,
+            reverseTransitionDuration: Duration.zero,
+            pageBuilder: (_, _, _) => CommunitySwitcherPage(
+              arrivingCommunity: arrivingCommunity,
+              destination: measureCommunityAvatar(),
+              prepareLanding: prepareCommunityLanding,
+              onFlightChanged: (flying) {
+                if (context.mounted) communityFlightActive.value = flying;
+              },
+              onTransitionProgress: onSettingsTransitionProgress,
+            ),
+          ),
+        );
+        if (context.mounted) {
+          communityFlightActive.value = false;
+          if (completedPairing.status == PairingStatus.success &&
+              identical(ref.read(pairingProvider), completedPairing)) {
+            ref.read(pairingProvider.notifier).reset();
+          }
+        }
+      }
+
+      unawaited(revealPairedCommunity());
+      return () => cancelled = true;
+    }, [arrivingCommunity]);
+
+    void openCommunityGrid() {
+      if (!context.mounted) return;
+      ref.invalidate(communityIconProvider);
+      final destination = measureCommunityAvatar();
+      late final _CommunitySwitcherRoute route;
+      route = _CommunitySwitcherRoute(
+        onTransitionProgress: onSettingsTransitionProgress,
+        builder: (_) => CommunitySwitcherPage(
+          destination: destination,
+          prepareLanding: prepareCommunityLanding,
+          onFlightChanged: (flying) {
+            route.flying = flying;
+            communityFlightActive.value = flying;
+          },
+          onTransitionProgress: onSettingsTransitionProgress,
+        ),
+      );
+      Navigator.of(context).push(route).whenComplete(() {
+        if (context.mounted) communityFlightActive.value = false;
       });
-      return timer.cancel;
-    }, [isReconnectingWithContent]);
+    }
+
+    final showImportedCommunities = ref.watch(communityGridLandingProvider);
+    useEffect(() {
+      if (!showImportedCommunities) return null;
+      var cancelled = false;
+      Future<void> revealImportedCommunities() async {
+        // Let the hosted sheet and pushed Add route finish dismissing first.
+        do {
+          await WidgetsBinding.instance.endOfFrame;
+          if (cancelled || !context.mounted) return;
+        } while (ModalRoute.of(context)?.isCurrent == false);
+        if (!ref.read(communityGridLandingProvider)) return;
+        ref.read(communityGridLandingProvider.notifier).clear();
+        openCommunityGrid();
+      }
+
+      unawaited(revealImportedCommunities());
+      return () => cancelled = true;
+    }, [showImportedCommunities]);
 
     void openCommunitySwitcher() {
+      // Freeze the menu shape for this presentation. If a cold permission
+      // lookup is still pending, the next opening uses its resolved result.
+      final role = ref.read(currentCommunityRoleProvider).unwrapPrevious();
+      final canInvite = role.hasError || canManageCommunityInvites(role.value);
       unawaited(HapticFeedback.selectionClick());
-      ref.invalidate(communityIconProvider);
       showBuzzModalBottomSheet<void>(
         context: context,
         showCloseButton: false,
-        showDragHandle: false,
-        builder: (_) => const _CommunitySwitcherSheet(),
+        showDragHandle: true,
+        builder: (_) => _CommunityMenuSheet(
+          canInvite: canInvite,
+          onSwitchCommunity: openCommunityGrid,
+          invitePageBuilder: communityInvitePageBuilder,
+          appearancePageBuilder: communityAppearancePageBuilder,
+        ),
       );
     }
 
+    final activeCommunity = ref
+        .watch(activeCommunityProvider)
+        .unwrapPrevious()
+        .value;
+    final communityRelay = activeCommunity?.relayUrl;
+    final communityAvatar = communityRelay == null
+        ? null
+        : ref.watch(communityIconPresentationProvider(communityRelay));
+    final communityName = activeCommunity?.name.trim() ?? '';
     final topSectionGradient = context.appColors.topSectionGradient;
     final usesPinnedGradient = topSectionGradient != null;
+    Future<void> openCreateAction(_QuickAction action) async {
+      final channel = await showBuzzModalBottomSheet<Channel>(
+        context: context,
+        title: action == _QuickAction.createChannel
+            ? 'Create a new channel'
+            : 'New message',
+        constraints: _quickActionSheetConstraints(context),
+        isScrollControlled: true,
+        showDragHandle: true,
+        builder: (_) => action == _QuickAction.createChannel
+            ? const _CreateChannelSheet(channelType: 'stream')
+            : _NewDirectMessageSheet(currentPubkey: currentPubkey),
+      );
+      if (channel != null && context.mounted) await openChannel(channel);
+    }
+
+    Future<void> openCreateMenu() async {
+      final action = await showBuzzModalBottomSheet<_QuickAction>(
+        context: context,
+        title: 'Create',
+        builder: (sheetContext) => Padding(
+          padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
+          child: SheetActionSection(
+            children: [
+              ListTile(
+                leading: const Icon(BuzzIcons.hash),
+                title: const Text('New channel'),
+                onTap: () =>
+                    Navigator.pop(sheetContext, _QuickAction.createChannel),
+              ),
+              ListTile(
+                leading: const Icon(BuzzIcons.messageSquare),
+                title: const Text('New DM'),
+                onTap: () => Navigator.pop(sheetContext, _QuickAction.newDm),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (action == null || !context.mounted) return;
+      await openCreateAction(action);
+    }
+
+    useEffect(() {
+      var active = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!active) return;
+        newChannelAction?.value = () =>
+            openCreateAction(_QuickAction.createChannel);
+        newDmAction?.value = () => openCreateAction(_QuickAction.newDm);
+        communityAction?.value = openCommunitySwitcher;
+      });
+      return () => active = false;
+    }, [newChannelAction, newDmAction, communityAction, currentPubkey]);
 
     return FrostedScaffold(
       backgroundColor: usesPinnedGradient
@@ -322,77 +550,173 @@ class ChannelsPage extends HookConsumerWidget {
           : context.colors.surface,
       backgroundGradient: topSectionGradient,
       appBar: FrostedAppBar(
+        key: headerKey,
+        onNativeReadyChanged: (ready) => nativeHeaderReady.value = ready,
+        nativeTitle: '',
+        useNativeNavigation: messagesFilters == null,
+        nativeLeading: messagesFilters != null
+            ? null
+            : IosNavigationAction(
+                label: 'Community settings',
+                onAvatarBoundsChanged: (bounds) {
+                  final header = headerKey.currentContext?.findRenderObject();
+                  if (header is RenderBox) {
+                    // Store native coordinates, then apply the current Home transform
+                    // when measuring the destination immediately before departure.
+                    nativeCommunityAvatarBounds.value =
+                        header.globalToLocal(bounds.topLeft) & bounds.size;
+                  }
+                },
+                avatarHidden: communityFlightActive.value,
+                avatarIdentity: activeCommunity?.id,
+                symbol: 'building.2.crop.circle',
+                imageUrl: communityAvatar,
+                avatarInitial: communityName.isEmpty
+                    ? '?'
+                    : communityName.substring(0, 1).toUpperCase(),
+                onPressed: openCommunitySwitcher,
+              ),
+        nativeActions: messagesFilters != null
+            ? const []
+            : [
+                if (onSearch != null)
+                  IosNavigationAction(
+                    label: 'Search',
+                    symbol: 'magnifyingglass',
+                    sharesBackground: false,
+                    icon: BuzzIcons.search300,
+                    onPressed: onSearch,
+                  ),
+                IosNavigationAction(
+                  label: 'Create',
+                  symbol: 'plus',
+                  sharesBackground: false,
+                  icon: BuzzIcons.plus,
+                  children: [
+                    IosNavigationAction(
+                      label: 'New channel',
+                      symbol: 'number',
+                      onPressed: () =>
+                          openCreateAction(_QuickAction.createChannel),
+                    ),
+                    IosNavigationAction(
+                      label: 'New DM',
+                      symbol: 'bubble.left',
+                      onPressed: () => openCreateAction(_QuickAction.newDm),
+                    ),
+                  ],
+                ),
+              ],
         horizontalInset: _kTopSectionInset,
         // Let the full Buzz gradient show at rest. Once the list begins to
         // move beneath this row, build up blur over the first 64dp of scroll
         // without adding the usual white frosted wash. The Buzz list is
         // transparent, so the blurred pixels remain a continuation of the
         // pinned gradient instead of turning into a white header.
-        frosted: !usesPinnedGradient || headerFrostProgress.value > 0,
-        frostedSurfaceOpacity: usesPinnedGradient ? 0 : 0.5,
-        frostedBlurSigma: usesPinnedGradient
+        frosted:
+            messagesFilters != null ||
+            !usesPinnedGradient ||
+            headerFrostProgress.value > 0,
+        alwaysFrosted: messagesFilters != null,
+        frostedSurfaceOpacity: messagesFilters != null
+            ? 0.45
+            : usesPinnedGradient
+            ? 0
+            : 0.5,
+        frostedBlurSigma: messagesFilters != null
+            ? 20
+            : usesPinnedGradient
             ? _kHeaderFrostMaxBlurSigma * headerFrostProgress.value
             : 20,
         showBottomDivider: false,
-        leading: _CommunityIndicator(onTap: openCommunitySwitcher),
+        leading: messagesFilters != null
+            ? null
+            : _CommunityIndicator(
+                onTap: openCommunitySwitcher,
+                avatarKey: communityAvatarKey,
+                hidden: communityFlightActive.value,
+              ),
         centerTitle: false,
         titleStyle: headerTitleStyle,
-        title: _CommunityHeaderTitle(
-          style: headerTitleStyle,
-          onTap: openCommunitySwitcher,
-        ),
-        actions: [
-          SizedBox(
-            width: Grid.xl,
-            height: Grid.xl,
-            child: Center(
-              child: ProfileAvatar(
-                size: _kTopSectionProfileAvatarSize,
-                showPresence: false,
-                onTap: () {
-                  unawaited(HapticFeedback.lightImpact());
-                  final route = _SettingsPageRoute(
-                    builder: settingsPageBuilder,
-                    onTransitionProgress: onSettingsTransitionProgress,
-                  );
-                  Navigator.of(context).push(route);
-                },
+
+        automaticallyImplyLeading: messagesFilters == null,
+        title: messagesFilters == null
+            ? const SizedBox.shrink()
+            : ClipRect(
+                child: ExcludeSemantics(
+                  excluding: headerCollapse.value >= filterContentHeight,
+                  child: Opacity(
+                    opacity: 1 - headerCollapse.value / filterContentHeight,
+                    child: Transform.translate(
+                      offset: Offset(0, -headerCollapse.value),
+                      child: Text('Messages', style: headerTitleStyle),
+                    ),
+                  ),
+                ),
               ),
-            ),
-          ),
-        ],
-        bottomHeight: _kTopSectionBottomPadding,
-        bottom: const SizedBox.expand(),
+        actions: messagesFilters != null
+            ? messagesActionsBuilder?.call(
+                    openCommunityGrid,
+                    communityAvatarKey,
+                  ) ??
+                  const []
+            : [
+                _ChannelHeaderActions(
+                  onSearch: onSearch,
+                  onCreate: openCreateMenu,
+                ),
+              ],
+        bottomHeight: messagesFilters == null
+            ? _kTopSectionBottomPadding
+            : filterContentHeight - headerCollapse.value,
+        bottomOverlap: messagesFilters == null ? 0 : headerCollapse.value,
+        bottom: messagesFilters == null
+            ? const SizedBox.expand()
+            : Padding(
+                padding: EdgeInsets.only(
+                  right: 60 * headerCollapse.value / filterContentHeight,
+                ),
+                child: messagesFilters,
+              ),
       ),
       body: _ChannelsBody(
+        soloSliver: soloSliver,
+        showTeam: showTeam,
+        showTeamHeading: showTeamHeading,
+        onInbox: onInbox,
+        onReadyChanged: (ready) => bodyReady.value = ready,
         channels: channels,
         channelsAsync: channelsAsync,
         showError: showError.value,
         sessionStatus: sessionState.status,
-        showConnectionSkeleton: showConnectionSkeleton.value,
         currentPubkey: currentPubkey,
         topSectionHeight: topSectionHeight,
         usesPinnedGradient: usesPinnedGradient,
         scrollController: channelsScrollController,
-        onRefresh: () => ref.read(channelsProvider.notifier).refresh(),
+        onRefresh: () {
+          // Solo has no banner, so pulling must also restart its reader.
+          if (soloSliver != null) ref.invalidate(meGroupsProvider);
+          return ref.read(channelsProvider.notifier).refresh();
+        },
         onSelectChannel: openChannel,
       ),
     );
   }
 }
 
-/// A custom route deliberately avoids [MaterialPageRoute]'s platform exit
-/// transition on Home. Settings has a centered scale-and-fade transition, not
-/// a lateral page push.
-class _SettingsPageRoute extends PageRouteBuilder<void> {
-  _SettingsPageRoute({
+/// Scale-and-fade route retained for the community switcher.
+class _CommunitySurfaceRoute extends PageRouteBuilder<void> {
+  _CommunitySurfaceRoute({
     required WidgetBuilder builder,
     required this.onTransitionProgress,
+    bool? opaque,
   }) : super(
          pageBuilder: (context, animation, secondaryAnimation) =>
              builder(context),
          transitionsBuilder: _buildSettingsTransition,
-         opaque: false,
+         // Stop compositing Home's UIKit controls once Settings has settled.
+         // Opaque routes still paint the previous page during both transitions.
+         opaque: opaque ?? defaultTargetPlatform == TargetPlatform.iOS,
          allowSnapshotting: false,
          transitionDuration: const Duration(milliseconds: 150),
          reverseTransitionDuration: const Duration(milliseconds: 150),

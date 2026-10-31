@@ -2,10 +2,11 @@ pub mod agent_management;
 mod client;
 mod commands;
 mod error;
+mod help_tree;
 mod links;
 mod validate;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use client::BuzzClient;
 use error::CliError;
 use nostr::Keys;
@@ -38,7 +39,7 @@ where
     // double-install returns Err and is harmless.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let cli = match Cli::try_parse_from(args) {
+    let cli = match parse_args(args) {
         Ok(cli) => cli,
         Err(e) => {
             if e.use_stderr() {
@@ -60,6 +61,61 @@ where
     }
 }
 
+/// Root help layout. Identical to clap's default except that `{subcommands}`
+/// is dropped and the command tree arrives through `{after-help}` instead, so
+/// the group list is not printed twice. `{options}` and `{subcommands}` emit no
+/// heading of their own — clap writes those from `write_all_args`, which this
+/// template bypasses — so the headings are spelled out here.
+const ROOT_HELP_TEMPLATE: &str = "\
+{before-help}{about-with-newline}
+{usage-heading} {usage}{after-help}
+
+Options:
+{options}";
+
+/// The root command with the agent-friendly command tree installed.
+///
+/// clap picks `after_long_help` for `--help` and falls back to `after_help`
+/// for `-h`, which is what gives the two depths: `-h` keeps the group-level
+/// summary, `--help` shows every subcommand under every group.
+fn build_command() -> clap::Command {
+    let cmd = Cli::command();
+    let groups = help_tree::render(&cmd, 1);
+    let full = help_tree::render(&cmd, usize::MAX);
+    cmd.help_template(ROOT_HELP_TEMPLATE)
+        .after_help(format!("Commands:\n{groups}"))
+        .after_long_help(format!("Commands:\n{full}"))
+}
+
+fn parse_args<I, S>(args: I) -> Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<std::ffi::OsString> + Clone,
+{
+    let matches = build_command().try_get_matches_from(args)?;
+    let mut cli = Cli::from_arg_matches(&matches)?;
+    if matches.value_source("format") == Some(clap::parser::ValueSource::DefaultValue) {
+        cli.format = env_output_format(std::env::var_os("BUZZ_OUTPUT_FORMAT").as_deref());
+    }
+    Ok(cli)
+}
+
+/// `BUZZ_OUTPUT_FORMAT` only picks the default `--format`, so an empty or
+/// unknown value (e.g. one a newer harness sets) falls back to `json` rather
+/// than failing every command, writes included.
+fn env_output_format(value: Option<&std::ffi::OsStr>) -> OutputFormat {
+    let Some(value) = value.filter(|value| !value.is_empty()) else {
+        return OutputFormat::default();
+    };
+    value
+        .to_str()
+        .and_then(|value| OutputFormat::from_str(value, false).ok())
+        .unwrap_or_else(|| {
+            eprintln!("warning: ignoring unsupported BUZZ_OUTPUT_FORMAT={value:?}; using json");
+            OutputFormat::default()
+        })
+}
+
 #[derive(Parser)]
 #[command(
     name = "buzz",
@@ -71,6 +127,7 @@ Configuration (flags override env vars):
   BUZZ_RELAY_URL     Relay base URL        [default: http://localhost:3000]
   BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [required]
   BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
+  BUZZ_OUTPUT_FORMAT Default --format; unknown values fall back to json  [optional]
 
 The 'pack' subcommand runs locally and does not require a relay connection.
 
@@ -90,7 +147,9 @@ struct Cli {
     #[arg(long, env = "BUZZ_AUTH_TAG", hide_env_values = true)]
     auth_tag: Option<String>,
 
-    /// Output format: 'json' (default, full fields) or 'compact' (reduced fields).
+    /// Output format: 'json' (default, full fields), 'compact' (reduced fields),
+    /// or 'agent' (event reads without signature material). Defaults to
+    /// `BUZZ_OUTPUT_FORMAT` when that names a known format.
     #[arg(long, value_enum, default_value = "json")]
     format: OutputFormat,
 
@@ -128,6 +187,27 @@ impl std::fmt::Display for ChannelVisibility {
         match self {
             Self::Open => write!(f, "open"),
             Self::Private => write!(f, "private"),
+        }
+    }
+}
+
+/// The role a new person gets in a channel (`join_role`).
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum ChannelJoinRoleArg {
+    /// New people become members (default).
+    #[value(name = "member")]
+    Member,
+    /// New people become guests, who can read but not write. On an open
+    /// channel this makes an announce channel.
+    #[value(name = "guest")]
+    Guest,
+}
+
+impl From<ChannelJoinRoleArg> for buzz_sdk::ChannelJoinRole {
+    fn from(value: ChannelJoinRoleArg) -> Self {
+        match value {
+            ChannelJoinRoleArg::Member => Self::Member,
+            ChannelJoinRoleArg::Guest => Self::Guest,
         }
     }
 }
@@ -170,6 +250,12 @@ pub enum OutputFormat {
     /// Reduced fields for agent scanning
     #[value(name = "compact")]
     Compact,
+    /// Event reads drop signature material (`sig`, NIP-OA `auth` conditions and
+    /// signature) and fold NIP-10 thread markers into `reply_to`/`thread_root`;
+    /// other reads match `json`.
+    /// Default for harness-managed agents.
+    #[value(name = "agent")]
+    Agent,
 }
 
 #[derive(Subcommand)]
@@ -576,7 +662,7 @@ pub enum ChannelsCmd {
     },
     /// Create a new channel
     #[command(
-        after_help = "Examples:\n  buzz channels create --name general --type stream --visibility open\n  buzz channels create --name design --type forum --visibility open --description \"Design discussions\"\n  buzz channels create --name standup --type stream --visibility open --ttl 3600  # ephemeral, archived after 1h idle\n  buzz channels create --name project-x --template \"Buzz Team\"  # type/visibility/canvas/roster from the template; explicit flags override"
+        after_help = "Examples:\n  buzz channels create --name general --type stream --visibility open\n  buzz channels create --name design --type forum --visibility open --description \"Design discussions\"\n  buzz channels create --name standup --type stream --visibility open --ttl 3600  # ephemeral, archived after 1h idle\n  buzz channels create --name project-x --template \"Buzz Team\"  # type/visibility/canvas/roster from the template; explicit flags override\n  buzz channels create --name notes --type stream --visibility private --unlisted  # never listed, even after it is made open"
     )]
     Create {
         /// Channel name
@@ -596,6 +682,13 @@ pub enum ChannelsCmd {
         /// many seconds pass without a new message.
         #[arg(long, value_name = "SECONDS")]
         ttl: Option<i64>,
+        /// Create the channel unlisted: left out of channel lists for people
+        /// who are not members. Anyone can still read and join an unlisted
+        /// open channel by its id. Change it later with `channels update
+        /// --unlisted`. Refused if the relay does not advertise
+        /// `buzz-unlisted-channels`.
+        #[arg(long)]
+        unlisted: bool,
         /// Apply a desktop-local channel template by name (case-insensitive):
         /// supplies default type/visibility/description/canvas, and resolves
         /// its agent roster against the relay to add as members.
@@ -606,9 +699,9 @@ pub enum ChannelsCmd {
         #[arg(long, value_name = "PATH")]
         templates_file: Option<String>,
     },
-    /// Update channel name, description, visibility, or ephemeral TTL
+    /// Update channel name, description, visibility, join role, unlisted, or ephemeral TTL
     #[command(
-        after_help = "Examples:\n  buzz channels update --channel <uuid> --name general\n  buzz channels update --channel <uuid> --visibility open\n  buzz channels update --channel <uuid> --visibility private"
+        after_help = "Examples:\n  buzz channels update --channel <uuid> --name general\n  buzz channels update --channel <uuid> --visibility open\n  buzz channels update --channel <uuid> --visibility private\n  buzz channels update --channel <uuid> --join-role guest\n  buzz channels update --channel <uuid> --visibility open --unlisted true"
     )]
     Update {
         /// Channel UUID
@@ -630,6 +723,18 @@ pub enum ChannelsCmd {
         /// Clear an existing TTL, making the channel permanent.
         #[arg(long)]
         no_ttl: bool,
+        /// The role a new person gets when nobody picks one. `guest` on an
+        /// open channel makes an announce channel: people who join can read
+        /// but not write. Does not change existing members. Owner/admin only.
+        #[arg(long, value_enum)]
+        join_role: Option<ChannelJoinRoleArg>,
+        /// Leave the channel out of channel lists for people who are not
+        /// members (`true`), or list it again (`false`). Anyone can still read
+        /// and join an unlisted open channel by its id. Matters only while the
+        /// channel is open. Owner/admin only. `true` is refused if the relay
+        /// does not advertise `buzz-unlisted-channels`.
+        #[arg(long, value_name = "BOOL", action = clap::ArgAction::Set)]
+        unlisted: Option<bool>,
     },
     /// Set the channel topic
     Topic {
@@ -724,6 +829,10 @@ pub enum CanvasCmd {
         /// Channel UUID
         #[arg(long)]
         channel: String,
+        /// Fetch a specific historical revision by event ID (64-char hex);
+        /// defaults to the current head
+        #[arg(long)]
+        revision: Option<String>,
     },
     /// Set (replace) the canvas document for a channel
     Set {
@@ -733,6 +842,24 @@ pub enum CanvasCmd {
         /// Canvas content (markdown; use '-' to read from stdin)
         #[arg(long)]
         content: String,
+    },
+    /// List canvas revision history for a channel, newest first
+    History {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Maximum number of revisions to return (1–10000)
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=10_000))]
+        limit: u32,
+    },
+    /// Restore the canvas to a previous revision by re-publishing its content
+    Restore {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Revision event ID to restore (64-char hex)
+        #[arg(long)]
+        revision: String,
     },
 }
 
@@ -1237,6 +1364,38 @@ pub enum ReposCmd {
     /// Manage branch and tag protection rules on one of your repositories.
     #[command(subcommand)]
     Protect(ReposProtectCmd),
+    /// Inspect or change the relay-hosted repository's default branch.
+    #[command(subcommand)]
+    DefaultBranch(ReposDefaultBranchCmd),
+}
+
+/// Commands for the authoritative Git default branch, not announcement metadata.
+#[derive(Subcommand)]
+pub enum ReposDefaultBranchCmd {
+    /// Read the default branch and observed manifest version.
+    Get {
+        /// Repository identifier.
+        #[arg(long)]
+        id: String,
+        /// Repository owner (64-char hex). Defaults to your signing identity.
+        #[arg(long)]
+        owner: Option<String>,
+    },
+    /// Select an existing branch without moving or deleting any refs.
+    Set {
+        /// Repository identifier.
+        #[arg(long)]
+        id: String,
+        /// Repository owner (64-char hex). Defaults to your signing identity.
+        #[arg(long)]
+        owner: Option<String>,
+        /// Short branch name, e.g. main or release/v1 (not refs/heads/main).
+        #[arg(long)]
+        branch: String,
+        /// Manifest digest returned by get. Omit to read it before updating.
+        #[arg(long)]
+        expected_manifest: Option<String>,
+    },
 }
 
 /// Commands for inspecting and changing repository protection rules.
@@ -2180,6 +2339,24 @@ mod tests {
 
     /// Smoke test: CLI definition is valid and parseable.
     #[test]
+    fn output_format_env_is_a_lenient_default_but_the_flag_stays_strict() {
+        use std::ffi::OsStr;
+        assert!(matches!(env_output_format(None), OutputFormat::Json));
+        for ignored in ["", "agent-v2"] {
+            assert!(matches!(
+                env_output_format(Some(OsStr::new(ignored))),
+                OutputFormat::Json
+            ));
+        }
+        assert!(matches!(
+            env_output_format(Some(OsStr::new("agent"))),
+            OutputFormat::Agent
+        ));
+        assert!(parse_args(["buzz", "--format", "agent", "pack", "validate", "x"]).is_ok());
+        assert!(parse_args(["buzz", "--format", "agent-v2", "pack", "validate", "x"]).is_err());
+    }
+
+    #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
     }
@@ -2223,6 +2400,29 @@ mod tests {
             event.as_str(),
         ])
         .is_err());
+    }
+
+    /// `canvas history --limit` is bounded 1–10000 at parse time: zero and
+    /// max+1 reject, the maximum is accepted, and the max stays above one
+    /// 1,000-row relay page so the >1,000 pagination path remains reachable.
+    #[test]
+    fn canvas_history_limit_is_bounded() {
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+        let parse = |limit: &str| {
+            Cli::try_parse_from([
+                "buzz",
+                "canvas",
+                "history",
+                "--channel",
+                channel,
+                "--limit",
+                limit,
+            ])
+        };
+        assert!(parse("0").is_err(), "zero must reject");
+        assert!(parse("10001").is_err(), "max+1 must reject");
+        assert!(parse("10000").is_ok(), "maximum must be accepted");
+        assert!(parse("1000").is_ok(), "one relay page must be reachable");
     }
 
     #[test]
@@ -2360,7 +2560,10 @@ mod tests {
                 "update"
             ]
         );
-        assert_eq!(names(&cmd, "canvas"), vec!["get", "set"]);
+        assert_eq!(
+            names(&cmd, "canvas"),
+            vec!["get", "history", "restore", "set"]
+        );
         assert_eq!(names(&cmd, "reactions"), vec!["add", "get", "remove"]);
         assert_eq!(
             names(&cmd, "emoji"),
@@ -2399,12 +2602,13 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "repos"),
-            vec!["bind", "create", "get", "list", "protect"]
+            vec!["bind", "create", "default-branch", "get", "list", "protect"]
         );
         let repos = cmd
             .get_subcommands()
             .find(|subcommand| subcommand.get_name() == "repos")
             .expect("repos command");
+        assert_eq!(names(repos, "default-branch"), vec!["get", "set"]);
         let protect = repos
             .get_subcommands()
             .find(|subcommand| subcommand.get_name() == "protect")
@@ -2463,7 +2667,7 @@ mod tests {
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
             ("agents", 5),
-            ("canvas", 2),
+            ("canvas", 4),
             ("channels", 16),
             ("dms", 4),
             ("emoji", 5),
@@ -2476,7 +2680,7 @@ mod tests {
             ("pr", 5),
             ("projects", 8),
             ("reactions", 3),
-            ("repos", 5),
+            ("repos", 6),
             ("social", 7),
             ("upload", 1),
             ("users", 5),

@@ -5,16 +5,20 @@ import test from "node:test";
 import {
   buildReconnectReplayFilter,
   DB_CREATED_AT_FLOOR_SECS,
+  LIVE_REQ_ACK_TIMEOUT_MS,
   FENCE_CLOCK_MARGIN_SECS,
   RELAY_INGEST_FUTURE_TOLERANCE_SECS,
   RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS,
   replayReconnectHistoryPages,
   PAGE_REPLAY_MAX_ATTEMPTS,
   replayLiveSubscriptions,
+  releaseLiveEoseWaiter,
   REPLAY_BATCH_SIZE,
+  retireConnectionSubscriptions,
   shouldPageReconnectReplay,
 } from "./relayReconnectReplay.ts";
 import { buildChannelFilter } from "./relayChannelFilters.ts";
+import { stampLiveUntilOnClose } from "./relayResumeCursor.ts";
 import {
   flushEvents,
   markReconnectLiveEose,
@@ -90,6 +94,20 @@ function eventRange(prefix, start, count) {
   return Array.from({ length: count }, (_, index) =>
     event(`${prefix}-${index}`, start + index),
   ).reverse();
+}
+
+// Plays the relay for paged channels: acknowledges each restored live REQ with
+// EOSE exactly as the session's EOSE handler would, which releases the HTTP
+// repair (it must start only after the live REQ is registered).
+function ackingSendRaw(subscriptions, generation = 0, sent = []) {
+  return async (payload) => {
+    sent.push(payload);
+    if (payload[0] !== "REQ") return;
+    queueMicrotask(() => {
+      const subscription = subscriptions.get(payload[1]);
+      if (subscription) markReconnectLiveEose(subscription, generation);
+    });
+  };
 }
 
 function replayFilter(filter, since, until) {
@@ -605,15 +623,14 @@ test("channel reconnect replay pages the missed window until a short page", asyn
 
   await replayLiveSubscriptions({
     subscriptions,
-    sendRaw: async (payload) => {
-      sentPayloads.push(payload);
-    },
+    sendRaw: ackingSendRaw(subscriptions, 0, sentPayloads),
     requestRepair: async (request) => {
       historyFilters.push(request);
       return pages.shift() ?? [];
     },
   });
 
+  // The repair pages cover the window, so the live REQ reads no history.
   assert.deepEqual(sentPayloads, [
     [
       "REQ",
@@ -621,7 +638,7 @@ test("channel reconnect replay pages the missed window until a short page", asyn
       {
         kinds: filter.kinds,
         "#h": ["channel-1"],
-        limit: 50,
+        limit: 0,
       },
     ],
   ]);
@@ -673,7 +690,7 @@ test("native repair preserves an explicit subscription since boundary", async ()
 
   await replayLiveSubscriptions({
     subscriptions,
-    sendRaw: async () => {},
+    sendRaw: ackingSendRaw(subscriptions),
     requestRepair: async (request) => {
       repairRequests.push(request);
       return [];
@@ -761,6 +778,9 @@ test("reconnect replay starts live REQs in parallel and preserves per-sub page o
 
   for (const resolve of sendResolvers) {
     resolve();
+  }
+  for (const subscription of subscriptions.values()) {
+    markReconnectLiveEose(subscription, 0);
   }
   await replayPromise;
 
@@ -900,7 +920,7 @@ test("disposed subscription receives no repair events after an in-flight page", 
 
   await replayLiveSubscriptions({
     subscriptions,
-    sendRaw: async () => {},
+    sendRaw: ackingSendRaw(subscriptions),
     requestRepair: async () => {
       assert.equal(subscriptions.delete("live-1"), true);
       return [event("disposed", 1001)];
@@ -934,7 +954,7 @@ test("stale repair cannot clear the successor generation dedupe state", async ()
     subscriptions,
     generation: 10,
     isActive: () => generationActive,
-    sendRaw: async () => {},
+    sendRaw: ackingSendRaw(subscriptions, 10),
     requestRepair: async () => {
       startRepair();
       return repairPage;
@@ -981,7 +1001,7 @@ test("history backfill rejection never escapes replayLiveSubscriptions", async (
   // Must resolve — a rejection here is the socket-killing flap regression.
   await replayLiveSubscriptions({
     subscriptions,
-    sendRaw: async () => {},
+    sendRaw: ackingSendRaw(subscriptions),
     requestRepair: async () => {
       historyCalls++;
       throw new Error("rate-limited: quota exceeded; retry in 4s");
@@ -1018,7 +1038,7 @@ test("backfill retry waits out the armed gate, then succeeds", async () => {
   });
   const replayPromise = replayLiveSubscriptions({
     subscriptions,
-    sendRaw: async () => {},
+    sendRaw: ackingSendRaw(subscriptions),
     requestRepair: async () => {
       attemptAtMs.push(fakeNow);
       if (attemptAtMs.length === 1) {
@@ -1064,7 +1084,7 @@ test("backfill retry aborts when the subscription was replaced", async () => {
   let historyCalls = 0;
   await replayLiveSubscriptions({
     subscriptions,
-    sendRaw: async () => {},
+    sendRaw: ackingSendRaw(subscriptions),
     requestRepair: async () => {
       historyCalls++;
       // Simulate the subscription being torn down while the REQ is in flight.
@@ -1098,7 +1118,7 @@ test("exhausted backfill pins the floor: next replay still requests the original
   // Reconnect 1: every backfill attempt is rate-limited.
   await replayLiveSubscriptions({
     subscriptions,
-    sendRaw: async () => {},
+    sendRaw: ackingSendRaw(subscriptions),
     requestRepair: async () => {
       throw new Error("rate-limited: quota exceeded; retry in 4s");
     },
@@ -1117,7 +1137,7 @@ test("exhausted backfill pins the floor: next replay still requests the original
   const historyFilters = [];
   await replayLiveSubscriptions({
     subscriptions,
-    sendRaw: async () => {},
+    sendRaw: ackingSendRaw(subscriptions),
     requestRepair: async (request) => {
       historyFilters.push(request);
       return [];
@@ -1140,7 +1160,7 @@ test("exhausted backfill pins the floor: next replay still requests the original
   const laterFilters = [];
   await replayLiveSubscriptions({
     subscriptions,
-    sendRaw: async () => {},
+    sendRaw: ackingSendRaw(subscriptions),
     requestRepair: async (request) => {
       laterFilters.push(request);
       return [];
@@ -1174,7 +1194,7 @@ test("in-flight stale abort keeps the pinned floor for the superseding connectio
   let historyCalls = 0;
   await replayLiveSubscriptions({
     subscriptions,
-    sendRaw: async () => {},
+    sendRaw: ackingSendRaw(subscriptions),
     isActive: () => generationActive,
     requestRepair: async () => {
       historyCalls++;
@@ -1217,10 +1237,11 @@ test("future-dated cursor repairs backdated edits and deletions", async () => {
     lastSeenCreatedAt: 10_900,
   };
   const requests = [];
+  const subscriptions = new Map([["live-1", subscription]]);
   await replayLiveSubscriptions({
-    subscriptions: new Map([["live-1", subscription]]),
+    subscriptions,
     generation: 11,
-    sendRaw: async () => {},
+    sendRaw: ackingSendRaw(subscriptions, 11),
     requestRepair: async (request) => {
       requests.push(request);
       return recovered;
@@ -1247,10 +1268,11 @@ test("dense-second repair advances by event id without gaps", async () => {
   const dense = Array.from({ length: 1_205 }, (_, index) =>
     event(index.toString().padStart(64, "0"), 2000),
   );
+  const subscriptions = new Map([["live-1", subscription]]);
   await replayLiveSubscriptions({
-    subscriptions: new Map([["live-1", subscription]]),
+    subscriptions,
     generation: 7,
-    sendRaw: async () => {},
+    sendRaw: ackingSendRaw(subscriptions, 7),
     requestRepair: async (request) => {
       requests.push(request);
       const start = request.beforeId
@@ -1349,9 +1371,722 @@ test("live-before-repair and repair-before-live dispatch once", async () => {
   }
 });
 
+// ── Resume cursor (liveUntil) and live-only REQ for paged channels ────────────
+
+async function drainMicrotasks() {
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+}
+
+function liveSub(filter, overrides = {}) {
+  return { mode: "live", filter, onEvent: () => {}, ...overrides };
+}
+
+async function replayOne(subscription, { generation = 0, repairs = [] } = {}) {
+  const subscriptions = new Map([["live-1", subscription]]);
+  const sent = [];
+  await replayLiveSubscriptions({
+    subscriptions,
+    generation,
+    sendRaw: ackingSendRaw(subscriptions, generation, sent),
+    requestRepair: async (request) => {
+      repairs.push(request);
+      return [];
+    },
+  });
+  return { sent, repairs };
+}
+
+// A clock far enough past each test's liveUntil that the silent-drop window
+// does not bind; the next test covers the window itself.
+const RESUME_NOW_MS = 200_000_000;
+
+test("a recent liveUntil resumes no later than the silent-drop window", async () => {
+  resetGate(RESUME_NOW_MS);
+  const nowSecs = RESUME_NOW_MS / 1_000;
+  const quiet = { kinds: [9], "#h": ["a", "b"], limit: 1000 };
+  const quietReplay = await replayOne(liveSub(quiet, { liveUntil: nowSecs }));
+  assert.equal(quietReplay.sent[0][2].since, nowSecs - 3_600);
+  const paged = buildChannelFilter("channel-1", 1000);
+  const { repairs } = await replayOne(liveSub(paged, { liveUntil: nowSecs }));
+  assert.equal(
+    repairs[0].since,
+    nowSecs - 3_600,
+    "a fan-out the relay dropped within the window is repaired",
+  );
+});
+
+test("quiet non-paged subscription resumes from liveUntil - 960s with its full limit", async () => {
+  resetGate(RESUME_NOW_MS); // liveUntil is older than the silent-drop window
+  const filter = { kinds: [9], "#h": ["a", "b"], limit: 1000, since: 100 };
+  const { sent, repairs } = await replayOne(
+    liveSub(filter, { liveUntil: 10_000 }),
+  );
+  assert.deepEqual(sent, [
+    ["REQ", "live-1", { ...filter, since: 9_040, limit: 1000 }],
+  ]);
+  assert.deepEqual(
+    repairs,
+    [],
+    "non-paged subscriptions never use HTTP repair",
+  );
+});
+
+test("a backdated event stored after the close is inside the resume window", async () => {
+  resetGate();
+  const filter = { kinds: [9], "#h": ["a", "b"], limit: 1000 };
+  const liveUntil = 100_000;
+  const { sent } = await replayOne(liveSub(filter, { liveUntil }));
+  const { since } = sent[0][2];
+  // The relay accepts created_at up to 900s behind its clock, so a row stored
+  // just after the close can be backdated by the full drift window. Add the
+  // client clock margin: a client clock 60s ahead must not lose it either.
+  const stored = [
+    event("backdated-max", liveUntil - RELAY_INGEST_FUTURE_TOLERANCE_SECS),
+    event(
+      "backdated-skewed-clock",
+      liveUntil - RELAY_INGEST_FUTURE_TOLERANCE_SECS - 59,
+    ),
+    event("backdated-1s", liveUntil - 1),
+  ];
+  for (const row of stored) {
+    assert.ok(
+      row.created_at >= since,
+      `${row.id} (created_at ${row.created_at}) must satisfy REQ since ${since}`,
+    );
+  }
+});
+
+test("resume since never drops below the original filter since", async () => {
+  resetGate();
+  const filter = { kinds: [9], "#h": ["a", "b"], limit: 50, since: 9_990 };
+  const { sent } = await replayOne(liveSub(filter, { liveUntil: 10_000 }));
+  assert.equal(sent[0][2].since, 9_990);
+});
+
+test("resume uses the newer of lastSeen - 5s and liveUntil - 960s and caps limit as before", async () => {
+  resetGate(RESUME_NOW_MS); // liveUntil is older than the silent-drop window
+  const filter = { kinds: [9], "#h": ["a", "b"], limit: 1000 };
+  for (const [lastSeen, liveUntil, since] of [
+    [10_000, 9_000, 9_995],
+    [9_000, 10_000, 9_040],
+  ]) {
+    const { sent } = await replayOne(
+      liveSub(filter, { lastSeenCreatedAt: lastSeen, liveUntil }),
+    );
+    assert.deepEqual(sent[0][2], { ...filter, since, limit: 500 });
+  }
+});
+
+test("a subscription with no cursor still replays its original filter", async () => {
+  resetGate();
+  const filter = { kinds: [9], "#h": ["a", "b"], limit: 1000, since: 100 };
+  const { sent } = await replayOne(liveSub(filter));
+  assert.equal(sent[0][2], filter);
+  const paged = buildChannelFilter("channel-1", 1000);
+  const second = await replayOne(liveSub(paged));
+  assert.equal(
+    second.sent[0][2],
+    paged,
+    "no cursor means no repair to lean on",
+  );
+  assert.deepEqual(second.repairs, []);
+});
+
+test("paged channel resumes from liveUntil with a live-only REQ and a bounded HTTP repair", async () => {
+  resetGate(RESUME_NOW_MS); // liveUntil is older than the silent-drop window
+  const filter = { ...buildChannelFilter("channel-1", 1000), since: 100 };
+  const { sent, repairs } = await replayOne(
+    liveSub(filter, { liveUntil: 100_000 }),
+  );
+  // The repair covers the window, so the relay does no history read.
+  assert.deepEqual(sent, [["REQ", "live-1", { ...filter, limit: 0 }]]);
+  assert.equal(
+    repairs[0].since,
+    100_000 - RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS,
+    "channel repair keeps the wide event-time lookback",
+  );
+  assert.equal(repairs.length, 1);
+});
+
+test("a pinned failed-backfill floor beats a newer liveUntil", async () => {
+  resetGate(RESUME_NOW_MS); // liveUntil is older than the silent-drop window
+  const subscription = liveSub(buildChannelFilter("channel-1", 1000), {
+    liveUntil: 100_000,
+    pendingReplaySince: 4_000,
+  });
+  const { repairs } = await replayOne(subscription);
+  assert.equal(repairs[0].since, 4_000, "never advance past a recorded gap");
+});
+
+test("paged repair starts only after the live-only REQ is acknowledged", async () => {
+  resetGate();
+  const subscription = liveSub(buildChannelFilter("channel-1", 1000), {
+    lastSeenCreatedAt: 5_000,
+  });
+  const subscriptions = new Map([["live-1", subscription]]);
+  const repairs = [];
+  const replay = replayLiveSubscriptions({
+    subscriptions,
+    sendRaw: async () => {},
+    requestRepair: async (request) => {
+      repairs.push(request);
+      return [];
+    },
+  });
+  await drainMicrotasks();
+  assert.deepEqual(
+    repairs,
+    [],
+    "no repair before EOSE: the gap would be unowned",
+  );
+  markReconnectLiveEose(subscription, 0);
+  await replay;
+  assert.equal(repairs.length, 1);
+});
+
+test("an unacknowledged live REQ falls back after one deadline instead of repairing blind", async () => {
+  resetGate();
+  const filter = buildChannelFilter("channel-1", 1000);
+  const subscription = liveSub(filter, { lastSeenCreatedAt: 5_000 });
+  const repairs = [];
+  const sent = [];
+  const replay = replayLiveSubscriptions({
+    subscriptions: new Map([["live-1", subscription]]),
+    sendRaw: async (payload) => {
+      sent.push(payload);
+    },
+    requestRepair: async (request) => {
+      repairs.push(request);
+      return [];
+    },
+  });
+  await drainMicrotasks();
+  tickTo(fakeNow + LIVE_REQ_ACK_TIMEOUT_MS);
+  await replay;
+  // Waiting again on the same unchanged REQ cannot make its EOSE arrive.
+  assert.deepEqual(sent, [
+    ["REQ", "live-1", { ...filter, limit: 0 }],
+    [
+      "REQ",
+      "live-1",
+      buildReconnectReplayFilter(
+        filter,
+        5_000 - RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS,
+      ),
+    ],
+  ]);
+  assert.deepEqual(repairs, [], "bounded: never repairs without the overlap");
+  assert.equal(
+    subscription.pendingReplaySince,
+    5_000 - RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS,
+    "the window stays pinned for the next reconnect",
+  );
+  // Only the history fallback's dedupe deadline remains; it releases the set.
+  assert.equal(pendingTimers.size, 1, "no ack timer is left armed");
+  tickTo(fakeNow + LIVE_REQ_ACK_TIMEOUT_MS);
+  assert.equal(subscription.reconnectReplay, undefined);
+  assert.equal(pendingTimers.size, 0);
+});
+
+test("every paged repair floor is pinned before any live-only REQ, so a queued channel survives a second disconnect", async () => {
+  resetGate();
+  const lastSeen = 5_000;
+  const delivered = [];
+  const originalFloor = lastSeen - RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS;
+  const subscriptions = new Map(
+    Array.from({ length: 5 }, (_, i) => [
+      `live-${i + 1}`,
+      liveSub(buildChannelFilter(`channel-${i + 1}`, 1000), {
+        lastSeenCreatedAt: lastSeen,
+        onEvent: (value) => delivered.push(value.id),
+      }),
+    ]),
+  );
+  // Only the first PAGE_CONCURRENCY (4) repairs start; the 5th stays queued.
+  const blocked = [];
+  let firstConnectionActive = true;
+  const first = replayLiveSubscriptions({
+    subscriptions,
+    generation: 0,
+    isActive: () => firstConnectionActive,
+    sendRaw: ackingSendRaw(subscriptions, 0),
+    requestRepair: (request) =>
+      new Promise((resolve) => blocked.push({ request, resolve })),
+  });
+  await drainMicrotasks();
+  assert.equal(blocked.length, 4, "precondition: the 5th repair is queued");
+  const queued = subscriptions.get("live-5");
+  assert.equal(queued.reconnectReplay.liveEose, true, "5th live REQ was acked");
+  assert.equal(
+    queued.pendingReplaySince,
+    originalFloor,
+    "the queued channel's floor is pinned although its worker never ran",
+  );
+
+  // The session's EOSE handler records the generation, and the socket drops
+  // again before the queued repair ever ran.
+  for (const subscription of subscriptions.values()) {
+    subscription.eoseGeneration = 0;
+  }
+  stampLiveUntilOnClose(subscriptions, 0, 200_000_000, 200_000_000);
+  assert.equal(queued.liveUntil, 200_000);
+  firstConnectionActive = false;
+
+  // A message older than the (advanced) lookback that was never fetched.
+  const missed = event("missed-old", 4_000);
+  const repairs = [];
+  await replayLiveSubscriptions({
+    subscriptions,
+    generation: 1,
+    sendRaw: ackingSendRaw(subscriptions, 1),
+    requestRepair: async (request) => {
+      repairs.push(request);
+      return request.channelId === "channel-5" &&
+        missed.created_at >= request.since
+        ? [missed]
+        : [];
+    },
+  });
+  const fifth = repairs.find((request) => request.channelId === "channel-5");
+  assert.equal(
+    fifth.since,
+    originalFloor,
+    "never advance past an unrepaired floor",
+  );
+  assert.ok(
+    missed.created_at < 200_000 - RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS,
+  );
+  assert.deepEqual(delivered, ["missed-old"], "the old message is recovered");
+  assert.equal(
+    queued.pendingReplaySince,
+    undefined,
+    "cleared by the completed repair",
+  );
+
+  for (const { resolve } of blocked) resolve([]);
+  await first;
+});
+
+test("a superseding replay releases the stale worker without a repair", async () => {
+  resetGate();
+  const subscription = liveSub(buildChannelFilter("channel-1", 1000), {
+    lastSeenCreatedAt: 5_000,
+  });
+  const subscriptions = new Map([["live-1", subscription]]);
+  let active = true;
+  const repairs = [];
+  const stale = replayLiveSubscriptions({
+    subscriptions,
+    generation: 1,
+    isActive: () => active,
+    sendRaw: async () => {},
+    requestRepair: async (request) => {
+      repairs.push(request);
+      return [];
+    },
+  });
+  await drainMicrotasks();
+  active = false;
+  // The successor installs its own replay state on the shared subscription.
+  await replayLiveSubscriptions({
+    subscriptions,
+    generation: 2,
+    sendRaw: ackingSendRaw(subscriptions, 2),
+    requestRepair: async (request) => {
+      repairs.push(request);
+      return [];
+    },
+  });
+  await stale;
+  assert.equal(repairs.length, 1, "only the live generation repairs");
+  assert.equal(pendingTimers.size, 0);
+});
+
 // ── Teardown ──────────────────────────────────────────────────────────────────
 
 test("teardown — restore Date.now", () => {
   Date.now = origDateNow;
   assert.ok(true);
+});
+
+test("a connection reset releases repair workers parked on EOSE at once", async () => {
+  resetGate();
+  const subscriptions = new Map(
+    ["channel-1", "channel-2"].map((channelId, i) => [
+      `live-${i + 1}`,
+      liveSub(buildChannelFilter(channelId, 1000), {
+        lastSeenCreatedAt: 5_000,
+        eoseGeneration: 0,
+      }),
+    ]),
+  );
+  let active = true;
+  let settled = false;
+  const repairs = [];
+  const replay = replayLiveSubscriptions({
+    subscriptions,
+    isActive: () => active,
+    // One worker: the second channel is still queued behind the first.
+    pageReplayConcurrency: 1,
+    sendRaw: async () => {},
+    requestRepair: async (request) => {
+      repairs.push(request);
+      return [];
+    },
+  }).then(() => {
+    settled = true;
+  });
+  await drainMicrotasks();
+  assert.equal(settled, false, "precondition: parked on the live EOSE");
+
+  // The session's resetConnection: generation moves on, then retirement.
+  active = false;
+  retireConnectionSubscriptions(subscriptions, 0, 4_000_000);
+  await drainMicrotasks();
+  assert.equal(
+    settled,
+    true,
+    "connect() must not wait LIVE_REQ_ACK_TIMEOUT_MS on a dead socket",
+  );
+  await replay;
+  assert.deepEqual(
+    repairs,
+    [],
+    "neither the parked nor the queued worker repaired",
+  );
+  assert.equal(pendingTimers.size, 0, "no ack timer outlives the connection");
+  for (const subscription of subscriptions.values()) {
+    assert.equal(
+      subscription.pendingReplaySince,
+      5_000 - RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS,
+      "the unrepaired window stays pinned",
+    );
+  }
+});
+
+test("disposing a subscription releases its parked repair worker", async () => {
+  resetGate();
+  const subscription = liveSub(buildChannelFilter("channel-1", 1000), {
+    lastSeenCreatedAt: 5_000,
+  });
+  const subscriptions = new Map([["live-1", subscription]]);
+  let settled = false;
+  const replay = replayLiveSubscriptions({
+    subscriptions,
+    sendRaw: async () => {},
+    requestRepair: async () => assert.fail("a disposed sub must not repair"),
+  }).then(() => {
+    settled = true;
+  });
+  await drainMicrotasks();
+  subscriptions.delete("live-1");
+  releaseLiveEoseWaiter(subscription);
+  await drainMicrotasks();
+  assert.equal(settled, true);
+  await replay;
+  assert.equal(pendingTimers.size, 0);
+});
+
+test("the EOSE wait cancels its timer through the injected clear function", async () => {
+  resetGate();
+  const subscription = liveSub(buildChannelFilter("channel-1", 1000), {
+    lastSeenCreatedAt: 5_000,
+  });
+  const injected = new Map();
+  const cleared = [];
+  let nextHandle = 9_000;
+  const replay = replayLiveSubscriptions({
+    subscriptions: new Map([["live-1", subscription]]),
+    sendRaw: async () => {},
+    requestRepair: async () => [],
+    setTimeoutFn: (fn, ms) => {
+      injected.set(++nextHandle, { fn, ms });
+      return nextHandle;
+    },
+    clearTimeoutFn: (handle) => {
+      cleared.push(handle);
+      injected.delete(handle);
+    },
+  });
+  await drainMicrotasks();
+  const [[handle, timer]] = [...injected];
+  assert.equal(timer.ms, LIVE_REQ_ACK_TIMEOUT_MS);
+  markReconnectLiveEose(subscription, 0);
+  await replay;
+  assert.deepEqual(cleared, [handle], "cancelled by the matching clear");
+  assert.equal(injected.size, 0);
+});
+
+test("an exhausted repair falls back to the window's bounded history on the same connection", async () => {
+  resetGate();
+  const filter = buildChannelFilter("channel-1", 1000);
+  const subscription = liveSub(filter, { lastSeenCreatedAt: 5_000 });
+  const subscriptions = new Map([["live-1", subscription]]);
+  const sent = [];
+  let attempts = 0;
+  await replayLiveSubscriptions({
+    subscriptions,
+    sendRaw: ackingSendRaw(subscriptions, 0, sent),
+    requestRepair: async () => {
+      attempts++;
+      throw new Error("error: database error");
+    },
+  });
+  const floor = 5_000 - RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS;
+  assert.equal(attempts, PAGE_REPLAY_MAX_ATTEMPTS);
+  assert.deepEqual(sent, [
+    ["REQ", "live-1", { ...filter, limit: 0 }],
+    ["REQ", "live-1", buildReconnectReplayFilter(filter, floor)],
+  ]);
+  assert.equal(sent[1][2].since, floor, "history from the missed window");
+  assert.ok(sent[1][2].limit > 0, "the fallback reads history");
+  assert.equal(
+    subscription.pendingReplaySince,
+    floor,
+    "the floor stays pinned for anything the cap left out",
+  );
+});
+
+test("a superseded replay sends no history fallback", async () => {
+  resetGate();
+  const subscription = liveSub(buildChannelFilter("channel-1", 1000), {
+    lastSeenCreatedAt: 5_000,
+  });
+  const subscriptions = new Map([["live-1", subscription]]);
+  const sent = [];
+  let active = true;
+  let attempts = 0;
+  await replayLiveSubscriptions({
+    subscriptions,
+    isActive: () => active,
+    sendRaw: ackingSendRaw(subscriptions, 0, sent),
+    requestRepair: async () => {
+      if (++attempts === PAGE_REPLAY_MAX_ATTEMPTS) active = false;
+      throw new Error("error: database error");
+    },
+  });
+  assert.equal(attempts, PAGE_REPLAY_MAX_ATTEMPTS);
+  assert.equal(sent.length, 1, "only the original live-only REQ went out");
+});
+
+test("the exhausted-repair fallback keeps dedupe until its own EOSE", async () => {
+  resetGate();
+  const subscription = liveSub(buildChannelFilter("channel-1", 1000), {
+    lastSeenCreatedAt: 5_000,
+  });
+  const subscriptions = new Map([["live-1", subscription]]);
+  const event = { id: "seen-live", created_at: 4_900 };
+  let dispatched = 0;
+  let dedupeDuringFallback;
+  await replayLiveSubscriptions({
+    subscriptions,
+    sendRaw: async (payload) => {
+      if (payload[0] !== "REQ") return;
+      const fallback = payload[2].limit !== 0;
+      queueMicrotask(() => {
+        if (fallback) dedupeDuringFallback = !!subscription.reconnectReplay;
+        // Live delivers it first; the fallback's history returns it again.
+        if (shouldDispatchSubscriptionEvent(subscription, event)) dispatched++;
+        markReconnectLiveEose(subscription, 0);
+      });
+    },
+    requestRepair: async () => {
+      throw new Error("error: database error");
+    },
+  });
+  await drainMicrotasks();
+  assert.equal(dedupeDuringFallback, true);
+  assert.equal(dispatched, 1, "the fallback must not redeliver a live event");
+  assert.equal(
+    subscription.reconnectReplay,
+    undefined,
+    "the fallback's own EOSE ends dedupe",
+  );
+  assert.equal(pendingTimers.size, 0, "and cancels the dedupe deadline");
+});
+
+test("a failed fallback REQ ends dedupe", async () => {
+  resetGate();
+  const subscription = liveSub(buildChannelFilter("channel-1", 1000), {
+    lastSeenCreatedAt: 5_000,
+  });
+  const subscriptions = new Map([["live-1", subscription]]);
+  const acking = ackingSendRaw(subscriptions);
+  await replayLiveSubscriptions({
+    subscriptions,
+    sendRaw: async (payload) => {
+      if (payload[0] === "REQ" && payload[2].limit !== 0) {
+        throw new Error("socket closed");
+      }
+      await acking(payload);
+    },
+    requestRepair: async () => {
+      throw new Error("error: database error");
+    },
+  });
+  assert.equal(subscription.reconnectReplay, undefined);
+});
+
+for (const replaced of [false, true]) {
+  test(`a ${replaced ? "replacement" : "disposal"} racing the fallback REQ ${replaced ? "is left open" : "is closed again"}`, async () => {
+    resetGate();
+    const filter = buildChannelFilter("channel-1", 1000);
+    const subscription = liveSub(filter, { lastSeenCreatedAt: 5_000 });
+    const subscriptions = new Map([["live-1", subscription]]);
+    const sent = [];
+    let markStarted;
+    const started = new Promise((resolve) => {
+      markStarted = resolve;
+    });
+    let release;
+    const held = new Promise((resolve) => {
+      release = resolve;
+    });
+    const run = replayLiveSubscriptions({
+      subscriptions,
+      sendRaw: async (payload) => {
+        sent.push(payload);
+        if (payload[0] !== "REQ") return;
+        if (payload[2].limit === 0) {
+          queueMicrotask(() => markReconnectLiveEose(subscription, 0));
+          return;
+        }
+        markStarted();
+        await held;
+      },
+      requestRepair: async () => {
+        throw new Error("error: database error");
+      },
+    });
+    await started;
+    subscriptions.delete("live-1");
+    if (replaced) subscriptions.set("live-1", liveSub(filter));
+    release();
+    await run;
+    assert.deepEqual(
+      sent.map((frame) => frame[0]),
+      replaced ? ["REQ", "REQ"] : ["REQ", "REQ", "CLOSE"],
+    );
+    if (!replaced) assert.deepEqual(sent[2], ["CLOSE", "live-1"]);
+  });
+}
+
+async function exhaustWithLostFallbackEose(subscription) {
+  const subscriptions = new Map([["live-1", subscription]]);
+  await replayLiveSubscriptions({
+    subscriptions,
+    sendRaw: async (payload) => {
+      // The relay acknowledges the restored live REQ but drops the
+      // fallback's EOSE while the socket stays up.
+      if (payload[0] !== "REQ" || payload[2].limit !== 0) return;
+      queueMicrotask(() => markReconnectLiveEose(subscription, 0));
+    },
+    requestRepair: async () => {
+      throw new Error("error: database error");
+    },
+  });
+  await drainMicrotasks();
+}
+
+test("a lost fallback EOSE releases dedupe at the deadline", async () => {
+  resetGate();
+  const subscription = liveSub(buildChannelFilter("channel-1", 1000), {
+    lastSeenCreatedAt: 5_000,
+  });
+  await exhaustWithLostFallbackEose(subscription);
+  const retained = subscription.reconnectReplay;
+  assert.ok(retained, "precondition: dedupe waits for the fallback's EOSE");
+  for (let i = 0; i < 50; i++) {
+    shouldDispatchSubscriptionEvent(subscription, event(`live-${i}`, 5_100));
+  }
+  assert.equal(retained.seenEventIds.size, 50, "live traffic grows the set");
+  tickTo(fakeNow + LIVE_REQ_ACK_TIMEOUT_MS);
+  assert.equal(subscription.reconnectReplay, undefined, "released");
+  assert.equal(pendingTimers.size, 0);
+  assert.equal(
+    subscription.pendingReplaySince,
+    5_000 - RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS,
+    "the unrepaired window stays pinned",
+  );
+});
+
+test("a stale fallback release cannot clear a successor's dedupe", async () => {
+  resetGate();
+  const subscription = liveSub(buildChannelFilter("channel-1", 1000), {
+    lastSeenCreatedAt: 5_000,
+  });
+  await exhaustWithLostFallbackEose(subscription);
+  const staleRelease = subscription.reconnectReplay.liveEoseWaiter;
+  const successorWaiter = () => {};
+  const successor = {
+    generation: 1,
+    seenEventIds: new Set(["next"]),
+    liveEose: false,
+    repairDone: false,
+    liveEoseWaiter: successorWaiter,
+  };
+  subscription.reconnectReplay = successor;
+  staleRelease();
+  tickTo(fakeNow + LIVE_REQ_ACK_TIMEOUT_MS);
+  assert.equal(subscription.reconnectReplay, successor);
+  assert.equal(successor.liveEoseWaiter, successorWaiter);
+});
+
+test("each EOSE deadline runs from its REQ's send, not from when a queued worker starts", async () => {
+  resetGate();
+  const subscriptions = new Map(
+    [1, 2].map((i) => [
+      `live-${i}`,
+      liveSub(buildChannelFilter(`channel-${i}`, 1000), {
+        lastSeenCreatedAt: 5_000,
+      }),
+    ]),
+  );
+  const fallbacks = [];
+  const replay = replayLiveSubscriptions({
+    subscriptions,
+    pageReplayConcurrency: 1,
+    sendRaw: async (payload) => {
+      if (payload[0] === "REQ" && payload[2].limit !== 0) {
+        fallbacks.push(payload[1]);
+      }
+    },
+    requestRepair: async () => assert.fail("never acknowledged"),
+  });
+  await drainMicrotasks();
+  // One deadline covers both: the queued second channel gets no fresh wait.
+  tickTo(fakeNow + LIVE_REQ_ACK_TIMEOUT_MS);
+  await drainMicrotasks();
+  tickTo(fakeNow);
+  await drainMicrotasks();
+  assert.deepEqual(fallbacks, ["live-1", "live-2"]);
+  await replay;
+});
+
+test("a late original EOSE after the ack timeout does not end the fallback's dedupe", async () => {
+  resetGate();
+  const subscription = liveSub(buildChannelFilter("channel-1", 1000), {
+    lastSeenCreatedAt: 5_000,
+  });
+  const event = { id: "seen-live", created_at: 4_900 };
+  let dispatched = 0;
+  const deliver = () => {
+    if (shouldDispatchSubscriptionEvent(subscription, event)) dispatched++;
+  };
+  const replay = replayLiveSubscriptions({
+    subscriptions: new Map([["live-1", subscription]]),
+    sendRaw: async () => {},
+    requestRepair: async () => assert.fail("never acknowledged"),
+  });
+  await drainMicrotasks();
+  deliver(); // live delivers it while the REQ is unacknowledged
+  tickTo(fakeNow + LIVE_REQ_ACK_TIMEOUT_MS);
+  await replay; // the fallback REQ went out
+  markReconnectLiveEose(subscription, 0); // the original's EOSE, late
+  deliver(); // the fallback's history returns it again
+  assert.equal(dispatched, 1, "dispatched once");
+  assert.ok(subscription.reconnectReplay, "dedupe waits for the deadline");
+  tickTo(fakeNow + LIVE_REQ_ACK_TIMEOUT_MS);
+  assert.equal(subscription.reconnectReplay, undefined);
+  assert.equal(pendingTimers.size, 0);
 });

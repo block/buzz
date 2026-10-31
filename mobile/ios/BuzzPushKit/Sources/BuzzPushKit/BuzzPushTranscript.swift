@@ -2,15 +2,17 @@ import Foundation
 
 /// Errors thrown by the canonical transcript encoder.
 public enum BuzzPushTranscriptError: Error, Equatable {
-    /// A string field contained non-ASCII scalars. NIP-PL admits only ASCII
+    /// A string field contained non-ASCII scalars. Buzz push admits only ASCII
     /// authority-bearing strings; rather than guess at UTF-8-vs-escaping
     /// behavior we fail closed.
     case nonASCIIInput(field: String)
+    /// The configured gateway was not an HTTP or HTTPS origin.
+    case invalidGatewayOrigin
 }
 
-/// Canonical NIP-PL App Attest transcript encoder.
+/// Canonical Buzz push App Attest transcript encoder.
 ///
-/// NIP-PL ("Exact App Attest transcript construction") pins the exact bytes
+/// Buzz push pins the exact bytes
 /// every App Attest operation signs:
 ///
 ///     <domain> + "\n" + <compact ordered JSON object>
@@ -27,11 +29,9 @@ public enum BuzzPushTranscriptError: Error, Equatable {
 /// generated and asserted by the gateway's own encoder. The tests in this
 /// package replay those vectors byte-for-byte.
 ///
-/// The `audience` member of each transcript is a **fixed protocol constant**
-/// defined by NIP-PL (`https://push.buzz.xyz/v1/...`). It is a cross-route
-/// domain-separation string, not a deployment URL: the gateway hardcodes it
-/// regardless of where it is hosted, so clients must never derive it from a
-/// discovered gateway base URL or relay host.
+/// The `audience` member uses the fixed origin and route registered by NIP-PL
+/// v1. A configurable gateway origin changes transport routing, not these
+/// protocol bytes.
 public enum BuzzPushTranscript {
     // MARK: Domains
 
@@ -41,37 +41,31 @@ public enum BuzzPushTranscript {
     public static let revokeDelegationDomain = "buzz.push.revoke-delegation.v1"
     public static let revokeInstallationDomain = "buzz.push.revoke-installation.v1"
 
-    // MARK: Fixed audiences (protocol constants, see type docs)
-
-    public static let enrollAudience = "https://push.buzz.xyz/v1/installations"
-    public static let delegateAudience = "https://push.buzz.xyz/v1/delegations"
-    public static let rotateEndpointAudience = "https://push.buzz.xyz/v1/installations/endpoint"
-    public static let revokeDelegationAudience = "https://push.buzz.xyz/v1/delegations/revoke"
-    public static let revokeInstallationAudience = "https://push.buzz.xyz/v1/installations/revoke"
-
-    /// Wire version pinned by NIP-PL. Every transcript carries `"v":1`.
+    /// Wire version for buzz-push-v1. Every transcript carries `"v":1`.
     public static let wireVersion: Int64 = 1
+
+    /// Origin registered by NIP-PL v1 for every App Attest transcript audience.
+    private static let registeredAudienceOrigin = "https://push.buzz.xyz"
 
     // MARK: Transcripts
 
     /// `buzz.push.enroll.v1` — these exact bytes are the App Attest
     /// `clientData` supplied to attestation verification.
     public static func enroll(
+        gatewayOrigin: URL,
         challengeId: UUID,
         challenge: String,
         keyId: String,
-        appProfile: String,
         endpoint: String,
         endpointEpoch: Int64,
         expiresAt: Int64
     ) throws -> Data {
         var o = CanonicalObject()
         o.int("v", wireVersion)
-        try o.string("audience", Self.enrollAudience)
+        try o.string("audience", audience(gatewayOrigin, route: "v1/installations"))
         o.uuid("challenge_id", challengeId)
         try o.string("challenge", challenge, field: "challenge")
         try o.string("key_id", keyId, field: "key_id")
-        try o.string("app_profile", appProfile, field: "app_profile")
         try o.string("endpoint", endpoint, field: "endpoint")
         o.int("endpoint_epoch", endpointEpoch)
         o.int("expires_at", expiresAt)
@@ -81,6 +75,7 @@ public enum BuzzPushTranscript {
     /// `buzz.push.delegate.v1` — `SHA-256(bytes)` is the assertion
     /// `clientDataHash`.
     public static func delegate(
+        gatewayOrigin: URL,
         challengeId: UUID,
         challenge: String,
         installationHandle: UUID,
@@ -92,7 +87,7 @@ public enum BuzzPushTranscript {
     ) throws -> Data {
         var o = CanonicalObject()
         o.int("v", wireVersion)
-        try o.string("audience", Self.delegateAudience)
+        try o.string("audience", audience(gatewayOrigin, route: "v1/delegations"))
         o.uuid("challenge_id", challengeId)
         try o.string("challenge", challenge, field: "challenge")
         o.uuid("installation_handle", installationHandle)
@@ -107,6 +102,7 @@ public enum BuzzPushTranscript {
     /// `buzz.push.rotate-endpoint.v1` — `SHA-256(bytes)` is the assertion
     /// `clientDataHash`.
     public static func rotateEndpoint(
+        gatewayOrigin: URL,
         challengeId: UUID,
         challenge: String,
         installationHandle: UUID,
@@ -116,7 +112,10 @@ public enum BuzzPushTranscript {
     ) throws -> Data {
         var o = CanonicalObject()
         o.int("v", wireVersion)
-        try o.string("audience", Self.rotateEndpointAudience)
+        try o.string(
+            "audience",
+            audience(gatewayOrigin, route: "v1/installations/endpoint")
+        )
         o.uuid("challenge_id", challengeId)
         try o.string("challenge", challenge, field: "challenge")
         o.uuid("installation_handle", installationHandle)
@@ -129,6 +128,7 @@ public enum BuzzPushTranscript {
     /// `buzz.push.revoke-delegation.v1` — `SHA-256(bytes)` is the assertion
     /// `clientDataHash`.
     public static func revokeDelegation(
+        gatewayOrigin: URL,
         challengeId: UUID,
         challenge: String,
         installationHandle: UUID,
@@ -137,7 +137,10 @@ public enum BuzzPushTranscript {
     ) throws -> Data {
         var o = CanonicalObject()
         o.int("v", wireVersion)
-        try o.string("audience", Self.revokeDelegationAudience)
+        try o.string(
+            "audience",
+            audience(gatewayOrigin, route: "v1/delegations/revoke")
+        )
         o.uuid("challenge_id", challengeId)
         try o.string("challenge", challenge, field: "challenge")
         o.uuid("installation_handle", installationHandle)
@@ -149,6 +152,7 @@ public enum BuzzPushTranscript {
     /// `buzz.push.revoke-installation.v1` — `SHA-256(bytes)` is the assertion
     /// `clientDataHash`.
     public static func revokeInstallation(
+        gatewayOrigin: URL,
         challengeId: UUID,
         challenge: String,
         installationHandle: UUID,
@@ -157,7 +161,10 @@ public enum BuzzPushTranscript {
     ) throws -> Data {
         var o = CanonicalObject()
         o.int("v", wireVersion)
-        try o.string("audience", Self.revokeInstallationAudience)
+        try o.string(
+            "audience",
+            audience(gatewayOrigin, route: "v1/installations/revoke")
+        )
         o.uuid("challenge_id", challengeId)
         try o.string("challenge", challenge, field: "challenge")
         o.uuid("installation_handle", installationHandle)
@@ -170,6 +177,34 @@ public enum BuzzPushTranscript {
 
     private static func encode(domain: String, object: CanonicalObject) -> Data {
         Data((domain + "\n" + object.encoded()).utf8)
+    }
+
+    /// Validates and canonicalizes a configured gateway origin.
+    public static func canonicalGatewayOrigin(_ value: URL) throws -> (url: URL, text: String) {
+        guard let scheme = value.scheme?.lowercased(),
+            scheme == "http" || scheme == "https",
+            let host = value.host?.lowercased(),
+            value.path.isEmpty || value.path == "/",
+            value.user == nil,
+            value.password == nil,
+            value.query == nil,
+            value.fragment == nil
+        else {
+            throw BuzzPushTranscriptError.invalidGatewayOrigin
+        }
+        var components = URLComponents()
+        components.scheme = scheme
+        components.host = host
+        components.port = value.port
+        guard let url = components.url, let text = components.string else {
+            throw BuzzPushTranscriptError.invalidGatewayOrigin
+        }
+        return (url, text)
+    }
+
+    private static func audience(_ gatewayOrigin: URL, route: String) throws -> String {
+        _ = try canonicalGatewayOrigin(gatewayOrigin)
+        return "\(registeredAudienceOrigin)/\(route)"
     }
 
     /// Ordered compact JSON object writer. Emission order == call order;

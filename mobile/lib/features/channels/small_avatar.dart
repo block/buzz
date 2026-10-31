@@ -10,11 +10,16 @@ class SmallAvatar extends StatelessWidget {
   final Map<String, UserProfile> userCache;
   final double size;
 
+  /// Draws the agent shape when the caller knows this is an agent, even if
+  /// its profile names no owner.
+  final bool agent;
+
   const SmallAvatar({
     super.key,
     required this.pubkey,
     required this.userCache,
     this.size = 20,
+    this.agent = false,
   });
 
   @override
@@ -23,7 +28,7 @@ class SmallAvatar extends StatelessWidget {
     final avatarUrl = profile?.avatarUrl;
     final initial =
         profile?.initial ?? (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?');
-    final isAgent = profile?.ownerPubkey != null;
+    final isAgent = agent || profile?.ownerPubkey != null;
 
     return Container(
       width: size,
@@ -36,7 +41,7 @@ class SmallAvatar extends StatelessWidget {
       child: AvatarImage(
         imageUrl: avatarUrl,
         radius: (size - 2) / 2,
-        backgroundColor: context.colors.primaryContainer,
+        backgroundColor: context.controlSurface,
         fallback: Text(
           initial,
           style: TextStyle(

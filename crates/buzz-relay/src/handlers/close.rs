@@ -1,35 +1,179 @@
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+use buzz_core::tenant::TenantContext;
+use buzz_pubsub::EventTopic;
 
 use tracing::debug;
 
 use crate::connection::ConnectionState;
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
+use crate::subscription::SubscriptionScope;
 
 /// Handle a CLOSE command — remove the subscription and send CLOSED acknowledgement.
 pub async fn handle_close(sub_id: String, conn: Arc<ConnectionState>, state: Arc<AppState>) {
-    let conn_id = conn.conn_id;
+    // Client CLOSE targets whatever currently holds the ID, so it is
+    // unconditional. Retiring before CLOSED means nothing is routed to this
+    // sub after the acknowledgement.
+    let mut subs = conn.subscriptions.lock().await;
+    retire_locked(&mut subs, &sub_id, &conn, &state).await;
+    conn.send(RelayMessage::closed(&sub_id, ""));
+    drop(subs);
 
-    conn.subscriptions.lock().await.remove(&sub_id);
+    debug!(conn_id = %conn.conn_id, sub_id = %sub_id, "Subscription closed");
+}
 
-    // Deregister from the fan-out index before sending CLOSED so no new
-    // messages are routed to this sub after the client's CLOSE is acknowledged.
-    if let Some(removed) = state.sub_registry.remove_subscription(conn_id, &sub_id) {
-        if removed.scope.is_global() {
-            state
-                .pubsub
-                .release_topic(&conn.tenant, buzz_pubsub::EventTopic::Global)
-                .await;
-        }
-        for &channel_id in removed.scope.channel_ids() {
-            state
-                .pubsub
-                .release_topic(&conn.tenant, buzz_pubsub::EventTopic::Channel(channel_id))
-                .await;
+/// Refuse a `REQ` or sync `REQ` with `CLOSED reason`. A `REQ` replaces
+/// whatever held its ID (NIP-01), and `CLOSED` tells the client the ID is
+/// closed, so the old holder is retired before the frame, under the lifecycle
+/// lock. Every refusal before a request claims its ID goes through here. If
+/// the frame cannot be queued, the connection is cancelled: the client would
+/// otherwise never learn that the old holder is gone.
+pub(crate) async fn refuse(sub_id: &str, reason: &str, conn: &ConnectionState, state: &AppState) {
+    let mut subs = conn.subscriptions.lock().await;
+    retire_locked(&mut subs, sub_id, conn, state).await;
+    if !conn.send(RelayMessage::closed(sub_id, reason)) {
+        conn.cancel.cancel();
+    }
+}
+
+/// Queue `frame` for `sub_id` only while the request holding `owner` still
+/// owns the ID. A request that a newer same-ID REQ replaced sends nothing:
+/// its late `EOSE` would otherwise tell a replacing sync that a set it never
+/// sent is complete. Returns whether the frame was queued.
+pub(crate) async fn send_if_owner(
+    sub_id: &str,
+    owner: u64,
+    frame: String,
+    conn: &ConnectionState,
+) -> bool {
+    #[cfg(test)]
+    test_seam::pause_at(&test_seam::SEND_PAUSE).await;
+    let subs = conn.subscriptions.lock().await;
+    subs.get(sub_id) == Some(&owner) && conn.send(frame)
+}
+
+/// Monotonic source of subscription owner tokens. Each REQ claims its sub ID
+/// with a fresh token, so a superseded request can tell it no longer owns it.
+static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn next_owner() -> u64 {
+    NEXT_OWNER.fetch_add(1, Ordering::Relaxed)
+}
+
+// Lifecycle lock: `conn.subscriptions` serializes every change to a
+// connection's subscription state — map token, registry entry, topic
+// retention, and the terminal CLOSED frame. Neither the registry nor pubsub
+// takes it, so holding it across their awaits cannot invert lock order.
+
+/// Drop `sub_id` from the map, the fan-out index, and its topic retention.
+/// The caller holds the lifecycle lock (`subs`).
+pub(crate) async fn retire_locked(
+    subs: &mut HashMap<String, u64>,
+    sub_id: &str,
+    conn: &ConnectionState,
+    state: &AppState,
+) {
+    subs.remove(sub_id);
+    state.artifact_syncs.remove(conn.conn_id, sub_id);
+    if let Some(removed) = state.sub_registry.remove_subscription(conn.conn_id, sub_id) {
+        #[cfg(test)]
+        test_seam::pause_at(&test_seam::RELEASE_PAUSE).await;
+        release_scope_topics(state, &conn.tenant, &removed.scope).await;
+    }
+}
+
+/// Retire `sub_id` only if the request holding `owner` still owns it, then
+/// send `closed` (if any) before releasing the lifecycle lock, so a replacing
+/// REQ can never claim the ID between the teardown and its terminal frame.
+/// Returns whether this request still owned the ID. A superseded request
+/// touches nothing and says nothing.
+pub(crate) async fn close_if_owner(
+    sub_id: &str,
+    owner: u64,
+    closed: Option<&str>,
+    conn: &ConnectionState,
+    state: &AppState,
+) -> bool {
+    let mut subs = conn.subscriptions.lock().await;
+    if subs.get(sub_id) != Some(&owner) {
+        return false;
+    }
+    retire_locked(&mut subs, sub_id, conn, state).await;
+    #[cfg(test)]
+    test_seam::pause_at(&test_seam::PAUSE).await;
+    if let Some(reason) = closed {
+        if !conn.send(RelayMessage::closed(sub_id, reason)) {
+            // The outbound channel is full or closed: the terminal frame is
+            // lost. Cancel the connection so the subscription is not silently
+            // orphaned — the client will reconnect and resubscribe.
+            conn.cancel.cancel();
         }
     }
+    true
+}
 
-    conn.send(RelayMessage::closed(&sub_id, ""));
+/// Final subscription cleanup for a closed connection. Its cancellation token
+/// must already be cancelled: claims check it under the lifecycle lock, so no
+/// detached REQ task can register after this runs.
+pub(crate) async fn release_connection_subscriptions(conn: &ConnectionState, state: &AppState) {
+    debug_assert!(conn.cancel.is_cancelled());
+    #[cfg(test)]
+    test_seam::pause_at(&test_seam::CLEANUP_PAUSE).await;
+    let mut subs = conn.subscriptions.lock().await;
+    subs.clear();
+    state.artifact_syncs.remove_connection(conn.conn_id);
+    for removed in state.sub_registry.remove_connection(conn.conn_id) {
+        release_scope_topics(state, &conn.tenant, &removed.scope).await;
+    }
+}
 
-    debug!(conn_id = %conn_id, sub_id = %sub_id, "Subscription closed");
+/// Release the pubsub topics a subscription scope retained.
+pub(crate) async fn release_scope_topics(
+    state: &AppState,
+    tenant: &TenantContext,
+    scope: &SubscriptionScope,
+) {
+    if scope.is_global() {
+        state.pubsub.release_topic(tenant, EventTopic::Global).await;
+    }
+    for &channel_id in scope.channel_ids() {
+        state
+            .pubsub
+            .release_topic(tenant, EventTopic::Channel(channel_id))
+            .await;
+    }
+}
+
+/// Test-only pause points, scoped to one task so parallel tests don't
+/// interfere: `PAUSE` inside `close_if_owner` between teardown and the
+/// terminal frame, `RELEASE_PAUSE` inside `retire_locked` between the
+/// registry removal and the topic release, `CLEANUP_PAUSE` at the start of
+/// `release_connection_subscriptions`.
+#[cfg(test)]
+pub(crate) mod test_seam {
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    #[derive(Default)]
+    pub(crate) struct Pause {
+        pub(crate) reached: Notify,
+        pub(crate) resume: Notify,
+    }
+
+    tokio::task_local! {
+        pub(crate) static PAUSE: Arc<Pause>;
+        pub(crate) static RELEASE_PAUSE: Arc<Pause>;
+        pub(crate) static CLEANUP_PAUSE: Arc<Pause>;
+        pub(crate) static SEND_PAUSE: Arc<Pause>;
+    }
+
+    pub(crate) async fn pause_at(point: &'static tokio::task::LocalKey<Arc<Pause>>) {
+        if let Ok(pause) = point.try_with(Arc::clone) {
+            pause.reached.notify_one();
+            pause.resume.notified().await;
+        }
+    }
 }

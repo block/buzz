@@ -66,8 +66,8 @@ export const MANAGED_AGENT_PAIR_ACTION_LABELS: Record<
  * Canonicalize a relay URL the way the backend keys runtime pairs, so a
  * stored community URL (e.g. `ws://localhost:3000`) matches backend rows
  * (`ws://127.0.0.1:3000`). Mirrors buzz-core's `normalize_relay_url`
- * (`crates/buzz-core/src/relay.rs`): lowercase host, loopback hosts folded
- * to 127.0.0.1, default ports and root-path trailing slash stripped.
+ * (`crates/buzz-core/src/relay.rs`): lowercase host, `localhost` and loopback IP
+ * addresses folded to 127.0.0.1, default ports and root-path trailing slash stripped.
  * Returns null when the URL cannot be parsed as ws/wss.
  */
 export function canonicalRelayUrl(raw: string): string | null {
@@ -79,7 +79,13 @@ export function canonicalRelayUrl(raw: string): string | null {
   }
   if (url.protocol !== "ws:" && url.protocol !== "wss:") return null;
   let host = url.hostname.toLowerCase();
-  if (host === "localhost" || host === "[::1]" || host.startsWith("127.")) {
+  // `URL` normalizes IP literals, so only a real 127.0.0.0/8 address or the
+  // IPv6 loopback matches here; a domain such as `127.preview.example` does not.
+  if (
+    host === "localhost" ||
+    host === "[::1]" ||
+    /^127\.\d+\.\d+\.\d+$/.test(host)
+  ) {
     host = "127.0.0.1";
   }
   const defaultPort = url.protocol === "ws:" ? "80" : "443";

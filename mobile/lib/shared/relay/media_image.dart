@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
@@ -6,13 +7,14 @@ import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 
+import '../hosted/hosted_relay_auth.dart';
 import 'media_auth.dart';
 
 /// Shared, keep-alive HTTP client for media fetches. One client per container
 /// so TLS connections are reused across images instead of re-handshaking per
 /// fetch. Override in tests to stub the network.
 final mediaHttpClientProvider = Provider<http.Client>((ref) {
-  final client = http.Client();
+  final client = ref.watch(hostedHttpClientFactoryProvider)();
   ref.onDispose(client.close);
   return client;
 });
@@ -45,13 +47,21 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   /// Excluded from equality: transport, not identity.
   final http.Client client;
 
+  /// Deadline for the complete response, including a stalled response body.
+  /// Aborts the request without closing the shared client.
+  final Duration requestTimeout;
+
   const MediaImageProvider({
     required this.url,
     required this.auth,
     required this.client,
     this.onBytesLoaded,
     this.scale = 1.0,
+    this.requestTimeout = const Duration(seconds: 30),
   });
+
+  /// Maximum encoded image body retained before decoding (20 MiB).
+  static const maxResponseBytes = 20 * 1024 * 1024;
 
   static const _defaultCooldown = Duration(seconds: 30);
   static const _maxRetryAfter = Duration(minutes: 5);
@@ -97,7 +107,35 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       final uri = Uri.parse(url);
       final http.Response response;
       try {
-        response = await client.get(uri, headers: auth.headersFor(url));
+        final abort = Completer<void>();
+        final deadline = Timer(requestTimeout, abort.complete);
+        StreamIterator<List<int>>? body;
+        try {
+          final request = http.AbortableRequest(
+            'GET',
+            uri,
+            abortTrigger: abort.future,
+          )..headers.addAll(auth.headersFor(url));
+          final streamed = await client.send(request);
+          final iterator = body = StreamIterator(streamed.stream);
+          final bytes = BytesBuilder(copy: false);
+          while (await iterator.moveNext()) {
+            final chunk = iterator.current;
+            if (chunk.length > maxResponseBytes - bytes.length) {
+              throw const FormatException('Image response too large');
+            }
+            bytes.add(chunk);
+          }
+          response = http.Response.bytes(
+            bytes.takeBytes(),
+            streamed.statusCode,
+            headers: streamed.headers,
+          );
+        } finally {
+          deadline.cancel();
+          if (!abort.isCompleted) abort.complete();
+          unawaited(body?.cancel());
+        }
       } catch (_) {
         _cooldownUntil[url] = debugNow().add(_defaultCooldown);
         rethrow;
@@ -116,7 +154,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       }
       onBytesLoaded?.call(bytes);
       final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
-      return decode(buffer);
+      return await decode(buffer);
     } catch (_) {
       // Match NetworkImage: make sure an errored key is not retained in the
       // cache. The cooldown map (not the cache) throttles retries.

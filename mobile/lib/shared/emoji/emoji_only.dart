@@ -25,6 +25,8 @@ const double kEmojiOnlyCustomEmojiSize = kEmojiOnlyFontSize * 1.45;
 /// digit-based sequences don't match — those are covered by the dataset's own
 /// native set instead, exactly as desktop does it.
 final RegExp _pictographic = RegExp(
+  // The Dart VM supports this Unicode property; the analyzer parser does not.
+  // ignore: valid_regexps
   r'\p{Extended_Pictographic}',
   unicode: true,
 );
@@ -44,35 +46,35 @@ bool isEmojiOnlyMessage(
   final trimmed = content.trim();
   if (trimmed.isEmpty) return false;
 
-  final shortcodes = {
-    for (final emoji in customEmoji) emoji.shortcode.toLowerCase(),
-  };
+  Set<String>? shortcodes;
   var sawEmoji = false;
 
   // Grapheme clusters, so a ZWJ family or a flag pair is one unit. Desktop
   // hand-rolls this scan; Dart's `characters` already segments correctly.
   final iterator = trimmed.characters.iterator;
-  final clusters = <String>[];
   while (iterator.moveNext()) {
-    clusters.add(iterator.current);
-  }
+    final cluster = iterator.current;
 
-  var index = 0;
-  while (index < clusters.length) {
-    final cluster = clusters[index];
-
-    if (cluster.trim().isEmpty) {
-      index += 1;
-      continue;
-    }
+    if (cluster.trim().isEmpty) continue;
 
     if (cluster == ':') {
-      final end = clusters.indexOf(':', index + 1);
-      if (end <= index + 1) return false;
-      final shortcode = clusters.sublist(index + 1, end).join().toLowerCase();
-      if (!shortcodes.contains(shortcode)) return false;
+      final shortcode = StringBuffer();
+      var closed = false;
+      while (iterator.moveNext()) {
+        if (iterator.current == ':') {
+          closed = true;
+          break;
+        }
+        shortcode.write(iterator.current);
+      }
+      if (!closed || shortcode.isEmpty) return false;
+      shortcodes ??= {
+        for (final emoji in customEmoji) emoji.shortcode.toLowerCase(),
+      };
+      if (!shortcodes.contains(shortcode.toString().toLowerCase())) {
+        return false;
+      }
       sawEmoji = true;
-      index = end + 1;
       continue;
     }
 
@@ -80,7 +82,6 @@ bool isEmojiOnlyMessage(
       return false;
     }
     sawEmoji = true;
-    index += 1;
   }
 
   return sawEmoji;

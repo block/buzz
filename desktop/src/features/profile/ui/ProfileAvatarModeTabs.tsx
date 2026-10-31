@@ -5,6 +5,7 @@ import type {
   AvatarMode,
 } from "@/features/profile/ui/ProfileAvatarEditor.types";
 import { cn } from "@/shared/lib/cn";
+import { SegmentedControl } from "@/shared/ui/segmented-control";
 import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
 
 const MODE_TAB_ORDER: AvatarMode[] = ["image", "emoji", "animated"];
@@ -13,6 +14,10 @@ const MODE_TAB_LABELS: Record<AvatarMode, string> = {
   emoji: "Emoji",
   image: "Image",
 };
+const MODE_SEGMENT_OPTIONS = MODE_TAB_ORDER.map((value) => ({
+  label: MODE_TAB_LABELS[value],
+  value,
+}));
 
 type ProfileAvatarModeTabsProps = {
   disabled: boolean;
@@ -30,7 +35,20 @@ export function ProfileAvatarModeTabs({
   portalContainer,
 }: ProfileAvatarModeTabsProps) {
   const isOnboardingModal = presentation === "onboarding-modal";
-  const tabs = (
+  const isOnboardingInline = presentation === "onboarding-inline";
+  const tabs = isOnboardingInline ? (
+    <SegmentedControl
+      className="w-full bg-muted"
+      disabled={disabled}
+      indicatorTestId="onboarding-avatar-mode-indicator"
+      legend="Avatar type"
+      onValueChange={onModeChange}
+      optionTestIdPrefix="onboarding-avatar-mode"
+      options={MODE_SEGMENT_OPTIONS}
+      testId="onboarding-avatar-mode-control"
+      value={mode}
+    />
+  ) : (
     <Tabs
       className={isOnboardingModal ? "flex w-full justify-center" : "w-full"}
       onValueChange={(nextMode) => {
@@ -49,7 +67,8 @@ export function ProfileAvatarModeTabs({
         <div
           aria-hidden="true"
           className={cn(
-            "absolute bottom-1 left-1 top-1 z-0 rounded-full shadow transition-transform duration-[250ms] ease-out",
+            "absolute z-0 rounded-full transition-transform motion-reduce:transition-none",
+            "bottom-1 left-1 top-1 shadow duration-[250ms] ease-out",
             isOnboardingModal
               ? "bg-[rgb(var(--buzz-onboarding-avatar-action-bg))]"
               : "bg-background",

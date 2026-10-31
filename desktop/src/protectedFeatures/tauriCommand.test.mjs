@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
@@ -12,7 +12,11 @@ const desktopRoot = path.resolve(
 );
 const configDir = path.join(desktopRoot, "src-tauri");
 const wrapper = path.join(desktopRoot, "scripts/tauri-command.mjs");
-const fakeCli = path.join(tmpdir(), `buzz-fake-tauri-${process.pid}.mjs`);
+// Everything these tests write lives under one private root, removed once the
+// file's tests finish.
+const tempRoot = mkdtempSync(path.join(tmpdir(), "buzz-tauri-command-test-"));
+after(() => rmSync(tempRoot, { recursive: true, force: true }));
+const fakeCli = path.join(tempRoot, "fake-tauri.mjs");
 
 writeFileSync(
   fakeCli,
@@ -65,10 +69,8 @@ function packageVariant(variant, result, runnerArguments = []) {
 }
 
 test("opposite Tauri package variants own private frontend artifacts", async () => {
-  const resultRoot = path.join(tmpdir(), `buzz-tauri-results-${process.pid}`);
-  mkdirSync(resultRoot, { recursive: true });
-  const ossResult = path.join(resultRoot, "oss.json");
-  const internalResult = path.join(resultRoot, "internal.json");
+  const ossResult = path.join(tempRoot, "oss.json");
+  const internalResult = path.join(tempRoot, "internal.json");
 
   await Promise.all([
     packageVariant("0", ossResult),
@@ -83,10 +85,7 @@ test("opposite Tauri package variants own private frontend artifacts", async () 
 });
 
 test("private config precedes Cargo runner arguments", async () => {
-  const result = path.join(
-    tmpdir(),
-    `buzz-tauri-runner-arguments-${process.pid}.json`,
-  );
+  const result = path.join(tempRoot, "runner-arguments.json");
   await packageVariant("0", result, [
     "--config",
     '{"bundle":{"active":false}}',
@@ -106,10 +105,7 @@ test("private config precedes Cargo runner arguments", async () => {
 });
 
 test("private frontendDist is never mistaken for a URL", async () => {
-  const result = path.join(
-    tmpdir(),
-    `buzz-tauri-frontend-dist-${process.pid}.json`,
-  );
+  const result = path.join(tempRoot, "frontend-dist.json");
   await packageVariant("0", result);
   const invocation = JSON.parse(readFileSync(result, "utf8"));
 

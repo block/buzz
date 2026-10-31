@@ -38,10 +38,15 @@ async function waitForMockLiveSubscription(
             window as Window & {
               __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
                 channelName: string;
+                kind: number;
+                exactChannel: boolean;
               }) => boolean;
             }
-          ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({ channelName: ch }) ??
-          false,
+          ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+            channelName: ch,
+            kind: 9,
+            exactChannel: true,
+          }) ?? false,
         { ch: channelName },
       );
     })
@@ -124,6 +129,7 @@ test.describe("channel muting", () => {
 
     await page.getByTestId("channel-random").click();
     await expect(page.getByTestId("chat-title")).toHaveText("random");
+    await waitForMockLiveSubscription(page, "engineering");
 
     await page.evaluate(
       ({ pubkey, mockPubkey }) => {

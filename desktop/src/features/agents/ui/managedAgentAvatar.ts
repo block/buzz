@@ -1,3 +1,5 @@
+import { squareEmojiAvatarDataUrl } from "@/features/profile/ui/ProfileAvatarEditor.utils";
+
 type BlobDescriptor = {
   url: string;
   sha256: string;
@@ -23,10 +25,11 @@ export async function resolveManagedAgentAvatarUrl(
 
   // Emoji avatars are stored as inline, percent-encoded SVG data URLs
   // (`data:image/svg+xml,%3C...`) — the same self-contained form profile
-  // persists. They are not base64 and must not be run through `atob`/upload;
-  // pass them through unchanged so the emoji survives agent creation.
+  // persists. They are not base64 and must not be run through `atob`/upload.
+  // Normalize legacy rounded source artwork to a square while creating or
+  // editing an agent so the consuming squircle owns the complete silhouette.
   if (!isBase64DataUri(resolvedAvatarUrl)) {
-    return resolvedAvatarUrl;
+    return squareEmojiAvatarDataUrl(resolvedAvatarUrl);
   }
 
   try {

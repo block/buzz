@@ -5,12 +5,13 @@ import {
   mkdirSync,
   mkdtempSync,
   realpathSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { policy as desktopPolicy } from "../desktop/scripts/check-file-sizes.mjs";
 import { policy as mobilePolicy } from "../mobile/scripts/check-file-sizes.mjs";
 import { policy as webPolicy } from "../web/scripts/check-file-sizes.mjs";
@@ -24,18 +25,35 @@ import {
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 
+const fixtureRepos = [];
+after(() => {
+  for (const repo of fixtureRepos)
+    rmSync(repo, { recursive: true, force: true });
+});
+
+function createFixtureRepo(prefix) {
+  const repo = realpathSync(mkdtempSync(path.join(tmpdir(), prefix)));
+  fixtureRepos.push(repo);
+  return repo;
+}
+
 function git(repo, ...args) {
   // These fixture repositories inherit both hook configuration and Git's
   // repository-local environment when this test runs from pre-push. Isolate
   // them completely so fixture commits cannot recurse into the real checkout.
+  // A global core.fsmonitor would also leave a daemon running per fixture.
   const env = Object.fromEntries(
     Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
   );
-  return execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
-    cwd: repo,
-    encoding: "utf8",
-    env,
-  }).trim();
+  return execFileSync(
+    "git",
+    ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", ...args],
+    {
+      cwd: repo,
+      encoding: "utf8",
+      env,
+    },
+  ).trim();
 }
 
 function createEntrypointFixture({
@@ -44,9 +62,7 @@ function createEntrypointFixture({
   lineDelta = 1,
   symlinkEntrypoint = false,
 }) {
-  const repo = realpathSync(
-    mkdtempSync(path.join(tmpdir(), `file-size-${surface}-`)),
-  );
+  const repo = createFixtureRepo(`file-size-${surface}-`);
   const scriptsDir = path.join(repo, "scripts");
   const surfaceScriptsDir = path.join(repo, surface, "scripts");
   mkdirSync(scriptsDir, { recursive: true });
@@ -95,7 +111,7 @@ function createEntrypointFixture({
 }
 
 test("local base resolution uses the branch merge-base and fails without origin/main", () => {
-  const repo = mkdtempSync(path.join(tmpdir(), "file-size-base-"));
+  const repo = createFixtureRepo("file-size-base-");
   git(repo, "init", "-b", "main");
   git(repo, "config", "user.name", "Test");
   git(repo, "config", "user.email", "test@example.com");

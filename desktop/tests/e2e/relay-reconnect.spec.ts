@@ -35,20 +35,6 @@ async function disconnectMockWebsockets(page: import("@playwright/test").Page) {
   expect(disconnected).toBeGreaterThan(0);
 }
 
-async function restartMockWebsockets(page: import("@playwright/test").Page) {
-  const restarted = await page.evaluate(() => {
-    const restart = (
-      window as Window & {
-        __BUZZ_E2E_RESTART_MOCK_WEBSOCKETS__?: () => number;
-      }
-    ).__BUZZ_E2E_RESTART_MOCK_WEBSOCKETS__;
-    if (!restart)
-      throw new Error("E2E websocket restart seam is not installed.");
-    return restart();
-  });
-  expect(restarted).toBeGreaterThan(0);
-}
-
 async function setMockWebsocketUnavailable(
   page: import("@playwright/test").Page,
   unavailable: boolean,
@@ -363,14 +349,16 @@ test("rate-limited reconnect backfill does not tear down the authenticated socke
   ).toBe("connected");
 });
 
-test("service restart close resets accumulated backoff", async ({ page }) => {
+test("service restart close redials after its spread draw, not the backoff", async ({
+  page,
+}) => {
   await installMockBridge(page, {
     websocketConnectErrors: ["down 1", "down 2", "down 3"],
   });
   await page.goto("/");
-  // Three rejected dials put the session deep in its backoff loop before it
-  // connects; wait for that connect rather than for the Tauri-backed channel
-  // list, which paints long before the websocket is up.
+  // Three rejected dials escalate the backoff before the session connects;
+  // wait for that connect rather than for the Tauri-backed channel list,
+  // which paints long before the websocket is up.
   await expect
     .poll(
       () =>
@@ -379,16 +367,30 @@ test("service restart close resets accumulated backoff", async ({ page }) => {
     )
     .toBe("connected");
 
-  const startedAt = Date.now();
-  await restartMockWebsockets(page);
+  // Pin the restart spread draw: 0.6 of the 10s window is a 6s redial. The
+  // escalated backoff with the same draw is 1.05x a power of two (1.05s,
+  // 2.1s, 4.2s, 8.4s, ...), so only the spread lands in [5.8s, 7s).
+  const restart = await page.evaluate(() => {
+    Math.random = () => 0.6;
+    window.__BUZZ_E2E_RESET_WEBSOCKET_CONNECT_ATTEMPTS__?.();
+    const at = Date.now();
+    return { at, sockets: window.__BUZZ_E2E_RESTART_MOCK_WEBSOCKETS__?.() };
+  });
+  expect(restart.sockets).toBeGreaterThan(0);
   await expect
     .poll(
       () =>
         page.evaluate(() => window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?.()),
-      { timeout: 2_500 },
+      { timeout: 10_000 },
     )
     .toBe("connected");
-  expect(Date.now() - startedAt).toBeLessThan(2_500);
+  const attempts = await page.evaluate(
+    () => window.__BUZZ_E2E_GET_WEBSOCKET_CONNECT_ATTEMPTS__?.() ?? [],
+  );
+  expect(attempts.length).toBeGreaterThan(0);
+  const redialDelayMs = attempts[0] - restart.at;
+  expect(redialDelayMs).toBeGreaterThanOrEqual(5_800);
+  expect(redialDelayMs).toBeLessThan(7_000);
 });
 
 test("passive relay watchdog does not write while the websocket is half-open", async ({

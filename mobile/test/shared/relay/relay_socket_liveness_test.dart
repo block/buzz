@@ -84,28 +84,94 @@ void main() {
     await server.close();
   });
 
-  test('keeps an idle but healthy peer connected', () async {
-    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-    server.transform(WebSocketTransformer()).listen((ws) {
-      // A healthy relay answers pings without sending application data.
-      ws.listen((_) {}, onError: (_) {}, onDone: () {});
-    });
+  test(
+    'scoped headers stay at the upgrade origin and healthy peers stay connected',
+    () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final paths = <String>[];
+      // A different port prevents a closed upgrade connection from masking a
+      // redirect attempt through connection-pool reuse.
+      final sink = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      sink.listen((request) async {
+        paths.add('sink');
+        expect(
+          request.headers.value('Nostr-Federated-Identity'),
+          'Bearer synthetic',
+        );
+        request.response.statusCode = 403;
+        await request.response.close();
+      });
+      server.listen((request) async {
+        paths.add(request.uri.path);
+        expect(
+          request.headers.value('Nostr-Federated-Identity'),
+          'Bearer synthetic',
+        );
+        if (request.uri.path == '/denied') {
+          request.response.statusCode = 403;
+          await request.response.close();
+          return;
+        }
+        if (request.uri.path == '/redirect') {
+          request.response.statusCode = 302;
+          request.response.headers.set(
+            'Location',
+            'http://127.0.0.1:${sink.port}/sink',
+          );
+          await request.response.close();
+          return;
+        }
+        final ws = await WebSocketTransformer.upgrade(request);
+        ws.listen((_) {}, onError: (_) {}, onDone: () {});
+      });
 
-    var tornDown = false;
-    final socket = RelaySocket(
-      wsUrl: 'ws://127.0.0.1:${server.port}',
-      nsec: null,
-      onMessage: (_) {},
-      onConnected: () {},
-      onDisconnected: (_) => tornDown = true,
-    );
-    unawaited(socket.connect());
+      var tornDown = false;
+      final socket = RelaySocket(
+        wsUrl: 'ws://127.0.0.1:${server.port}',
+        nsec: null,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (_) => tornDown = true,
+      );
+      socket.headers = {'Nostr-Federated-Identity': 'Bearer synthetic'};
+      unawaited(socket.connect());
 
-    await Future<void>.delayed(testPingInterval * 4);
+      await Future<void>.delayed(testPingInterval * 4);
 
-    expect(tornDown, isFalse);
+      expect(tornDown, isFalse);
 
-    await socket.disconnect();
-    await server.close(force: true);
-  });
+      await socket.disconnect();
+      final refused = Completer<void>();
+      final redirect = RelaySocket(
+        wsUrl: 'ws://127.0.0.1:${server.port}/redirect',
+        nsec: null,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (_) {
+          if (!refused.isCompleted) refused.complete();
+        },
+      );
+      redirect.headers = {'Nostr-Federated-Identity': 'Bearer synthetic'};
+      await redirect.connect();
+      await refused.future;
+      expect(paths, ['/', '/redirect']);
+      redirect.dispose();
+      final denial = Completer<Object?>();
+      final denied = RelaySocket(
+        wsUrl: 'ws://127.0.0.1:${server.port}/denied',
+        nsec: null,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (error) {
+          if (!denial.isCompleted) denial.complete(error);
+        },
+      );
+      denied.headers = {'Nostr-Federated-Identity': 'Bearer synthetic'};
+      await denied.connect();
+      expect(relayUpgradeRefused(await denial.future), isTrue);
+      denied.dispose();
+      await server.close(force: true);
+      await sink.close(force: true);
+    },
+  );
 }

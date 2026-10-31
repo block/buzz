@@ -1,4 +1,7 @@
-import { formatMentionDisplayLabel } from "@/shared/lib/mentionDisplay";
+import {
+  formatLegacyMentionDisplayLabel,
+  formatMentionDisplayLabel,
+} from "@/shared/lib/mentionDisplay";
 import { truncateInlineChipLabel } from "@/shared/ui/mentionChip";
 
 import { getMentionOffsets } from "./hasMention";
@@ -94,6 +97,17 @@ export function matchChipTextToLabel(
   const compact =
     sigil === "@" ? formatMentionDisplayLabel(label, pubkey) : label;
   if (compact !== label && matches(canonicalMentionLabel(compact))) {
+    return "truncated";
+  }
+  // A chip copied before keys displayed as npub carries the hex-truncated
+  // key in its text. Accept that prior *display* form — derived from the
+  // same label and pubkey this record declares, never from the pasted text
+  // itself — so an old whole-chip copy still re-binds instead of losing its
+  // identity. The two forms are disjoint (a hex truncation cannot contain
+  // the `n` an npub starts with), so this cannot reclassify any new chip.
+  const legacy =
+    sigil === "@" ? formatLegacyMentionDisplayLabel(label, pubkey) : label;
+  if (legacy !== label && matches(canonicalMentionLabel(legacy))) {
     return "truncated";
   }
   return "fragment";

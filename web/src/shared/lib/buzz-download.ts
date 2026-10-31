@@ -1,11 +1,22 @@
-export const BUZZ_RELEASES_URL = "https://github.com/block/buzz/releases";
+export const BUZZ_RELEASES_URL = "https://github.com/block/buzz-app/releases";
+/** Official iOS download destination. */
+export const BUZZ_IOS_APP_STORE_URL = "https://apps.apple.com/app/id6779728271";
+/** Official Android download destination. */
+export const BUZZ_ANDROID_PLAY_STORE_URL =
+  "https://play.google.com/store/apps/details?id=xyz.block.buzz.mobile";
 const BUZZ_RELEASES_API_URL =
-  "https://api.github.com/repos/block/buzz/releases?per_page=10";
-const CACHE_KEY = "buzz.latestDownload.v1";
+  "https://api.github.com/repos/block/buzz-app/releases?per_page=10";
+const CACHE_KEY = "buzz.latestDownload.v2";
 const CACHE_TTL_MS = 60 * 60 * 1000;
 
 export type BuzzDownloadPlatform = {
-  operatingSystem: "linux" | "macos" | "windows" | "unknown";
+  operatingSystem:
+    | "linux"
+    | "macos"
+    | "windows"
+    | "ios"
+    | "android"
+    | "unknown";
   architecture: "arm64" | "x64" | "unknown";
 };
 
@@ -36,13 +47,17 @@ function normalizeOperatingSystem(
 
   // Compatibility tokens are treacherous: iPadOS can report MacIntel and a
   // Macintosh UA, while Android and ChromeOS expose Linux platform strings.
-  // Reject non-desktop devices before admitting desktop-looking signals.
+  // Classify mobile devices before admitting desktop-looking signals.
   const isIPadDesktopMode =
     platform === "macintel" && navigatorValue.maxTouchPoints > 1;
+  if (isIPadDesktopMode || /iphone|ipad|ipod/.test(userAgent)) return "ios";
+  // Fire OS identifies as Android but does not ship with Google Play.
+  if (/kindle|silk/.test(userAgent)) return "unknown";
+  if (/android/.test(userAgent) || platform === "android") return "android";
+
   const isUnsupportedDevice =
     userAgentData?.mobile === true ||
-    isIPadDesktopMode ||
-    /android|iphone|ipad|ipod|mobile|tablet|windows phone|iemobile|opera mini|opera mobi|webos|blackberry|bb10|kindle|silk|kaios|cros/.test(
+    /mobile|tablet|windows phone|iemobile|opera mini|opera mobi|webos|blackberry|bb10|kindle|silk|kaios|cros/.test(
       userAgent,
     );
   if (isUnsupportedDevice) return "unknown";
@@ -87,6 +102,9 @@ export async function detectBuzzDownloadPlatform(
     navigatorValue,
     userAgentData,
   );
+  if (operatingSystem === "ios" || operatingSystem === "android") {
+    return { operatingSystem, architecture: "unknown" };
+  }
   let architecture = normalizeArchitecture(navigatorValue.userAgent);
 
   if (userAgentData?.getHighEntropyValues) {
@@ -111,14 +129,13 @@ function assetPattern(platform: BuzzDownloadPlatform): RegExp | undefined {
   switch (platform.operatingSystem) {
     case "macos":
       if (platform.architecture === "arm64") return /_aarch64\.dmg$/i;
-      if (platform.architecture === "x64") return /_x64\.dmg$/i;
       return undefined;
     case "windows":
-      return /_x64-setup[^/]*\.exe$/i;
+      return /_x64(?:-setup[^/]*|_unsigned)\.exe$/i;
     case "linux":
       return platform.architecture === "arm64"
         ? undefined
-        : /_amd64\.AppImage$/i;
+        : /_(?:amd64|x86_64)\.AppImage$/i;
     default:
       return undefined;
   }
@@ -132,7 +149,7 @@ export function selectBuzzDownloadUrl(
   if (!pattern) return undefined;
 
   for (const release of releases) {
-    if (release.draft || release.prerelease) continue;
+    if (release.draft) continue;
     const asset = release.assets.find(({ name }) => pattern.test(name));
     if (asset) return asset.browser_download_url;
   }
@@ -142,6 +159,10 @@ export function selectBuzzDownloadUrl(
 export async function resolveBuzzDownloadUrlForPlatform(
   platform: BuzzDownloadPlatform,
 ): Promise<string> {
+  if (platform.operatingSystem === "ios") return BUZZ_IOS_APP_STORE_URL;
+  if (platform.operatingSystem === "android")
+    return BUZZ_ANDROID_PLAY_STORE_URL;
+
   try {
     const cached = JSON.parse(sessionStorage.getItem(CACHE_KEY) ?? "null") as {
       expiresAt: number;

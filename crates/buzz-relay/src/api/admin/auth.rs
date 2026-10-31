@@ -1,6 +1,15 @@
 //! Authentication and principal resolution for the deployment-admin API.
 //!
-//! # NIP-98 mode (mutations available)
+//! Every route makes one of three checks against the [`AdminAccess`] that
+//! [`authorize`] returns:
+//!
+//! | Check | Routes | `nip98` | `disabled` |
+//! |-------|--------|---------|------------|
+//! | view  | every moderation read | any staff role | served to any caller |
+//! | act   | every mutation | staff, then role checks | 403 |
+//! | operator | `/operators` | Operator | 403 |
+//!
+//! # NIP-98 mode (default)
 //!
 //! Every request carries `Authorization: Nostr <base64 event>`. After
 //! verifying the signature, timestamp, `u` tag, method tag, and (for
@@ -21,13 +30,15 @@
 //! Config outranks DB: a `relay_operators` DB row for a config-backed
 //! Operator pubkey is ignored; it never demotes a config grant.
 //!
-//! # disabled mode (read-only)
+//! # disabled mode (network-trusted, read-only)
 //!
-//! `authorize()` succeeds for read requests but returns `None` for the
-//! principal — mutations and staffing routes call
-//! [`require_mutation_principal`], which 403s on `None`.
+//! `authorize()` checks no credential and returns
+//! [`AdminAccess::NetworkTrusted`]: whoever can reach the relay may view every
+//! moderation read. There is no identity, so [`AdminAccess::act`] and
+//! [`AdminAccess::operator`] refuse with 403; an anonymous caller is never given
+//! a principal.
 
-use axum::http::{header, HeaderMap};
+use axum::http::{header, HeaderMap, Method, Uri};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 
@@ -67,8 +78,7 @@ pub enum AdminSource {
     Db,
 }
 
-/// A resolved deployment-level principal, returned by [`authorize`] in nip98
-/// mode.
+/// A resolved deployment-level principal, carried by [`AdminAccess::Staff`].
 #[derive(Debug, Clone)]
 pub struct AdminPrincipal {
     /// 32-byte pubkey (binary).
@@ -96,6 +106,15 @@ pub(crate) fn admin_source_str(source: &AdminSource) -> &'static str {
     }
 }
 
+/// Compare an inbound Host against the configured admin host case-insensitively.
+/// Host names are case-insensitive (RFC 3986 §6.2.2.1), and `config.host` is
+/// already lowercased at config load — but a proxy, curl, or non-desktop client
+/// can still send a mixed-case Host header, so the comparison itself must fold
+/// case rather than relying on the inbound value already being lowercase.
+fn host_matches(inbound: &str, configured: &str) -> bool {
+    inbound.eq_ignore_ascii_case(configured)
+}
+
 pub(crate) fn is_admin_host(state: &AppState, headers: &HeaderMap) -> bool {
     let Some(config) = state.config.admin.as_ref() else {
         return false;
@@ -103,7 +122,7 @@ pub(crate) fn is_admin_host(state: &AppState, headers: &HeaderMap) -> bool {
     headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|host| host == config.host)
+        .is_some_and(|host| host_matches(host, &config.host))
 }
 
 /// Scheme for an admin authority: `http://` for loopback hosts (`localhost`,
@@ -180,18 +199,16 @@ fn method_has_body(method: &str) -> bool {
 /// deserialize the same bytes. Never pass `None` for a body-bearing method in
 /// nip98 mode — the `payload` sha256 tag would be skipped.
 ///
-/// Returns:
-/// - `Ok(Some(principal))` — nip98 mode (role resolved from roster).
-/// - `Ok(None)` — disabled mode; reads pass, mutations 403 via
-///   [`require_mutation_principal`].
-/// - `Err(_)` — authentication or authorization failed.
+/// `Ok(_)` is the view check: the caller may read. Writes and staffing then
+/// call [`AdminAccess::act`] or [`AdminAccess::operator`]. `Err(_)` means
+/// authentication or authorization failed.
 pub async fn authorize(
     state: &AppState,
     headers: &HeaderMap,
     path_and_query: &str,
     method: &str,
     raw_body: Option<&[u8]>,
-) -> Result<Option<AdminPrincipal>, ApiError> {
+) -> Result<AdminAccess, ApiError> {
     let config = state
         .config
         .admin
@@ -200,8 +217,8 @@ pub async fn authorize(
 
     // Credential check first: an unauthenticated caller learns nothing about
     // which Host or Origin the deployment expects.
-    let (principal, nip98_event_id) = match &config.auth {
-        AdminAuth::Disabled => (None, None),
+    let (access, nip98_event_id) = match &config.auth {
+        AdminAuth::Disabled => (AdminAccess::NetworkTrusted, None),
         AdminAuth::Nip98 => {
             let full_path = format!("{ADMIN_API_PREFIX}{path_and_query}");
             let (pubkey_bytes, event_id) =
@@ -211,7 +228,7 @@ pub async fn authorize(
             // must not be able to consume replay slots at request rate. Only a
             // request that clears authorization claims its event ID.
             let principal = resolve_admin_principal(state, pubkey_bytes).await?;
-            (Some(principal), Some(event_id))
+            (AdminAccess::Staff(principal), Some(event_id))
         }
     };
 
@@ -233,7 +250,46 @@ pub async fn authorize(
         claim_nip98_replay(state, &event_id).await?;
     }
 
-    Ok(principal)
+    Ok(access)
+}
+
+/// [`authorize`] for a bodyless read, bound to the request's real method and
+/// full target. Axum serves `HEAD` through `GET` handlers, so hardcoding
+/// `"GET"` would reject a correctly signed `HEAD`.
+pub async fn authorize_read(
+    state: &AppState,
+    headers: &HeaderMap,
+    method: &Method,
+    uri: &Uri,
+) -> Result<AdminAccess, ApiError> {
+    authorize(state, headers, request_target(uri), method.as_str(), None).await
+}
+
+/// [`authorize`] for a mutation, bound to the request's real method and full
+/// target. Hardcoding the method would reject every correctly signed request
+/// to a handler mounted on a second method. `raw_body` follows [`authorize`]'s
+/// contract: the buffered body bytes, or `None` only for a bodyless `DELETE`.
+pub async fn authorize_write(
+    state: &AppState,
+    headers: &HeaderMap,
+    method: &Method,
+    uri: &Uri,
+    raw_body: Option<&[u8]>,
+) -> Result<AdminAccess, ApiError> {
+    authorize(
+        state,
+        headers,
+        request_target(uri),
+        method.as_str(),
+        raw_body,
+    )
+    .await
+}
+
+/// The full request target NIP-98 clients sign: path plus any query string.
+fn request_target(uri: &Uri) -> &str {
+    uri.path_and_query()
+        .map_or_else(|| uri.path(), |pq| pq.as_str())
 }
 
 /// Resolve a 32-byte pubkey to an `AdminPrincipal` using config + DB.
@@ -250,6 +306,19 @@ pub async fn resolve_admin_principal(
     state: &AppState,
     pubkey: [u8; 32],
 ) -> Result<AdminPrincipal, ApiError> {
+    lookup_admin_principal(state, pubkey)
+        .await?
+        .ok_or_else(ApiError::forbidden)
+}
+
+/// Effective staff grant for `pubkey`, same precedence as
+/// [`resolve_admin_principal`]. `Ok(None)` means "not staff"; a roster lookup
+/// failure is an `Err`, so callers fail closed instead of treating it as
+/// "not staff".
+pub async fn lookup_admin_principal(
+    state: &AppState,
+    pubkey: [u8; 32],
+) -> Result<Option<AdminPrincipal>, ApiError> {
     let pubkey_hex = hex::encode(pubkey);
     let cfg = &state.config;
 
@@ -259,11 +328,11 @@ pub async fn resolve_admin_principal(
         .iter()
         .any(|pk| pk == &pubkey_hex)
     {
-        return Ok(AdminPrincipal {
+        return Ok(Some(AdminPrincipal {
             pubkey,
             role: AdminRole::Operator,
             source: AdminSource::Config,
-        });
+        }));
     }
 
     // 2. Owner fallback B: only when configured RELAY_OPERATOR_PUBKEYS is empty.
@@ -271,11 +340,11 @@ pub async fn resolve_admin_principal(
     if cfg.relay_operator_pubkeys.is_empty() {
         if let Some(ref owner_hex) = cfg.relay_owner_pubkey {
             if owner_hex == &pubkey_hex {
-                return Ok(AdminPrincipal {
+                return Ok(Some(AdminPrincipal {
                     pubkey,
                     role: AdminRole::Operator,
                     source: AdminSource::OwnerFallback,
-                });
+                }));
             }
         }
     }
@@ -300,36 +369,49 @@ pub async fn resolve_admin_principal(
                 return Err(ApiError::forbidden());
             }
         };
-        return Ok(AdminPrincipal {
+        return Ok(Some(AdminPrincipal {
             pubkey,
             role,
             source: AdminSource::Db,
-        });
+        }));
     }
 
     // 4. No grant found.
-    Err(ApiError::forbidden())
+    Ok(None)
 }
 
-/// Require that this request resolved a principal (nip98 mode) and return it.
-/// Mutation and staffing routes are unavailable in disabled mode.
-///
-/// Returns the principal or a 403 if none was resolved.
-pub fn require_mutation_principal(
-    principal: Option<AdminPrincipal>,
-) -> Result<AdminPrincipal, ApiError> {
-    principal
-        .ok_or_else(|| ApiError::forbidden_with_message("mutations require BUZZ_ADMIN_AUTH=nip98"))
+/// What [`authorize`] established about the caller.
+#[derive(Debug, Clone)]
+pub enum AdminAccess {
+    /// `disabled` mode: the network vouches for the caller; there is no
+    /// identity. May view, never act or staff.
+    NetworkTrusted,
+    /// `nip98` mode: a signed, rostered staff member.
+    Staff(AdminPrincipal),
 }
 
-/// Require that the principal holds Operator role. Used by staffing routes.
-pub fn require_operator(principal: &AdminPrincipal) -> Result<(), ApiError> {
-    if principal.role == AdminRole::Operator {
-        Ok(())
-    } else {
-        Err(ApiError::forbidden_with_message(
-            "staffing endpoints require operator role",
-        ))
+impl AdminAccess {
+    /// The act check: a write needs a signed staff member. Role-specific
+    /// checks run on the returned principal.
+    pub fn act(self) -> Result<AdminPrincipal, ApiError> {
+        match self {
+            Self::Staff(principal) => Ok(principal),
+            Self::NetworkTrusted => Err(ApiError::forbidden_with_message(
+                "this endpoint requires BUZZ_ADMIN_AUTH=nip98",
+            )),
+        }
+    }
+
+    /// The operator check: roster routes need a signed Operator.
+    pub fn operator(self) -> Result<AdminPrincipal, ApiError> {
+        let principal = self.act()?;
+        if principal.role == AdminRole::Operator {
+            Ok(principal)
+        } else {
+            Err(ApiError::forbidden_with_message(
+                "staffing endpoints require operator role",
+            ))
+        }
     }
 }
 
@@ -443,18 +525,46 @@ fn nostr_credential(value: &str) -> Option<&str> {
 }
 
 fn origin_matches_host(origin: &str, host: &str) -> bool {
-    // Compare against the exact canonical origin: https:// for non-loopback,
-    // http:// for loopback. Accepting either scheme for non-loopback would
-    // allow plaintext origins for production hosts.
-    let expected = format!("{}://{host}", scheme_for_host(host));
-    origin == expected
+    // The scheme is matched exactly — https:// for non-loopback, http:// for
+    // loopback. Accepting either scheme for non-loopback would allow plaintext
+    // origins for production hosts, so the scheme check must not fold anything.
+    // The host portion, by contrast, is case-insensitive (RFC 3986 §6.2.2.1)
+    // and may arrive mixed-case from a browser, so it folds case.
+    let Some(origin_host) = origin
+        .strip_prefix(scheme_for_host(host))
+        .and_then(|rest| rest.strip_prefix("://"))
+    else {
+        return false;
+    };
+    origin_host.eq_ignore_ascii_case(host)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        admin_api_origin, canonical_url, method_has_body, nostr_credential, origin_matches_host,
+        admin_api_origin, canonical_url, host_matches, method_has_body, nostr_credential,
+        origin_matches_host,
     };
+
+    #[test]
+    fn admin_host_compare_is_case_insensitive() {
+        // config.host is lowercased at load, but a proxy/curl/non-desktop
+        // client can still send a mixed-case Host header — it must match.
+        assert!(host_matches(
+            "Admin.Example.Com:8443",
+            "admin.example.com:8443"
+        ));
+        // Exact same-case is trivially a match.
+        assert!(host_matches(
+            "admin.example.com:8443",
+            "admin.example.com:8443"
+        ));
+        // A genuinely different host never matches.
+        assert!(!host_matches(
+            "attacker.example:8443",
+            "admin.example.com:8443"
+        ));
+    }
 
     #[test]
     fn browser_origin_must_match_admin_host() {
@@ -491,6 +601,17 @@ mod tests {
         assert!(!origin_matches_host(
             "https://admin.localhost:3000",
             "admin.localhost:3000"
+        ));
+        // Host is case-insensitive (RFC 3986 §6.2.2.1): a mixed-case Origin
+        // host matches the lowercased configured host, but the scheme is still
+        // matched exactly (http rejected for a non-loopback host).
+        assert!(origin_matches_host(
+            "https://Admin.Example.Com",
+            "admin.example.com"
+        ));
+        assert!(!origin_matches_host(
+            "http://Admin.Example.Com",
+            "admin.example.com"
         ));
     }
 

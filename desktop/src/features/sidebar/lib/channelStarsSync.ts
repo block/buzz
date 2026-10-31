@@ -46,6 +46,11 @@ export class ChannelStarSyncManager {
   private lastRemoteCreatedAt: number;
   private pendingStore: ChannelStarStore | null = null;
   private lastPublishedStore: ChannelStarStore | null = null;
+  /** The bootstrap first-copy seed; retired once any relay head is observed. */
+  private seedStore: ChannelStarStore | null = null;
+  /** Decoded heads, LWW-merged within the 500-entry bound, for each attempt. */
+  private remoteStore: ChannelStarStore | null = null;
+  private remoteRev = 0;
   private destroyed = false;
 
   constructor(pubkey: string, relayUrl: string) {
@@ -71,6 +76,7 @@ export class ChannelStarSyncManager {
       if (!result) {
         return { status: "failed", createdAt: event.created_at };
       }
+      this.remember(result.store);
       return {
         status: "found",
         data: result,
@@ -87,6 +93,22 @@ export class ChannelStarSyncManager {
       this.lastRemoteCreatedAt = createdAt;
     }
     advanceWatermark(this.pubkey, BLOB_TYPE, this.relayUrl, createdAt);
+    // A seed only fills a relay believed empty; any head supersedes it, even
+    // one whose payload a concurrent reader drops or cannot decrypt.
+    if (this.seedStore && this.pendingStore === this.seedStore) {
+      this.cancelPendingStarPublish();
+      this.pendingStore = null;
+    }
+    this.seedStore = null;
+  }
+
+  private remember(store: ChannelStarStore): void {
+    const next = this.remoteStore
+      ? mergeStores(this.remoteStore, store)
+      : store;
+    // Only a changed winner invalidates in-flight attempts.
+    if (!this.sameEntries(this.remoteStore, next)) this.remoteRev++;
+    this.remoteStore = next;
   }
 
   cancelPendingStarPublish(): void {
@@ -127,19 +149,21 @@ export class ChannelStarSyncManager {
       this.recordRemoteHead(event.created_at);
       const remote = await decryptAndParse(event);
       if (!remote) return store;
-      return mergeStores(store, remote.store);
+      this.remember(remote.store);
+      return store;
     } catch {
       return store;
     }
   }
 
-  private isIdenticalToLastPublished(store: ChannelStarStore): boolean {
-    if (!this.lastPublishedStore) return false;
-    const lastKeys = Object.keys(this.lastPublishedStore.channels);
+  /** Same winners (IDs, `starred`, `updatedAt`), ignoring key order. */
+  private sameEntries(prev: ChannelStarStore | null, store: ChannelStarStore) {
+    if (!prev) return false;
+    const lastKeys = Object.keys(prev.channels);
     const currentKeys = Object.keys(store.channels);
     if (lastKeys.length !== currentKeys.length) return false;
     for (const key of currentKeys) {
-      const last = this.lastPublishedStore.channels[key];
+      const last = prev.channels[key];
       const current = store.channels[key];
       if (
         !last ||
@@ -152,14 +176,29 @@ export class ChannelStarSyncManager {
   }
 
   private async doPublish(store: ChannelStarStore): Promise<void> {
+    // A seed retired while acquired (preflight, crypto or socket wait) aborts.
+    const seed = store === this.seedStore;
+    let rev = this.remoteRev; // a changed winner before dispatch voids it
+    const stale = () =>
+      this.destroyed ||
+      (seed && this.seedStore !== store) ||
+      rev !== this.remoteRev;
+    // Only the attempt that still owns `pendingStore` may clear it.
+    const release = () => {
+      if (this.pendingStore === store) this.pendingStore = null;
+    };
     try {
-      const merged = await this.fetchOwnBlobBeforePublish(store);
+      const pre = await this.fetchOwnBlobBeforePublish(store);
+      const merged = this.remoteStore
+        ? mergeStores(pre, this.remoteStore)
+        : pre;
+      rev = this.remoteRev;
       // Guard: manager may have been destroyed while fetchOwnBlobBeforePublish
       // was awaited (community switch during in-flight fetch). If so, abort
       // before touching the relay.
-      if (this.destroyed) return;
-      if (this.isIdenticalToLastPublished(merged)) {
-        this.pendingStore = null;
+      if (stale()) return;
+      if (this.sameEntries(this.lastPublishedStore, merged)) {
+        release();
         return;
       }
       const payload = {
@@ -180,17 +219,21 @@ export class ChannelStarSyncManager {
           ["t", D_TAG], // relay discoverability; not used in our filters
         ],
       });
-      if (this.destroyed) return;
+      if (stale()) return;
       await relayClient.publishEvent(
         event,
         "Timed out publishing channel stars.",
         "Failed to publish channel stars.",
+        () => !stale(),
       );
       this.recordRemoteHead(event.created_at);
       this.lastPublishedStore = merged;
-      this.pendingStore = null;
+      release();
     } catch (error) {
       console.warn("[channelStarsSync] publish failed:", error);
+    } finally {
+      const owned = !this.destroyed && this.pendingStore === store;
+      if (owned && rev !== this.remoteRev) this.publishStars(store);
     }
   }
 
@@ -210,7 +253,8 @@ export class ChannelStarSyncManager {
         // still advances the watermark and blocks future seed-publish.
         this.recordRemoteHead(event.created_at);
         void decryptAndParse(event).then((result) => {
-          if (result) {
+          if (result && !this.destroyed) {
+            this.remember(result.store);
             onUpdate(result);
           }
         });
@@ -229,7 +273,10 @@ export class ChannelStarSyncManager {
       lastHead: this.lastRemoteCreatedAt,
       localStore,
       isLocalNonEmpty: (s) => Object.keys(s.channels).length > 0,
-      publishFn: (s) => this.publishStars(s),
+      publishFn: (s) => {
+        this.seedStore = s;
+        this.publishStars(s);
+      },
     });
   }
 

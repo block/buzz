@@ -23,6 +23,7 @@ const buzzModalAnimationStyle = AnimationStyle(
 /// uses native concentric corners when available and paints a requested drag
 /// handle inside the shared header so its spacing is consistent on every
 /// platform.
+/// Set [padBottom] to false when the content owns its bottom edge spacing.
 Future<T?> showBuzzModalBottomSheet<T>({
   required BuildContext context,
   required WidgetBuilder builder,
@@ -42,6 +43,7 @@ Future<T?> showBuzzModalBottomSheet<T>({
   bool? showDragHandle,
   bool showCloseButton = true,
   bool useSafeArea = false,
+  bool padBottom = true,
   RouteSettings? routeSettings,
   AnimationController? transitionAnimationController,
   Offset? anchorPoint,
@@ -76,7 +78,19 @@ Future<T?> showBuzzModalBottomSheet<T>({
             showCloseButton: showCloseButton,
             showDragHandle: showDragHandle == true,
             surfaceColor: surfaceColor,
-            child: builder(themedContext),
+            // Keep the entire scroll viewport above gesture navigation. The
+            // inner builder sees a consumed bottom inset, so sheet-local safe
+            // areas and scroll padding do not reserve that system inset twice.
+            child: SafeArea(
+              top: false,
+              left: false,
+              right: false,
+              bottom: padBottom,
+              child: Padding(
+                padding: EdgeInsets.only(bottom: padBottom ? Grid.half : 0),
+                child: Builder(builder: builder),
+              ),
+            ),
           ),
         ),
       ),

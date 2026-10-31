@@ -11,7 +11,6 @@ class _CustomChannelSection extends StatelessWidget {
   final bool expanded;
   final bool isFirst;
   final bool isLast;
-  final bool showTopDivider;
   final VoidCallback onToggle;
   final VoidCallback onRename;
   final VoidCallback onDelete;
@@ -31,7 +30,6 @@ class _CustomChannelSection extends StatelessWidget {
     required this.expanded,
     required this.isFirst,
     required this.isLast,
-    required this.showTopDivider,
     required this.onToggle,
     required this.onRename,
     required this.onDelete,
@@ -48,7 +46,6 @@ class _CustomChannelSection extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (showTopDivider) const _SectionDivider(),
         _CustomSectionHeader(
           section: section,
           expanded: expanded,
@@ -62,7 +59,7 @@ class _CustomChannelSection extends StatelessWidget {
           sortMode: sortMode,
           onSortModeChange: onSortModeChange,
         ),
-        _AnimatedSectionBody(
+        CollapsibleSectionBody(
           expanded: expanded,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -77,7 +74,6 @@ class _CustomChannelSection extends StatelessWidget {
                   onMarkRead: () => onMarkChannelRead(channel),
                   sectionId: section.id,
                 ),
-              const SizedBox(height: _kExpandedSectionTrailingPadding),
             ],
           ),
         ),
@@ -86,7 +82,7 @@ class _CustomChannelSection extends StatelessWidget {
   }
 }
 
-class _CustomSectionHeader extends ConsumerWidget {
+class _CustomSectionHeader extends StatelessWidget {
   final ChannelSection section;
   final bool expanded;
   final bool isFirst;
@@ -114,13 +110,8 @@ class _CustomSectionHeader extends ConsumerWidget {
   });
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final sectionColor = navigationSectionForeground(context);
-    final icon = section.icon;
-    final customEmoji = icon == null
-        ? null
-        : _resolveCustomEmoji(icon, ref.watch(customEmojiListProvider));
-
+  Widget build(BuildContext context) {
+    final sectionColor = navigationHeadingForeground(context);
     return GestureDetector(
       onTap: onToggle,
       behavior: HitTestBehavior.opaque,
@@ -133,55 +124,21 @@ class _CustomSectionHeader extends ConsumerWidget {
         ),
         child: Row(
           children: [
-            SizedBox(
-              width: _kChannelLeadingWidth,
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: icon == null || icon.isEmpty
-                    ? Icon(
-                        LucideIcons.folder,
-                        size: _kChannelIconSize,
-                        color: sectionColor,
-                      )
-                    : customEmoji != null
-                    ? CustomEmojiImage(
-                        shortcode: customEmoji.shortcode,
-                        url: customEmoji.url,
-                        size: _kChannelIconSize,
-                      )
-                    : Text(
-                        icon,
-                        maxLines: 1,
-                        overflow: TextOverflow.visible,
-                        style: TextStyle(
-                          fontSize: _kChannelIconSize,
-                          height: 1,
-                          color: sectionColor,
-                        ),
-                      ),
-              ),
-            ),
-            const SizedBox(width: _kChannelLabelGap),
             Expanded(
-              child: Text(
-                section.name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: contentListTitleTextStyle.copyWith(
-                  color: sectionColor,
-                  fontWeight: FontWeight.w600,
-                ),
+              child: _SectionLabel(
+                label: section.name,
+                expanded: expanded,
+                color: sectionColor,
               ),
             ),
             Builder(
-              builder: (buttonContext) => IconButton(
+              builder: (buttonContext) => _SectionOptionsButton(
                 key: ValueKey('section-menu-${section.id}'),
                 tooltip: '${section.name} options',
-                visualDensity: VisualDensity.compact,
                 icon: Icon(
-                  LucideIcons.ellipsisVertical,
-                  size: _kChannelIconSize,
-                  color: sectionColor,
+                  BuzzIcons.ellipsis,
+                  size: 14,
+                  color: navigationAccessoryForeground(context),
                 ),
                 onPressed: () async {
                   final value = await showAnchoredPopover<String>(
@@ -194,7 +151,7 @@ class _CustomSectionHeader extends ConsumerWidget {
                         value: 'rename',
                         padding: _sectionMenuItemPadding,
                         child: _SectionMenuItemContent(
-                          icon: LucideIcons.pencil,
+                          icon: BuzzIcons.pencil,
                           label: 'Rename section',
                         ),
                       ),
@@ -203,7 +160,7 @@ class _CustomSectionHeader extends ConsumerWidget {
                         enabled: !isFirst,
                         padding: _sectionMenuItemPadding,
                         child: const _SectionMenuItemContent(
-                          icon: LucideIcons.arrowUp,
+                          icon: BuzzIcons.arrowUp,
                           label: 'Move up',
                         ),
                       ),
@@ -212,7 +169,7 @@ class _CustomSectionHeader extends ConsumerWidget {
                         enabled: !isLast,
                         padding: _sectionMenuItemPadding,
                         child: const _SectionMenuItemContent(
-                          icon: LucideIcons.arrowDown,
+                          icon: BuzzIcons.arrowDown,
                           label: 'Move down',
                         ),
                       ),
@@ -221,7 +178,7 @@ class _CustomSectionHeader extends ConsumerWidget {
                         value: 'delete',
                         padding: _sectionMenuItemPadding,
                         child: _SectionMenuItemContent(
-                          icon: LucideIcons.trash2,
+                          icon: BuzzIcons.trash2,
                           label: 'Delete section',
                           color: context.colors.error,
                         ),
@@ -245,8 +202,6 @@ class _CustomSectionHeader extends ConsumerWidget {
                 },
               ),
             ),
-            const SizedBox(width: Grid.quarter),
-            _SectionChevron(expanded: expanded, color: sectionColor),
           ],
         ),
       ),
@@ -282,16 +237,6 @@ class _SectionMenuItemContent extends StatelessWidget {
       ],
     );
   }
-}
-
-CustomEmoji? _resolveCustomEmoji(String icon, List<CustomEmoji> palette) {
-  if (!icon.startsWith(':') || !icon.endsWith(':')) return null;
-  final shortcode = normalizeShortcode(icon);
-  if (shortcode == null) return null;
-  for (final emoji in palette) {
-    if (emoji.shortcode == shortcode) return emoji;
-  }
-  return null;
 }
 
 class _SectionNameDialog extends HookWidget {
@@ -346,7 +291,7 @@ PopupMenuItem<String> _sortMenuItem({
     children: [
       Expanded(child: Text(label)),
       if (selected)
-        const Icon(LucideIcons.check, key: ValueKey('sort-selected-check'))
+        const Icon(BuzzIcons.check, key: ValueKey('sort-selected-check'))
       else
         const SizedBox(width: 24),
     ],
@@ -372,11 +317,9 @@ List<PopupMenuEntry<String>> _sortMenuItems(
 
 class _ChannelSection extends StatelessWidget {
   final String title;
-  final IconData icon;
   final bool expanded;
   final VoidCallback onToggle;
   final List<Channel> channels;
-  final bool showTopDivider;
   final Set<String> unreadChannelIds;
   final Set<String> mutedChannelIds;
   final String? currentPubkey;
@@ -387,11 +330,9 @@ class _ChannelSection extends StatelessWidget {
 
   const _ChannelSection({
     required this.title,
-    required this.icon,
     required this.expanded,
     required this.onToggle,
     required this.channels,
-    required this.showTopDivider,
     required this.unreadChannelIds,
     required this.mutedChannelIds,
     required this.currentPubkey,
@@ -406,16 +347,14 @@ class _ChannelSection extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (showTopDivider) const _SectionDivider(),
         _SectionHeader(
           label: title,
-          icon: icon,
           expanded: expanded,
           onToggle: onToggle,
           sortMode: sortMode,
           onSortModeChange: onSortModeChange,
         ),
-        _AnimatedSectionBody(
+        CollapsibleSectionBody(
           expanded: expanded,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -428,10 +367,15 @@ class _ChannelSection extends StatelessWidget {
                     top: Grid.half,
                     bottom: Grid.half,
                   ),
-                  child: Text(
-                    emptyLabel,
-                    style: contentListBodyTextStyle.copyWith(
-                      color: context.colors.onSurfaceVariant,
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      emptyLabel,
+                      style: contentListBodyTextStyle.copyWith(
+                        color: context.colors.onSurfaceVariant.withValues(
+                          alpha: 0.65,
+                        ),
+                      ),
                     ),
                   ),
                 )
@@ -446,7 +390,6 @@ class _ChannelSection extends StatelessWidget {
                     onMarkRead: null,
                     sectionId: null,
                   ),
-              const SizedBox(height: _kExpandedSectionTrailingPadding),
             ],
           ),
         ),
@@ -467,7 +410,7 @@ class _EmptyState extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(
-              LucideIcons.messagesSquare,
+              BuzzIcons.messagesSquare,
               size: Grid.xl,
               color: context.colors.onSurfaceVariant,
             ),
@@ -485,27 +428,8 @@ class _EmptyState extends StatelessWidget {
   }
 }
 
-class _SectionDivider extends StatelessWidget {
-  const _SectionDivider();
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
-      child: Divider(
-        height: 1,
-        thickness: 1,
-        indent: _kChannelSectionInset,
-        endIndent: _kChannelSectionInset,
-        color: context.colors.primary.withValues(alpha: 0.15),
-      ),
-    );
-  }
-}
-
 class _SectionHeader extends StatelessWidget {
   final String label;
-  final IconData icon;
   final bool expanded;
   final VoidCallback onToggle;
   final ChannelSortMode? sortMode;
@@ -513,7 +437,6 @@ class _SectionHeader extends StatelessWidget {
 
   const _SectionHeader({
     required this.label,
-    required this.icon,
     required this.expanded,
     required this.onToggle,
     this.sortMode,
@@ -522,7 +445,7 @@ class _SectionHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final sectionColor = navigationSectionForeground(context);
+    final sectionColor = navigationHeadingForeground(context);
 
     return GestureDetector(
       onTap: onToggle,
@@ -536,47 +459,28 @@ class _SectionHeader extends StatelessWidget {
         ),
         child: Row(
           children: [
-            SizedBox(
-              width: _kChannelLeadingWidth,
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Icon(icon, size: _kChannelIconSize, color: sectionColor),
-              ),
-            ),
-            const SizedBox(width: _kChannelLabelGap),
-            Text(
-              label,
-              style: contentListTitleTextStyle.copyWith(
+            Expanded(
+              child: _SectionLabel(
+                label: label,
+                expanded: expanded,
                 color: sectionColor,
-                fontWeight: FontWeight.w600,
               ),
             ),
-            const Spacer(),
             if (sortMode case final mode?) ...[
               Builder(
-                builder: (buttonContext) => IconButton(
+                builder: (buttonContext) => _SectionOptionsButton(
                   key: ValueKey('sort-menu-$label'),
                   tooltip: '$label options',
-                  visualDensity: VisualDensity.compact,
                   icon: Icon(
-                    LucideIcons.ellipsisVertical,
-                    size: _kChannelIconSize,
-                    color: sectionColor,
+                    BuzzIcons.ellipsis,
+                    size: 14,
+                    color: navigationAccessoryForeground(context),
                   ),
                   onPressed: () async {
                     final value = await showAnchoredPopover<String>(
                       context: buttonContext,
                       width: 216,
                       alignment: AnchoredPopoverAlignment.end,
-                      color: context.colors.surface,
-                      elevation: 4,
-                      shadowColor: context.colors.shadow.withValues(
-                        alpha: 0.18,
-                      ),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(Radii.md),
-                        side: BorderSide(color: context.colors.outline),
-                      ),
                       surfaceKey: ValueKey('sort-popover-$label'),
                       items: _sortMenuItems(mode, showDivider: false),
                     );
@@ -588,14 +492,46 @@ class _SectionHeader extends StatelessWidget {
                   },
                 ),
               ),
-              const SizedBox(width: Grid.quarter),
             ],
-            _SectionChevron(expanded: expanded, color: sectionColor),
           ],
         ),
       ),
     );
   }
+}
+
+class _SectionLabel extends StatelessWidget {
+  const _SectionLabel({
+    required this.label,
+    required this.expanded,
+    required this.color,
+  });
+
+  final String label;
+  final bool expanded;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    children: [
+      Flexible(
+        child: Text(
+          label,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: navigationSectionTextStyle.copyWith(
+            color: color,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ),
+      const SizedBox(width: Grid.quarter),
+      _SectionChevron(
+        expanded: expanded,
+        color: navigationAccessoryForeground(context),
+      ),
+    ],
+  );
 }
 
 class _SectionChevron extends StatelessWidget {
@@ -610,108 +546,47 @@ class _SectionChevron extends StatelessWidget {
 
     return AnimatedRotation(
       turns: expanded ? 0 : -0.25,
-      duration: reducedMotion ? Duration.zero : _kSectionExpandDuration,
-      curve: _kSectionExpandCurve,
-      child: Icon(
-        LucideIcons.chevronDown,
-        size: _kChannelIconSize,
-        color: color,
-      ),
+      duration: reducedMotion ? Duration.zero : sectionExpandDuration,
+      curve: sectionExpandCurve,
+      child: Icon(BuzzIcons.chevronDown, size: 14, color: color),
     );
   }
 }
 
-class _AnimatedSectionBody extends HookWidget {
-  final bool expanded;
-  final Widget child;
+class _SectionOptionsButton extends StatelessWidget {
+  const _SectionOptionsButton({
+    super.key,
+    required this.tooltip,
+    required this.icon,
+    required this.onPressed,
+  });
 
-  const _AnimatedSectionBody({required this.expanded, required this.child});
+  final String tooltip;
+  final Widget icon;
+  final VoidCallback onPressed;
 
   @override
-  Widget build(BuildContext context) {
-    final reducedMotion = MediaQuery.of(context).disableAnimations;
-    final controller = useAnimationController(
-      duration: reducedMotion ? Duration.zero : _kSectionExpandDuration,
-      reverseDuration: reducedMotion
-          ? Duration.zero
-          : _kSectionCollapseDuration,
-      initialValue: expanded ? 1 : 0,
-    );
-    final curvedAnimation = useMemoized(
-      () => CurvedAnimation(
-        parent: controller,
-        curve: _kSectionExpandCurve,
-        reverseCurve: _kSectionCollapseCurve,
-      ),
-      [controller],
-    );
-    final shouldRender = useState(expanded);
-
-    useEffect(() => curvedAnimation.dispose, [curvedAnimation]);
-
-    useEffect(() {
-      void handleStatus(AnimationStatus status) {
-        if (status == AnimationStatus.dismissed && !expanded) {
-          shouldRender.value = false;
-        }
-      }
-
-      controller.addStatusListener(handleStatus);
-      return () => controller.removeStatusListener(handleStatus);
-    }, [controller, expanded]);
-
-    useEffect(() {
-      controller.duration = reducedMotion
-          ? Duration.zero
-          : _kSectionExpandDuration;
-      controller.reverseDuration = reducedMotion
-          ? Duration.zero
-          : _kSectionCollapseDuration;
-
-      if (expanded) {
-        shouldRender.value = true;
-        if (reducedMotion) {
-          controller.value = 1;
-        } else {
-          unawaited(controller.forward());
-        }
-      } else if (reducedMotion) {
-        controller.value = 0;
-        shouldRender.value = false;
-      } else {
-        unawaited(controller.reverse());
-      }
-
-      return null;
-    }, [controller, expanded, reducedMotion]);
-
-    return ClipRect(
-      child: AnimatedBuilder(
-        animation: curvedAnimation,
-        child: shouldRender.value ? child : const SizedBox.shrink(),
-        builder: (context, child) {
-          final value = curvedAnimation.value.clamp(0.0, 1.0);
-          final scaleY =
-              _kSectionCollapsedScaleY +
-              ((1 - _kSectionCollapsedScaleY) * value);
-
-          return Align(
-            alignment: Alignment.topCenter,
-            heightFactor: value,
-            child: Opacity(
-              opacity: value,
-              child: Transform.scale(
-                alignment: Alignment.topCenter,
-                scaleY: scaleY,
-                child: ExcludeSemantics(
-                  excluding: !expanded,
-                  child: IgnorePointer(ignoring: !expanded, child: child),
-                ),
-              ),
+  Widget build(BuildContext context) => Semantics(
+    button: true,
+    label: tooltip,
+    onTap: onPressed,
+    excludeSemantics: true,
+    child: Tooltip(
+      message: tooltip,
+      child: SizedBox.square(
+        dimension: 44,
+        child: InkWell(
+          onTap: onPressed,
+          borderRadius: BorderRadius.circular(Radii.full),
+          child: Align(
+            alignment: Alignment.centerRight,
+            child: SizedBox(
+              width: _kChannelIconSize,
+              child: Center(child: icon),
             ),
-          );
-        },
+          ),
+        ),
       ),
-    );
-  }
+    ),
+  );
 }

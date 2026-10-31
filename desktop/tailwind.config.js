@@ -33,6 +33,11 @@ export default {
           "calc(var(--buzz-type-rem) * 2.25)",
           { lineHeight: "1.3" },
         ],
+        // 22px at the 16px type rem — compact onboarding-card private key.
+        "nsec-key-card": [
+          "calc(var(--buzz-type-rem) * 1.375)",
+          { lineHeight: "1.3" },
+        ],
       },
       lineHeight: {
         // Keep fixed Tailwind line-height utilities in the typography scale so

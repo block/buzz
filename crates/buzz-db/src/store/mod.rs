@@ -18,22 +18,42 @@ pub mod community;
 pub mod deletion;
 /// Direct message channel persistence.
 pub mod dm;
+/// Shared operator-global deletion workflow persistence.
+pub mod entity_deletion;
 /// Event storage and retrieval.
 pub mod event;
+/// App-owned push enqueue and channel TTL refresh for inserted events.
+pub(crate) mod event_follow_up;
+/// Per-community NIP-FI issuer bindings.
+pub mod nip_fi_binding;
+/// User-specific deletion submission and inventory preparation.
+pub mod user_deletion;
+/// Operator-global user restrictions and identity-lock primitives.
+pub mod user_deletion_fences;
+
+#[cfg(test)]
+mod event_follow_up_postgres_tests;
+
 /// Home feed queries.
 pub mod feed;
 /// Git repository name registry (NIP-34 kind:30617).
 pub mod git_repo;
 /// Community moderation: reports, bans/timeouts, audit actions.
 pub mod moderation;
+/// Deployment-global operator-listener mention registrations and delivery queues.
+pub mod operator_listener;
 /// Monthly table partition management.
 pub mod partition;
+/// Private signer-owned accessory read progress.
+pub mod personal_read;
 /// Buzz product-feedback sidecar persistence.
 pub mod product_feedback;
 /// Community-scoped push lease and durable wake-outbox persistence.
 pub mod push;
 /// Reaction persistence.
 pub mod reaction;
+/// Complete own-author read-state snapshots.
+pub mod read_state;
 /// HTTP report-resolution enforcement state machine persistence.
 pub mod relay_admin_actions;
 /// Use-limited relay invite persistence (v2 opaque tokens).
@@ -46,11 +66,38 @@ pub mod relay_operators;
 pub mod reminder;
 /// Replaceable-event persistence and coordinate locking.
 pub mod replaceable;
+/// Durable completed snapshots from the isolated media-storage worker.
+pub mod storage_accounting;
 /// Thread metadata persistence.
 pub mod thread;
+/// Strict newest-first thread windows and auxiliary scans.
+pub mod thread_window;
 /// Per-community usage rollup queries for Prometheus gauges.
 pub mod usage;
 /// User profile persistence.
 pub mod user;
 /// Workflow, run, and approval persistence.
 pub mod workflow;
+
+/// NIP-AR artifact lifecycle and durable delivery.
+pub mod artifact;
+
+mod artifact_query;
+/// Timestamp-based incremental artifact reads.
+pub mod artifact_sync;
+pub use artifact_query::{ArtifactSnapshot, SnapshotDenied};
+
+#[cfg(test)]
+mod artifact_postgres_tests;
+
+#[cfg(test)]
+mod legacy_channel_types_postgres_tests;
+
+#[cfg(test)]
+mod unlisted_channels_postgres_tests;
+
+#[cfg(test)]
+mod admission_postgres_tests;
+
+/// Durable NIP-FI verified-profile projection state.
+pub mod verified_profiles;

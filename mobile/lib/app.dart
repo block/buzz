@@ -1,4 +1,12 @@
+import 'features/activity/activity_provider.dart';
+import 'features/channels/default_agent_launcher.dart';
+import 'features/agents/agents_page.dart';
 import 'dart:async';
+import 'hosted_app_gate.dart';
+import 'onboarding_app_entry.dart';
+import 'shared/widgets/ios_navigation_metrics.dart';
+import 'shared/community/paired_community_landing.dart';
+import 'shared/community/community_loading_surface.dart';
 
 import 'package:app_badge_plus/app_badge_plus.dart';
 import 'package:flutter/material.dart';
@@ -7,33 +15,34 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
-import 'features/activity/activity_provider.dart';
-import 'features/activity/inbox_local_state_provider.dart';
-import 'features/activity/inbox_read_state.dart';
+import 'features/age_gate/age_restriction_page.dart';
+import 'features/age_gate/age_signal_provider.dart';
 import 'features/channels/channel.dart';
 import 'features/channels/channel_management_provider.dart';
 import 'features/channels/channels_provider.dart';
 import 'features/channels/unread_badge/unread_badge_provider.dart';
 import 'features/home/home_page.dart';
+import 'features/channels/me/me_page.dart';
+import 'features/channels/me/me_unread_provider.dart';
 import 'features/invites/invite_create_page.dart';
 import 'features/invites/invite_join_provider.dart';
 import 'features/pairing/pairing_page.dart';
+import 'features/pairing/pairing_provider.dart';
 import 'features/channels/agent_activity/observer_subscription.dart';
 import 'features/channels/channel_detail_page.dart';
-import 'features/channels/deep_link_dispatcher.dart';
-import 'features/channels/voice_note_recording.dart';
+import 'shared/widgets/app_route_observer.dart';
 import 'features/profile/user_status_cache_provider.dart';
 import 'features/profile/settings_profile_header.dart';
+import 'features/profile/set_status_sheet.dart';
+import 'features/profile/user_status_provider.dart';
 import 'features/profile/profile_edit_page.dart';
 import 'features/profile/profile_text_editor.dart';
 import 'features/settings/settings_page.dart';
+import 'features/settings/theme_picker_page.dart';
 import 'shared/auth/auth.dart';
 import 'shared/deeplink/pending_deep_link_provider.dart';
 import 'shared/emoji/emoji_burst.dart';
-import 'shared/push/push_subscription_provider.dart';
-import 'shared/push/push_relay_capability_provider.dart';
 import 'shared/relay/relay.dart';
-import 'shared/read_state/read_state_provider.dart';
 import 'shared/theme/theme.dart';
 import 'shared/widgets/buzz_loading_indicator.dart';
 
@@ -235,9 +244,9 @@ InviteJoinRecovery buildMobileInviteJoinRecovery(
           .read(_inviteRelayConnectedProvider(scope.relayHttpOrigin).future)
           .timeout(const Duration(seconds: 15));
       ensureScopeCurrent();
-      await ref.read(channelsProvider.notifier).refresh(fetchDirectory: true);
-      ensureScopeCurrent();
-      final channels = await ref.read(channelsProvider.future);
+      final channels = await ref
+          .read(channelsProvider.notifier)
+          .fetchFresh(fetchDirectory: true);
       ensureScopeCurrent();
       return channels;
     },
@@ -263,28 +272,6 @@ InviteJoinRecovery buildMobileInviteJoinRecovery(
   );
 }
 
-/// App-shell projection that joins Activity state for the Home navigation.
-///
-/// This belongs at the composition root because it deliberately aggregates
-/// Activity feature providers for a sibling navigation surface.
-final _unreadInboxItemCountProvider = Provider<int>((ref) {
-  final readState = ref.watch(readStateProvider);
-  if (!readState.isReady) return 0;
-
-  final localState = ref.watch(inboxLocalStateProvider);
-  final items = ref.watch(inboxItemsProvider);
-  return items
-      .where(
-        (item) => !isInboxItemDone(
-          item,
-          markerOf: readState.effectiveTimestamp,
-          localUnreadOverrides: localState.unreadIds,
-          localDoneSet: localState.doneIds,
-        ),
-      )
-      .length;
-});
-
 final _mobileRootNavigatorKey = GlobalKey<NavigatorState>();
 
 class App extends HookConsumerWidget {
@@ -292,48 +279,40 @@ class App extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final communityTheme = ref.watch(communityThemeProvider);
+    final ageSignalState = ref.watch(ageSignalProvider);
+    ref.listen(ageSignalProvider, (_, next) {
+      if (next == AgeSignalState.restricted) {
+        ref.read(pairingProvider.notifier).reset();
+      }
+    });
+    final communityTheme = ageSignalState != AgeSignalState.restricted
+        ? ref.watch(communityThemeProvider)
+        : defaultCommunityTheme;
     final themeMode = communityTheme.mode;
-    final accentIndex = effectiveAccentIndex(
-      communityTheme.theme,
-      communityTheme.accent,
-    );
-    final schemeName = communityTheme.theme;
     final authState = ref.watch(authProvider);
+    final pairedCommunity = ref.watch(pairedCommunityLandingProvider);
 
-    final resolved = resolveSchemes(schemeName, themeMode);
-    final lightScheme = applyAccent(resolved.light, accentIndex);
-    final darkScheme = applyAccent(resolved.dark, accentIndex);
-    // Light/Dark modes pin the brightness; System leaves it null so Flutter
-    // follows the OS across the selected theme and its pair.
-    final effectiveMode = resolved.forcedMode ?? themeMode;
-
-    // Derive the gradient from the themes that produced each color scheme.
-    // This keeps fallbacks and pinned brightness changes aligned with the
-    // rendered palette rather than the raw persisted selection.
-    final buzzLightGradient = buzzTopSectionGradient(
-      resolved.lightTheme?.name ?? '',
-      lightScheme.brightness,
-    );
-    final buzzDarkGradient = buzzTopSectionGradient(
-      resolved.darkTheme?.name ?? '',
-      darkScheme.brightness,
-    );
+    useEffect(() {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        unawaited(ref.read(ageSignalProvider.notifier).request());
+      });
+      return null;
+    }, const []);
 
     // Eagerly initialize websocket session and lifecycle observer when
     // authenticated. These providers connect and manage the websocket.
-    var hasUnreadInbox = false;
-    if (authState.value?.status == AuthStatus.authenticated) {
+    if (ageSignalState != AgeSignalState.restricted &&
+        authState.value?.status == AuthStatus.authenticated) {
       ref.watch(relaySessionProvider);
-      ref.watch(observerRelayProvider);
+      // Listen, not watch: these publish often, and an App rebuild rebuilds
+      // every route, including an open chat.
+      ref.listen(observerRelayProvider, (_, _) {});
       ref.watch(appLifecycleProvider);
-      ref.watch(userStatusCacheProvider);
-      if (ref.watch(activeCommunityProvider).value?.pushNotificationsEnabled ==
-              true &&
-          ref.watch(currentRelayPushDescriptorProvider).value != null) {
-        ref.watch(pushSubscriptionSyncProvider);
-      }
-      hasUnreadInbox = ref.watch(_unreadInboxItemCountProvider) > 0;
+      ref.listen(userStatusCacheProvider, (_, _) {});
+      // Activity owns hidden-DM recovery even when Inbox is never opened.
+      ref.listen(activityProvider, (_, _) {});
+      // Preserve initial read seeding even while Solo is hidden.
+      ref.listen(meUnreadChannelIdsProvider, (_, _) {});
     }
 
     // Start listening for buzz:// links immediately (even pre-auth) so a
@@ -351,46 +330,85 @@ class App extends HookConsumerWidget {
     }
 
     useEffect(() {
-      applyBadge(ref.read(unreadBadgeProvider));
+      if (ageSignalState != AgeSignalState.restricted) {
+        applyBadge(ref.read(unreadBadgeProvider));
+      } else {
+        AppBadgePlus.updateBadge(0);
+      }
       return null;
-    }, const []);
-    ref.listen<UnreadBadgeState>(unreadBadgeProvider, (_, next) {
-      applyBadge(next);
-    });
+    }, [ageSignalState]);
+    if (ageSignalState != AgeSignalState.restricted) {
+      ref.listen<UnreadBadgeState>(unreadBadgeProvider, (_, next) {
+        applyBadge(next);
+      });
+    }
 
     return MaterialApp(
       navigatorKey: _mobileRootNavigatorKey,
-      navigatorObservers: [voiceNoteRouteObserver],
+      navigatorObservers: [appRouteObserver],
       title: 'Buzz',
-      theme: AppTheme.light(
-        colorScheme: lightScheme,
-        topSectionGradient: buzzLightGradient,
-      ),
-      darkTheme: AppTheme.dark(
-        colorScheme: darkScheme,
-        topSectionGradient: buzzDarkGradient,
-      ),
-      themeMode: effectiveMode,
-      // Above the navigator, so a burst keeps playing over a pushed thread page
-      // or a modal sheet — the same reason desktop pins its canvas to the
-      // viewport rather than to the message row.
-      builder: (context, child) => MobileHuddleShell(
-        navigatorKey: _mobileRootNavigatorKey,
-        child: EmojiBurstOverlay(child: child ?? const SizedBox.shrink()),
-      ),
+      theme: mobileAppearanceTheme(Brightness.light, communityTheme.accent),
+      darkTheme: mobileAppearanceTheme(Brightness.dark, communityTheme.accent),
+      themeMode: themeMode,
+      // Above the navigator, so an age restriction cannot be bypassed by a
+      // route that was pushed while the store signal request was in flight.
+      builder: (context, child) => switch (ageSignalState) {
+        AgeSignalState.restricted => const AgeRestrictionPage(),
+        _ => IosNavigationMetricsHost(
+          child: AppMarkdownTheme(
+            child: MobileHuddleShell(
+              navigatorKey: _mobileRootNavigatorKey,
+              child: EmojiBurstOverlay(
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    ExcludeSemantics(
+                      excluding: pairedCommunity != null,
+                      child: AbsorbPointer(
+                        absorbing: pairedCommunity != null,
+                        child: child ?? const SizedBox.shrink(),
+                      ),
+                    ),
+                    // Cover the navigator while onboarding is removed and the
+                    // destination installs the matching avatar-flight route.
+                    if (pairedCommunity != null)
+                      CommunityLoadingSurface(
+                        name: pairedCommunity.name,
+                        relayUrl: pairedCommunity.relayUrl,
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      },
       home: authState.when(
         loading: () => const _SplashScreen(),
         error: (_, _) => const PairingPage(),
         data: (state) => switch (state.status) {
-          AuthStatus.authenticated => DeepLinkDispatcher(
+          AuthStatus.authenticated => HostedAppGate(
+            authenticated: true,
             child: HomePage(
+              onAgents: showAgents,
+              defaultAgentBuilder: (context) => DefaultAgentLauncher(
+                onChooseAgent: () => showAgents(context),
+              ),
+              mePageBuilder: (_, chat, workspace) => MePage(
+                sliver: true,
+                newChatAction: chat,
+                newWorkspaceAction: workspace,
+              ),
               settingsPageBuilder: _buildSettingsPage,
-              hasUnreadInbox: hasUnreadInbox,
+              profilePageBuilder: (_) =>
+                  const _SettingsPageContent(embedded: true),
+              communityInvitePageBuilder: (_) => const CommunityInvitePage(),
+              communityAppearancePageBuilder: (_) => const ThemePickerPage(),
             ),
           ),
-          _ => const DeepLinkDispatcher(
-            dispatchMessageLinks: false,
-            child: PairingPage(),
+          _ => const HostedAppGate(
+            authenticated: false,
+            child: OnboardingAppEntry(),
           ),
         },
       ),
@@ -401,17 +419,22 @@ class App extends HookConsumerWidget {
 Widget _buildSettingsPage(BuildContext context) => const _SettingsPageContent();
 
 class _SettingsPageContent extends ConsumerWidget {
-  const _SettingsPageContent();
+  const _SettingsPageContent({this.embedded = false});
+  final bool embedded;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return SettingsPage(
+      embedded: embedded,
       profileHeader: const SettingsProfileHeader(),
       profileEditPageBuilder: (_) =>
           const ProfileEditPage(startInPhotoEditor: true),
+      onSetStatus: (context) => showSetStatusSheet(
+        context,
+        currentStatus: ref.read(userStatusProvider).asData?.value,
+      ),
       onEditDisplayName: showProfileDisplayNameEditor,
       onEditProfileDescription: showProfileDescriptionEditor,
-      invitePageBuilder: (_) => const CommunityInvitePage(),
       identityRecoveryPageBuilder: (_) =>
           const PairingPage(addingCommunity: true, identityRecoveryOnly: true),
     );

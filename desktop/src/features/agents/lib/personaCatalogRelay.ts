@@ -1,4 +1,5 @@
 import type {
+  AcpSessionPolicy,
   AgentPersona,
   CatalogSourceCoordinate,
   RespondToMode,
@@ -13,12 +14,14 @@ type CatalogAgentProjection = {
   /** Optional public description (validated server-side; max 280 chars). */
   description: string | null;
   systemPrompt: string;
+  acpCommand?: string | null;
   runtime: string | null;
   model: string | null;
   provider: string | null;
   namePool: string[];
   respondTo: RespondToMode | null;
   parallelism: number | null;
+  sessionPolicy: AcpSessionPolicy;
 };
 
 export type PersonaCatalogPublication = {
@@ -73,6 +76,7 @@ function publicationToPersona(
     avatarUrl: publication.agent.avatarUrl,
     description: publication.agent.description ?? null,
     systemPrompt: publication.agent.systemPrompt,
+    acpCommand: publication.agent.acpCommand ?? "buzz-acp",
     runtime: publication.agent.runtime,
     model: publication.agent.model,
     provider: publication.agent.provider,
@@ -85,6 +89,7 @@ function publicationToPersona(
     respondTo: publication.agent.respondTo,
     respondToAllowlist: [],
     parallelism: publication.agent.parallelism,
+    sessionPolicy: publication.agent.sessionPolicy,
     createdAt: timestamp,
     updatedAt: timestamp,
   };

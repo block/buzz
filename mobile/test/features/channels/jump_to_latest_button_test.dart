@@ -6,7 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 void main() {
   test(
@@ -90,7 +90,7 @@ void main() {
       await tester.pump();
       expect(find.byType(UiKitView), findsNothing);
       expect(find.byType(BackdropFilter), findsOneWidget);
-      expect(find.byIcon(LucideIcons.arrowDown), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.arrowDown), findsOneWidget);
     } finally {
       messageActionBackdropActive.value = false;
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
@@ -120,7 +120,7 @@ void main() {
 
       expect(find.byType(UiKitView), findsNothing);
       expect(find.byType(BackdropFilter), findsOneWidget);
-      expect(find.byIcon(LucideIcons.arrowDown), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.arrowDown), findsOneWidget);
       expect(
         tester.getSize(find.byType(JumpToLatestButton)),
         const Size.square(Grid.xl),

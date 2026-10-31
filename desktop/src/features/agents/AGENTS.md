@@ -53,6 +53,12 @@ with a TypeScript lookup table or an id comparison in a component.
    `ownedByModelId`; Claude effort is `deferredUntilNativeOptionsAvailable`.
    New absences get new named reasons in `AgentConfigOmission` /
    `render` — never a `showX` prop.
+   Known exception, pending follow-up: the effort write control (rule 14)
+   derives Claude's levels in `ui/effortPicker.ts`, including a TypeScript
+   table for Claude Code's model aliases (`default`, `opus`, `opusplan`,
+   `sonnet`), while this descriptor still says
+   `deferredUntilNativeOptionsAvailable`. Move those levels into the runtime
+   catalog or model data rather than extending the table.
 4. **The clearing policy is the named types.** `onContextChange:
    "resetDependentValues"` (user changed harness/provider → dependent values
    reset everywhere) vs `onCatalogMismatch: "explainOnly" | "onboardingCleanup"`
@@ -223,23 +229,35 @@ with a TypeScript lookup table or an id comparison in a component.
    [the provenance contract](../../../../docs/agent-management-provenance.md).
 14. **Thinking effort has two surfaces: a local-only WRITE control and a
    read-only two-facts DISPLAY.** The write control is `EffortPickerField`
-   (`ui/EffortPickerField.tsx`), a self-contained section component mounted in
-   `AgentInstanceEditDialog` beside the Model block. It is **Save-gated, not
-   direct-write**: the control is fully controlled by the parent dialog
-   (`value`/`onChange`) and owns no mutation. The dialog persists the selection
-   by embedding `effortLevel` in the locked `update_managed_agent` IPC call, so
+   (`ui/EffortPickerField.tsx`), mounted in `AgentInstanceEditDialog` beside
+   the Model block and in the create dialog (`AgentDialog`, local agents
+   only). It is **Save-gated, not direct-write**: the control is fully
+   controlled by the parent dialog (`value`/`onChange`) and owns no mutation.
+   Edit embeds `effortLevel` in the locked `update_managed_agent` IPC call, so
    the effort write is atomic with any access-policy change and can never race
-   or survive a Cancel or failed Save. There is no standalone
-   `persistAgentEffortLevel` setter. Its gating and option compute live in the
-   pure helper `ui/effortPicker.ts` (`effortPickerState`): the picker renders
-   only when `agent.backend.type === "local"` **AND** a `thought_level`
-   `effortConfigId` has been discovered from the running session (absent
-   pre-first-session and for runtimes/models without effort support). Local-only
+   or survive a Cancel or failed Save; Create passes it to
+   `create_managed_agent`, which sets it when it builds the record. There is
+   no standalone `persistAgentEffortLevel` setter. Gating and option compute
+   live in the pure helper `ui/effortPicker.ts`: `effortChoices` returns the
+   levels the model that will run offers, and `effortPickerState` renders only
+   when `agent.backend.type === "local"` **AND** levels are known or a level
+   is stored. Claude's levels come from the model data for the model Claude
+   will launch: the explicit or linked-definition model, then the structured
+   global model, then the adapter default from model discovery — never baked
+   `BUZZ_AGENT_MODEL` or provider fallbacks, which Claude never launches with,
+   and never the stored session, which does not record which model produced
+   it. While that model is unknown (`EFFORT_LEVELS_UNKNOWN`) the picker hides
+   but a pending pick is kept. Other runtimes use the running session's
+   `thought_level` list while the runtime is unchanged (absent
+   pre-first-session). A stored level is only the agent's own saved value
+   (`ownEffortLevel`, origin `buzzExplicit`) — never a session, inherited, or
+   config-file value the dialog cannot clear. It stays shown and clearable
+   across model and runtime switches, even when the model doesn't list it,
+   and is hidden only on the pin→inherit transition, which clears it. Local-only
    is load-bearing, not cosmetic — the Rust command rejects non-local backends
-   because remote effort is set at deploy time via `policy_env`. Because the
-   control reads its inputs from the config surface the dialog already fetches
-   (`useAgentConfigSurface`), it integrates into the dialog's existing field
-   group without additional IPC. The read-only display is the `thinkingEffort`
+   because remote effort is set at deploy time via `policy_env`. The control
+   reads the config surface, model discovery, and global config the dialogs
+   already fetch, so it adds no IPC of its own. The read-only display is the `thinkingEffort`
    normalized field rendered by `AgentConfigPanel` via `NormalizedRow`, which
    already shows both facts — `field.value` (canonical, the effort the next
    spawn will launch with) and, when a running ACP session differs,
@@ -306,7 +324,29 @@ with a TypeScript lookup table or an id comparison in a component.
     refresh only local persona/team/managed-agent caches; they must never
     invalidate the remote relay directory.
 
-17. **Databricks model discovery has one shared catalog authority.** Desktop and ACP call the shared `buzz-agent` discovery library; Desktop passes the effective merged `DATABRICKS_MODEL_FILTER` explicitly, and the library applies it to raw workspace endpoint IDs and Unity Catalog model-service FQNs after the additive union. A successful filtered-empty catalog is authoritative: it stays empty, disables switching, and never falls through to configured or known-model fallback. UC FQNs are catalog data and always use the MLflow Chat Completions route, regardless of family-looking text in their components. Global Defaults preserves the discovered model ID as the selected value while its closed trigger renders the provider-scoped display label; do not force the raw persisted ID over that label.
+17. **Databricks model discovery has one shared catalog authority.** Desktop and ACP call the shared `buzz-agent` discovery library; Desktop passes the effective merged `DATABRICKS_MODEL_FILTER` explicitly, and the library applies it to raw workspace endpoint IDs and Unity Catalog model-service FQNs after the additive union. A successful filtered-empty catalog is authoritative: it stays empty, disables switching, and never falls through to configured or known-model fallback. Verified provider-qualified exact records in `scripts/model-capabilities.json` take precedence for UC FQNs: `data_workflow_tools.goose.goose-claude-opus-5-5` uses Anthropic Messages, adaptive thinking, and `output_config.effort` (default medium). This does not confer capabilities on other namespaces or similarly named services. Uncurated UC FQNs do not inherit family effort capabilities: Claude service components select Anthropic Messages and expose no effort choices, while GPT-5-or-newer service components select OpenAI Responses with neutral fallback effort capabilities; other uncurated FQNs use MLflow Chat Completions. Catalog/schema components never infer routing. Keep exact-record precedence and fallback rules identical in the Rust and TypeScript capability interpreters and shared corpus. Effort inheritance, persistence, and clearing semantics are unchanged. Global Defaults preserves the discovered model ID as the selected value while its closed trigger renders the provider-scoped display label; do not force the raw persisted ID over that label.
+
+18. **ACP transport is persona-owned before deployment.** Select `acp_command` in the persona create/edit form beside the harness. Deployment inherits that value; linked instances do not expose a competing post-deploy override. Legacy definitions without the field use `buzz-acp`; definition-less agents retain their stored command. Switching a linked definition back to stock resets the instance transport on the next spawn. Shared persona events and restart snapshots carry the field so edits apply on the next spawn.
+
+19. **ACP command selection is convention-based.** The editor always offers
+    stock `buzz-acp` and installed executable `buzz-*-acp` aliases discovered
+    from normal executable search directories. It does not offer arbitrary
+    command entry. A persisted value outside that set remains visible as an
+    unavailable compatibility option but is not editable; selecting a conventional
+    option replaces it. Discovery returns the path produced by the same resolver
+    used at spawn, so a duplicate alias must never advertise one executable and
+    later launch another. Keep these transitions in the pure
+    `ui/acpCommandPicker.ts` helper and preserve persisted values across loading,
+    failed discovery, and late candidate arrival. ACP-only selections must mark
+    the form dirty, including catalog-update and embedded discard protection.
+    Catalog and portable agent/team snapshots carry only stock or conventional
+    aliases (ASCII letters, digits, hyphens, and underscores in the middle).
+    Foreign artifacts with other command values are rejected; exports omit
+    legacy machine-local commands. Owner-native and owner-device synchronization
+    retain custom-command compatibility and are not an execution sandbox.
+    Shared persona heads redact nonportable commands and emit explicit stock
+    for resets; owner replay of a redacted head preserves only a nonportable
+    local override. That local path is not synchronized through catalog heads.
 
 ## Channel-only runtime controls
 
@@ -361,10 +401,14 @@ buzz messages send --channel <channel-id> --reply-to <thread-root-id> \
   every profile tab when opened from Agents and from the agent's DM.
 - `ui/AgentConfigPanelPresentation.test.mjs` — shared profile/agent config rows
   show only effective values, with an em dash for unknown values.
-- `ui/effortPicker.test.mjs` — `effortPickerState` gating (local + discovered
-  `effortConfigId` renders; provider backend or missing configId hides) and
-  option/preselect compute, plus `effortSelectionToPersistedValue` sentinel →
-  null. This is where the v4 provider regression is pinned: the write control
+- `ui/acpCommandPicker.test.mjs` — stock/discovered/unavailable command mode,
+  late discovery, query-failure compatibility, and conventional replacement of
+  persisted unknown commands.
+- `ui/effortPicker.test.mjs` — `effortChoices` level resolution (Claude model
+  data and aliases, unknown model, other runtimes' session list),
+  `effortPickerState` gating (local + known levels or a stored level renders;
+  provider backend hides) and option/preselect/note compute, `ownEffortLevel`,
+  and `effortSelectionToPersistedValue` sentinel → null. This is where the v4 provider regression is pinned: the write control
   must never render for a provider backend.
 - `desktop/tests/e2e/onboarding-agent-defaults.spec.ts` — onboarding behavior
   acceptance coverage for readiness, failure states, defaults, session-draft
@@ -380,6 +424,25 @@ buzz messages send --channel <channel-id> --reply-to <thread-root-id> \
   enqueue errors, relay rejection/unavailability, and accepted publication.
 - Rust: `definition_validation` and inbound persona tests pin the shared
   Unicode/control-character policy at local, import, publish, and sync gates.
+
+## Managed avatar media
+
+Desktop-managed profiles retain the saved persona/instance avatar as the desired
+source. Never publish another configured community's authenticated `/media/` URL
+verbatim: `relay::profile_avatar::localize_avatar` verifies/copies its bytes into
+the caller-pinned target before kind:0 comparison/publication. The shared record
+keeps the source URL, not the target projection. Transfer or kind:0 rejection
+leaves the previous profile intact so normal reconciliation can retry. The
+Agent-managed profiles opt-out still disables automatic reconciliation.
+
+The configured community origin set is refreshed through narrow workspace IPC
+before startup restore and when inactive communities change, without resetting
+active community state. After source removal, the shared writer may reuse an
+already-published target-local picture with the same original content hash;
+this is not permission to fetch the removed source. It is not learned from profile URLs. Media transfer
+uses the fixed agent signer, origin-scoped Blossom auth, no redirects, byte caps,
+and hash/descriptor verification; ordinary public external avatars remain
+unauthenticated passthrough. No image-reader proxy or tenant isolation exception.
 
 ## Keep this file true
 

@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:buzz/shared/relay/media_auth.dart';
 import 'package:buzz/shared/relay/media_image.dart';
@@ -31,30 +32,35 @@ void main() {
     PaintingBinding.instance.imageCache.clearLiveImages();
   });
 
-  group('MediaGetAuthService memoization', () {
-    test('repeated calls return byte-identical headers', () {
+  group('MediaGetAuthService mint-per-request', () {
+    test('consecutive calls return distinct headers (mint-per-request)', () {
       final nsec = nostr.Keys.generate().nsec;
       final auth = _auth(nsec: nsec);
       final first = auth.headersFor(_mediaUrl);
       final second = auth.headersFor(_mediaUrl);
       expect(first, isNotEmpty);
-      expect(identical(first, second), isTrue);
+      // With lifetime == margin == 60s, refreshAt == signedAt, so the cache
+      // never hits: each call produces a fresh proof.
+      expect(identical(first, second), isFalse);
+      expect(second['Authorization'], isNot(first['Authorization']));
     });
 
-    test('re-signs only at the refresh margin before expiry', () {
+    test('each call produces a fresh token regardless of elapsed time', () {
       final nsec = nostr.Keys.generate().nsec;
       var current = DateTime.utc(2026, 7, 21, 12);
       final auth = _auth(nsec: nsec, now: () => current);
 
       final first = auth.headersFor(_mediaUrl);
-      // 600s lifetime - 60s margin = re-sign boundary at +540s.
-      current = current.add(const Duration(seconds: 539));
-      expect(identical(auth.headersFor(_mediaUrl), first), isTrue);
+      // No elapsed time: still mints fresh.
+      final atZero = auth.headersFor(_mediaUrl);
+      expect(identical(atZero, first), isFalse);
+      expect(atZero['Authorization'], isNot(first['Authorization']));
 
-      current = current.add(const Duration(seconds: 2));
-      final refreshed = auth.headersFor(_mediaUrl);
-      expect(identical(refreshed, first), isFalse);
-      expect(refreshed['Authorization'], isNot(first['Authorization']));
+      // Advance clock: still mints fresh.
+      current = current.add(const Duration(seconds: 30));
+      final at30 = auth.headersFor(_mediaUrl);
+      expect(identical(at30, first), isFalse);
+      expect(at30['Authorization'], isNot(first['Authorization']));
     });
 
     test('non-relay URLs get no headers even with a key', () {
@@ -106,6 +112,60 @@ void main() {
   });
 
   group('MediaImageProvider fetching', () {
+    test(
+      'oversized image streams abort before decode and preserve the client',
+      () async {
+        for (final declared in [true, false]) {
+          var cancelled = false;
+          var aborted = false;
+          var delivered = false;
+          final controller = StreamController<List<int>>(
+            onCancel: () => cancelled = true,
+          );
+          final client = _StreamingClient((request) async {
+            if (request.url.path.endsWith('valid.png')) {
+              return http.StreamedResponse(Stream.value(_pngBytes), 200);
+            }
+            (request as http.AbortableRequest).abortTrigger!.then((_) {
+              aborted = true;
+            });
+            // Never finish: the loader must stop as soon as the cap is crossed.
+            controller.add(Uint8List(MediaImageProvider.maxResponseBytes));
+            controller.add([0]);
+            return http.StreamedResponse(
+              controller.stream,
+              200,
+              contentLength: declared
+                  ? MediaImageProvider.maxResponseBytes + 1
+                  : null,
+            );
+          });
+          final provider = MediaImageProvider(
+            url: 'https://avatar.example/$declared.png',
+            auth: _auth(),
+            client: client,
+            onBytesLoaded: (_) => delivered = true,
+          );
+          final error = await _waitError(
+            provider.resolve(ImageConfiguration.empty),
+          ).timeout(const Duration(seconds: 2));
+          expect(error, isA<FormatException>());
+          expect(cancelled, isTrue);
+          expect(aborted, isTrue);
+          expect(delivered, isFalse);
+          await controller.close();
+          await _wait(
+            MediaImageProvider(
+              url: 'https://avatar.example/valid.png',
+              auth: _auth(),
+              client: client,
+            ).resolve(ImageConfiguration.empty),
+          );
+          PaintingBinding.instance.imageCache.clear();
+        }
+      },
+    );
+
     test('resolves one fetch for repeated resolves of the same key', () async {
       var fetches = 0;
       final client = http_testing.MockClient((request) async {
@@ -236,4 +296,12 @@ Future<Object?> _waitError(ImageStream stream) async {
   } catch (e) {
     return e;
   }
+}
+
+class _StreamingClient extends http.BaseClient {
+  _StreamingClient(this.respond);
+  final Future<http.StreamedResponse> Function(http.BaseRequest) respond;
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) =>
+      respond(request);
 }

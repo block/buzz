@@ -44,7 +44,7 @@ void main() {
             find.byKey(const ValueKey('profile-avatar-background')),
           )
           .color,
-      AppTheme.light().colorScheme.primaryContainer,
+      neutralControlSurface(Brightness.light),
     );
     expect(
       tester.widget<ClipPath>(find.byType(ClipPath).last).clipper,

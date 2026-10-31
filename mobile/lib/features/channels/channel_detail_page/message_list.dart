@@ -1,7 +1,11 @@
 part of '../channel_detail_page.dart';
 
 class _MessageList extends HookConsumerWidget {
+  final ValueNotifier<StickyDateHeaderState> stickyDateHeaderState;
   final List<MainTimelineEntry> entries;
+
+  /// Agents typing in each thread, by lowercase root message ID.
+  final Map<String, List<String>> threadWorking;
   final List<TimelineMessage> allMessages;
   final String? initialMessageId;
   final String? initialThreadRootId;
@@ -11,6 +15,8 @@ class _MessageList extends HookConsumerWidget {
   final Set<String> initialForcedUnreadMessageIds;
   final bool hasInitialUnread;
   final String channelId;
+  final ChannelMessagesNotifier notifier;
+  final bool isDm;
   final String? currentPubkey;
   final bool isMember;
   final bool isArchived;
@@ -21,6 +27,8 @@ class _MessageList extends HookConsumerWidget {
 
   const _MessageList({
     required this.entries,
+    this.threadWorking = const {},
+    required this.stickyDateHeaderState,
     required this.allMessages,
     required this.initialMessageId,
     required this.initialThreadRootId,
@@ -30,6 +38,8 @@ class _MessageList extends HookConsumerWidget {
     required this.initialForcedUnreadMessageIds,
     required this.hasInitialUnread,
     required this.channelId,
+    required this.notifier,
+    required this.isDm,
     required this.currentPubkey,
     required this.isMember,
     required this.isArchived,
@@ -48,12 +58,12 @@ class _MessageList extends HookConsumerWidget {
     final displayEntries = groupMembershipTimelineEntries(entries);
     final itemScrollController = useMemoized(ItemScrollController.new);
     final itemPositionsListener = useMemoized(ItemPositionsListener.create);
-    final stickyDateHeaderState = useValueNotifier(
-      StickyDateHeaderState.hidden,
-    );
     final stickyDayTimestamp = useValueNotifier<int?>(null);
     final timelineViewportHeight = useRef(MediaQuery.sizeOf(context).height);
     final isLoadingOlder = useState(false);
+    final navigatingOldest = useRef(false);
+    final olderFetchPaused = useRef(false);
+    final oldestNavigationGeneration = useRef(0);
     final isAtLatest = useState(true);
     final settledImeBottomInset = useState(
       usesFixedAndroidImeViewport
@@ -81,9 +91,12 @@ class _MessageList extends HookConsumerWidget {
     final oldestUnreadMessageId = useState<String?>(null);
     final unreadBoundaryLoadFailed = useState(false);
     final unreadBoundaryFetchCount = useRef(0);
+    // Reaching the oldest page publishes no messages, so nothing else
+    // rebuilds this list to re-run the unread effect below. A count, not a
+    // flag: a reconnect can reset the notifier and reach the oldest page again.
+    final unreadBoundaryReachedOldestCount = useState(0);
     final hasUnreadDeepLink =
         initialMessageId != null || initialThreadRootId != null;
-    final notifier = ref.read(channelMessagesProvider(channelId).notifier);
     final dayTimestampByReversedIndex = <int, int>{};
     final dayStartByReversedIndex = <int, int>{};
     final dayHeaderTimestampByReversedIndex = <int, int>{};
@@ -163,7 +176,10 @@ class _MessageList extends HookConsumerWidget {
           unawaited(
             Future<void>(() async {
               final loaded = await notifier.fetchOlder();
-              if (!cancelled && !loaded && !notifier.reachedOldest) {
+              if (cancelled || loaded) return;
+              if (notifier.reachedOldest) {
+                unreadBoundaryReachedOldestCount.value += 1;
+              } else {
                 unreadBoundaryLoadFailed.value = true;
               }
             }),
@@ -234,7 +250,9 @@ class _MessageList extends HookConsumerWidget {
         StickyDateHeaderState state, {
         int? activeDayTimestamp,
       }) {
-        stickyDateHeaderState.value = state;
+        stickyDateHeaderState.value = showUnreadNavigation
+            ? StickyDateHeaderState.hidden
+            : state;
         stickyDayTimestamp.value = activeDayTimestamp;
       }
 
@@ -345,6 +363,14 @@ class _MessageList extends HookConsumerWidget {
       try {
         final targetIndex =
             reversedIndexOf(latestNavigationTargetId.value) ?? 0;
+        if (latestNavigationTargetId.value != null) {
+          itemScrollController.jumpTo(
+            index: targetIndex,
+            // Index zero already includes the composer padding.
+            alignment: targetIndex == 0 ? 0 : latestAlignment(),
+          );
+          return;
+        }
         await itemScrollController.scrollTo(
           index: targetIndex,
           alignment: latestAlignment(),
@@ -505,17 +531,21 @@ class _MessageList extends HookConsumerWidget {
               .reduce((a, b) => a > b ? a : b);
           if (!hasUserScrolled.value ||
               oldestVisible < displayEntries.length - 3 ||
-              isLoadingOlder.value) {
+              isLoadingOlder.value ||
+              navigatingOldest.value ||
+              olderFetchPaused.value) {
             return;
           }
-          final notifier = ref.read(
-            channelMessagesProvider(channelId).notifier,
-          );
           if (notifier.reachedOldest) return;
           isLoadingOlder.value = true;
-          notifier.fetchOlder().whenComplete(
-            () => isLoadingOlder.value = false,
-          );
+          notifier
+              .fetchOlder()
+              .then((loaded) {
+                olderFetchPaused.value = !loaded && !notifier.reachedOldest;
+              })
+              .whenComplete(() {
+                if (context.mounted) isLoadingOlder.value = false;
+              });
         }
 
         var disposed = false;
@@ -536,11 +566,89 @@ class _MessageList extends HookConsumerWidget {
         itemPositionsListener,
         appBarTitleContentHeight,
         composerBottomInset,
+        showUnreadNavigation,
+        stickyDateHeaderState,
       ],
     );
 
+    void readVisibleRows() {
+      final readState = ref.read(readStateProvider);
+      final viewportHeight = timelineViewportHeight.value;
+      if (!context.mounted ||
+          !readState.isReady ||
+          isAutoScrolling.value ||
+          viewportHeight <= 0 ||
+          entries.isEmpty) {
+        return;
+      }
+      // Rows hidden under the app bar, the composer or the keyboard are not
+      // read. The keyboard covers rows even when the list does not follow
+      // the latest message, so this uses the whole covered height, not the
+      // list's own bottom inset.
+      final bottomEdge =
+          (navigationBottomInset / viewportHeight).clamp(0.0, 1.0) - 0.01;
+      final topEdge =
+          1 -
+          frostedAppBarHeight(
+                context,
+                titleContentHeight: appBarTitleContentHeight,
+              ) /
+              viewportHeight +
+          0.01;
+      final visible = <TimelineMessage>[];
+      for (final position in itemPositionsListener.itemPositions.value) {
+        if (position.index >= displayEntries.length ||
+            position.itemLeadingEdge < bottomEdge ||
+            position.itemTrailingEdge > topEdge) {
+          continue;
+        }
+        final group =
+            displayEntries[displayEntries.length - 1 - position.index];
+        visible.addAll(group.map((entry) => entry.message));
+      }
+      final latest = entries.last.message;
+      final atBottom =
+          latestIsAtBoundary() &&
+          itemPositionsListener.itemPositions.value.any(
+            (position) =>
+                position.index == 0 && position.itemLeadingEdge >= bottomEdge,
+          );
+      final marks = readingMarks(
+        readState: readState,
+        channelId: channelId,
+        isDm: isDm,
+        currentPubkey: currentPubkey,
+        loaded: allMessages,
+        visible: visible,
+        bottom: atBottom ? latest : null,
+      );
+      final notifier = ref.read(readStateProvider.notifier);
+      // Reading to the bottom ends a manual "mark unread" on the channel.
+      if (atBottom && readState.isForcedUnread(channelId)) {
+        notifier.clearForcedUnread(channelId);
+      }
+      for (final mark in marks.entries) {
+        notifier.markContextRead(mark.key, mark.value);
+      }
+    }
+
+    // Reading starts once the timeline holds still for the dwell while this
+    // page is in front and the app is in use.
+    final appInUse = isAppInUse(useAppLifecycleState());
+    final readStateReady = ref.watch(
+      readStateProvider.select((state) => state.isReady),
+    );
+    useReadingDwell(
+      positions: itemPositionsListener.itemPositions,
+      active:
+          readStateReady &&
+          appInUse &&
+          (ModalRoute.of(context)?.isCurrent ?? true),
+      onDwell: readVisibleRows,
+      keys: [channelId, readingContentKey(allMessages), navigationBottomInset],
+    );
+
     useEffect(() {
-      stickyDateHeaderState.value = StickyDateHeaderState.hidden;
       stickyDayTimestamp.value = null;
       return null;
     }, [channelId]);
@@ -673,43 +781,26 @@ class _MessageList extends HookConsumerWidget {
       return null;
     }, [latestEntryId, localSendAnimations]);
 
-    if (entries.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              LucideIcons.messageSquare,
-              size: Grid.xl,
-              color: context.colors.onSurfaceVariant,
-            ),
-            const SizedBox(height: Grid.xxs),
-            Text(
-              'No messages yet',
-              style: context.textTheme.bodyLarge?.copyWith(
-                color: context.colors.onSurfaceVariant,
-              ),
-            ),
-            const SizedBox(height: Grid.half),
-            Text(
-              'Be the first to say something!',
-              style: context.textTheme.bodySmall?.copyWith(
-                color: context.colors.onSurfaceVariant,
-              ),
-            ),
-          ],
-        ),
-      );
-    }
+    _useChannelScrollToOldest(
+      context,
+      notifier: notifier,
+      itemScrollController: itemScrollController,
+      displayCount: displayEntries.length,
+      isLoadingOlder: isLoadingOlder,
+      navigatingOldest: navigatingOldest,
+      olderFetchPaused: olderFetchPaused,
+      oldestNavigationGeneration: oldestNavigationGeneration,
+      onStart: () {
+        followsLatest.value = false;
+        hasUserScrolled.value = true;
+        isAtLatest.value = false;
+        if (showUnreadNavigation) detachedWhileUnreadShown.value = true;
+      },
+    );
 
-    // Build channel names map once for all message bubbles.
-    final channelsAsync = ref.watch(channelsProvider);
-    final channelNamesMap = <String, String>{};
-    channelsAsync.whenData((channels) {
-      for (final ch in channels) {
-        channelNamesMap[ch.name.toLowerCase()] = ch.id;
-      }
-    });
+    if (entries.isEmpty) return const _EmptyMessages();
+
+    final channelNamesMap = ref.watch(channelIdsByNameProvider);
 
     return Stack(
       children: [
@@ -741,6 +832,9 @@ class _MessageList extends HookConsumerWidget {
             );
             if (notification is UserScrollNotification &&
                 notification.direction != ScrollDirection.idle) {
+              navigatingOldest.value = false;
+              oldestNavigationGeneration.value++;
+              olderFetchPaused.value = false;
               hasUserScrolled.value = true;
               followsLatest.value = false;
               if (showUnreadNavigation) {
@@ -805,6 +899,7 @@ class _MessageList extends HookConsumerWidget {
                 final showAuthor =
                     !message.isSystem &&
                     (message.hasAttachments ||
+                        prevMessage?.hasAttachments == true ||
                         prevMessage == null ||
                         prevMessage.isSystem ||
                         showDayDivider ||
@@ -812,7 +907,22 @@ class _MessageList extends HookConsumerWidget {
                             message.pubkey.toLowerCase() ||
                         (message.createdAt - prevMessage.createdAt) > 300);
 
+                final nextMessage = chronIdx + 1 < displayEntries.length
+                    ? displayEntries[chronIdx + 1].first.message
+                    : null;
+                final showAvatar =
+                    message.hasAttachments ||
+                    nextMessage == null ||
+                    nextMessage.isSystem ||
+                    nextMessage.hasAttachments ||
+                    !isSameDay(message.createdAt, nextMessage.createdAt) ||
+                    nextMessage.pubkey.toLowerCase() !=
+                        message.pubkey.toLowerCase() ||
+                    nextMessage.createdAt - message.createdAt > 300;
+
                 return LocalMessageSendTransition(
+                  messageId: message.id,
+                  channelId: channelId,
                   key: ValueKey('channel-message-send-${message.id}'),
                   animate: isRecentLocalMessageSendAnimation(
                     localSendAnimations,
@@ -836,6 +946,13 @@ class _MessageList extends HookConsumerWidget {
                         if (message.isSystem)
                           _SystemMessageRow(
                             message: message,
+                            startsDay: showDayDivider,
+                            endsDay:
+                                nextMessage != null &&
+                                !isSameDay(
+                                  message.createdAt,
+                                  nextMessage.createdAt,
+                                ),
                             groupedMessages: entryGroup.length > 1
                                 ? entryGroup
                                       .map((entry) => entry.message)
@@ -850,7 +967,35 @@ class _MessageList extends HookConsumerWidget {
                         else ...[
                           _MessageBubble(
                             message: message,
+                            startsDay: showDayDivider,
+                            endsDay:
+                                nextMessage != null &&
+                                !isSameDay(
+                                  message.createdAt,
+                                  nextMessage.createdAt,
+                                ),
                             showAuthor: showAuthor,
+                            showAvatar: showAvatar,
+                            hasReplies: entry.summary != null,
+                            replyFooter:
+                                entry.summary == null &&
+                                    !threadWorking.containsKey(
+                                      message.id.toLowerCase(),
+                                    )
+                                ? null
+                                : _ThreadSummaryRow(
+                                    summary: entry.summary,
+                                    working:
+                                        threadWorking[message.id
+                                            .toLowerCase()] ??
+                                        const [],
+                                    message: message,
+                                    allMessages: allMessages,
+                                    channelId: channelId,
+                                    currentPubkey: currentPubkey,
+                                    isMember: isMember,
+                                    isArchived: isArchived,
+                                  ),
                             channelNames: channelNamesMap,
                             currentChannelId: channelId,
                             currentPubkey: currentPubkey,
@@ -860,16 +1005,6 @@ class _MessageList extends HookConsumerWidget {
                             composerFocusNode: composerFocusNode,
                             restoreComposerFocus: restoreComposerFocus,
                           ),
-                          if (entry.summary != null)
-                            _ThreadSummaryRow(
-                              summary: entry.summary!,
-                              message: message,
-                              allMessages: allMessages,
-                              channelId: channelId,
-                              currentPubkey: currentPubkey,
-                              isMember: isMember,
-                              isArchived: isArchived,
-                            ),
                         ],
                       ],
                     ),
@@ -879,21 +1014,6 @@ class _MessageList extends HookConsumerWidget {
             ),
           ),
         ),
-        if (!showUnreadNavigation)
-          Positioned(
-            left: 0,
-            right: 0,
-            top:
-                frostedAppBarHeight(
-                  context,
-                  titleContentHeight: appBarTitleContentHeight,
-                ) +
-                Grid.twelve,
-            child: StickyDateHeader(
-              key: const ValueKey('channel-sticky-date-header'),
-              state: stickyDateHeaderState,
-            ),
-          ),
         if (showUnreadNavigation)
           Positioned(
             left: 0,
@@ -910,10 +1030,10 @@ class _MessageList extends HookConsumerWidget {
                 onPressed: scrollToOldestUnread,
                 tooltip: 'Jump to oldest unread message',
                 style: IconButton.styleFrom(
-                  backgroundColor: context.colors.primaryContainer,
+                  backgroundColor: context.controlSurface,
                   foregroundColor: context.colors.onPrimaryContainer,
                 ),
-                icon: const Icon(LucideIcons.chevronUp, size: 20),
+                icon: const Icon(BuzzIcons.chevronUp, size: 20),
               ),
             ),
           )

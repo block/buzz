@@ -215,9 +215,10 @@ pub struct LlmResponse {
     ///
     /// Empty string when the provider returned no reasoning content.
     pub reasoning: String,
-    /// Raw `reasoning_details` array from an OpenRouter response, if present.
-    /// Replayed on subsequent turns so the model can continue its chain-of-thought.
-    /// `None` for all non-OpenRouter providers.
+    /// Provider-owned replay state: OpenRouter's raw `reasoning_details` array,
+    /// or an `anthropic_content` object holding ordered native content blocks.
+    /// Kept opaque so signed thinking survives tool-result continuation. Each
+    /// serializer consumes only its own shape, including after model switches.
     pub reasoning_details: Option<Value>,
     /// The model id that was actually sent in the request body — the
     /// actually-requested model after any auto/mesh resolution. Populated by

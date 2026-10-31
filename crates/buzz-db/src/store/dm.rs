@@ -76,7 +76,7 @@ pub async fn find_dm_by_participants(
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
-               purpose, purpose_set_by, purpose_set_at
+               purpose, purpose_set_by, purpose_set_at, labels, join_role, unlisted
         FROM channels
         WHERE community_id = $1
           AND participant_hash = $2
@@ -127,7 +127,12 @@ pub async fn create_dm(
 
     let hash = compute_participant_hash(participants);
 
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
 
     // Idempotency check inside the transaction.
     let existing = sqlx::query(
@@ -137,7 +142,7 @@ pub async fn create_dm(
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
-               purpose, purpose_set_by, purpose_set_at
+               purpose, purpose_set_by, purpose_set_at, labels, join_role, unlisted
         FROM channels
         WHERE community_id = $1
           AND participant_hash = $2
@@ -148,7 +153,7 @@ pub async fn create_dm(
     )
     .bind(community_id.as_uuid())
     .bind(hash.as_slice())
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.conn())
     .await?;
 
     if let Some(row) = existing {
@@ -177,7 +182,7 @@ pub async fn create_dm(
     .bind(&name)
     .bind(created_by)
     .bind(hash.as_slice())
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     // Add all participants as members with role='member'.
@@ -187,6 +192,7 @@ pub async fn create_dm(
             INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
             VALUES ($1, $2, $3, 'member', $4)
             ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
+                sync_modified_at = CASE WHEN channel_members.removed_at IS NOT NULL THEN clock_timestamp() ELSE channel_members.sync_modified_at END,
                 removed_at = NULL,
                 removed_by = NULL,
                 role = EXCLUDED.role
@@ -196,7 +202,7 @@ pub async fn create_dm(
         .bind(id)
         .bind(*pk)
         .bind(created_by)
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await?;
     }
 
@@ -207,13 +213,13 @@ pub async fn create_dm(
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
-               purpose, purpose_set_by, purpose_set_at
+               purpose, purpose_set_by, purpose_set_at, labels, join_role, unlisted
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
     .bind(community_id.as_uuid())
     .bind(id)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.conn())
     .await?;
 
     let record = row_to_channel_record(row)?;
@@ -402,6 +408,12 @@ pub async fn hide_dm(
     channel_id: Uuid,
     pubkey: &[u8],
 ) -> Result<()> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let result = sqlx::query(
         r#"
         UPDATE channel_members
@@ -412,7 +424,7 @@ pub async fn hide_dm(
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .bind(pubkey)
-    .execute(pool)
+    .execute(tx.conn())
     .await?;
 
     if result.rows_affected() == 0 {
@@ -421,6 +433,7 @@ pub async fn hide_dm(
         )));
     }
 
+    tx.commit().await?;
     Ok(())
 }
 
@@ -434,6 +447,12 @@ pub async fn unhide_dm(
     channel_id: Uuid,
     pubkey: &[u8],
 ) -> Result<()> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     sqlx::query(
         r#"
         UPDATE channel_members
@@ -444,9 +463,10 @@ pub async fn unhide_dm(
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .bind(pubkey)
-    .execute(pool)
+    .execute(tx.conn())
     .await?;
 
+    tx.commit().await?;
     Ok(())
 }
 
@@ -513,6 +533,9 @@ fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<ChannelRecord> {
         purpose_set_at: row.try_get("purpose_set_at").unwrap_or(None),
         ttl_seconds: row.try_get("ttl_seconds").unwrap_or(None),
         ttl_deadline: row.try_get("ttl_deadline").unwrap_or(None),
+        labels: row.try_get("labels")?,
+        join_role: row.try_get("join_role")?,
+        unlisted: row.try_get("unlisted")?,
     })
 }
 

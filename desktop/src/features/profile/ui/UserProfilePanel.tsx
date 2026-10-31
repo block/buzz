@@ -1,4 +1,5 @@
 import * as React from "react";
+import { isRelayRemovedError } from "@/features/agents/managedAgentRelayCleanup";
 import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
@@ -77,7 +78,7 @@ import {
   resolveAgentInstruction,
   resolvePanelProfile,
   resolveProfileDisplayName,
-  truncatePubkey,
+  truncateNpub,
   type UserProfilePanelProps,
   useRetainedPersona,
 } from "@/features/profile/ui/UserProfilePanelUtils";
@@ -464,7 +465,9 @@ export function UserProfilePanel({
 
     try {
       const created = await createManagedAgentForPersona(resolvedPersona);
-      if (created.spawnError) {
+      if (isRelayRemovedError(created.spawnError)) {
+        // Its community was removed meanwhile: created, not started, no error.
+      } else if (created.spawnError) {
         toast.error(created.spawnError);
       } else {
         toast.success(`Started ${created.agent.name}.`);
@@ -675,7 +678,7 @@ export function UserProfilePanel({
       return (
         ownerProfile?.nip05Handle?.trim() ||
         ownerProfile?.displayName?.trim() ||
-        truncatePubkey(ownerPubkey)
+        truncateNpub(ownerPubkey)
       );
     }
 
@@ -687,7 +690,7 @@ export function UserProfilePanel({
     return (
       currentProfile?.nip05Handle?.trim() ||
       currentProfile?.displayName?.trim() ||
-      truncatePubkey(currentPubkey)
+      truncateNpub(currentPubkey)
     );
   }, [
     currentProfileQuery.data,

@@ -244,6 +244,18 @@ test("issue assignees can be assigned and unassigned", async ({ page }) => {
 
   const unassign = page.getByTestId(`project-issue-unassign-${assignee}`);
   await expect(unassign).toBeVisible({ timeout: 10_000 });
+  const assigneeAvatar = unassign.locator("[data-avatar-shape]");
+  const expectedShape = await assigneeAvatar.getAttribute("data-avatar-shape");
+  await unassign.focus();
+  await expect(unassign).toBeFocused();
+  await expect(unassign).toHaveCSS("clip-path", "none");
+  await expect(unassign).not.toHaveClass(/rounded-squircle/);
+  await expect(assigneeAvatar).toHaveCSS(
+    "clip-path",
+    expectedShape === "squircle"
+      ? /url\(["']?#rounded-squircle-clip["']?\)/
+      : "none",
+  );
   await unassign.click();
   await expect(page.getByText("Task unassigned.")).toBeVisible();
   await expect(unassign).toHaveCount(0, { timeout: 10_000 });

@@ -8,20 +8,26 @@ let package = Package(
         .library(name: "BuzzPushKit", targets: ["BuzzPushKit"])
     ],
     dependencies: [
-        .package(url: "https://github.com/21-DOT-DEV/swift-secp256k1.git", exact: "0.21.1")
+        .package(url: "https://github.com/swhitty/SwiftDraw.git", exact: "0.29.0")
     ],
     targets: [
         .target(
+            name: "CSecp256k1",
+            sources: ["vendor/src/secp256k1.c", "vendor/src/precomputed_ecmult.c", "vendor/src/precomputed_ecmult_gen.c"],
+            publicHeadersPath: "include",
+            cSettings: [.define("ENABLE_MODULE_EXTRAKEYS"), .define("ENABLE_MODULE_SCHNORRSIG")]
+        ),
+        .target(
             name: "BuzzPushKit",
-            dependencies: [.product(name: "P256K", package: "swift-secp256k1")]
+            dependencies: ["CSecp256k1", .product(name: "SwiftDraw", package: "SwiftDraw")]
         ),
         .testTarget(
             name: "BuzzPushKitTests",
             dependencies: [
                 "BuzzPushKit",
-                .product(name: "P256K", package: "swift-secp256k1"),
+                "CSecp256k1",
             ],
-            resources: [.copy("Fixtures/app_attest_transcripts.json")]
+            resources: [.copy("Fixtures/app_attest_transcripts.json"), .copy("CryptoFixtures/bip340.csv")]
         ),
     ]
 )

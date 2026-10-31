@@ -1,0 +1,15 @@
+[package]
+name = "relay-feature-selection-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[features]
+static-feature-flags = []
+environment-feature-flags = []
+launchdarkly-feature-flags = ["buzz-feature-flags/launchdarkly"]
+
+[dependencies]
+buzz-feature-flags = { path = "../../.." }

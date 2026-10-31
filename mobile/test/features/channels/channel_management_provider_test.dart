@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:buzz/features/channels/channel.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel_management_provider.dart';
@@ -13,6 +14,110 @@ import 'package:buzz/shared/relay/relay.dart';
 /// also exposed on `ChannelDetails` MUST be propagated here — otherwise
 /// `mergeDetails` silently clears that state on the merged Channel.
 void main() {
+  test('shortcut selects only an active exact DM using current membership', () {
+    final dm = Channel(
+      id: 'dm',
+      name: '',
+      channelType: 'dm',
+      visibility: 'private',
+      description: '',
+      createdBy: 'owner',
+      createdAt: DateTime(2026),
+      memberCount: 2,
+      isMember: true,
+      participantPubkeys: const ['owner', 'agent'],
+    );
+    expect(isActiveDirectConversation(dm, null, 'owner', 'agent'), isTrue);
+    for (final candidate in [
+      dm.copyWith(isMember: false),
+      dm.copyWith(archivedAt: DateTime(2026)),
+      Channel.fromJson({...dm.toJson(), 'channel_type': 'stream'}),
+      Channel.fromJson({
+        ...dm.toJson(),
+        'participant_pubkeys': ['owner', 'agent', 'other'],
+      }),
+      Channel.fromJson({
+        ...dm.toJson(),
+        'participant_pubkeys': ['owner', 'other'],
+      }),
+    ]) {
+      expect(
+        isActiveDirectConversation(candidate, null, 'owner', 'agent'),
+        isFalse,
+      );
+    }
+    expect(isActiveDirectConversation(dm, null, null, 'agent'), isFalse);
+    expect(
+      isActiveDirectConversation(dm, null, 'other-account', 'agent'),
+      isFalse,
+    );
+    final members = ['owner', 'agent', 'other']
+        .map(
+          (key) => ChannelMember(
+            pubkey: key,
+            role: 'member',
+            joinedAt: DateTime(2026),
+          ),
+        )
+        .toList();
+    expect(isActiveDirectConversation(dm, members, 'owner', 'agent'), isFalse);
+    expect(
+      isActiveDirectConversation(
+        dm,
+        members.take(2).toList(),
+        'owner',
+        'agent',
+      ),
+      isTrue,
+    );
+  });
+
+  test(
+    'Solo metadata survives details merges and classifies only own private streams',
+    () {
+      for (final type in ['stream', 'forum', 'dm']) {
+        for (final private in [true, false]) {
+          final details = channelDetailsFromEvent(
+            NostrEvent(
+              id: 'metadata',
+              pubkey: 'relay',
+              createdAt: 1,
+              kind: 39000,
+              tags: [
+                ['d', 'chat'],
+                ['t', type],
+                ['t', 'buzz.solo'],
+                ['P', 'owner'],
+                [private ? 'private' : 'public'],
+              ],
+              content: '',
+              sig: '',
+            ),
+          );
+          final channel = Channel(
+            id: 'chat',
+            name: '',
+            channelType: 'stream',
+            visibility: 'private',
+            description: '',
+            createdBy: 'relay',
+            createdAt: DateTime(2026),
+            memberCount: 1,
+          ).mergeDetails(details).copyWith(isMember: true);
+          expect(channel.labels, ['buzz.solo']);
+          expect(channel.createdBy, 'owner');
+          expect(channel.isSolo, type == 'stream' && private);
+          expect(
+            channel.isPersonalChat('owner', const []),
+            type == 'stream' && private,
+          );
+          expect(channel.isPersonalChat('other', const []), isFalse);
+          expect(ChannelDetails.fromChannel(channel).labels, ['buzz.solo']);
+        }
+      }
+    },
+  );
+
   test('extracts unique relay members from current and legacy tags', () {
     final pubkeys = relayMemberPubkeysFromEvents([
       NostrEvent(
@@ -79,6 +184,69 @@ void main() {
     expect(users.map((user) => user.label), ['Alice', 'Bob']);
     expect(users.first.pubkey, 'alice');
     expect(users.first.avatarUrl, 'https://example.com/alice.png');
+  });
+
+  group('identity labels', () {
+    // Valid fixture keys whose npub encodings were verified against the
+    // NIP-19 codec independently of the code under test.
+    const alicePubkey =
+        'a11ce00000000000000000000000000000000000000000000000000000000000';
+    const bobPubkey =
+        'b0b0000000000000000000000000000000000000000000000000000000000000';
+
+    test('member labels honor "You", authored names, and npub fallback', () {
+      final unnamed = ChannelMember(
+        pubkey: alicePubkey,
+        role: 'member',
+        joinedAt: DateTime.fromMillisecondsSinceEpoch(0),
+      );
+      final named = ChannelMember(
+        pubkey: alicePubkey,
+        role: 'member',
+        joinedAt: DateTime.fromMillisecondsSinceEpoch(0),
+        displayName: '  Alice  ',
+      );
+
+      // Unnamed members fall back to the compact npub …
+      expect(unnamed.labelFor(null), 'npub15yw…ccpw');
+      // … but only the member's own identity is "You" — never the caller's key.
+      expect(unnamed.labelFor(alicePubkey), 'You');
+      expect(unnamed.labelFor(alicePubkey.toUpperCase()), 'You');
+      expect(unnamed.labelFor(bobPubkey), 'npub15yw…ccpw');
+      // An authored display name wins over every fallback.
+      expect(named.labelFor(bobPubkey), 'Alice');
+    });
+
+    test(
+      'directory labels keep names, one-line npub fallbacks, and initials',
+      () {
+        final unnamed = DirectoryUser(pubkey: alicePubkey);
+        final alsoUnnamed = DirectoryUser(pubkey: bobPubkey);
+        final named = DirectoryUser(
+          pubkey: alicePubkey,
+          displayName: 'Alice',
+          nip05Handle: 'alice@example.com',
+        );
+
+        // Unnamed: the primary label is already the compact key, so a
+        // second key-shaped line would only duplicate it.
+        expect(unnamed.label, 'npub15yw…ccpw');
+        expect(unnamed.secondaryLabel, '');
+        // Initials stay hex-derived — a compact npub would render `N` for all.
+        expect(unnamed.initial, 'A');
+        expect(alsoUnnamed.initial, 'B');
+        // Named: the authored name leads, the handle keys the second line.
+        expect(named.label, 'Alice');
+        expect(named.secondaryLabel, 'alice@example.com');
+        expect(named.initial, 'A');
+      },
+    );
+
+    test('add-members failures identify the member by compact npub', () {
+      const failure = AddMembersException({alicePubkey: 'not a member'});
+
+      expect(failure.message, 'npub15yw…ccpw: not a member');
+    });
   });
 
   test('propagates archived state from kind:39000 archived tag', () {
@@ -157,6 +325,28 @@ void main() {
   });
 
   group('buildCreateChannelTags', () {
+    test(
+      'Solo creation carries its discovery label without client creator claims',
+      () {
+        final tags = buildCreateChannelTags(
+          channelId: _channelId,
+          name: 'Solo',
+          channelType: 'stream',
+          visibility: 'private',
+          labels: const ['buzz.solo'],
+        );
+        expect(tags, contains(equals(['t', 'buzz.solo'])));
+        expect(tags.where((tag) => tag.first == 'P'), isEmpty);
+        final ordinary = buildCreateChannelTags(
+          channelId: _channelId,
+          name: 'Private channel',
+          channelType: 'stream',
+          visibility: 'private',
+        );
+        expect(ordinary.where((tag) => tag.first == 't'), isEmpty);
+      },
+    );
+
     test('builds an ongoing channel without a ttl tag', () {
       final tags = buildCreateChannelTags(
         channelId: 'c8c629ae-d35c-44fa-bc39-f6c1816756cc',
@@ -660,6 +850,27 @@ void main() {
       expect(session.searchQueryCount, 2);
     });
 
+    test('search results keep the relay ranking', () async {
+      // The relay ranks the exact name first; alphabetizing would move
+      // "Abe Wes" above "Wes".
+      final session = _DirectoryFakeRelaySession(
+        profileEvents: [profile('wes', 'Wes'), profile('abe', 'Abe Wes')],
+      );
+      final container = buildContainer(session);
+      addTearDown(container.dispose);
+
+      final results = await container.read(
+        relayDirectorySearchProvider('wes').future,
+      );
+      expect(results.map((user) => user.label), ['Wes', 'Abe Wes']);
+      final found = await container
+          .read(channelActionsProvider)
+          .searchUsers('wes');
+      expect(found.map((user) => user.label), ['Wes', 'Abe Wes']);
+      final browsed = await container.read(relayDirectoryUsersProvider.future);
+      expect(browsed.map((user) => user.label), ['Abe Wes', 'Wes']);
+    });
+
     test('cached search families are released once unlistened', () async {
       final session = _DirectoryFakeRelaySession(
         profileEvents: [profile('alice', 'Alice')],
@@ -787,10 +998,19 @@ class _DirectoryFakeRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     if (filters.any((filter) => filter.search != null)) {
-      searchQueryCount++;
-    } else {
-      directoryQueryCount++;
+      throw StateError('name search must use searchProfiles');
     }
+    directoryQueryCount++;
+    return profileEvents;
+  }
+
+  @override
+  Future<List<NostrEvent>> searchProfiles(
+    String query, {
+    int limit = 50,
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    searchQueryCount++;
     return profileEvents;
   }
 

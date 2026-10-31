@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'accent_colors.dart';
 import 'app_colors.dart';
+import 'theme_extensions.dart';
 
 /// Name of the first-party Buzz theme. Buzz reuses the GitHub Light palette for
 /// every base color; the one thing that sets it apart is a branded gradient
@@ -55,9 +56,7 @@ Color navigationSectionForeground(BuildContext context) {
 
 /// Search-field surface for the mobile top navigation.
 Color navigationSearchSurface(BuildContext context) {
-  final scheme = Theme.of(context).colorScheme;
-  if (!isBuzzThemeContext(context)) return scheme.surfaceContainerHighest;
-  return navigationPrimaryForeground(context).withValues(alpha: 0.04);
+  return context.controlSurface;
 }
 
 /// A low-contrast navigation divider derived from the active theme foreground.
@@ -101,3 +100,27 @@ LinearGradient? buzzTopSectionGradient(
     ],
   );
 }
+
+/// Desktop navigation ink distinguishes read destinations from unread labels.
+Color channelNavigationForeground(BuildContext context, {bool unread = false}) {
+  final dark = Theme.of(context).brightness == Brightness.dark;
+  return unread
+      ? (dark ? const Color(0xFFFFFFFF) : const Color(0xFF262626))
+      : (dark ? const Color(0xFFC7C7C7) : const Color(0xFF404040));
+}
+
+/// Shared desktop section-heading ink.
+Color navigationHeadingForeground(BuildContext context) =>
+    Theme.of(context).brightness == Brightness.dark
+    ? const Color(0xFFC7C7C7)
+    : const Color(0xFF525252);
+
+/// Section disclosure controls share the heading's foreground role.
+Color navigationAccessoryForeground(BuildContext context) =>
+    navigationHeadingForeground(context);
+
+/// Muted destinations remain quieter than ordinary rows and section headings.
+Color navigationMetadataForeground(BuildContext context) =>
+    Theme.of(context).brightness == Brightness.dark
+    ? const Color(0xFFA4A4A4)
+    : const Color(0xFF5F5F5F);

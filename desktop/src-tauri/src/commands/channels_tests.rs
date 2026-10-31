@@ -513,3 +513,39 @@ fn profile_join_pubkeys_caps_in_roster_order() {
     assert_eq!(profile_join_pubkeys(&members, 10).len(), 3);
     assert!(profile_join_pubkeys(&[], 10).is_empty());
 }
+
+// Mutation oracle: removing `"consistency"` from `channel_metadata_filter`
+// fails this test, and create/update/starter/open-DM all read back through it.
+#[test]
+fn channel_metadata_filter_carries_strong_consistency() {
+    let ids = ["a", "b"];
+    let f = channel_metadata_filter(&ids);
+    assert_eq!(
+        f.get("consistency").and_then(|v| v.as_str()),
+        Some("strong"),
+        "channel metadata read-back must carry consistency=strong: {f}"
+    );
+    assert_eq!(f["kinds"], serde_json::json!([39000]));
+    assert_eq!(f["#d"], serde_json::json!(["a", "b"]));
+    assert_eq!(f.get("limit").and_then(|v| v.as_u64()), Some(2));
+}
+
+// Mutation oracle: dropping `"consistency"` from the read-your-writes arm of
+// `channel_members_filter`, or adding it to the default arm, fails this test.
+#[test]
+fn channel_members_filter_pins_writer_only_for_read_your_writes() {
+    let pinned = channel_members_filter("a", true);
+    assert_eq!(
+        pinned.get("consistency").and_then(|v| v.as_str()),
+        Some("strong"),
+        "read-your-writes member read must carry consistency=strong: {pinned}"
+    );
+    assert_eq!(pinned["kinds"], serde_json::json!([39002]));
+    assert_eq!(pinned["#d"], serde_json::json!(["a"]));
+
+    let display = channel_members_filter("a", false);
+    assert!(
+        display.get("consistency").is_none(),
+        "display member read must stay replica-eligible: {display}"
+    );
+}

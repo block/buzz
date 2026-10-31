@@ -1,3 +1,4 @@
+import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -17,6 +18,47 @@ import 'package:buzz/shared/deeplink/deep_link.dart';
 import '../../shared/community/community_storage_test.dart';
 
 void main() {
+  test(
+    'legacy invite entry refuses staging before key generation or claim',
+    () async {
+      final storage = CommunityStorage(secure: FakeSecureStorage());
+      var generated = 0;
+      var requests = 0;
+      final container = ProviderContainer(
+        overrides: [
+          communityStorageProvider.overrideWithValue(storage),
+          inviteKeyGeneratorProvider.overrideWithValue(() {
+            generated++;
+            return nostr.Keys.generate();
+          }),
+          inviteJoinHttpClientProvider.overrideWithValue(
+            http_testing.MockClient((_) async {
+              requests++;
+              return http.Response('{}', 500);
+            }),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(communityListProvider.future);
+      final notifier = container.read(inviteJoinProvider.notifier);
+      await notifier.prepare(
+        const InviteDeepLink(
+          relayUrl: 'wss://team.communities.public.builderlabstaging.xyz',
+          code: 'fixture',
+        ),
+      );
+      await notifier.confirmJoin();
+      expect(container.read(inviteJoinProvider).status, InviteJoinStatus.error);
+      expect(generated, 0);
+      expect(requests, 0);
+      expect(await storage.loadAll(), isEmpty);
+    },
+    skip: !HostedEnvironment.requiresAuth(
+      'team.communities.public.builderlabstaging.xyz',
+    ),
+  );
+
   for (final existingRelayUrl in [
     'wss://relay.example.com',
     'https://relay.example.com',
@@ -572,65 +614,229 @@ void main() {
     expect(attempts, 1);
   });
 
-  test('failed claim can be retried and preserves policy receipt', () async {
-    final keys = nostr.Keys.generate();
-    var attempts = 0;
-    final bodies = <String>[];
-    final storage = CommunityStorage(secure: FakeSecureStorage());
-    final auth = _RecordingAuthNotifier();
-    final container = ProviderContainer(
-      overrides: [
-        communityStorageProvider.overrideWithValue(storage),
-        authProvider.overrideWith(() => auth),
-        inviteKeyGeneratorProvider.overrideWithValue(() => keys),
-        inviteJoinRecoveryProvider.overrideWithValue(
-          (_) => _successfulRecovery(),
-        ),
-        inviteJoinHttpClientProvider.overrideWithValue(
-          http_testing.MockClient((request) async {
-            attempts++;
-            bodies.add(request.body);
-            if (attempts == 1) {
-              return http.Response(jsonEncode({'error': 'temporary'}), 503);
-            }
-            return http.Response(
-              jsonEncode({
-                'status': 'joined',
-                'host': 'relay.example.com',
-                'role': 'member',
-              }),
-              200,
-            );
-          }),
-        ),
-      ],
-    );
-    addTearDown(container.dispose);
-
-    await container
-        .read(inviteJoinProvider.notifier)
-        .prepare(
-          const InviteDeepLink(
-            relayUrl: 'wss://relay.example.com',
-            code: 'code',
-            policyReceipt: 'receipt.value',
+  for (final (sentinel, guidance) in [
+    (
+      'invite_restricted',
+      'This account, or the account that owns it, is restricted in this community. Contact a community administrator. If the restriction is temporary, try again after it ends.',
+    ),
+    (
+      'invite_owner_mismatch',
+      'This account does not match its recorded owner. Use the correct account or owner identity to join this community.',
+    ),
+  ]) {
+    test('$sentinel explains recovery without replacing the invite', () async {
+      final keys = nostr.Keys.generate();
+      var attempts = 0;
+      final storage = CommunityStorage(secure: FakeSecureStorage());
+      final auth = _RecordingAuthNotifier();
+      final container = ProviderContainer(
+        overrides: [
+          communityStorageProvider.overrideWithValue(storage),
+          authProvider.overrideWith(() => auth),
+          inviteKeyGeneratorProvider.overrideWithValue(() => keys),
+          inviteJoinRecoveryProvider.overrideWithValue(
+            (_) => _successfulRecovery(),
           ),
-        );
-    await container.read(inviteJoinProvider.notifier).confirmJoin();
-    expect(container.read(inviteJoinProvider).status, InviteJoinStatus.error);
+          inviteJoinHttpClientProvider.overrideWithValue(
+            http_testing.MockClient((request) async {
+              attempts++;
+              expect(jsonDecode(request.body)['code'], 'same-code');
+              return attempts == 1
+                  ? http.Response(jsonEncode({'error': sentinel}), 403)
+                  : http.Response(jsonEncode({'status': 'joined'}), 200);
+            }),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      final notifier = container.read(inviteJoinProvider.notifier);
+      await notifier.prepare(
+        const InviteDeepLink(
+          relayUrl: 'wss://relay.example.com',
+          code: 'same-code',
+        ),
+      );
+      await notifier.confirmJoin();
 
-    await container.read(inviteJoinProvider.notifier).confirmJoin();
+      final denied = container.read(inviteJoinProvider);
+      expect(denied.status, InviteJoinStatus.error);
+      expect(denied.errorMessage, guidance);
+      expect(denied.requiresFreshInvite, isFalse);
+      expect(attempts, 1);
+      expect(auth.authenticatedCommunities, isEmpty);
+      expect(await storage.loadAll(), isEmpty);
 
-    expect(container.read(inviteJoinProvider).status, InviteJoinStatus.success);
-    expect(attempts, 2);
-    expect(
-      bodies,
-      everyElement(
-        jsonEncode({'code': 'code', 'policy_receipt': 'receipt.value'}),
-      ),
-    );
-    expect(auth.authenticatedCommunities, hasLength(1));
-  });
+      // Model an explicit retry after the restriction or identity is corrected.
+      await notifier.confirmJoin();
+      expect(
+        container.read(inviteJoinProvider).status,
+        InviteJoinStatus.success,
+      );
+      expect(attempts, 2);
+    });
+  }
+
+  test(
+    'committed claim with lost response retries the same key after restart',
+    () async {
+      var attempts = 0;
+      String? claimedPubkey;
+      String? lastClaimPubkey;
+      final bodies = <String>[];
+      final secure = FakeSecureStorage();
+      final storage = CommunityStorage(secure: secure);
+      final auth = _RecordingAuthNotifier();
+      ProviderContainer open() => ProviderContainer(
+        overrides: [
+          communityStorageProvider.overrideWithValue(storage),
+          communitySnapshotWriterProvider.overrideWithValue((_) async {}),
+          communityPushLeaseRevocationEnqueuerProvider.overrideWithValue(
+            (_) async => false,
+          ),
+          authProvider.overrideWith(() => auth),
+          // Keep the production fresh-key generator: a fixed fake masks key loss.
+          inviteJoinRecoveryProvider.overrideWithValue(
+            (_) => _successfulRecovery(),
+          ),
+          inviteJoinHttpClientProvider.overrideWithValue(
+            http_testing.MockClient((request) async {
+              attempts++;
+              bodies.add(request.body);
+              final event =
+                  jsonDecode(
+                        utf8.decode(
+                          base64Decode(
+                            request.headers['Authorization']!.substring(
+                              'Nostr '.length,
+                            ),
+                          ),
+                        ),
+                      )
+                      as Map;
+              final pubkey = event['pubkey'] as String;
+              lastClaimPubkey = pubkey;
+              if (attempts == 1) {
+                claimedPubkey = pubkey;
+                throw http.ClientException('Response lost after commit');
+              }
+              if (pubkey != claimedPubkey) {
+                return http.Response(
+                  jsonEncode({'error': 'invite exhausted'}),
+                  403,
+                );
+              }
+              return http.Response(
+                jsonEncode({
+                  'status': 'already_member',
+                  'host': 'relay.example.com',
+                  'role': 'member',
+                }),
+                200,
+              );
+            }),
+          ),
+        ],
+      );
+      const invite = InviteDeepLink(
+        relayUrl: 'wss://relay.example.com',
+        code: 'code',
+        policyReceipt: 'receipt.value',
+      );
+      var container = open();
+      await container.read(inviteJoinProvider.notifier).prepare(invite);
+      await container.read(inviteJoinProvider.notifier).confirmJoin();
+      expect(container.read(inviteJoinProvider).status, InviteJoinStatus.error);
+      expect(await storage.loadAll(), isEmpty);
+      container.dispose();
+      container = open();
+      addTearDown(container.dispose);
+      await container.read(inviteJoinProvider.notifier).prepare(invite);
+      await container.read(inviteJoinProvider.notifier).confirmJoin();
+      expect(
+        container.read(inviteJoinProvider).status,
+        InviteJoinStatus.success,
+      );
+      expect(attempts, 2);
+      expect(
+        bodies,
+        everyElement(
+          jsonEncode({'code': 'code', 'policy_receipt': 'receipt.value'}),
+        ),
+      );
+      expect((await storage.loadAll()).single.pubkey, claimedPubkey);
+      expect(
+        (await secure.readAll()).keys.where(
+          (key) => key.startsWith('buzz_pending_invite_'),
+        ),
+        isEmpty,
+      );
+      final saved = (await storage.loadAll()).single;
+      // A crash after saving the community can leave the journal behind.
+      await storage.pendingInviteIdentity(
+        invite.relayUrl,
+        invite.code,
+        () => saved.nsec!,
+      );
+      await container.read(inviteJoinProvider.notifier).prepare(invite);
+      expect(
+        (await secure.readAll()).values.where((value) => value == saved.nsec),
+        isEmpty,
+      );
+
+      // Also cover a destination saved after the confirmation page was opened.
+      await storage.saveAll([]);
+      container.invalidate(communityListProvider);
+      await container.read(inviteJoinProvider.notifier).prepare(invite);
+      await storage.saveAll([saved]);
+      container.invalidate(communityListProvider);
+      await storage.pendingInviteIdentity(
+        invite.relayUrl,
+        invite.code,
+        () => saved.nsec!,
+      );
+      await container.read(inviteJoinProvider.notifier).confirmJoin();
+      expect(
+        (await secure.readAll()).values.where((value) => value == saved.nsec),
+        isEmpty,
+      );
+
+      // Any matching journal, including a different invite, must be retired on
+      // sign-out. Unrelated pending identities must survive.
+      await storage.pendingInviteIdentity(
+        invite.relayUrl,
+        invite.code,
+        () => saved.nsec!,
+      );
+      await storage.pendingInviteIdentity(
+        invite.relayUrl,
+        'another-code',
+        () => saved.nsec!,
+      );
+      final unrelated = nostr.Keys.generate().nsec;
+      await storage.pendingInviteIdentity(
+        'wss://other.example',
+        'other-code',
+        () => unrelated,
+      );
+      secure.failPendingInviteDeletes = true;
+      await expectLater(
+        container.read(authProvider.notifier).signOut(),
+        throwsStateError,
+      );
+      expect((await storage.loadAll()).single.nsec, saved.nsec);
+      secure.failPendingInviteDeletes = false;
+      await container.read(authProvider.notifier).signOut();
+      expect(await storage.loadAll(), isEmpty);
+      expect((await secure.readAll()).values, isNot(contains(saved.nsec)));
+      expect((await secure.readAll()).values, contains(unrelated));
+      await container.read(inviteJoinProvider.notifier).prepare(invite);
+      await container.read(inviteJoinProvider.notifier).confirmJoin();
+      expect(attempts, 3);
+      expect(lastClaimPubkey, isNot(claimedPubkey));
+      expect(container.read(inviteJoinProvider).status, InviteJoinStatus.error);
+      expect(await storage.loadAll(), isEmpty);
+    },
+  );
 
   test('builds a fresh recovery with the second community identity', () async {
     final firstKeys = nostr.Keys.generate();
@@ -749,7 +955,12 @@ class _RecordingAuthNotifier extends AuthNotifier {
       const AuthState(status: AuthStatus.unauthenticated);
 
   @override
-  Future<void> authenticateWithCommunity(Community community) async {
+  Future<void> authenticateWithCommunity(
+    Community community, {
+    bool Function()? shouldContinue,
+    bool activate = true,
+  }) async {
+    if (shouldContinue != null && !shouldContinue()) return;
     final storage = ref.read(communityStorageProvider);
     await storage.save(community);
     await storage.saveActiveId(community.id);

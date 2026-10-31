@@ -17,6 +17,10 @@
 //! are driven by user-initiated file transfers rather than bridge event flow,
 //! and they have independent retry logic.
 //!
+//! The native WS client also arms this gate for the explicit
+//! `shared admission unavailable` signal. Quota/concurrency CLOSEDs stay on
+//! WebSocket; they do not consume the HTTP bridge's separate ApiCalls budget.
+//!
 //! **Community scope:** the gate is reset on every `apply_workspace` call,
 //! mirroring the TS gate's `resetRateLimitGate()` on community switch in
 //! `useCommunityInit.ts`. A 429 from community A cannot stall community B.
@@ -36,8 +40,7 @@ const DEFAULT_RATE_LIMIT_SECONDS: u64 = 10;
 /// Prevents an untrusted relay from pinning traffic for an unreasonable window
 /// or overflowing `Instant` arithmetic.
 /// Exposed `pub` so `relay.rs` can clamp the hint before embedding it in the
-/// returned error string — ensuring every consumer (Rust gate and TS gate via
-/// `applyTauriRateLimitIfNeeded`) sees the same capped value.
+/// returned error string, matching the window the native HTTP gate honours.
 pub const MAX_HINT_SECONDS: u64 = 300;
 
 static GATE_EXPIRY: Mutex<Option<Instant>> = Mutex::new(None);

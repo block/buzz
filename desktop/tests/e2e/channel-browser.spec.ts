@@ -413,6 +413,59 @@ test("Enter with no matches jumps to create", async ({ page }) => {
   );
 });
 
+// Type and press Enter in one task. React commits the urgent render on the
+// microtask queue, but the deferred list re-renders in a later task, so Enter
+// lands while the list still shows the previous (unfiltered) results.
+async function typeThenEnterBeforeDeferredRender(page: Page, value: string) {
+  await page
+    .getByTestId("channel-browser-search")
+    .evaluate(async (el, text) => {
+      const input = el as HTMLInputElement;
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set?.call(input, text);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      for (let i = 0; i < 5; i += 1) await Promise.resolve();
+      input.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          key: "Enter",
+        }),
+      );
+    }, value);
+}
+
+test("Enter before the list catches up still creates a new name", async ({
+  page,
+}) => {
+  const channelName = `enter-fast-${Date.now()}`;
+
+  await page.goto("/");
+
+  await openChannelBrowser(page);
+  await expect(page.getByTestId("browse-channel-agents")).toBeVisible();
+  await typeThenEnterBeforeDeferredRender(page, channelName);
+
+  await expect(page.getByTestId("create-channel-name")).toHaveValue(
+    channelName,
+  );
+});
+
+test("Enter before the list catches up still opens the typed match", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await openChannelBrowser(page);
+  await expect(page.getByTestId("browse-channel-agents")).toBeVisible();
+  await typeThenEnterBeforeDeferredRender(page, "desig");
+
+  await expect(page.getByTestId("channel-browser-dialog")).not.toBeVisible();
+  await expect(page.getByTestId("chat-title")).toHaveText("design");
+});
+
 test("arrow keys reach the pinned create row and Enter activates it", async ({
   page,
 }) => {
