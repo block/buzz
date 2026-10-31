@@ -10,7 +10,9 @@ void main() {
         ('Trailing space  \n', 'Trailing space $editedSlot'),
         ('- one\n- two', '- one\n- two $editedSlot'),
         ('> quoted', '> quoted $editedSlot'),
-        ('# Heading', '# Heading $editedSlot'),
+        ('# Title\nbody', '# Title\nbody $editedSlot'),
+        ('Visit https://x.io today', 'Visit https://x.io today $editedSlot'),
+        ('#######', '####### $editedSlot'),
         ('wavy\n~~~', 'wavy\n~~~ $editedSlot'),
         ('ok\n--', 'ok\n-- $editedSlot'),
         ('a | b', 'a | b $editedSlot'),
@@ -45,6 +47,12 @@ void main() {
         ])
           'ok\n$marker',
         'pick\n( )',
+        '# Heading',
+        '### Notes  ',
+        'ok\n\nhttps://example.com/file.pdf',
+        'see https://example.com.',
+        'Read [the docs](https://x.io)',
+        'buzz://message?channel=c&id=e',
       ]) {
         expect(withEditedSlot(markdown), isNull, reason: markdown);
       }

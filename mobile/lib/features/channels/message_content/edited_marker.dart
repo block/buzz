@@ -12,16 +12,20 @@ const editedMarkerText = '(edited)';
 
 // Last lines that a following " (edited)" would join or turn into Markdown
 // structure: indented code, a table row, a rule or setext underline, display
-// math, or a bare list, heading, quote, checkbox or radio marker.
+// math, or a bare list, quote, checkbox or radio marker. A heading takes its
+// own line as on desktop, and so does a line ending in a link: links render
+// as widget spans, so screen readers would read a joined marker first.
 final _block = RegExp(
   r'^(?:\s{4}|\t)|^\s*\||\|\s*$|\$\$\s*$|\\\]\s*$'
   r'|^\s*(?:([-*_])(?:\s*\1){2,}|=+)\s*$'
-  r'|^\s*(?:[-*+]|#{1,6}|>|\d+\.|\[[ xX]\]|\([ xX]\))\s*$',
+  r'|^\s*#{1,6}(?:\s|$)'
+  r'|[a-zA-Z][a-zA-Z0-9+.-]*://\S*\s*$|\]\([^)]*\)\s*$'
+  r'|^\s*(?:[-*+]|>|\d+\.|\[[ xX]\]|\([ xX]\))\s*$',
 );
 
 /// [markdown] with the edited slot joined to its last line, or null when the
 /// marker must take its own line instead. It joins prose (a paragraph, list
-/// item, quote or heading). Bodies with a code fence anywhere never get the
+/// item or quote). Bodies with a code fence anywhere never get the
 /// slot: gpt_markdown's fence rules differ from CommonMark, so the slot could
 /// land inside code or open a new block.
 String? withEditedSlot(String markdown) {
