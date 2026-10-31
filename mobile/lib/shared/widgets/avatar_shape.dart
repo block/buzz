@@ -3,7 +3,8 @@ import 'package:flutter/widgets.dart';
 /// The single source of avatar silhouettes.
 ///
 /// Agents use desktop's squircle (`ROUNDED_SQUIRCLE_PATH` in
-/// `desktop/src/shared/ui/AvatarClipPaths.tsx`) and people use circles. Every avatar frame, clip, halo and placeholder takes its shape
+/// `desktop/src/shared/ui/AvatarClipPaths.tsx`) and people use circles.
+/// Every avatar frame, clip, halo and placeholder takes its shape
 /// from here, so the two never drift apart across surfaces or clients.
 OutlinedBorder avatarShape({
   required bool isAgent,
