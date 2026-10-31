@@ -32,6 +32,7 @@ import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/avatar_shape.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/bouncing_dots_indicator.dart';

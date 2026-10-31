@@ -7,6 +7,7 @@ import 'package:video_player/video_player.dart';
 
 import '../animated_avatar.dart';
 import 'avatar_image.dart';
+import 'avatar_shape.dart';
 import 'android_transparent_avatar.dart';
 
 /// Plays the transparent video paired with a bundled character poster.
@@ -98,21 +99,24 @@ class PresetAgentAvatar extends HookWidget {
 
     return SizedBox.square(
       dimension: size,
-      child: Transform.scale(
-        scale: animatedAvatarArtworkScale,
-        child: isAndroid && videoUrl != null
-            ? AndroidTransparentAvatar(
-                key: ValueKey(videoUrl),
-                url: videoUrl,
-                playing: playing,
-                fallback: AvatarImageContent(
-                  imageUrl: poster,
-                  fallback: fallback,
-                ),
-              )
-            : controller != null && ready.value == controller
-            ? VideoPlayer(controller)
-            : AvatarImageContent(imageUrl: poster, fallback: fallback),
+      child: AvatarClip(
+        isAgent: true,
+        child: Transform.scale(
+          scale: animatedAvatarArtworkScale,
+          child: isAndroid && videoUrl != null
+              ? AndroidTransparentAvatar(
+                  key: ValueKey(videoUrl),
+                  url: videoUrl,
+                  playing: playing,
+                  fallback: AvatarImageContent(
+                    imageUrl: poster,
+                    fallback: fallback,
+                  ),
+                )
+              : controller != null && ready.value == controller
+              ? VideoPlayer(controller)
+              : AvatarImageContent(imageUrl: poster, fallback: fallback),
+        ),
       ),
     );
   }

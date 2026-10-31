@@ -16,6 +16,7 @@ import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/utils/string_utils.dart';
+import '../../shared/widgets/avatar_shape.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/agent_artwork_panel.dart';
 import '../../shared/widgets/buzz_sheet_header.dart';
@@ -603,12 +604,9 @@ class _ProfileAvatar extends HookWidget {
                     imageUrl: animatedAvatar?.posterUrl ?? avatarUrl,
                     fallback: _AvatarFallback(initial: initial),
                   );
-            if (!isAgent) return ClipOval(child: avatar);
-            return ClipRRect(
-              borderRadius: BorderRadius.circular(
-                constraints.biggest.shortestSide * 0.3,
-              ),
-              child: !usesInsetAgentArtwork(avatarUrl)
+            return AvatarClip(
+              isAgent: isAgent,
+              child: !isAgent || !usesInsetAgentArtwork(avatarUrl)
                   ? avatar
                   : Transform.scale(
                       scale: animatedAvatarArtworkScale,
