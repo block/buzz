@@ -825,6 +825,11 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             }
             state.conn_manager.mark_admitted(conn_id);
             conn.send(RelayMessage::ok(&event_id_hex, true, ""));
+            crate::verified_profiles::admitted(
+                &state,
+                &conn.tenant,
+                conn.nip_fi_assertion.as_ref(),
+            );
             // _auth_permit drops here — expiry's write guard may proceed.
         }
         Err(e) => {

@@ -98,3 +98,6 @@ mod unlisted_channels_postgres_tests;
 
 #[cfg(test)]
 mod admission_postgres_tests;
+
+/// Durable NIP-FI verified-profile projection state.
+pub mod verified_profiles;

@@ -2173,6 +2173,7 @@ mod tests {
         // Enforce that is the startup-race condition that must return 503 for
         // a token-carrying request.
         config.nip_fi = NipFiRelayConfig {
+            profile_policies: Vec::new(),
             source: Default::default(),
             mode,
             registry: IssuerRegistry::new(),
@@ -4036,6 +4037,7 @@ mod tests {
         };
 
         config.nip_fi = NipFiRelayConfig {
+            profile_policies: Vec::new(),
             source: Default::default(),
             mode: NipFiMode::Enforce,
             registry: {
