@@ -525,10 +525,13 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     final isConnectionInProgress =
         sessionStatus == SessionStatus.connecting ||
         sessionStatus == SessionStatus.reconnecting;
+    // A loaded timeline stays on screen through a reconnect, as a loaded
+    // forum does. The session drops its socket five seconds into the
+    // background, so nearly every return to the app reconnects. Only a forum
+    // with no posts yet waits out this debounce for its skeleton.
     final showConnectionSkeleton = useState(false);
     final shouldDebounceConnectionSkeleton =
-        isConnectionInProgress &&
-        (resolvedChannel.isForum || messagesNotifier.hasLoadedMessages);
+        isConnectionInProgress && resolvedChannel.isForum;
     useEffect(() {
       if (!shouldDebounceConnectionSkeleton) {
         showConnectionSkeleton.value = false;
@@ -661,7 +664,6 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
           !resolvedChannel.isForum &&
               timelineEntries.isNotEmpty &&
               !showInitialConnectionSkeleton &&
-              !showConnectionSkeleton.value &&
               !messagesState.isLoading
           ? Stack(
               children: [
@@ -780,7 +782,6 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                         key: ValueKey('message-loading:${channel.id}'),
                         loading:
                             showInitialConnectionSkeleton ||
-                            showConnectionSkeleton.value ||
                             messagesState.isLoading,
                         shimmerEnabled:
                             sessionStatus != SessionStatus.disconnected,

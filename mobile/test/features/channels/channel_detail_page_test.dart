@@ -2146,7 +2146,7 @@ void main() {
       },
     );
 
-    testWidgets('uses known media shapes in the reconnect shimmer', (
+    testWidgets('keeps the loaded timeline visible during reconnect', (
       tester,
     ) async {
       final relaySession = _ReconnectingRelaySession();
@@ -2175,21 +2175,21 @@ void main() {
       await tester.pump(const Duration(seconds: 3));
       expect(
         tester.widget<SkeletonReveal>(find.byType(SkeletonReveal)).loading,
-        isTrue,
+        isFalse,
       );
       expect(
         tester
             .widget<Opacity>(find.byKey(const Key('skeleton-reveal-content')))
             .opacity,
-        0,
+        1,
       );
       expect(
-        find.byKey(
-          const ValueKey(
-            'message-skeleton-image:https://example.com/loading.jpg',
-          ),
-        ),
-        findsOneWidget,
+        tester
+            .widget<Opacity>(
+              find.byKey(const Key('skeleton-reveal-placeholder')),
+            )
+            .opacity,
+        0,
       );
       relaySession.connect();
       await tester.pumpAndSettle();
