@@ -1948,6 +1948,9 @@ pub async fn dispatch(
             let vis_str = visibility.as_ref().map(|v| v.to_string());
             cmd_list_channels(client, vis_str.as_deref(), Some(member), limit, format).await
         }
+        ChannelsCmd::MarkRead { channel } => {
+            crate::commands::channel_mark_read::cmd_mark_read(client, &channel).await
+        }
         ChannelsCmd::Unread { channel, limit } => {
             crate::commands::channel_unread::cmd_unread(client, &channel, limit).await
         }

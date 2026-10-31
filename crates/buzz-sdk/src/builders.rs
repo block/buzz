@@ -12,7 +12,7 @@ use buzz_core::{
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
         KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_PROJECT,
-        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_READ_STATE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -892,6 +892,27 @@ pub fn build_update_channel(
         tags.push(tag(&["unlisted", if unlisted { "true" } else { "false" }])?);
     }
     Ok(EventBuilder::new(Kind::Custom(9002), "").tags(tags))
+}
+
+/// Build a NIP-RS read-state slot (kind 30078, `d=read-state:<slot_id>`).
+///
+/// `ciphertext` is the NIP-44 encryption of the slot blob to the author's own
+/// key. `slot_id` must be exactly 32 lowercase hexadecimal characters.
+pub fn build_read_state(slot_id: &str, ciphertext: &str) -> Result<EventBuilder, SdkError> {
+    if slot_id.len() != 32
+        || !slot_id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(SdkError::InvalidInput(
+            "read-state slot id must be 32 lowercase hex characters".into(),
+        ));
+    }
+    let tags = vec![
+        tag(&["d", &format!("read-state:{slot_id}")])?,
+        tag(&["t", "read-state"])?,
+    ];
+    Ok(EventBuilder::new(Kind::Custom(KIND_READ_STATE as u16), ciphertext).tags(tags))
 }
 
 /// Build a NIP-29 edit-metadata event for topic (kind 9002).
@@ -3801,6 +3822,28 @@ mod tests {
             build_update_channel(cid, None, None, None, None, None, None),
             Err(SdkError::InvalidTag(_))
         ));
+    }
+
+    #[test]
+    fn read_state_slot_tags_and_slot_id_shape() {
+        let slot = "0123456789abcdef0123456789abcdef";
+        let ev = sign(build_read_state(slot, "ciphertext").unwrap());
+        assert_eq!(ev.kind.as_u16(), 30078);
+        assert_eq!(ev.content, "ciphertext");
+        assert!(has_tag(&ev, "d", &format!("read-state:{slot}")));
+        assert!(has_tag(&ev, "t", "read-state"));
+        for bad in [
+            "",
+            "abc",
+            &slot.to_uppercase(),
+            &format!("{slot}0"),
+            "g123456789abcdef0123456789abcdef",
+        ] {
+            assert!(
+                matches!(build_read_state(bad, "x"), Err(SdkError::InvalidInput(_))),
+                "{bad}"
+            );
+        }
     }
 
     #[test]
