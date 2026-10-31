@@ -568,3 +568,26 @@ fn resolve_provider_binary_accepts_valid_id_format() {
         ),
     }
 }
+
+#[test]
+fn portable_acp_aliases_exclude_paths_arguments_and_platform_metacharacters() {
+    for command in ["buzz-acp", "buzz-janet-acp", "buzz-Team_2-acp"] {
+        assert!(is_portable_acp_command(command), "{command}");
+    }
+    for command in [
+        "",
+        "buzz--acp",
+        "/tmp/buzz-janet-acp",
+        r"C:\buzz-janet-acp.cmd",
+        "buzz-../evil-acp",
+        "buzz-a b-acp",
+        "buzz-a&b-acp",
+        "buzz-a%PATH%-acp",
+        "buzz-a\nb-acp",
+        "buzz-a\u{202e}b-acp",
+        "other-command",
+        "buzz-janet-acp.exe",
+    ] {
+        assert!(!is_portable_acp_command(command), "{command:?}");
+    }
+}

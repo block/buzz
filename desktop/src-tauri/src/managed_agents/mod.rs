@@ -77,8 +77,8 @@ pub(crate) fn lock_env_mutex() -> std::sync::MutexGuard<'static, ()> {
 
 pub use backend::*;
 pub(crate) use definition_validation::{
-    is_portable_acp_command, validate_agent_definition_text, validate_agent_description_text,
-    validate_managed_agent_definition_text, validate_portable_acp_command,
+    validate_agent_definition_text, validate_agent_description_text,
+    validate_managed_agent_definition_text, validate_visible_text,
 };
 pub use discovery::*;
 pub use env_vars::*;

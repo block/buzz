@@ -813,7 +813,7 @@ pub struct AgentModelInfo {
     pub description: Option<String>,
 }
 
-pub use buzz_core_pkg::definition_validation::DEFAULT_ACP_COMMAND;
+pub const DEFAULT_ACP_COMMAND: &str = "buzz-acp";
 /// ~5 min (320s) — matches the CLI harness default (BUZZ_ACP_IDLE_TIMEOUT).
 pub const DEFAULT_AGENT_TURN_TIMEOUT_SECONDS: u64 = 320;
 pub const DEFAULT_AGENT_PARALLELISM: u32 = 10;
@@ -878,7 +878,9 @@ impl RespondTo {
             "owner-only" => Ok(Self::OwnerOnly),
             "allowlist" => Ok(Self::Allowlist),
             "anyone" => Ok(Self::Anyone),
-            other => Err(buzz_core_pkg::team_catalog::respond_to_error(other)),
+            other => Err(format!(
+                "definition respond_to '{other}' is not a recognized mode (expected 'owner-only', 'allowlist', or 'anyone')"
+            )),
         }
     }
 }

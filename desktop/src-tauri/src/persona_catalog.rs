@@ -7,7 +7,7 @@
 
 use std::{collections::HashMap, time::Duration};
 
-use buzz_core_pkg::{definition_validation::validate_persona_object, kind::KIND_PERSONA};
+use buzz_core_pkg::kind::KIND_PERSONA;
 use nostr::Event;
 use regex::Regex;
 use serde::Serialize;
@@ -16,7 +16,11 @@ use std::sync::LazyLock;
 use tauri::State;
 
 use crate::{
-    app_state::AppState, managed_agents::AcpSessionPolicy, native_relay_client::NativeRelayClient,
+    app_state::AppState,
+    managed_agents::{
+        validate_agent_definition_text, validate_agent_description_text, AcpSessionPolicy,
+    },
+    native_relay_client::NativeRelayClient,
 };
 
 const CATALOG_PAGE_SIZE: usize = 500;
@@ -225,12 +229,23 @@ fn parse_agent(content: &str) -> Option<CatalogAgentProjection> {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    validate_persona_object(object).ok()?;
-    let description = optional_string(object.get("description"));
-    let acp_command = object
-        .get("acp_command")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned);
+    validate_agent_definition_text(&display_name, &system_prompt).ok()?;
+    // Untrusted boundary: a description that fails the shared 280-char +
+    // visible-text policy rejects the whole entry rather than being stripped,
+    // matching how the other definition fields are handled.
+    let raw_description = match object.get("description") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(_) => return None,
+    };
+    validate_agent_description_text(raw_description.as_deref()).ok()?;
+    let description = raw_description.filter(|value| !value.trim().is_empty());
+    let acp_command = match object.get("acp_command") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(command)) => Some(command.clone()),
+        _ => return None,
+    };
+    crate::managed_agents::validate_portable_acp_command(acp_command.as_deref()).ok()?;
 
     let respond_to = match object.get("respond_to").and_then(Value::as_str) {
         Some("allowlist") => Some("owner-only".to_string()),

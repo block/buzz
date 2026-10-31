@@ -1,5 +1,7 @@
 use std::{collections::BTreeMap, sync::atomic::AtomicBool};
 
+use serde::{Deserialize, Deserializer, Serialize};
+
 use super::{AgentDefinition, ManagedAgentRecord};
 use crate::app_state::AppState;
 
@@ -24,7 +26,42 @@ impl AppState {
     }
 }
 
-pub use buzz_core_pkg::team_catalog::AcpSessionPolicy;
+/// Defines whether one ACP conversation is shared by a channel or isolated per thread.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcpSessionPolicy {
+    /// Share one ACP conversation across all threads in a channel.
+    #[default]
+    Channel,
+    /// Keep a separate ACP conversation for each channel thread.
+    Thread,
+}
+
+impl<'de> Deserialize<'de> for AcpSessionPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            Some("thread") => Self::Thread,
+            _ => Self::Channel,
+        })
+    }
+}
+
+impl AcpSessionPolicy {
+    pub(crate) const fn is_channel(&self) -> bool {
+        matches!(self, Self::Channel)
+    }
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Channel => "channel",
+            Self::Thread => "thread",
+        }
+    }
+}
 
 pub(crate) fn apply_acp_session_policy_env(
     command: &mut std::process::Command,
