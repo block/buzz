@@ -3056,9 +3056,7 @@ Photos
         );
       });
 
-      testWidgets('unknown #token stays text once channels have loaded', (
-        tester,
-      ) async {
+      testWidgets('unknown #token stays text', (tester) async {
         await tester.pumpWidget(
           _testable(
             const MessageContent(
@@ -3073,7 +3071,7 @@ Photos
         expect(_allRichText(tester), contains('Took over #8700 from'));
       });
 
-      testWidgets('unknown channel renders without tap while channels load', (
+      testWidgets('no #token becomes a chip before channel names load', (
         tester,
       ) async {
         await tester.pumpWidget(
@@ -3082,9 +3080,8 @@ Photos
           ),
         );
 
-        expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
-        expect(find.text('unknown'), findsOneWidget);
-        expect(find.text('#unknown'), findsNothing);
+        expect(find.byIcon(BuzzIcons.hash), findsNothing);
+        expect(_allRichText(tester), contains('Check #unknown'));
       });
 
       testWidgets('possessive #channel keeps the pill and the suffix', (

@@ -215,7 +215,7 @@ void main() {
       );
     });
 
-    test('only known channels become chips once channels have loaded', () {
+    test('only known channels become chips', () {
       expect(
         _pieces(
           'took over #8700, see #general and #8774\'s #gen',
@@ -236,9 +236,8 @@ void main() {
         _pieces('#eng-ios', channelNames: {'eng': 'c1', 'eng-ios': 'c2'}),
         [const PreviewChannel('eng-ios')],
       );
-      expect(_pieces('see #8700'), [
-        const PreviewText('see '),
-        const PreviewChannel('8700'),
+      expect(_pieces('see #8700 in #general'), [
+        const PreviewText('see #8700 in #general'),
       ]);
     });
 

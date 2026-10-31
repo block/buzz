@@ -4,8 +4,8 @@ library;
 
 /// Only [knownNames] match, longest first so `#eng-ios` wins over `#eng`.
 /// That keeps `#8700` or `#123` in prose as text instead of an inert chip.
-/// While the channel list is still empty (loading), any `#token` matches, as
-/// on desktop.
+/// With no known names (channels still loading, or none visible) nothing
+/// matches; the message rebuilds with chips once channel names arrive.
 ///
 /// A token can't start inside a word, path or URL (`a#b`, `x.y/#z`), and it
 /// ends at whitespace, the end of a line, or punctuation that commonly follows
@@ -18,17 +18,15 @@ RegExp channelTokenPattern(Iterable<String> knownNames) {
           .toSet()
           .toList()
         ..sort((a, b) => b.length.compareTo(a.length));
-  final alternatives = names.isEmpty
-      ? _genericName
-      : names.map(RegExp.escape).join('|');
+  if (names.isEmpty) return _noMatch;
   return RegExp(
-    '$_leading#(?:$alternatives)$_trailing',
+    '$_leading#(?:${names.map(RegExp.escape).join('|')})$_trailing',
     caseSensitive: false,
     multiLine: true,
   );
 }
 
-const _genericName = r'[A-Za-z0-9_][A-Za-z0-9_-]*';
+final _noMatch = RegExp(r'(?!)');
 const _leading = r'(?<![\w./:-])';
 const _trailing =
     r'(?=$|[\s,;.!?:)\]}'
