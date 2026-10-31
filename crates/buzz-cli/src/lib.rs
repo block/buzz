@@ -896,8 +896,25 @@ pub enum ReactionsCmd {
 
 #[derive(Subcommand)]
 pub enum EmojiCmd {
-    /// List the workspace custom emoji palette (union of every member's set)
+    /// List your own set and the legacy workspace union of members' sets.
+    ///
+    /// Catalog emoji (one event per emoji) are not listed here; find them with
+    /// `emoji search`.
     List,
+    /// Search catalog emoji by shortcode prefix (at least 2 characters)
+    Search {
+        /// Shortcode prefix, without surrounding colons
+        prefix: String,
+        /// Maximum results (1-50)
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
+    /// Look up catalog emoji by exact shortcode; unknown names are listed as missing
+    Resolve {
+        /// Shortcodes, without surrounding colons
+        #[arg(required = true)]
+        names: Vec<String>,
+    },
     /// Add or update a custom emoji in your own set
     Set {
         /// Emoji shortcode, without surrounding colons
@@ -2567,7 +2584,7 @@ mod tests {
         assert_eq!(names(&cmd, "reactions"), vec!["add", "get", "remove"]);
         assert_eq!(
             names(&cmd, "emoji"),
-            vec!["export", "import", "list", "rm", "set"]
+            vec!["export", "import", "list", "resolve", "rm", "search", "set"]
         );
         assert_eq!(
             names(&cmd, "dms"),
@@ -2670,7 +2687,7 @@ mod tests {
             ("canvas", 4),
             ("channels", 16),
             ("dms", 4),
-            ("emoji", 5),
+            ("emoji", 7),
             ("feed", 1),
             ("issues", 6),
             ("media", 1),
