@@ -1,5 +1,6 @@
 pub mod agents;
 pub mod channel_templates;
+pub mod channel_unread;
 pub mod channels;
 pub mod dms;
 pub mod emoji;
@@ -17,6 +18,7 @@ pub mod pr;
 pub mod project_channel;
 pub mod projects;
 pub mod reactions;
+pub(crate) mod read_state;
 mod repo_default_branch;
 pub mod repos;
 pub mod social;

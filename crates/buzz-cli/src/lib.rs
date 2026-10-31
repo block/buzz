@@ -636,6 +636,19 @@ pub enum ChannelsCmd {
         #[arg(long)]
         limit: Option<u32>,
     },
+    /// Unread message counts from your synced read state (read-only)
+    #[command(
+        after_help = "Examples:\n  buzz channels unread\n  buzz channels unread --channel <uuid> --channel <uuid>\n  buzz channels unread --limit 20\n\nOutput: [{channel_id, name, last_read_at, unread_count, capped}]. `capped: true` means unread_count is a lower bound. When more channels exist than --limit (at most 200), the rest are listed in a stderr warning count and not counted. Fails if a read-state slot cannot be decrypted or decoded."
+    )]
+    Unread {
+        /// Count only these channels (repeatable, at most 200). Default: every
+        /// non-archived channel you are a member of
+        #[arg(long)]
+        channel: Vec<String>,
+        /// Most channels to count [default: 200, max: 200]
+        #[arg(long)]
+        limit: Option<u32>,
+    },
     /// Get details for a single channel
     Get {
         /// Channel UUID
@@ -2557,6 +2570,7 @@ mod tests {
                 "set-add-policy",
                 "topic",
                 "unarchive",
+                "unread",
                 "update"
             ]
         );
@@ -2668,7 +2682,7 @@ mod tests {
         let expected: Vec<(&str, usize)> = vec![
             ("agents", 5),
             ("canvas", 4),
-            ("channels", 16),
+            ("channels", 17),
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
