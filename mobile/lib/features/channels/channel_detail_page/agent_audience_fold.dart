@@ -25,7 +25,20 @@ class _AgentAudienceFold extends HookConsumerWidget {
       ...recipients,
     ]);
     if (expanded.value) {
-      return GestureDetector(onTap: () => expanded.value = false, child: child);
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          GestureDetector(onTap: () => expanded.value = false, child: child),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton(
+              key: ValueKey('collapse-agent-audience-${message.id}'),
+              onPressed: () => expanded.value = false,
+              child: const Text('Collapse message'),
+            ),
+          ),
+        ],
+      );
     }
     var preview = message.content.trimLeft();
     for (final label in [for (final r in recipients) '@${labels[r]}']) {

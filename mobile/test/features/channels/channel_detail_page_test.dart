@@ -720,21 +720,34 @@ void main() {
   });
 
   testWidgets('agent audience folding follows the build flag', (tester) async {
+    const root = threadIdLocalDashRoot;
     final scout = 'a' * 64, helper = 'b' * 64;
+    final messages = [
+      _textMsg(
+        id: root,
+        pubkey: scout,
+        content: '@Helper Progress on the build',
+        extraTags: [
+          ['p', helper],
+          ['audience', 'agents'],
+        ],
+      ),
+      _textMsg(id: 'm2', pubkey: scout, content: 'Done', createdAt: 1001),
+    ];
     await tester.pumpWidget(
       _buildTestable(
-        messages: [
-          _textMsg(
-            id: 'm1',
-            pubkey: scout,
-            content: '@Helper Progress on the build',
-            extraTags: [
-              ['p', helper],
-              ['audience', 'agents'],
-            ],
-          ),
-          _textMsg(id: 'm2', pubkey: scout, content: 'Done', createdAt: 1001),
-        ],
+        messages: messages,
+        messagesNotifier: _FakeMessagesNotifier(
+          messages,
+          summaries: const {
+            root: ChannelWindowThreadSummary(
+              replyCount: 1,
+              descendantCount: 1,
+              lastReplyAt: 1100,
+              participantPubkeys: ['helper'],
+            ),
+          },
+        ),
         users: {
           scout: UserProfile(pubkey: scout, displayName: 'Scout'),
           helper: UserProfile(pubkey: helper, displayName: 'Helper'),
@@ -743,10 +756,10 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    final fold = find.byKey(const ValueKey('agent-audience-m1'));
+    final fold = find.byKey(const ValueKey('agent-audience-$root'));
     if (!collapseAgentMessages) {
       expect(fold, findsNothing);
-      expect(find.byKey(const ValueKey('message-row-m1')), findsOneWidget);
+      expect(find.byKey(const ValueKey('message-row-$root')), findsOneWidget);
       expect(
         find.textContaining('Progress on the build', findRichText: true),
         findsOneWidget,
@@ -754,7 +767,7 @@ void main() {
       expect(find.byKey(const ValueKey('message-author-m2')), findsNothing);
       expect(
         find.descendant(
-          of: find.byKey(const ValueKey('message-row-m1')),
+          of: find.byKey(const ValueKey('message-row-$root')),
           matching: find.byType(MessageMediaAvatar),
         ),
         findsNothing,
@@ -769,7 +782,7 @@ void main() {
       return;
     }
     expect(fold, findsOneWidget);
-    expect(find.byKey(const ValueKey('message-row-m1')), findsNothing);
+    expect(find.byKey(const ValueKey('message-row-$root')), findsNothing);
     expect(
       find.descendant(
         of: fold,
@@ -784,7 +797,7 @@ void main() {
 
     await tester.tap(fold);
     await tester.pumpAndSettle();
-    final row = find.byKey(const ValueKey('message-row-m1'));
+    final row = find.byKey(const ValueKey('message-row-$root'));
     expect(row, findsOneWidget);
     expect(
       find.descendant(of: row, matching: find.byType(MessageMediaAvatar)),
@@ -792,6 +805,16 @@ void main() {
     );
 
     await tester.tap(row);
+    await tester.pumpAndSettle();
+    expect(find.byType(ThreadDetailPage), findsOneWidget);
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+
+    final collapse = find.byKey(
+      const ValueKey('collapse-agent-audience-$root'),
+    );
+    expect(collapse, findsOneWidget);
+    await tester.tap(collapse);
     await tester.pumpAndSettle();
     expect(fold, findsOneWidget);
     expect(row, findsNothing);
