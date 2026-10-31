@@ -1669,8 +1669,9 @@ void main() {
       ),
       Community(
         id: 'bravo',
-        name: 'Bravo',
-        relayUrl: 'wss://bravo.example.com',
+        // Hosted communities without relay metadata store their host.
+        name: 'bravo.communities.buzz.xyz',
+        relayUrl: 'wss://bravo.communities.buzz.xyz',
         addedAt: DateTime(2025),
       ),
     ];
@@ -1717,7 +1718,11 @@ void main() {
 
     expect(find.byTooltip('Close community switcher'), findsOneWidget);
     expect(find.text('alpha.example.com'), findsNothing);
-    expect(find.text('bravo.example.com'), findsNothing);
+    expect(find.text('bravo.communities.buzz.xyz'), findsNothing);
+    expect(
+      find.descendant(of: options, matching: find.text('bravo')),
+      findsOneWidget,
+    );
 
     expect(find.text('Rename'), findsNothing);
     expect(
@@ -1790,13 +1795,13 @@ void main() {
     expect(activeSelection, findsNothing);
     expect(inactiveSelection, findsNothing);
 
-    await tester.tap(find.byTooltip('Remove Bravo'));
+    await tester.tap(find.byTooltip('Remove bravo'));
     await tester.pumpAndSettle();
 
     expect(find.text('Remove community?'), findsOneWidget);
     expect(
       find.text(
-        'Are you sure you want to remove “Bravo”? '
+        'Are you sure you want to remove “bravo”? '
         'You can pair with it again later.',
       ),
       findsOneWidget,
@@ -1807,7 +1812,7 @@ void main() {
 
     expect(communityNotifier.removedIds, ['bravo']);
     expect(find.text('Switch Community'), findsOneWidget);
-    expect(find.text('Bravo'), findsNothing);
+    expect(find.text('bravo'), findsNothing);
     expect(find.text('Done'), findsOneWidget);
 
     await tester.tap(find.text('Done'));
