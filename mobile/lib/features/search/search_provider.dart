@@ -57,6 +57,7 @@ class SearchState {
   final List<Channel> channelResults;
   final bool isLoading;
   final String? error;
+  final bool channelSearchFailed;
 
   const SearchState({
     this.query = '',
@@ -65,6 +66,7 @@ class SearchState {
     this.channelResults = const [],
     this.isLoading = false,
     this.error,
+    this.channelSearchFailed = false,
   });
 
   const SearchState.initial()
@@ -73,7 +75,8 @@ class SearchState {
       userResults = const [],
       channelResults = const [],
       isLoading = false,
-      error = null;
+      error = null,
+      channelSearchFailed = false;
 
   SearchState copyWith({
     String? query,
@@ -82,6 +85,7 @@ class SearchState {
     List<Channel>? channelResults,
     bool? isLoading,
     String? error,
+    bool? channelSearchFailed,
   }) => SearchState(
     query: query ?? this.query,
     messageResults: messageResults ?? this.messageResults,
@@ -89,6 +93,7 @@ class SearchState {
     channelResults: channelResults ?? this.channelResults,
     isLoading: isLoading ?? this.isLoading,
     error: error ?? this.error,
+    channelSearchFailed: channelSearchFailed ?? this.channelSearchFailed,
   );
 }
 
@@ -97,6 +102,7 @@ class SearchNotifier extends Notifier<SearchState> {
   int _generation = 0;
   int _scopeGeneration = 0;
   bool _lookupsPending = false;
+  bool _channelLookupFailed = false;
   Future<void>? _directoryLoad;
 
   @override
@@ -106,6 +112,7 @@ class SearchNotifier extends Notifier<SearchState> {
     ref.watch(myPubkeyProvider);
     _directoryLoad = null;
     _lookupsPending = false;
+    _channelLookupFailed = false;
     ref.listen(channelsProvider, (_, _) => _updateChannels());
     ref.listen(channelDirectoryLoadStatusProvider, (_, _) => _updateChannels());
     ref.onDispose(() {
@@ -127,6 +134,7 @@ class SearchNotifier extends Notifier<SearchState> {
     }
 
     _lookupsPending = true;
+    _channelLookupFailed = false;
     state = SearchState(query: trimmed, isLoading: true);
 
     _debounce = Timer(const Duration(milliseconds: 300), () {
@@ -222,7 +230,15 @@ class SearchNotifier extends Notifier<SearchState> {
       // ensureDirectoryLoaded retries membership loading too.
     }
     if (!ref.mounted || scopeGeneration != _scopeGeneration) return;
-    await ref.read(channelsProvider.notifier).ensureDirectoryLoaded();
+    final channels = ref.read(channelsProvider.notifier);
+    await channels.ensureDirectoryLoaded();
+    if (!ref.mounted || scopeGeneration != _scopeGeneration) return;
+    if (ref.read(channelDirectoryLoadStatusProvider).status ==
+        ChannelDirectoryLoadStatus.idle) {
+      // A membership refresh displaced discovery. One retry per shared
+      // request, never a loop and never an automatic retry of relay errors.
+      await channels.ensureDirectoryLoaded();
+    }
   }
 
   Future<void> _searchChannels(int generation) async {
@@ -235,7 +251,7 @@ class SearchNotifier extends Notifier<SearchState> {
       }
     } catch (_) {
       if (!_isCurrent(generation)) return;
-      state = state.copyWith(error: 'Couldn’t load channels.');
+      _channelLookupFailed = true;
     }
   }
 
@@ -256,13 +272,18 @@ class SearchNotifier extends Notifier<SearchState> {
       ref.read(myPubkeyProvider),
     );
     final status = directory.scope == scope ? directory.status : null;
+    if (status == ChannelDirectoryLoadStatus.loaded) {
+      _channelLookupFailed = false;
+    }
     state = state.copyWith(
       channelResults: matches,
       isLoading:
           _lookupsPending || status == ChannelDirectoryLoadStatus.loading,
-      error: !_lookupsPending && status == ChannelDirectoryLoadStatus.error
-          ? 'Couldn’t load channels.'
-          : null,
+      channelSearchFailed:
+          !_lookupsPending &&
+          (_channelLookupFailed ||
+              status == ChannelDirectoryLoadStatus.error ||
+              status == ChannelDirectoryLoadStatus.idle),
     );
   }
 

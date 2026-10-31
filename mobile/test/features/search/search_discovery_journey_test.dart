@@ -57,9 +57,43 @@ void main() {
       expect(find.text('Couldn’t load channels.'), findsOneWidget);
       expect(find.text('Retry'), findsOneWidget);
       expect(find.byKey(const Key('search-no-results-state')), findsNothing);
+      final errorSemantics = tester.widget<Semantics>(
+        find
+            .ancestor(
+              of: find.text('Couldn’t load channels.'),
+              matching: find.byType(Semantics),
+            )
+            .first,
+      );
+      expect(errorSemantics.properties.liveRegion, isTrue);
+      await tester.tap(find.text('People'));
+      await tester.pumpAndSettle();
+      expect(find.text('Couldn’t load channels.'), findsNothing);
+      await tester.tap(find.text('All'));
+      await tester.pumpAndSettle();
 
       session.directory = Completer<List<NostrEvent>>();
-      await tester.tap(find.text('Retry'));
+      await tester.tap(find.byKey(const Key('search-retry')));
+      await tester.pump(const Duration(milliseconds: 310));
+      await tester.pump();
+      // A membership refresh displaces the first directory attempt. Search
+      // retries once; a second displacement settles to a manual retry.
+      final displaced = session.directory;
+      await container.read(channelsProvider.notifier).refresh();
+      session.directory = Completer<List<NostrEvent>>();
+      displaced.complete(const []);
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('Couldn’t load channels.'), findsNothing);
+      final retryRequestCount = session.directoryRequests;
+      final displacedAgain = session.directory;
+      await container.read(channelsProvider.notifier).refresh();
+      session.directory = Completer<List<NostrEvent>>();
+      displacedAgain.complete(const []);
+      await tester.pumpAndSettle();
+      expect(session.directoryRequests, retryRequestCount);
+      expect(find.text('Couldn’t load channels.'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('search-retry')));
       await tester.pump(const Duration(milliseconds: 310));
       await tester.pump();
       session.directory.complete([
@@ -78,6 +112,39 @@ void main() {
         container.read(searchProvider).channelResults.single.isMember,
         isFalse,
       );
+
+      session.messages = Completer<List<NostrEvent>>();
+      await tester.enterText(find.byType(TextField), 'welcome');
+      await tester.pump(const Duration(milliseconds: 310));
+      await tester.pump();
+      session.messages!.completeError(StateError('message search offline'));
+      await tester.pumpAndSettle();
+      expect(find.text('Couldn’t load messages.'), findsOneWidget);
+      session.messages = null;
+
+      // An external refresh fails, then recovers without changing the query.
+      // Its success must clear the channel error alongside the cached results.
+      session.directory = Completer<List<NostrEvent>>();
+      final failedRefresh = container
+          .read(channelsProvider.notifier)
+          .retryDirectory();
+      await tester.pump();
+      session.directory.completeError(StateError('offline again'));
+      await failedRefresh;
+      await tester.pumpAndSettle();
+      expect(find.text('Couldn’t load channels.'), findsOneWidget);
+      expect(find.text('welcome-everyone'), findsOneWidget);
+      session.directory = Completer<List<NostrEvent>>();
+      final recovery = container
+          .read(channelsProvider.notifier)
+          .fetchFresh(fetchDirectory: true);
+      await tester.pump();
+      session.directory.complete([_meta('open', 'welcome-everyone')]);
+      await recovery;
+      await tester.pumpAndSettle();
+      expect(find.text('Couldn’t load channels.'), findsNothing);
+      expect(find.text('welcome-everyone'), findsOneWidget);
+      expect(find.text('Couldn’t load messages.'), findsOneWidget);
 
       // Reuse the loaded directory while editing, including a genuine empty hit.
       final requests = session.directoryRequests;

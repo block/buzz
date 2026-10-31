@@ -312,6 +312,11 @@ class _SearchBody extends ConsumerWidget {
     final showMessages =
         filter == _SearchFilter.all || filter == _SearchFilter.messages;
 
+    final visibleError = showChannels && state.channelSearchFailed
+        ? 'Couldn’t load channels.'
+        : showMessages
+        ? state.error
+        : null;
     final hasAnyResults =
         state.channelResults.isNotEmpty ||
         state.userResults.isNotEmpty ||
@@ -319,7 +324,7 @@ class _SearchBody extends ConsumerWidget {
     void recordResultSelection() =>
         ref.read(recentSearchesProvider.notifier).record(state.query);
 
-    if (!state.isLoading && state.error == null && !hasAnyResults) {
+    if (!state.isLoading && visibleError == null && !hasAnyResults) {
       return Padding(
         key: const Key('search-no-results-state'),
         padding: EdgeInsets.only(
@@ -348,7 +353,7 @@ class _SearchBody extends ConsumerWidget {
           ),
           sliver: SliverMainAxisGroup(
             slivers: [
-              if (state.error != null)
+              if (visibleError != null)
                 SliverToBoxAdapter(
                   child: Padding(
                     padding: const EdgeInsets.symmetric(
@@ -356,8 +361,19 @@ class _SearchBody extends ConsumerWidget {
                     ),
                     child: Row(
                       children: [
-                        Expanded(child: Text(state.error!)),
+                        Expanded(
+                          child: Semantics(
+                            liveRegion: true,
+                            child: Text(
+                              visibleError,
+                              style: context.textTheme.bodyMedium?.copyWith(
+                                color: context.colors.onSurfaceVariant,
+                              ),
+                            ),
+                          ),
+                        ),
                         TextButton(
+                          key: const Key('search-retry'),
                           onPressed: () => ref
                               .read(searchProvider.notifier)
                               .search(state.query),

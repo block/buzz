@@ -346,7 +346,7 @@ void main() {
 
         expect(
           container.read(channelDirectoryLoadStatusProvider).status,
-          ChannelDirectoryLoadStatus.error,
+          ChannelDirectoryLoadStatus.idle,
         );
         expect(
           container
