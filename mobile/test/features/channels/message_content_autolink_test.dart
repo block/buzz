@@ -4,6 +4,20 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:plugin_platform_interface/plugin_platform_interface.dart';
+import 'package:url_launcher_platform_interface/url_launcher_platform_interface.dart';
+
+class _FakeUrlLauncher extends Fake
+    with MockPlatformInterfaceMixin
+    implements UrlLauncherPlatform {
+  final launched = <String>[];
+
+  @override
+  Future<bool> launchUrl(String url, LaunchOptions options) async {
+    launched.add(url);
+    return true;
+  }
+}
 
 final _url =
     'buzz://message?channel=580ca78b-9dae-46f3-8854-bd671853ba32'
@@ -129,5 +143,17 @@ void main() {
     await _pump(tester, links.map((link) => '$link.').join('\n\n'));
 
     expect(_links(tester), unorderedEquals(links));
+  });
+
+  testWidgets('opens email links', (tester) async {
+    final launcher = _FakeUrlLauncher();
+    final original = UrlLauncherPlatform.instance;
+    UrlLauncherPlatform.instance = launcher;
+    addTearDown(() => UrlLauncherPlatform.instance = original);
+    await _pump(tester, 'Write to a@b.com');
+
+    expect(_links(tester), ['mailto:a@b.com']);
+    await tester.tapOnText(find.textRange.ofSubstring('a@b.com'));
+    expect(launcher.launched, ['mailto:a@b.com']);
   });
 }
