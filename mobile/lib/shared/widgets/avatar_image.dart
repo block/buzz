@@ -11,7 +11,7 @@ import '../animated_avatar.dart';
 import '../emoji/emoji_avatar.dart';
 import '../emoji/native_emoji_glyph.dart';
 import '../relay/relay.dart';
-import 'agent_avatar_border.dart';
+import 'avatar_shape.dart';
 
 part 'avatar_image_native.dart';
 
@@ -47,26 +47,26 @@ class AvatarImage extends StatelessWidget {
         fallback: fallback,
       ),
     );
+    final clipped = AvatarClip(
+      isAgent: isAgent,
+      child: isAgent && usesInsetAgentArtwork(imageUrl)
+          ? Transform.scale(scale: animatedAvatarArtworkScale, child: content)
+          : content,
+    );
+    // CircleAvatar keeps its theme default when people have no background.
     if (!isAgent) {
       return CircleAvatar(
         radius: radius,
         backgroundColor: color,
-        child: ClipOval(child: content),
+        child: clipped,
       );
     }
-
-    const shape = AgentAvatarBorder();
     return DecoratedBox(
-      decoration: ShapeDecoration(color: color, shape: shape),
-      child: ClipPath(
-        clipper: const ShapeBorderClipper(shape: shape),
-        child: !usesInsetAgentArtwork(imageUrl)
-            ? content
-            : Transform.scale(
-                scale: animatedAvatarArtworkScale,
-                child: content,
-              ),
+      decoration: ShapeDecoration(
+        color: color,
+        shape: avatarShape(isAgent: true),
       ),
+      child: clipped,
     );
   }
 }

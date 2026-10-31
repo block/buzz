@@ -79,7 +79,7 @@ import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/huddle/huddle.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
-import 'package:buzz/shared/widgets/agent_avatar_border.dart';
+import 'package:buzz/shared/widgets/avatar_shape.dart';
 import 'package:buzz/shared/widgets/app_list_card.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
@@ -11322,9 +11322,10 @@ void main() {
               )
               .first,
         );
+        final shape = (frame.decoration! as ShapeDecoration).shape;
         expect(
-          (frame.decoration! as ShapeDecoration).shape,
-          isA<AgentAvatarBorder>(),
+          shape,
+          avatarShape(isAgent: true, side: (shape as OutlinedBorder).side),
         );
       }
       // As on desktop, the reply branch waits for a reply.

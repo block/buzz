@@ -199,9 +199,7 @@ class _HuddleParticipantSpotlight extends ConsumerWidget {
                     : const Duration(milliseconds: 180),
                 padding: EdgeInsets.all(active ? Grid.xxs : Grid.half),
                 decoration: ShapeDecoration(
-                  shape: isAgent
-                      ? const AgentAvatarBorder()
-                      : const CircleBorder(),
+                  shape: avatarShape(isAgent: isAgent),
                   color: context.colors.primary.withValues(
                     alpha: active ? 0.18 : 0.08,
                   ),

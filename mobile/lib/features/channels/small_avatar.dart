@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../shared/theme/theme.dart';
-import '../../shared/widgets/agent_avatar_border.dart';
+import '../../shared/widgets/avatar_shape.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/profile/user_profile.dart';
 
@@ -36,9 +36,7 @@ class SmallAvatar extends StatelessWidget {
       width: size,
       height: size,
       decoration: ShapeDecoration(
-        shape: isAgent
-            ? AgentAvatarBorder(side: side)
-            : CircleBorder(side: side),
+        shape: avatarShape(isAgent: isAgent, side: side),
       ),
       child: AvatarImage(
         imageUrl: avatarUrl,

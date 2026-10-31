@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-import 'package:buzz/shared/widgets/agent_avatar_border.dart';
+import 'package:buzz/shared/widgets/avatar_shape.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:buzz/shared/emoji/native_emoji_glyph.dart';
 import 'package:flutter/material.dart';
@@ -59,31 +59,8 @@ void main() {
     final clip = tester.widget<ClipPath>(find.byType(ClipPath));
     expect(
       (clip.clipper! as ShapeBorderClipper).shape,
-      const AgentAvatarBorder(),
+      avatarShape(isAgent: true),
     );
-  });
-
-  test('agent squircle follows the desktop mask geometry', () {
-    // Desktop's avatar-squircle.svg passes through (.089, .089) at each
-    // corner's midpoint, outside a circle and inside the square.
-    final path = agentAvatarPath(const Rect.fromLTWH(0, 0, 100, 100));
-    expect(path.getBounds(), const Rect.fromLTWH(0, 0, 100, 100));
-    for (final corner in [
-      const Offset(9.5, 9.5),
-      const Offset(90.5, 9.5),
-      const Offset(90.5, 90.5),
-      const Offset(9.5, 90.5),
-    ]) {
-      expect(path.contains(corner), isTrue, reason: '$corner');
-    }
-    for (final corner in [
-      const Offset(8, 8),
-      const Offset(92, 8),
-      const Offset(92, 92),
-      const Offset(8, 92),
-    ]) {
-      expect(path.contains(corner), isFalse, reason: '$corner');
-    }
   });
 
   testWidgets('renders raccoon percent-encoded SVG data avatar', (

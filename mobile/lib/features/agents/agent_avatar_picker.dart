@@ -12,7 +12,7 @@ import '../../shared/emoji/emoji_avatar.dart';
 import '../../shared/emoji/emoji_data_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
-import '../../shared/widgets/agent_avatar_border.dart';
+import '../../shared/widgets/avatar_shape.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/avatar_image_source_controls.dart';
 import '../../shared/widgets/image_avatar_capture.dart';
@@ -229,8 +229,8 @@ class AgentAvatarPicker extends HookConsumerWidget {
       child: SizedBox.square(
         dimension: 220,
         child: selection.bytes != null
-            ? ClipPath(
-                clipper: const ShapeBorderClipper(shape: AgentAvatarBorder()),
+            ? AvatarClip(
+                isAgent: true,
                 child: Image.memory(selection.bytes!, fit: BoxFit.cover),
               )
             : PresetAgentAvatar(

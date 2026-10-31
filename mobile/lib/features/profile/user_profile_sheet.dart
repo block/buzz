@@ -14,7 +14,7 @@ import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/utils/string_utils.dart';
-import '../../shared/widgets/agent_avatar_border.dart';
+import '../../shared/widgets/avatar_shape.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/agent_artwork_panel.dart';
 import '../../shared/widgets/buzz_sheet_header.dart';
@@ -472,10 +472,9 @@ class _ProfileAvatar extends HookWidget {
                     imageUrl: animatedAvatar?.posterUrl ?? avatarUrl,
                     fallback: _AvatarFallback(initial: initial),
                   );
-            if (!isAgent) return ClipOval(child: avatar);
-            return ClipPath(
-              clipper: const ShapeBorderClipper(shape: AgentAvatarBorder()),
-              child: !usesInsetAgentArtwork(avatarUrl)
+            return AvatarClip(
+              isAgent: isAgent,
+              child: !isAgent || !usesInsetAgentArtwork(avatarUrl)
                   ? avatar
                   : Transform.scale(
                       scale: animatedAvatarArtworkScale,

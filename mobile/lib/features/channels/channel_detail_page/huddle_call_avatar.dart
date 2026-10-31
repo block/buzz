@@ -189,9 +189,7 @@ class _HuddleCallAvatar extends HookConsumerWidget {
                             width: speakingRingSize,
                             height: speakingRingSize,
                             decoration: ShapeDecoration(
-                              shape: isAgent
-                                  ? const AgentAvatarBorder()
-                                  : const CircleBorder(),
+                              shape: avatarShape(isAgent: isAgent),
                               color: context.colors.primary.withValues(
                                 alpha: 0.07,
                               ),
@@ -215,9 +213,7 @@ class _HuddleCallAvatar extends HookConsumerWidget {
                                 width: avatarRadius * 2,
                                 height: avatarRadius * 2,
                                 decoration: ShapeDecoration(
-                                  shape: isAgent
-                                      ? const AgentAvatarBorder()
-                                      : const CircleBorder(),
+                                  shape: avatarShape(isAgent: isAgent),
                                   color: context.controlSurface,
                                 ),
                                 alignment: Alignment.center,

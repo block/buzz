@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../../shared/animated_avatar.dart';
 import '../../shared/theme/theme.dart';
-import '../../shared/widgets/agent_avatar_border.dart';
+import '../../shared/widgets/avatar_shape.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/progressive_animated_avatar.dart';
 
@@ -117,10 +117,8 @@ class AgentCard extends StatelessWidget {
                                     child: RepaintBoundary(
                                       child: SizedBox.square(
                                         dimension: 104,
-                                        child: ClipPath(
-                                          clipper: const ShapeBorderClipper(
-                                            shape: AgentAvatarBorder(),
-                                          ),
+                                        child: AvatarClip(
+                                          isAgent: true,
                                           child: portrait,
                                         ),
                                       ),
