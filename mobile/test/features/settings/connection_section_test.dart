@@ -17,6 +17,16 @@ import '../../helpers/widget_helpers.dart';
 
 void main() {
   testWidgets('shows a compact copyable identity row', (tester) async {
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform_views,
+      (_) async => null,
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform_views,
+        null,
+      ),
+    );
     var hapticCount = 0;
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
       const MethodChannel('buzz/haptics'),
@@ -126,7 +136,7 @@ void main() {
     expect(copy.center.dx, closeTo(chevron.center.dx, 0.5));
 
     await tester.tap(find.text('Copy public key (npub)'));
-    await tester.pump();
+    await tester.pumpAndSettle();
     expect(hapticCount, 1);
     expect(clipboardCall?.method, 'Clipboard.setData');
     expect(clipboardCall?.arguments, {'text': expectedNpub});
