@@ -381,6 +381,8 @@ void editedMarkerTests() {
       'ok\n-',
       'ok\n#',
       'todo\n[x]',
+      '# Heading',
+      'ok\n\nhttps://example.com/file.pdf',
     ]) {
       await show(content, edited: false);
       final unedited = plainTexts(tester).toList();
