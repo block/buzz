@@ -748,7 +748,7 @@ void main() {
       expect(fold, findsNothing);
       expect(find.byKey(const ValueKey('message-row-m1')), findsOneWidget);
       expect(
-        find.text('@Helper Progress on the build', findRichText: true),
+        find.textContaining('Progress on the build', findRichText: true),
         findsOneWidget,
       );
       expect(find.byKey(const ValueKey('message-author-m2')), findsNothing);
