@@ -186,6 +186,80 @@ void main() {
       expect(fetches, 1);
     });
 
+    test(
+      'abandoning a load another consumer still waits for keeps it cached',
+      () async {
+        var fetches = 0;
+        var aborted = false;
+        final response = Completer<void>();
+        final client = _StreamingClient((request) async {
+          fetches += 1;
+          (request as http.AbortableRequest).abortTrigger!.then((_) {
+            if (!response.isCompleted) aborted = true;
+          });
+          await response.future;
+          return http.StreamedResponse(Stream.value(_pngBytes), 200);
+        });
+        final provider = MediaImageProvider(
+          url: _mediaUrl,
+          auth: _auth(),
+          client: client,
+        );
+        const config = ImageConfiguration.empty;
+        final cell = provider.resolve(config);
+        final cellListener = ImageStreamListener((_, _) {});
+        cell.addListener(cellListener);
+        final prefetch = provider.resolve(config);
+        final loaded = Completer<void>();
+        final prefetchListener = ImageStreamListener((image, _) {
+          image.dispose();
+          if (!loaded.isCompleted) loaded.complete();
+        });
+        prefetch.addListener(prefetchListener);
+
+        // The cell scrolls away while the prefetch still wants the image.
+        cell.removeListener(cellListener);
+        abandonPendingImage(cell, provider, config);
+        response.complete();
+        await loaded.future.timeout(const Duration(seconds: 2));
+        prefetch.removeListener(prefetchListener);
+
+        expect(aborted, isFalse);
+        expect(
+          PaintingBinding.instance.imageCache.containsKey(provider),
+          isTrue,
+        );
+        await _wait(provider.resolve(config));
+        expect(fetches, 1);
+      },
+    );
+
+    test('abandoning a load nobody else waits for aborts it', () async {
+      final aborted = Completer<void>();
+      final client = _StreamingClient((request) async {
+        (request as http.AbortableRequest).abortTrigger!.then((_) {
+          if (!aborted.isCompleted) aborted.complete();
+        });
+        await aborted.future;
+        throw http.RequestAbortedException(request.url);
+      });
+      final provider = MediaImageProvider(
+        url: _mediaUrl,
+        auth: _auth(),
+        client: client,
+      );
+      final stream = provider.resolve(ImageConfiguration.empty);
+      final listener = ImageStreamListener((_, _) {});
+      stream.addListener(listener);
+      stream.removeListener(listener);
+      abandonPendingImage(stream, provider, ImageConfiguration.empty);
+      await aborted.future.timeout(const Duration(seconds: 2));
+      expect(
+        PaintingBinding.instance.imageCache.containsKey(provider),
+        isFalse,
+      );
+    });
+
     test('sends auth headers with the fetch', () async {
       Map<String, String>? seen;
       final client = http_testing.MockClient((request) async {

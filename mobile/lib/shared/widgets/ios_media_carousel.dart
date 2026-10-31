@@ -161,13 +161,15 @@ class _CarouselImages {
     image.cancelled = true;
     image.nextFrame?.dispose();
     image.nextFrame = null;
-    _releasePending(image);
     image.detach();
+    _releasePending(image);
     if (!image.encoding) _finish(image);
   }
 
   void _releasePending(_CarouselImage image) {
-    if (!image.receivedFrame) abandonPendingImage(image.provider, image.config);
+    final stream = image.stream;
+    if (stream == null || image.receivedFrame) return;
+    abandonPendingImage(stream, image.provider, image.config);
   }
 
   void _drain() {
@@ -259,6 +261,7 @@ class _CarouselImages {
     _queued.clear();
     for (final image in _running.values.toList()) {
       image.cancelled = true;
+      image.detach();
       _releasePending(image);
       _finish(image);
     }

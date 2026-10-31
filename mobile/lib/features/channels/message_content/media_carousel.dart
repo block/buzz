@@ -118,7 +118,7 @@ class _PrecacheLoad {
     if (_settled) return;
     _settled = true;
     _stream.removeListener(_listener);
-    abandonPendingImage(provider, config);
+    abandonPendingImage(_stream, provider, config);
   }
 }
 

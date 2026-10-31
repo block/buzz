@@ -94,7 +94,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     // The image cache listens to a pending load, so this fires mid-download
     // only once a consumer evicts the entry and stops listening, as the iOS
     // carousel does for a preview scrolled past. Abort the download then.
-    return MultiFrameImageStreamCompleter(
+    return _MediaImageStreamCompleter(
       codec: _loadAsync(key, decode, abandoned.future),
       scale: key.scale,
       debugLabel: url,
@@ -235,15 +235,23 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
 
 /// Stops waiting for [provider]'s image before its first frame arrives.
 ///
-/// Until then the image cache holds its own listener on the load, so removing
-/// a caller's listener alone leaves the download running. Evicting the pending
-/// entry drops that listener; once no other listener remains, a
-/// [MediaImageProvider] load aborts its download. The live entry stays, so a
-/// consumer still listening keeps the load shared with later resolves.
+/// Call after removing your own listener from [stream]. Until the first frame
+/// the image cache holds its own listener on the load, so removing a caller's
+/// listener alone leaves the download running. When no other consumer is
+/// listening, evicting the pending entry drops that last listener and a
+/// [MediaImageProvider] load aborts its download. When another consumer still
+/// listens, the entry stays so the finished image is still cached.
 void abandonPendingImage(
+  ImageStream stream,
   ImageProvider<Object> provider,
   ImageConfiguration config,
 ) {
+  final completer = stream.completer;
+  if (completer is _MediaImageStreamCompleter &&
+      completer._listeners.length != 1) {
+    // Someone besides the cache still wants it, or it already finished.
+    return;
+  }
   unawaited(
     provider
         .obtainKey(config)
@@ -254,6 +262,30 @@ void abandonPendingImage(
           ),
         ),
   );
+}
+
+/// Tracks its listeners so [abandonPendingImage] can tell whether anyone
+/// besides the image cache is still waiting for the load.
+class _MediaImageStreamCompleter extends MultiFrameImageStreamCompleter {
+  _MediaImageStreamCompleter({
+    required super.codec,
+    required super.scale,
+    super.debugLabel,
+  });
+
+  final _listeners = <ImageStreamListener>[];
+
+  @override
+  void addListener(ImageStreamListener listener) {
+    _listeners.add(listener);
+    super.addListener(listener);
+  }
+
+  @override
+  void removeListener(ImageStreamListener listener) {
+    _listeners.remove(listener);
+    super.removeListener(listener);
+  }
 }
 
 /// Thrown when a fetch is suppressed because the URL recently failed.
