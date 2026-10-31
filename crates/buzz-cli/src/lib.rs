@@ -272,6 +272,9 @@ enum Cmd {
     /// Get and set channel canvas documents
     #[command(subcommand)]
     Canvas(CanvasCmd),
+    /// Read and write editable channel records (NIP-AR artifacts)
+    #[command(subcommand)]
+    Artifacts(ArtifactsCmd),
     /// Add, remove, and list emoji reactions
     #[command(subcommand)]
     Reactions(ReactionsCmd),
@@ -1983,6 +1986,140 @@ pub enum MediaCmd {
     },
 }
 
+/// Subcommands for `buzz artifacts`.
+///
+/// An artifact is a typed, titled, editable record with one home channel
+/// (NIP-AR). Every write publishes a complete snapshot that names the current
+/// revision, so two writers racing on one artifact cannot both succeed: the
+/// loser exits 5 and must re-read with `get` and reapply its change.
+#[derive(Subcommand)]
+#[command(
+    after_help = "Examples:\n  buzz artifacts create --channel <uuid> --type buzz.task --title \"Fix timeout\" --content '{\"version\":1}'\n  buzz artifacts list --channel <uuid> --type buzz.task\n  buzz artifacts update --channel <uuid> --id <artifact-uuid> --content-file task.json\n  buzz artifacts create --channel <uuid> --type buzz.config --title Theme --ensure theme  # safe to retry\n\nWrites are compare-and-set on the current revision: a lost race exits 5. Re-read with `get`, reapply, then retry."
+)]
+pub enum ArtifactsCmd {
+    /// List the current revision of each live artifact in a channel
+    ///
+    /// Deleted artifacts are omitted. Returns at most --limit events; narrow
+    /// with --type when a channel holds more.
+    List {
+        /// Home channel UUID.
+        #[arg(long)]
+        channel: String,
+        /// Only artifacts of this exact type (for example buzz.task).
+        #[arg(long = "type")]
+        artifact_type: Option<String>,
+        /// Maximum artifacts to return (1-1000).
+        #[arg(long, default_value_t = commands::artifacts::LIST_DEFAULT_LIMIT, value_parser = clap::value_parser!(u32).range(1..=commands::artifacts::LIST_MAX_LIMIT as i64))]
+        limit: u32,
+    },
+    /// Get the current revision of one live artifact
+    Get {
+        /// Home channel UUID.
+        #[arg(long)]
+        channel: String,
+        /// Artifact UUID (the `d` tag).
+        #[arg(long)]
+        id: String,
+    },
+    /// Create an artifact; prints its `artifact_id`
+    ///
+    /// The type is a lowercase dot-separated name with at least two parts
+    /// (for example buzz.task). Content is opaque text up to 64 KiB. With
+    /// --ensure KEY the id is derived from the channel, type and key, and an
+    /// existing artifact is restored or updated so the command is safe to retry.
+    Create {
+        /// Home channel UUID.
+        #[arg(long)]
+        channel: String,
+        /// Namespaced artifact type, such as buzz.task. Cannot change later.
+        #[arg(long = "type")]
+        artifact_type: String,
+        /// Display title (non-blank, at most 512 bytes). Visible to every channel reader.
+        #[arg(long)]
+        title: String,
+        /// Content text.
+        #[arg(long, conflicts_with = "content_file")]
+        content: Option<String>,
+        /// Read content from a file; `-` reads stdin.
+        #[arg(long)]
+        content_file: Option<String>,
+        /// Derive a stable id from this key and make the artifact match the given title and content.
+        #[arg(long)]
+        ensure: Option<String>,
+    },
+    /// Edit an artifact, keeping its id, type, channel and other tags
+    ///
+    /// Publishes a new snapshot against the current revision. Fields you
+    /// omit keep their current values. A concurrent edit exits 5.
+    Update {
+        /// Home channel UUID.
+        #[arg(long)]
+        channel: String,
+        /// Artifact UUID.
+        #[arg(long)]
+        id: String,
+        /// New title.
+        #[arg(long)]
+        title: Option<String>,
+        /// New content text.
+        #[arg(long, conflicts_with = "content_file")]
+        content: Option<String>,
+        /// Read new content from a file; `-` reads stdin.
+        #[arg(long)]
+        content_file: Option<String>,
+    },
+    /// Move an artifact into another channel
+    ///
+    /// Publishes the current snapshot into the destination under the same id,
+    /// and drops the conversation anchor. Everyone who reads the destination
+    /// can read it. Without --yes nothing is written; the command describes the
+    /// destination audience and exits 1.
+    Move {
+        /// Current home channel UUID.
+        #[arg(long)]
+        channel: String,
+        /// Artifact UUID.
+        #[arg(long)]
+        id: String,
+        /// Destination channel UUID.
+        #[arg(long)]
+        to: String,
+        /// Confirm the move after reviewing the destination audience.
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
+    /// Soft-delete an artifact
+    ///
+    /// Earlier revisions stay readable under their channels' access rules and
+    /// the id stays reserved. Bring it back with `restore`.
+    Delete {
+        /// Home channel UUID.
+        #[arg(long)]
+        channel: String,
+        /// Artifact UUID.
+        #[arg(long)]
+        id: String,
+    },
+    /// Restore a deleted artifact from a complete new snapshot
+    Restore {
+        /// Home channel UUID.
+        #[arg(long)]
+        channel: String,
+        /// Artifact UUID.
+        #[arg(long)]
+        id: String,
+        /// Title of the restored artifact.
+        #[arg(long)]
+        title: String,
+        /// Content text.
+        #[arg(long, conflicts_with = "content_file")]
+        content: Option<String>,
+        /// Read content from a file; `-` reads stdin.
+        #[arg(long)]
+        content_file: Option<String>,
+    },
+}
+
 /// Subcommands for `buzz mem`.
 #[derive(Subcommand)]
 pub enum MemCmd {
@@ -2265,6 +2402,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
+        Cmd::Artifacts(sub) => commands::artifacts::dispatch(sub, &client, &cli.format).await,
         Cmd::Reactions(sub) => commands::reactions::dispatch(sub, &client).await,
         Cmd::Emoji(sub) => commands::emoji::dispatch(sub, &client).await,
         Cmd::Gifs(sub) => commands::gifs::dispatch(sub, &client).await,
@@ -2453,6 +2591,7 @@ mod tests {
     fn command_inventory_is_stable() {
         let expected_groups: Vec<&str> = vec![
             "agents",
+            "artifacts",
             "canvas",
             "channels",
             "dms",
@@ -2561,6 +2700,10 @@ mod tests {
             ]
         );
         assert_eq!(
+            names(&cmd, "artifacts"),
+            vec!["create", "delete", "get", "list", "move", "restore", "update"]
+        );
+        assert_eq!(
             names(&cmd, "canvas"),
             vec!["get", "history", "restore", "set"]
         );
@@ -2667,6 +2810,7 @@ mod tests {
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
             ("agents", 5),
+            ("artifacts", 7),
             ("canvas", 4),
             ("channels", 16),
             ("dms", 4),
