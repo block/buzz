@@ -55,7 +55,7 @@ class AgentModelPicker extends StatelessWidget {
             BuzzSettingMenu<String>(
               controlKey: const Key('agent-model'),
               enabled: enabled,
-              label: 'Mode',
+              label: 'Model',
               grouped: true,
               trailingIcon: Icons.unfold_more,
               onSelected: (value) => onChanged(value, null),
@@ -70,7 +70,7 @@ class AgentModelPicker extends StatelessWidget {
             BuzzSettingMenu<String>(
               controlKey: const Key('agent-effort'),
               enabled: enabled && selected != null,
-              label: 'Speed',
+              label: 'Thinking',
               grouped: true,
               trailingIcon: Icons.unfold_more,
               onSelected: (value) => onChanged(selected!.id, value),
