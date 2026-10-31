@@ -66,6 +66,8 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   static const _defaultCooldown = Duration(seconds: 30);
   static const _maxRetryAfter = Duration(minutes: 5);
   static final Map<String, DateTime> _cooldownUntil = {};
+  static final Map<(String, MediaGetAuthService), Future<Uint8List>> _inFlight =
+      {};
 
   /// Injectable clock for cooldown tests.
   @visibleForTesting
@@ -96,62 +98,17 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     ImageDecoderCallback decode,
   ) async {
     try {
-      final until = _cooldownUntil[url];
-      if (until != null) {
-        if (debugNow().isBefore(until)) {
-          throw MediaImageCooldownException(url: url, until: until);
-        }
-        _cooldownUntil.remove(url);
-      }
-
-      final uri = Uri.parse(url);
-      final http.Response response;
-      try {
-        final abort = Completer<void>();
-        final deadline = Timer(requestTimeout, abort.complete);
-        StreamIterator<List<int>>? body;
-        try {
-          final request = http.AbortableRequest(
-            'GET',
-            uri,
-            abortTrigger: abort.future,
-          )..headers.addAll(auth.headersFor(url));
-          final streamed = await client.send(request);
-          final iterator = body = StreamIterator(streamed.stream);
-          final bytes = BytesBuilder(copy: false);
-          while (await iterator.moveNext()) {
-            final chunk = iterator.current;
-            if (chunk.length > maxResponseBytes - bytes.length) {
-              throw const FormatException('Image response too large');
-            }
-            bytes.add(chunk);
-          }
-          response = http.Response.bytes(
-            bytes.takeBytes(),
-            streamed.statusCode,
-            headers: streamed.headers,
-          );
-        } finally {
-          deadline.cancel();
-          if (!abort.isCompleted) abort.complete();
-          unawaited(body?.cancel());
-        }
-      } catch (_) {
-        _cooldownUntil[url] = debugNow().add(_defaultCooldown);
-        rethrow;
-      }
-      if (response.statusCode != 200) {
-        _cooldownUntil[url] = debugNow().add(_cooldownFor(response));
-        throw NetworkImageLoadException(
-          statusCode: response.statusCode,
-          uri: uri,
-        );
-      }
-      final bytes = response.bodyBytes;
-      if (bytes.isEmpty) {
-        _cooldownUntil[url] = debugNow().add(_defaultCooldown);
-        throw NetworkImageLoadException(statusCode: 200, uri: uri);
-      }
+      // Each decode size is its own cache entry (see [ResizeImage]), so one
+      // URL shown at two sizes resolves twice. Share the download instead of
+      // fetching the same bytes once per size.
+      final fetchKey = (url, auth);
+      // whenComplete awaits a returned Future, so the callback must not
+      // return the removed entry (this same future) or it never completes.
+      final bytes = await (_inFlight[fetchKey] ??= _fetchBytes().whenComplete(
+        () {
+          _inFlight.remove(fetchKey);
+        },
+      ));
       onBytesLoaded?.call(bytes);
       final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
       return await decode(buffer);
@@ -163,6 +120,66 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       });
       rethrow;
     }
+  }
+
+  Future<Uint8List> _fetchBytes() async {
+    final until = _cooldownUntil[url];
+    if (until != null) {
+      if (debugNow().isBefore(until)) {
+        throw MediaImageCooldownException(url: url, until: until);
+      }
+      _cooldownUntil.remove(url);
+    }
+
+    final uri = Uri.parse(url);
+    final http.Response response;
+    try {
+      final abort = Completer<void>();
+      final deadline = Timer(requestTimeout, abort.complete);
+      StreamIterator<List<int>>? body;
+      try {
+        final request = http.AbortableRequest(
+          'GET',
+          uri,
+          abortTrigger: abort.future,
+        )..headers.addAll(auth.headersFor(url));
+        final streamed = await client.send(request);
+        final iterator = body = StreamIterator(streamed.stream);
+        final bytes = BytesBuilder(copy: false);
+        while (await iterator.moveNext()) {
+          final chunk = iterator.current;
+          if (chunk.length > maxResponseBytes - bytes.length) {
+            throw const FormatException('Image response too large');
+          }
+          bytes.add(chunk);
+        }
+        response = http.Response.bytes(
+          bytes.takeBytes(),
+          streamed.statusCode,
+          headers: streamed.headers,
+        );
+      } finally {
+        deadline.cancel();
+        if (!abort.isCompleted) abort.complete();
+        unawaited(body?.cancel());
+      }
+    } catch (_) {
+      _cooldownUntil[url] = debugNow().add(_defaultCooldown);
+      rethrow;
+    }
+    if (response.statusCode != 200) {
+      _cooldownUntil[url] = debugNow().add(_cooldownFor(response));
+      throw NetworkImageLoadException(
+        statusCode: response.statusCode,
+        uri: uri,
+      );
+    }
+    final bytes = response.bodyBytes;
+    if (bytes.isEmpty) {
+      _cooldownUntil[url] = debugNow().add(_defaultCooldown);
+      throw NetworkImageLoadException(statusCode: 200, uri: uri);
+    }
+    return bytes;
   }
 
   Duration _cooldownFor(http.Response response) {

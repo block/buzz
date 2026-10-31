@@ -186,6 +186,29 @@ void main() {
       expect(fetches, 1);
     });
 
+    test('one URL shown at two decode sizes downloads once', () async {
+      var fetches = 0;
+      final response = Completer<void>();
+      final client = http_testing.MockClient((request) async {
+        fetches += 1;
+        await response.future;
+        return http.Response.bytes(_pngBytes, 200);
+      });
+      final auth = _auth(nsec: nostr.Keys.generate().nsec);
+      ImageStream resolveAt(int width) => ResizeImage(
+        MediaImageProvider(url: _mediaUrl, auth: auth, client: client),
+        width: width,
+      ).resolve(ImageConfiguration.empty);
+
+      final small = _wait(resolveAt(40));
+      final large = _wait(resolveAt(120));
+      await pumpEventQueue();
+      response.complete();
+      await Future.wait([small, large]);
+
+      expect(fetches, 1);
+    });
+
     test('sends auth headers with the fetch', () async {
       Map<String, String>? seen;
       final client = http_testing.MockClient((request) async {
