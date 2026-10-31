@@ -74,11 +74,12 @@ confirmation, not app runs.
 
 ## Ecosystem
 
-Buzz spans five repos. This one (`block/buzz`) is the OSS source for the relay, desktop, mobile, and CLI. The others handle internal builds and deployment:
+Buzz spans six repos. This one (`block/buzz`) is the OSS source for the relay, mobile, CLI, and the deprecated Buzz 0.X desktop app. [block/buzz-app](https://github.com/block/buzz-app) is the OSS source for the Buzz 1.0 desktop and web app. The others handle internal builds and deployment:
 
 | Repo | Purpose |
 |------|---------|
-| [block/buzz](https://github.com/block/buzz) | OSS source — relay, desktop app, mobile app, CLI, agent harness |
+| [block/buzz](https://github.com/block/buzz) | OSS source — relay, mobile app, CLI, agent harness, deprecated Buzz 0.X desktop app |
+| [block/buzz-app](https://github.com/block/buzz-app) | OSS source — Buzz 1.0 desktop and web app; all new desktop feature work |
 | [squareup/buzz-releases](https://github.com/squareup/buzz-releases) | Buildkite pipelines producing Block-signed macOS + iOS builds with `-block` desktop version suffix |
 | [squareup/sprout-oss](https://github.com/squareup/sprout-oss) | CI pipeline building the relay Docker image and pushing to internal ECR |
 | [squareup/block-coder-tf-stacks](https://github.com/squareup/block-coder-tf-stacks) | Terraform + ArgoCD deploying the relay to the staging Kubernetes cluster |
@@ -130,7 +131,7 @@ crates/
   buzz-test-client    # Integration test client and E2E test suite
   sprig               # All-in-one harness bundling ACP, agent, and dev MCP
 
-desktop/              # Tauri 2 + React 19 desktop app
+desktop/              # Buzz 0.X Tauri desktop app (deprecated: new desktop work goes to block/buzz-app)
 web/                  # Browser web client (repo browser, served by the relay)
 mobile/               # Flutter mobile app
 migrations/           # SQL migrations (run at relay startup when BUZZ_AUTO_MIGRATE is on: binary default off, Helm default on; deployments at scale apply them out of band — see docs/database.md)
@@ -618,6 +619,15 @@ description. See [PR #803](https://github.com/block/buzz/pull/803).
 ---
 
 ## Desktop App
+
+> **`desktop/` is deprecated.** It is the Buzz 0.X desktop app. The Buzz 1.0
+> desktop app lives in [block/buzz-app](https://github.com/block/buzz-app).
+> Do not open block/buzz PRs that add features to `desktop/`; build desktop
+> features in block/buzz-app (or as a Buzz plugin) instead. Change `desktop/`
+> here only to fix a 0.X bug, or to keep it compiling when a shared crate it
+> depends on changes. This includes agent guidance bundled with the 0.X app,
+> such as `desktop/src-tauri/src/managed_agents/nest_skill.md`: CLI PRs do not
+> need to update it.
 
 The desktop app is Tauri 2 + React 19 + Vite + Tailwind CSS. Features are
 organized under `desktop/src/features/`. Biome handles linting and formatting.
