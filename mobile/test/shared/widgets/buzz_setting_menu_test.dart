@@ -97,6 +97,7 @@ void main() {
     await tester.pumpWidget(nativeMenu());
     final view = tester.widget<UiKitView>(find.byType(UiKitView));
     expect(view.viewType, 'buzz/navigation_glass');
+    expect(view.creationParams, containsPair('deferMenuActions', false));
     expect(view.gestureRecognizers, isEmpty);
     expect(find.byType(MenuAnchor), findsNothing);
     expect(

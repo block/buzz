@@ -27,6 +27,7 @@ class IosMessageCreateButton extends HookWidget {
     this.enabled = true,
     this.selectedIndex,
     this.eagerGestures = true,
+    this.deferMenuActions = true,
     this.showIconWithLabel = false,
   });
 
@@ -47,6 +48,9 @@ class IosMessageCreateButton extends HookWidget {
 
   /// Capture gestures immediately; disable for rows inside a scroll view.
   final bool eagerGestures;
+
+  /// Wait for menu dismissal before actions that navigate to another route.
+  final bool deferMenuActions;
   final bool showIconWithLabel;
 
   final List<({String label, String symbol, VoidCallback? onPressed})> actions;
@@ -102,6 +106,7 @@ class IosMessageCreateButton extends HookWidget {
       'showIconWithLabel': showIconWithLabel,
       'accessibilityLabel': accessibilityLabel,
       'menu': menu,
+      'deferMenuActions': deferMenuActions,
     };
     useEffect(() {
       final current = channel.value;
@@ -139,6 +144,7 @@ class IosMessageCreateButton extends HookWidget {
         accessibilityLabel,
         enabled,
         selectedIndex,
+        deferMenuActions,
         showIconWithLabel,
         ...dividerBefore,
         ...actions.expand((a) => [a.label, a.symbol, a.onPressed != null]),

@@ -182,7 +182,7 @@ class AgentCard extends StatelessWidget {
                     child: Icon(
                       Icons.star,
                       size: 18,
-                      color: context.colors.onSurface,
+                      color: context.colors.onSurfaceVariant,
                     ),
                   ),
                 ),

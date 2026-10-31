@@ -80,6 +80,7 @@ class BuzzSettingMenu<T> extends StatelessWidget {
                 height: constraints.maxHeight,
                 enabled: enabled,
                 eagerGestures: false,
+                deferMenuActions: false,
                 selectedIndex: options.indexWhere(
                   (option) => option.value == value,
                 ),
