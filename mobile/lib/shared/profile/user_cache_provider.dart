@@ -65,6 +65,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     bool refreshCached = false,
   }) async {
     final requested = pubkeys.map((pubkey) => pubkey.toLowerCase()).toSet();
+    _trackVerified(requested);
     final toFetch = requested
         .where((pubkey) => refreshCached || !state.containsKey(pubkey))
         .toList();
@@ -115,6 +116,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
         .toSet()
         .toList();
     if (normalized.isEmpty) return true;
+    _trackVerified(normalized);
     final generation = _generation;
     try {
       final session = ref.read(relaySessionProvider.notifier);

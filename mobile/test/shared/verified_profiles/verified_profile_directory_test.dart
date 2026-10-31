@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/verified_profiles/verified_profile.dart';
 import 'package:buzz/shared/verified_profiles/verified_profile_directory.dart';
@@ -212,5 +215,15 @@ void main() {
     );
     h.async.elapse(const Duration(minutes: 5));
     expect(h.profiles, isEmpty);
+  });
+
+  journey('profiles hydrated through resolve are tracked', (h) {
+    h.relay.seed([signedProjection(profileTags(subjectA))]);
+    h.start(const []);
+    h.container.listen(userCacheProvider, (_, _) {});
+    unawaited(h.container.read(userCacheProvider.notifier).resolve([subjectA]));
+    h.settle();
+    expect(h.dFilters.single['#d'], [subjectA]);
+    expect(h.profiles[subjectA]?.displayName, 'Ada Lovelace');
   });
 }
