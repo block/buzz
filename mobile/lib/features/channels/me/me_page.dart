@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -19,6 +20,9 @@ import 'solo_working_dots.dart';
 import 'me_unread_provider.dart';
 import '../../../shared/widgets/avatar_image.dart';
 import '../../../shared/me/me_groups.dart';
+import '../../../shared/me/default_agent.dart';
+import '../../../shared/me/me_chat_title.dart';
+import '../../../shared/crypto/event_signing.dart';
 import '../../../shared/me/me_chat_creation.dart';
 import '../../../shared/me/me_project_creation.dart';
 import '../../../shared/me/me_sync.dart';
@@ -74,6 +78,7 @@ class MePage extends HookConsumerWidget {
           );
     // Warm the directory while browsing Me, before the creation form opens.
     final assistants = ref.watch(meAssistantsProvider).value;
+    ref.watch(defaultAgentProvider);
     useEffect(() {
       if (assistants != null) {
         ref.read(userCacheProvider.notifier).preload([

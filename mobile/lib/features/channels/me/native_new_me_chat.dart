@@ -41,7 +41,8 @@ Future<(Channel, String)?> _showNewMeChat(
     final sync = ref.read(meSyncProvider);
     final pending = MeChatCreation.pending(sync);
     final id = pending?.id ?? const Uuid().v4();
-    String name = pending?.name ?? '';
+    final messageMode = pending == null || pending.initialMessage != null;
+    String name = pending?.initialMessage?.content ?? pending?.name ?? '';
     String? assistant = pending?.agent;
     String? project = pending?.project;
     String? error = pending == null ? null : 'Resume your unfinished chat.';
@@ -59,6 +60,7 @@ Future<(Channel, String)?> _showNewMeChat(
       if (!context.mounted) return null;
       final theme = utilitySurfaceThemeData(Theme.of(context));
       Map<Object?, Object?>? draft;
+      ProviderSubscription<AsyncValue<String?>>? bestieSubscription;
       try {
         final presentation = const MethodChannel('buzz/profile_text_editor')
             .invokeMethod<Map<Object?, Object?>>('presentChat', {
@@ -66,8 +68,9 @@ Future<(Channel, String)?> _showNewMeChat(
               'presentationId': presentationId,
               'assistantsLoading': directory == null,
               'initialValue': name,
-              'placeholder': 'Chat name',
-              'multiline': false,
+              'placeholder': messageMode ? 'Message' : 'Chat name',
+              'multiline': messageMode,
+              'messageMode': messageMode,
               'brightness': theme.brightness.name,
               'pageBackgroundArgb': theme.colorScheme.surface.toARGB32(),
               'containerBackgroundArgb': theme
@@ -75,7 +78,8 @@ Future<(Channel, String)?> _showNewMeChat(
                   .surfaceContainerHighest
                   .toARGB32(),
               'containerCornerRadius': Radii.container,
-              'selectedAssistant': assistant,
+              'selectedAssistant':
+                  assistant ?? _availableBestie(ref, directory ?? []),
               if (retry && assistant != null)
                 'savedAssistant': {
                   'id': assistant,
@@ -110,6 +114,7 @@ Future<(Channel, String)?> _showNewMeChat(
             ).invokeMethod<void>('updateChatAssistants', {
               'presentationId': presentationId,
               'assistants': _nativeMeAssistants(agents),
+              'defaultAssistant': _availableBestie(ref, agents),
             });
           } catch (_) {
             if (!active || !context.mounted || sync.disposed) return;
@@ -131,11 +136,15 @@ Future<(Channel, String)?> _showNewMeChat(
         }
 
         loadAssistants();
+        bestieSubscription = ref.listenManual(defaultAgentProvider, (_, next) {
+          if (next.hasValue) loadAssistants();
+        });
         draft = await presentation;
       } on MissingPluginException {
         break;
       } finally {
         active = false;
+        bestieSubscription?.close();
       }
       if (draft == null || !context.mounted) return null;
       name = (draft['name'] as String? ?? '').trim();
@@ -149,9 +158,10 @@ Future<(Channel, String)?> _showNewMeChat(
           ref,
           sync,
           id,
-          name,
+          messageMode ? startingMeChatTitle(name) : name,
           assistant,
           project,
+          initialContent: messageMode ? name : null,
         );
         return (created, assistant);
       } catch (failure) {
@@ -179,10 +189,32 @@ Future<Channel> _createMeChat(
   String channelId,
   String name,
   String assistant,
-  String? project,
-) async {
+  String? project, {
+  String? initialContent,
+}) async {
   sync = _currentMeSync(ref, sync);
-  final intent = MeChatCreation(channelId, name, assistant, project: project);
+  final pending = MeChatCreation.pending(sync);
+  final initialMessage = initialContent == null
+      ? null
+      : pending?.initialMessage ??
+            NostrEvent.fromJson(
+              signNostrEvent(
+                kind: EventKind.streamMessage,
+                content: initialContent,
+                tags: [
+                  ['h', channelId],
+                  ['p', assistant],
+                ],
+                secretKey: sync.privateHex,
+              ).toMap(),
+            );
+  final intent = MeChatCreation(
+    channelId,
+    name,
+    assistant,
+    project: project,
+    initialMessage: initialMessage,
+  );
   await intent.save(sync);
   final actions = ref.read(channelActionsProvider);
   final preflight = await Future.wait<Object?>([
@@ -242,3 +274,8 @@ List<Map<String, String>> _nativeMeAssistants(
       'avatarUrl': agent.avatarUrl ?? '',
     },
 ];
+
+String? _availableBestie(WidgetRef ref, List<AgentDirectoryEntry> choices) {
+  final bestie = ref.read(defaultAgentProvider).value;
+  return choices.any((agent) => agent.pubkey == bestie) ? bestie : null;
+}

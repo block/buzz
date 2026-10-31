@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:buzz/shared/me/me_chat_creation.dart';
+import 'package:buzz/shared/me/default_agent.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -74,6 +75,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
           myPubkeyProvider.overrideWithValue('owner'),
           channelsProvider.overrideWith(LabeledChannels.new),
           meGroupsProvider.overrideWith(
@@ -112,6 +114,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
           meGroupsProvider.overrideWith(
             (ref) => Stream.value(const MeGroups()),
           ),
@@ -141,6 +144,7 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
+            defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
             meGroupsProvider.overrideWith((ref) => updates.stream),
             channelsProvider.overrideWith(FakeChannels.new),
           ],
@@ -204,8 +208,10 @@ void main() {
     },
   );
   testWidgets(
-    'footer new chat offers project selection without losing its name',
+    'new chat defaults to Bestie and preserves message and explicit agent choice',
     (tester) async {
+      final bestie = StreamController<String?>();
+      addTearDown(bestie.close);
       final action = ValueNotifier<VoidCallback?>(null);
       addTearDown(action.dispose);
       final sync = MeSync(
@@ -222,6 +228,7 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
+            defaultAgentProvider.overrideWith((ref) => bestie.stream),
             meGroupsProvider.overrideWith(
               (ref) => Stream.value(
                 const MeGroups(
@@ -240,6 +247,7 @@ void main() {
             meAssistantsProvider.overrideWith(
               (ref) async => const [
                 AgentDirectoryEntry(pubkey: 'agent', displayName: 'Owner Name'),
+                AgentDirectoryEntry(pubkey: 'bestie', displayName: 'My Bestie'),
               ],
             ),
             userCacheProvider.overrideWith(_ConfusableProfiles.new),
@@ -256,6 +264,22 @@ void main() {
       action.value!();
       await tester.pumpAndSettle();
       expect(find.byType(BottomSheet), findsOneWidget);
+      bestie.add('bestie');
+      await tester.pumpAndSettle();
+      expect(find.text('My Bestie'), findsOneWidget);
+      bestie.addError(StateError('Offline cache write failed'));
+      await tester.pumpAndSettle();
+      expect(find.text('My Bestie'), findsOneWidget);
+      bestie.add('agent');
+      await tester.pumpAndSettle();
+      expect(find.text('Owner Name'), findsOneWidget);
+      bestie.add(null);
+      await tester.pumpAndSettle();
+      expect(find.text('Choose an agent'), findsOneWidget);
+      bestie.add('bestie');
+      await tester.pumpAndSettle();
+      expect(find.bySemanticsLabel('Message'), findsOneWidget);
+      expect(find.text('Send'), findsOneWidget);
       expect(
         find.byKey(const ValueKey('new-session-name')).hitTestable(),
         findsOneWidget,
@@ -263,6 +287,22 @@ void main() {
       expect(
         find.byKey(const ValueKey('new-session-assistant')).hitTestable(),
         findsOneWidget,
+      );
+      await tester.enterText(
+        find.byKey(const ValueKey('new-session-name')),
+        'x' * 8193,
+      );
+      await tester.tap(find.text('Send'));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Message is too long. Keep it under 8 KB.'),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const ValueKey('new-session-name')))
+            .enabled,
+        isTrue,
       );
       await tester.enterText(
         find.byKey(const ValueKey('new-session-name')),
@@ -278,9 +318,6 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('No project').last);
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Create chat'));
-      await tester.pumpAndSettle();
-      expect(find.text('Enter a name and choose an agent.'), findsOneWidget);
       expect(find.text('Design session'), findsOneWidget);
       // The owner's label and its initial outrank the agent's own profile.
       await tester.tap(find.byKey(const ValueKey('new-session-assistant')));
@@ -294,6 +331,12 @@ void main() {
       );
       expect(
         find.descendant(of: row, matching: find.text('O')),
+        findsOneWidget,
+      );
+      bestie.add('bestie');
+      await tester.pumpAndSettle();
+      expect(
+        find.descendant(of: row, matching: find.text('Owner Name')),
         findsOneWidget,
       );
       expect(find.textContaining('Confusable'), findsNothing);
@@ -334,6 +377,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
           meGroupsProvider.overrideWith(
             (ref) => Stream.value(
               const MeGroups(
@@ -372,7 +416,7 @@ void main() {
     expect(calls.single.method, 'presentChat');
     final args = calls.single.arguments as Map;
     expect(args['title'], 'New chat');
-    expect(args['placeholder'], 'Chat name');
+    expect(args['placeholder'], 'Message');
     expect(args['assistants'], [
       {
         'id': 'agent',
@@ -440,6 +484,7 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
+            defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
             meGroupsProvider.overrideWith(
               (ref) => Stream.value(const MeGroups()),
             ),
@@ -476,7 +521,7 @@ void main() {
         MeChatCreation.pending(restarted)?.id,
         resume ? 'same-id' : isNull,
       );
-      expect(args['placeholder'], 'Chat name');
+      expect(args['placeholder'], resume ? 'Chat name' : 'Message');
       expect(args['assistants'], isEmpty);
       expect(args['containerCornerRadius'], Radii.container);
       expect(find.byType(BottomSheet), findsNothing);
@@ -491,6 +536,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
           meGroupsProvider.overrideWith(
             (ref) => Stream<MeGroups>.error(StateError('offline')),
           ),

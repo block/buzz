@@ -1,3 +1,4 @@
+import 'package:buzz/shared/me/default_agent.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
@@ -88,6 +89,7 @@ void main() {
         await tester.pumpWidget(
           ProviderScope(
             overrides: [
+              defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
               meSyncProvider.overrideWith((ref) => sync),
               meGroupsProvider.overrideWith(
                 (ref) => Stream.value(const MeGroups()),

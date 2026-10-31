@@ -232,10 +232,10 @@ void main() {
               find.byKey(const ValueKey('new-session-name')),
               'Mobile Solo',
             );
-            await tester.tap(find.text('Create chat'));
+            await tester.tap(find.text('Send'));
             await tester.pumpAndSettle();
             expect(
-              find.text('Enter a name and choose an agent.'),
+              find.text('Enter a message and choose an agent.'),
               findsOneWidget,
             );
             expect(relay.submitted, isEmpty);
@@ -311,6 +311,15 @@ void main() {
           expect(MeChatCreation.pending(sync)?.id, channelId);
           expect(command.tags, contains(equals(['p', agent.public])));
         } else {
+          final pending = MeChatCreation.pending(sync)!;
+          expect(pending.name, 'Mobile Solo');
+          expect(pending.initialMessage?.content, 'Mobile Solo');
+          expect(pending.initialMessage?.pubkey, owner.public);
+          expect(
+            pending.initialMessage?.tags,
+            contains(equals(['p', agent.public])),
+          );
+          expect(pending.initialMessage?.getTagValue('h'), pending.id);
           expect(command.kind, 9007);
           expect(command.pubkey, owner.public);
           expect(command.tags, contains(equals(['t', 'buzz.solo'])));

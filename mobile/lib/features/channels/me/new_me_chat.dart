@@ -6,8 +6,12 @@ class _NewMeChat extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final sync = ref.watch(meSyncProvider);
     final pending = useMemoized(() => MeChatCreation.pending(sync));
-    final name = useTextEditingController(text: pending?.name ?? '');
+    final messageMode = pending == null || pending.initialMessage != null;
+    final name = useTextEditingController(
+      text: pending?.initialMessage?.content ?? pending?.name ?? '',
+    );
     final selected = useState<String?>(pending?.agent);
+    final manuallySelected = useState(false);
     final project = useState<String?>(pending?.project);
     final groups = ref.watch(meGroupsProvider);
     final channelId = useMemoized(() => pending?.id ?? const Uuid().v4());
@@ -28,6 +32,13 @@ class _NewMeChat extends HookConsumerWidget {
       );
     }
     final choices = directory.asData?.value ?? [];
+    final bestie = ref.watch(defaultAgentProvider).value;
+    useEffect(() {
+      if (!manuallySelected.value && frozenAgent.value == null) {
+        selected.value = choices.any((a) => a.pubkey == bestie) ? bestie : null;
+      }
+      return null;
+    }, [bestie, choices]);
     final profile = ref.watch(userCacheProvider)[selected.value];
     final chosen =
         choices.where((agent) => agent.pubkey == selected.value).firstOrNull ??
@@ -54,8 +65,13 @@ class _NewMeChat extends HookConsumerWidget {
             autofocus: true,
             textCapitalization: TextCapitalization.sentences,
             enabled: !busy.value && frozenName.value == null,
-            maxLength: 120,
-            decoration: const InputDecoration(hintText: 'Chat name'),
+            maxLength: messageMode ? null : 120,
+            minLines: messageMode ? 3 : 1,
+            maxLines: messageMode ? 6 : 1,
+            decoration: InputDecoration(
+              labelText: messageMode ? 'Message' : 'Chat name',
+              hintText: messageMode ? 'What would you like to work on?' : null,
+            ),
             onChanged: (_) => error.value = null,
           ),
           const SizedBox(height: Grid.xs),
@@ -120,6 +136,7 @@ class _NewMeChat extends HookConsumerWidget {
                       ),
                     );
                     if (context.mounted && picked != null) {
+                      manuallySelected.value = true;
                       selected.value = picked;
                     }
                   },
@@ -150,13 +167,22 @@ class _NewMeChat extends HookConsumerWidget {
                 ? null
                 : () async {
                     if (name.text.trim().isEmpty || selected.value == null) {
-                      error.value = 'Enter a name and choose an agent.';
+                      error.value = messageMode
+                          ? 'Enter a message and choose an agent.'
+                          : 'Enter a name and choose an agent.';
+                      return;
+                    }
+                    if (messageMode &&
+                        utf8.encode(name.text.trim()).length > 8192) {
+                      error.value = 'Message is too long. Keep it under 8 KB.';
                       return;
                     }
                     busy.value = true;
                     error.value = null;
                     try {
-                      frozenName.value ??= name.text.trim();
+                      frozenName.value ??= messageMode
+                          ? startingMeChatTitle(name.text)
+                          : name.text.trim();
                       frozenAgent.value ??= selected.value;
                       final created = await _createMeChat(
                         ref,
@@ -165,6 +191,7 @@ class _NewMeChat extends HookConsumerWidget {
                         frozenName.value!,
                         frozenAgent.value!,
                         project.value,
+                        initialContent: messageMode ? name.text.trim() : null,
                       );
                       if (context.mounted) {
                         Navigator.of(
@@ -188,6 +215,8 @@ class _NewMeChat extends HookConsumerWidget {
                   ? 'Creating chat…'
                   : frozenName.value != null
                   ? 'Retry'
+                  : messageMode
+                  ? 'Send'
                   : 'Create chat',
             ),
           ),
