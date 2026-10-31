@@ -725,7 +725,14 @@ function VirtualizedTimelineRows({
       const scroller = hostRef.current?.firstElementChild;
       if (!list || !(scroller instanceof HTMLDivElement)) return;
       onVirtualizerRangeChanged?.();
-      const distanceFromBottom = list.scrollSize - list.viewportSize - offset;
+      // Measure the floor from the scroller itself. During a `shift` (an older
+      // page prepending, or a window refresh trimming the head) Virtua resizes
+      // `scrollSize` at render but applies the matching scroll jump later, so a
+      // scroll event in between pairs the trimmed size with the old offset.
+      // That reads as far past the floor and bottom-pins a reader who is near
+      // the top.
+      const distanceFromBottom =
+        scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop;
       // Do not infer reader intent from an intermediate virtualizer offset.
       // Initial channel positioning deliberately chases the floor while rows
       // are measured; those measurements can briefly report a large gap and
