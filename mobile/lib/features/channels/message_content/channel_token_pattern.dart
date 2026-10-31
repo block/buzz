@@ -2,7 +2,11 @@
 /// preview share it so they always agree on what is a channel token.
 library;
 
-/// Known [knownNames] match longest first, so `#eng-ios` wins over `#eng`.
+/// Only [knownNames] match, longest first so `#eng-ios` wins over `#eng`.
+/// That keeps `#8700` or `#123` in prose as text instead of an inert chip.
+/// While the channel list is still empty (loading), any `#token` matches, as
+/// on desktop.
+///
 /// A token can't start inside a word, path or URL (`a#b`, `x.y/#z`), and it
 /// ends at whitespace, the end of a line, or punctuation that commonly follows
 /// a word in prose: `#general's`, `"#general"`, `#general…`, `#general—`.
@@ -14,7 +18,9 @@ RegExp channelTokenPattern(Iterable<String> knownNames) {
           .toSet()
           .toList()
         ..sort((a, b) => b.length.compareTo(a.length));
-  final alternatives = [...names.map(RegExp.escape), _genericName].join('|');
+  final alternatives = names.isEmpty
+      ? _genericName
+      : names.map(RegExp.escape).join('|');
   return RegExp(
     '$_leading#(?:$alternatives)$_trailing',
     caseSensitive: false,

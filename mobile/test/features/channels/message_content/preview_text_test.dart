@@ -215,6 +215,33 @@ void main() {
       );
     });
 
+    test('only known channels become chips once channels have loaded', () {
+      expect(
+        _pieces(
+          'took over #8700, see #general and #8774\'s #gen',
+          channelNames: {'general': 'c1'},
+        ),
+        [
+          const PreviewText('took over #8700, see '),
+          const PreviewChannel('general'),
+          const PreviewText(" and #8774's #gen"),
+        ],
+      );
+      // A known prefix doesn't claim a longer unknown name; the longest known
+      // name wins when both are known.
+      expect(_pieces('#eng-ios', channelNames: {'eng': 'c1'}), [
+        const PreviewText('#eng-ios'),
+      ]);
+      expect(
+        _pieces('#eng-ios', channelNames: {'eng': 'c1', 'eng-ios': 'c2'}),
+        [const PreviewChannel('eng-ios')],
+      );
+      expect(_pieces('see #8700'), [
+        const PreviewText('see '),
+        const PreviewChannel('8700'),
+      ]);
+    });
+
     test('channel tokens end at punctuation that follows a word', () {
       for (final (before, after) in [
         ('', "'s plan"),
