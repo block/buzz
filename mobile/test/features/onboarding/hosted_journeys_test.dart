@@ -281,6 +281,14 @@ void main() {
     expect(f.probes, isEmpty);
     await tester.tap(find.byType(CommunityGridOption).first);
     await f.settle(tester);
+    await tester.enterText(
+      find.byType(TextField).hitTestable(),
+      'Draft Person',
+    );
+    expect(find.byTooltip('Add profile photo'), findsNothing);
+    await f.tap(tester, 'Continue');
+    expect(find.text('Choose your avatar'), findsOneWidget);
+    expect(f.profileWrites, isEmpty);
     await tester.tap(find.byTooltip('Add profile photo'));
     await f.settle(tester);
     expect(find.byType(ProfileSetupAvatarEditor), findsOneWidget);
@@ -289,45 +297,68 @@ void main() {
       find.byType(ProfileSetupAvatarEditor, skipOffstage: false),
       findsNothing,
     );
-    expect(find.text('Set up your profile', skipOffstage: false), findsNothing);
+    expect(find.text('Choose your avatar', skipOffstage: false), findsNothing);
     expect(f.profileWrites, isEmpty);
   });
 
-  journey('fallback profile previews the accepted draft before saving', (
-    tester,
-    f,
-  ) async {
-    await f.initialize();
-    f.rows.add(f.row('one'));
-    await f.mount(tester);
-    // Account restoration may resume independently of the Add choices.
-    await f.flow.signInAccount();
-    await f.settle(tester);
-    expect(f.flow.stage, HostedFlowStage.chooseCommunities);
-    expect(f.probes, isEmpty);
-    await tester.tap(find.byType(CommunityGridOption).first);
-    await f.settle(tester);
-    await tester.tap(find.byTooltip('Add profile photo'));
-    await f.settle(tester);
-    final url = emojiAvatarDataUrl('🐝', 0xFFFFE75C);
-    Navigator.of(
-      tester.element(find.byType(ProfileSetupAvatarEditor)),
-    ).pop(ProfileUrlAvatarDraft(url));
-    await f.settle(tester);
-    expect(
-      tester
-          .widget<PlayingAvatarImage>(find.byType(PlayingAvatarImage))
-          .imageUrl,
-      url,
+  for (final skipAvatar in [false, true]) {
+    journey(
+      'fallback profile preserves drafts and recovers save failures (skip: $skipAvatar)',
+      (tester, f) async {
+        await f.initialize();
+        f.rows.add(f.row('one'));
+        await f.mount(tester);
+        // Account restoration may resume independently of the Add choices.
+        await f.flow.signInAccount();
+        await f.settle(tester);
+        expect(f.flow.stage, HostedFlowStage.chooseCommunities);
+        expect(f.probes, isEmpty);
+        await tester.tap(find.byType(CommunityGridOption).first);
+        await f.settle(tester);
+        await tester.enterText(
+          find.byType(TextField).hitTestable(),
+          'Draft Person',
+        );
+        expect(find.byTooltip('Add profile photo'), findsNothing);
+        await f.tap(tester, 'Continue');
+        expect(find.text('Choose your avatar'), findsOneWidget);
+        expect(f.profileWrites, isEmpty);
+        await tester.tap(find.byTooltip('Add profile photo'));
+        await f.settle(tester);
+        final url = emojiAvatarDataUrl('🐝', 0xFFFFE75C);
+        Navigator.of(
+          tester.element(find.byType(ProfileSetupAvatarEditor)),
+        ).pop(ProfileUrlAvatarDraft(url));
+        await f.settle(tester);
+        expect(
+          tester
+              .widget<PlayingAvatarImage>(find.byType(PlayingAvatarImage))
+              .imageUrl,
+          url,
+        );
+        await tester.tap(find.byTooltip('Back'));
+        await f.settle(tester);
+        expect(find.text('Choose a display name'), findsOneWidget);
+        expect(
+          tester
+              .widget<TextField>(find.byType(TextField).hitTestable())
+              .controller!
+              .text,
+          'Draft Person',
+        );
+        await f.tap(tester, 'Continue');
+        expect(find.byTooltip('Edit profile photo'), findsOneWidget);
+        f.profileSaveFailures = 1;
+        await f.tap(tester, 'Continue');
+        expect(f.profileWrites, isEmpty);
+        expect(find.text('Not now'), findsOneWidget);
+        expect(find.byTooltip('Edit profile photo'), findsOneWidget);
+        await f.tap(tester, skipAvatar ? 'Skip' : 'Continue');
+        expect(f.profileWrites, ['Draft Person']);
+        expect(f.profileAvatars, skipAvatar ? isEmpty : [url]);
+      },
     );
-    await tester.enterText(
-      find.byType(TextField).hitTestable(),
-      'Draft Person',
-    );
-    await f.tap(tester, 'Continue');
-    expect(f.profileWrites, ['Draft Person']);
-    expect(f.profileAvatars, [url]);
-  });
+  }
 
   journey(
     'QR credentials enter without an account when domain is not required',
@@ -715,6 +746,8 @@ void main() {
         'Journey Person',
       );
       await f.tap(tester, 'Continue');
+      expect(f.profileWrites, isEmpty);
+      await f.tap(tester, 'Skip');
       expect(f.profileWrites, ['Journey Person']);
       final saved = (await f.storage.loadAll()).single;
       expect(saved.id, pending.id);
@@ -1126,6 +1159,7 @@ void main() {
       );
       await tester.enterText(find.byType(TextField).hitTestable(), 'Creator');
       await f.tap(tester, 'Continue');
+      await f.tap(tester, 'Skip');
       final saved = (await f.storage.loadAll()).single;
       expect(saved.relayUrl, 'wss://new-home.communities.buzz.xyz');
       expect(saved.nsec, f.keys.nsec);
