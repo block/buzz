@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -608,18 +607,27 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
         );
     var page = fetched.where(matches).toList();
     var visible = page.where((e) => !isQuietAgentMessage(e.tags)).length;
+    final seen = {for (final event in page) event.id};
     final found = <NostrEvent>[];
     for (var i = 0; i < maxPages; i++) {
       if (page.length < filter.limit || visible >= filter.limit) break;
-      final oldest = page.map((e) => e.createdAt).reduce(min);
+      // The relay's composite cursor: newest first, ties by ascending id, so
+      // events sharing the boundary second are not skipped.
+      final last =
+          ([...page]..sort((a, b) {
+                final time = b.createdAt.compareTo(a.createdAt);
+                return time != 0 ? time : a.id.compareTo(b.id);
+              }))
+              .last;
       page = (await _queryWithWebSocketFallback(session, [
         NostrFilter(
           kinds: filter.kinds,
           tags: filter.tags,
           limit: filter.limit,
-          until: oldest - 1,
+          until: last.createdAt,
+          extensions: {'before_id': last.id},
         ),
-      ])).where(matches).toList();
+      ])).where(matches).where((e) => seen.add(e.id)).toList();
       final kept = page.where((e) => !isQuietAgentMessage(e.tags));
       found.addAll(kept);
       visible += kept.length;

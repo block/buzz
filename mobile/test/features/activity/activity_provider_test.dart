@@ -169,7 +169,10 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
   /// The newest [NostrFilter.limit] matches, as a relay returns them.
   List<NostrEvent> _window(NostrFilter filter) =>
       (_history.where((event) => _matches(filter, event)).toList()
-            ..sort((a, b) => b.createdAt.compareTo(a.createdAt)))
+            ..sort((a, b) {
+              final time = b.createdAt.compareTo(a.createdAt);
+              return time != 0 ? time : a.id.compareTo(b.id);
+            }))
           .take(filter.limit)
           .toList();
 
@@ -177,6 +180,12 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
     if (!filter.kinds.contains(event.kind)) return false;
     final until = filter.until;
     if (until != null && event.createdAt > until) return false;
+    final beforeId = filter.extensions['before_id'] as String?;
+    if (beforeId != null &&
+        event.createdAt == until &&
+        event.id.compareTo(beforeId) <= 0) {
+      return false;
+    }
     for (final entry in filter.tags.entries) {
       final tagName = entry.key.startsWith('#')
           ? entry.key.substring(1)
@@ -380,9 +389,17 @@ void main() {
           sig: '',
         );
     // A full mention window of quiet messages hides the older real one.
-    final session = _RecordingSessionNotifier()..seed(mention('mention'));
-    for (var i = 1; i <= 50; i++) {
-      session.seed(mention('quiet-$i', quiet: true, at: i));
+    // The real mention shares the boundary second with quiet ones that sort
+    // before it, so a one-second-back cursor would skip it.
+    final session = _RecordingSessionNotifier()..seed(mention('z-mention'));
+    for (var i = 0; i < 50; i++) {
+      session.seed(
+        mention(
+          'quiet-${i.toString().padLeft(2, '0')}',
+          quiet: true,
+          at: i < 5 ? 0 : i,
+        ),
+      );
     }
     final container = ProviderContainer(
       overrides: [
@@ -399,9 +416,9 @@ void main() {
     await container.read(channelsProvider.future);
     final feed = await container.read(activityProvider.future);
 
-    expect(feed.all.map((item) => item.id), ['mention']);
+    expect(feed.all.map((item) => item.id), ['z-mention']);
     expect(container.read(inboxItemsProvider).map((item) => item.id), [
-      'mention',
+      'z-mention',
     ]);
   });
 
