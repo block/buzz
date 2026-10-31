@@ -7,6 +7,8 @@ import 'features/pairing/pairing_page.dart';
 import 'features/pairing/pairing_provider.dart';
 import 'shared/hosted/hosted_flow_provider.dart';
 import 'shared/hosted/hosted_flow.dart';
+import 'shared/hosted/hosted_communities.dart';
+import 'shared/hosted/use_known_communities.dart';
 import 'shared/hosted/hosted_environment.dart';
 import 'shared/hosted/hosted_community_creation.dart';
 import 'shared/hosted/hosted_flow_problem_message.dart';
@@ -32,6 +34,7 @@ class OnboardingAppEntry extends HookConsumerWidget {
         ? ref.watch(hostedFlowProvider)
         : null;
     useListenable(flow);
+    useListenable(flow?.account.subjectChanges);
     useEffect(() {
       if (flow == null || !restoreAccount) return null;
       Future<void> restore() async {
@@ -84,6 +87,18 @@ class OnboardingAppEntry extends HookConsumerWidget {
         (flow.stage == HostedFlowStage.working ||
             flow.stage == HostedFlowStage.signIn);
     final connected = flow?.account.account != null;
+    final hasKnownCommunities = useKnownCommunities(
+      accountKey: flow?.account.account?.subject,
+      active:
+          !addingCommunity &&
+          !existingUser.value &&
+          !enteringCommunityLink.value &&
+          !creating.value &&
+          flow?.stage == HostedFlowStage.idle &&
+          (ModalRoute.of(context)?.isCurrent ?? true),
+      load: () async =>
+          (await loadKnownHostedCommunities(flow!.account)).isNotEmpty,
+    );
     final problem = flow != null && flow.accountOnly ? flow.problem : null;
     final status = flow == null
         ? null
@@ -150,6 +165,8 @@ class OnboardingAppEntry extends HookConsumerWidget {
         showConnectionOptions:
             !HostedEnvironment.enabled || addingCommunity || connected,
         addingCommunity: addingCommunity,
+        signedInOnboarding: connected && !addingCommunity && !signingIn,
+        hasKnownCommunities: hasKnownCommunities,
         existingUser: existingUser.value,
         enteringCommunityLink: enteringCommunityLink.value,
         creatingCommunity: creating.value,
