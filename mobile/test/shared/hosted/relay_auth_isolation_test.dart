@@ -100,8 +100,13 @@ void main() {
         await auth.headers(hostedRelay).timeout(const Duration(seconds: 2)),
         {'Nostr-Federated-Identity': 'Bearer hosted-token'},
       );
+      // The hosted relay then refuses this key.
+      auth.rejected(hostedRelay, 'Bearer hosted-token', terminal: true);
       stalled.complete(http.Response('{}', 503));
       await expectLater(orgHeaders, throwsA(isA<AccountFailure>()));
+      // The stale organization failure never hides the hosted recovery.
+      expect(auth.failedRelay, hostedRelay.baseUrl);
+      expect(auth.failure, AccountFailure.denied);
       auth.dispose();
     },
     // Hosted relays are protected only in builds with authentication domains.

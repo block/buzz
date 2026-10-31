@@ -71,6 +71,10 @@ class HostedRelayAuth extends ChangeNotifier {
   // Per account client, so a stalled issuer never delays an unrelated one.
   final _pending = <BuilderlabAccountClient, Future<void>>{};
   bool _disposed = false;
+  // Orders issuance and refusals, so a stale result never replaces a newer
+  // failure for another relay or key.
+  int _sequence = 0;
+  int _failureSequence = 0;
   String? failedRelay;
   String? failedPubkey;
   AccountFailure? failure;
@@ -169,6 +173,7 @@ class HostedRelayAuth extends ChangeNotifier {
     String relay,
     String pubkey,
   ) async {
+    final started = ++_sequence;
     try {
       if (account.account == null && await account.restore() == null) {
         throw AccountFailure.signedOut;
@@ -241,11 +246,13 @@ class HostedRelayAuth extends ChangeNotifier {
       // Issuance alone cannot prove admission after a relay refusal.
       if (failure != AccountFailure.denied) connected(config);
     } on AccountFailure catch (error) {
-      if (!_disposed) {
-        failedRelay = config.baseUrl;
-        failedPubkey = pubkey;
-        failure = error;
-        notifyListeners();
+      // Issuers run in parallel, so a failure that started before another
+      // relay's unresolved failure was recorded must not replace it.
+      final otherScope =
+          failure != null &&
+          (failedRelay != config.baseUrl || failedPubkey != pubkey);
+      if (!_disposed && !(otherScope && _failureSequence > started)) {
+        _record(config.baseUrl, pubkey, error, started);
       }
       rethrow;
     }
@@ -270,11 +277,26 @@ class HostedRelayAuth extends ChangeNotifier {
     if (!protects(config) || usedToken == null) return;
     if ('Bearer ${_cached?.token}' == usedToken) _cached = null;
     if (terminal && !_disposed) {
-      failedRelay = config.baseUrl;
-      failedPubkey = pubkeyFromNsec(config.nsec);
-      failure = AccountFailure.denied;
-      notifyListeners();
+      _record(
+        config.baseUrl,
+        pubkeyFromNsec(config.nsec),
+        AccountFailure.denied,
+        ++_sequence,
+      );
     }
+  }
+
+  void _record(
+    String relay,
+    String? pubkey,
+    AccountFailure error,
+    int sequence,
+  ) {
+    failedRelay = relay;
+    failedPubkey = pubkey;
+    failure = error;
+    _failureSequence = sequence;
+    notifyListeners();
   }
 
   @override
