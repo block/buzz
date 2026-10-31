@@ -1,3 +1,5 @@
+import 'package:buzz/shared/widgets/buzz_toast.dart';
+import 'package:buzz/features/onboarding/hosted_reconnect_banner.dart';
 import 'package:buzz/shared/hosted/hosted_community_creation.dart';
 import 'package:buzz/shared/community/community_grid_option.dart';
 import 'package:buzz/shared/hosted/account_identity_store.dart';
@@ -347,6 +349,28 @@ void main() {
       expect(find.text('Reconnect to Builderlab'), findsOneWidget);
       expect(f.socketHeaders, isEmpty);
 
+      final feedbackContext = tester.element(
+        find.byType(HostedReconnectBanner),
+      );
+      showBuzzToast(feedbackContext, 'Copied');
+      await f.settle(tester);
+      expect(find.text('Copied'), findsOneWidget);
+      expect(find.text('Reconnect to Builderlab'), findsNothing);
+      expect(find.text('Sign in'), findsNothing);
+      var retried = false;
+      showBuzzToast(
+        feedbackContext,
+        'Couldn’t save changes',
+        onRetry: () {
+          retried = true;
+        },
+      );
+      await f.settle(tester);
+      expect(find.text('Copied'), findsNothing);
+      expect(find.text('Reconnect to Builderlab'), findsNothing);
+      await f.tap(tester, 'Retry');
+      expect(retried, isTrue);
+      expect(find.text('Reconnect to Builderlab'), findsOneWidget);
       final browser = Completer<void>();
       f.beforeBrowserReturn = () => browser.future;
       await f.tap(tester, 'Sign in');

@@ -1,3 +1,4 @@
+import 'dart:ui' show SemanticsAction;
 import 'package:buzz/shared/clipboard_utils.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/buzz_toast.dart';
@@ -64,6 +65,7 @@ void main() {
     tester.view.physicalSize = const Size(320, 700);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
+    final semantics = tester.ensureSemantics();
     var retries = 0;
     for (final brightness in Brightness.values) {
       await tester.pumpWidget(
@@ -77,14 +79,21 @@ void main() {
             ),
             child: Scaffold(
               body: Builder(
-                builder: (context) => TextButton(
-                  onPressed: () => showBuzzToast(
-                    context,
-                    'Couldn’t save changes',
-                    kind: ToastKind.error,
-                    onRetry: () => retries++,
-                  ),
-                  child: const Text('Show error'),
+                builder: (context) => Stack(
+                  children: [
+                    ReconnectCapsule(onSignIn: () {}),
+                    Center(
+                      child: TextButton(
+                        onPressed: () => showBuzzToast(
+                          context,
+                          'Couldn’t save changes',
+                          kind: ToastKind.error,
+                          onRetry: () => retries++,
+                        ),
+                        child: const Text('Show error'),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -119,9 +128,23 @@ void main() {
       await tester.tap(button);
       await tester.pump();
       expect(button, findsNothing);
+      expect(find.text('Reconnect to Builderlab'), findsOneWidget);
+      await tester.tap(find.text('Show error'));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 20));
+      expect(find.text('Reconnect to Builderlab'), findsNothing);
+      final dismissible = find.byWidgetPredicate(
+        (widget) => widget is Semantics && widget.properties.onDismiss != null,
+      );
+      final node = tester.getSemantics(dismissible);
+      node.owner!.performAction(node.id, SemanticsAction.dismiss);
+      await tester.pumpAndSettle();
+      expect(button, findsNothing);
+      expect(find.text('Reconnect to Builderlab'), findsOneWidget);
       expect(tester.takeException(), isNull);
     }
     expect(retries, 2);
+    semantics.dispose();
   });
 
   testWidgets(
@@ -224,32 +247,41 @@ void main() {
         home: Scaffold(
           body: Builder(
             builder: (context) {
-              return Center(
-                child: TextButton(
-                  onPressed: () => showModalBottomSheet<void>(
-                    context: context,
-                    builder: (context) => SizedBox(
-                      height: 200,
-                      child: TextButton(
-                        onPressed: () => copyToClipboard(context, 'example'),
-                        child: const Text('Copy'),
+              return Stack(
+                children: [
+                  ReconnectCapsule(onSignIn: () {}),
+                  Center(
+                    child: TextButton(
+                      onPressed: () => showModalBottomSheet<void>(
+                        context: context,
+                        builder: (context) => SizedBox(
+                          height: 200,
+                          child: TextButton(
+                            onPressed: () =>
+                                copyToClipboard(context, 'example'),
+                            child: const Text('Copy'),
+                          ),
+                        ),
                       ),
+                      child: const Text('Open sheet'),
                     ),
                   ),
-                  child: const Text('Open sheet'),
-                ),
+                ],
               );
             },
           ),
         ),
       ),
     );
+    await tester.pumpAndSettle();
+    expect(find.text('Reconnect to Builderlab'), findsOneWidget);
     await tester.tap(find.text('Open sheet'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Copy'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 140));
     expect(hapticCount, 1);
+    expect(find.text('Reconnect to Builderlab'), findsNothing);
     final enteringY = tester.getTopLeft(find.text('Copied')).dy;
     final textWidth = tester.getSize(find.text('Copied')).width;
     final shapeFinder = find
@@ -292,6 +324,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Copied'), findsOneWidget);
     expect(hapticCount, 2);
+    expect(find.text('Reconnect to Builderlab'), findsNothing);
     await tester.pump(const Duration(seconds: 1));
     expect(find.text('Copied'), findsOneWidget);
     await tester.pump(const Duration(seconds: 2));
@@ -311,6 +344,8 @@ void main() {
     expect(tester.getTopLeft(find.text('Copied')).dy, lessThan(settledY));
     await tester.pump(const Duration(milliseconds: 220));
     expect(find.text('Copied'), findsNothing);
+    await tester.pumpAndSettle();
+    expect(find.text('Reconnect to Builderlab'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

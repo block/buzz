@@ -14,7 +14,18 @@ export '../toast_haptic.dart' show ToastKind;
 part 'buzz_toast_island.dart';
 part 'reconnect_capsule.dart';
 
-final _activeToasts = Expando<_ToastHandle>();
+final _toastCoordinators = Expando<_ToastCoordinator>();
+
+_ToastCoordinator _toastCoordinator(BuildContext context) {
+  final overlay = Overlay.of(context, rootOverlay: true);
+  return _toastCoordinators[overlay] ??= _ToastCoordinator();
+}
+
+class _ToastCoordinator extends ValueNotifier<bool> {
+  _ToastCoordinator() : super(false);
+
+  _ToastHandle? active;
+}
 
 /// Shows brief feedback above routes and modal sheets.
 /// A new notice replaces the current one instead of building a stale queue.
@@ -28,7 +39,8 @@ void showBuzzToast(
   double islandSpeed = 0.75,
 }) {
   final overlay = Overlay.of(context, rootOverlay: true);
-  _activeToasts[overlay]?.remove();
+  final coordinator = _toastCoordinator(context);
+  coordinator.active?.remove();
   late final _ToastHandle handle;
   final entry = OverlayEntry(
     builder: (_) => _ToastBubble(
@@ -45,11 +57,13 @@ void showBuzzToast(
     ),
   );
   handle = _ToastHandle(entry, () {
-    if (identical(_activeToasts[overlay], handle)) {
-      _activeToasts[overlay] = null;
+    if (identical(coordinator.active, handle)) {
+      coordinator.active = null;
+      coordinator.value = false;
     }
   });
-  _activeToasts[overlay] = handle;
+  coordinator.active = handle;
+  coordinator.value = true;
   overlay.insert(entry);
   unawaited(toastHaptic(kind));
 }
@@ -218,6 +232,7 @@ class _ToastBubble extends HookWidget {
               ),
               child: Semantics(
                 liveRegion: true,
+                onDismiss: persistent ? null : onDismiss,
                 // Lay text out once at its full width. Only the capsule's
                 // painted bounds expand, revealing rather than scaling text.
                 child: CustomPaint(
