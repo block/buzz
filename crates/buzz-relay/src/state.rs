@@ -98,7 +98,6 @@ pub(crate) struct CommunityConnectionControl {
     /// NIP-42-proven pubkey plus the NIP-FI session it was admitted
     /// under; matched by the registry's `disconnect_nip_fi` scan.  [FI-TRACE-DENY-SET]
     proven_identity: Arc<std::sync::RwLock<Option<ProvenIdentity>>>,
-    profile_disconnect: Arc<std::sync::atomic::AtomicI64>,
     /// Serializes NIP-FI denial writers across reason-win + terminal enqueue,
     /// and holds the audio terminal-frame sender (root connections leave it `None`).
     terminal_frame_tx: Arc<std::sync::Mutex<Option<mpsc::Sender<WsMessage>>>>,
@@ -120,7 +119,6 @@ impl CommunityConnectionControl {
             cancel,
             reason_tx,
             proven_identity: Arc::new(std::sync::RwLock::new(None)),
-            profile_disconnect: Arc::default(),
             terminal_frame_tx: Arc::new(std::sync::Mutex::new(None)),
             pubkey: Arc::default(),
             owner: Arc::default(),
@@ -189,23 +187,6 @@ impl CommunityConnectionControl {
             Some(owner) => principal || owner[..] == *pubkey,
             None => principal,
         }
-    }
-
-    pub(crate) fn profile_disconnected_at(&self) -> Option<i64> {
-        let at = self
-            .profile_disconnect
-            .load(std::sync::atomic::Ordering::Acquire);
-        (at != 0).then_some(at)
-    }
-
-    pub(crate) fn mark_profile_disconnect(&self, triggered_at: i64) {
-        // Keep the first scan's trigger for a delayed post-publication check.
-        let _ = self.profile_disconnect.compare_exchange(
-            0,
-            triggered_at,
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Acquire,
-        );
     }
 
     pub(crate) fn cancellation_token(&self) -> CancellationToken {
@@ -450,11 +431,6 @@ impl CommunityConnectionRegistry {
     ///
     /// Returns the number of connections closed.
     pub fn disconnect_nip_fi(&self, issuer: &str, pubkey: &[u8]) -> usize {
-        self.disconnect_nip_fi_at(issuer, pubkey, chrono::Utc::now().timestamp())
-    }
-
-    /// Close matching sessions while retaining the originating cleanup trigger.
-    pub fn disconnect_nip_fi_at(&self, issuer: &str, pubkey: &[u8], triggered_at: i64) -> usize {
         let mut closed = 0;
         for entry in self.connections.iter() {
             let matches = entry
@@ -466,7 +442,6 @@ impl CommunityConnectionRegistry {
                 .and_then(|v| v.as_ref().map(|id| id.matches(issuer, pubkey)))
                 .unwrap_or(false);
             if matches {
-                entry.value().1.mark_profile_disconnect(triggered_at);
                 entry.value().1.disconnect_nip_fi();
                 closed += 1;
             }
@@ -963,11 +938,6 @@ impl ConnectionManager {
     ///
     /// Returns the number of connections closed.
     pub fn disconnect_nip_fi(&self, issuer: &str, pubkey: &[u8]) -> usize {
-        self.disconnect_nip_fi_at(issuer, pubkey, chrono::Utc::now().timestamp())
-    }
-
-    /// Close matching sessions while retaining the originating cleanup trigger.
-    pub fn disconnect_nip_fi_at(&self, issuer: &str, pubkey: &[u8], triggered_at: i64) -> usize {
         let mut closed = 0usize;
         for entry in self.connections.iter() {
             let matches = entry
@@ -986,9 +956,6 @@ impl ConnectionManager {
                 .unwrap_or(false);
             if matches {
                 // Winner-only enqueue on the terminal channel, then cancel.
-                entry
-                    .community_control
-                    .mark_profile_disconnect(triggered_at);
                 entry
                     .community_control
                     .manager_disconnect_nip_fi(&entry.terminal_ctrl_tx);

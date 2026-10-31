@@ -66,10 +66,6 @@ pub struct NipFiDisconnect {
     /// the signed command JWT is preserved across pod boundaries.
     #[serde(default)]
     pub until_unix_nanos: u32,
-    /// Original cleanup trigger time, retained across delayed cross-pod delivery.
-    /// Absent on messages from relays deployed before verified profiles.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_triggered_at: Option<i64>,
 }
 
 /// Encode a [`NipFiDisconnect`] message to a JSON string for publication on
@@ -418,7 +414,6 @@ mod tests {
             pubkey_bytes: vec![0xabu8; 32],
             until_unix: 9_999_999_999,
             until_unix_nanos: 500_000_000,
-            profile_triggered_at: Some(1_700_000_000),
         };
         let json = serde_json::to_string(&cmd).unwrap();
         let decoded: NipFiDisconnect = serde_json::from_str(&json).unwrap();
@@ -435,7 +430,6 @@ mod tests {
             "missing nanos field must default to 0"
         );
         assert_eq!(decoded.until_unix, 9_999_999_999);
-        assert_eq!(decoded.profile_triggered_at, None);
     }
 
     #[test]
@@ -457,7 +451,6 @@ mod tests {
             pubkey_bytes: vec![1u8; 32],
             until_unix: 1_000_000,
             until_unix_nanos: 0,
-            profile_triggered_at: None,
         })
         .unwrap();
         assert!(serde_json::from_str::<NipFiDisconnect>(&good).is_ok());

@@ -564,8 +564,6 @@ mod postgres_tests {
             "storage_accounting_snapshots",
             "operator_listener_pubkeys",
             "operator_listener_outbox",
-            "nip_fi_profile_policies",
-            "nip_fi_profile_config",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());

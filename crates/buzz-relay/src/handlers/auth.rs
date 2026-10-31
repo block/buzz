@@ -465,13 +465,6 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 return;
             }
 
-            let profile_epoch = crate::verified_profiles::capture(
-                &state,
-                conn.tenant.community(),
-                conn.nip_fi_assertion.as_ref(),
-            )
-            .await;
-
             // Community ban gate (NIP-42 seam). Runs after NIP-FI pairing and
             // before the allowlist and relay-membership gates, per
             // COMMUNITY_MODERATION_PLAN.md §0 decision 4 and the MOD-7/M20
@@ -834,10 +827,8 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             conn.send(RelayMessage::ok(&event_id_hex, true, ""));
             crate::verified_profiles::admitted(
                 &state,
-                conn.tenant.community(),
+                &conn.tenant,
                 conn.nip_fi_assertion.as_ref(),
-                profile_epoch,
-                &conn.community_control,
             );
             // _auth_permit drops here — expiry's write guard may proceed.
         }

@@ -459,7 +459,7 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
         }
 
         // This optional evidence has no effect on admission or capabilities.
-        // Agents participate in ordering/retraction, OAuth client subjects do not.
+        // Agents carry no profile, OAuth client subjects carry no evidence.
         let profile_eligible = match policy.token_class() {
             TokenClass::DedicatedNipFi => true,
             TokenClass::AccessTokenAtJwt { subject_class } => {

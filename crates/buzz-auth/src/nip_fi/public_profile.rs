@@ -79,7 +79,7 @@ pub fn valid_username(value: &str) -> bool {
 pub struct ProfileAssertion {
     /// Authenticated assertion issuance time, including fractional seconds.
     pub issued_at: chrono::DateTime<chrono::Utc>,
-    /// None for agents and malformed/missing human claims: retract only.
+    /// None for agents and malformed/missing human claims: publish nothing.
     pub profile: Option<PublicProfile>,
 }
 

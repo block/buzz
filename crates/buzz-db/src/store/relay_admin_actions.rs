@@ -509,10 +509,10 @@ pub async fn execute_ban_with_marker(
 
     sqlx::query(
         r#"
-        INSERT INTO community_bans (community_id, pubkey, banned, actor_pubkey, ban_reason, access_generation)
-        VALUES ($1, $2, TRUE, $3, $4, gen_random_uuid())
+        INSERT INTO community_bans (community_id, pubkey, banned, actor_pubkey, ban_reason)
+        VALUES ($1, $2, TRUE, $3, $4)
         ON CONFLICT (community_id, pubkey)
-        DO UPDATE SET banned = TRUE, ban_expires_at = NULL, access_generation = gen_random_uuid(),
+        DO UPDATE SET banned = TRUE, ban_expires_at = NULL,
                       actor_pubkey = EXCLUDED.actor_pubkey,
                       ban_reason = EXCLUDED.ban_reason, updated_at = now()
         "#,
@@ -551,12 +551,6 @@ pub async fn execute_ban_with_marker(
     }
 
     tx.commit().await?;
-    crate::verified_profiles::schedule_access_cleanup(
-        pool,
-        community_id,
-        Some(&hex::encode(target_pubkey)),
-        None,
-    );
     Ok(true)
 }
 

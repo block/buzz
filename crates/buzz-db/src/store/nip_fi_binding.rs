@@ -137,14 +137,6 @@ impl Db {
             NipFiUnbind::Removed
         };
         tx.commit().await?;
-        if matches!(outcome, NipFiUnbind::Removed) {
-            crate::verified_profiles::schedule_access_cleanup(
-                &self.pool,
-                community,
-                None,
-                Some(issuer),
-            );
-        }
         Ok(outcome)
     }
 

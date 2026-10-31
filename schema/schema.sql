@@ -216,11 +216,4 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i seeds/relay_operator_audit.sql
 \i seeds/storage_accounting_snapshots.sql
 
-\i tables/public/nip_fi_profile_policies.sql
 \i tables/public/nip_fi_profile_heads.sql
-\i tables/public/nip_fi_profile_assertions.sql
-
-
-\i tables/public/nip_fi_profile_config.sql
-
-\i seeds/nip_fi_profiles.sql

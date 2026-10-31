@@ -79,7 +79,6 @@ pub const RELAY_ADMIN_TABLES: &[(&str, &str)] = &[
 /// blocks deletion until this manifest is intentionally updated.
 pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "nip_fi_profile_heads",
-    "nip_fi_profile_assertions",
     "api_tokens",
     "archived_identities",
     "artifact_heads",
@@ -132,7 +131,6 @@ const EXCLUDED_SCOPED_TABLES: &[&str] = &[
 /// Foreign-key-safe child-before-parent order for the PostgreSQL purge.
 pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "nip_fi_profile_heads",
-    "nip_fi_profile_assertions",
     "personal_read_frontiers",
     "personal_read_accounts",
     "workflow_approvals",

@@ -1,7 +1,9 @@
 use super::*;
 use chrono::Duration;
 
-async fn fixture() -> (Db, CommunityId, Keys, String, ProfilePolicy) {
+const ISSUER: &str = "https://issuer.test";
+
+async fn fixture() -> (Db, CommunityId, Keys, String) {
     let db = Db::new(&crate::DbConfig {
         database_url: crate::test_support::database_url(),
         ..crate::DbConfig::default()
@@ -19,543 +21,8 @@ async fn fixture() -> (Db, CommunityId, Keys, String, ProfilePolicy) {
         .await
         .unwrap();
     let key = Keys::generate().public_key().to_hex();
-    let mut tx = crate::begin_community_write_transaction(
-        &db.pool,
-        community,
-        crate::observability::WriterOperation::Authorization,
-    )
-    .await
-    .unwrap();
-    sqlx::query("INSERT INTO relay_members (community_id, pubkey, role) VALUES ($1, $2, 'member')")
-        .bind(community.as_uuid())
-        .bind(&key)
-        .execute(tx.conn())
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
-    let policy = ProfilePolicy {
-        issuer: "https://issuer.test".into(),
-        label: Some("Example".into()),
-        refresh_seconds: 3600,
-        community_hosts: None,
-    };
-    db.configure_profile_policies(std::slice::from_ref(&policy), 0)
-        .await
-        .unwrap();
-    (db, community, Keys::generate(), key, policy)
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn admit(
-    db: &Db,
-    community: CommunityId,
-    keys: &Keys,
-    key: &str,
-    policy: &ProfilePolicy,
-    epoch: ProfileEpoch,
-    iat: DateTime<Utc>,
-    profile: Option<(&str, &str, Option<&str>)>,
-) {
-    db.apply_profile_admission(
-        ProfileAdmission {
-            community,
-            issuer: &policy.issuer,
-            pubkey: key,
-            issued_at: iat,
-            admitted_at: Utc::now(),
-            profile,
-            epoch,
-            database_binding: false,
-            membership_required: true,
-        },
-        keys,
-    )
-    .await
-    .unwrap();
-}
-
-async fn current(db: &Db, community: CommunityId, key: &str) -> Option<Event> {
-    let value: Option<serde_json::Value> = sqlx::query_scalar(
-        "SELECT event FROM nip_fi_profile_heads WHERE community_id = $1 AND pubkey = $2",
-    )
-    .bind(community.as_uuid())
-    .bind(key)
-    .fetch_optional(&db.pool)
-    .await
-    .unwrap();
-    value.map(|v| Event::from_json(v.to_string()).unwrap())
-}
-
-async fn lifecycle() {
-    let (db, community, keys, key, policy) = fixture().await;
-    let epoch = db
-        .profile_epoch(community, &key, &policy)
-        .await
-        .unwrap()
-        .unwrap();
-    let now = Utc::now();
-    let first_iat = now - Duration::seconds(10);
-    admit(
-        &db,
-        community,
-        &keys,
-        &key,
-        &policy,
-        epoch,
-        first_iat,
-        Some(("Alice", "alice", Some("Alice Example"))),
-    )
-    .await;
-    let first = current(&db, community, &key).await.unwrap();
-    assert_eq!(first.pubkey, keys.public_key());
-    assert_eq!(first.tags.len(), 8);
-    assert_eq!(tag(&first, "full_name"), Some("Alice Example"));
-    assert_eq!(tag(&first, "display_name"), Some("Alice"));
-    assert!(first.verify().is_ok());
-    admit(
-        &db,
-        community,
-        &keys,
-        &key,
-        &policy,
-        epoch,
-        first_iat + Duration::nanoseconds(2),
-        Some(("Alice", "alice", Some("Alice Example"))),
-    )
-    .await;
-    assert_eq!(
-        current(&db, community, &key).await.unwrap().id,
-        first.id,
-        "unchanged admission does not refresh early"
-    );
-    admit(
-        &db,
-        community,
-        &keys,
-        &key,
-        &policy,
-        epoch,
-        first_iat + Duration::nanoseconds(3),
-        Some(("Alice", "alice", Some("Alice Renamed"))),
-    )
-    .await;
-    let renamed = current(&db, community, &key).await.unwrap();
-    assert_ne!(
-        renamed.id, first.id,
-        "full-name changes publish immediately"
-    );
-    assert_eq!(tag(&renamed, "full_name"), Some("Alice Renamed"));
-    admit(
-        &db,
-        community,
-        &keys,
-        &key,
-        &policy,
-        epoch,
-        first_iat + Duration::nanoseconds(4),
-        Some(("Alice", "alice", None)),
-    )
-    .await;
-    let without_full_name = current(&db, community, &key).await.unwrap();
-    assert_ne!(without_full_name.id, renamed.id);
-    assert_eq!(tag(&without_full_name, "full_name"), None);
-    assert_eq!(without_full_name.tags.len(), 7);
-    admit(
-        &db,
-        community,
-        &keys,
-        &key,
-        &policy,
-        epoch,
-        first_iat + Duration::nanoseconds(1),
-        None,
-    )
-    .await;
-    assert!(!db.pending_profile_work(None).await.unwrap().is_empty()); // initial broadcast still queued
-    assert_eq!(
-        tag(
-            &db.process_profile_work(community, &key, &keys, true)
-                .await
-                .unwrap()
-                .unwrap(),
-            "active"
-        ),
-        Some("true"),
-        "older fractional iat cannot retract"
-    );
-    admit(&db, community, &keys, &key, &policy, epoch, now, None).await;
-    let retracted = db
-        .process_profile_work(community, &key, &keys, true)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(tag(&retracted, "active"), Some("false"));
-    assert_eq!(retracted.tags.len(), 3);
-    assert!(retracted.created_at > first.created_at);
-    admit(
-        &db,
-        community,
-        &keys,
-        &key,
-        &policy,
-        epoch,
-        first_iat,
-        Some(("Old", "old", None)),
-    )
-    .await;
-    assert_eq!(
-        current(&db, community, &key).await.unwrap().id,
-        retracted.id
-    );
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn profile_lifecycle_retains_assertion_ordering() {
-    lifecycle().await;
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn migration_schema_profile_lifecycle_retains_assertion_ordering() {
-    lifecycle().await;
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn affected_scope_and_configuration_epochs_fence_restored_state() {
-    let (db, community, keys, key, policy) = fixture().await;
-    let epoch = db
-        .profile_epoch(community, &key, &policy)
-        .await
-        .unwrap()
-        .unwrap();
-    let mut tx = crate::begin_community_write_transaction(
-        &db.pool,
-        community,
-        crate::observability::WriterOperation::Authorization,
-    )
-    .await
-    .unwrap();
-    sqlx::query("UPDATE relay_members SET access_generation = gen_random_uuid() WHERE community_id = $1 AND pubkey = $2").bind(community.as_uuid()).bind("b".repeat(64)).execute(tx.conn()).await.unwrap();
-    tx.commit().await.unwrap();
-    admit(
-        &db,
-        community,
-        &keys,
-        &key,
-        &policy,
-        epoch,
-        Utc::now(),
-        Some(("Alice", "alice", None)),
-    )
-    .await;
-    assert!(
-        current(&db, community, &key).await.is_some(),
-        "unrelated key invalidation does not drop Alice"
-    );
-    let mut tx = crate::begin_community_write_transaction(
-        &db.pool,
-        community,
-        crate::observability::WriterOperation::Authorization,
-    )
-    .await
-    .unwrap();
-    sqlx::query("UPDATE relay_members SET access_generation = gen_random_uuid() WHERE community_id = $1 AND pubkey = $2").bind(community.as_uuid()).bind(&key).execute(tx.conn()).await.unwrap();
-    tx.commit().await.unwrap();
-    db.retract_profile_admission(
-        community,
-        &policy.issuer,
-        &key,
-        Utc::now().timestamp(),
-        None,
-    )
-    .await
-    .unwrap();
-    db.process_profile_work(community, &key, &keys, true)
-        .await
-        .unwrap();
-    admit(
-        &db,
-        community,
-        &keys,
-        &key,
-        &policy,
-        epoch,
-        Utc::now(),
-        Some(("Stale", "stale", None)),
-    )
-    .await;
-    assert_eq!(
-        tag(&current(&db, community, &key).await.unwrap(), "active"),
-        Some("false")
-    );
-    db.configure_profile_policies(&[], 1).await.unwrap();
-    assert!(
-        db.configure_profile_policies(std::slice::from_ref(&policy), 0)
-            .await
-            .is_err(),
-        "stale pod cannot restore policy"
-    );
-    assert!(
-        db.configure_profile_policies(std::slice::from_ref(&policy), 1)
-            .await
-            .is_err(),
-        "same revision cannot change meaning"
-    );
-    db.configure_profile_policies(std::slice::from_ref(&policy), 2)
-        .await
-        .unwrap();
-    admit(
-        &db,
-        community,
-        &keys,
-        &key,
-        &policy,
-        epoch,
-        Utc::now(),
-        Some(("Stale", "stale", None)),
-    )
-    .await;
-    assert_eq!(
-        tag(&current(&db, community, &key).await.unwrap(), "active"),
-        Some("false")
-    );
-}
-
-async fn ordering_and_access_races() {
-    let (db, community, keys, key, policy) = fixture().await;
-    let epoch = db
-        .profile_epoch(community, &key, &policy)
-        .await
-        .unwrap()
-        .unwrap();
-    let now = Utc::now() - Duration::seconds(30);
-    let input = |admitted_at, epoch| ProfileAdmission {
-        community,
-        issuer: &policy.issuer,
-        pubkey: &key,
-        issued_at: now,
-        admitted_at,
-        profile: Some(("Alice", "alice", None)),
-        epoch,
-        database_binding: false,
-        membership_required: true,
-    };
-    db.apply_profile_admission(input(now, epoch), &keys)
-        .await
-        .unwrap()
-        .unwrap();
-    let first = current(&db, community, &key).await.unwrap();
-    let trigger = now.timestamp();
-    db.retract_profile_admission(community, &policy.issuer, &key, trigger, None)
-        .await
-        .unwrap();
-    db.apply_profile_admission(input(now + Duration::seconds(1), epoch), &keys)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        current(&db, community, &key).await.unwrap().id,
-        first.id,
-        "unchanged values must not refresh early or erase pending cleanup"
-    );
-    db.process_profile_work(community, &key, &keys, true)
-        .await
-        .unwrap();
-    assert_eq!(
-        tag(&current(&db, community, &key).await.unwrap(), "active"),
-        Some("false")
-    );
-    // A still-valid pre-disconnect assertion can republish. Its public
-    // verification time is now later than the original cleanup trigger.
-    db.apply_profile_admission(input(now + Duration::seconds(2), epoch), &keys)
-        .await
-        .unwrap()
-        .unwrap();
-    let later_head = current(&db, community, &key).await.unwrap();
-    // A delayed deny-only cancellation has no original command time. It may
-    // cancel its observed event, never a later replacement even with a broad T.
-    db.retract_profile_admission(
-        community,
-        &policy.issuer,
-        &key,
-        trigger + 99,
-        Some(&first.id.to_hex()),
-    )
-    .await
-    .unwrap();
-    db.retract_profile_admission(community, &policy.issuer, &key, trigger, None)
-        .await
-        .unwrap();
-    db.retract_profile_admission(community, "another-issuer", &key, trigger + 99, None)
-        .await
-        .unwrap();
-    db.process_profile_work(community, &key, &keys, true)
-        .await
-        .unwrap();
-    assert_eq!(
-        current(&db, community, &key).await.unwrap().id,
-        later_head.id
-    );
-    assert!(
-        db.apply_profile_admission(input(now, epoch), &keys)
-            .await
-            .unwrap()
-            .is_none(),
-        "public verified_at cannot move backwards"
-    );
-    let later = Utc::now();
-
-    // Holding a projection lock must not hold access revocation open.
-    let mut lock = crate::begin_community_write_transaction(
-        &db.pool,
-        community,
-        crate::observability::WriterOperation::Authorization,
-    )
-    .await
-    .unwrap();
-    lock_profile(&mut lock, &key).await.unwrap();
-    let bytes = hex::decode(&key).unwrap();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        crate::moderation::ban_member(&db.pool, community, &bytes, &bytes, None, None),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    crate::moderation::unban_member(&db.pool, community, &bytes, &bytes)
-        .await
-        .unwrap();
-    lock.commit().await.unwrap();
-    assert!(
-        db.apply_profile_admission(input(later + Duration::seconds(2), epoch), &keys)
-            .await
-            .unwrap()
-            .is_none(),
-        "ban/unban fences work from the previous incarnation"
-    );
-    let restored = db
-        .profile_epoch(community, &key, &policy)
-        .await
-        .unwrap()
-        .unwrap();
-    db.apply_profile_admission(
-        ProfileAdmission {
-            profile: Some(("Restored Alice", "alice", None)),
-            ..input(later + Duration::seconds(3), restored)
-        },
-        &keys,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    db.process_profile_work(community, &key, &keys, true)
-        .await
-        .unwrap();
-    assert_eq!(
-        tag(&current(&db, community, &key).await.unwrap(), "active"),
-        Some("true"),
-        "late cleanup does not retract the independently eligible restored admission"
-    );
-
-    // Reinsertions get new membership incarnations even from old writers.
-    let removed = crate::relay_members::remove_relay_member(&db.pool, community, &key, &keys)
-        .await
-        .unwrap();
-    assert!(matches!(
-        removed.outcome,
-        crate::relay_members::RemoveResult::Removed
-    ));
-    assert!(
-        db.apply_profile_admission(input(later + Duration::seconds(4), restored), &keys)
-            .await
-            .unwrap()
-            .is_none(),
-        "open relay admission is not explicit membership"
-    );
-    let mut tx = crate::begin_community_write_transaction(
-        &db.pool,
-        community,
-        crate::observability::WriterOperation::Authorization,
-    )
-    .await
-    .unwrap();
-    sqlx::query("INSERT INTO relay_members (community_id, pubkey, role) VALUES ($1, $2, 'member')")
-        .bind(community.as_uuid())
-        .bind(&key)
-        .execute(tx.conn())
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
-    assert!(
-        db.apply_profile_admission(input(later + Duration::seconds(5), restored), &keys)
-            .await
-            .unwrap()
-            .is_none(),
-        "remove/restore fences the old membership"
-    );
-    let restored = db
-        .profile_epoch(community, &key, &policy)
-        .await
-        .unwrap()
-        .unwrap();
-    db.apply_profile_admission(
-        ProfileAdmission {
-            profile: Some(("Restored again", "alice", None)),
-            ..input(later + Duration::seconds(6), restored)
-        },
-        &keys,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    db.process_profile_work(community, &key, &keys, true)
-        .await
-        .unwrap();
-    assert_eq!(
-        tag(&current(&db, community, &key).await.unwrap(), "active"),
-        Some("true")
-    );
-    // Environment authorization ignores unrelated DB binding backfills.
-    let mut tx = crate::begin_community_write_transaction(
-        &db.pool,
-        community,
-        crate::observability::WriterOperation::Authorization,
-    )
-    .await
-    .unwrap();
-    sqlx::query("INSERT INTO community_nip_fi_issuers (community_id, issuer) VALUES ($1, $2)")
-        .bind(community.as_uuid())
-        .bind(&policy.issuer)
-        .execute(tx.conn())
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
-    db.process_profile_work(community, &key, &keys, true)
-        .await
-        .unwrap();
-    assert_eq!(
-        tag(&current(&db, community, &key).await.unwrap(), "active"),
-        Some("true")
-    );
-    assert!(db
-        .apply_profile_admission(input(later + Duration::seconds(7), restored), &keys)
-        .await
-        .unwrap()
-        .is_some());
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn cleanup_versions_preserve_later_admissions_and_access_does_not_wait() {
-    ordering_and_access_races().await;
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn migration_schema_cleanup_versions_preserve_later_admissions_and_access_does_not_wait() {
-    ordering_and_access_races().await;
+    set_member(&db, community, &key, true).await;
+    (db, community, Keys::generate(), key)
 }
 
 async fn set_member(db: &Db, community: CommunityId, key: &str, member: bool) {
@@ -580,252 +47,347 @@ async fn set_member(db: &Db, community: CommunityId, key: &str, member: bool) {
     tx.commit().await.unwrap();
 }
 
-async fn active(db: &Db, community: CommunityId, key: &str) -> Option<String> {
-    current(db, community, key)
-        .await
-        .and_then(|event| tag(&event, "active").map(str::to_owned))
+fn input<'a>(
+    community: CommunityId,
+    key: &'a str,
+    issued_at: DateTime<Utc>,
+    admitted_at: DateTime<Utc>,
+    full_name: Option<&'a str>,
+) -> ProfileAdmission<'a> {
+    ProfileAdmission {
+        community,
+        issuer: ISSUER,
+        pubkey: key,
+        issued_at,
+        admitted_at,
+        display_name: "Alice",
+        username: "alice",
+        full_name,
+        label: "Example",
+        refresh_seconds: 3600,
+        membership_required: true,
+    }
 }
 
-async fn open_relay_eligibility() {
-    let (db, community, keys, key, policy) = fixture().await;
-    set_member(&db, community, &key, false).await;
-    let epoch = db
-        .profile_epoch(community, &key, &policy)
+async fn current(db: &Db, community: CommunityId, key: &str) -> Option<Event> {
+    let value: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT event FROM nip_fi_profile_heads WHERE community_id = $1 AND pubkey = $2",
+    )
+    .bind(community.as_uuid())
+    .bind(key)
+    .fetch_optional(&db.pool)
+    .await
+    .unwrap();
+    value.map(|v| Event::from_json(v.to_string()).unwrap())
+}
+
+async fn lifecycle() {
+    let (db, community, keys, key) = fixture().await;
+    let start = Utc::now() - Duration::hours(3);
+    let iat = start - Duration::seconds(10);
+    let publish = |input| db.publish_verified_profile(input, &keys);
+
+    let first = publish(input(community, &key, iat, start, Some("Alice Example")))
         .await
         .unwrap()
-        .unwrap();
-    let now = Utc::now() - Duration::seconds(60);
-    let input = |admitted_at, epoch, membership_required| ProfileAdmission {
+        .expect("first admission publishes");
+    assert_eq!(current(&db, community, &key).await.unwrap().id, first.id);
+    assert_eq!(first.pubkey, keys.public_key());
+    assert_eq!(first.kind, Kind::Custom(30382));
+    assert_eq!(first.tags.len(), 8);
+    assert_eq!(tag(&first, "d"), Some(key.as_str()));
+    assert_eq!(tag(&first, "active"), Some("true"));
+    assert_eq!(tag(&first, "display_name"), Some("Alice"));
+    assert_eq!(tag(&first, "full_name"), Some("Alice Example"));
+    assert_eq!(tag(&first, "issuer_label"), Some("Example"));
+    assert_eq!(verified_at(&first), Some(start.timestamp()));
+    assert!(first.verify().is_ok());
+
+    let step = |n: i64| start + Duration::seconds(n);
+    assert!(
+        publish(input(
+            community,
+            &key,
+            iat + Duration::nanoseconds(2),
+            step(1),
+            Some("Alice Example"),
+        ))
+        .await
+        .unwrap()
+        .is_none(),
+        "unchanged admission does not refresh early"
+    );
+
+    let renamed = publish(input(
         community,
-        issuer: &policy.issuer,
-        pubkey: &key,
-        issued_at: now,
-        admitted_at,
-        profile: Some(("Alice", "alice", None)),
-        epoch,
-        database_binding: false,
-        membership_required,
+        &key,
+        iat + Duration::nanoseconds(3),
+        step(2),
+        Some("Alice Renamed"),
+    ))
+    .await
+    .unwrap()
+    .expect("full-name changes publish immediately");
+    assert_eq!(tag(&renamed, "full_name"), Some("Alice Renamed"));
+    assert!(renamed.created_at > first.created_at);
+
+    let without_full_name = publish(input(
+        community,
+        &key,
+        iat + Duration::nanoseconds(4),
+        step(3),
+        None,
+    ))
+    .await
+    .unwrap()
+    .expect("dropping the full name publishes");
+    assert_eq!(tag(&without_full_name, "full_name"), None);
+    assert_eq!(without_full_name.tags.len(), 7);
+
+    // An assertion older than the last accepted one cannot overwrite.
+    assert!(
+        publish(input(
+            community,
+            &key,
+            iat + Duration::nanoseconds(1),
+            step(4),
+            Some("Old"),
+        ))
+        .await
+        .unwrap()
+        .is_none(),
+        "older fractional iat cannot overwrite"
+    );
+    assert!(
+        publish(input(
+            community,
+            &key,
+            iat + Duration::nanoseconds(5),
+            step(2),
+            Some("Delayed"),
+        ))
+        .await
+        .unwrap()
+        .is_none(),
+        "public verified_at cannot move backwards"
+    );
+    assert_eq!(
+        current(&db, community, &key).await.unwrap().id,
+        without_full_name.id
+    );
+
+    let refreshed = publish(input(
+        community,
+        &key,
+        iat + Duration::nanoseconds(6),
+        step(3 + 3600),
+        None,
+    ))
+    .await
+    .unwrap()
+    .expect("unchanged names refresh after the interval");
+    assert_eq!(verified_at(&refreshed), Some(step(3 + 3600).timestamp()));
+    assert_eq!(
+        current(&db, community, &key).await.unwrap().id,
+        refreshed.id
+    );
+
+    // Each public field change publishes immediately.
+    let alicia = |ns: i64, n: i64| ProfileAdmission {
+        display_name: "Alicia",
+        username: "alicia",
+        label: "Example Corp",
+        ..input(
+            community,
+            &key,
+            iat + Duration::nanoseconds(ns),
+            step(n),
+            None,
+        )
+    };
+    let mut last = refreshed;
+    for (field, admission) in [
+        (
+            "display_name",
+            ProfileAdmission {
+                username: "alice",
+                label: "Example",
+                ..alicia(7, 3604)
+            },
+        ),
+        (
+            "username",
+            ProfileAdmission {
+                label: "Example",
+                ..alicia(8, 3605)
+            },
+        ),
+        ("issuer_label", alicia(9, 3606)),
+    ] {
+        let event = publish(admission)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{field} change publishes"));
+        assert_ne!(tag(&event, field), tag(&last, field));
+        last = event;
+    }
+
+    // A no-op login still advances the issuer's assertion ordering.
+    assert!(publish(alicia(20, 3607)).await.unwrap().is_none());
+    assert!(
+        publish(ProfileAdmission {
+            display_name: "Stale",
+            ..alicia(15, 3608)
+        })
+        .await
+        .unwrap()
+        .is_none(),
+        "an assertion older than an unchanged one cannot overwrite"
+    );
+
+    // The latest verification from any issuer wins; assertion times are not
+    // compared across issuers.
+    let other = |n: i64| ProfileAdmission {
+        issuer: "https://other-issuer.test",
+        display_name: "Other",
+        ..input(community, &key, iat - Duration::hours(1), step(n), None)
     };
     assert!(
-        db.apply_profile_admission(input(now + Duration::seconds(1), epoch, true), &keys)
+        publish(other(3605)).await.unwrap().is_none(),
+        "an earlier verification from another issuer cannot replace"
+    );
+    let taken = publish(other(3609))
+        .await
+        .unwrap()
+        .expect("a newer verification from another issuer replaces");
+    assert_eq!(tag(&taken, "display_name"), Some("Other"));
+    let back = publish(alicia(21, 3610))
+        .await
+        .unwrap()
+        .expect("the original issuer takes the profile back on a newer verification");
+    assert_eq!(tag(&back, "display_name"), Some("Alicia"));
+    assert_eq!(current(&db, community, &key).await.unwrap().id, back.id);
+    let live: Vec<String> = sqlx::query_scalar(
+        "SELECT encode(id, 'hex') FROM events WHERE community_id = $1 AND kind = 30382 AND d_tag = $2 AND deleted_at IS NULL",
+    )
+    .bind(community.as_uuid())
+    .bind(&key)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(live, vec![back.id.to_hex()], "one live replaceable event");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn profile_lifecycle_publishes_updates_and_orders() {
+    lifecycle().await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn migration_schema_profile_lifecycle_publishes_updates_and_orders() {
+    lifecycle().await;
+}
+
+async fn eligibility() {
+    let (db, community, keys, key) = fixture().await;
+    set_member(&db, community, &key, false).await;
+    let iat = Utc::now() - Duration::seconds(60);
+    let at = |n: i64, membership_required| ProfileAdmission {
+        membership_required,
+        ..input(community, &key, iat, iat + Duration::seconds(n), None)
+    };
+    assert!(
+        db.publish_verified_profile(at(1, true), &keys)
             .await
             .unwrap()
             .is_none(),
         "members-required relays need an explicit member row"
     );
+    assert!(current(&db, community, &key).await.is_none());
     assert!(
-        db.apply_profile_admission(input(now + Duration::seconds(2), epoch, false), &keys)
+        db.publish_verified_profile(at(2, false), &keys)
             .await
             .unwrap()
             .is_some(),
         "open relays publish for enforced admissions without a member row"
     );
-    db.process_profile_work(community, &key, &keys, false)
-        .await
-        .unwrap();
-    assert_eq!(active(&db, community, &key).await.as_deref(), Some("true"));
 
-    // Membership incarnations do not fence open-relay work, but still fence
-    // work on relays that require membership.
-    set_member(&db, community, &key, true).await;
-    assert!(
-        db.apply_profile_admission(input(now + Duration::seconds(3), epoch, true), &keys)
-            .await
-            .unwrap()
-            .is_none(),
-        "a new membership incarnation fences members-required work"
-    );
-    assert!(
-        db.apply_profile_admission(input(now + Duration::seconds(3), epoch, false), &keys)
-            .await
-            .unwrap()
-            .is_some(),
-        "membership incarnations do not fence open-relay work"
-    );
-    set_member(&db, community, &key, false).await;
-
-    // A ban retracts, and ban/unban still fences the earlier admission. Its
-    // cleanup is stamped with wall time, so later admissions must follow it.
+    // A banned key never publishes, and its existing profile stays as a
+    // historical record.
+    let published = current(&db, community, &key).await.unwrap();
     let bytes = hex::decode(&key).unwrap();
     crate::moderation::ban_member(&db.pool, community, &bytes, &bytes, None, None)
         .await
         .unwrap();
-    db.process_profile_work(community, &key, &keys, false)
-        .await
-        .unwrap();
-    assert_eq!(active(&db, community, &key).await.as_deref(), Some("false"));
+    set_member(&db, community, &key, true).await;
+    for membership_required in [true, false] {
+        assert!(
+            db.publish_verified_profile(
+                ProfileAdmission {
+                    display_name: "Banned Alice",
+                    ..at(3, membership_required)
+                },
+                &keys,
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "banned keys do not publish"
+        );
+    }
+    assert_eq!(
+        current(&db, community, &key).await.unwrap().id,
+        published.id
+    );
     crate::moderation::unban_member(&db.pool, community, &bytes, &bytes)
         .await
         .unwrap();
-    let later = Utc::now() + Duration::seconds(1);
-    assert!(
-        db.apply_profile_admission(input(later, epoch, false), &keys)
-            .await
-            .unwrap()
-            .is_none(),
-        "ban/unban fences open-relay work from the previous incarnation"
-    );
-    let epoch = db
-        .profile_epoch(community, &key, &policy)
-        .await
-        .unwrap()
-        .unwrap();
-    db.apply_profile_admission(input(later + Duration::seconds(1), epoch, false), &keys)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(active(&db, community, &key).await.as_deref(), Some("true"));
-
-    // A disconnect cleanup retracts; a later admission republishes.
-    db.retract_profile_admission(
-        community,
-        &policy.issuer,
-        &key,
-        (later + Duration::seconds(2)).timestamp(),
-        None,
-    )
-    .await
-    .unwrap();
-    db.process_profile_work(community, &key, &keys, false)
-        .await
-        .unwrap();
-    assert_eq!(active(&db, community, &key).await.as_deref(), Some("false"));
-    db.apply_profile_admission(input(later + Duration::seconds(3), epoch, false), &keys)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(active(&db, community, &key).await.as_deref(), Some("true"));
-
-    // Requiring membership later retracts keys without a member row.
-    db.process_profile_work(community, &key, &keys, true)
-        .await
-        .unwrap();
-    assert_eq!(active(&db, community, &key).await.as_deref(), Some("false"));
-    db.apply_profile_admission(input(later + Duration::seconds(4), epoch, false), &keys)
-        .await
-        .unwrap()
-        .unwrap();
-
-    // Disabling the policy retracts and fences the earlier admission.
-    db.configure_profile_policies(
-        &[ProfilePolicy {
-            label: None,
-            ..policy.clone()
-        }],
-        1,
-    )
-    .await
-    .unwrap();
-    db.process_profile_work(community, &key, &keys, false)
-        .await
-        .unwrap();
-    assert_eq!(active(&db, community, &key).await.as_deref(), Some("false"));
-    db.configure_profile_policies(std::slice::from_ref(&policy), 2)
-        .await
-        .unwrap();
-    assert!(
-        db.apply_profile_admission(input(later + Duration::seconds(5), epoch, false), &keys)
-            .await
-            .unwrap()
-            .is_none(),
-        "policy disable/restore fences open-relay work"
-    );
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn open_relays_publish_without_membership_and_keep_other_fences() {
-    open_relay_eligibility().await;
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn migration_schema_open_relays_publish_without_membership_and_keep_other_fences() {
-    open_relay_eligibility().await;
-}
-
-async fn environment_removal_cleanup() {
-    let (db, community, keys, key, mut policy) = fixture().await;
-    let other = CommunityId::from_uuid(uuid::Uuid::new_v4());
-    let host = format!("profile-{}.test", community.as_uuid());
-    let other_host = format!("profile-{}.test", other.as_uuid());
-    sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
-        .bind(other.as_uuid())
-        .bind(&other_host)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    let mut tx = crate::begin_community_write_transaction(
-        &db.pool,
-        other,
-        crate::observability::WriterOperation::Authorization,
-    )
-    .await
-    .unwrap();
-    sqlx::query("INSERT INTO relay_members (community_id, pubkey, role) VALUES ($1, $2, 'member')")
-        .bind(other.as_uuid())
-        .bind(&key)
-        .execute(tx.conn())
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
-    policy.community_hosts = Some(vec![host.clone(), other_host.clone()]);
-    db.configure_profile_policies(std::slice::from_ref(&policy), 1)
-        .await
-        .unwrap();
-    for id in [community, other] {
-        let epoch = db.profile_epoch(id, &key, &policy).await.unwrap().unwrap();
-        admit(
-            &db,
-            id,
+    assert!(db
+        .publish_verified_profile(
+            ProfileAdmission {
+                display_name: "Restored Alice",
+                ..at(4, true)
+            },
             &keys,
-            &key,
-            &policy,
-            epoch,
-            Utc::now(),
-            Some(("Alice", "alice", None)),
         )
-        .await;
-    }
-    let unaffected = current(&db, other, &key).await.unwrap();
-    policy.community_hosts = Some(vec![other_host]);
-    db.configure_profile_policies(std::slice::from_ref(&policy), 2)
         .await
-        .unwrap();
-    // Wait on the production asynchronous scheduler, not a test-only marker.
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            let marked: bool = sqlx::query_scalar("SELECT retract_before IS NOT NULL FROM nip_fi_profile_heads WHERE community_id = $1 AND pubkey = $2")
-                .bind(community.as_uuid()).bind(&key).fetch_one(&db.pool).await.unwrap();
-            if marked { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    }).await.unwrap();
-    // Restoration before housekeeping must not erase already-triggered cleanup.
-    policy.community_hosts.as_mut().unwrap().push(host);
-    db.configure_profile_policies(std::slice::from_ref(&policy), 3)
+        .unwrap()
+        .is_some());
+    crate::moderation::ban_member(
+        &db.pool,
+        community,
+        &bytes,
+        &bytes,
+        None,
+        Some(Utc::now() - Duration::minutes(1)),
+    )
+    .await
+    .unwrap();
+    assert!(
+        db.publish_verified_profile(
+            ProfileAdmission {
+                display_name: "Expired-ban Alice",
+                ..at(5, true)
+            },
+            &keys,
+        )
         .await
-        .unwrap();
-    for id in [community, other] {
-        db.process_profile_work(id, &key, &keys, true)
-            .await
-            .unwrap();
-    }
-    assert_eq!(
-        tag(&current(&db, community, &key).await.unwrap(), "active"),
-        Some("false")
+        .unwrap()
+        .is_some(),
+        "an expired ban does not block"
     );
-    assert_eq!(current(&db, other, &key).await.unwrap().id, unaffected.id);
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn environment_binding_removal_only_cleans_its_community() {
-    environment_removal_cleanup().await;
+async fn profiles_publish_only_for_eligible_keys() {
+    eligibility().await;
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn migration_schema_environment_binding_removal_only_cleans_its_community() {
-    environment_removal_cleanup().await;
+async fn migration_schema_profiles_publish_only_for_eligible_keys() {
+    eligibility().await;
 }

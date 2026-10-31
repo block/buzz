@@ -8,6 +8,5 @@ CREATE TABLE community_nip_fi_issuers (
     community_id UUID NOT NULL REFERENCES communities(id),
     issuer       TEXT NOT NULL CHECK (length(issuer) BETWEEN 1 AND 2048),
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    access_generation UUID DEFAULT gen_random_uuid(),
     PRIMARY KEY (community_id, issuer)
 );

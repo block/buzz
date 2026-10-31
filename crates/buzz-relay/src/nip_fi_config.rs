@@ -421,7 +421,6 @@ impl NipFiRelayConfig {
                 issuer: entry.issuer.clone(),
                 label,
                 refresh_seconds: i64::from(refresh),
-                community_hosts: None,
             });
             policies.push(policy);
             jwks_configs.push(jwks_config);
@@ -525,18 +524,6 @@ impl NipFiRelayConfig {
             // authorization still needs a per-community binding.
             CommunitySource::Database => NipFiCommunities::default(),
         };
-        // Retain the association itself so removed communities can initiate
-        // scoped cleanup while generation changes fence queued publication.
-        for policy in &mut profile_policies {
-            policy.community_hosts = (source == CommunitySource::Env).then(|| {
-                communities
-                    .by_host
-                    .iter()
-                    .filter(|(_, binding)| binding.authorizes(&policy.issuer))
-                    .map(|(host, _)| host.clone())
-                    .collect()
-            });
-        }
         for policy in policies {
             registry.insert(policy);
         }
