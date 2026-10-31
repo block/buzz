@@ -64,6 +64,73 @@ void main() {
     );
   }
 
+  for (final selfHosted in [false, true]) {
+    journey(
+      'finishing ${selfHosted ? "self-hosted" : "hosted"} Add restores picker memberships and keeps the new destination',
+      (tester, f) async {
+        await f.initialize();
+        f.offerProfile = false;
+        f.rows.addAll([f.row('one'), f.row('two')]);
+        await f.mount(tester, openEntry: false);
+        await f.flow.signInAccount();
+        await f.settle(tester);
+        expect(find.text('Select a community'), findsOneWidget);
+        await tester.tap(find.byKey(const Key('community-switcher-add')));
+        await f.settle(tester);
+        expect(find.text('Add a community'), findsOneWidget);
+        expect(f.probes, isEmpty);
+        final discoveries = f.sent('/known-communities/list').length;
+        f.secondRelayFailures = 1;
+        if (selfHosted) {
+          await f.tap(tester, 'Enter a community link');
+          await tester.enterText(
+            find.byKey(const Key('community-link-input')).hitTestable(),
+            'my-community.example',
+          );
+          await f.tap(tester, 'Continue');
+          await f.tap(tester, 'Saved identity');
+        } else {
+          await f.link(tester, 'three');
+          await tester.tap(find.byType(CheckboxListTile));
+          await f.settle(tester);
+          await f.tap(tester, 'Accept and join');
+        }
+        expect(f.flow.stage, HostedFlowStage.blocked);
+        expect(find.text('Try again').hitTestable(), findsOneWidget);
+        expect(find.text('Community home').hitTestable(), findsNothing);
+        final newRelay = selfHosted
+            ? 'wss://my-community.example'
+            : 'wss://three.communities.buzz.xyz';
+        final partial = await f.storage.loadAll();
+        expect(
+          partial.map((c) => c.relayUrl),
+          containsAll([newRelay, 'wss://one.communities.buzz.xyz']),
+        );
+        final added = partial.singleWhere((c) => c.relayUrl == newRelay);
+        expect(await f.storage.loadActiveId(), added.id);
+        await f.tap(tester, 'Try again');
+        expect(f.flow.stage, HostedFlowStage.complete);
+        expect(
+          (await f.storage.loadAll()).map((c) => c.relayUrl),
+          unorderedEquals([
+            newRelay,
+            'wss://one.communities.buzz.xyz',
+            'wss://two.communities.buzz.xyz',
+          ]),
+        );
+        expect(await f.storage.loadActiveId(), added.id);
+        expect(f.probes.where((c) => c.relayUrl == newRelay), hasLength(1));
+        expect(
+          f.probes.where((c) => c.relayUrl == 'wss://one.communities.buzz.xyz'),
+          hasLength(1),
+        );
+        expect(f.sent('/known-communities/list'), hasLength(discoveries));
+        expect(find.byType(OnboardingAppEntry), findsNothing);
+        expect(find.text('Community home').hitTestable(), findsOneWidget);
+      },
+    );
+  }
+
   for (final importing in [false, true]) {
     journey(
       'new account ${importing ? 'imports' : 'creates'} and keeps its identity on retry',
