@@ -104,6 +104,58 @@ void main() {
     expect(shown, ['$relay/media/$hash.thumb.jpg', original]);
   });
 
+  testWidgets('a missing thumbnail falls back to the original', (tester) async {
+    const relay = 'https://relay.example';
+    final missing = '$relay/media/${'cd' * 32}.jpg';
+    final broken = '$relay/media/${'ef' * 32}.jpg';
+    final requested = <String>[];
+    final client = http_testing.MockClient((request) async {
+      final url = request.url.toString();
+      requested.add(url);
+      if (url.startsWith(broken.replaceFirst('.jpg', ''))) {
+        return http.Response('', 500);
+      }
+      return http.Response('', 404);
+    });
+    tester.view.devicePixelRatio = 3;
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          mediaGetAuthServiceProvider.overrideWithValue(
+            MediaGetAuthService(baseUrl: relay, nsec: null),
+          ),
+          mediaHttpClientProvider.overrideWithValue(client),
+        ],
+        child: MaterialApp(
+          home: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final url in [missing, broken])
+                AvatarImage(
+                  imageUrl: url,
+                  radius: 20,
+                  fallback: Text(url == missing ? 'M' : 'B'),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+    for (var i = 0; i < 4; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 20)),
+      );
+      await tester.pump();
+    }
+
+    String thumb(String url) => url.replaceFirst('.jpg', '.thumb.jpg');
+    // A 404 retries the original; any other failure shows the fallback.
+    expect(requested, containsAll([thumb(missing), missing, thumb(broken)]));
+    expect(requested, isNot(contains(broken)));
+    expect(find.text('B'), findsOneWidget);
+  });
+
   testWidgets('clips agents to the desktop squircle', (tester) async {
     await tester.pumpWidget(subject(null, isAgent: true));
 

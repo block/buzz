@@ -250,7 +250,8 @@ String? relayThumbnailUrl(String url, MediaGetAuthService auth) {
 ///   (the zoomable full-screen viewer).
 ///
 /// With [preferThumbnail], a relay JPEG laid out small enough loads the
-/// relay's generated thumbnail instead of the original upload.
+/// relay's generated thumbnail instead of the original upload, falling back
+/// to the original when the relay has no thumbnail for it.
 class MediaImage extends ConsumerWidget {
   final String url;
   final BoxFit? fit;
@@ -295,6 +296,10 @@ class MediaImage extends ConsumerWidget {
        assert(
          !preferThumbnail || onBytesLoaded == null,
          'thumbnail bytes are not the original upload',
+       ),
+       assert(
+         !preferThumbnail || errorBuilder != null,
+         'a thumbnail failure other than 404 needs an error widget',
        );
 
   @override
@@ -320,14 +325,34 @@ class MediaImage extends ConsumerWidget {
         final cacheWidth = maxWidth.isFinite && maxWidth > 0
             ? _physicalWidth(context, maxWidth)
             : null;
-        final thumbnail =
+        final candidate =
             preferThumbnail && _fitsThumbnail(context, constraints)
             ? relayThumbnailUrl(url, auth)
             : null;
-        return _image(providerFor(thumbnail ?? url), cacheWidth);
+        final thumbnail = _missingThumbnails.contains(candidate)
+            ? null
+            : candidate;
+        if (thumbnail == null) return _image(providerFor(url), cacheWidth);
+        return _image(
+          providerFor(thumbnail),
+          cacheWidth,
+          errorBuilder: (context, error, stackTrace) {
+            if (error is! NetworkImageLoadException ||
+                error.statusCode != 404) {
+              return errorBuilder!(context, error, stackTrace);
+            }
+            // Older or externally populated media may have no generated
+            // thumbnail. Remember that, so later builds go straight to the
+            // original instead of hitting the thumbnail's failure cooldown.
+            _missingThumbnails.add(thumbnail);
+            return _image(providerFor(url), cacheWidth);
+          },
+        );
       },
     );
   }
+
+  static final Set<String> _missingThumbnails = {};
 
   bool _fitsThumbnail(BuildContext context, BoxConstraints constraints) {
     if (!constraints.hasBoundedWidth || !constraints.hasBoundedHeight) {
@@ -343,14 +368,18 @@ class MediaImage extends ConsumerWidget {
     return (logicalWidth * MediaQuery.devicePixelRatioOf(context)).ceil();
   }
 
-  Widget _image(MediaImageProvider provider, int? cacheWidth) {
+  Widget _image(
+    MediaImageProvider provider,
+    int? cacheWidth, {
+    ImageErrorWidgetBuilder? errorBuilder,
+  }) {
     return Image(
       image: ResizeImage.resizeIfNeeded(cacheWidth, null, provider),
       fit: fit,
       width: width,
       height: height,
       semanticLabel: semanticLabel,
-      errorBuilder: errorBuilder,
+      errorBuilder: errorBuilder ?? this.errorBuilder,
       frameBuilder: frameBuilder,
       filterQuality: filterQuality,
       gaplessPlayback: true,
