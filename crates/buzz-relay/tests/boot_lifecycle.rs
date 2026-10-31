@@ -690,11 +690,15 @@ mod postgres_tests {
         }
     }
 
-    fn reserve_closed_port() -> u16 {
-        let reserved = TcpListener::bind(("127.0.0.1", 0)).expect("reserve port");
-        let port = reserved.local_addr().expect("reserved address").port();
-        drop(reserved);
-        port
+    /// Returns `N` distinct ports that are closed again when this returns.
+    ///
+    /// All listeners are held until every port is read: releasing each one
+    /// before binding the next lets the kernel hand the same port out twice,
+    /// so two of the relay's listeners collide and its second bind fails.
+    fn reserve_closed_ports<const N: usize>() -> [u16; N] {
+        let reserved: [TcpListener; N] =
+            std::array::from_fn(|_| TcpListener::bind(("127.0.0.1", 0)).expect("reserve port"));
+        reserved.map(|listener| listener.local_addr().expect("reserved address").port())
     }
 
     /// Runs the relay until it exits on its own, or kills it once `timeout`
@@ -733,9 +737,9 @@ mod postgres_tests {
     fn unreachable_redis_fails_boot_before_the_health_listener_binds() {
         let database_url = std::env::var("DATABASE_URL")
             .expect("postgres lane provides DATABASE_URL for each test process");
-        let redis_url = format!("redis://127.0.0.1:{}", reserve_closed_port());
-        let metrics_port = reserve_closed_port().to_string();
-        let health_port = reserve_closed_port();
+        let [redis_port, metrics_port, health_port] = reserve_closed_ports();
+        let redis_url = format!("redis://127.0.0.1:{redis_port}");
+        let metrics_port = metrics_port.to_string();
         let health_port_value = health_port.to_string();
 
         let (exited, output) = run_until_exit(
@@ -783,8 +787,8 @@ mod postgres_tests {
         let database_url = std::env::var("DATABASE_URL")
             .expect("postgres lane provides DATABASE_URL for each test process");
         let redis_peer = HangingRedisPeer::spawn();
-        let metrics_port = reserve_closed_port().to_string();
-        let health_port = reserve_closed_port();
+        let [metrics_port, health_port] = reserve_closed_ports();
+        let metrics_port = metrics_port.to_string();
         let health_port_value = health_port.to_string();
         let timeout = REDIS_BOOTSTRAP_BUDGET + REDIS_BOOTSTRAP_SCHEDULING_SLACK;
         let started_at = Instant::now();
@@ -855,10 +859,10 @@ mod postgres_tests {
             .expect("postgres lane provides DATABASE_URL for each test process");
         let redis_url = std::env::var("REDIS_URL")
             .expect("the postgres lane runs alongside Redis and exports REDIS_URL");
-        let metrics_port = reserve_closed_port();
+        let [metrics_port, health_port, bind_port] = reserve_closed_ports();
         let metrics_port_value = metrics_port.to_string();
-        let health_port_value = reserve_closed_port().to_string();
-        let bind_addr = format!("127.0.0.1:{}", reserve_closed_port());
+        let health_port_value = health_port.to_string();
+        let bind_addr = format!("127.0.0.1:{bind_port}");
 
         let mut process = RelayProcess::spawn(&[
             ("BUZZ_RELAY_PRIVATE_KEY", VALID_RELAY_PRIVATE_KEY),
@@ -907,14 +911,13 @@ mod postgres_tests {
             .expect("postgres lane provides DATABASE_URL for each test process");
         let redis_url = std::env::var("REDIS_URL")
             .expect("the postgres lane runs alongside Redis and exports REDIS_URL");
+        let [read_database_port, metrics_port, health_port, bind_port] = reserve_closed_ports();
         let read_database_url = format!(
-            "postgres://buzz:buzz@127.0.0.1:{}/buzz", // sadscan:disable np.postgres.1
-            reserve_closed_port()
+            "postgres://buzz:buzz@127.0.0.1:{read_database_port}/buzz" // sadscan:disable np.postgres.1
         );
-        let metrics_port_value = reserve_closed_port().to_string();
-        let health_port = reserve_closed_port();
+        let metrics_port_value = metrics_port.to_string();
         let health_port_value = health_port.to_string();
-        let bind_addr = format!("127.0.0.1:{}", reserve_closed_port());
+        let bind_addr = format!("127.0.0.1:{bind_port}");
 
         let mut process = RelayProcess::spawn(&[
             ("BUZZ_RELAY_PRIVATE_KEY", VALID_RELAY_PRIVATE_KEY),
@@ -993,10 +996,10 @@ mod postgres_tests {
             .expect("postgres lane provides DATABASE_URL for each test process");
         let redis_url = std::env::var("REDIS_URL")
             .expect("the postgres lane runs alongside Redis and exports REDIS_URL");
-        let metrics_port = reserve_closed_port().to_string();
-        let health_port = reserve_closed_port();
+        let [metrics_port, health_port, bind_port] = reserve_closed_ports();
+        let metrics_port = metrics_port.to_string();
         let health_port_value = health_port.to_string();
-        let bind_addr = format!("127.0.0.1:{}", reserve_closed_port());
+        let bind_addr = format!("127.0.0.1:{bind_port}");
         let mut environment = vec![
             ("BUZZ_RELAY_PRIVATE_KEY", VALID_RELAY_PRIVATE_KEY),
             ("BUZZ_METRICS_PORT", metrics_port.as_str()),
