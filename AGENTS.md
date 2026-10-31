@@ -713,7 +713,7 @@ by [block/buzz-app](https://github.com/block/buzz-app).
 - **Theme:** Catppuccin Latte (light) / Macchiato (dark)
 - **Features:** Isolated under `lib/features/`, shared code in `lib/shared/`
 - **Nostr models:** `lib/shared/relay/nostr_models.dart` — event kinds must
-  stay in sync with `desktop/src/shared/constants/kinds.ts`
+  stay in sync with `crates/buzz-core/src/kind.rs`
 
 ### Rules
 
