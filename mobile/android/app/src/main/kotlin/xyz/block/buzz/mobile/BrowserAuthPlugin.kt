@@ -59,9 +59,12 @@ internal class BrowserAuthPlugin(
     fun onNewIntent(intent: Intent) {
         val uri = intent.data ?: return
         if (pending == null || uri.scheme != "xyz.block.buzz.mobile" ||
-            uri.encodedSchemeSpecificPart.substringBefore('?') != "/auth/callback" ||
-            uri.getQueryParameter("state") != state
+            uri.encodedSchemeSpecificPart.substringBefore('?') != "/auth/callback"
         ) return
+        // A rejected auth callback also brings the Activity back. Its resume
+        // is not a browser dismissal and must not cancel the newer attempt.
+        departed = false
+        if (uri.getQueryParameter("state") != state) return
         val result = pending
         clear()
         // Dart remains authoritative for canonical URI, state, expiry and PKCE.

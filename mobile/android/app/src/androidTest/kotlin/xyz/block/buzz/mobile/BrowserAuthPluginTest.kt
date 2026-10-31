@@ -39,7 +39,9 @@ class BrowserAuthPluginTest {
         plugin.onNewIntent(Intent(Intent.ACTION_VIEW, Uri.parse(
             "xyz.block.buzz.mobile:/auth/callback?state=first&code=old",
         )))
+        plugin.onResume() // Return caused by the stale callback, not dismissal.
         assertEquals(0, second.replies)
+        plugin.onPause() // The current browser can still complete.
         val callback = "xyz.block.buzz.mobile:/auth/callback?state=second&code=code"
         plugin.onNewIntent(Intent(Intent.ACTION_VIEW, Uri.parse(callback)))
         plugin.onResume()
@@ -54,6 +56,15 @@ class BrowserAuthPluginTest {
         plugin.onResume()
         assertEquals("cancelled", third.error)
         assertEquals(1, third.replies)
+        val fourth = messenger.start("fourth")
+        plugin.onPause()
+        plugin.onNewIntent(Intent(Intent.ACTION_VIEW, Uri.parse(callback)))
+        plugin.onResume()
+        assertEquals(0, fourth.replies)
+        plugin.onPause() // Returning to the browser re-arms dismissal detection.
+        plugin.onResume()
+        assertEquals("cancelled", fourth.error)
+        assertEquals(1, fourth.replies)
         plugin.dispose()
         assertNull(messenger.handler)
     }
