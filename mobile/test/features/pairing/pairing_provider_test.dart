@@ -1324,17 +1324,10 @@ class FakeAuthNotifier extends AsyncNotifier<AuthState>
   Community? lastCommunity;
   Completer<void>? authentication;
   Completer<void>? entered;
-  bool signedOut = false;
 
   @override
   Future<AuthState> build() async =>
       const AuthState(status: AuthStatus.unauthenticated);
-
-  @override
-  Future<void> signOut() async {
-    signedOut = true;
-    state = const AsyncData(AuthState(status: AuthStatus.unauthenticated));
-  }
 
   @override
   Future<void> authenticateWithCommunity(

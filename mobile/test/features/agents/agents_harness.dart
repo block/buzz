@@ -1,4 +1,3 @@
-import 'package:buzz/features/agents/community_bot_profiles.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import '../../shared/me/me_sync_test.dart' show FakeRelay;
 import 'dart:async';
@@ -196,7 +195,6 @@ class AgentsHarness {
   Future<void> open(
     WidgetTester tester, {
     required List<String> directory,
-    List<String> botDirectory = const [],
     Widget? home,
   }) async {
     registered = [...directory, oldAppAgentKeys.public];
@@ -209,9 +207,6 @@ class AgentsHarness {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
-          communityBotProfilesProvider.overrideWith(
-            (ref) async => botDirectory,
-          ),
           ownedAgentDirectoryProvider.overrideWith(
             (ref) =>
                 loadOwnedAgentDirectory(fakeOwner.public, relay.fetchHistory),

@@ -88,27 +88,6 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
       }
     });
   }
-
-  Future<void> signOut() {
-    return () async {
-      final storage = ref.read(communityStorageProvider);
-      await ref
-          .read(communityListProvider.notifier)
-          .removeActiveCommunityForSignOut();
-
-      // Community removal already persisted the outbox, deleted credentials,
-      // selected the next active community, and removed NSE state. Authentication
-      // only needs to publish the truthful resulting account state.
-      final remaining = await storage.loadAll();
-      ref.invalidate(activeCommunityProvider);
-      if (remaining.isEmpty) {
-        state = const AsyncData(AuthState(status: AuthStatus.unauthenticated));
-        return;
-      }
-      ref.invalidateSelf();
-      await future;
-    }();
-  }
 }
 
 bool _hasValidNsec(String? nsec) {

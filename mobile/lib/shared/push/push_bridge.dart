@@ -2,90 +2,14 @@ import 'dart:async';
 
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../community/community.dart';
 import '../deeplink/deep_link.dart';
 import '../relay/relay_provider.dart';
-import '../relay/app_lifecycle_provider.dart';
 import 'push_snapshot.dart';
 
 const _channel = MethodChannel('buzz/push');
-
-enum BuzzPushAuthorizationStatus {
-  notDetermined,
-  denied,
-  authorized,
-  provisional,
-  ephemeral,
-}
-
-typedef BuzzPushAuthorizationStatusReader =
-    Future<BuzzPushAuthorizationStatus> Function();
-typedef BuzzPushNotificationSettingsOpener = Future<bool> Function();
-
-final buzzPushAuthorizationStatusReaderProvider =
-    Provider<BuzzPushAuthorizationStatusReader>((ref) {
-      return readBuzzPushAuthorizationStatus;
-    });
-
-final buzzPushNotificationSettingsOpenerProvider =
-    Provider<BuzzPushNotificationSettingsOpener>((ref) {
-      return openBuzzPushNotificationSettings;
-    });
-
-final buzzPushAuthorizationStatusProvider =
-    AsyncNotifierProvider<
-      BuzzPushAuthorizationStatusNotifier,
-      BuzzPushAuthorizationStatus
-    >(BuzzPushAuthorizationStatusNotifier.new);
-
-class BuzzPushAuthorizationStatusNotifier
-    extends AsyncNotifier<BuzzPushAuthorizationStatus> {
-  @override
-  Future<BuzzPushAuthorizationStatus> build() async {
-    ref.listen(appLifecycleProvider, (previous, next) {
-      if (previous != AppLifecycleState.resumed &&
-          next == AppLifecycleState.resumed) {
-        unawaited(refresh());
-      }
-    });
-    return ref.read(buzzPushAuthorizationStatusReaderProvider)();
-  }
-
-  Future<void> refresh() async {
-    state = const AsyncLoading<BuzzPushAuthorizationStatus>();
-    state = await AsyncValue.guard(
-      ref.read(buzzPushAuthorizationStatusReaderProvider),
-    );
-  }
-}
-
-Future<BuzzPushAuthorizationStatus> readBuzzPushAuthorizationStatus() async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) {
-    return BuzzPushAuthorizationStatus.authorized;
-  }
-  final raw = await _channel.invokeMethod<String>(
-    'notificationAuthorizationStatus',
-  );
-  return switch (raw) {
-    'notDetermined' => BuzzPushAuthorizationStatus.notDetermined,
-    'denied' => BuzzPushAuthorizationStatus.denied,
-    'authorized' => BuzzPushAuthorizationStatus.authorized,
-    'provisional' => BuzzPushAuthorizationStatus.provisional,
-    'ephemeral' => BuzzPushAuthorizationStatus.ephemeral,
-    _ => throw FormatException(
-      'Native push bridge returned unknown authorization status: $raw',
-    ),
-  };
-}
-
-Future<bool> openBuzzPushNotificationSettings() async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) return false;
-  return await _channel.invokeMethod<bool>('openNotificationSettings') ?? false;
-}
 
 /// Latest APNs registration state, including callbacks replayed by iOS after
 /// the Flutter method channel attaches.
@@ -260,20 +184,6 @@ void reportPushLeaseCleanupError(Object error, StackTrace stackTrace) {
   debugPrintStack(stackTrace: stackTrace);
 }
 
-Future<void> registerBuzzPushCommunitySnapshot(List<Community> communities) =>
-    _registerBuzzPushCommunitySnapshot(communities, strict: false);
-
-/// Writes the age-gate snapshot through a native path that must acknowledge
-/// both the app-group store and signing-key update.
-Future<void> registerBuzzPushCommunitySnapshotStrict(
-  List<Community> communities, {
-  required bool settleFence,
-}) => _registerBuzzPushCommunitySnapshot(
-  communities,
-  strict: true,
-  settleFence: settleFence,
-);
-
 /// Restores notification presentation without reading community storage.
 Future<void> restoreAgeRestrictedBuzzNotifications() async {
   if (defaultTargetPlatform != TargetPlatform.iOS) return;
@@ -286,11 +196,9 @@ Future<void> purgeAgeRestrictedBuzzNotifications() async {
   await _channel.invokeMethod<void>('purgeAgeRestrictedNotifications');
 }
 
-Future<void> _registerBuzzPushCommunitySnapshot(
-  List<Community> communities, {
-  required bool strict,
-  bool settleFence = false,
-}) async {
+Future<void> registerBuzzPushCommunitySnapshot(
+  List<Community> communities,
+) async {
   if (defaultTargetPlatform != TargetPlatform.iOS) return;
   try {
     final snapshots = [
@@ -320,17 +228,12 @@ Future<void> _registerBuzzPushCommunitySnapshot(
         // Native storage is fail-closed; malformed keys are never exported.
       }
     }
-    await _channel.invokeMethod<void>(
-      strict ? 'syncAgeGatePushSnapshot' : 'syncPushSnapshot',
-      {
-        'section': 'communities',
-        'communities': [for (final snapshot in snapshots) snapshot.toJson()],
-        'signingKeys': signingKeys,
-        if (strict) 'settleFence': settleFence,
-      },
-    );
+    await _channel.invokeMethod<void>('syncPushSnapshot', {
+      'section': 'communities',
+      'communities': [for (final snapshot in snapshots) snapshot.toJson()],
+      'signingKeys': signingKeys,
+    });
   } on MissingPluginException {
-    if (strict) rethrow;
     // Flutter tests and non-Runner embeddings do not install the native bridge.
   }
 }

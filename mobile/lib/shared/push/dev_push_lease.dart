@@ -475,24 +475,6 @@ Future<BuzzPushLeasePublication> publishBuzzPushLeaseTombstone({
   );
 }
 
-Future<BuzzPushLeasePublication> publishBuzzPushLeaseTombstoneThroughRelay({
-  required BuzzPushLeaseDescriptor descriptor,
-  required String installationId,
-  required int generation,
-  required String nsec,
-  required String memberPubkey,
-  required SignedEventRelay relay,
-  DateTime Function() now = DateTime.now,
-}) => publishBuzzPushLeaseTombstone(
-  descriptor: descriptor,
-  installationId: installationId,
-  generation: generation,
-  nsec: nsec,
-  memberPubkey: memberPubkey,
-  submit: relay.submit,
-  now: now,
-);
-
 void _validateGrant(
   BuzzPushEndpointGrant grant,
   BuzzPushLeaseDescriptor descriptor,

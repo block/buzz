@@ -1,12 +1,11 @@
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'channel_unread.dart';
 import '../../shared/widgets/collapsible_section_body.dart';
-import '../../shared/widgets/compose_morph_icon.dart';
 import '../../shared/me/me_sync.dart';
 
 import 'dart:async';
 import 'dart:io';
-import 'dart:math' show max, min, pi;
+import 'dart:math' show max, min;
 import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
@@ -14,7 +13,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
-import 'package:flutter/physics.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
@@ -37,10 +35,8 @@ import '../../shared/widgets/anchored_popover_menu.dart';
 import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/buzz_setting_menu.dart';
-import '../../shared/widgets/concentric_sheet_surface.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
-import '../../shared/widgets/mobile_tab_footer_backdrop.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/confirmation_dialog.dart';
 import '../../shared/widgets/skeleton.dart';
@@ -76,8 +72,6 @@ part 'channels_page/skeleton.dart';
 part 'channels_page/community.dart';
 part 'channels_page/community_switcher.dart';
 part 'channels_page/community_switcher_action.dart';
-part 'channels_page/quick_actions.dart';
-part 'channels_page/quick_actions_launcher.dart';
 part 'channels_page/header_actions.dart';
 
 enum _QuickAction { createChannel, newDm }
@@ -113,7 +107,6 @@ class ChannelsPage extends HookConsumerWidget {
     this.showTeamHeading = false,
     this.newChannelAction,
     this.newDmAction,
-    this.communityAction,
     this.onInbox,
     this.communityInvitePageBuilder,
     this.communityAppearancePageBuilder,
@@ -131,7 +124,6 @@ class ChannelsPage extends HookConsumerWidget {
   final bool showTeamHeading;
   final ValueNotifier<VoidCallback?>? newChannelAction;
   final ValueNotifier<VoidCallback?>? newDmAction;
-  final ValueNotifier<VoidCallback?>? communityAction;
 
   /// Opens global search from the header.
   final VoidCallback? onSearch;
@@ -497,7 +489,7 @@ class ChannelsPage extends HookConsumerWidget {
         isScrollControlled: true,
         showDragHandle: true,
         builder: (_) => action == _QuickAction.createChannel
-            ? const _CreateChannelSheet(channelType: 'stream')
+            ? const _CreateChannelSheet()
             : _NewDirectMessageSheet(currentPubkey: currentPubkey),
       );
       if (channel != null && context.mounted) await openChannel(channel);
@@ -537,10 +529,9 @@ class ChannelsPage extends HookConsumerWidget {
         newChannelAction?.value = () =>
             openCreateAction(_QuickAction.createChannel);
         newDmAction?.value = () => openCreateAction(_QuickAction.newDm);
-        communityAction?.value = openCommunitySwitcher;
       });
       return () => active = false;
-    }, [newChannelAction, newDmAction, communityAction, currentPubkey]);
+    }, [newChannelAction, newDmAction, currentPubkey]);
 
     return FrostedScaffold(
       backgroundColor: usesPinnedGradient
@@ -795,4 +786,11 @@ class _CommunitySurfaceRoute extends PageRouteBuilder<void> {
       ),
     );
   }
+}
+
+BoxConstraints _quickActionSheetConstraints(BuildContext context) {
+  final mediaQuery = MediaQuery.of(context);
+  return BoxConstraints(
+    maxHeight: mediaQuery.size.height - mediaQuery.viewPadding.top - Grid.sm,
+  );
 }
