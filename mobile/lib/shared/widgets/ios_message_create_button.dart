@@ -87,6 +87,7 @@ class IosMessageCreateButton extends HookWidget {
     final avatar = useFuture(avatarFuture, preserveState: false).data;
     final channel = useState<MethodChannel?>(null);
     final latest = useRef(actions)..value = actions;
+    final latestEnabled = useRef(enabled)..value = enabled;
     final menu = [
       for (var i = 0; i < actions.length; i++)
         {
@@ -108,6 +109,8 @@ class IosMessageCreateButton extends HookWidget {
       'menu': menu,
       'deferMenuActions': deferMenuActions,
     };
+    // Keep one handler per channel. Replacing this effect on enabled changes
+    // would let the old hook cleanup clear the newly installed handler.
     useEffect(() {
       final current = channel.value;
       if (current == null) return null;
@@ -115,11 +118,11 @@ class IosMessageCreateButton extends HookWidget {
         if (call.method != 'menuAction') return;
         final index = call.arguments as int;
         if (index >= 0 && index < latest.value.length) {
-          if (enabled) latest.value[index].onPressed?.call();
+          if (latestEnabled.value) latest.value[index].onPressed?.call();
         }
       });
       return () => current.setMethodCallHandler(null);
-    }, [channel.value, enabled]);
+    }, [channel.value]);
     useEffect(
       () {
         final current = channel.value;

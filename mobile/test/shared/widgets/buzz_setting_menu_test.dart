@@ -94,7 +94,7 @@ void main() {
             ),
           ),
         );
-    await tester.pumpWidget(nativeMenu());
+    await tester.pumpWidget(nativeMenu(enabled: false));
     final view = tester.widget<UiKitView>(find.byType(UiKitView));
     expect(view.viewType, 'buzz/navigation_glass');
     expect(view.creationParams, containsPair('deferMenuActions', false));
@@ -121,6 +121,8 @@ void main() {
       await tester.pump();
     }
 
+    await tester.pumpWidget(nativeMenu());
+    await tester.pump();
     await choose(0);
     expect(selected, 'low');
     await tester.pumpWidget(nativeMenu(value: 'low'));
@@ -136,6 +138,10 @@ void main() {
     );
     await choose(1);
     expect(selected, 'low');
+    await tester.pumpWidget(nativeMenu(value: 'low'));
+    await tester.pump();
+    await choose(1);
+    expect(selected, 'high');
     await tester.pumpWidget(const SizedBox.shrink());
     debugDefaultTargetPlatformOverride = null;
   });
