@@ -8,7 +8,7 @@ import '../../shared/relay/relay.dart';
 import '../channels/channel.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/channels_provider.dart';
-import '../channels/unread_badge/is_quiet_agent_message.dart';
+import '../../shared/agents/is_quiet_agent_message.dart';
 import 'dm_resurface.dart';
 import 'feed_item.dart';
 import 'inbox_item.dart';
