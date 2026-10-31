@@ -220,6 +220,21 @@ test("delete of an unknown, ambiguous, built-in, or team-managed agent is an err
   }
 });
 
+test("a confirmed delete keeps its target while the agent list refetches", () => {
+  const confirmed = persona({ id: "p1", displayName: "Scout" });
+  for (const options of [{ confirmed }, { confirmed, loadFailed: true }]) {
+    assert.deepEqual(resolveDeleteTarget([], "Scout", options), {
+      status: "ready",
+      persona: confirmed,
+    });
+  }
+  const failed = resolveDeleteTarget([confirmed], "Scout", {
+    loadFailed: true,
+  });
+  assert.equal(failed.status, "error");
+  assert.match(failed.message, /Could not load your agents/);
+});
+
 test("delete waits for the agent list instead of reporting an unknown agent", () => {
   assert.deepEqual(resolveDeleteTarget(undefined, "Scout"), {
     status: "loading",

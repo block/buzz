@@ -56,6 +56,8 @@ export function useAgentManagement() {
   const seenRequestIds = React.useRef(new Set<string>());
   const pendingRequestId = React.useRef<string | null>(null);
   const isDeleting = React.useRef(false);
+  const [confirmedDelete, setConfirmedDelete] =
+    React.useState<AgentPersona | null>(null);
   const sourceAgentPubkey = React.useRef<string | null>(null);
   const managedAgentsRef = React.useRef(managedAgentsQuery.data);
   const channelsRef = React.useRef(channelsQuery.data);
@@ -248,6 +250,7 @@ export function useAgentManagement() {
   async function submitDelete(persona: AgentPersona) {
     if (request?.action !== "delete" || isDeleting.current) return;
     isDeleting.current = true;
+    setConfirmedDelete(persona);
     setError(null);
     try {
       assertAgentCanActFromOrigin(request.request.channelId);
@@ -269,6 +272,7 @@ export function useAgentManagement() {
   function dismiss() {
     pendingRequestId.current = null;
     sourceAgentPubkey.current = null;
+    setConfirmedDelete(null);
     setRequest(null);
   }
 
@@ -289,14 +293,11 @@ export function useAgentManagement() {
 
   const deleteTarget = React.useMemo<DeleteTarget | null>(() => {
     if (request?.action !== "delete") return null;
-    if (personasQuery.isError) {
-      return {
-        status: "error",
-        message: "Could not load your agents. Nothing was deleted.",
-      };
-    }
-    return resolveDeleteTarget(personasQuery.data, request.request.agentName);
-  }, [personasQuery.data, personasQuery.isError, request]);
+    return resolveDeleteTarget(personasQuery.data, request.request.agentName, {
+      confirmed: confirmedDelete,
+      loadFailed: personasQuery.isError,
+    });
+  }, [confirmedDelete, personasQuery.data, personasQuery.isError, request]);
 
   const deleteInstanceCount = React.useMemo(() => {
     if (deleteTarget?.status !== "ready") return 0;

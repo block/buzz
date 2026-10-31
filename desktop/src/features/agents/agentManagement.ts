@@ -182,7 +182,18 @@ export type DeleteTarget =
 export function resolveDeleteTarget(
   personas: readonly AgentPersona[] | undefined,
   agentName: string,
+  {
+    confirmed = null,
+    loadFailed = false,
+  }: { confirmed?: AgentPersona | null; loadFailed?: boolean } = {},
 ): DeleteTarget {
+  if (confirmed) return { status: "ready", persona: confirmed };
+  if (loadFailed) {
+    return {
+      status: "error",
+      message: "Could not load your agents. Nothing was deleted.",
+    };
+  }
   if (personas === undefined) return { status: "loading" };
   const name = agentName.trim();
   const target = name.toLocaleLowerCase();

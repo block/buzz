@@ -238,11 +238,17 @@ fn draft_output(
     built: &BuiltDraftRequest,
     message: &str,
 ) -> Result<serde_json::Value, CliError> {
-    let mut output: serde_json::Value = serde_json::from_str(response)
-        .map_err(|e| CliError::Other(format!("invalid relay response: {e}")))?;
+    let sent = |detail: &str| {
+        CliError::Other(format!(
+            "invalid relay response after sending draft request {}; do not resend: {detail}",
+            built.request_id
+        ))
+    };
+    let mut output: serde_json::Value =
+        serde_json::from_str(response).map_err(|e| sent(&e.to_string()))?;
     let obj = output
         .as_object_mut()
-        .ok_or_else(|| CliError::Other("invalid relay response: expected a JSON object".into()))?;
+        .ok_or_else(|| sent("expected a JSON object"))?;
     obj.insert("request_id".into(), built.request_id.clone().into());
     obj.insert("action".into(), built.action.into());
     obj.insert("saved".into(), false.into());
@@ -1220,12 +1226,13 @@ mod tests {
 
     #[test]
     fn draft_output_rejects_a_reply_it_cannot_annotate() {
+        let built = built_delete();
         for reply in ["not json", "[]", "\"ok\""] {
-            let error = draft_output(reply, &built_delete(), DELETE_DRAFT_MESSAGE).unwrap_err();
-            assert!(
-                error.to_string().contains("invalid relay response"),
-                "{reply}"
-            );
+            let error = draft_output(reply, &built, DELETE_DRAFT_MESSAGE)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("invalid relay response"), "{reply}");
+            assert!(error.contains(&built.request_id), "{reply}");
         }
     }
 
