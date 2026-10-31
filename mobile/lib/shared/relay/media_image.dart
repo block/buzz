@@ -238,13 +238,21 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
 /// Until then the image cache holds its own listener on the load, so removing
 /// a caller's listener alone leaves the download running. Evicting the pending
 /// entry drops that listener; once no other listener remains, a
-/// [MediaImageProvider] load aborts its download.
+/// [MediaImageProvider] load aborts its download. The live entry stays, so a
+/// consumer still listening keeps the load shared with later resolves.
 void abandonPendingImage(
   ImageProvider<Object> provider,
   ImageConfiguration config,
 ) {
   unawaited(
-    provider.obtainKey(config).then(PaintingBinding.instance.imageCache.evict),
+    provider
+        .obtainKey(config)
+        .then(
+          (key) => PaintingBinding.instance.imageCache.evict(
+            key,
+            includeLive: false,
+          ),
+        ),
   );
 }
 
