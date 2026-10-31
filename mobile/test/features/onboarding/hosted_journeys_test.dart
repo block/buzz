@@ -62,6 +62,40 @@ void main() {
     );
   }
 
+  journey('welcome cancels browser sign-in and can retry', (tester, f) async {
+    await f.initialize(localIdentity: false, signedIn: false);
+    f.bound = null;
+    f.offerProfile = false;
+    await f.mount(tester, addingCommunity: false);
+    Future<void> cancelled() async {
+      for (var i = 0; i < 100 && f.flow.stage != HostedFlowStage.idle; i++) {
+        await Future<void>.delayed(Duration.zero);
+        await tester.pump();
+      }
+      expect(f.flow.stage, HostedFlowStage.idle);
+      await f.settle(tester);
+      expect(find.text('or sign in with email').hitTestable(), findsOneWidget);
+    }
+
+    final abandonedBrowser = Completer<void>();
+    f.beforeBrowserReturn = () => abandonedBrowser.future;
+    await f.tap(tester, 'or sign in with email');
+    expect(find.text('Cancel sign-in').hitTestable(), findsOneWidget);
+    await f.tap(tester, 'Cancel sign-in');
+    abandonedBrowser.complete();
+    await cancelled();
+    expect(f.flow.account.account, isNull);
+    f.beforeBrowserReturn = () async {
+      throw PlatformException(code: 'cancelled');
+    };
+    await f.tap(tester, 'or sign in with email');
+    await cancelled();
+    f.beforeBrowserReturn = null;
+    await f.tap(tester, 'or sign in with email');
+    await f.settle(tester);
+    expect(find.text('Create my Buzz identity').hitTestable(), findsOneWidget);
+  });
+
   for (final importing in [false, true]) {
     journey(
       'new account ${importing ? 'imports' : 'creates'} and keeps its identity on retry',

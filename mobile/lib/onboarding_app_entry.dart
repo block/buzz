@@ -171,7 +171,7 @@ class OnboardingAppEntry extends HookConsumerWidget {
             ? null
             : () => unawaited(flow.signInAccount()),
         accountStatus: status,
-        builderlabBusy: busy,
+        builderlabBusy: busy && !signingIn,
         signInPending: signingIn || busy,
         builderlabLabel: signingIn
             ? 'Cancel sign-in'

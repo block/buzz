@@ -9,8 +9,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
-import 'package:url_launcher/url_launcher.dart';
-
 import '../storage/secure_storage.dart';
 
 import 'hosted_environment.dart';
@@ -244,7 +242,8 @@ class BrowserAuth {
   Future<void> cancel() async {
     ++_generation;
     _activeState = null;
-    if (defaultTargetPlatform == TargetPlatform.iOS) {
+    if (defaultTargetPlatform == TargetPlatform.iOS ||
+        defaultTargetPlatform == TargetPlatform.android) {
       try {
         await _channel.invokeMethod<void>('cancel');
       } catch (_) {
@@ -270,17 +269,14 @@ class BrowserAuth {
   }
 
   static Future<String?> _openPlatformBrowser(Uri uri) async {
-    if (defaultTargetPlatform == TargetPlatform.iOS) {
+    if (defaultTargetPlatform == TargetPlatform.iOS ||
+        defaultTargetPlatform == TargetPlatform.android) {
       return _channel.invokeMethod<String>('start', {
         'url': uri.toString(),
         if (kDebugMode &&
             const bool.fromEnvironment('BUZZ_DEBUG_PRIVATE_LOGIN'))
           'ephemeral': 'true',
       });
-    }
-    if (defaultTargetPlatform == TargetPlatform.android &&
-        await launchUrl(uri, mode: LaunchMode.inAppBrowserView)) {
-      return null;
     }
     throw BrowserAuthFailure.unavailable;
   }
