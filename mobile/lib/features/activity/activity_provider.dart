@@ -628,7 +628,12 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
           extensions: {'before_id': last.id},
         ),
       ])).where(matches).where((e) => seen.add(e.id)).toList();
-      final kept = page.where((e) => !isQuietAgentMessage(e.tags));
+      // Refill only up to the original limit, newest first.
+      final kept =
+          (page.where((e) => !isQuietAgentMessage(e.tags)).toList()
+                ..sort((a, b) => b.createdAt.compareTo(a.createdAt)))
+              .take(filter.limit - visible)
+              .toList();
       found.addAll(kept);
       visible += kept.length;
     }

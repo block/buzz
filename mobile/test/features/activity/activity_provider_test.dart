@@ -422,6 +422,50 @@ void main() {
     ]);
   });
 
+  test('paging past quiet mentions refills only up to the limit', () async {
+    NostrEvent mention(String id, int at, {bool quiet = false}) => NostrEvent(
+      id: id,
+      pubkey: 'agent_pk',
+      createdAt: 1_700_000_000 + at,
+      kind: 9,
+      tags: [
+        ['p', 'me_pk'],
+        ['h', 'channel-1'],
+        if (quiet) ['audience', 'agents'],
+      ],
+      content: 'hi',
+      sig: '',
+    );
+    // The newest window holds one quiet mention and 49 real ones; a full
+    // window of older real mentions sits behind it.
+    final session = _RecordingSessionNotifier()
+      ..seed(mention('quiet', 1000, quiet: true));
+    for (var i = 0; i < 49; i++) {
+      session.seed(mention('new-$i', 900 + i));
+    }
+    for (var i = 0; i < 50; i++) {
+      session.seed(mention('old-$i', 100 + i));
+    }
+    final container = ProviderContainer(
+      overrides: [
+        relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+        myPubkeyProvider.overrideWithValue('me_pk'),
+        relaySessionProvider.overrideWith(() => session),
+        channelsProvider.overrideWith(
+          () => _FixedChannelsNotifier(const <Channel>[]),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(channelsProvider.future);
+    final feed = await container.read(activityProvider.future);
+
+    expect(feed.mentions, hasLength(50));
+    expect(feed.mentions.map((item) => item.id), contains('old-49'));
+    expect(feed.mentions.map((item) => item.id), isNot(contains('old-48')));
+  });
+
   test(
     'refreshes the inbox projection when addressed activity arrives',
     () async {
