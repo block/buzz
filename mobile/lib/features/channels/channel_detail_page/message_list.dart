@@ -3,6 +3,7 @@ part of '../channel_detail_page.dart';
 class _MessageList extends HookConsumerWidget {
   final ValueNotifier<StickyDateHeaderState> stickyDateHeaderState;
   final List<MainTimelineEntry> entries;
+  final List<TypingEntry> inlineTyping;
 
   /// Agents typing in each thread, by lowercase root message ID.
   final Map<String, List<String>> threadWorking;
@@ -27,6 +28,7 @@ class _MessageList extends HookConsumerWidget {
 
   const _MessageList({
     required this.entries,
+    this.inlineTyping = const [],
     this.threadWorking = const {},
     required this.stickyDateHeaderState,
     required this.allMessages,
@@ -51,6 +53,11 @@ class _MessageList extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final handoff = useAgentReplyHandoffs(channelId, inlineTyping, allMessages);
+    final displayedTyping = handoff.typing;
+    final workingAgents = {
+      for (final agents in threadWorking.values) ...agents,
+    };
     final appView = View.of(context);
     final localSendAnimations = ref.watch(
       localMessageSendAnimationProvider(channelId),
@@ -798,6 +805,27 @@ class _MessageList extends HookConsumerWidget {
       },
     );
 
+    if (entries.isEmpty &&
+        (displayedTyping.isNotEmpty || TypingMotionPreview.enabled)) {
+      return Align(
+        alignment: Alignment.bottomCenter,
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(
+            Grid.gutter,
+            0,
+            Grid.gutter,
+            composerBottomInset,
+          ),
+          child: TypingMotionPreview.enabled
+              ? TypingMotionPreview(channelId: channelId)
+              : InlineAgentTyping(
+                  channelId: channelId,
+                  entries: displayedTyping,
+                  knownAgents: workingAgents,
+                ),
+        ),
+      );
+    }
     if (entries.isEmpty) return const _EmptyMessages();
 
     final channelNamesMap = ref.watch(channelIdsByNameProvider);
@@ -974,7 +1002,16 @@ class _MessageList extends HookConsumerWidget {
                                   message.createdAt,
                                   nextMessage.createdAt,
                                 ),
-                            showAuthor: showAuthor,
+                            showAuthor:
+                                showAuthor ||
+                                isRecentAgentReplyHandoff(
+                                  handoff.messageIds,
+                                  message.id,
+                                ),
+                            typingHandoff: isRecentAgentReplyHandoff(
+                              handoff.messageIds,
+                              message.id,
+                            ),
                             showAvatar: showAvatar,
                             hasReplies: entry.summary != null,
                             replyFooter:
@@ -1006,6 +1043,17 @@ class _MessageList extends HookConsumerWidget {
                             restoreComposerFocus: restoreComposerFocus,
                           ),
                         ],
+                        if (index == 0 &&
+                            (displayedTyping.isNotEmpty ||
+                                TypingMotionPreview.enabled))
+                          if (TypingMotionPreview.enabled)
+                            TypingMotionPreview(channelId: channelId)
+                          else
+                            InlineAgentTyping(
+                              channelId: channelId,
+                              entries: displayedTyping,
+                              knownAgents: workingAgents,
+                            ),
                       ],
                     ),
                   ),
