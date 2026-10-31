@@ -66,6 +66,7 @@ dev_dependencies:
   # Test-only platform interface fakes (depend_on_referenced_packages).
   path_provider_platform_interface: ^2.1.2
   plugin_platform_interface: ^2.1.8
+  url_launcher_platform_interface: ^2.3.2
   video_player_platform_interface: ^6.6.0
 
 flutter:

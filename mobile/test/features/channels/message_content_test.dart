@@ -3210,6 +3210,29 @@ Photos
         expect(_hasNestedPlaceholder(tester), isFalse);
       });
 
+      testWidgets('tokens inside a link URL stay part of the URL', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content:
+                  'See [x](https://e.com/?u=@Alice) and https://e.com/?q=#general',
+              channelNames: {'general': 'ch-id-1'},
+              mentionNames: {'pk1': 'Alice'},
+            ),
+          ),
+        );
+
+        expect(_linkSpans(tester, 'x').single.url, 'https://e.com/?u=@Alice');
+        expect(
+          _linkSpans(tester, 'https://e.com/?q=#general').single.url,
+          'https://e.com/?q=#general',
+        );
+        expect(find.byIcon(BuzzIcons.hash), findsNothing);
+        expect(find.text('@'), findsNothing);
+      });
+
       testWidgets('tokens outside a link label still render as pills', (
         tester,
       ) async {
