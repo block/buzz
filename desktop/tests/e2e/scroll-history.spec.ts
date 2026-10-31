@@ -1343,6 +1343,33 @@ test("fast middle-page scroll settles with continuous mounted coverage", async (
     )
     .toBeGreaterThan(scrollHeightBeforePrepend + 2_000);
 
+  // Opening the channel armed the bottom settle, and only reader input
+  // cancels it, not the scrollTop writes below. Without a real wheel first,
+  // Virtua's next re-measure pins the list back to the floor. Wait until the
+  // wheel has left the floor (the timeline's 32 px at-bottom band) and held
+  // still for two frames, so the writes below are the last scroll.
+  await timeline.hover();
+  await page.mouse.wheel(0, -120);
+  await expect
+    .poll(() =>
+      timeline.evaluate(
+        (element) =>
+          new Promise<number>((resolve) => {
+            const scrollTop = element.scrollTop;
+            requestAnimationFrame(() =>
+              requestAnimationFrame(() =>
+                resolve(
+                  element.scrollTop === scrollTop
+                    ? element.scrollHeight - element.clientHeight - scrollTop
+                    : 0,
+                ),
+              ),
+            );
+          }),
+      ),
+    )
+    .toBeGreaterThan(32);
+
   // Simulate a fast trackpad pass through several middle-page ranges, then
   // stop. The final evaluate emits the last scroll event; all coverage samples
   // after it are passive observations.
