@@ -409,7 +409,33 @@ async fn execute_relay_admin_command(
                     return Err("cannot remove the relay owner".to_string());
                 }
                 RemoveResult::NotFound => {
-                    return Err(format!("member not found: {target_hex}"));
+                    // An absent direct membership is not proof of lost access:
+                    // open relays and NIP-OA agents can still admit this key.
+                    // Only retry disconnection when neither admission applies.
+                    if !state.config.require_relay_membership {
+                        return Err(format!("member not found: {target_hex}"));
+                    }
+                    let target_bytes = hex::decode(&target_hex)
+                        .map_err(|e| format!("invalid target pubkey: {e}"))?;
+                    let policy = state
+                        .db
+                        .get_agent_channel_policy(tenant.community(), &target_bytes)
+                        .await
+                        .map_err(|e| format!("database error: {e}"))?;
+                    if let Some((_, Some(owner))) = policy {
+                        if state
+                            .db
+                            // Revocation must use current authority: a stale reader
+                            // can miss a newly admitted owner and close a valid agent.
+                            .is_relay_member_writer(tenant.community(), &hex::encode(owner))
+                            .await
+                            .map_err(|e| format!("database error: {e}"))?
+                        {
+                            return Err(
+                                "member not found: target retains owner-derived access".to_string()
+                            );
+                        }
+                    }
                 }
                 RemoveResult::RoleMismatch => {
                     return Err("actor not authorized: admins can only remove members".to_string());
@@ -437,8 +463,10 @@ async fn execute_relay_admin_command(
                 Err(e) => Err(format!("invalid target pubkey: {e}")),
             };
 
-            if let Err(e) = publish_nip43_member_removed(tenant, state, &target_hex).await {
-                warn!(error = %e, "failed to publish NIP-43 member removed event");
+            if write.outcome == RemoveResult::Removed {
+                if let Err(e) = publish_nip43_member_removed(tenant, state, &target_hex).await {
+                    warn!(error = %e, "failed to publish NIP-43 member removed event");
+                }
             }
             fan_out_nip43_membership_list(tenant, state, write.snapshot).await;
             revoked
@@ -986,6 +1014,197 @@ mod postgres_tests {
 
         assert!(member_socket.cancellation_token().is_cancelled());
         assert!(!bystander_socket.cancellation_token().is_cancelled());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn absent_member_retry_preserves_admitted_agents_and_revokes_removed_members() {
+        let host = format!(
+            "remove-retry-authority-{}.example",
+            uuid::Uuid::new_v4().simple()
+        );
+        let (state, tenant) = workspace_profile_test_state(&host, true).await;
+        let (owner, admin, agent, member) = (
+            Keys::generate(),
+            Keys::generate(),
+            Keys::generate(),
+            Keys::generate(),
+        );
+        for (keys, role) in [(&owner, "owner"), (&admin, "admin"), (&member, "member")] {
+            state
+                .db
+                .add_relay_member(
+                    tenant.community(),
+                    &keys.public_key().to_hex(),
+                    role,
+                    None,
+                    &state.relay_keypair,
+                )
+                .await
+                .map(|write| write.outcome)
+                .expect("seed membership");
+        }
+        for keys in [&owner, &agent] {
+            state
+                .db
+                .ensure_user(tenant.community(), keys.public_key().as_bytes())
+                .await
+                .expect("user");
+        }
+        assert!(state
+            .db
+            .set_agent_owner(
+                tenant.community(),
+                agent.public_key().as_bytes(),
+                owner.public_key().as_bytes()
+            )
+            .await
+            .expect("owner linkage"));
+        let agent_socket = bound_root_socket(&state, tenant.community(), &agent);
+        let command = |keys: &Keys| {
+            EventBuilder::new(Kind::Custom(RELAY_ADMIN_REMOVE_MEMBER as u16), "")
+                .tags([Tag::public_key(keys.public_key())])
+                .sign_with_keys(&admin)
+                .expect("sign")
+        };
+        let refusal = handle_relay_admin_event(&tenant, &state, &command(&agent)).await;
+        assert!(matches!(refusal, Err(RelayAdminError::Rejected(_))));
+        assert!(
+            !agent_socket.is_cancelled(),
+            "an absent roster row cannot revoke the owner's admitted agent"
+        );
+        // Simulate the previously authorized member removal committing before
+        // live revocation/publication. The exact retry must close its socket.
+        let member_socket = bound_root_socket(&state, tenant.community(), &member);
+        state
+            .db
+            .remove_relay_member_if_role(
+                tenant.community(),
+                &member.public_key().to_hex(),
+                "member",
+                &state.relay_keypair,
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("committed removal");
+        handle_relay_admin_event(&tenant, &state, &command(&member))
+            .await
+            .expect("repair removal");
+        assert!(member_socket.is_cancelled());
+        assert!(!agent_socket.is_cancelled());
+        let open_host = format!("open-{host}");
+        let (open_state, open_tenant) = workspace_profile_test_state(&open_host, false).await;
+        open_state
+            .db
+            .add_relay_member(
+                open_tenant.community(),
+                &admin.public_key().to_hex(),
+                "admin",
+                None,
+                &open_state.relay_keypair,
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("open-relay admin");
+        let open_socket = bound_root_socket(&open_state, open_tenant.community(), &member);
+        assert!(
+            handle_relay_admin_event(&open_tenant, &open_state, &command(&member))
+                .await
+                .is_err()
+        );
+        assert!(
+            !open_socket.is_cancelled(),
+            "a rosterless open-relay caller retains access"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn local_http_relay_repairs_repeated_membership_commands() {
+        use base64::Engine as _;
+        use sha2::{Digest, Sha256};
+        let host = format!("roster-http-{}.example", uuid::Uuid::new_v4().simple());
+        let (mut state, tenant) = workspace_profile_test_state(&host, true).await;
+        // Use the real replay guard for the loopback HTTP exercise. The fixture's
+        // disconnected pubsub remains outside this persistence/readback test.
+        let redis_url =
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
+        let redis_pool = deadpool_redis::Config::from_url(redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("Redis pool");
+        let fixture = Arc::get_mut(&mut state).expect("unshared fixture");
+        fixture.admission_rate_limiter = Arc::new(
+            buzz_pubsub::rate_limiter::RedisRateLimiter::new(redis_pool.clone()),
+        );
+        fixture.nip98_replay =
+            Arc::new(buzz_pubsub::RedisNip98ReplayGuard::new(redis_pool.clone()));
+        fixture.redis_pool = redis_pool;
+        let (owner, member) = (Keys::generate(), Keys::generate());
+        state
+            .db
+            .add_relay_member(
+                tenant.community(),
+                &owner.public_key().to_hex(),
+                "owner",
+                None,
+                &state.relay_keypair,
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("owner");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener");
+        let address = listener.local_addr().expect("address");
+        let router = crate::router::build_router(state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("client");
+        for kind in [9030, 9030, 9031, 9031] {
+            let event = EventBuilder::new(Kind::Custom(kind), "")
+                .tags([Tag::public_key(member.public_key())])
+                .sign_with_keys(&owner)
+                .expect("command");
+            let body = serde_json::to_vec(&event).expect("command JSON");
+            let proof = EventBuilder::new(Kind::Custom(27235), "")
+                .tags([
+                    Tag::parse(["u", &format!("https://{host}/events")]).expect("URL"),
+                    Tag::parse(["method", "POST"]).expect("method"),
+                    Tag::parse(["payload", &hex::encode(Sha256::digest(&body))]).expect("payload"),
+                    Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()]).expect("nonce"),
+                ])
+                .sign_with_keys(&owner)
+                .expect("NIP98 proof");
+            let auth = base64::engine::general_purpose::STANDARD
+                .encode(serde_json::to_vec(&proof).expect("proof JSON"));
+            let response = client
+                .post(format!("http://{address}/events"))
+                .header("Host", &host)
+                .header("Authorization", format!("Nostr {auth}"))
+                .header("Content-Type", "application/json")
+                .body(body)
+                .send()
+                .await
+                .expect("HTTP response");
+            let status = response.status();
+            let response_body = response.text().await.expect("response body");
+            assert!(status.is_success(), "kind {kind}: {status} {response_body}");
+            let response_json: serde_json::Value =
+                serde_json::from_str(&response_body).expect("response JSON");
+            assert_eq!(response_json["accepted"], true);
+            assert_eq!(
+                state
+                    .db
+                    .is_relay_member(tenant.community(), &member.public_key().to_hex())
+                    .await
+                    .expect("membership"),
+                kind == 9030
+            );
+        }
+        server.abort();
     }
 
     /// A pod-local root socket registered and bound to `keys`, as root AUTH
