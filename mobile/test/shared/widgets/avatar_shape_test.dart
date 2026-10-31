@@ -20,6 +20,9 @@ void main() {
       (const Offset(92, 8), false),
       (const Offset(92, 92), false),
       (const Offset(8, 92), false),
+      // Inside the old 30% rounded rect, outside the squircle.
+      (const Offset(1.9, 22), false),
+      (const Offset(98.1, 78), false),
     ]) {
       expect(path.contains(point), inside, reason: '$point');
     }
@@ -33,7 +36,9 @@ void main() {
   test('avatar shapes come only from avatarShape', () {
     // Agent avatars drifted into circles and 30% rounded rects because each
     // surface picked its own shape. Shape decisions keyed on agent identity,
-    // and person shapes on agent-only surfaces, must use avatar_shape.dart.
+    // the old agent radius idiom, and person shapes on agent-only surfaces
+    // must use avatar_shape.dart. Best effort: it matches the patterns that
+    // produced past drift, not every possible spelling.
     final inlineAgentShape = RegExp(
       r'\b(isAgent|isBot|agent)\b\s*\?\s*(const\s+)?'
       r'(BoxShape|BorderRadius|Radius|CircleBorder|RoundedRectangleBorder|'
@@ -42,6 +47,10 @@ void main() {
     final inlineAgentClip = RegExp(
       r'if\s*\(\s*!?\s*(isAgent|isBot|agent)\s*\)\s*return\s+'
       r'(ClipOval|ClipRRect|CircleAvatar)\b',
+    );
+    // The old hand-rolled agent radius: 30% of a size, or 60% of a radius.
+    final agentRadius = RegExp(
+      r'Radius\.circular\(\s*[\w.()+\s]*\*\s*0\.[36]\s*,?\s*\)',
     );
     final personShape = RegExp(r'\b(ClipOval|CircleAvatar|BoxShape\.circle)\b');
     final violations = <String>[];
@@ -53,6 +62,7 @@ void main() {
       for (final match in [
         ...inlineAgentShape.allMatches(source),
         ...inlineAgentClip.allMatches(source),
+        ...agentRadius.allMatches(source),
         if (path.startsWith('lib/features/agents/'))
           ...personShape.allMatches(source),
       ]) {

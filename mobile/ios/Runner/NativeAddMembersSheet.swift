@@ -281,8 +281,8 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     let size = CGSize(width: 40, height: 40)
     return UIGraphicsImageRenderer(size: size).image { _ in
       (Self.color(user["avatarBackground"]) ?? .tertiarySystemFill).setFill()
-      UIBezierPath(roundedRect: CGRect(origin: .zero, size: size),
-        cornerRadius: user["agent"] as? Bool == true ? 12 : 20).fill()
+      let rect = CGRect(origin: .zero, size: size)
+      (user["agent"] as? Bool == true ? Self.agentSquircle(rect) : UIBezierPath(ovalIn: rect)).fill()
       let text = (user["initial"] as? String ?? "?") as NSString
       let attributes: [NSAttributedString.Key: Any] = [
         .font: UIFont.systemFont(ofSize: 18, weight: .medium),
@@ -291,6 +291,21 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
       let measured = text.size(withAttributes: attributes)
       text.draw(at: CGPoint(x: (40 - measured.width) / 2, y: (40 - measured.height) / 2), withAttributes: attributes)
     }.withRenderingMode(.alwaysOriginal)
+  }
+
+  /// Mirrors avatar_shape.dart and desktop's avatar-squircle.svg.
+  private static func agentSquircle(_ rect: CGRect) -> UIBezierPath {
+    func at(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+      CGPoint(x: rect.minX + rect.width * x, y: rect.minY + rect.height * y)
+    }
+    let path = UIBezierPath()
+    path.move(to: at(0.5, 0))
+    path.addCurve(to: at(1, 0.5), controlPoint1: at(0.93, 0), controlPoint2: at(1, 0.07))
+    path.addCurve(to: at(0.5, 1), controlPoint1: at(1, 0.93), controlPoint2: at(0.93, 1))
+    path.addCurve(to: at(0, 0.5), controlPoint1: at(0.07, 1), controlPoint2: at(0, 0.93))
+    path.addCurve(to: at(0.5, 0), controlPoint1: at(0, 0.07), controlPoint2: at(0.07, 0))
+    path.close()
+    return path
   }
 
   private static func color(_ value: Any?) -> UIColor? {
