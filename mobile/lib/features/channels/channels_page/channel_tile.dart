@@ -3,6 +3,10 @@ part of '../channels_page.dart';
 class _ChannelTile extends ConsumerWidget {
   final Channel channel;
   final bool isUnread;
+
+  /// Whether unread thread replies, mentions or broadcasts need attention.
+  /// They show as a dot without bolding the label.
+  final bool hasAttention;
   final bool isMuted;
   final String? currentPubkey;
   final VoidCallback onTap;
@@ -18,6 +22,7 @@ class _ChannelTile extends ConsumerWidget {
     required this.channel,
     required this.isUnread,
     required this.currentPubkey,
+    this.hasAttention = false,
     required this.onTap,
     this.isMuted = false,
     this.onMarkRead,
@@ -101,6 +106,18 @@ class _ChannelTile extends ConsumerWidget {
                 ],
               ),
             ),
+            if (hasAttention) ...[
+              const SizedBox(width: Grid.xxs),
+              Container(
+                key: ValueKey('channel-attention-dot-${channel.id}'),
+                width: 6,
+                height: 6,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: context.colors.primary,
+                ),
+              ),
+            ],
             if (channel.isEphemeral) ...[
               const SizedBox(width: Grid.xxs),
               _EphemeralBadge(channel: channel),
@@ -149,7 +166,8 @@ class _ChannelTile extends ConsumerWidget {
     showChannelActionsSheet(
       context: context,
       channel: channel,
-      isUnread: isUnread,
+      // Mark read also clears the dot: the channel mark reads every reply.
+      isUnread: isUnread || hasAttention,
       onMarkRead: onMarkRead,
       sectionId: sectionId,
     );

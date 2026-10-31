@@ -1,7 +1,9 @@
 import 'package:buzz/shared/widgets/ios_message_create_button.dart';
 import 'package:buzz/features/channels/default_agent_launcher.dart';
 import 'package:buzz/features/agents/agents_page.dart';
+
 import 'dart:convert';
+
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 import 'package:buzz/shared/read_state/read_state_storage.dart';
@@ -3467,7 +3469,7 @@ void main() {
     );
   });
 
-  testWidgets('bolds channels with unread thread activity without a badge', (
+  testWidgets('dots, not bolds, channels with only unread thread replies', (
     tester,
   ) async {
     final channels = [
@@ -3528,11 +3530,20 @@ void main() {
 
     expect(
       tester.widget<Text>(find.text('general')).style?.fontWeight,
-      FontWeight.w600,
+      FontWeight.w400,
     );
+    expect(
+      find.byKey(const ValueKey('channel-attention-dot-1')),
+      findsOneWidget,
+    );
+
+    readState.markContextRead('thread-activity:$threadIdRoot', 30);
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey('channel-attention-dot-1')), findsNothing);
   });
 
-  for (final (label, events, bold) in [
+  for (final (label, events, bold, dot) in [
     (
       'catch-up marks read ordinary messages and thread replies',
       [
@@ -3545,10 +3556,21 @@ void main() {
         ),
       ],
       false,
+      false,
     ),
     (
-      'channel catch-up does not read a mention',
+      'channel catch-up leaves a mention as a dot',
       [_observed(id: 'mention-1', createdAt: 20, highPriority: true)],
+      false,
+      true,
+    ),
+    (
+      'unread backlog bolds alongside a mention dot',
+      [
+        _observed(id: 'msg-1', createdAt: 28),
+        _observed(id: 'mention-1', createdAt: 20, highPriority: true),
+      ],
+      true,
       true,
     ),
   ]) {
@@ -3601,6 +3623,10 @@ void main() {
       expect(
         tester.widget<Text>(find.text('general')).style?.fontWeight,
         bold ? FontWeight.w600 : FontWeight.w400,
+      );
+      expect(
+        find.byKey(const ValueKey('channel-attention-dot-1')),
+        dot ? findsOneWidget : findsNothing,
       );
     });
   }

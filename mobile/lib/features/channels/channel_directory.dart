@@ -537,6 +537,7 @@ String _encodeRootIdSet(Set<String> values) => jsonEncode(values.toList());
 /// a part shares its parent's library.
 extension _ObservedUnreadRecording on ChannelsNotifier {
   void _recordUnreadEvent(Channel channel, NostrEvent event, String myPk) {
+    if (isQuietAgentMessage(event.tags)) return;
     final isThreadedReply =
         event.threadReference.parentId != null && !_isBroadcastReply(event);
     final isHighPriority =
