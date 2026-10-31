@@ -102,7 +102,8 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
         activeMentionFetches -= 1;
       }
     }
-    return {for (final filter in filters) ..._window(filter)}.toList();
+    // Like the production bridge: each filter's results, concatenated.
+    return [for (final filter in filters) ..._window(filter)];
   }
 
   @override
@@ -465,6 +466,49 @@ void main() {
     expect(feed.mentions.map((item) => item.id), contains('old-49'));
     expect(feed.mentions.map((item) => item.id), isNot(contains('old-48')));
   });
+
+  test(
+    'an addressed DM mention counts once toward the mention window',
+    () async {
+      NostrEvent mention(String id, int at, {bool quiet = false}) => NostrEvent(
+        id: id,
+        pubkey: 'agent_pk',
+        createdAt: 1_700_000_000 + at,
+        kind: 9,
+        tags: [
+          ['p', 'me_pk'],
+          ['h', 'dm-1'],
+          if (quiet) ['audience', 'agents'],
+        ],
+        content: 'hi',
+        sig: '',
+      );
+      // The DM filter returns the newest DM mentions a second time.
+      final session = _RecordingSessionNotifier()
+        ..seed(mention('quiet', 1000, quiet: true))
+        ..seed(mention('older', 1));
+      for (var i = 0; i < 49; i++) {
+        session.seed(mention('new-$i', 900 + i));
+      }
+      final container = ProviderContainer(
+        overrides: [
+          relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+          myPubkeyProvider.overrideWithValue('me_pk'),
+          relaySessionProvider.overrideWith(() => session),
+          channelsProvider.overrideWith(
+            () => _FixedChannelsNotifier([_dmChannel('dm-1')]),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(channelsProvider.future);
+      final feed = await container.read(activityProvider.future);
+
+      expect(feed.mentions, hasLength(50));
+      expect(feed.mentions.map((item) => item.id), contains('older'));
+    },
+  );
 
   test(
     'refreshes the inbox projection when addressed activity arrives',

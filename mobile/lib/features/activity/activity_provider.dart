@@ -605,9 +605,14 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
           (tag) =>
               tag.length > 1 && tag[0] == 'p' && tag[1].toLowerCase() == pubkey,
         );
-    var page = fetched.where(matches).toList();
+    // The bridge concatenates each filter's results, so an addressed DM
+    // message can arrive twice: once per matching filter. Count it once.
+    final seen = <String>{};
+    var page = [
+      for (final event in fetched)
+        if (matches(event) && seen.add(event.id)) event,
+    ];
     var visible = page.where((e) => !isQuietAgentMessage(e.tags)).length;
-    final seen = {for (final event in page) event.id};
     final found = <NostrEvent>[];
     for (var i = 0; i < maxPages; i++) {
       if (page.length < filter.limit || visible >= filter.limit) break;
