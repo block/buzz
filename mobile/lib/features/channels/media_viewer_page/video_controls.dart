@@ -88,18 +88,15 @@ class _VideoTransportBar extends HookConsumerWidget {
       } catch (error) {
         debugPrint('[VideoViewer] seek failed: $error');
         if (context.mounted && isCurrent()) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: const Text('Could not seek in this video.'),
-              action: SnackBarAction(
-                label: 'Retry',
-                onPressed: () {
-                  if (!isCurrent()) return;
-                  beginScrub(next);
-                  unawaited(finishScrub(next));
-                },
-              ),
-            ),
+          showBuzzToast(
+            context,
+            'Could not seek in this video.',
+            kind: ToastKind.error,
+            onRetry: () {
+              if (!isCurrent()) return;
+              beginScrub(next);
+              unawaited(finishScrub(next));
+            },
           );
         }
       } finally {

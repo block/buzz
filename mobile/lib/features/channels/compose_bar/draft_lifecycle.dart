@@ -38,10 +38,9 @@ Future<void> _sendTextOnlyDraft({
     // A draft that changed while adding ran is not the draft the user sent.
     // Keep it and send nothing.
     if (context.mounted && draftRevision.value != submittedDraftRevision) {
-      messenger?.showSnackBar(
-        const SnackBar(
-          content: Text('Not sent: the message changed while adding people.'),
-        ),
+      messenger?.showFeedbackSnackBar(
+        const SnackBar(content: Text('Not sent. Message changed.')),
+        kind: ToastKind.error,
       );
       return;
     }
@@ -65,8 +64,9 @@ Future<void> _sendTextOnlyDraft({
     // The caller runs unawaited, so surface publish failures and restore the
     // sent draft unless the user has already started a new one.
     restoreClearedDraft();
-    messenger?.showSnackBar(
+    messenger?.showFeedbackSnackBar(
       SnackBar(content: Text(_composeSendErrorMessage(error))),
+      kind: ToastKind.error,
     );
   }
 }

@@ -73,6 +73,7 @@ flutter:
     enable-swift-package-manager: false
   uses-material-design: true
   shaders:
+    - shaders/toast_island.frag
     - shaders/onboarding_wordmark.frag
   assets:
     - assets/images/buzz-icon.png

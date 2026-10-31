@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -100,10 +101,11 @@ class DefaultAgentLauncher extends HookConsumerWidget {
         );
       } catch (error) {
         if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(context).showFeedbackSnackBar(
             SnackBar(
               content: Text('Could not open the agent conversation. $error'),
             ),
+            kind: ToastKind.error,
           );
         }
       } finally {

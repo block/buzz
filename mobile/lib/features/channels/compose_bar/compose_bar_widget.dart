@@ -561,7 +561,10 @@ class ComposeBar extends HookConsumerWidget {
           ),
         );
       } on FormatException catch (error) {
-        messenger?.showSnackBar(SnackBar(content: Text(error.message)));
+        messenger?.showFeedbackSnackBar(
+          SnackBar(content: Text(error.message)),
+          kind: ToastKind.error,
+        );
         return;
       }
       final outgoing = _OutgoingMentions(selectedMentions);
@@ -579,17 +582,14 @@ class ComposeBar extends HookConsumerWidget {
         );
       } catch (_) {
         // Nothing was sent and the draft is untouched, so Retry sends it again.
-        messenger?.showSnackBar(
-          SnackBar(
-            content: const Text(
-              'Message not sent: could not check who is in this channel',
-            ),
-            action: SnackBarAction(
-              label: 'Retry',
-              onPressed: () => unawaited(send()),
-            ),
-          ),
-        );
+        if (context.mounted) {
+          showBuzzToast(
+            context,
+            'Not sent. Couldn’t check members.',
+            kind: ToastKind.error,
+            onRetry: () => unawaited(send()),
+          );
+        }
         return;
       }
 
@@ -913,7 +913,7 @@ class ComposeBar extends HookConsumerWidget {
                     .read(mediaUploadServiceProvider)
                     .pickGalleryImages();
                 queueImages(photos);
-              }, errorMessage: 'Unable to open your photo library.'),
+              }, errorMessage: 'Couldn’t open photo library'),
               onVideo: () => chooseAttachment(() {
                 final service = ref.read(mediaUploadServiceProvider);
                 return pickThenQueue(

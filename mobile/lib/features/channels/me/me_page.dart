@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -98,10 +99,11 @@ class MePage extends HookConsumerWidget {
           await _offerMeRecovery(context, ref.read(meSyncProvider));
         }
         if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(context).showFeedbackSnackBar(
             SnackBar(
               content: Text(error.toString().replaceFirst('Bad state: ', '')),
             ),
+            kind: ToastKind.error,
           );
         }
       } finally {

@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'community_link_focus.dart';
 import '../../shared/widgets/ios_community_link_input.dart';
 import 'dart:async';
@@ -135,8 +136,9 @@ class PairingPage extends HookConsumerWidget {
         }
         if (identityRecoveryOnly &&
             Uri.tryParse(code)?.queryParameters['mode'] != 'recover') {
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(context).showFeedbackSnackBar(
             const SnackBar(content: Text('Scan a desktop recovery code.')),
+            kind: ToastKind.generic,
           );
           return;
         }
