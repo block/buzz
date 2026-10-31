@@ -400,6 +400,38 @@ void main() {
     );
   });
 
+  test(
+    'a directory retry clears an earlier failure before it yields',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      session.membershipFailures = 1;
+      await container.read(channelsProvider.notifier).retryDirectory();
+      expect(
+        container.read(channelDirectoryLoadStatusProvider).status,
+        ChannelDirectoryLoadStatus.error,
+      );
+
+      // A refresh that retires this attempt in the same microtask drain must
+      // not leave the old error to be read as its result.
+      final retry = container.read(channelsProvider.notifier).retryDirectory();
+      expect(
+        container.read(channelDirectoryLoadStatusProvider).status,
+        ChannelDirectoryLoadStatus.idle,
+      );
+      await retry;
+      expect(
+        container.read(channelDirectoryLoadStatusProvider).status,
+        ChannelDirectoryLoadStatus.loaded,
+      );
+    },
+  );
+
   for (final rebuild in [false, true]) {
     test(
       '${rebuild ? 'Same-scope rebuild' : 'Ordinary refresh'} settles a superseded directory load for retry',

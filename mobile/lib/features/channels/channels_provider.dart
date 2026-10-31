@@ -1109,6 +1109,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       directoryStatus.markError(scope);
       return;
     }
+    // This attempt replaces the last failure before anything can retire it,
+    // so a displaced attempt never reports the old error (beginRefresh clears
+    // it too, for other entry points, but only after a yield).
+    if (directoryStatus.hasFailed(scope)) directoryStatus.markIdle(scope);
     // Let a pending first load finish, as fetchFresh does. This request
     // would retire it, and its late failure would replace the list.
     final generation = _buildGeneration;
