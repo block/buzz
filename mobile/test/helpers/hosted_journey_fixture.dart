@@ -71,6 +71,7 @@ class HostedJourneyFixture {
   final socketHeaders = <Map<String, String>>[];
   bool offerProfile = true;
   bool profileUnavailable = false;
+  int profileSaveFailures = 0;
   bool rejectList = false;
   int saveFailures = 0;
   final knownSaved = <String>{};
@@ -518,11 +519,19 @@ class _Profile extends ProfileNotifier {
 
   @override
   Future<void> updateDisplayName(String name) async {
+    if (fixture.profileSaveFailures > 0) {
+      fixture.profileSaveFailures--;
+      throw StateError('profile save unavailable');
+    }
     fixture.profileWrites.add(name);
   }
 
   @override
   Future<void> updateSetup(String name, String? avatarUrl) async {
+    if (fixture.profileSaveFailures > 0) {
+      fixture.profileSaveFailures--;
+      throw StateError('profile save unavailable');
+    }
     fixture.profileWrites.add(name);
     fixture.profileAvatars.add(avatarUrl);
   }
