@@ -130,7 +130,7 @@ crates/
   buzz-test-client    # Integration test client and E2E test suite
   sprig               # All-in-one harness bundling ACP, agent, and dev MCP
 
-desktop/              # Tauri 2 + React 19 desktop app
+desktop/              # Legacy Tauri 2 + React 19 desktop app (being replaced by block/buzz-app)
 web/                  # Browser web client (repo browser, served by the relay)
 mobile/               # Flutter mobile app
 migrations/           # SQL migrations (run at relay startup when BUZZ_AUTO_MIGRATE is on: binary default off, Helm default on; deployments at scale apply them out of band — see docs/database.md)
@@ -619,6 +619,10 @@ description. See [PR #803](https://github.com/block/buzz/pull/803).
 
 ## Desktop App
 
+> **Legacy.** `desktop/` will soon be superseded by
+> [block/buzz-app](https://github.com/block/buzz-app). Never use it as an
+> implementation or design reference for the mobile app, which is current.
+
 The desktop app is Tauri 2 + React 19 + Vite + Tailwind CSS. Features are
 organized under `desktop/src/features/`. Biome handles linting and formatting.
 
@@ -699,13 +703,20 @@ Key files:
 
 The mobile app lives in `mobile/` — a Flutter app using Riverpod + Hooks.
 
+The mobile app is current. Do not use the legacy `desktop/` app as an
+implementation or design reference for it: `desktop/` will soon be superseded
+by [block/buzz-app](https://github.com/block/buzz-app). This does not relax
+cross-client wire compatibility: mobile must keep reading and writing the same
+event payloads as other clients (for example the `channel-sort` NIP-78 payload,
+which buzz-app also uses), even where a payload is documented only in code.
+
 ### Architecture
 
 - **State management:** Riverpod + `flutter_hooks` (`HookConsumerWidget`)
-- **Theme:** Catppuccin Latte (light) / Macchiato (dark) — matches desktop
+- **Theme:** Catppuccin Latte (light) / Macchiato (dark)
 - **Features:** Isolated under `lib/features/`, shared code in `lib/shared/`
 - **Nostr models:** `lib/shared/relay/nostr_models.dart` — event kinds must
-  stay in sync with `desktop/src/shared/constants/kinds.ts`
+  stay in sync with `crates/buzz-core/src/kind.rs`
 
 ### Rules
 

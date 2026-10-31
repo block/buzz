@@ -2,6 +2,7 @@ import 'package:buzz/features/agents/community_bot_profiles.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import '../../shared/me/me_sync_test.dart' show FakeRelay;
 import 'dart:async';
+import 'package:buzz/shared/relay/relay_author_provider.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import 'package:buzz/features/agents/agents_page.dart';
@@ -38,6 +39,17 @@ class _Relay extends FakeRelay {
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    final handler = harness.onQuery;
+    return handler == null
+        ? super.queryRelay(filters, timeout: timeout)
+        : handler(filters.single);
+  }
 
   @override
   Future<List<NostrEvent>> fetchHistory(
@@ -138,6 +150,7 @@ class GatedController extends RelayFakeController {
 /// belong to the fake-async zone that created them, so each file holds only
 /// one widget test that touches the store.
 class AgentsHarness {
+  Future<List<NostrEvent>> Function(NostrFilter)? onQuery;
   AgentsHarness._(this.registry, this.controller, this.community);
   final FakeRegistry registry;
   final GatedController controller;
@@ -146,6 +159,7 @@ class AgentsHarness {
 
   /// Fails agent profile fetches until the relay recovers.
   bool relayDown = false;
+  bool authorityDown = false;
 
   /// Agents the owner registered in this community (kind:30177).
   List<String> registered = const [];
@@ -205,6 +219,10 @@ class AgentsHarness {
           builderlabAccountProvider.overrideWithValue(registry),
           remoteAgentControllerProvider.overrideWithValue(controller),
           relaySessionProvider.overrideWith(() => relay),
+          relayAuthorProvider(community.relayUrl).overrideWith((ref) async {
+            if (authorityDown) throw StateError('Relay metadata offline');
+            return 'e' * 64;
+          }),
           meSyncProvider.overrideWithValue(sync),
           activeCommunityProvider.overrideWith((ref) async => community),
           agentDirectoryProvider.overrideWith(

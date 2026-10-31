@@ -2058,7 +2058,7 @@ void main() {
         await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
         await tester.pumpAndSettle();
 
-        expect(find.text('Unable to open your photo library.'), findsOneWidget);
+        expect(find.text('Couldn’t open photo library'), findsOneWidget);
       } finally {
         await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
         await tester.pumpWidget(const SizedBox.shrink());
@@ -3455,10 +3455,7 @@ void main() {
       // that state on the very next frame, so the surface must outlive the
       // switch.
       expect(
-        find.widgetWithText(
-          SnackBar,
-          'Message not sent: the community changed',
-        ),
+        find.widgetWithText(SnackBar, 'Not sent. Community changed.'),
         findsOneWidget,
       );
       // Characterization, not a fix: the unsent text is already retained in
@@ -4790,10 +4787,7 @@ void main() {
         await tester.tap(find.byIcon(BuzzIcons.arrowUp));
         await tester.pumpAndSettle();
 
-        expect(
-          find.text('Message not sent: could not check who is in this channel'),
-          findsNothing,
-        );
+        expect(find.text('Not sent. Couldn’t check members.'), findsNothing);
         expect(sentRecipients, contains(pat));
         expect(sentTags, isNot(contains(orderedEquals(['mention', pat]))));
       });
@@ -4822,10 +4816,7 @@ void main() {
         await mentionMaryAndSend(tester);
 
         expect(sendCount, 0);
-        expect(
-          find.text('Message not sent: could not check who is in this channel'),
-          findsOneWidget,
-        );
+        expect(find.text('Not sent. Couldn’t check members.'), findsOneWidget);
         final field = tester.widget<TextField>(find.byType(TextField));
         expect(field.controller!.text, 'hello @Mary Jane');
 

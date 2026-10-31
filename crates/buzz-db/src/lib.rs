@@ -90,3 +90,6 @@ pub use store::{ArtifactSnapshot, SnapshotDenied};
 pub use usage::SessionLeader;
 
 use buzz_core::CommunityId;
+
+/// Durable NIP-FI verified-profile projection state.
+pub use store::verified_profiles;

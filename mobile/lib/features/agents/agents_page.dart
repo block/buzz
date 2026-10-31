@@ -5,8 +5,10 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/agents/owned_agent_directory.dart';
+import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../../shared/agents/remote_agents.dart';
 import '../../shared/community/community_provider.dart';
+import '../../shared/me/default_agent.dart';
 import '../../shared/hosted/hosted_flow.dart';
 import '../../shared/hosted/hosted_flow_provider.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
@@ -27,6 +29,7 @@ import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/theme/buzz_icons.dart';
 import 'agent_card_grid.dart';
 import 'delete_agent_action.dart';
+import 'agent_identity_sections.dart';
 import 'bestie_agent_action.dart';
 
 /// Opens the active community's full-page Agents navigation stack.
@@ -94,9 +97,14 @@ class _AgentsNavigation extends HookConsumerWidget {
                         ? 'Builderbot agent'
                         : 'Manage on desktop',
                     primaryActionsSpacing: Grid.md,
-                    contextualActionsSpacing: Grid.xxs,
-                    contextualActions: (_) => BestieAgentAction(pubkey: pubkey),
-                    headerLeading: DeleteAgentAction(
+                    contextualActions: (_) =>
+                        BestieAgentAction(pubkey: pubkey, compact: true),
+                    agentIdentity: (_) => AgentIdentitySections(
+                      pubkey: pubkey,
+                      controller: controller,
+                    ),
+                    agentSettings: (_) => DeleteAgentAction(
+                      asSettingsRow: true,
                       controller: controller,
                       pubkey: pubkey,
                     ),
@@ -144,6 +152,7 @@ class AgentsPage extends HookConsumerWidget {
       return null;
     }, [flow.stage]);
     final community = ref.watch(activeCommunityProvider).asData?.value;
+    final bestie = ref.watch(defaultAgentProvider).asData?.value;
     final ownedDirectory = ref.watch(ownedAgentDirectoryProvider);
     // The account's remote agents with a verified owner profile here are
     // listed too, so one stays listed while a deletion that already removed
@@ -184,7 +193,14 @@ class AgentsPage extends HookConsumerWidget {
           agent['agent_pubkey'] as String: agent['agent_name'] as String,
       },
     );
-    keys.sort((a, b) => names.labelFor(a).compareTo(names.labelFor(b)));
+    // Buzz App orders names without case and uses the identity as a stable tie.
+    keys.sort((a, b) {
+      final byName = names
+          .labelFor(a)
+          .toLowerCase()
+          .compareTo(names.labelFor(b).toLowerCase());
+      return byName != 0 ? byName : a.compareTo(b);
+    });
     final profiles = ref.watch(userCacheProvider);
     final creating = useState(false);
     final failed =
@@ -288,7 +304,8 @@ class AgentsPage extends HookConsumerWidget {
         top: false,
         child: Material(
           color: Colors.transparent,
-          child: RefreshIndicator(
+          child: BeeRefreshIndicator(
+            edgeOffset: topHeight,
             onRefresh: refresh,
             child: CustomScrollView(
               physics: const AlwaysScrollableScrollPhysics(),
@@ -333,6 +350,7 @@ class AgentsPage extends HookConsumerWidget {
                     return AgentCard(
                       key: ValueKey(key),
                       name: names.labelFor(key),
+                      isBestie: key == bestie,
                       imageUrl:
                           profiles[key]?.avatarUrl ??
                           ownedDirectory.asData?.value

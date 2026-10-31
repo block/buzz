@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		ACAF00000000000000000001 /* ToastLayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACAF00000000000000000002 /* ToastLayer.swift */; };
 		BC0010000000000000000003 /* BrowserAuthBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC0010000000000000000004 /* BrowserAuthBridgeTests.swift */; };
 		BC0010000000000000000001 /* BuzzBrowserAuthBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC0010000000000000000002 /* BuzzBrowserAuthBridge.swift */; };
 		F84380010000000000000001 /* ProfileSetupRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F84380010000000000000002 /* ProfileSetupRecoveryTests.swift */; };
@@ -103,6 +104,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		ACAF00000000000000000002 /* ToastLayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToastLayer.swift; sourceTree = "<group>"; };
 		BC0010000000000000000004 /* BrowserAuthBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserAuthBridgeTests.swift; sourceTree = "<group>"; };
 		BC0010000000000000000002 /* BuzzBrowserAuthBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuzzBrowserAuthBridge.swift; sourceTree = "<group>"; };
 		F84380010000000000000002 /* ProfileSetupRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileSetupRecoveryTests.swift; sourceTree = "<group>"; };
@@ -299,6 +301,7 @@
 				BZZ00000000000000000024 /* PushNativeState.swift */,
 				BZZ00000000000000000027 /* PushEndpointGrantStore.swift */,
 				BZZ0000000000000000002A /* PushSnapshotBridge.swift */,
+				ACAF00000000000000000002 /* ToastLayer.swift */,
 				DCAF00000000000000000002 /* IosNavigationBar.swift */,
 				DAAB00000000000000000002 /* NativeTabler.swift */,
 				331C809A294A618700263BE5 /* MediaSanitizer.swift */,
@@ -646,6 +649,7 @@
 				BZZ00000000000000000023 /* PushNativeState.swift in Sources */,
 				BZZ00000000000000000026 /* PushEndpointGrantStore.swift in Sources */,
 				BZZ00000000000000000029 /* PushSnapshotBridge.swift in Sources */,
+				ACAF00000000000000000001 /* ToastLayer.swift in Sources */,
 				DCAF00000000000000000001 /* IosNavigationBar.swift in Sources */,
 				DAAB00000000000000000001 /* NativeTabler.swift in Sources */,
 				331C809B294A63AB00263BE5 /* MediaSanitizer.swift in Sources */,

@@ -86,3 +86,6 @@ pub mod workflow_sink;
 pub use config::Config;
 pub use error::{RelayError, Result};
 pub use state::AppState;
+
+/// Optional relay-signed verified profiles.
+pub mod verified_profiles;

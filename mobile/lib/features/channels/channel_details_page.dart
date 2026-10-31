@@ -255,8 +255,9 @@ class ChannelDetailsPage extends HookConsumerWidget {
         if (context.mounted) Navigator.of(context).pop(false);
       } catch (_) {
         if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(context).showFeedbackSnackBar(
             const SnackBar(content: Text('Couldn’t join channel. Try again.')),
+            kind: ToastKind.error,
           );
         }
       } finally {
@@ -497,7 +498,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
                   copyToClipboard(
                     context,
                     resolvedChannel.name,
-                    message: 'Channel name copied to clipboard',
+                    message: 'Channel name copied',
                   );
                 },
               ),
@@ -508,7 +509,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
                   copyToClipboard(
                     context,
                     resolvedChannel.id,
-                    message: 'Channel ID copied to clipboard',
+                    message: 'Channel ID copied',
                   );
                 },
               ),

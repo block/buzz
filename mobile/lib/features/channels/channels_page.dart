@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'channel_unread.dart';
 import '../../shared/widgets/collapsible_section_body.dart';
 import '../../shared/widgets/compose_morph_icon.dart';

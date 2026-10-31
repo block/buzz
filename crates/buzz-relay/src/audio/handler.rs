@@ -2013,6 +2013,8 @@ async fn run_active_audio_connection(
         }
     }
 
+    crate::verified_profiles::admitted(&state, &tenant, nip_fi_assertion.as_ref());
+
     // Commit-won. Take guard fields into the live runtime — any remaining
     // fields in guard at this point would be double-released on drop, but all
     // fields were taken by commit_participant_join above.
