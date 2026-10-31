@@ -176,11 +176,26 @@ class VerifiedProfile {
 /// A newer signed event with a malformed profile still replaces the older one
 /// at this address, so a malformed projection clears the earlier verified name
 /// instead of preserving it. Callers must have verified id and signature.
+/// Longer than any valid tag name or value (64 scalar values is at most 128
+/// UTF-16 code units).
+const _maxTagValue = 256;
+
 String? verifiedProfileSubject(
   NostrEvent event,
   VerifiedProfileAuthority authority,
 ) {
-  if (event.kind != verifiedProfileKind || event.pubkey != authority.pubkey) {
+  if (event.kind != verifiedProfileKind ||
+      event.pubkey != authority.pubkey ||
+      // Bounded before any buffering or proof work: a projection or
+      // retraction has empty content and at most eight short two-element tags.
+      event.content.isNotEmpty ||
+      event.tags.length > 8 ||
+      event.tags.any(
+        (tag) =>
+            tag.length != 2 ||
+            tag[0].length > _maxTagValue ||
+            tag[1].length > _maxTagValue,
+      )) {
     return null;
   }
   for (final tag in event.tags) {

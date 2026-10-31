@@ -20,7 +20,15 @@ class _Batch {
   _Batch(this.subjects);
   final List<String> subjects;
   final List<NostrEvent> early = [];
+
+  /// Live events awaiting proof, newest per subject, so a fast stream cannot
+  /// queue unbounded work.
+  final Map<String, NostrEvent> pending = {};
   Future<void> tail = Future.value();
+
+  /// Bumped when the relay replays the subscription, so work from the
+  /// previous snapshot is dropped.
+  int epoch = 0;
   void Function()? unsubscribe;
 
   /// Retires this batch so the next sync can reopen it.
@@ -248,10 +256,13 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
               limit: chunk.length,
             ),
             (event) => _onEvent(batch, event, authority, generation),
-            onStatusChanged: (status) {
-              if (status == RelaySubscriptionStatus.ready) {
-                _onEose(batch, authority, generation);
-              }
+            onStatusChanged: (status) => switch (status) {
+              RelaySubscriptionStatus.ready => _onEose(
+                batch,
+                authority,
+                generation,
+              ),
+              RelaySubscriptionStatus.retrying => _onRetry(batch, fail),
             },
             onClosed: (_) => fail(),
           );
@@ -285,13 +296,36 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
       batch.early.add(event);
       return;
     }
+    final queued = batch.pending.isNotEmpty;
+    if (supersedes(event, batch.pending[subject])) {
+      batch.pending[subject] = event;
+    }
+    if (queued) return;
+    final epoch = batch.epoch;
     _enqueue(batch, generation, () async {
-      final proven = await _prove([event]);
-      if (_live(batch, generation)) {
+      final events = batch.pending.values.toList();
+      batch.pending.clear();
+      final proven = await _prove(events);
+      if (_current(batch, generation, epoch)) {
         _accept(proven, authority);
         _publish();
       }
     });
+  }
+
+  /// The relay closed and is replaying the subscription: reconcile the replay
+  /// as a new snapshot rather than as live updates.
+  void _onRetry(_Batch batch, void Function() fail) {
+    if (!batch.active) return;
+    batch.epoch++;
+    batch.ready = false;
+    batch.candidates = 0;
+    batch.early.clear();
+    batch.pending.clear();
+    batch.timeout?.cancel();
+    batch.timeout = Timer(_eoseTimeout, fail);
+    _checked.removeAll(batch.subjects);
+    _publish();
   }
 
   void _onEose(
@@ -305,9 +339,11 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
     batch.timeout = null;
     final early = List.of(batch.early);
     batch.early.clear();
+    final epoch = batch.epoch;
+    final candidates = batch.candidates;
     _enqueue(batch, generation, () async {
       final proven = await _prove(early);
-      if (!_live(batch, generation)) return;
+      if (!_current(batch, generation, epoch)) return;
       _accept(proven, authority);
       final seen = {
         for (final event in proven) verifiedProfileSubject(event, authority)!,
@@ -315,7 +351,7 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
       // A full response that omits subjects may be truncated: only a short
       // response proves absence.
       final complete =
-          batch.candidates < batch.subjects.length ||
+          candidates < batch.subjects.length ||
           seen.length == batch.subjects.length;
       for (final subject in batch.subjects) {
         if (!complete && !seen.contains(subject)) continue;
@@ -329,9 +365,13 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
   bool _live(_Batch batch, int generation) =>
       batch.active && generation == _generation && ref.mounted;
 
+  bool _current(_Batch batch, int generation, int epoch) =>
+      _live(batch, generation) && batch.epoch == epoch;
+
   void _enqueue(_Batch batch, int generation, Future<void> Function() job) {
+    final epoch = batch.epoch;
     batch.tail = batch.tail.then((_) async {
-      if (!_live(batch, generation)) return;
+      if (!_live(batch, generation) || batch.epoch != epoch) return;
       try {
         await job();
       } catch (error) {
