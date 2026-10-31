@@ -464,16 +464,15 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
         if (channel.isDm && channel.isMember) channel.id,
     ];
 
-    final mentionFilter = NostrFilter(
-      kinds: const [9, 40002, 1, 45001, 45003],
-      tags: {
-        '#p': [myPk],
-      },
-      limit: 50,
-    );
     final filters = <NostrFilter>[
       // Mentions of me on user-visible channel content.
-      mentionFilter,
+      NostrFilter(
+        kinds: const [9, 40002, 1, 45001, 45003],
+        tags: {
+          '#p': [myPk],
+        },
+        limit: 50,
+      ),
       // Workflow approvals addressed to me.
       NostrFilter(
         kinds: const [46010, 46011, 46012],
@@ -505,7 +504,7 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
     final events = [
       for (final event in fetched)
         if (!isQuietAgentMessage(event.tags)) event,
-      ...await _mentionsPastQuiet(session, mentionFilter, fetched, myPk),
+      ...await _refillPastQuiet(session, filters, fetched),
     ];
 
     bool isFromOther(NostrEvent e) =>
@@ -587,62 +586,72 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
     );
   }
 
-  /// Quiet agent messages still count against the relay's mention limit, so a
-  /// window full of them can hide an older mention. Pages past a full window
-  /// that lost mentions to the quiet filter, a few pages at most, and returns
-  /// the non-quiet mentions found there.
-  Future<List<NostrEvent>> _mentionsPastQuiet(
+  /// Quiet agent messages still count against each filter's relay limit, so a
+  /// window full of them can hide older items. For each filter, rebuilds its
+  /// own window from the batched result (the bridge concatenates every
+  /// filter's newest `limit` matches), then pages past a window that lost
+  /// items to the quiet filter, a few pages at most, refilling only up to the
+  /// original limit. Returns the non-quiet events found on those pages.
+  Future<List<NostrEvent>> _refillPastQuiet(
     RelaySessionNotifier session,
-    NostrFilter filter,
+    List<NostrFilter> filters,
     List<NostrEvent> fetched,
-    String myPk,
   ) async {
     const maxPages = 3;
-    final pubkey = myPk.toLowerCase();
-    bool matches(NostrEvent event) =>
-        filter.kinds.contains(event.kind) &&
-        event.tags.any(
-          (tag) =>
-              tag.length > 1 && tag[0] == 'p' && tag[1].toLowerCase() == pubkey,
-        );
-    // The bridge concatenates each filter's results, so an addressed DM
-    // message can arrive twice: once per matching filter. Count it once.
-    final seen = <String>{};
-    var page = [
-      for (final event in fetched)
-        if (matches(event) && seen.add(event.id)) event,
-    ];
-    var visible = page.where((e) => !isQuietAgentMessage(e.tags)).length;
     final found = <NostrEvent>[];
-    for (var i = 0; i < maxPages; i++) {
-      if (page.length < filter.limit || visible >= filter.limit) break;
-      // The relay's composite cursor: newest first, ties by ascending id, so
-      // events sharing the boundary second are not skipped.
-      final last =
-          ([...page]..sort((a, b) {
-                final time = b.createdAt.compareTo(a.createdAt);
-                return time != 0 ? time : a.id.compareTo(b.id);
-              }))
-              .last;
-      page = (await _queryWithWebSocketFallback(session, [
-        NostrFilter(
-          kinds: filter.kinds,
-          tags: filter.tags,
-          limit: filter.limit,
-          until: last.createdAt,
-          extensions: {'before_id': last.id},
-        ),
-      ])).where(matches).where((e) => seen.add(e.id)).toList();
-      // Refill only up to the original limit, newest first.
-      final kept =
-          (page.where((e) => !isQuietAgentMessage(e.tags)).toList()
-                ..sort((a, b) => b.createdAt.compareTo(a.createdAt)))
-              .take(filter.limit - visible)
-              .toList();
-      found.addAll(kept);
-      visible += kept.length;
+    for (final filter in filters) {
+      final seen = <String>{};
+      List<NostrEvent> window(Iterable<NostrEvent> events) => _relayOrder([
+        for (final event in events)
+          if (_matchesFilter(filter, event) && seen.add(event.id)) event,
+      ]).take(filter.limit).toList();
+      var page = window(fetched);
+      var visible = page.where((e) => !isQuietAgentMessage(e.tags)).length;
+      for (var i = 0; i < maxPages; i++) {
+        if (page.length < filter.limit || visible >= filter.limit) break;
+        // The relay's composite cursor, so events sharing the boundary
+        // second are not skipped.
+        final last = page.last;
+        page = window(
+          await _queryWithWebSocketFallback(session, [
+            NostrFilter(
+              kinds: filter.kinds,
+              tags: filter.tags,
+              limit: filter.limit,
+              until: last.createdAt,
+              extensions: {'before_id': last.id},
+            ),
+          ]),
+        );
+        final kept = page
+            .where((e) => !isQuietAgentMessage(e.tags))
+            .take(filter.limit - visible)
+            .toList();
+        found.addAll(kept);
+        visible += kept.length;
+      }
     }
     return found;
+  }
+
+  /// Newest first, ties by ascending id: the relay's history order.
+  static List<NostrEvent> _relayOrder(List<NostrEvent> events) =>
+      events..sort((a, b) {
+        final time = b.createdAt.compareTo(a.createdAt);
+        return time != 0 ? time : a.id.compareTo(b.id);
+      });
+
+  static bool _matchesFilter(NostrFilter filter, NostrEvent event) {
+    if (!filter.kinds.contains(event.kind)) return false;
+    for (final MapEntry(:key, :value) in filter.tags.entries) {
+      final name = key.startsWith('#') ? key.substring(1) : key;
+      if (!event.tags.any(
+        (tag) => tag.length > 1 && tag[0] == name && value.contains(tag[1]),
+      )) {
+        return false;
+      }
+    }
+    return true;
   }
 
   Future<List<NostrEvent>> _queryWithWebSocketFallback(

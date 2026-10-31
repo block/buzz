@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:async';
 
 import 'package:buzz/features/activity/activity_provider.dart';
+import 'package:buzz/features/activity/feed_item.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
@@ -509,6 +510,70 @@ void main() {
       expect(feed.mentions.map((item) => item.id), contains('older'));
     },
   );
+
+  group('paging past quiet messages per source', () {
+    NostrEvent message(
+      String id,
+      int at, {
+      required String channel,
+      bool mention = true,
+      bool quiet = false,
+    }) => NostrEvent(
+      id: id,
+      pubkey: 'agent_pk',
+      createdAt: 1_700_000_000 + at,
+      kind: 9,
+      tags: [
+        if (mention) ['p', 'me_pk'],
+        ['h', channel],
+        if (quiet) ['audience', 'agents'],
+      ],
+      content: 'hi',
+      sig: '',
+    );
+    Future<HomeFeedResponse> load(_RecordingSessionNotifier session) async {
+      final container = ProviderContainer(
+        overrides: [
+          relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+          myPubkeyProvider.overrideWithValue('me_pk'),
+          relaySessionProvider.overrideWith(() => session),
+          channelsProvider.overrideWith(
+            () => _FixedChannelsNotifier([_dmChannel('dm-1')]),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      return container.read(activityProvider.future);
+    }
+
+    test('a DM window full of quiet messages is refilled', () async {
+      final session = _RecordingSessionNotifier()
+        ..seed(message('dm-older', 1, channel: 'dm-1', mention: false));
+      for (var i = 0; i < 30; i++) {
+        session.seed(
+          message('dm-quiet-$i', 100 + i, channel: 'dm-1', quiet: true),
+        );
+      }
+      final feed = await load(session);
+      expect(feed.activity.map((item) => item.id), ['dm-older']);
+    });
+
+    test('a DM-only event never moves the mention cursor', () async {
+      // The mention window: one quiet and 49 real channel mentions. An
+      // older addressed DM comes back only through the DM filter, and a
+      // real channel mention sits between it and the window.
+      final session = _RecordingSessionNotifier()
+        ..seed(message('quiet', 1000, channel: 'channel-1', quiet: true))
+        ..seed(message('gap', 500, channel: 'channel-1'))
+        ..seed(message('dm-old', 100, channel: 'dm-1'));
+      for (var i = 0; i < 49; i++) {
+        session.seed(message('new-$i', 900 + i, channel: 'channel-1'));
+      }
+      final feed = await load(session);
+      expect(feed.mentions.map((item) => item.id), contains('gap'));
+    });
+  });
 
   test(
     'refreshes the inbox projection when addressed activity arrives',
