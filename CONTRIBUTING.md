@@ -442,6 +442,11 @@ because we can't safely review them without prior discussion:
 - **Cosmetic renames or style-only churn** that doesn't fix a bug or improve
   clarity
 - **Entirely new features** with no prior discussion
+- **Feature work in `desktop/`** — `desktop/` is the deprecated Buzz 0.X
+  desktop app. Build desktop features in
+  [block/buzz-app](https://github.com/block/buzz-app) instead; change
+  `desktop/` here only to fix a 0.X bug or to keep it compiling after a shared
+  crate change
 - **Drive-by changes bundled into an unrelated fix** — split them out
 
 If you're considering any of these, open an issue first and we'll tell you
