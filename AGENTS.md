@@ -130,7 +130,7 @@ crates/
   buzz-test-client    # Integration test client and E2E test suite
   sprig               # All-in-one harness bundling ACP, agent, and dev MCP
 
-desktop/              # Legacy Tauri 2 + React 19 desktop app (being replaced by block/buzz-app)
+desktop/              # Buzz 0.X Tauri desktop app (deprecated: new desktop work goes to block/buzz-app)
 web/                  # Browser web client (repo browser, served by the relay)
 mobile/               # Flutter mobile app
 migrations/           # SQL migrations (run at relay startup when BUZZ_AUTO_MIGRATE is on: binary default off, Helm default on; deployments at scale apply them out of band — see docs/database.md)
@@ -619,9 +619,15 @@ description. See [PR #803](https://github.com/block/buzz/pull/803).
 
 ## Desktop App
 
-> **Legacy.** `desktop/` will soon be superseded by
-> [block/buzz-app](https://github.com/block/buzz-app). Never use it as an
-> implementation or design reference for the mobile app, which is current.
+> **`desktop/` is deprecated.** It is the Buzz 0.X desktop app. The Buzz 1.0
+> desktop app lives in [block/buzz-app](https://github.com/block/buzz-app).
+> Do not open block/buzz PRs that add features to `desktop/`; build desktop
+> features in block/buzz-app (or as a Buzz plugin) instead. Change `desktop/`
+> here only to fix a 0.X bug, or to keep it compiling when a shared crate it
+> depends on changes. This includes agent guidance bundled with the 0.X app,
+> such as `desktop/src-tauri/src/managed_agents/nest_skill.md`: CLI PRs do not
+> need to update it. Never use it as an implementation or design reference for
+> the mobile app, which is current.
 
 The desktop app is Tauri 2 + React 19 + Vite + Tailwind CSS. Features are
 organized under `desktop/src/features/`. Biome handles linting and formatting.
