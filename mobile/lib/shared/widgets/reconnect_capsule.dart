@@ -17,7 +17,7 @@ class ReconnectCapsule extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => _ToastBubble(
-    message: 'Sign in to Builderbot to reconnect',
+    message: 'Sign in to Builderlab to reconnect',
     actionLabel: 'Sign in',
     onRetry: onSignIn,
     onDismiss: () {},

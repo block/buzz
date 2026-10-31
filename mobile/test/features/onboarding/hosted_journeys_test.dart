@@ -309,7 +309,7 @@ void main() {
       expect(f.sent('/exchange'), isEmpty);
       expect(f.sent('/current'), isEmpty);
       expect(f.sent('/nsec-backups/status'), isEmpty);
-      expect(find.text('Sign in to Builderbot to reconnect'), findsNothing);
+      expect(find.text('Sign in to Builderlab to reconnect'), findsNothing);
     },
     requiresBuilderlab: false,
   );
@@ -337,14 +337,14 @@ void main() {
       final session = f.container.read(relaySessionProvider.notifier);
       await f.settle(tester);
       if (!HostedEnvironment.requiresAuth(Uri.parse(community.relayUrl).host)) {
-        expect(find.text('Sign in to Builderbot to reconnect'), findsNothing);
+        expect(find.text('Sign in to Builderlab to reconnect'), findsNothing);
         expect(f.socketHeaders, isNotEmpty);
         expect(f.socketHeaders, everyElement(isEmpty));
         expect(f.sent('/assertions'), isEmpty);
         expect(f.container.read(relayConfigProvider).nsec, community.nsec);
         return;
       }
-      expect(find.text('Sign in to Builderbot to reconnect'), findsOneWidget);
+      expect(find.text('Sign in to Builderlab to reconnect'), findsOneWidget);
       expect(f.socketHeaders, isEmpty);
 
       final browser = Completer<void>();
@@ -353,14 +353,14 @@ void main() {
       await f.tap(tester, 'Cancel sign-in');
       browser.complete();
       await f.settle(tester);
-      expect(find.text('Sign in to Builderbot to reconnect'), findsOneWidget);
+      expect(find.text('Sign in to Builderlab to reconnect'), findsOneWidget);
       expect(f.socketHeaders, isEmpty);
 
       f.beforeBrowserReturn = null;
       await f.tap(tester, 'Sign in');
       await f.settle(tester);
       expect(f.socketHeaders, isNotEmpty);
-      expect(find.text('Sign in to Builderbot to reconnect'), findsNothing);
+      expect(find.text('Sign in to Builderlab to reconnect'), findsNothing);
       await session.queryRelay(const []);
       expect(f.sent('/query'), hasLength(1));
       final proofRequest = f.sent('/identity/assertions').single;
@@ -416,7 +416,7 @@ void main() {
         throwsA(AccountFailure.signedOut),
       );
       await f.settle(tester);
-      expect(find.text('Sign in to Builderbot to reconnect'), findsOneWidget);
+      expect(find.text('Sign in to Builderlab to reconnect'), findsOneWidget);
       final beforeWrongAccount = f.sent('/identity/assertions').length;
       f.bound = f.secondKeys.public;
       f.subject = 'wrong-owner';
