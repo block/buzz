@@ -126,33 +126,55 @@ void main() {
         );
         expect(result, row.expected);
       }
-      final linked = event(
-        30177,
-        [
-          ['d', agent],
-        ],
-        {'system_prompt': 'Stale', 'persona_id': 'helper'},
-      );
-      expect(
-        await loadAgentInstructions(
-          agent,
-          owner,
-          (filter) async => switch (filter.kinds.single) {
-            30177 => [linked],
-            30175 => [
-              event(
-                30175,
-                [
-                  ['d', 'helper'],
-                ],
-                {'system_prompt': 'Definition instructions'},
-              ),
-            ],
-            _ => [],
-          },
-        ),
-        'Definition instructions',
-      );
+      // Coordinates match desktop persona_events::normalize_d_tag, including
+      // built-in IDs and the mixed-case/leading punctuation of team-pack slugs.
+      for (final (personaId, slug) in [
+        ('helper', 'helper'),
+        ('builtin:fizz', 'builtin-fizz'),
+        ('builtin:honey', 'builtin-honey'),
+        ('builtin:bumble', 'builtin-bumble'),
+        ('CodeReviewer', 'codereviewer'),
+        ('_Ops', 'a_ops'),
+        ('-Ops', 'a-ops'),
+        ('É😀Ops', 'a--ops'),
+        ('', 'a'),
+        ('A' * 65, 'a' * 64),
+      ]) {
+        final linked = event(
+          30177,
+          [
+            ['d', agent],
+          ],
+          {'system_prompt': 'Stale', 'persona_id': personaId},
+        );
+        for (final available in [true, false]) {
+          expect(
+            await loadAgentInstructions(
+              agent,
+              owner,
+              (filter) async => switch (filter.kinds.single) {
+                30177 => [linked],
+                30175
+                    when available &&
+                        filter.authors?.single == owner &&
+                        filter.tags['#d']?.single == slug =>
+                  [
+                    event(
+                      30175,
+                      [
+                        ['d', slug],
+                      ],
+                      {'system_prompt': 'Definition instructions'},
+                    ),
+                  ],
+                _ => [],
+              },
+            ),
+            available ? 'Definition instructions' : null,
+            reason: 'persona_id: $personaId, definition available: $available',
+          );
+        }
+      }
       await expectLater(
         loadAgentInstructions(
           agent,

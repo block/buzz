@@ -118,14 +118,14 @@ Future<String?> loadAgentInstructions(
   final registration = matching.first;
   final data = jsonDecode(registration.content);
   final personaId = data is Map ? data['persona_id'] : null;
-  if (personaId is String &&
-      RegExp(r'^[a-z0-9][a-z0-9_-]{0,63}$').hasMatch(personaId)) {
+  if (personaId is String) {
+    final slug = _personaDefinitionSlug(personaId);
     final definitions = await query(
       NostrFilter(
         kinds: const [30175],
         authors: [owner],
         tags: {
-          '#d': [personaId],
+          '#d': [slug],
         },
       ),
     );
@@ -135,7 +135,7 @@ Future<String?> loadAgentInstructions(
               (event) =>
                   event.kind == 30175 &&
                   event.pubkey == owner &&
-                  event.getTagValue('d') == personaId,
+                  event.getTagValue('d') == slug,
             )
             .toList()
           ..sort(
@@ -154,6 +154,28 @@ Future<String?> loadAgentInstructions(
   return data['system_prompt'] is String
       ? data['system_prompt'] as String
       : null;
+}
+
+// Keep in sync with desktop managed_agents/persona_events.rs normalize_d_tag.
+// Iterate Unicode scalars so non-ASCII characters each become one hyphen,
+// matching Rust's chars(), and lowercase only ASCII before slug validation.
+String _personaDefinitionSlug(String raw) {
+  final slug = StringBuffer();
+  for (var rune in raw.runes) {
+    if (rune >= 65 && rune <= 90) rune += 32;
+    final allowed =
+        (rune >= 97 && rune <= 122) ||
+        (rune >= 48 && rune <= 57) ||
+        rune == 95 ||
+        rune == 45;
+    final character = allowed ? String.fromCharCode(rune) : '-';
+    if (slug.isEmpty && (character == '_' || character == '-')) {
+      slug.write('a');
+    }
+    slug.write(character);
+    if (slug.length == 64) break;
+  }
+  return slug.isEmpty ? 'a' : slug.toString();
 }
 
 /// Read-only instructions, with explicit unavailable and retry states.
