@@ -357,6 +357,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(api::operator::list_joined_communities),
         )
         .route(
+            "/operator/listener/threads",
+            post(api::operator::register_listener_threads)
+                .delete(api::operator::remove_listener_threads),
+        )
+        .route(
             "/operator/listener/pubkeys",
             post(api::operator::register_listener_pubkeys)
                 .delete(api::operator::remove_listener_pubkeys),
