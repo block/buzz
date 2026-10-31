@@ -130,7 +130,8 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `vote` | Vote on a forum post |
 | `channels` | `list` | List channels |
 | | `get` | Get channel details |
-| | `create` | Create a channel |
+| | `create` | Create a channel (`--template <name>` applies a desktop template) |
+| | `templates list` | List the desktop channel templates `create --template` can use (read-only) |
 | | `update` | Update channel name/description |
 | | `topic` | Set channel topic |
 | | `purpose` | Set channel purpose |
@@ -174,6 +175,7 @@ The table below mirrors that tree for readers who are not at a terminal.
 | `repos` | `create` | Announce a git repository (NIP-34) |
 | | `get` | Get a repository announcement |
 | | `list` | List repository announcements |
+| | `state` | Read a repository's branches, tags, and HEAD (NIP-34 state) |
 | | `default-branch get/set` | Read or select an existing default branch (requires relay support) |
 | | `protect list` | List branch and tag protection rules |
 | | `protect set` | Create or replace a protection rule |
@@ -204,6 +206,30 @@ stderr: {"error": "category", "message": "detail"}
 exit:   0=ok  1=user  2=network  3=auth  4=other  5=write conflict
 ```
 
+
+### Repository state
+
+```bash
+buzz repos state --repo my-repo [--owner <owner-hex>]
+```
+
+Prints `{repo_id, owner, head, branches: [{name, commit}], tags: [{name, commit}], updated_at}`,
+the same view desktop shows. `--owner` defaults to the signing identity.
+The command trusts only state events signed by the owner or by the relay's
+NIP-11 `self` key, and uses the newest. `head` is the branch name, or `null`
+when the state has no `HEAD` ref. A repository with no state event yet (no push)
+exits 1; it never prints an empty state.
+
+### Channel templates
+
+```bash
+buzz channels templates list [--templates-file <path>]
+```
+
+Prints `{path, templates: [{name, description, channel_type, visibility, has_canvas_template, persona_ids, team_ids}]}`
+from the file `channels create --template` reads (same default path and
+`--templates-file` override). It never writes the file. A missing or
+unparseable file is an error (exit 1 or 4), not an empty list.
 
 ### Default branch
 
