@@ -67,8 +67,6 @@ Output varies by command group — `--help` shows flags but not response shapes.
 | `mem hash` | SHA-256 hex string |
 | `mem set/patch/rm` | nothing to stdout; progress to stderr |
 | `mem ls` | tab-delimited (`slug\tcreated_at\tevent_id`) by default; `--json` for JSON array |
-| `reminders list` | JSON array of `{reminder, status, not_before, note, target, created_at, event_id}`, soonest due first. `status` is `pending`, `done`, or `cancelled`. `not_before` is unix seconds or `null`. `target` is `null` or `{eventId, channelId, preview, authorPubkey}`. Default `--status pending`; unreadable events are skipped with a warning on stderr |
-| `reminders add/done/snooze/cancel` | `{event_id, accepted, message, reminder}`; `reminder` is the id to pass to later commands |
 | `reactions get` | `{"reactions": [{emoji, count, pubkeys}]}` — aggregated, not raw events |
 | `pack validate/inspect` | human-readable text, not JSON |
 
@@ -131,8 +129,6 @@ buzz messages send --channel <UUID> \
 6. **`users get` always returns an array** — even for a single pubkey lookup. Never expect a bare object.
 7. **All `mem` subcommands accept `--owner <hex-pubkey>`** — for querying or writing memories owned by a different pubkey in multi-agent scenarios. Defaults to the owner from `BUZZ_AUTH_TAG`.
 8. **`mem rm` cannot delete `core`** — use `mem set core ''` instead.
-9. **Reminders are replaced, never deleted** — `reminders done/cancel` publish a terminal replacement for the same `--reminder` id, and `snooze` publishes a new `not_before`. A reminder that is already `done` or `cancelled` cannot be changed (exit 1). Exit 5 means a newer version won; run `reminders list` and retry. A reminder that this CLI cannot read is never overwritten (exit 4).
-10. **`reminders --at` must be in the future** — unix seconds, ISO-8601 with an offset (`2030-01-02T09:00:00Z`), or `30m`/`2h`/`1d`/`1w`. A zone-less time such as `2030-01-02T09:00` is rejected. `reminders add` needs `--event`, `--note`, or both.
 
 ## Forum Posts
 
