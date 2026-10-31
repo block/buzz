@@ -365,6 +365,7 @@ class PairingPage extends HookConsumerWidget {
             value: onboardingSystemOverlayStyle,
             child: _OnboardingBackground(
               websiteWelcome: websiteWelcome,
+              scannerProgress: islandScannerProgress,
               child: Scaffold(
                 resizeToAvoidBottomInset:
                     hostedFlow?.stage != HostedFlowStage.profile,
