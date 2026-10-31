@@ -173,6 +173,9 @@ class FrostedAppBar extends StatelessWidget {
   /// Reactive counterpart avatar and presence badge for a native DM title.
   final IosNavigationAction? nativeTitleAvatar;
   final Color? nativeTitlePresenceColor;
+
+  /// Shows a refresh bar in the native iOS title capsule.
+  final bool nativeTitleRefreshing;
   final VoidCallback? onNativeTitlePressed;
 
   /// Whether UIKit should expand the title at the top of the page.
@@ -203,6 +206,7 @@ class FrostedAppBar extends StatelessWidget {
     this.nativeEphemeralLabel,
     this.nativeTitleAvatar,
     this.nativeTitlePresenceColor,
+    this.nativeTitleRefreshing = false,
     this.onNativeTitlePressed,
     this.nativeLargeTitle = false,
     this.useNativeNavigation = true,
@@ -290,6 +294,7 @@ class FrostedAppBar extends StatelessWidget {
                   ephemeralLabel: nativeEphemeralLabel,
                   titleAvatar: nativeTitleAvatar,
                   titlePresenceColor: nativeTitlePresenceColor,
+                  titleRefreshing: nativeTitleRefreshing,
                   onTitlePressed: onNativeTitlePressed,
                   largeTitle: nativeLargeTitle,
                   alwaysFrosted: alwaysFrosted,

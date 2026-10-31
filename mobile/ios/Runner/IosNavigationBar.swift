@@ -22,6 +22,64 @@ final class IosNavigationBarFactory: NSObject, FlutterPlatformViewFactory {
   }
 }
 
+/// A thin bar along the bottom inner edge of the title capsule while the page
+/// refreshes. It eases toward the end, then completes and fades once the
+/// refresh ends. The navigation view owns it so it survives title rebuilds.
+final class NavigationRefreshBar: UIView {
+  private let fill = UIView()
+  private(set) var isRefreshing = false
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    isUserInteractionEnabled = false
+    isAccessibilityElement = false
+    accessibilityIdentifier = "channel-navigation-refresh"
+    fill.layer.anchorPoint = CGPoint(x: 0, y: 0.5)
+    addSubview(fill)
+    alpha = 0
+  }
+
+  required init?(coder: NSCoder) { return nil }
+
+  var color: UIColor? {
+    get { fill.backgroundColor }
+    set { fill.backgroundColor = newValue }
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    let transform = fill.transform
+    fill.transform = .identity
+    fill.frame = bounds
+    fill.transform = transform
+  }
+
+  func setRefreshing(_ refreshing: Bool) {
+    guard refreshing != isRefreshing else { return }
+    isRefreshing = refreshing
+    let reduceMotion = UIAccessibility.isReduceMotionEnabled
+    fill.layer.removeAllAnimations()
+    layer.removeAllAnimations()
+    if refreshing {
+      alpha = 1
+      fill.transform = CGAffineTransform(scaleX: reduceMotion ? 1 : 0.001, y: 1)
+      guard !reduceMotion else { return }
+      UIView.animate(withDuration: 2.5, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
+        self.fill.transform = CGAffineTransform(scaleX: 0.85, y: 1)
+      }
+    } else {
+      UIView.animate(withDuration: reduceMotion ? 0 : 0.2, delay: 0, options: [.curveEaseIn, .beginFromCurrentState]) {
+        self.fill.transform = .identity
+      } completion: { _ in
+        guard !self.isRefreshing else { return }
+        UIView.animate(withDuration: 0.25, delay: 0, options: [.beginFromCurrentState]) {
+          self.alpha = self.isRefreshing ? 1 : 0
+        }
+      }
+    }
+  }
+}
+
 final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate {
   var onActivate: (() -> Void)?
   private let titleLabel = UILabel()
@@ -135,6 +193,18 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
     // The subtitle carries the visible temporary/expiry text. Keep the full
     // retention explanation on the title's single VoiceOver element too.
     accessibilityLabel = [accessibilityLabel, label].compactMap { $0 }.joined(separator: ", ")
+  }
+
+  func attachRefreshBar(_ bar: NavigationRefreshBar) {
+    bar.removeFromSuperview()
+    bar.translatesAutoresizingMaskIntoConstraints = false
+    contentView.addSubview(bar)
+    NSLayoutConstraint.activate([
+      bar.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+      bar.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+      bar.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+      bar.heightAnchor.constraint(equalToConstant: 2),
+    ])
   }
 
   func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
@@ -256,6 +326,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   private weak var trackedAvatar: UIButton?
   private var reportedAvatarFrame: CGRect?
   private var flutterSafeTop: CGFloat = 0
+  private let refreshBar = NavigationRefreshBar()
 
   init(frame: CGRect, id: Int64, args: Any?, messenger: FlutterBinaryMessenger, parent: UIViewController?) {
     container = NavigationClipView(frame: frame)
@@ -449,8 +520,11 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       if let label = args["ephemeralLabel"] as? String {
         button.setEphemeralStatus(label)
       }
+      refreshBar.color = color
+      button.attachRefreshBar(refreshBar)
       button.frame.size = button.intrinsicContentSize
       item.titleView = button
+      refreshBar.setRefreshing(args["titleRefreshing"] as? Bool == true)
     } else if largeTitle {
       compactTitle.text = item.title
       compactTitle.font = .preferredFont(forTextStyle: .headline)
