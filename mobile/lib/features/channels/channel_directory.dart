@@ -428,13 +428,10 @@ class _ChannelRefreshCoordinator {
       final status = loadStatus();
       if (status.isLoading(scope)) {
         // This refresh takes ownership of the shared generation, so the
-        // in-flight directory response will be discarded. The mounted Browse
-        // sheet cannot restart an idle request on its own: it only starts a
-        // load when it mounts and deliberately renders idle as its initial
-        // spinner. Settle the displaced load to a retryable terminal state so
-        // the sheet never waits forever for a response that may no longer
-        // write results.
-        status.markError(scope);
+        // in-flight directory response will be discarded. Mark it idle, not
+        // error: nothing failed, so a caller may load it again, and search
+        // retries a displaced load once instead of reporting a failure.
+        status.markIdle(scope);
       }
     }
     return fence;

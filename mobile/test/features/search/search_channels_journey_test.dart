@@ -201,10 +201,29 @@ void main() {
     expect(failed, findsOneWidget);
     expect(find.text("No results for 'zzzz'"), findsNothing);
 
+    // A membership refresh that displaces the load is not a failure: search
+    // loads it again once. A second displacement offers Retry, not a loop.
+    await tester.enterText(find.byType(TextField), 'zzz');
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(channels.directoryRequests, 3);
+    session.searches.removeAt(0).complete(const []);
+    actions.searches.removeAt(0).complete(const []);
+    channels.displaceDirectory();
+    await tester.pump();
+    expect(channels.directoryRequests, 4);
+    expect(spinner, findsOneWidget);
+    expect(failed, findsNothing);
+    channels.displaceDirectory();
+    await tester.pump();
+    expect(channels.directoryRequests, 4);
+    expect(spinner, findsNothing);
+    expect(failed, findsOneWidget);
+    expect(find.text("No results for 'zzz'"), findsNothing);
+
     // When it fails again, the member match stays beside the notice.
     await tester.enterText(find.byType(TextField), '4things');
     await tester.pump(const Duration(milliseconds: 300));
-    expect(channels.directoryRequests, 3);
+    expect(channels.directoryRequests, 5);
     session.searches.removeAt(0).complete(const []);
     actions.searches.removeAt(0).complete(const []);
     channels.failDirectory();
@@ -217,12 +236,17 @@ void main() {
     expect(unjoined, findsNothing);
     expect(failed, findsOneWidget);
 
-    // Retry loads the directory and finds the open channel.
+    // Retry loads the directory and finds the open channel, even when a
+    // membership refresh displaces the first load.
     await tester.tap(retry);
     await tester.pump();
-    expect(channels.directoryRequests, 4);
+    expect(channels.directoryRequests, 6);
     expect(spinner, findsOneWidget);
     expect(failed, findsNothing);
+    channels.displaceDirectory();
+    await tester.pump();
+    expect(channels.directoryRequests, 7);
+    expect(spinner, findsOneWidget);
     channels.finishDirectory();
     await tester.pump();
     expect(spinner, findsNothing);
@@ -236,16 +260,24 @@ void main() {
               tester.element(find.byType(SearchPage)),
             ).read(relayConfigProvider.notifier)
             as _Community;
+    // While the switch reloads the channel list, the old community's
+    // channels must not match.
+    final reload = channels.holdBuild = Completer<void>();
+    final general = find.byKey(const ValueKey('search-channel-row-general-id'));
     community.switchTo('http://other.test');
     await tester.pump();
-    await tester.enterText(find.byType(TextField), 'ops');
+    await tester.enterText(find.byType(TextField), 'general');
     await tester.pump(const Duration(milliseconds: 300));
-    expect(channels.directoryRequests, 5);
+    expect(channels.directoryRequests, 8);
+    expect(general, findsNothing);
+    reload.complete();
+    await tester.pump();
+    expect(general, findsOneWidget);
     community.switchTo('http://third.test');
     await tester.pump();
     await tester.enterText(find.byType(TextField), 'dev');
     await tester.pump(const Duration(milliseconds: 300));
-    expect(channels.directoryRequests, 6);
+    expect(channels.directoryRequests, 9);
     session.searches.removeLast().complete(const []);
     actions.searches.removeLast().complete(const []);
     channels.finishDirectory();
@@ -372,19 +404,35 @@ class _HeldUserSearch implements ChannelActions {
 
 /// Lists member channels, and adds the open directory when it is loaded.
 class _DirectoryChannels extends ChannelsNotifier {
-  final _directories = <Completer<bool>>[];
+  final _directories = <Completer<_DirectoryOutcome>>[];
   var directoryRequests = 0;
   Duration? maxAge;
 
-  void finishDirectory() => _directories.removeAt(0).complete(true);
+  void finishDirectory() =>
+      _directories.removeAt(0).complete(_DirectoryOutcome.loaded);
 
-  void failDirectory() => _directories.removeAt(0).complete(false);
+  void failDirectory() =>
+      _directories.removeAt(0).complete(_DirectoryOutcome.failed);
+
+  /// A membership refresh retires the load, as production marks it idle.
+  void displaceDirectory() =>
+      _directories.removeAt(0).complete(_DirectoryOutcome.displaced);
+
+  /// Holds the next list load, like a community switch waiting on the relay.
+  Completer<void>? holdBuild;
 
   @override
-  Future<List<Channel>> build() async => [
-    _channel('general', isMember: true),
-    _channel('team-4things', isMember: true),
-  ];
+  Future<List<Channel>> build() async {
+    // Like production, a community switch reloads the list.
+    ref.watch(relayConfigProvider);
+    final hold = holdBuild;
+    holdBuild = null;
+    if (hold != null) await hold.future;
+    return [
+      _channel('general', isMember: true),
+      _channel('team-4things', isMember: true),
+    ];
+  }
 
   @override
   Future<void> ensureDirectoryLoaded({Duration? maxAge}) async {
@@ -402,18 +450,26 @@ class _DirectoryChannels extends ChannelsNotifier {
     directoryRequests++;
     // Like production, the status turns loading only after memberships
     // arrive, so it stays as it was while the request is held.
-    final load = Completer<bool>();
+    final load = Completer<_DirectoryOutcome>();
     _directories.add(load);
-    if (!await load.future) {
-      // Like production retryDirectory: record the error, do not throw.
-      status.markError(scope);
-      return;
+    switch (await load.future) {
+      case _DirectoryOutcome.failed:
+        // Like production retryDirectory: record the error, do not throw.
+        status.markError(scope);
+        return;
+      case _DirectoryOutcome.displaced:
+        status.markIdle(scope);
+        return;
+      case _DirectoryOutcome.loaded:
+        break;
     }
     // Production marks the directory loaded before it installs the list.
     status.markLoaded(scope);
     state = AsyncData([...?state.value, _channel('4things', isMember: false)]);
   }
 }
+
+enum _DirectoryOutcome { loaded, failed, displaced }
 
 class _NoRecentSearches extends RecentSearchesNotifier {
   @override

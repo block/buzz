@@ -163,6 +163,11 @@ class SearchNotifier extends Notifier<SearchState> {
   // newer one.
   Object? _directoryLoad;
 
+  // A membership refresh retired this search's directory load twice in a
+  // row. Nothing failed at the relay, but the open channels are still
+  // missing, so search offers Retry as it does for a failure.
+  bool _directoryDisplaced = false;
+
   // Bumped by every new query, clear and rebuild. A lookup writes its result
   // only while its generation is current, so a late reply to an earlier query,
   // even one with the same text, cannot settle the current spinner.
@@ -170,12 +175,15 @@ class SearchNotifier extends Notifier<SearchState> {
 
   @override
   SearchState build() {
-    // Watch relayConfig so search state resets on community switch.
+    // Watch the community and identity so search state resets when either
+    // changes.
     ref.watch(relayConfigProvider);
+    ref.watch(myPubkeyProvider);
     _generation++;
     _messagesPending = false;
     _usersPending = false;
     _directoryLoad = null;
+    _directoryDisplaced = false;
     // Channel rows come from the loaded channel list, which gains open
     // channels when the directory arrives. Re-rank whenever either changes;
     // the directory status for this community also drives the spinner.
@@ -248,10 +256,28 @@ class SearchNotifier extends Notifier<SearchState> {
   void _loadDirectory() {
     if (_directoryLoad != null) return;
     final load = _directoryLoad = Object();
+    _directoryDisplaced = false;
+    final channels = ref.read(channelsProvider.notifier);
+    Future<void> ensure() =>
+        channels.ensureDirectoryLoaded(maxAge: searchDirectoryMaxAge);
     unawaited(
-      ref
-          .read(channelsProvider.notifier)
-          .ensureDirectoryLoaded(maxAge: searchDirectoryMaxAge)
+      ensure()
+          .then((_) {
+            // A membership refresh that starts during the load retires it and
+            // marks the directory idle. Load it again once; a second
+            // displacement offers Retry instead of looping.
+            if (!ref.mounted ||
+                _directoryLoad != load ||
+                !_directoryIs(ChannelDirectoryLoadStatus.idle)) {
+              return null;
+            }
+            return ensure().then((_) {
+              if (!ref.mounted || _directoryLoad != load) return;
+              _directoryDisplaced = _directoryIs(
+                ChannelDirectoryLoadStatus.idle,
+              );
+            });
+          })
           .catchError((Object error) {
             debugPrint(
               '[SearchNotifier] channel directory load failed: $error',
@@ -279,7 +305,8 @@ class SearchNotifier extends Notifier<SearchState> {
       // Channel-name lookup from the cached channels list — not all hits
       // will have a known channel (e.g. ones we're not a member of).
       final channelsById = {
-        for (final c in ref.read(channelsProvider).value ?? const <Channel>[])
+        for (final c
+            in ref.read(channelsProvider).asData?.value ?? const <Channel>[])
           c.id: c.name,
       };
 
@@ -329,14 +356,17 @@ class SearchNotifier extends Notifier<SearchState> {
   void _refreshChannels() {
     if (state.query.isEmpty) return;
     state = state.copyWith(
+      // A reload keeps the previous community's list in AsyncLoading; only
+      // installed data belongs to this search's community.
       channelResults: rankSearchChannels(
-        ref.read(channelsProvider).value ?? const <Channel>[],
+        ref.read(channelsProvider).asData?.value ?? const <Channel>[],
         state.query,
       ),
       // An earlier failure stays hidden while our next load runs.
       channelSearchFailed:
           _directoryLoad == null &&
-          _directoryIs(ChannelDirectoryLoadStatus.error),
+          (_directoryDisplaced ||
+              _directoryIs(ChannelDirectoryLoadStatus.error)),
       isLoading: _isLoading,
     );
   }
