@@ -329,6 +329,9 @@ enum Cmd {
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
+    /// Community administration — members, roles, invite links
+    #[command(subcommand)]
+    Community(CommunityCmd),
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -2081,6 +2084,98 @@ pub enum PackCmd {
     },
 }
 
+/// Community administration commands.
+///
+/// The community (tenant) is selected by the relay host in `--relay` /
+/// `BUZZ_RELAY_URL`. The relay authorizes every command by the signing key's
+/// community role.
+#[derive(Subcommand)]
+pub enum CommunityCmd {
+    /// List, add, remove, and re-role community members (NIP-43)
+    #[command(subcommand)]
+    Members(CommunityMembersCmd),
+    /// Create invite links
+    #[command(subcommand)]
+    Invite(CommunityInviteCmd),
+}
+
+/// Community member management (kinds 13534, 9030–9032).
+#[derive(Subcommand)]
+pub enum CommunityMembersCmd {
+    /// List members and roles from the relay-signed membership list (kind 13534)
+    #[command(
+        after_help = "Output: JSON array of {pubkey, role}, owners first. Exits 1 when the relay published no list (open relays publish none).
+
+Examples:
+  buzz community members list"
+    )]
+    List,
+    /// Add members (kind 9030, owner or admin). Adding an existing member changes nothing
+    #[command(
+        after_help = "Output: JSON array with one {pubkey, event_id, accepted, message} per member. Members are added one at a time; the first failure stops the run, prints the members already added, and exits non-zero.
+
+Examples:
+  buzz community members add --pubkey <HEX>
+  buzz community members add --pubkey npub1... <HEX> --role admin"
+    )]
+    Add {
+        /// Member pubkeys (64-char hex or npub); repeat or list several
+        #[arg(long, required = true, num_args = 1..)]
+        pubkey: Vec<String>,
+        /// Role to grant: admin (owner only) | member (default)
+        #[arg(long, value_parser = ["admin", "member"])]
+        role: Option<String>,
+    },
+    /// Remove members (kind 9031, owner or admin; admins remove only members)
+    #[command(
+        after_help = "Output: JSON array with one {pubkey, event_id, accepted, message} per member. The first failure stops the run, prints the members already removed, and exits non-zero.
+
+Examples:
+  buzz community members remove --pubkey <HEX>"
+    )]
+    Remove {
+        /// Member pubkeys (64-char hex or npub); repeat or list several
+        #[arg(long, required = true, num_args = 1..)]
+        pubkey: Vec<String>,
+    },
+    /// Change a member's role (kind 9032, owner only)
+    #[command(
+        after_help = "Output: JSON array with one {pubkey, event_id, accepted, message}. The owner role cannot be granted or changed.
+
+Examples:
+  buzz community members set-role --pubkey <HEX> --role admin"
+    )]
+    SetRole {
+        /// Member pubkey (64-char hex or npub)
+        #[arg(long)]
+        pubkey: String,
+        /// New role: admin | member
+        #[arg(long, value_parser = ["admin", "member"])]
+        role: String,
+    },
+}
+
+/// Community invite links (`POST /api/invites`).
+#[derive(Subcommand)]
+pub enum CommunityInviteCmd {
+    /// Create an invite link (owner or admin). The code is printed once — treat it as a credential
+    #[command(
+        after_help = "Output: JSON {code, url, expires_at, max_uses, uses_remaining}. The relay does not show the code again and each run mints a new invite; share the url only with the people you want to join. Each run is sent once and never retried.
+
+Examples:
+  buzz community invite create
+  buzz community invite create --ttl 24h --max-uses 5"
+    )]
+    Create {
+        /// Lifetime: seconds, or a number with s/m/h/d (60s to 30d; relay default 72h)
+        #[arg(long)]
+        ttl: Option<String>,
+        /// Maximum number of uses, 1 to 10000 (default: unlimited)
+        #[arg(long)]
+        max_uses: Option<i32>,
+    },
+}
+
 /// Community moderation commands.
 ///
 /// The community (tenant) is selected by the relay host in `--relay` /
@@ -2283,6 +2378,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
+        Cmd::Community(sub) => commands::community::dispatch(sub, &client, &cli.format).await,
         Cmd::Pack(_) => unreachable!("handled above"),
     }
 }
@@ -2455,6 +2551,7 @@ mod tests {
             "agents",
             "canvas",
             "channels",
+            "community",
             "dms",
             "emoji",
             "feed",

@@ -12,7 +12,8 @@ use buzz_core::{
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
         KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_PROJECT,
-        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER,
+        RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -2076,6 +2077,50 @@ pub fn build_moderation_resolve_report(
         tags.push(tag(&["reason", r])?);
     }
     Ok(EventBuilder::new(Kind::Custom(KIND_MODERATION_RESOLVE_REPORT as u16), "").tags(tags))
+}
+
+/// Role values the relay accepts on kinds 9030 and 9032. `owner` is never
+/// grantable through these commands.
+pub const RELAY_MEMBER_ROLES: [&str; 2] = ["admin", "member"];
+
+fn relay_admin_member(
+    kind: u32,
+    target_pubkey: &str,
+    role: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    let target_pubkey = check_pubkey_hex(target_pubkey, "target_pubkey")?;
+    let mut tags = vec![tag(&["p", &target_pubkey])?];
+    if let Some(role) = role {
+        if !RELAY_MEMBER_ROLES.contains(&role) {
+            return Err(SdkError::InvalidInput(format!(
+                "role must be admin or member (got: {role})"
+            )));
+        }
+        tags.push(tag(&["role", role])?);
+    }
+    Ok(EventBuilder::new(Kind::Custom(kind as u16), "").tags(tags))
+}
+
+/// Build a NIP-43 add-member command (kind 9030). The relay defaults an absent
+/// role to `member`; an existing member is left unchanged.
+pub fn build_relay_member_add(
+    target_pubkey: &str,
+    role: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    relay_admin_member(RELAY_ADMIN_ADD_MEMBER, target_pubkey, role)
+}
+
+/// Build a NIP-43 remove-member command (kind 9031).
+pub fn build_relay_member_remove(target_pubkey: &str) -> Result<EventBuilder, SdkError> {
+    relay_admin_member(RELAY_ADMIN_REMOVE_MEMBER, target_pubkey, None)
+}
+
+/// Build a NIP-43 change-role command (kind 9032); only an owner may send it.
+pub fn build_relay_member_set_role(
+    target_pubkey: &str,
+    role: &str,
+) -> Result<EventBuilder, SdkError> {
+    relay_admin_member(RELAY_ADMIN_CHANGE_ROLE, target_pubkey, Some(role))
 }
 
 // ---------------------------------------------------------------------------
@@ -5205,6 +5250,39 @@ mod tests {
         assert!(has_tag(&ev, "p", &pk));
         assert!(has_tag(&ev, "expiration", "1783500000"));
         assert!(has_tag(&ev, "reason", "cool off"));
+    }
+
+    #[test]
+    fn relay_member_commands_match_desktop_wire_shape() {
+        let pk = "AB".repeat(32);
+        let lower = "ab".repeat(32);
+        let add = sign(build_relay_member_add(&pk, Some("admin")).unwrap());
+        assert_eq!(add.kind.as_u16(), 9030);
+        let tags: Vec<_> = add.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+        assert_eq!(tags, vec![vec!["p", lower.as_str()], vec!["role", "admin"]]);
+        assert!(add.content.is_empty());
+
+        let default_role = sign(build_relay_member_add(&pk, None).unwrap());
+        assert!(!default_role.tags.iter().any(|t| t.as_slice()[0] == "role"));
+
+        let remove = sign(build_relay_member_remove(&pk).unwrap());
+        assert_eq!(remove.kind.as_u16(), 9031);
+        assert_eq!(remove.tags.len(), 1);
+
+        let set = sign(build_relay_member_set_role(&pk, "member").unwrap());
+        assert_eq!(set.kind.as_u16(), 9032);
+        assert!(has_tag(&set, "role", "member"));
+    }
+
+    #[test]
+    fn relay_member_commands_reject_bad_input() {
+        let pk = "a".repeat(64);
+        for role in ["owner", "", "Admin", "root"] {
+            assert!(build_relay_member_add(&pk, Some(role)).is_err(), "{role}");
+            assert!(build_relay_member_set_role(&pk, role).is_err(), "{role}");
+        }
+        assert!(build_relay_member_add("abc", None).is_err());
+        assert!(build_relay_member_remove(&"z".repeat(64)).is_err());
     }
 
     #[test]
