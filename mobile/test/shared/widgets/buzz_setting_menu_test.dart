@@ -94,10 +94,13 @@ void main() {
             ),
           ),
         );
+    await tester.binding.setSurfaceSize(const Size(340, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.pumpWidget(nativeMenu(enabled: false));
     final view = tester.widget<UiKitView>(find.byType(UiKitView));
     expect(view.viewType, 'buzz/navigation_glass');
     expect(view.creationParams, containsPair('deferMenuActions', false));
+    expect(view.creationParams, containsPair('fillWidth', true));
     expect(view.gestureRecognizers, isEmpty);
     expect(find.byType(MenuAnchor), findsNothing);
     expect(
@@ -123,6 +126,13 @@ void main() {
 
     await tester.pumpWidget(nativeMenu());
     await tester.pump();
+    final portraitWidth = tester.getSize(find.byType(UiKitView)).width;
+    await tester.binding.setSurfaceSize(const Size(600, 340));
+    await tester.pump();
+    expect(
+      tester.getSize(find.byType(UiKitView)).width,
+      greaterThan(portraitWidth),
+    );
     await choose(0);
     expect(selected, 'low');
     await tester.pumpWidget(nativeMenu(value: 'low'));

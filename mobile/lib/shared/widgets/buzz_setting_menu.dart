@@ -75,6 +75,7 @@ class BuzzSettingMenu<T> extends StatelessWidget {
               builder: (context, constraints) => IosMessageCreateButton(
                 key: controlKey,
                 label: '',
+                fillWidth: true,
                 accessibilityLabel: '$label: $valueLabel',
                 width: constraints.maxWidth,
                 height: constraints.maxHeight,

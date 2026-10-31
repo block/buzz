@@ -2,6 +2,7 @@ import 'package:buzz/features/agents/community_bot_profiles.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import '../../shared/me/me_sync_test.dart' show FakeRelay;
 import 'dart:async';
+import 'package:buzz/shared/relay/relay_author_provider.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import 'package:buzz/features/agents/agents_page.dart';
@@ -130,6 +131,7 @@ class AgentsHarness {
 
   /// Fails agent profile fetches until the relay recovers.
   bool relayDown = false;
+  bool authorityDown = false;
 
   /// [relayUrl] defaults to a hosted community that supports remote agents.
   static Future<AgentsHarness> create({String? relayUrl}) async {
@@ -180,6 +182,10 @@ class AgentsHarness {
           builderlabAccountProvider.overrideWithValue(registry),
           remoteAgentControllerProvider.overrideWithValue(controller),
           relaySessionProvider.overrideWith(() => relay),
+          relayAuthorProvider(community.relayUrl).overrideWith((ref) async {
+            if (authorityDown) throw StateError('Relay metadata offline');
+            return 'e' * 64;
+          }),
           meSyncProvider.overrideWithValue(sync),
           activeCommunityProvider.overrideWith((ref) async => community),
           agentDirectoryProvider.overrideWith(

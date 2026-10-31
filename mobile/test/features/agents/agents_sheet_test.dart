@@ -9,7 +9,6 @@ import 'package:buzz/features/agents/agents_page.dart';
 import 'package:buzz/features/agents/agent_card.dart';
 import 'package:buzz/features/profile/user_profile_sheet.dart';
 import 'package:flutter/material.dart';
-import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/features/home/home_page.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -144,25 +143,20 @@ void main() {
     await tester.tap(find.byKey(ValueKey(existing)));
     await tester.pumpAndSettle();
     expect(find.text('Could not load instructions.'), findsOneWidget);
-    h.onQuery = (filter) async => filter.kinds.single == 30177
-        ? [
-            NostrEvent(
-              id: 'c' * 64,
-              pubkey: h.community.pubkey!,
-              createdAt: 1,
-              kind: 30177,
-              tags: [
-                ['d', existing],
-              ],
-              content: '{"system_prompt":"Help the team review changes."}',
-              sig: 'd' * 128,
-            ),
-          ]
-        : [];
+    h.onQuery = (_) async => [];
+    h.authorityDown = true;
     await tester.ensureVisible(find.text('Retry'));
     await tester.tap(find.text('Retry'));
     await tester.pumpAndSettle();
-    expect(find.text('Help the team review changes.'), findsOneWidget);
+    expect(find.text('Could not load instructions.'), findsOneWidget);
+    h.authorityDown = false;
+    await tester.ensureVisible(find.text('Retry'));
+    await tester.tap(find.text('Retry'));
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining('Instructions aren’t available'),
+      findsOneWidget,
+    );
     tester.platformDispatcher.textScaleFactorTestValue = 2;
     await tester.pumpAndSettle();
     await tester.pumpAndSettle();

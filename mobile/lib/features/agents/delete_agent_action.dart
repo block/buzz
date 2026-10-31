@@ -29,6 +29,7 @@ class DeleteAgentAction extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     useListenable(controller);
+    final deleting = useState(false);
     final community = ref.watch(activeCommunityProvider).asData?.value;
     final agent = controller.agents
         .where((row) => row['agent_pubkey'] == pubkey)
@@ -64,14 +65,21 @@ class DeleteAgentAction extends HookConsumerWidget {
         ),
       );
       if (confirmed != true || !context.mounted) return;
-      final success = await controller.deleteAgent(
-        pubkey: pubkey,
-        community: community,
-        isCurrent: () =>
-            context.mounted &&
-            ref.read(activeCommunityProvider).asData?.value?.id == community.id,
-        fetch: ref.read(relaySessionProvider.notifier).fetchHistory,
-      );
+      deleting.value = true;
+      bool success;
+      try {
+        success = await controller.deleteAgent(
+          pubkey: pubkey,
+          community: community,
+          isCurrent: () =>
+              context.mounted &&
+              ref.read(activeCommunityProvider).asData?.value?.id ==
+                  community.id,
+          fetch: ref.read(relaySessionProvider.notifier).fetchHistory,
+        );
+      } finally {
+        if (context.mounted) deleting.value = false;
+      }
       if (!context.mounted) return;
       ref.invalidate(agentDirectoryProvider);
       if (success) {
@@ -100,7 +108,7 @@ class DeleteAgentAction extends HookConsumerWidget {
             onTap: controller.busy ? null : remove,
             titleColor: context.colors.error,
             icon: BuzzIcons.trash2,
-            title: controller.busy ? 'Deleting…' : 'Delete agent',
+            title: deleting.value ? 'Deleting…' : 'Delete agent',
           ),
         ],
       );

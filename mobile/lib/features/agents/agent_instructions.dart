@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 
 import '../../shared/community/community_provider.dart';
 import '../../shared/relay/relay.dart';
+import '../../shared/relay/relay_author_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 
@@ -18,19 +19,25 @@ final agentInstructionsProvider = FutureProvider.autoDispose
       final relay = ref.watch(relaySessionProvider.notifier);
       Future<List<NostrEvent>> query(NostrFilter filter) =>
           relay.queryRelay([filter]);
-      return loadAgentInstructions(pubkey, owner, query);
+      final relayAuthor = await ref.watch(
+        relayAuthorProvider(community!.relayUrl).future,
+      );
+      if (relayAuthor == null) return null;
+      return loadAgentInstructions(pubkey, owner, relayAuthor, query);
     });
 
-/// Resolves current config before the legacy registration/definition prompt.
-/// Unreadable config never falls back to a potentially stale prompt.
+/// Only published config is authoritative; local desktop overrides cannot be
+/// inferred from legacy registration or definition prompts.
 Future<String?> loadAgentInstructions(
   String pubkey,
   String owner,
+  String relayAuthor,
   Future<List<NostrEvent>> Function(NostrFilter) query,
 ) async {
   final channels = await query(
     NostrFilter(
       kinds: const [39000],
+      authors: [relayAuthor],
       tags: {
         '#P': [owner],
         '#t': [pubkey],
@@ -40,6 +47,7 @@ Future<String?> loadAgentInstructions(
   final configs = channels.where((event) {
     final channel = ChannelData.fromEvent(event);
     return event.kind == 39000 &&
+        event.pubkey == relayAuthor &&
         channel.creator == owner &&
         channel.channelType == 'system' &&
         channel.labels.contains('agent-config') &&
@@ -91,91 +99,7 @@ Future<String?> loadAgentInstructions(
     }
     return data['text'] as String;
   }
-  final registrations = await query(
-    NostrFilter(
-      kinds: const [30177],
-      authors: [owner],
-      tags: {
-        '#d': [pubkey],
-      },
-    ),
-  );
-  final matching =
-      registrations
-          .where(
-            (event) =>
-                event.kind == 30177 &&
-                event.pubkey == owner &&
-                event.getTagValue('d') == pubkey,
-          )
-          .toList()
-        ..sort(
-          (a, b) => a.createdAt != b.createdAt
-              ? b.createdAt.compareTo(a.createdAt)
-              : a.id.compareTo(b.id),
-        );
-  if (matching.isEmpty) return null;
-  final registration = matching.first;
-  final data = jsonDecode(registration.content);
-  final personaId = data is Map ? data['persona_id'] : null;
-  if (personaId is String) {
-    final slug = _personaDefinitionSlug(personaId);
-    final definitions = await query(
-      NostrFilter(
-        kinds: const [30175],
-        authors: [owner],
-        tags: {
-          '#d': [slug],
-        },
-      ),
-    );
-    final matchingDefinitions =
-        definitions
-            .where(
-              (event) =>
-                  event.kind == 30175 &&
-                  event.pubkey == owner &&
-                  event.getTagValue('d') == slug,
-            )
-            .toList()
-          ..sort(
-            (a, b) => a.createdAt != b.createdAt
-                ? b.createdAt.compareTo(a.createdAt)
-                : a.id.compareTo(b.id),
-          );
-    if (matchingDefinitions.isEmpty) return null;
-    final definition = jsonDecode(matchingDefinitions.first.content);
-    return definition is Map && definition['system_prompt'] is String
-        ? definition['system_prompt'] as String
-        : '';
-  }
-  // A linked definition that cannot be resolved must not show a legacy copy.
-  if (data is! Map || data['persona_id'] != null) return null;
-  return data['system_prompt'] is String
-      ? data['system_prompt'] as String
-      : null;
-}
-
-// Keep in sync with desktop managed_agents/persona_events.rs normalize_d_tag.
-// Iterate Unicode scalars so non-ASCII characters each become one hyphen,
-// matching Rust's chars(), and lowercase only ASCII before slug validation.
-String _personaDefinitionSlug(String raw) {
-  final slug = StringBuffer();
-  for (var rune in raw.runes) {
-    if (rune >= 65 && rune <= 90) rune += 32;
-    final allowed =
-        (rune >= 97 && rune <= 122) ||
-        (rune >= 48 && rune <= 57) ||
-        rune == 95 ||
-        rune == 45;
-    final character = allowed ? String.fromCharCode(rune) : '-';
-    if (slug.isEmpty && (character == '_' || character == '-')) {
-      slug.write('a');
-    }
-    slug.write(character);
-    if (slug.length == 64) break;
-  }
-  return slug.isEmpty ? 'a' : slug.toString();
+  return null;
 }
 
 /// Read-only instructions, with explicit unavailable and retry states.
@@ -195,7 +119,13 @@ class AgentInstructions extends ConsumerWidget {
         children: [
           const Text('Could not load instructions.'),
           TextButton(
-            onPressed: () => ref.invalidate(agentInstructionsProvider(pubkey)),
+            onPressed: () {
+              final community = ref.read(activeCommunityProvider).asData?.value;
+              if (community != null) {
+                ref.invalidate(relayAuthorProvider(community.relayUrl));
+              }
+              ref.invalidate(agentInstructionsProvider(pubkey));
+            },
             child: const Text('Retry'),
           ),
         ],

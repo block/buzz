@@ -29,7 +29,7 @@ struct SettingMenuSelectionTests {
         frame: CGRect(x: 0, y: 0, width: 340, height: 56),
         viewIdentifier: 1,
         arguments: [
-          "plain": true, "label": "", "enabled": true,
+          "fillWidth": true, "plain": true, "label": "", "enabled": true,
           "deferMenuActions": deferred,
           "menu": [
             ["id": 0, "label": "Low", "enabled": true, "checked": false],
@@ -39,6 +39,11 @@ struct SettingMenuSelectionTests {
         messenger: messenger
       )
       let button = view.view().subviews.compactMap { $0 as? NavigationGlassButton }.first!
+      view.view().layoutIfNeeded()
+      view.view().frame.size.width = 600
+      view.view().layoutIfNeeded()
+      precondition(button.bounds.width == 600)
+      precondition(button.point(inside: CGPoint(x: 570, y: 28), with: nil))
       let group = button.menu!.children.first as! UIMenu
       let choices = group.children.compactMap { $0 as? UIAction }
       precondition(choices[0].state == .off && choices[1].state == .on)

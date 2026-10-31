@@ -24,6 +24,7 @@ class IosMessageCreateButton extends HookWidget {
     this.width = 64,
     this.height = 48,
     this.plain = true,
+    this.fillWidth = false,
     this.enabled = true,
     this.selectedIndex,
     this.eagerGestures = true,
@@ -39,6 +40,7 @@ class IosMessageCreateButton extends HookWidget {
   final String accessibilityLabel;
   final double width, height;
   final bool plain;
+  final bool fillWidth;
 
   /// Whether the native trigger and its actions are interactive.
   final bool enabled;
@@ -172,6 +174,7 @@ class IosMessageCreateButton extends HookWidget {
         creationParams: {
           ...content,
           'plain': plain,
+          'fillWidth': fillWidth,
           'buttonCenterX': width / 2,
           'controlWidth': width,
           'controlSize': height,

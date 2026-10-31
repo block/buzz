@@ -1,4 +1,8 @@
 import 'dart:convert';
+import 'package:buzz/shared/relay/relay_author_provider.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 
 import 'package:buzz/features/agents/agent_instructions.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -9,6 +13,7 @@ void main() {
   const channel = '89b66a68-9631-4d2f-a032-a70220b6a4aa';
   final owner = 'a' * 64;
   final agent = 'b' * 64;
+  final relayAuthor = 'e' * 64;
   final artifact = const Uuid().v5(channel, 'buzz.agent.instructions');
   NostrEvent event(
     int kind,
@@ -17,7 +22,7 @@ void main() {
     String? author,
   }) => NostrEvent(
     id: 'c' * 64,
-    pubkey: author ?? owner,
+    pubkey: author ?? (kind == 39000 ? relayAuthor : owner),
     createdAt: 1,
     kind: kind,
     tags: tags,
@@ -50,6 +55,41 @@ void main() {
     ],
     {'version': 1, 'text': 'Current instructions'},
   );
+
+  test('relay authority uses NIP-11 self, never the contact key', () async {
+    for (final info in [
+      {'self': relayAuthor, 'pubkey': owner},
+      {'pubkey': owner},
+      {'self': 'invalid', 'pubkey': owner},
+    ]) {
+      final container = ProviderContainer(
+        overrides: [
+          relayInformationClientProvider.overrideWithValue(
+            MockClient((request) async {
+              expect(request.url.toString(), 'https://relay.example');
+              expect(request.headers['Accept'], 'application/nostr+json');
+              return http.Response(jsonEncode(info), 200);
+            }),
+          ),
+        ],
+      );
+      final subscription = container.listen(
+        relayAuthorProvider('wss://relay.example'),
+        (_, _) {},
+      );
+      try {
+        expect(
+          await container.read(
+            relayAuthorProvider('wss://relay.example').future,
+          ),
+          info['self'] == relayAuthor ? relayAuthor : null,
+        );
+      } finally {
+        subscription.close();
+        container.dispose();
+      }
+    }
+  });
 
   test(
     'instruction sources preserve precedence and do not revive unavailable config',
@@ -95,7 +135,12 @@ void main() {
               artifacts: [current],
               expected: null,
             ),
-            (channels: [], artifacts: [], expected: 'Legacy instructions'),
+            (channels: [], artifacts: [], expected: null),
+            (
+              channels: [event(39000, config.tags, {}, author: owner)],
+              artifacts: [current],
+              expected: null,
+            ),
             (
               channels: [
                 event(39000, [
@@ -107,14 +152,18 @@ void main() {
                 ], {}),
               ],
               artifacts: [current],
-              expected: 'Legacy instructions',
+              expected: null,
             ),
           ]) {
         final result = await loadAgentInstructions(
           agent,
           owner,
+          relayAuthor,
           (filter) async => switch (filter.kinds.single) {
-            39000 => row.channels,
+            39000 => () {
+              expect(filter.authors, [relayAuthor]);
+              return row.channels;
+            }(),
             45010 =>
               filter.extensions['artifact'] == 'current' &&
                       filter.tags['#h']?.single == channel
@@ -126,59 +175,11 @@ void main() {
         );
         expect(result, row.expected);
       }
-      // Coordinates match desktop persona_events::normalize_d_tag, including
-      // built-in IDs and the mixed-case/leading punctuation of team-pack slugs.
-      for (final (personaId, slug) in [
-        ('helper', 'helper'),
-        ('builtin:fizz', 'builtin-fizz'),
-        ('builtin:honey', 'builtin-honey'),
-        ('builtin:bumble', 'builtin-bumble'),
-        ('CodeReviewer', 'codereviewer'),
-        ('_Ops', 'a_ops'),
-        ('-Ops', 'a-ops'),
-        ('É😀Ops', 'a--ops'),
-        ('', 'a'),
-        ('A' * 65, 'a' * 64),
-      ]) {
-        final linked = event(
-          30177,
-          [
-            ['d', agent],
-          ],
-          {'system_prompt': 'Stale', 'persona_id': personaId},
-        );
-        for (final available in [true, false]) {
-          expect(
-            await loadAgentInstructions(
-              agent,
-              owner,
-              (filter) async => switch (filter.kinds.single) {
-                30177 => [linked],
-                30175
-                    when available &&
-                        filter.authors?.single == owner &&
-                        filter.tags['#d']?.single == slug =>
-                  [
-                    event(
-                      30175,
-                      [
-                        ['d', slug],
-                      ],
-                      {'system_prompt': 'Definition instructions'},
-                    ),
-                  ],
-                _ => [],
-              },
-            ),
-            available ? 'Definition instructions' : null,
-            reason: 'persona_id: $personaId, definition available: $available',
-          );
-        }
-      }
       await expectLater(
         loadAgentInstructions(
           agent,
           owner,
+          relayAuthor,
           (_) async => throw StateError('offline'),
         ),
         throwsStateError,
@@ -187,6 +188,7 @@ void main() {
         loadAgentInstructions(
           agent,
           owner,
+          relayAuthor,
           (filter) async => filter.kinds.single == 39000
               ? [config]
               : [
