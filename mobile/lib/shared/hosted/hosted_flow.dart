@@ -70,6 +70,10 @@ typedef HostedCommunityAdmission =
       bool Function() isCurrent,
     );
 
+/// Reopens the completed Add destination after restoring older memberships.
+typedef HostedCommunityReturn =
+    Future<void> Function(bool Function() isCurrent);
+
 /// Account-scoped picker state retained while the Add route is open.
 class HostedCommunityChoices {
   HostedCommunityChoices._(
@@ -97,6 +101,7 @@ class HostedFlow extends ChangeNotifier {
     required this.identity,
     required this.enterCommunity,
     this.openLandingCommunity,
+    this.captureAddedCommunity,
     Future<bool> Function(Uri)? openWeb,
   }) : _openWeb =
            openWeb ??
@@ -107,6 +112,14 @@ class HostedFlow extends ChangeNotifier {
   final HostedIdentityService identity;
   final HostedCommunityAdmission enterCommunity;
   final HostedCommunityAdmission? openLandingCommunity;
+
+  /// Captures the persisted Add destination before restoring older memberships.
+  final Future<HostedCommunityReturn> Function()? captureAddedCommunity;
+  bool _returnToAddedCommunity = false;
+  HostedCommunityReturn? _openAddedCommunity;
+
+  /// Restoring older memberships must not replace the newly added destination.
+  bool get restoringAfterAdd => _returnToAddedCommunity;
   bool get canRetry =>
       problem == null ||
       problem == HostedFlowProblem.retry ||
@@ -690,6 +703,8 @@ class HostedFlow extends ChangeNotifier {
         !communities.any((item) => item.relayUrl == relay)) {
       return;
     }
+    _returnToAddedCommunity = false;
+    _openAddedCommunity = null;
     selectedRelays = Set.unmodifiable({...selectedRelays, relay});
     landingRelay = relay;
     notifyListeners();
@@ -731,12 +746,13 @@ class HostedFlow extends ChangeNotifier {
     return true;
   }
 
-  Future<void> addSelectedCommunities() {
+  Future<void> addSelectedCommunities({bool returnToAddedCommunity = false}) {
     if (!accountOnly ||
         stage != HostedFlowStage.chooseCommunities ||
         selectedRelays.isEmpty) {
       return Future.value();
     }
+    _returnToAddedCommunity = returnToAddedCommunity || _returnToAddedCommunity;
     _addingCommunities = true;
     final generation = _nextGeneration();
     _set(HostedFlowStage.working);
@@ -802,6 +818,13 @@ class HostedFlow extends ChangeNotifier {
       _set(HostedFlowStage.chooseCommunities);
       return;
     }
+    if (_returnToAddedCommunity && _openAddedCommunity == null) {
+      final capture = captureAddedCommunity;
+      if (capture == null) throw AccountFailure.unavailable;
+      final open = await capture();
+      if (!current()) return;
+      _openAddedCommunity = open;
+    }
     _failedRelay = null;
     final ordered = [
       ...communities.where((item) => item.relayUrl == landingRelay),
@@ -831,6 +854,13 @@ class HostedFlow extends ChangeNotifier {
     }
     if (!current()) return;
     addingCommunityName = null;
+    if (_openAddedCommunity != null) {
+      await _openAddedCommunity!(current);
+      if (!current()) return;
+      await browser.clearIntent();
+      if (current()) _set(HostedFlowStage.complete);
+      return;
+    }
     if (_addedRelays.isEmpty) {
       communities = List.unmodifiable(
         communities.where((item) => selectedRelays.contains(item.relayUrl)),
@@ -952,6 +982,8 @@ class HostedFlow extends ChangeNotifier {
   bool noCommunitiesToAdd = false;
 
   void _clearCommunityBatch() {
+    _returnToAddedCommunity = false;
+    _openAddedCommunity = null;
     noCommunitiesToAdd = false;
     communities = const [];
     selectedRelays = const {};

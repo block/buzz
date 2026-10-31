@@ -54,6 +54,13 @@ class HostedCommunitySelection extends HookConsumerWidget {
           addingCommunity: true,
           restoreAccount: false,
           onExit: exit,
+          onComplete: () {
+            if (flow.restoreCommunityChoices(choices)) {
+              flow.addSelectedCommunities(returnToAddedCommunity: true);
+            } else {
+              flow.signInAccount();
+            }
+          },
         ),
       );
       navigator.push(route);
