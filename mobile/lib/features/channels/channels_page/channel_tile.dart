@@ -108,13 +108,18 @@ class _ChannelTile extends ConsumerWidget {
             ),
             if (hasAttention) ...[
               const SizedBox(width: Grid.xxs),
-              Container(
-                key: ValueKey('channel-attention-dot-${channel.id}'),
-                width: 6,
-                height: 6,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: context.colors.primary,
+              // The dot is the only sign of this state, so name it for
+              // screen readers; it merges into the row's label.
+              Semantics(
+                label: 'New replies or mentions',
+                child: Container(
+                  key: ValueKey('channel-attention-dot-${channel.id}'),
+                  width: 6,
+                  height: 6,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: context.colors.primary,
+                  ),
                 ),
               ),
             ],

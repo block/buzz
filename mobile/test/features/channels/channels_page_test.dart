@@ -3472,6 +3472,7 @@ void main() {
   testWidgets('dots, not bolds, channels with only unread thread replies', (
     tester,
   ) async {
+    final semantics = tester.ensureSemantics();
     final channels = [
       Channel(
         id: '1',
@@ -3536,11 +3537,20 @@ void main() {
       find.byKey(const ValueKey('channel-attention-dot-1')),
       findsOneWidget,
     );
+    expect(
+      find.bySemanticsLabel(RegExp(r'general[\s\S]*New replies or mentions')),
+      findsOneWidget,
+    );
 
     readState.markContextRead('thread-activity:$threadIdRoot', 30);
     await tester.pump();
 
     expect(find.byKey(const ValueKey('channel-attention-dot-1')), findsNothing);
+    expect(
+      find.bySemanticsLabel(RegExp('New replies or mentions')),
+      findsNothing,
+    );
+    semantics.dispose();
   });
 
   for (final (label, events, bold, dot) in [
