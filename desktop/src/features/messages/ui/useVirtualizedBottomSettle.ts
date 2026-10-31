@@ -19,6 +19,53 @@ function isEditableKeyboardTarget(target: EventTarget | null) {
   );
 }
 
+/**
+ * Calls `onReaderScroll` when the reader takes scroll ownership of
+ * `scroller`: a wheel, a touch drag, a pointerdown on the scroller itself
+ * (scrollbar or background), or a scroll key aimed at it. Returns the
+ * unsubscribe function.
+ */
+export function listenForReaderScroll(
+  scroller: HTMLElement,
+  onReaderScroll: () => void,
+): () => void {
+  const onTouchMove = () => onReaderScroll();
+  const onPointerDown = (event: PointerEvent) => {
+    // A descendant pointerdown is ordinary row interaction (link, reaction,
+    // thread action), not evidence that the reader took scroll ownership.
+    // Direct scroller hits cover scrollbar/background drag initiation.
+    if (event.target === scroller) onReaderScroll();
+  };
+  const onWheel = (event: WheelEvent) => {
+    // Ctrl+wheel is browser zoom, not reader navigation. The resulting
+    // viewport/content reflow must still settle at the new physical floor.
+    if (!event.ctrlKey) onReaderScroll();
+  };
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (
+      !event.altKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      event.target instanceof Node &&
+      scroller.contains(event.target) &&
+      !isEditableKeyboardTarget(event.target) &&
+      SCROLL_INTENT_KEYS.has(event.key)
+    ) {
+      onReaderScroll();
+    }
+  };
+  scroller.addEventListener("pointerdown", onPointerDown, { passive: true });
+  scroller.addEventListener("touchmove", onTouchMove, { passive: true });
+  scroller.addEventListener("wheel", onWheel, { passive: true });
+  window.addEventListener("keydown", onKeyDown, true);
+  return () => {
+    scroller.removeEventListener("pointerdown", onPointerDown);
+    scroller.removeEventListener("touchmove", onTouchMove);
+    scroller.removeEventListener("wheel", onWheel);
+    window.removeEventListener("keydown", onKeyDown, true);
+  };
+}
+
 export function useVirtualizedBottomSettle(
   hostRef: React.RefObject<HTMLDivElement | null>,
   listRef: React.RefObject<VListHandle | null>,
@@ -58,44 +105,7 @@ export function useVirtualizedBottomSettle(
   React.useLayoutEffect(() => {
     const scroller = hostRef.current?.firstElementChild;
     if (!(scroller instanceof HTMLDivElement)) return;
-    const retire = () => cancel();
-    const retireForPointer = (event: PointerEvent) => {
-      // A descendant pointerdown is ordinary row interaction (link, reaction,
-      // thread action), not evidence that the reader took scroll ownership.
-      // Direct scroller hits cover scrollbar/background drag initiation.
-      if (event.target === scroller) cancel();
-    };
-    const retireForWheel = (event: WheelEvent) => {
-      // Ctrl+wheel is browser zoom, not reader navigation. Keep bottom intent
-      // armed so the resulting viewport/content reflow can settle at the new
-      // physical floor.
-      if (!event.ctrlKey) cancel();
-    };
-    const retireForScrollKey = (event: KeyboardEvent) => {
-      if (
-        !event.altKey &&
-        !event.ctrlKey &&
-        !event.metaKey &&
-        event.target instanceof Node &&
-        scroller.contains(event.target) &&
-        !isEditableKeyboardTarget(event.target) &&
-        SCROLL_INTENT_KEYS.has(event.key)
-      ) {
-        cancel();
-      }
-    };
-    scroller.addEventListener("pointerdown", retireForPointer, {
-      passive: true,
-    });
-    scroller.addEventListener("touchmove", retire, { passive: true });
-    scroller.addEventListener("wheel", retireForWheel, { passive: true });
-    window.addEventListener("keydown", retireForScrollKey, true);
-    return () => {
-      scroller.removeEventListener("pointerdown", retireForPointer);
-      scroller.removeEventListener("touchmove", retire);
-      scroller.removeEventListener("wheel", retireForWheel);
-      window.removeEventListener("keydown", retireForScrollKey, true);
-    };
+    return listenForReaderScroll(scroller, cancel);
   }, [cancel, hostRef]);
 
   React.useLayoutEffect(() => {
