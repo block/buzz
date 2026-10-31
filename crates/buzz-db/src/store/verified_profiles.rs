@@ -51,6 +51,9 @@ pub struct ProfileAdmission<'a> {
     pub epoch: ProfileEpoch,
     /// Database community bindings, as opposed to operator environment bindings.
     pub database_binding: bool,
+    /// Whether the relay requires an explicit `relay_members` row to connect.
+    /// Open relays treat enforced NIP-FI admission as eligibility instead.
+    pub membership_required: bool,
 }
 
 /// Access-owned incarnations survive removal/restoration without projection locks.
@@ -92,12 +95,23 @@ async fn lock_profile(tx: &mut AdmittedTx, pubkey: &str) -> Result<()> {
     Ok(())
 }
 
-fn same_access(mut left: AccessEpoch, mut right: AccessEpoch, database_binding: bool) -> bool {
+fn same_access(
+    mut left: AccessEpoch,
+    mut right: AccessEpoch,
+    database_binding: bool,
+    membership_required: bool,
+) -> bool {
     if !database_binding {
         left.binding = false;
         left.issuer = None;
         right.binding = false;
         right.issuer = None;
+    }
+    if !membership_required {
+        left.member = false;
+        left.membership = None;
+        right.member = false;
+        right.membership = None;
     }
     left == right
 }
@@ -296,8 +310,9 @@ impl Db {
         }))
     }
 
-    /// Publish/refresh/retract under the current policy, membership, and
-    /// recorded assertion ordering in one admitted transaction.
+    /// Publish/refresh/retract under the current policy, access (membership
+    /// only where the relay requires it), and recorded assertion ordering in
+    /// one admitted transaction.
     pub async fn apply_profile_admission(
         &self,
         input: ProfileAdmission<'_>,
@@ -327,9 +342,14 @@ impl Db {
         lock_profile(&mut tx, input.pubkey).await?;
         let (access, banned) =
             access_epoch(tx.conn(), input.community, input.pubkey, input.issuer).await?;
-        if !same_access(access, input.epoch.access, input.database_binding)
-            || (input.database_binding && !access.binding)
-            || (input.profile.is_some() && (!access.member || banned))
+        if !same_access(
+            access,
+            input.epoch.access,
+            input.database_binding,
+            input.membership_required,
+        ) || (input.database_binding && !access.binding)
+            || (input.profile.is_some()
+                && ((input.membership_required && !access.member) || banned))
         {
             return Ok(None);
         }
@@ -434,6 +454,7 @@ impl Db {
                 .0,
             access,
             input.database_binding,
+            input.membership_required,
         ) {
             return Ok(None);
         }
@@ -489,12 +510,14 @@ impl Db {
     }
 
     /// Materialize a pending retraction, retaining ordering records, then return
-    /// the durable event for retryable local/cross-process broadcast.
+    /// the durable event for retryable local/cross-process broadcast. Only
+    /// relays that require membership retract a key that has no member row.
     pub async fn process_profile_work(
         &self,
         community: CommunityId,
         pubkey: &str,
         keys: &Keys,
+        membership_required: bool,
     ) -> Result<Option<Event>> {
         let mut tx = crate::begin_community_write_transaction(
             &self.pool,
@@ -524,7 +547,7 @@ impl Db {
         let retract = row.get::<bool, _>("active")
             && (pending
                 || row.try_get::<bool, _>("retract")?
-                || (!current.member
+                || ((membership_required && !current.member)
                     || banned
                     || (row.get::<bool, _>("database_binding") && !current.binding)));
         if retract {

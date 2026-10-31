@@ -90,6 +90,7 @@ pub(crate) fn admitted(
                         }),
                         epoch,
                         database_binding: state.config.nip_fi.source == CommunitySource::Database,
+                        membership_required: state.config.require_relay_membership,
                     },
                     &state.relay_keypair,
                 )
@@ -196,7 +197,12 @@ async fn process_pending(
         let result = async {
             let Some(event) = state
                 .db
-                .process_profile_work(community, &pubkey, &state.relay_keypair)
+                .process_profile_work(
+                    community,
+                    &pubkey,
+                    &state.relay_keypair,
+                    state.config.require_relay_membership,
+                )
                 .await?
             else {
                 return Ok::<(), anyhow::Error>(());

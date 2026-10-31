@@ -66,6 +66,7 @@ async fn admit(
             profile,
             epoch,
             database_binding: false,
+            membership_required: true,
         },
         keys,
     )
@@ -173,7 +174,7 @@ async fn lifecycle() {
     assert!(!db.pending_profile_work(None).await.unwrap().is_empty()); // initial broadcast still queued
     assert_eq!(
         tag(
-            &db.process_profile_work(community, &key, &keys)
+            &db.process_profile_work(community, &key, &keys, true)
                 .await
                 .unwrap()
                 .unwrap(),
@@ -184,7 +185,7 @@ async fn lifecycle() {
     );
     admit(&db, community, &keys, &key, &policy, epoch, now, None).await;
     let retracted = db
-        .process_profile_work(community, &key, &keys)
+        .process_profile_work(community, &key, &keys, true)
         .await
         .unwrap()
         .unwrap();
@@ -271,7 +272,7 @@ async fn affected_scope_and_configuration_epochs_fence_restored_state() {
     )
     .await
     .unwrap();
-    db.process_profile_work(community, &key, &keys)
+    db.process_profile_work(community, &key, &keys, true)
         .await
         .unwrap();
     admit(
@@ -339,6 +340,7 @@ async fn ordering_and_access_races() {
         profile: Some(("Alice", "alice", None)),
         epoch,
         database_binding: false,
+        membership_required: true,
     };
     db.apply_profile_admission(input(now, epoch), &keys)
         .await
@@ -358,7 +360,7 @@ async fn ordering_and_access_races() {
         first.id,
         "unchanged values must not refresh early or erase pending cleanup"
     );
-    db.process_profile_work(community, &key, &keys)
+    db.process_profile_work(community, &key, &keys, true)
         .await
         .unwrap();
     assert_eq!(
@@ -389,7 +391,7 @@ async fn ordering_and_access_races() {
     db.retract_profile_admission(community, "another-issuer", &key, trigger + 99, None)
         .await
         .unwrap();
-    db.process_profile_work(community, &key, &keys)
+    db.process_profile_work(community, &key, &keys, true)
         .await
         .unwrap();
     assert_eq!(
@@ -448,7 +450,7 @@ async fn ordering_and_access_races() {
     .await
     .unwrap()
     .unwrap();
-    db.process_profile_work(community, &key, &keys)
+    db.process_profile_work(community, &key, &keys, true)
         .await
         .unwrap();
     assert_eq!(
@@ -508,7 +510,7 @@ async fn ordering_and_access_races() {
     .await
     .unwrap()
     .unwrap();
-    db.process_profile_work(community, &key, &keys)
+    db.process_profile_work(community, &key, &keys, true)
         .await
         .unwrap();
     assert_eq!(
@@ -530,7 +532,7 @@ async fn ordering_and_access_races() {
         .await
         .unwrap();
     tx.commit().await.unwrap();
-    db.process_profile_work(community, &key, &keys)
+    db.process_profile_work(community, &key, &keys, true)
         .await
         .unwrap();
     assert_eq!(
@@ -554,6 +556,192 @@ async fn cleanup_versions_preserve_later_admissions_and_access_does_not_wait() {
 #[ignore = "requires Postgres"]
 async fn migration_schema_cleanup_versions_preserve_later_admissions_and_access_does_not_wait() {
     ordering_and_access_races().await;
+}
+
+async fn set_member(db: &Db, community: CommunityId, key: &str, member: bool) {
+    let mut tx = crate::begin_community_write_transaction(
+        &db.pool,
+        community,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await
+    .unwrap();
+    let sql = if member {
+        "INSERT INTO relay_members (community_id, pubkey, role) VALUES ($1, $2, 'member')"
+    } else {
+        "DELETE FROM relay_members WHERE community_id = $1 AND pubkey = $2"
+    };
+    sqlx::query(sql)
+        .bind(community.as_uuid())
+        .bind(key)
+        .execute(tx.conn())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+}
+
+async fn active(db: &Db, community: CommunityId, key: &str) -> Option<String> {
+    current(db, community, key)
+        .await
+        .and_then(|event| tag(&event, "active").map(str::to_owned))
+}
+
+async fn open_relay_eligibility() {
+    let (db, community, keys, key, policy) = fixture().await;
+    set_member(&db, community, &key, false).await;
+    let epoch = db
+        .profile_epoch(community, &key, &policy)
+        .await
+        .unwrap()
+        .unwrap();
+    let now = Utc::now() - Duration::seconds(60);
+    let input = |admitted_at, epoch, membership_required| ProfileAdmission {
+        community,
+        issuer: &policy.issuer,
+        pubkey: &key,
+        issued_at: now,
+        admitted_at,
+        profile: Some(("Alice", "alice", None)),
+        epoch,
+        database_binding: false,
+        membership_required,
+    };
+    assert!(
+        db.apply_profile_admission(input(now + Duration::seconds(1), epoch, true), &keys)
+            .await
+            .unwrap()
+            .is_none(),
+        "members-required relays need an explicit member row"
+    );
+    assert!(
+        db.apply_profile_admission(input(now + Duration::seconds(2), epoch, false), &keys)
+            .await
+            .unwrap()
+            .is_some(),
+        "open relays publish for enforced admissions without a member row"
+    );
+    db.process_profile_work(community, &key, &keys, false)
+        .await
+        .unwrap();
+    assert_eq!(active(&db, community, &key).await.as_deref(), Some("true"));
+
+    // Membership incarnations do not fence open-relay work, but still fence
+    // work on relays that require membership.
+    set_member(&db, community, &key, true).await;
+    assert!(
+        db.apply_profile_admission(input(now + Duration::seconds(3), epoch, true), &keys)
+            .await
+            .unwrap()
+            .is_none(),
+        "a new membership incarnation fences members-required work"
+    );
+    assert!(
+        db.apply_profile_admission(input(now + Duration::seconds(3), epoch, false), &keys)
+            .await
+            .unwrap()
+            .is_some(),
+        "membership incarnations do not fence open-relay work"
+    );
+    set_member(&db, community, &key, false).await;
+
+    // A ban retracts, and ban/unban still fences the earlier admission. Its
+    // cleanup is stamped with wall time, so later admissions must follow it.
+    let bytes = hex::decode(&key).unwrap();
+    crate::moderation::ban_member(&db.pool, community, &bytes, &bytes, None, None)
+        .await
+        .unwrap();
+    db.process_profile_work(community, &key, &keys, false)
+        .await
+        .unwrap();
+    assert_eq!(active(&db, community, &key).await.as_deref(), Some("false"));
+    crate::moderation::unban_member(&db.pool, community, &bytes, &bytes)
+        .await
+        .unwrap();
+    let later = Utc::now() + Duration::seconds(1);
+    assert!(
+        db.apply_profile_admission(input(later, epoch, false), &keys)
+            .await
+            .unwrap()
+            .is_none(),
+        "ban/unban fences open-relay work from the previous incarnation"
+    );
+    let epoch = db
+        .profile_epoch(community, &key, &policy)
+        .await
+        .unwrap()
+        .unwrap();
+    db.apply_profile_admission(input(later + Duration::seconds(1), epoch, false), &keys)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(active(&db, community, &key).await.as_deref(), Some("true"));
+
+    // A disconnect cleanup retracts; a later admission republishes.
+    db.retract_profile_admission(
+        community,
+        &policy.issuer,
+        &key,
+        (later + Duration::seconds(2)).timestamp(),
+        None,
+    )
+    .await
+    .unwrap();
+    db.process_profile_work(community, &key, &keys, false)
+        .await
+        .unwrap();
+    assert_eq!(active(&db, community, &key).await.as_deref(), Some("false"));
+    db.apply_profile_admission(input(later + Duration::seconds(3), epoch, false), &keys)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(active(&db, community, &key).await.as_deref(), Some("true"));
+
+    // Requiring membership later retracts keys without a member row.
+    db.process_profile_work(community, &key, &keys, true)
+        .await
+        .unwrap();
+    assert_eq!(active(&db, community, &key).await.as_deref(), Some("false"));
+    db.apply_profile_admission(input(later + Duration::seconds(4), epoch, false), &keys)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Disabling the policy retracts and fences the earlier admission.
+    db.configure_profile_policies(
+        &[ProfilePolicy {
+            label: None,
+            ..policy.clone()
+        }],
+        1,
+    )
+    .await
+    .unwrap();
+    db.process_profile_work(community, &key, &keys, false)
+        .await
+        .unwrap();
+    assert_eq!(active(&db, community, &key).await.as_deref(), Some("false"));
+    db.configure_profile_policies(std::slice::from_ref(&policy), 2)
+        .await
+        .unwrap();
+    assert!(
+        db.apply_profile_admission(input(later + Duration::seconds(5), epoch, false), &keys)
+            .await
+            .unwrap()
+            .is_none(),
+        "policy disable/restore fences open-relay work"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn open_relays_publish_without_membership_and_keep_other_fences() {
+    open_relay_eligibility().await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn migration_schema_open_relays_publish_without_membership_and_keep_other_fences() {
+    open_relay_eligibility().await;
 }
 
 async fn environment_removal_cleanup() {
@@ -619,7 +807,9 @@ async fn environment_removal_cleanup() {
         .await
         .unwrap();
     for id in [community, other] {
-        db.process_profile_work(id, &key, &keys).await.unwrap();
+        db.process_profile_work(id, &key, &keys, true)
+            .await
+            .unwrap();
     }
     assert_eq!(
         tag(&current(&db, community, &key).await.unwrap(), "active"),
