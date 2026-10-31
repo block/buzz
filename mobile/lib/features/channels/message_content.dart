@@ -56,7 +56,7 @@ import 'voice_note_attachment.dart';
 part 'message_content/media_carousel.dart';
 part 'message_content/message_preview.dart';
 part 'message_content/bubble_shape.dart';
-part 'message_content/inline_components.dart';
+part 'message_content/inline_patterns.dart';
 part 'message_content/token_pill.dart';
 part 'message_content/video_preview.dart';
 part 'message_content/link_actions.dart';
@@ -383,7 +383,7 @@ class MessageContent extends HookConsumerWidget {
       return result;
     }, [markdownContent, mentionPresentationKey]);
 
-    final inlineComponents = _useMessageInlineComponents(
+    final inlinePatterns = _useMessageInlinePatterns(
       content: content,
       finalContent: finalContent,
       mentionNames: resolvedMentionNames,
@@ -447,7 +447,7 @@ class MessageContent extends HookConsumerWidget {
         },
         textAlign: textAlign ?? (bubble ? TextAlign.start : null),
         maxLines: maxLines,
-        inlinePatterns: inlineComponents,
+        inlinePatterns: inlinePatterns,
       ),
     );
     final segments = bubble
@@ -611,7 +611,7 @@ class MessageContent extends HookConsumerWidget {
         ? [TextSpan(text: unshieldMarkdownEscapes(link.label))]
         : link.labelSpans;
     // Not `link.label`: it still carries gpt_markdown's placeholders for
-    // inline-pattern matches, such as the encoded brackets in a filename.
+    // inline-pattern matches, such as an @mention in the label.
     final text = TextSpan(children: labelSpans).toPlainText();
     final baseStyle = fallbackStyle ?? link.style;
     if (imeta != null &&
@@ -730,6 +730,10 @@ class MessageContent extends HookConsumerWidget {
       } else if (deepLink is MessageDeepLink || deepLink is InviteDeepLink) {
         ref.read(pendingDeepLinkProvider.notifier).open(uri);
       }
+      return;
+    }
+    if (uri.scheme == 'mailto') {
+      await launchUrl(uri);
       return;
     }
     if (uri.scheme != 'http' && uri.scheme != 'https') return;
@@ -1066,7 +1070,7 @@ InlinePattern _mentionPattern({
   required Map<String, String> mentionLabels,
   required Set<String> agentMentionPubkeys,
   void Function(String pubkey)? onMentionTap,
-}) => InlinePattern.prefixed(
+}) => _prefixedToken(
   prefix: '@',
   knownNames: bindings.keys.map(_markdownMentionName),
   genericTokenPattern: r'[A-Za-z0-9_][A-Za-z0-9_\u00A0-]*',
