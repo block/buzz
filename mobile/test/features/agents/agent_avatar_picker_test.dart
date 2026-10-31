@@ -4,6 +4,7 @@ import 'package:buzz/features/agents/agent_avatar_picker.dart';
 import 'package:buzz/shared/agents/agent_avatar_catalog.dart';
 import 'package:buzz/shared/emoji/emoji_data.dart';
 import 'package:buzz/shared/emoji/emoji_data_provider.dart';
+import 'package:buzz/shared/widgets/agent_avatar_border.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -76,6 +77,17 @@ void main() {
 
     await tester.pumpAndSettle();
     expect(selection.bytes, isNotNull);
+    // The preview uses the same squircle the agent gets once created.
+    final previewClip = tester.widget<ClipPath>(
+      find.descendant(
+        of: find.bySemanticsLabel('Selected agent avatar'),
+        matching: find.byType(ClipPath),
+      ),
+    );
+    expect(
+      (previewClip.clipper! as ShapeBorderClipper).shape,
+      const AgentAvatarBorder(),
+    );
     expect(
       (tester
                   .widget<GridView>(

@@ -11,6 +11,7 @@ import '../animated_avatar.dart';
 import '../emoji/emoji_avatar.dart';
 import '../emoji/native_emoji_glyph.dart';
 import '../relay/relay.dart';
+import 'agent_avatar_border.dart';
 
 part 'avatar_image_native.dart';
 
@@ -54,11 +55,11 @@ class AvatarImage extends StatelessWidget {
       );
     }
 
-    final borderRadius = BorderRadius.circular(radius * 0.6);
+    const shape = AgentAvatarBorder();
     return DecoratedBox(
-      decoration: BoxDecoration(color: color, borderRadius: borderRadius),
-      child: ClipRRect(
-        borderRadius: borderRadius,
+      decoration: ShapeDecoration(color: color, shape: shape),
+      child: ClipPath(
+        clipper: const ShapeBorderClipper(shape: shape),
         child: !usesInsetAgentArtwork(imageUrl)
             ? content
             : Transform.scale(

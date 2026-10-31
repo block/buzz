@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/agent_avatar_border.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/profile/user_profile.dart';
 
@@ -29,14 +30,15 @@ class SmallAvatar extends StatelessWidget {
     final initial =
         profile?.initial ?? (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?');
     final isAgent = agent || profile?.ownerPubkey != null;
+    final side = BorderSide(color: context.colors.surface, width: 1.5);
 
     return Container(
       width: size,
       height: size,
-      decoration: BoxDecoration(
-        shape: isAgent ? BoxShape.rectangle : BoxShape.circle,
-        borderRadius: isAgent ? BorderRadius.circular(size * 0.3) : null,
-        border: Border.all(color: context.colors.surface, width: 1.5),
+      decoration: ShapeDecoration(
+        shape: isAgent
+            ? AgentAvatarBorder(side: side)
+            : CircleBorder(side: side),
       ),
       child: AvatarImage(
         imageUrl: avatarUrl,

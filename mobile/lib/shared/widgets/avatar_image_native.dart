@@ -17,12 +17,13 @@ Future<Uint8List?> nativeAvatarImage({
   final recorder = ui.PictureRecorder();
   final canvas = Canvas(recorder);
   final bounds = const Rect.fromLTWH(0, 0, dimension, dimension);
-  canvas.clipRRect(
-    RRect.fromRectAndRadius(
-      bounds,
-      Radius.circular(dimension * (isAgent && !circular ? 0.3 : 0.5)),
-    ),
-  );
+  if (isAgent && !circular) {
+    canvas.clipPath(agentAvatarPath(bounds));
+  } else {
+    canvas.clipRRect(
+      RRect.fromRectAndRadius(bounds, const Radius.circular(dimension / 2)),
+    );
+  }
   canvas.drawColor(background, BlendMode.src);
   final imageBounds = isAgent && usesInsetAgentArtwork(url)
       ? bounds.deflate(dimension * (1 - animatedAvatarArtworkScale) / 2)

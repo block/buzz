@@ -12,6 +12,7 @@ import 'agent_avatar_picker.dart';
 import '../../shared/community/community.dart';
 import '../../shared/community/community_provider.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/agent_avatar_border.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/ios_glass_navigation_action.dart';
@@ -197,7 +198,10 @@ class CreateAgentPage extends HookConsumerWidget {
                         child: SizedBox.square(
                           dimension: 160,
                           child: avatar.value.bytes != null
-                              ? ClipOval(
+                              ? ClipPath(
+                                  clipper: const ShapeBorderClipper(
+                                    shape: AgentAvatarBorder(),
+                                  ),
                                   child: Image.memory(
                                     avatar.value.bytes!,
                                     fit: BoxFit.cover,
@@ -213,7 +217,8 @@ class CreateAgentPage extends HookConsumerWidget {
                                 ),
                         ),
                       ),
-                      if (!pending)
+                      if (!pending) ...[
+                        const SizedBox(height: Grid.xxs),
                         _ChooseAvatarButton(
                           onPressed: busy
                               ? null
@@ -232,6 +237,7 @@ class CreateAgentPage extends HookConsumerWidget {
                                   }
                                 },
                         ),
+                      ],
                     ],
                   ),
                 ),

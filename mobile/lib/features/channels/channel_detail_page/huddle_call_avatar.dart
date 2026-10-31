@@ -188,15 +188,10 @@ class _HuddleCallAvatar extends HookConsumerWidget {
                             key: ValueKey('huddle-speaking-halo-$pubkey'),
                             width: speakingRingSize,
                             height: speakingRingSize,
-                            decoration: BoxDecoration(
+                            decoration: ShapeDecoration(
                               shape: isAgent
-                                  ? BoxShape.rectangle
-                                  : BoxShape.circle,
-                              borderRadius: isAgent
-                                  ? BorderRadius.circular(
-                                      speakingRingSize * 0.3,
-                                    )
-                                  : null,
+                                  ? const AgentAvatarBorder()
+                                  : const CircleBorder(),
                               color: context.colors.primary.withValues(
                                 alpha: 0.07,
                               ),
@@ -219,15 +214,10 @@ class _HuddleCallAvatar extends HookConsumerWidget {
                                 ),
                                 width: avatarRadius * 2,
                                 height: avatarRadius * 2,
-                                decoration: BoxDecoration(
+                                decoration: ShapeDecoration(
                                   shape: isAgent
-                                      ? BoxShape.rectangle
-                                      : BoxShape.circle,
-                                  borderRadius: isAgent
-                                      ? BorderRadius.circular(
-                                          avatarRadius * 0.6,
-                                        )
-                                      : null,
+                                      ? const AgentAvatarBorder()
+                                      : const CircleBorder(),
                                   color: context.controlSurface,
                                 ),
                                 alignment: Alignment.center,

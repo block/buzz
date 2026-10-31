@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:buzz/shared/widgets/agent_avatar_border.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:buzz/shared/emoji/native_emoji_glyph.dart';
 import 'package:flutter/material.dart';
@@ -38,7 +39,7 @@ void main() {
         'https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/pollies/pollies-10.png';
     for (final url in [poster, animated, preset]) {
       await tester.pumpWidget(subject(url, isAgent: true));
-      final clip = find.byType(ClipRRect);
+      final clip = find.byType(ClipPath);
       final scale = find.descendant(of: clip, matching: find.byType(Transform));
       if (url != poster) {
         expect(scale, findsOneWidget);
@@ -51,12 +52,38 @@ void main() {
     }
   });
 
-  testWidgets('clips agents to a 30 percent squircle', (tester) async {
+  testWidgets('clips agents to the desktop squircle', (tester) async {
     await tester.pumpWidget(subject(null, isAgent: true));
 
     expect(find.byType(CircleAvatar), findsNothing);
-    final clip = tester.widget<ClipRRect>(find.byType(ClipRRect));
-    expect(clip.borderRadius, BorderRadius.circular(9.6));
+    final clip = tester.widget<ClipPath>(find.byType(ClipPath));
+    expect(
+      (clip.clipper! as ShapeBorderClipper).shape,
+      const AgentAvatarBorder(),
+    );
+  });
+
+  test('agent squircle follows the desktop mask geometry', () {
+    // Desktop's avatar-squircle.svg passes through (.089, .089) at each
+    // corner's midpoint, outside a circle and inside the square.
+    final path = agentAvatarPath(const Rect.fromLTWH(0, 0, 100, 100));
+    expect(path.getBounds(), const Rect.fromLTWH(0, 0, 100, 100));
+    for (final corner in [
+      const Offset(9.5, 9.5),
+      const Offset(90.5, 9.5),
+      const Offset(90.5, 90.5),
+      const Offset(9.5, 90.5),
+    ]) {
+      expect(path.contains(corner), isTrue, reason: '$corner');
+    }
+    for (final corner in [
+      const Offset(8, 8),
+      const Offset(92, 8),
+      const Offset(92, 92),
+      const Offset(8, 92),
+    ]) {
+      expect(path.contains(corner), isFalse, reason: '$corner');
+    }
   });
 
   testWidgets('renders raccoon percent-encoded SVG data avatar', (
