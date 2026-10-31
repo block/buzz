@@ -111,7 +111,7 @@ class _ChannelTile extends ConsumerWidget {
               // The dot is the only sign of this state, so name it for
               // screen readers; it merges into the row's label.
               Semantics(
-                label: 'New replies or mentions',
+                label: 'Needs your attention',
                 child: Container(
                   key: ValueKey('channel-attention-dot-${channel.id}'),
                   width: 6,

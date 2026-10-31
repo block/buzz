@@ -3538,7 +3538,7 @@ void main() {
       findsOneWidget,
     );
     expect(
-      find.bySemanticsLabel(RegExp(r'general[\s\S]*New replies or mentions')),
+      find.bySemanticsLabel(RegExp(r'general[\s\S]*Needs your attention')),
       findsOneWidget,
     );
 
@@ -3546,10 +3546,7 @@ void main() {
     await tester.pump();
 
     expect(find.byKey(const ValueKey('channel-attention-dot-1')), findsNothing);
-    expect(
-      find.bySemanticsLabel(RegExp('New replies or mentions')),
-      findsNothing,
-    );
+    expect(find.bySemanticsLabel(RegExp('Needs your attention')), findsNothing);
     semantics.dispose();
   });
 
