@@ -705,7 +705,10 @@ The mobile app lives in `mobile/` — a Flutter app using Riverpod + Hooks.
 
 The mobile app is current. Do not use the legacy `desktop/` app as an
 implementation or design reference for it: `desktop/` will soon be superseded
-by [block/buzz-app](https://github.com/block/buzz-app).
+by [block/buzz-app](https://github.com/block/buzz-app). This does not relax
+cross-client wire compatibility: mobile must keep reading and writing the same
+event payloads as other clients (for example the `channel-sort` NIP-78 payload,
+which buzz-app also uses), even where a payload is documented only in code.
 
 ### Architecture
 
