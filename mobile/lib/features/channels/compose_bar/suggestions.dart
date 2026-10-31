@@ -1,5 +1,7 @@
 part of '../compose_bar.dart';
 
+const _mentionChooserHeight = 240.0;
+
 class _MentionSuggestions extends StatelessWidget {
   final List<MentionCandidate> suggestions;
 
@@ -8,6 +10,10 @@ class _MentionSuggestions extends StatelessWidget {
 
   /// The directory search failed: show its error and a retry below the rows.
   final bool searchFailed;
+
+  /// Hold the full height, rows at the top, so rows that join late fill
+  /// empty space instead of pushing the shown rows up.
+  final bool reserveHeight;
   final VoidCallback? onRetry;
   final Map<String, UserProfile> userCache;
   final String? currentPubkey;
@@ -18,6 +24,7 @@ class _MentionSuggestions extends StatelessWidget {
     required this.suggestions,
     this.unavailable = const {},
     this.searchFailed = false,
+    this.reserveHeight = false,
     this.onRetry,
     required this.userCache,
     required this.currentPubkey,
@@ -37,7 +44,10 @@ class _MentionSuggestions extends StatelessWidget {
       shape: appPopoverShape(context),
       clipBehavior: Clip.hardEdge,
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxHeight: 240),
+        constraints: BoxConstraints(
+          minHeight: reserveHeight ? _mentionChooserHeight : 0,
+          maxHeight: _mentionChooserHeight,
+        ),
         child: ListView.separated(
           shrinkWrap: true,
           padding: const EdgeInsets.symmetric(vertical: Grid.xxs),

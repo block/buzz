@@ -50,6 +50,11 @@ NostrEvent _profile(String pubkey, String name) => NostrEvent(
 /// Holds every search request open until the test answers it.
 class _HeldSearchSession extends RelaySessionNotifier {
   final searches = <Completer<List<NostrEvent>>>[];
+  final queries = <String>[];
+
+  /// The open search for [query].
+  Completer<List<NostrEvent>> searchFor(String query) =>
+      searches[queries.lastIndexOf(query)];
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
@@ -68,6 +73,7 @@ class _HeldSearchSession extends RelaySessionNotifier {
   }) {
     final search = Completer<List<NostrEvent>>();
     searches.add(search);
+    queries.add(query);
     return search.future;
   }
 
@@ -213,5 +219,81 @@ void main() {
 
     expect(session.searches, hasLength(2));
     expect(shownPubkeys(), isNot(contains(_alice)));
+  });
+
+  group('search cache', () {
+    List<String> shownFor(MentionChooserArgs args) => [
+      for (final candidate in container.read(mentionCandidatesProvider(args)))
+        candidate.pubkey,
+    ];
+
+    /// Opens a chooser for [args]; the returned function closes it.
+    void Function() open(MentionChooserArgs args) {
+      final candidates = container.listen(
+        mentionCandidatesProvider(args),
+        (_, _) {},
+      );
+      final pending = container.listen(
+        mentionSearchPendingProvider(args),
+        (_, _) {},
+      );
+      void close() {
+        candidates.close();
+        pending.close();
+      }
+
+      addTearDown(close);
+      return close;
+    }
+
+    test('an unsearched query is pending until its search finishes', () async {
+      expect(container.read(mentionSearchPendingProvider(_args)), isTrue);
+      await passTypingPause();
+      expect(container.read(mentionSearchPendingProvider(_args)), isTrue);
+
+      session.searches.first.complete([_profile(_alice, 'Alice')]);
+      await container.pump();
+      expect(container.read(mentionSearchPendingProvider(_args)), isFalse);
+      expect(shownPubkeys(), [_alice]);
+    });
+
+    test(
+      'a new opening of a searched query shows its people at once',
+      () async {
+        const first = (channelId: _channelId, query: 'bo', opening: 2);
+        final close = open(first);
+        await passTypingPause();
+        session.searchFor('bo').complete([_profile(_bob, 'Bob')]);
+        await container.pump();
+        expect(shownFor(first), [_bob]);
+        close();
+        await container.pump();
+
+        const again = (channelId: _channelId, query: 'bo', opening: 3);
+        open(again);
+        expect(shownFor(again), [_bob]);
+        expect(container.read(mentionSearchPendingProvider(again)), isFalse);
+
+        // The query still searches again in the background.
+        final searched = session.searches.length;
+        await passTypingPause();
+        expect(session.searches, hasLength(searched + 1));
+      },
+    );
+
+    test('a longer query starts from the people its prefix found', () async {
+      await passTypingPause();
+      session.searches.first.complete([
+        _profile(_alice, 'Alice'),
+        _profile(_bob, 'Alba'),
+      ]);
+      await container.pump();
+
+      const longer = (channelId: _channelId, query: 'ali', opening: 1);
+      open(longer);
+      expect(shownFor(longer), [_alice]);
+      // Its own search can still add people, so it is pending.
+      expect(container.read(mentionSearchPendingProvider(longer)), isTrue);
+    });
   });
 }

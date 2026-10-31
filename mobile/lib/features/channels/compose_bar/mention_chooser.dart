@@ -3,10 +3,17 @@ part of '../compose_bar.dart';
 /// The rows the open mention chooser shows, and the shown rows that can no
 /// longer be chosen. A row keeps its place while the query and the opening
 /// stay the same (portable mention rules, section 6).
+///
+/// The chooser sits on the composer and grows upward, so a taller chooser
+/// moves every shown row. While the directory search can still add people
+/// for this query, `reserveHeight` holds the chooser at full height so a
+/// late row fills empty space instead of moving the row under a finger.
+/// The reservation lasts until the query or the opening changes.
 typedef _MentionRows = ({
   List<MentionCandidate> rows,
   Set<String> unavailable,
   bool searchFailed,
+  bool reserveHeight,
 });
 
 _MentionRows _useMentionRows(
@@ -15,22 +22,30 @@ _MentionRows _useMentionRows(
   required String? query,
   required int opening,
 }) {
-  final shown = useRef<(String, int, List<MentionCandidate>)?>(null);
+  final shown = useRef<(String, int, List<MentionCandidate>, bool)?>(null);
   if (query == null) {
     shown.value = null;
-    return (rows: const [], unavailable: const {}, searchFailed: false);
+    return (
+      rows: const [],
+      unavailable: const {},
+      searchFailed: false,
+      reserveHeight: false,
+    );
   }
   final args = (channelId: channelId, query: query, opening: opening);
   final ranked = ref.watch(mentionCandidatesProvider(args));
   final searchFailed = ref.watch(mentionSearchFailedProvider(args));
+  final pending = ref.watch(mentionSearchPendingProvider(args));
   final last = shown.value;
   final same = last != null && last.$1 == query && last.$2 == opening;
   final result = stableMentionRows(same ? last.$3 : const [], ranked);
-  shown.value = (query, opening, result.rows);
+  final reserveHeight = pending || (same && last.$4);
+  shown.value = (query, opening, result.rows, reserveHeight);
   return (
     rows: result.rows,
     unavailable: result.unavailable,
     searchFailed: searchFailed,
+    reserveHeight: reserveHeight,
   );
 }
 
