@@ -7,6 +7,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/agents/owned_agent_directory.dart';
 import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../../shared/agents/remote_agents.dart';
+import '../../shared/deeplink/deep_link.dart';
+import '../../shared/widgets/feedback_snackbar.dart';
 import '../../shared/community/community_provider.dart';
 import '../../shared/me/default_agent.dart';
 import '../../shared/hosted/hosted_flow.dart';
@@ -21,6 +23,7 @@ import '../../shared/widgets/agent_navigation_icon.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
 import '../profile/user_profile_sheet.dart';
+import 'agent_creation_draft.dart';
 import 'create_agent_page.dart';
 import 'agent_card.dart';
 import 'remote_agent_model_control.dart';
@@ -32,16 +35,35 @@ import 'delete_agent_action.dart';
 import 'agent_identity_sections.dart';
 import 'bestie_agent_action.dart';
 
+Route<Channel>? _openAgentsRoute;
+
 /// Opens the active community's full-page Agents navigation stack.
-Future<void> showAgents(BuildContext context) async {
+///
+/// A [draft] from a `buzz://agent/new` link opens [CreateAgentPage] pre-filled
+/// once the account, registry and community gates allow it.
+Future<void> showAgents(
+  BuildContext context, {
+  AgentCreationDeepLink? draft,
+}) async {
   final container = ProviderScope.containerOf(context);
   final controller = container.read(remoteAgentControllerProvider);
   unawaited(controller.run(controller.refresh));
-  final channel = await Navigator.of(context).push<Channel>(
-    MaterialPageRoute(
-      builder: (_) => _AgentsNavigation(controller: controller),
-    ),
+  final navigator = Navigator.of(context);
+  // A link replaces an Agents stack that is already open instead of stacking
+  // a second one on top of it.
+  final open = _openAgentsRoute;
+  if (draft != null &&
+      open != null &&
+      open.isActive &&
+      open.navigator == navigator) {
+    navigator.removeRoute(open);
+  }
+  final route = MaterialPageRoute<Channel>(
+    builder: (_) => _AgentsNavigation(controller: controller, draft: draft),
   );
+  _openAgentsRoute = route;
+  final channel = await navigator.push(route);
+  if (identical(_openAgentsRoute, route)) _openAgentsRoute = null;
   if (channel != null && context.mounted) {
     await Navigator.of(context).push<void>(
       MaterialPageRoute(builder: (_) => ChannelDetailPage(channel: channel)),
@@ -50,9 +72,10 @@ Future<void> showAgents(BuildContext context) async {
 }
 
 class _AgentsNavigation extends HookConsumerWidget {
-  const _AgentsNavigation({required this.controller});
+  const _AgentsNavigation({required this.controller, this.draft});
 
   final RemoteAgentController controller;
+  final AgentCreationDeepLink? draft;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -75,6 +98,7 @@ class _AgentsNavigation extends HookConsumerWidget {
             color: context.colors.surface,
             child: AgentsPage(
               controller: controller,
+              draft: draft,
               onClose: () => Navigator.of(context).pop(),
               onSelect: (pubkey) async {
                 final channel = await showBuzzModalBottomSheet<Channel>(
@@ -130,8 +154,12 @@ class AgentsPage extends HookConsumerWidget {
     required this.controller,
     required this.onClose,
     required this.onSelect,
+    this.draft,
     super.key,
   });
+
+  /// Link-supplied draft to open in [CreateAgentPage] when permitted.
+  final AgentCreationDeepLink? draft;
   final VoidCallback onClose;
   final ValueChanged<String> onSelect;
   final RemoteAgentController controller;
@@ -224,6 +252,28 @@ class AgentsPage extends HookConsumerWidget {
       }
     }
 
+    Future<void> openCreate([AgentCreationDraft? initialDraft]) async {
+      if (community == null) return;
+      creating.value = true;
+      try {
+        await Navigator.of(context).push<bool>(
+          MaterialPageRoute(
+            builder: (_) => CreateAgentPage(
+              controller: controller,
+              community: community,
+              initialDraft: initialDraft,
+              onCreated: () {
+                ref.invalidate(agentDirectoryProvider);
+                ref.invalidate(ownedAgentDirectoryProvider);
+              },
+            ),
+          ),
+        );
+      } finally {
+        if (context.mounted) creating.value = false;
+      }
+    }
+
     final VoidCallback? addAgent =
         community == null || controller.busy || creating.value || signingIn
         ? null
@@ -232,24 +282,87 @@ class AgentsPage extends HookConsumerWidget {
               await flow.reconnectAccount();
               return;
             }
-            creating.value = true;
-            try {
-              await Navigator.of(context).push<bool>(
-                MaterialPageRoute(
-                  builder: (_) => CreateAgentPage(
-                    controller: controller,
-                    community: community,
-                    onCreated: () {
-                      ref.invalidate(agentDirectoryProvider);
-                      ref.invalidate(ownedAgentDirectoryProvider);
-                    },
-                  ),
-                ),
-              );
-            } finally {
-              if (context.mounted) creating.value = false;
-            }
+            await openCreate();
           };
+
+    // Open a link's draft once: sign in first if needed, then wait for the
+    // registry so an unfinished setup is known before anything is offered.
+    final draftStep = useRef(draft == null ? _DraftStep.done : _DraftStep.wait);
+    // Looked up during build: effects cannot read inherited widgets, and
+    // snack bars cannot show while a frame is building.
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    void drop(String message) {
+      draftStep.value = _DraftStep.done;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        messenger?.showFeedbackSnackBar(
+          SnackBar(content: Text(message)),
+          kind: ToastKind.error,
+        );
+      });
+    }
+
+    useEffect(
+      () {
+        final link = draft;
+        if (link == null || draftStep.value == _DraftStep.done) return null;
+        if (community == null || controller.busy || signingIn) return null;
+        if (!supportsRemoteAgents(community)) {
+          drop('Remote agents aren’t available in this community.');
+          return null;
+        }
+        if (controller.account.account == null) {
+          if (draftStep.value == _DraftStep.wait) {
+            draftStep.value = _DraftStep.signingIn;
+            unawaited(flow.reconnectAccount());
+          } else {
+            drop(
+              'Sign in to Builderlab to create this agent. Reopen the link.',
+            );
+          }
+          return null;
+        }
+        if (controller.listingFailed) {
+          drop('Couldn’t load your agents. Reopen the link to retry.');
+          return null;
+        }
+        if (controller.pending != null) {
+          drop(
+            'Finish your unfinished agent setup first, then reopen the link.',
+          );
+          return null;
+        }
+        draftStep.value = _DraftStep.done;
+        final client = ref.read(agentCardClientProvider)();
+        unawaited(() async {
+          // Hold Create (+) off while the card loads, like an open form does.
+          // Deferred past this build: hooks state can't change mid-build.
+          await Future<void>.value();
+          if (!context.mounted) return client.close();
+          creating.value = true;
+          final AgentCreationDraft resolved;
+          try {
+            resolved = await AgentCreationDraft.fetch(link, client);
+          } on AgentCardException catch (error) {
+            if (context.mounted) {
+              creating.value = false;
+              drop(error.message);
+            }
+            return;
+          } finally {
+            client.close();
+          }
+          if (context.mounted) await openCreate(resolved);
+        }());
+        return null;
+      },
+      [
+        controller.busy,
+        signingIn,
+        flow.stage,
+        community?.id,
+        controller.account.account?.subject,
+      ],
+    );
 
     final headerStyle = context.textTheme.titleMedium?.copyWith(
       fontSize: 22,
@@ -391,3 +504,6 @@ class AgentsPage extends HookConsumerWidget {
     );
   }
 }
+
+/// Progress of opening a link's draft: waiting on gates, in sign-in, or done.
+enum _DraftStep { wait, signingIn, done }

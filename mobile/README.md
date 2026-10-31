@@ -29,6 +29,44 @@ names, not URLs or wildcards. The list does not add trusted account servers:
 configured domains outside the supported Builderlab realm cannot use hosted
 setup. `BUZZ_BUILDERLAB_URL` still selects the trusted account environment.
 
+## Agent creation links
+
+`buzz://agent/new?card=<id>` opens the Agents page and an editable, pre-filled
+Create agent form for the active community. Opening a link never creates an
+agent. A Builderlab agent card's QR leads to its share page
+(`app.builderlab.xyz/a/<id>`), whose **Add to Buzz** button opens this link.
+
+The app fetches `<avatars CDN>/<id>/agent.json` from the CDN for this build's
+Builderlab environment (`HostedEnvironment.avatarsCdnOrigin`), never from a
+host named by the link. The link carries only the id, so instructions can be
+any length while the QR stays small.
+
+```json
+{
+  "name": "Scout",
+  "avatarUrl": "https://<avatars CDN>/<id>/<revision>/avatar.png",
+  "instructions": "Reply concisely.",
+  "model": "<model catalog id>",
+  "reasoningEffort": "high"
+}
+```
+
+- Every field is optional and left for the user when missing. Cards published
+  so far have only `name` and `avatarUrl`. snake_case and a few synonyms
+  (`system_prompt`, `model_id`, `effort`, a `model` object with an `id`) are
+  also read. Other fields are ignored.
+- The avatar is used only if it is an `https` URL on the same CDN; otherwise the
+  form picks its usual default. It stays editable.
+- `model` and `reasoningEffort` are pre-selected only if the live model catalog
+  offers them (the effort only for that model).
+- The link waits for sign-in and community load. It needs Builderlab login and a
+  hosted community that supports remote agents, and is dropped with a message if
+  an unfinished agent setup exists (resume or discard that first) or the card
+  can't be loaded.
+
+The parser is `lib/shared/deeplink/agent_creation_link.dart`; the card reader
+is `lib/features/agents/agent_creation_draft.dart`.
+
 ## Hosted relay authentication
 
 `--dart-define=BUZZ_HOSTED_RELAY_AUTH=true` enables Builderlab relay assertions

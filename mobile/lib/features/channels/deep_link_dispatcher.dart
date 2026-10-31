@@ -4,6 +4,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/agents/agents_surface.dart';
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/deeplink/pending_deep_link_provider.dart';
 import '../../shared/relay/relay.dart';
@@ -89,6 +90,12 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
 
   void _maybeDispatch(BuzzDeepLink? link) {
     if (link == null || _preparingInvite || _handlingOnboarding) return;
+    if (link is AgentCreationDeepLink) {
+      // Held until signed in and the community is hydrated.
+      if (!widget.dispatchMessageLinks) return;
+      unawaited(_dispatchAgentCreation(link));
+      return;
+    }
     if (widget.onboardingHandler != null &&
         (link is InviteDeepLink ||
             link is NostrBindDeepLink ||
@@ -110,6 +117,41 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
     }
 
     _dispatchNavigableLink(link);
+  }
+
+  Future<void> _dispatchAgentCreation(AgentCreationDeepLink link) async {
+    _handlingOnboarding = true;
+    try {
+      final handler = ref.read(agentCreationSurfaceProvider);
+      if (handler == null) {
+        ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+          const SnackBar(
+            content: Text('Agent creation is unavailable in this build.'),
+          ),
+          kind: ToastKind.error,
+        );
+      } else {
+        await handler(context, link);
+      }
+    } catch (error) {
+      debugPrint('deep-link: agent draft failed: $error');
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+          const SnackBar(
+            content: Text('Couldn’t open this agent draft. Reopen the link.'),
+          ),
+          kind: ToastKind.error,
+        );
+      }
+    } finally {
+      if (mounted) {
+        if (ref.read(pendingDeepLinkProvider) == link) {
+          ref.read(pendingDeepLinkProvider.notifier).consume();
+        }
+        _handlingOnboarding = false;
+        _maybeDispatch(ref.read(pendingDeepLinkProvider));
+      }
+    }
   }
 
   Future<void> _dispatchOnboarding(BuzzDeepLink link) async {
