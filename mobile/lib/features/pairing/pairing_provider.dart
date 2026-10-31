@@ -945,6 +945,9 @@ class PairingNotifier extends Notifier<PairingState> {
     _validationSocket = socket;
     try {
       await socket.connect().timeout(const Duration(seconds: 8));
+      if (socket.state != SocketState.connected) {
+        throw StateError('Relay did not authenticate the paired identity');
+      }
     } finally {
       if (identical(_validationSocket, socket)) _validationSocket = null;
       await socket.disconnect();

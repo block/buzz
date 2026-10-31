@@ -1,5 +1,4 @@
 import 'message_swipe_reply.dart';
-import 'agent_reply_handoff.dart';
 import 'huddle_timeline.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
@@ -19,6 +18,7 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../../shared/emoji/emoji_burst.dart';
+import '../../shared/me/me_assistants.dart';
 import '../../shared/me/me_sync.dart';
 import '../../shared/me/me_search_placement.dart';
 import 'me/me_assistant_picker.dart';
@@ -56,8 +56,8 @@ import 'channel_management_provider.dart';
 import 'channel_sections/channel_sections_provider.dart';
 import 'channel_messages_provider.dart';
 import 'channel_typing_provider.dart';
-import 'inline_agent_typing.dart';
-import 'typing_motion_preview.dart';
+import 'conversation_activity.dart';
+import 'conversation_activity_state.dart';
 import 'channel_ids_by_name_provider.dart';
 import 'channels_provider.dart';
 import 'unread_badge/observed_unread_event.dart';
@@ -100,6 +100,8 @@ part 'channel_detail_page/placement_route.dart';
 part 'channel_detail_page/empty_messages.dart';
 part 'channel_detail_page/oldest_navigation.dart';
 part 'channel_detail_page/system_rows.dart';
+part 'channel_detail_page/thread_working.dart';
+part 'channel_detail_page/composer_activity.dart';
 part 'channel_detail_page/activity_members_sheet.dart';
 part 'channel_detail_page/huddle_sheet.dart';
 part 'channel_detail_page/huddle_call_avatar.dart';
@@ -363,17 +365,6 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
         initialForcedUnreadMessageIdsRef.value;
     // Ownership comes from the signing identity, not reloadable profile metadata.
     final currentPubkey = ref.watch(currentPubkeyProvider);
-    // Me flattens replies into this timeline, so include their typing signals.
-    // Ordinary channels keep thread activity inside the thread view.
-    final typingEntries = ref
-        .watch(
-          visibleTypingProvider(
-            channel.id,
-            selfPubkey: currentPubkey,
-            include: (e) => personalChat || e.threadHeadId == null,
-          ),
-        )
-        .entries;
     final baseChannel = listedChannel ?? channel;
     final resolvedChannel =
         detailsAsync.whenData(baseChannel.mergeDetails).value ?? baseChannel;
@@ -453,6 +444,18 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       ),
       channelBotPubkeys:
           channelBotPubkeysState.asData?.value ?? const <String>{},
+    );
+    // As on desktop, the user's agents working in a thread show on its root
+    // message. Me counts thread typing as its own conversation's.
+    final threadWorking = _threadWorkingAgents(
+      ref,
+      personalChat
+          ? ''
+          : ref.watch(
+              channelTypingProvider(
+                channel.id,
+              ).select((all) => _threadTypingKey(all, currentPubkey)),
+            ),
     );
     useEffect(() {
       if (sessionStatus != SessionStatus.connected ||
@@ -818,7 +821,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                           data: (events) {
                             return _MessageList(
                               notifier: ref.watch(messagesProvider.notifier),
-                              inlineTyping: typingEntries,
+                              threadWorking: threadWorking,
                               stickyDateHeaderState: stickyDateHeaderState,
                               entries: timelineEntries,
                               allMessages: timelineMessages,
@@ -886,6 +889,15 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      _ComposerActivity(
+                        scope: ActivityScope(
+                          channelId: channel.id,
+                          selfPubkey: currentPubkey,
+                          allThreads: personalChat,
+                        ),
+                        channel: resolvedChannel,
+                        messages: timelineMessages,
+                      ),
                       ?assistant.pendingNotice,
                       ComposeBar(
                         channelId: channel.id,

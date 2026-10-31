@@ -105,36 +105,14 @@ impl Db {
 #[cfg(test)]
 mod postgres_tests {
     use super::*;
+    use crate::test_support::ScratchDb;
     use sqlx::postgres::PgPoolOptions;
-    use sqlx::PgPool;
-    use uuid::Uuid;
-
-    async fn create_scratch_db(admin: &PgPool) -> (PgPool, String) {
-        let name = format!("storage_accounting_{}", Uuid::new_v4().simple());
-        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
-            .execute(admin)
-            .await
-            .expect("create scratch db");
-        let base = crate::test_support::database_url();
-        let idx = base.rfind('/').expect("db url has path");
-        let pool = PgPool::connect(&format!("{}/{name}", &base[..idx]))
-            .await
-            .expect("connect scratch db");
-        crate::migration::run_migrations(&pool)
-            .await
-            .expect("migrate scratch db");
-        (pool, name)
-    }
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn complete_snapshot_replaces_atomically_and_worker_lock_excludes_overlap() {
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&crate::test_support::database_url())
-            .await
-            .expect("connect admin");
-        let (pool, name) = create_scratch_db(&admin).await;
+        let (pool, _scratch) =
+            ScratchDb::migrated(&crate::test_support::database_url(), "storage_accounting").await;
         let first = Db::from_pool(pool.clone());
         let second = Db::from_pool(pool.clone());
 
@@ -169,16 +147,6 @@ mod postgres_tests {
         assert_eq!(stored.duration_ms, 20);
         assert_eq!(stored.max_objects, 200);
         assert_eq!(stored.code_sha, "b");
-
-        drop(leader);
-        drop(first);
-        drop(second);
-        pool.close().await;
-        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
-        )))
-        .execute(&admin)
-        .await;
     }
 
     #[tokio::test]
@@ -189,7 +157,8 @@ mod postgres_tests {
             .connect(&crate::test_support::database_url())
             .await
             .expect("connect admin");
-        let (pool, name) = create_scratch_db(&admin).await;
+        let (pool, _scratch) =
+            ScratchDb::migrated(&crate::test_support::database_url(), "storage_accounting").await;
         let first = Db::from_pool(pool.clone());
         let second = Db::from_pool(pool.clone());
 
@@ -242,16 +211,5 @@ mod postgres_tests {
         assert_eq!(stored.duration_ms, 20);
         assert_eq!(stored.max_objects, 200);
         assert_eq!(stored.code_sha, "b");
-
-        drop(stale_leader);
-        drop(fresh_leader);
-        drop(first);
-        drop(second);
-        pool.close().await;
-        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
-        )))
-        .execute(&admin)
-        .await;
     }
 }

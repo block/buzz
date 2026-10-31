@@ -125,7 +125,6 @@ void main() {
                 defaultAgentBuilder: (context) => DefaultAgentLauncher(
                   onChooseAgent: () => showAgents(context),
                 ),
-                hasUnreadInbox: false,
                 settingsPageBuilder: (_) => SettingsPage(
                   embedded: true,
                   profileHeader: const SettingsProfileHeader(),

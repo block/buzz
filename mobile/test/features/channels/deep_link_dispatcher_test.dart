@@ -827,7 +827,7 @@ void main() {
       );
       await tester.pump();
       await tester.pump();
-      await recovery.started.future;
+      expect(recovery.started.isCompleted, isTrue);
 
       expect(find.text('Finish setting up'), findsOneWidget);
       expect(find.text('Finishing setup…'), findsOneWidget);
@@ -893,7 +893,7 @@ void main() {
     );
     await tester.pump();
     await tester.pump();
-    await recovery.started.future;
+    expect(recovery.started.isCompleted, isTrue);
 
     recovery.completeError(Exception('relay did not respond'));
     await tester.pumpAndSettle();

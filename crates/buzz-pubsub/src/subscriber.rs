@@ -6,10 +6,10 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use nostr::JsonUtil;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
 
 use crate::topic::EventTopicKey;
-use crate::ChannelEvent;
+use crate::{ChannelEvent, LinkState};
 
 /// Initial reconnect backoff (1 second).
 const BACKOFF_INITIAL_SECS: u64 = 1;
@@ -21,12 +21,24 @@ pub(crate) type DesiredTopics = Arc<Mutex<HashMap<EventTopicKey, usize>>>;
 
 /// Commands sent from relay subscription registration/removal to the Redis
 /// pub/sub task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) enum SubscriptionCommand {
     /// Ensure the topic is subscribed on the current Redis pub/sub connection.
     Subscribe(EventTopicKey),
     /// Unsubscribe only if the desired refcount is still zero when processed.
     UnsubscribeIfIdle(EventTopicKey),
+    /// Subscribe if needed, then answer with the link epoch on which the
+    /// server has confirmed the subscription.
+    Confirm(EventTopicKey, oneshot::Sender<u64>),
+}
+
+/// Record a possible loss of messages: the epoch advances, so every reader
+/// that started on the old epoch can tell.
+fn mark_loss(link: &watch::Sender<LinkState>, up: bool) {
+    link.send_modify(|state| {
+        state.epoch += 1;
+        state.up = up;
+    });
 }
 
 /// Runs a dynamically scoped subscriber and forwards events to broadcast.
@@ -39,18 +51,24 @@ pub(crate) async fn run_subscriber(
     broadcast_tx: broadcast::Sender<ChannelEvent>,
     desired_topics: DesiredTopics,
     mut subscription_rx: mpsc::Receiver<SubscriptionCommand>,
+    link: watch::Sender<LinkState>,
 ) {
     let mut backoff_secs = BACKOFF_INITIAL_SECS;
 
     loop {
-        match connect_and_subscribe(
+        let result = connect_and_subscribe(
             &redis_url,
             &broadcast_tx,
             desired_topics.clone(),
             &mut subscription_rx,
+            &link,
         )
-        .await
-        {
+        .await;
+        if link.borrow().up {
+            // Messages published while the link is down are not replayed.
+            mark_loss(&link, false);
+        }
+        match result {
             Ok(()) => {
                 // Stream ended cleanly (Redis returned None). The connection was
                 // established and ran successfully, so reset backoff to the initial
@@ -77,6 +95,7 @@ async fn connect_and_subscribe(
     broadcast_tx: &broadcast::Sender<ChannelEvent>,
     desired_topics: DesiredTopics,
     subscription_rx: &mut mpsc::Receiver<SubscriptionCommand>,
+    link: &watch::Sender<LinkState>,
 ) -> Result<(), redis::RedisError> {
     let client = redis::Client::open(redis_url)?;
     let conn = client.get_async_pubsub().await?;
@@ -101,6 +120,7 @@ async fn connect_and_subscribe(
         topic_count = active_topics.len(),
         "Redis pub/sub subscriber connected with dynamic scoped subscriptions"
     );
+    mark_loss(link, true);
 
     loop {
         tokio::select! {
@@ -111,6 +131,14 @@ async fn connect_and_subscribe(
                         if active_topics.insert(channel.clone()) {
                             sink.subscribe(&channel).await?;
                         }
+                    }
+                    SubscriptionCommand::Confirm(topic, reply) => {
+                        let channel = topic.redis_channel();
+                        if !active_topics.contains(&channel) {
+                            sink.subscribe(&channel).await?;
+                            active_topics.insert(channel);
+                        }
+                        let _ = reply.send(link.borrow().epoch);
                     }
                     SubscriptionCommand::UnsubscribeIfIdle(topic) => {
                         if desired_refcount(&desired_topics, topic).await == 0 {
@@ -132,6 +160,7 @@ async fn connect_and_subscribe(
                     Ok(p) => p,
                     Err(e) => {
                         tracing::warn!("Failed to get pub/sub message payload: {e}");
+                        mark_loss(link, true);
                         continue;
                     }
                 };
@@ -149,6 +178,7 @@ async fn connect_and_subscribe(
                     Ok(e) => e,
                     Err(e) => {
                         tracing::warn!("Failed to deserialize event from pub/sub: {e}");
+                        mark_loss(link, true);
                         continue;
                     }
                 };
