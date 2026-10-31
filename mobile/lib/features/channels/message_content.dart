@@ -39,6 +39,7 @@ import 'message_content/preview_text.dart';
 import 'message_media.dart';
 import 'message_content/bubble_segments.dart';
 import 'message_content/buzz_link_label.dart';
+import 'message_content/channel_token_pattern.dart';
 import 'message_mention_pill.dart';
 import 'message_gallery.dart';
 import 'message_gallery_frame.dart';

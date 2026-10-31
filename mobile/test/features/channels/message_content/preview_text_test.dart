@@ -215,6 +215,30 @@ void main() {
       );
     });
 
+    test('channel tokens end at punctuation that follows a word', () {
+      for (final (before, after) in [
+        ('', "'s plan"),
+        ('', '\u2019s plan'),
+        ('"', '"'),
+        ('\u201C', '\u201D'),
+        ('\u2018', '\u2019'),
+        ('\u00AB', '\u00BB'),
+        ('', '\u2026'),
+        ('', '\u2014next'),
+        ('', '\u2013next'),
+      ]) {
+        expect(
+          _pieces('see $before#general$after', channelNames: {'general': 'c1'}),
+          [
+            PreviewText('see $before'),
+            const PreviewChannel('general'),
+            PreviewText(after),
+          ],
+          reason: '$before#general$after',
+        );
+      }
+    });
+
     test('a buzz channel link becomes a chip with the channel name', () {
       expect(
         _pieces(
