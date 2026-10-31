@@ -693,6 +693,12 @@ where
 /// Tracks active Nostr WebSocket connections and provides message routing by connection ID.
 pub struct ConnectionManager {
     connections: DashMap<Uuid, ConnEntry>,
+    /// Admitted connections per (community, authenticated pubkey), so a
+    /// disconnect can ask whether the key is still online without scanning
+    /// every connection. Kept in step with each entry's `admitted` flag and
+    /// `authenticated_pubkey`, which change only under that pubkey's write
+    /// lock; a key is removed when its count reaches zero.
+    admitted_by_pubkey: DashMap<(CommunityId, Vec<u8>), usize>,
     /// Sticky drain flag set by [`Self::drain_all`]. Registrations that land
     /// after the drain snapshot self-signal, so no upgrade-vs-shutdown
     /// interleaving can produce a connection that misses the restart close.
@@ -704,6 +710,7 @@ impl ConnectionManager {
     pub fn new() -> Self {
         Self {
             connections: DashMap::new(),
+            admitted_by_pubkey: DashMap::new(),
             draining: AtomicBool::new(false),
         }
     }
@@ -765,7 +772,34 @@ impl ConnectionManager {
 
     /// Removes a connection from the registry.
     pub fn deregister(&self, conn_id: Uuid) {
-        self.connections.remove(&conn_id);
+        if let Some((_, entry)) = self.connections.remove(&conn_id) {
+            let pubkey = entry
+                .authenticated_pubkey
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if entry.admitted.load(Ordering::Acquire) {
+                self.unindex_admitted(entry.community_id, pubkey.as_deref());
+            }
+        }
+    }
+
+    fn index_admitted(&self, community_id: CommunityId, pubkey: Option<&[u8]>) {
+        if let Some(pubkey) = pubkey {
+            *self
+                .admitted_by_pubkey
+                .entry((community_id, pubkey.to_vec()))
+                .or_insert(0) += 1;
+        }
+    }
+
+    fn unindex_admitted(&self, community_id: CommunityId, pubkey: Option<&[u8]>) {
+        if let Some(pubkey) = pubkey {
+            self.admitted_by_pubkey
+                .remove_if_mut(&(community_id, pubkey.to_vec()), |_, count| {
+                    *count = count.saturating_sub(1);
+                    *count == 0
+                });
+        }
     }
 
     /// Record the authenticated pubkey for a connection after NIP-42 succeeds.
@@ -788,6 +822,10 @@ impl ConnectionManager {
                 if let Ok(mut session_slot) = entry.nip_fi.write() {
                     *session_slot = nip_fi;
                 }
+                if entry.admitted.load(Ordering::Acquire) {
+                    self.unindex_admitted(entry.community_id, slot.as_deref());
+                    self.index_admitted(entry.community_id, Some(&pubkey_bytes));
+                }
                 *slot = Some(pubkey_bytes);
             }
         }
@@ -804,21 +842,21 @@ impl ConnectionManager {
     /// Mark `conn_id` admitted, once AUTH has succeeded.
     pub fn mark_admitted(&self, conn_id: Uuid) {
         if let Some(entry) = self.connections.get(&conn_id) {
-            entry.admitted.store(true, Ordering::Release);
+            let pubkey = entry
+                .authenticated_pubkey
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !entry.admitted.swap(true, Ordering::AcqRel) {
+                self.index_admitted(entry.community_id, pubkey.as_deref());
+            }
         }
     }
 
     /// Whether `pubkey_bytes` has an admitted connection in one community on
     /// this pod. Sockets still mid-admission do not count.
     pub fn has_admitted_connection(&self, community_id: CommunityId, pubkey_bytes: &[u8]) -> bool {
-        self.connections.iter().any(|entry| {
-            entry.community_id == community_id
-                && entry.admitted.load(Ordering::Acquire)
-                && entry
-                    .authenticated_pubkey
-                    .read()
-                    .is_ok_and(|value| value.as_deref() == Some(pubkey_bytes))
-        })
+        self.admitted_by_pubkey
+            .contains_key(&(community_id, pubkey_bytes.to_vec()))
     }
 
     /// Return live connection IDs authenticated as `pubkey_bytes` in one community.
@@ -1205,6 +1243,23 @@ impl Default for ConnectionManager {
 /// here.
 pub const OPEN_CHANNELS_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// How long a pod serves a cached ban/timeout row after the database read
+/// that produced it began (see [`AppState::restriction_cache`]).
+pub const RESTRICTION_CACHE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How long a pod serves a cached host → community mapping after the
+/// database read that produced it began (see [`AppState::tenant_host_cache`]).
+pub const TENANT_HOST_CACHE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// A cached restriction row and when the read that produced it began.
+#[derive(Debug, Clone)]
+pub struct CachedRestriction {
+    /// The restriction row as read.
+    pub state: buzz_db::moderation::RestrictionState,
+    /// When the database read that produced it began.
+    pub read_at: Instant,
+}
+
 /// A community's listed open channel IDs and when the read that listed them
 /// began.
 #[derive(Debug)]
@@ -1303,6 +1358,10 @@ pub struct AppState {
     /// the community's accessible channels, and used only for
     /// [`OPEN_CHANNELS_MAX_AGE`] after its database read began.
     pub open_channels_cache: Arc<moka::sync::Cache<CommunityId, Arc<OpenChannels>>>,
+    /// Per-community gate held while a pod reads a community's open set, so
+    /// concurrent misses wait for that read instead of each issuing their own
+    /// (see [`AppState::get_accessible_channel_ids_cached`]).
+    pub open_channels_reads: Arc<moka::sync::Cache<CommunityId, Arc<tokio::sync::Mutex<()>>>>,
     /// Per-community channel visibility string, used to gate the private-channel fan-out
     /// access check so open channels stay zero-cost. Invalidated on a flip.
     pub channel_visibility_cache: Arc<moka::sync::Cache<(CommunityId, Uuid), String>>,
@@ -1392,18 +1451,26 @@ pub struct AppState {
     /// uncached read as its durable write fence; on the ephemeral path archive
     /// also disconnects the community's live sockets.
     pub serving_active_cache: Arc<moka::sync::Cache<CommunityId, bool>>,
-    /// Ephemeral-path cache of the raw ban/timeout row, not the verdict, so a
-    /// timeout still lifts the moment `muted_until` passes. (`banned` is
-    /// computed at read time, so an expiring ban can outlive its expiry by up
-    /// to the TTL.) Key: (community, pubkey bytes). The 30s TTL is the only
-    /// staleness bound: on every pod and for every restriction writer, the
-    /// ephemeral path sees a ban/timeout change within 30s. As a best effort,
-    /// signed moderation commands (9040–9043) also drop the target's own entry
-    /// on the pod that handles them; owned agents' entries, other pods, and the
-    /// admin/report paths just age out. Persistent ingest stays uncached.
+    /// Cache of the raw ban/timeout row, not the verdict, so a timeout still
+    /// lifts the moment `muted_until` passes. (`banned` is computed at read
+    /// time, so an expiring ban can outlive its expiry by up to
+    /// [`RESTRICTION_CACHE_MAX_AGE`].) Key: (community, pubkey bytes). An entry
+    /// is served only for [`RESTRICTION_CACHE_MAX_AGE`] after its read began,
+    /// which is the only staleness bound: on every pod and for every
+    /// restriction writer, a cached reader sees a ban/timeout change within
+    /// that long. As a best effort, signed moderation commands (9040–9043)
+    /// also drop the target's own entry on the pod that handles them; owned
+    /// agents' entries, other pods, and the admin/report paths just age out.
+    /// Socket admission and moderation-command actors read fresh: a grant that
+    /// outlives the bound must not rest on a cached verdict.
     #[allow(clippy::type_complexity)]
-    pub restriction_cache:
-        Arc<moka::sync::Cache<(CommunityId, Vec<u8>), buzz_db::moderation::RestrictionState>>,
+    pub restriction_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), CachedRestriction>>,
+    /// Normalized request host → community, from the row-zero host binding
+    /// ([`crate::tenant::bind_community`]). Only mapped hosts are cached, and
+    /// an entry is served only for [`TENANT_HOST_CACHE_MAX_AGE`] after its read
+    /// began: a host remapped, archived or deleted elsewhere resolves to its
+    /// old community for at most that long.
+    pub tenant_host_cache: Arc<moka::sync::Cache<String, (CommunityId, Instant)>>,
 
     /// Runtime conformance tracer. Production binds [`crate::conformance::NoopTracer`]
     /// (zero cost). Conformance tests bind [`crate::conformance::JsonlTracer`] to
@@ -1623,6 +1690,12 @@ impl AppState {
                     .time_to_live(std::time::Duration::from_secs(10))
                     .build(),
             ),
+            open_channels_reads: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(10_000)
+                    .time_to_idle(std::time::Duration::from_secs(60))
+                    .build(),
+            ),
             channel_visibility_cache: Arc::new(
                 moka::sync::Cache::builder()
                     .max_capacity(10_000)
@@ -1680,10 +1753,18 @@ impl AppState {
                     .time_to_live(std::time::Duration::from_secs(10))
                     .build(),
             ),
+            // Readers use an entry only for `RESTRICTION_CACHE_MAX_AGE`; the
+            // TTL just reclaims memory.
             restriction_cache: Arc::new(
                 moka::sync::Cache::builder()
                     .max_capacity(100_000)
-                    .time_to_live(std::time::Duration::from_secs(30))
+                    .time_to_live(std::time::Duration::from_secs(10))
+                    .build(),
+            ),
+            tenant_host_cache: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(10_000)
+                    .time_to_live(std::time::Duration::from_secs(10))
                     .build(),
             ),
             // Default to NoopTracer: production builds pay zero cost.
@@ -1808,8 +1889,10 @@ impl AppState {
         Ok(result)
     }
 
-    /// `moderation_restriction_state` with a 30-second cache, for the
-    /// ephemeral path only. Errors are not cached.
+    /// `moderation_restriction_state` served from [`Self::restriction_cache`]
+    /// for [`RESTRICTION_CACHE_MAX_AGE`] after the read that produced it
+    /// began. For per-request gates (HTTP requests, publishes, ephemeral
+    /// pulses) whose grant ends with the request. Errors are not cached.
     pub async fn restriction_state_cached(
         &self,
         community_id: CommunityId,
@@ -1817,21 +1900,30 @@ impl AppState {
     ) -> Result<buzz_db::moderation::RestrictionState, buzz_db::DbError> {
         let key = (community_id, pubkey.to_vec());
         if let Some(cached) = self.restriction_cache.get(&key) {
-            metrics::counter!("buzz_restriction_cache_hits_total").increment(1);
-            return Ok(cached);
+            if cached.read_at.elapsed() < RESTRICTION_CACHE_MAX_AGE {
+                metrics::counter!("buzz_restriction_cache_hits_total").increment(1);
+                return Ok(cached.state);
+            }
         }
         metrics::counter!("buzz_restriction_cache_misses_total").increment(1);
-        let result = self
+        let read_at = Instant::now();
+        let state = self
             .db
             .moderation_restriction_state(community_id, pubkey)
             .await?;
-        self.restriction_cache.insert(key, result.clone());
-        Ok(result)
+        self.restriction_cache.insert(
+            key,
+            CachedRestriction {
+                state: state.clone(),
+                read_at,
+            },
+        );
+        Ok(state)
     }
 
     /// Best-effort drop of a pubkey's cached restriction row after a signed
-    /// ban, unban, timeout or untimeout. This pod and this key only; the
-    /// 30-second TTL is the actual bound everywhere else.
+    /// ban, unban, timeout or untimeout. This pod and this key only;
+    /// [`RESTRICTION_CACHE_MAX_AGE`] is the actual bound everywhere else.
     pub fn invalidate_restriction_cache(&self, community_id: CommunityId, pubkey: &[u8]) {
         self.restriction_cache
             .invalidate(&(community_id, pubkey.to_vec()));
@@ -2356,28 +2448,74 @@ impl AppState {
                 ids
             }
         };
-        let open = match self.open_channels_cache.get(&community_id) {
-            Some(open) if open.read_at.elapsed() < OPEN_CHANNELS_MAX_AGE => {
-                metrics::counter!("buzz_open_channels_cache_hits_total").increment(1);
-                open
-            }
-            cached => {
-                let reason = if cached.is_some() {
-                    "expired"
-                } else {
-                    "absent"
-                };
-                metrics::counter!("buzz_open_channels_cache_misses_total", "reason" => reason)
-                    .increment(1);
-                let read_at = Instant::now();
-                let ids = self.db.get_listed_open_channel_ids(community_id).await?;
-                let open = Arc::new(OpenChannels { ids, read_at });
-                self.open_channels_cache.insert(community_id, open.clone());
-                open
-            }
-        };
+        let open = self.open_channels(community_id).await?;
         buzz_db::channel_members::merge_channel_ids(&mut ids, &open.ids);
         Ok(ids)
+    }
+
+    /// The community's open set from [`Self::open_channels_cache`] while it
+    /// is younger than [`OPEN_CHANNELS_MAX_AGE`], else from a fresh read.
+    ///
+    /// Concurrent misses share one read: the first takes the community's
+    /// gate in [`Self::open_channels_reads`] and reads; the rest wait for it
+    /// to finish and use its set. A waiter whose leader failed or was
+    /// cancelled reads on its own rather than queueing behind another leader,
+    /// so a failing database costs each caller at most two reads' time.
+    async fn open_channels(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<Arc<OpenChannels>, buzz_db::DbError> {
+        let fresh = || {
+            self.open_channels_cache
+                .get(&community_id)
+                .filter(|open| open.read_at.elapsed() < OPEN_CHANNELS_MAX_AGE)
+        };
+        if let Some(open) = fresh() {
+            metrics::counter!("buzz_open_channels_cache_hits_total").increment(1);
+            return Ok(open);
+        }
+        let gate = self
+            .open_channels_reads
+            .get_with(community_id, || Arc::new(tokio::sync::Mutex::new(())));
+        let _leader = match gate.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(_) => {
+                drop(gate.lock().await);
+                if let Some(open) = fresh() {
+                    metrics::counter!("buzz_open_channels_cache_hits_total").increment(1);
+                    return Ok(open);
+                }
+                None
+            }
+        };
+        let reason = if self.open_channels_cache.contains_key(&community_id) {
+            "expired"
+        } else {
+            "absent"
+        };
+        metrics::counter!("buzz_open_channels_cache_misses_total", "reason" => reason).increment(1);
+        let read_at = Instant::now();
+        let ids = self.db.get_listed_open_channel_ids(community_id).await?;
+        let open = Arc::new(OpenChannels { ids, read_at });
+        self.open_channels_cache.insert(community_id, open.clone());
+        Ok(open)
+    }
+
+    /// Seeds a fresh restriction-cache entry for `key` without touching the
+    /// database.
+    #[cfg(test)]
+    pub(crate) fn seed_restriction(
+        &self,
+        key: (CommunityId, Vec<u8>),
+        state: buzz_db::moderation::RestrictionState,
+    ) {
+        self.restriction_cache.insert(
+            key,
+            CachedRestriction {
+                state,
+                read_at: Instant::now(),
+            },
+        );
     }
 
     /// Seeds both accessible-channel caches so `pubkey` reads exactly
@@ -3367,6 +3505,99 @@ pub(crate) mod tests {
         use super::*;
         use buzz_core::channel::{ChannelType, ChannelVisibility};
 
+        /// Open-set reads park on a lock on `channels`, where the test counts
+        /// them. Nine concurrent misses make one read and share its set. When
+        /// the read in flight is cancelled, its eight waiters each read at
+        /// once rather than one at a time behind the gate.
+        /// Mutations: drop the waiter path (nine reads park in the first
+        /// half), or hold the gate across a waiter's own read (one parks at a
+        /// time in the second) → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn open_set_misses_share_one_read_and_orphans_read_concurrently() {
+            let database_url = crate::test_support::database_url();
+            let state = test_state_with_database_url_and_pool_options(
+                &database_url,
+                sqlx::postgres::PgPoolOptions::new().max_connections(16),
+            )
+            .await;
+            let admin = sqlx::PgPool::connect(&database_url).await.unwrap();
+            let community = state
+                .db
+                .ensure_configured_community(&format!("open-set-sf-{}.local", Uuid::new_v4()))
+                .await
+                .unwrap()
+                .id;
+            let parked = || async {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM pg_stat_activity \
+                     WHERE datname = current_database() AND wait_event_type = 'Lock' \
+                     AND query LIKE '%FROM channels%'",
+                )
+                .fetch_one(&admin)
+                .await
+                .unwrap()
+            };
+            let parks = |want: i64| async move {
+                for _ in 0..500 {
+                    if parked().await >= want {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                panic!("{} open-set reads parked, want {want}", parked().await);
+            };
+            let misses = |n: usize| {
+                (0..n)
+                    .map(|_| {
+                        let state = Arc::clone(&state);
+                        tokio::spawn(async move { state.open_channels(community).await })
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let lock = || async {
+                let mut locker = admin.begin().await.unwrap();
+                sqlx::query("LOCK TABLE channels IN ACCESS EXCLUSIVE MODE")
+                    .execute(&mut *locker)
+                    .await
+                    .unwrap();
+                locker
+            };
+
+            let locker = lock().await;
+            let cohort = misses(9);
+            parks(1).await;
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            assert_eq!(parked().await, 1, "concurrent misses share one read");
+            locker.commit().await.unwrap();
+            let mut sets = Vec::new();
+            for miss in cohort {
+                sets.push(miss.await.expect("join").expect("open set"));
+            }
+            assert!(
+                sets.iter().all(|set| Arc::ptr_eq(set, &sets[0])),
+                "every miss gets the one read's set"
+            );
+
+            state.open_channels_cache.invalidate(&community);
+            let locker = lock().await;
+            let leader = misses(1).remove(0);
+            parks(1).await;
+            let orphans = misses(8);
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            assert_eq!(parked().await, 1, "waiters queue behind the leader");
+            leader.abort();
+            // The cancelled leader's backend stays parked, plus one per orphan.
+            parks(9).await;
+            locker.commit().await.unwrap();
+            for orphan in orphans {
+                orphan
+                    .await
+                    .expect("join")
+                    .expect("an orphan reads on its own");
+            }
+        }
+
         /// Cross-pod invalidation is best-effort. With it withheld, a pod may
         /// grant a channel that left the open set on another pod only until
         /// its cached open set is [`OPEN_CHANNELS_MAX_AGE`] old; after that,
@@ -3765,6 +3996,46 @@ pub(crate) mod tests {
             .await
             .expect("both halves are cached");
         assert_eq!(ids, vec![both, open]);
+    }
+
+    /// Misses that arrive while a read of the community's open set is in
+    /// flight wait for it and share its set. The database is unreachable, so
+    /// any read of a waiter's own fails. (The leaderless case is
+    /// `open_set_misses_share_one_read_and_orphans_read_concurrently`.)
+    /// Mutation: drop the waiter path → RED.
+    #[tokio::test]
+    async fn concurrent_open_channel_misses_share_the_in_flight_read() {
+        let state =
+            test_state_with_unreachable_database_url("postgres://buzz@127.0.0.1:1/buzz").await;
+        let community = CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
+        let open = Uuid::from_u128(9);
+        let waiters = |state: &Arc<AppState>| {
+            (0..8)
+                .map(|_| {
+                    let state = Arc::clone(state);
+                    tokio::spawn(async move { state.open_channels(community).await })
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let gate = state
+            .open_channels_reads
+            .get_with(community, || Arc::new(tokio::sync::Mutex::new(())));
+        let leader = gate.lock().await;
+        let shared = waiters(&state);
+        tokio::task::yield_now().await;
+        state.open_channels_cache.insert(
+            community,
+            Arc::new(OpenChannels {
+                ids: vec![open],
+                read_at: Instant::now(),
+            }),
+        );
+        drop(leader);
+        for waiter in shared {
+            let set = waiter.await.expect("join").expect("the leader's set");
+            assert_eq!(set.ids, vec![open]);
+        }
     }
 
     #[tokio::test]
@@ -4418,6 +4689,48 @@ pub(crate) mod tests {
         assert!(
             !mgr.has_admitted_connection(community, &pubkey),
             "a pending sibling does not keep presence"
+        );
+    }
+
+    /// `has_admitted_connection` follows every path that changes an admitted
+    /// socket's key: admission, a second admitted socket, re-authentication
+    /// to another key, and deregistration, per community.
+    /// Mutation: skip any one index update → RED.
+    #[tokio::test]
+    async fn admitted_index_follows_every_key_change() {
+        let mgr = ConnectionManager::new();
+        let community = CommunityId::from_uuid(Uuid::from_u128(0xe));
+        let other_community = CommunityId::from_uuid(Uuid::from_u128(0xf));
+        let (first_key, second_key) = ([4u8; 32], [5u8; 32]);
+
+        let first = bound_conn(&mgr, community, &first_key);
+        assert!(!mgr.has_admitted_connection(community, &first_key));
+        mgr.mark_admitted(first);
+        mgr.mark_admitted(first);
+        let second = bound_conn(&mgr, community, &first_key);
+        mgr.mark_admitted(second);
+        let elsewhere = bound_conn(&mgr, other_community, &first_key);
+        mgr.mark_admitted(elsewhere);
+
+        mgr.deregister(first);
+        assert!(
+            mgr.has_admitted_connection(community, &first_key),
+            "a second admitted socket keeps the key online"
+        );
+
+        mgr.set_authenticated_pubkey(second, second_key.to_vec());
+        assert!(!mgr.has_admitted_connection(community, &first_key));
+        assert!(mgr.has_admitted_connection(community, &second_key));
+        assert!(mgr.has_admitted_connection(other_community, &first_key));
+
+        mgr.deregister(second);
+        mgr.deregister(second);
+        mgr.deregister(elsewhere);
+        assert!(!mgr.has_admitted_connection(community, &second_key));
+        assert!(!mgr.has_admitted_connection(other_community, &first_key));
+        assert!(
+            mgr.admitted_by_pubkey.is_empty(),
+            "drained keys are removed"
         );
     }
 

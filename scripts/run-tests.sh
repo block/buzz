@@ -328,6 +328,12 @@ run_unit_tests() {
   run_test_step "buzz-relay community close suppresses losing denial frame test" \
     cargo test -p buzz-relay --lib state::tests::disconnect_community_wins_reason_losing_nip_fi_does_not_enqueue_frame -- --exact --nocapture
 
+  run_test_step "buzz-relay read cache tests" \
+    cargo test -p buzz-relay --lib -- --exact --nocapture \
+      state::tests::admitted_index_follows_every_key_change \
+      state::tests::concurrent_open_channel_misses_share_the_in_flight_read \
+      tenant::tests::app_state_resolver_serves_fresh_cached_hosts_only
+
   run_test_step "buzz-relay router tests" \
     cargo test -p buzz-relay --lib router::tests:: -- --nocapture
 
