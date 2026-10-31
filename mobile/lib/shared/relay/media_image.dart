@@ -344,7 +344,7 @@ class MediaImage extends ConsumerWidget {
             // Older or externally populated media may have no generated
             // thumbnail. Remember that, so later builds go straight to the
             // original instead of hitting the thumbnail's failure cooldown.
-            _missingThumbnails.add(thumbnail);
+            _rememberMissingThumbnail(thumbnail);
             return _image(providerFor(url), cacheWidth);
           },
         );
@@ -352,7 +352,27 @@ class MediaImage extends ConsumerWidget {
     );
   }
 
-  static final Set<String> _missingThumbnails = {};
+  /// Thumbnails the relay returned 404 for, oldest first. Bounded so a
+  /// community full of pre-thumbnail media cannot grow it without limit; an
+  /// evicted entry costs one more 404 before the original loads again.
+  static final Set<String> _missingThumbnails = <String>{};
+  static const _maxMissingThumbnails = 256;
+
+  static void _rememberMissingThumbnail(String url) {
+    _missingThumbnails
+      ..remove(url)
+      ..add(url);
+    if (_missingThumbnails.length > _maxMissingThumbnails) {
+      _missingThumbnails.remove(_missingThumbnails.first);
+    }
+  }
+
+  @visibleForTesting
+  static int get debugMissingThumbnailCount => _missingThumbnails.length;
+
+  @visibleForTesting
+  static void debugRememberMissingThumbnail(String url) =>
+      _rememberMissingThumbnail(url);
 
   bool _fitsThumbnail(BuildContext context, BoxConstraints constraints) {
     if (!constraints.hasBoundedWidth || !constraints.hasBoundedHeight) {

@@ -102,6 +102,15 @@ void main() {
     });
   });
 
+  test('remembers a bounded number of missing thumbnails', () {
+    for (var i = 0; i < 1000; i++) {
+      MediaImage.debugRememberMissingThumbnail(
+        '$_relayBase/media/$i.thumb.jpg',
+      );
+    }
+    expect(MediaImage.debugMissingThumbnailCount, 256);
+  });
+
   group('MediaImageProvider cache identity', () {
     test('equal url + same auth service => equal keys', () {
       final auth = _auth(nsec: nostr.Keys.generate().nsec);
