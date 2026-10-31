@@ -80,42 +80,41 @@ class OrganizationSignIn extends ChangeNotifier {
     }
   }
 
-  Future<void> signIn() async {
-    if (_disposed || status == OrganizationSessionStatus.signingIn) return;
-    if (failure == AccountFailure.storage && account.account == null) {
+  Future<void> signIn() =>
       // An unreadable saved session blocks every exchange, and its subject is
       // unknown. Signing in again explicitly replaces only that session.
+      _begin(
+        clear: failure == AccountFailure.storage && account.account == null,
+      );
+
+  /// Drops only the organization session and signs in again, for an account
+  /// the relay refuses for this key. The hosted account is untouched.
+  Future<void> changeAccount() => _begin(clear: true);
+
+  Future<void> _begin({required bool clear}) async {
+    if (_disposed || status == OrganizationSessionStatus.signingIn) return;
+    // Busy before any await, so a second tap cannot start another attempt.
+    final attempt = ++_attempt;
+    failure = null;
+    _set(OrganizationSessionStatus.signingIn);
+    if (clear) {
       try {
         await account.clearLocalSession();
       } on AccountFailure catch (error) {
+        if (attempt != _attempt) return;
         failure = error;
         _set(_currentStatus());
         return;
       }
+      if (_disposed || attempt != _attempt) return;
     }
-    failure = null;
-    ++_attempt;
-    _set(OrganizationSessionStatus.signingIn);
     try {
       await browser.start(const {'purpose': 'organization'});
     } on BrowserAuthFailure catch (error) {
+      if (attempt != _attempt) return;
       failure = error;
       _set(_currentStatus());
     }
-  }
-
-  /// Drops only the organization session and signs in again, for an account
-  /// the relay refuses for this key. The hosted account is untouched.
-  Future<void> changeAccount() async {
-    if (_disposed || status == OrganizationSessionStatus.signingIn) return;
-    try {
-      await account.clearLocalSession();
-    } on AccountFailure catch (error) {
-      failure = error;
-      _set(_currentStatus());
-      return;
-    }
-    await signIn();
   }
 
   Future<void> cancel() async {
@@ -132,7 +131,12 @@ class OrganizationSignIn extends ChangeNotifier {
   Future<void> _exchange(BrowserAuthCode code) async {
     final attempt = _attempt;
     try {
-      await account.exchange(code: code.code, verifier: code.verifier);
+      await account.exchange(
+        code: code.code,
+        verifier: code.verifier,
+        // A cancelled attempt must never save its account.
+        isCurrent: () => !_disposed && attempt == _attempt,
+      );
     } on AccountFailure catch (error) {
       if (attempt != _attempt) return;
       failure = error;

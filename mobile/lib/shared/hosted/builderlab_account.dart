@@ -134,9 +134,12 @@ class BuilderlabAccountClient {
 
   /// Receives a one-use code only from a validated browser callback. PKCE is
   /// verified by Builderlab; state and callback origin are checked by the caller.
+  /// [isCurrent] is checked just before the session is saved, so a caller can
+  /// abandon an exchange without it later replacing a newer session.
   Future<BuilderlabAccount> exchange({
     required String code,
     required String verifier,
+    bool Function()? isCurrent,
   }) => _serial(() async {
     if (code.isEmpty ||
         !RegExp(r'^[A-Za-z0-9._~-]{43,128}$').hasMatch(verifier)) {
@@ -163,7 +166,9 @@ class BuilderlabAccountClient {
     if (stored != null && stored.subject != verified.subject) {
       throw AccountFailure.differentAccount;
     }
-    if (_disposed) throw AccountFailure.unavailable;
+    if (_disposed || (isCurrent != null && !isCurrent())) {
+      throw AccountFailure.unavailable;
+    }
     final record = jsonEncode({
       'origin': accountOrigin.toString(),
       'credential': credential,

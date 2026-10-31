@@ -39,16 +39,33 @@ void main() {
 
   test('a cancelled exchange never changes a newer sign-in', () async {
     final logins = <Uri>[];
-    final held = Completer<http.Response>();
+    final held = [Completer<http.Response>(), Completer<http.Response>()];
     var exchanges = 0;
+    http.Response exchangedAs(String credential) => http.Response(
+      jsonEncode({
+        'session_credential': credential,
+        'expires_at': expiry.toIso8601String(),
+      }),
+      200,
+    );
     final signIn = OrganizationSignIn(
       account: BuilderlabAccountClient(
         accountOrigin: organization,
         httpClient: MockClient((request) async {
           if (request.url.path.endsWith('/v1/auth/login/exchange')) {
-            return ++exchanges == 1 ? held.future : exchanged();
+            final index = exchanges++;
+            return index < held.length
+                ? held[index].future
+                : exchangedAs('org-member-b');
           }
-          return me();
+          final credential = request.headers['X-BB-Session-Credential']!;
+          return http.Response(
+            jsonEncode({
+              'subject': credential.substring('org-'.length),
+              'expires_at': expiry.toIso8601String(),
+            }),
+            200,
+          );
         }),
       ),
       browser: BrowserAuth(
@@ -62,14 +79,15 @@ void main() {
     );
     await signIn.initialize();
     await signIn.signIn();
-    await signIn.browser.receive(callback(logins.single, 'code-a'));
+    await signIn.browser.receive(callback(logins.last, 'code-1'));
     await pumpEventQueue();
     expect(exchanges, 1);
 
+    // A cancelled exchange that fails late leaves the newer attempt alone.
     await signIn.cancel();
     await signIn.signIn();
     expect(signIn.status, OrganizationSessionStatus.signingIn);
-    held.complete(http.Response('{}', 503));
+    held[0].complete(http.Response('{}', 503));
     await pumpEventQueue();
     expect(signIn.status, OrganizationSessionStatus.signingIn);
     expect(signIn.failure, isNull);
@@ -77,6 +95,56 @@ void main() {
     // The newer attempt still owns its browser and can be cancelled.
     await signIn.cancel();
     expect(signIn.status, OrganizationSessionStatus.signedOut);
+    await signIn.signIn();
+
+    // A cancelled exchange that succeeds late is never saved, so the newer
+    // sign-in as a different member still succeeds.
+    await signIn.browser.receive(callback(logins.last, 'code-2'));
+    await pumpEventQueue();
+    expect(exchanges, 2);
+    await signIn.cancel();
+    await signIn.signIn();
+    await signIn.browser.receive(callback(logins.last, 'code-3'));
+    held[1].complete(exchangedAs('org-member-a'));
+    await pumpEventQueue();
+    expect(signIn.failure, isNull);
+    expect(signIn.status, OrganizationSessionStatus.signedIn);
+    expect(signIn.account.account?.subject, 'member-b');
+    expect(
+      jsonDecode((await const FlutterSecureStorage().read(key: orgSessionKey))!)
+          as Map,
+      containsPair('subject', 'member-b'),
+    );
+    signIn.dispose();
+  });
+
+  test('a second tap while the session clears starts no attempt', () async {
+    await const FlutterSecureStorage().write(
+      key: orgSessionKey,
+      value: 'not json',
+    );
+    final logins = <Uri>[];
+    final browserStorage = _CountingStorage();
+    final signIn = OrganizationSignIn(
+      account: BuilderlabAccountClient(
+        accountOrigin: organization,
+        httpClient: MockClient((request) async => me()),
+      ),
+      browser: BrowserAuth(
+        origin: organization,
+        storage: browserStorage,
+        openBrowser: (uri) async {
+          logins.add(uri);
+          return null;
+        },
+      ),
+      reconnect: () async {},
+    );
+    await signIn.initialize();
+    expect(signIn.failure, AccountFailure.storage);
+    await Future.wait([signIn.signIn(), signIn.signIn()]);
+    expect(signIn.status, OrganizationSessionStatus.signingIn);
+    expect(browserStorage.attempts, 1);
     signIn.dispose();
   });
 
@@ -192,5 +260,25 @@ class _FailingDeleteStorage extends FlutterSecureStorage {
       throw PlatformException(code: 'keychain', message: 'unavailable');
     }
     return super.delete(key: key);
+  }
+}
+
+/// Counts browser sign-in attempts as they are saved.
+class _CountingStorage extends FlutterSecureStorage {
+  int attempts = 0;
+
+  @override
+  Future<void> write({
+    required String key,
+    required String? value,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) {
+    if (key.startsWith('buzz_browser_auth_attempt_v1_')) attempts++;
+    return super.write(key: key, value: value);
   }
 }
