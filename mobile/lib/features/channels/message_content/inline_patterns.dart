@@ -1,6 +1,6 @@
 part of '../message_content.dart';
 
-List<InlinePattern> _useMessageInlineComponents({
+List<InlinePattern> _useMessageInlinePatterns({
   required String content,
   required String finalContent,
   required Map<String, String> mentionNames,
@@ -30,7 +30,7 @@ List<InlinePattern> _useMessageInlineComponents({
         (String channelId) => channelHandler.value(channelId),
     const [],
   );
-  final inputs = _InlineComponentInputs(
+  final inputs = _InlinePatternInputs(
     content: content,
     finalContent: finalContent,
     mentionNames: mentionNames,
@@ -46,7 +46,7 @@ List<InlinePattern> _useMessageInlineComponents({
     hasMentionHandler: onMentionTap != null,
   );
 
-  // gpt_markdown compares components by identity. Recreating them on every
+  // gpt_markdown compares patterns by identity. Recreating them on every
   // parent rebuild reparses unchanged message bodies on the UI isolate.
   return useMemoized(
     () => [
@@ -70,13 +70,12 @@ List<InlinePattern> _useMessageInlineComponents({
         channelNames: inputs.channelNames,
         onChannelTap: channelTap,
       ),
-      _markdownLabelEntityPattern,
     ],
     [inputs],
   );
 }
 
-class _InlineComponentInputs {
+class _InlinePatternInputs {
   final String content;
   final String finalContent;
   final Map<String, String> mentionNames;
@@ -91,7 +90,7 @@ class _InlineComponentInputs {
   final bool hasMediaReply;
   final bool hasMediaMore;
 
-  _InlineComponentInputs({
+  _InlinePatternInputs({
     required this.content,
     required this.finalContent,
     required Map<String, String> mentionNames,
@@ -120,7 +119,7 @@ class _InlineComponentInputs {
 
   @override
   bool operator ==(Object other) =>
-      other is _InlineComponentInputs &&
+      other is _InlinePatternInputs &&
       content == other.content &&
       finalContent == other.finalContent &&
       emojiSize == other.emojiSize &&
@@ -145,11 +144,3 @@ class _InlineComponentInputs {
   int get hashCode =>
       Object.hash(content, finalContent, emojiSize, hasMentionHandler);
 }
-
-// Encoded label punctuation must remain literal even inside nested formatting.
-final _markdownLabelEntityPattern = InlinePattern(
-  pattern: RegExp(r'&#(?:91|92|93);'),
-  scopes: const {MarkdownScope.linkLabel},
-  builder: (context, match, style) =>
-      TextSpan(text: decodeMarkdownLabelSyntax(match[0]!), style: style),
-);

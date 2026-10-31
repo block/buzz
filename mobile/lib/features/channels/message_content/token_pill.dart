@@ -7,6 +7,28 @@ String? _channelNameForId(Map<String, String> channels, String channelId) {
   return null;
 }
 
+/// [InlinePattern.prefixed] that also skips a token right after `=`, `&`, `?`
+/// or `%`. Patterns are matched inside link URLs too, so `?u=@alice` would
+/// otherwise be cut out of the URL.
+InlinePattern _prefixedToken({
+  required String prefix,
+  required Iterable<String> knownNames,
+  required String genericTokenPattern,
+  required InlinePatternBuilder builder,
+}) => InlinePattern(
+  pattern: RegExp(
+    r'(?<![=&?%])' +
+        InlinePattern.buildPrefixedPattern(
+          prefix: prefix,
+          knownNames: knownNames,
+          genericTokenPattern: genericTokenPattern,
+        ).pattern,
+    caseSensitive: false,
+    multiLine: true,
+  ),
+  builder: builder,
+);
+
 /// `#channel` tokens. The default scopes keep this out of link labels: its
 /// [WidgetSpan] nested inside the link's own placeholder does not paint on
 /// iOS, so an authored `[#channel](url)` would render as nothing. Link
