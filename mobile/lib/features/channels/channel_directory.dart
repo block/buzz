@@ -57,6 +57,10 @@ class ChannelDirectoryLoadNotifier extends Notifier<ChannelDirectoryLoadState> {
       state.scope == scope &&
       state.status == ChannelDirectoryLoadStatus.loading;
 
+  /// Whether the last directory request for [scope] failed.
+  bool hasFailed(String scope) =>
+      state.scope == scope && state.status == ChannelDirectoryLoadStatus.error;
+
   /// Marks the directory as loading.
   void markLoading(String scope) => state = ChannelDirectoryLoadState(
     scope: scope,
@@ -431,6 +435,15 @@ class _ChannelRefreshCoordinator {
         // in-flight directory response will be discarded. Mark it idle, not
         // error: nothing failed, so a caller may load it again, and search
         // retries a displaced load once instead of reporting a failure.
+        status.markIdle(scope);
+      }
+    } else {
+      final status = loadStatus();
+      if (status.hasFailed(scope)) {
+        // A new attempt replaces the last failure. The status turns loading
+        // only after the membership reads, so a refresh that retires this
+        // attempt earlier must not leave the old error to be read as its
+        // result: idle lets search retry the displaced attempt.
         status.markIdle(scope);
       }
     }

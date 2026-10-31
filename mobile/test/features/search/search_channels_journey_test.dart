@@ -199,6 +199,17 @@ void main() {
       findsOneWidget,
     );
     expect(failed, findsOneWidget);
+    // Screen readers announce the notice when it appears.
+    expect(
+      find.descendant(
+        of: failed,
+        matching: find.byWidgetPredicate(
+          (widget) =>
+              widget is Semantics && widget.properties.liveRegion == true,
+        ),
+      ),
+      findsOneWidget,
+    );
 
     // Each query tries the directory again. A failure must not read as
     // "No results".
@@ -225,9 +236,11 @@ void main() {
       'http://community.test',
       container.read(myPubkeyProvider),
     );
-    // Start from no status for this community, as after launch, so the
-    // earlier failure does not decide the retry.
-    directoryStatus.markIdle('http://elsewhere.test:');
+    // The search starts from the earlier same-scope failure.
+    expect(
+      container.read(channelDirectoryLoadStatusProvider).status,
+      ChannelDirectoryLoadStatus.idle,
+    );
     channels.retireDirectory();
     await tester.pump();
     expect(channels.directoryRequests, 4);
@@ -404,7 +417,11 @@ void main() {
     // A membership refresh that starts before the load marks the directory
     // loading retires the load and writes no status. Search loads it again
     // once, through the real refresh.
-    status.markIdle('http://elsewhere.test:test');
+    // It starts from the earlier same-scope failure, as after a reconnect.
+    expect(
+      container.read(channelDirectoryLoadStatusProvider).status,
+      ChannelDirectoryLoadStatus.error,
+    );
     await tester.enterText(find.byType(TextField), 'dev');
     await tester.pump(const Duration(milliseconds: 300));
     session.searches.removeAt(0).complete(const []);
@@ -526,8 +543,12 @@ class _DirectoryChannels extends ChannelsNotifier {
       return;
     }
     directoryRequests++;
-    // Like production, the status turns loading only after memberships
-    // arrive, so it stays as it was while the request is held.
+    // Like production, a new attempt replaces this scope's last failure, and
+    // the status turns loading only after memberships arrive.
+    if (directory.scope == scope &&
+        directory.status == ChannelDirectoryLoadStatus.error) {
+      status.markIdle(scope);
+    }
     final load = Completer<_DirectoryOutcome>();
     _directories.add(load);
     switch (await load.future) {

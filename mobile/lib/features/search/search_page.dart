@@ -420,11 +420,14 @@ class _ChannelSearchFailed extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(
-            "Open channel search couldn't finish.",
-            textAlign: TextAlign.center,
-            style: context.textTheme.bodyMedium?.copyWith(
-              color: context.colors.onSurfaceVariant,
+          Semantics(
+            liveRegion: true,
+            child: Text(
+              "Open channel search couldn't finish.",
+              textAlign: TextAlign.center,
+              style: context.textTheme.bodyMedium?.copyWith(
+                color: context.colors.onSurfaceVariant,
+              ),
             ),
           ),
           TextButton(onPressed: onRetry, child: const Text('Retry channels')),
