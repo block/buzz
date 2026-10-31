@@ -18,6 +18,7 @@ import {
   resetAgentObserverStore,
   _testRegisterKnownAgents,
   _testGetArchivedChannelEvents,
+  retainArchivedChannel,
 } from "@/features/agents/observerRelayStore.ts";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -1240,6 +1241,28 @@ describe("archive window memory bound", () => {
     assert.ok(
       retained.filter((n) => n > 0).length < CHANNELS / 2,
       `archive must be bounded, retained per channel: ${retained.join(",")}`,
+    );
+  });
+
+  it("test_release_from_before_a_reset_keeps_the_new_viewer", async () => {
+    // A panel mounted before a community reset unmounts after the new
+    // community's panel has retained the same key.
+    const releaseStale = retainArchivedChannel(AGENT_PUBKEY, "chan-0");
+    resetAgentObserverStore();
+    _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY]);
+    retainArchivedChannel(AGENT_PUBKEY, "chan-0");
+    await ingestArchivedObserverEvents(channelPage("chan-0"), decryptContent);
+    releaseStale();
+    for (let c = 1; c < CHANNELS; c++) {
+      await ingestArchivedObserverEvents(
+        channelPage(`chan-${c}`),
+        decryptContent,
+      );
+    }
+    assert.equal(
+      _testGetArchivedChannelEvents(AGENT_PUBKEY, "chan-0").length,
+      PAGE,
+      "a stale release must not drop the new panel's viewer",
     );
   });
 

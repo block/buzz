@@ -12060,8 +12060,9 @@ export function maybeInstallE2eTauriMocks() {
       const channelId = JSON.parse(row.content).channelId as string;
       const channelRows = mockArchivedObserverRows.get(channelId) ?? [];
       channelRows.push(row);
+      // Same order as the Rust read: created_at DESC, id DESC.
       channelRows.sort(
-        (a, b) => b.created_at - a.created_at || a.id.localeCompare(b.id),
+        (a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id),
       );
       mockArchivedObserverRows.set(channelId, channelRows);
     }
@@ -15121,7 +15122,7 @@ export function maybeInstallE2eTauriMocks() {
           (row) =>
             beforeCreatedAt === null ||
             row.created_at < beforeCreatedAt ||
-            (row.created_at === beforeCreatedAt && row.id > (beforeId ?? "")),
+            (row.created_at === beforeCreatedAt && row.id < (beforeId ?? "")),
         );
         return rows
           .slice(0, limit ?? rows.length)
