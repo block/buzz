@@ -3505,6 +3505,99 @@ pub(crate) mod tests {
         use super::*;
         use buzz_core::channel::{ChannelType, ChannelVisibility};
 
+        /// Open-set reads park on a lock on `channels`, where the test counts
+        /// them. Nine concurrent misses make one read and share its set. When
+        /// the read in flight is cancelled, its eight waiters each read at
+        /// once rather than one at a time behind the gate.
+        /// Mutations: drop the waiter path (nine reads park in the first
+        /// half), or hold the gate across a waiter's own read (one parks at a
+        /// time in the second) → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn open_set_misses_share_one_read_and_orphans_read_concurrently() {
+            let database_url = crate::test_support::database_url();
+            let state = test_state_with_database_url_and_pool_options(
+                &database_url,
+                sqlx::postgres::PgPoolOptions::new().max_connections(16),
+            )
+            .await;
+            let admin = sqlx::PgPool::connect(&database_url).await.unwrap();
+            let community = state
+                .db
+                .ensure_configured_community(&format!("open-set-sf-{}.local", Uuid::new_v4()))
+                .await
+                .unwrap()
+                .id;
+            let parked = || async {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM pg_stat_activity \
+                     WHERE datname = current_database() AND wait_event_type = 'Lock' \
+                     AND query LIKE '%FROM channels%'",
+                )
+                .fetch_one(&admin)
+                .await
+                .unwrap()
+            };
+            let parks = |want: i64| async move {
+                for _ in 0..500 {
+                    if parked().await >= want {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                panic!("{} open-set reads parked, want {want}", parked().await);
+            };
+            let misses = |n: usize| {
+                (0..n)
+                    .map(|_| {
+                        let state = Arc::clone(&state);
+                        tokio::spawn(async move { state.open_channels(community).await })
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let lock = || async {
+                let mut locker = admin.begin().await.unwrap();
+                sqlx::query("LOCK TABLE channels IN ACCESS EXCLUSIVE MODE")
+                    .execute(&mut *locker)
+                    .await
+                    .unwrap();
+                locker
+            };
+
+            let locker = lock().await;
+            let cohort = misses(9);
+            parks(1).await;
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            assert_eq!(parked().await, 1, "concurrent misses share one read");
+            locker.commit().await.unwrap();
+            let mut sets = Vec::new();
+            for miss in cohort {
+                sets.push(miss.await.expect("join").expect("open set"));
+            }
+            assert!(
+                sets.iter().all(|set| Arc::ptr_eq(set, &sets[0])),
+                "every miss gets the one read's set"
+            );
+
+            state.open_channels_cache.invalidate(&community);
+            let locker = lock().await;
+            let leader = misses(1).remove(0);
+            parks(1).await;
+            let orphans = misses(8);
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            assert_eq!(parked().await, 1, "waiters queue behind the leader");
+            leader.abort();
+            // The cancelled leader's backend stays parked, plus one per orphan.
+            parks(9).await;
+            locker.commit().await.unwrap();
+            for orphan in orphans {
+                orphan
+                    .await
+                    .expect("join")
+                    .expect("an orphan reads on its own");
+            }
+        }
+
         /// Cross-pod invalidation is best-effort. With it withheld, a pod may
         /// grant a channel that left the open set on another pod only until
         /// its cached open set is [`OPEN_CHANNELS_MAX_AGE`] old; after that,
@@ -3906,9 +3999,9 @@ pub(crate) mod tests {
     }
 
     /// Misses that arrive while a read of the community's open set is in
-    /// flight wait for it and share its set; once it is gone without one,
-    /// each waiter reads on its own and fails rather than hanging. The
-    /// database is unreachable, so any read of its own fails the first half.
+    /// flight wait for it and share its set. The database is unreachable, so
+    /// any read of a waiter's own fails. (The leaderless case is
+    /// `open_set_misses_share_one_read_and_orphans_read_concurrently`.)
     /// Mutation: drop the waiter path → RED.
     #[tokio::test]
     async fn concurrent_open_channel_misses_share_the_in_flight_read() {
@@ -3942,19 +4035,6 @@ pub(crate) mod tests {
         for waiter in shared {
             let set = waiter.await.expect("join").expect("the leader's set");
             assert_eq!(set.ids, vec![open]);
-        }
-
-        state.open_channels_cache.invalidate(&community);
-        let leader = gate.lock().await;
-        let orphaned = waiters(&state);
-        tokio::task::yield_now().await;
-        drop(leader);
-        for waiter in orphaned {
-            let result = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
-                .await
-                .expect("a waiter must not queue behind other waiters' reads")
-                .expect("join");
-            assert!(result.is_err(), "no shared set, so each waiter reads");
         }
     }
 
