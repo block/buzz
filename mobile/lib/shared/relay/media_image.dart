@@ -47,9 +47,14 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   /// Excluded from equality: transport, not identity.
   final http.Client client;
 
-  /// Deadline for the complete response, including a stalled response body.
-  /// Aborts the request without closing the shared client.
-  final Duration requestTimeout;
+  /// Longest wait for response headers or the next body chunk. A slow link
+  /// that keeps delivering bytes finishes; one that stops is aborted without
+  /// closing the shared client.
+  final Duration stallTimeout;
+
+  /// Longest a fetch may take even while bytes keep arriving, so a server
+  /// that trickles bytes cannot hold a connection indefinitely.
+  final Duration maxFetchDuration;
 
   const MediaImageProvider({
     required this.url,
@@ -57,7 +62,8 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     required this.client,
     this.onBytesLoaded,
     this.scale = 1.0,
-    this.requestTimeout = const Duration(seconds: 30),
+    this.stallTimeout = const Duration(seconds: 20),
+    this.maxFetchDuration = const Duration(minutes: 5),
   });
 
   /// Maximum encoded image body retained before decoding (20 MiB).
@@ -108,7 +114,18 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       final http.Response response;
       try {
         final abort = Completer<void>();
-        final deadline = Timer(requestTimeout, abort.complete);
+        Timer? stall;
+        void restartStallTimer() {
+          stall?.cancel();
+          stall = Timer(stallTimeout, () {
+            if (!abort.isCompleted) abort.complete();
+          });
+        }
+
+        restartStallTimer();
+        final deadline = Timer(maxFetchDuration, () {
+          if (!abort.isCompleted) abort.complete();
+        });
         StreamIterator<List<int>>? body;
         try {
           final request = http.AbortableRequest(
@@ -117,9 +134,11 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
             abortTrigger: abort.future,
           )..headers.addAll(auth.headersFor(url));
           final streamed = await client.send(request);
+          restartStallTimer();
           final iterator = body = StreamIterator(streamed.stream);
           final bytes = BytesBuilder(copy: false);
           while (await iterator.moveNext()) {
+            restartStallTimer();
             final chunk = iterator.current;
             if (chunk.length > maxResponseBytes - bytes.length) {
               throw const FormatException('Image response too large');
@@ -132,6 +151,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
             headers: streamed.headers,
           );
         } finally {
+          stall?.cancel();
           deadline.cancel();
           if (!abort.isCompleted) abort.complete();
           unawaited(body?.cancel());

@@ -50,7 +50,7 @@ void main() {
               url: '$base/$index',
               auth: auth,
               client: client,
-              requestTimeout: const Duration(seconds: 1),
+              stallTimeout: const Duration(seconds: 1),
             ),
           ),
         );

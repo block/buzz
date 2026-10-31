@@ -202,6 +202,68 @@ void main() {
       expect(seen?['Authorization'], startsWith('Nostr '));
     });
 
+    test(
+      'a slow body that keeps arriving outlives the stall timeout',
+      () async {
+        const gap = Duration(milliseconds: 60);
+        final client = _StreamingClient((request) async {
+          // Honor the abort trigger the way the real IO client does.
+          var aborted = false;
+          (request as http.AbortableRequest).abortTrigger!.then((_) {
+            aborted = true;
+          });
+          Stream<List<int>> trickle() async* {
+            for (var i = 0; i < _pngBytes.length; i += 12) {
+              await Future<void>.delayed(gap);
+              if (aborted) throw http.RequestAbortedException(request.url);
+              yield _pngBytes.sublist(i, (i + 12).clamp(0, _pngBytes.length));
+            }
+          }
+
+          return http.StreamedResponse(trickle(), 200);
+        });
+        final stopwatch = Stopwatch()..start();
+        await _wait(
+          MediaImageProvider(
+            url: _mediaUrl,
+            auth: _auth(),
+            client: client,
+            stallTimeout: gap * 2.5,
+          ).resolve(ImageConfiguration.empty),
+        ).timeout(const Duration(seconds: 5));
+        // The whole body took several stall windows; only gaps are bounded.
+        expect(stopwatch.elapsed, greaterThan(gap * 5));
+      },
+    );
+
+    test('a body that never ends is aborted at the fetch cap', () async {
+      final client = _StreamingClient((request) async {
+        var aborted = false;
+        (request as http.AbortableRequest).abortTrigger!.then((_) {
+          aborted = true;
+        });
+        Stream<List<int>> endless() async* {
+          while (true) {
+            await Future<void>.delayed(const Duration(milliseconds: 20));
+            if (aborted) throw http.RequestAbortedException(request.url);
+            yield const [0];
+          }
+        }
+
+        return http.StreamedResponse(endless(), 200);
+      });
+      final error = await _waitError(
+        MediaImageProvider(
+          url: _mediaUrl,
+          auth: _auth(),
+          client: client,
+          stallTimeout: const Duration(seconds: 5),
+          maxFetchDuration: const Duration(milliseconds: 200),
+        ).resolve(ImageConfiguration.empty),
+      ).timeout(const Duration(seconds: 3));
+      expect(error, isA<http.RequestAbortedException>());
+    });
+
     test('failed URL is not refetched until cooldown elapses', () async {
       var fetches = 0;
       final client = http_testing.MockClient((request) async {
