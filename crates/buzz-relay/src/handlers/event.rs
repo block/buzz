@@ -737,7 +737,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                 ),
                 IngestError::AuthFailed(m)
                 | IngestError::Rejected(m)
-                | IngestError::CanvasConflict(m) => (m, "auth"),
+                | IngestError::Conflict(m) => (m, "auth"),
             };
             reject(reason);
             conn.send(RelayMessage::ok(&event_id_hex, false, &message));
@@ -868,7 +868,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                 // verbatim.
                 let (message, reason) = match e.into_legacy() {
                     IngestError::Rejected(message) => (message, "invalid"),
-                    IngestError::CanvasConflict(message) => (message, "invalid"),
+                    IngestError::Conflict(message) => (message, "invalid"),
                     IngestError::AuthFailed(message) => (message, "auth"),
                     IngestError::Internal(message) => (message, "error"),
                     // `into_legacy` never returns `Ban`; it would fail closed here.
@@ -938,7 +938,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             // Sanitize internal errors — don't leak DB/system details over WS.
             let (msg, reason) = match &e {
                 IngestError::Rejected(m) => (m.clone(), "invalid"),
-                IngestError::CanvasConflict(m) => (m.clone(), "invalid"),
+                IngestError::Conflict(m) => (m.clone(), "invalid"),
                 IngestError::AuthFailed(m) => (m.clone(), "auth"),
                 // `into_legacy` never returns `Ban`; it would fail closed here.
                 IngestError::Internal(_) | IngestError::Ban { .. } => {
