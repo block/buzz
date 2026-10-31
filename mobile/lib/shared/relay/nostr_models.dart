@@ -6,7 +6,7 @@ import 'thread_reference.dart';
 
 /// Nostr event kind constants.
 ///
-/// Keep in sync with `desktop/src/shared/constants/kinds.ts`.
+/// Keep in sync with `crates/buzz-core/src/kind.rs`.
 abstract final class EventKind {
   /// Kind:0 user profile metadata.
   static const profile = 0;
