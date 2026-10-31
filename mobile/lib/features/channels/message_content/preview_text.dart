@@ -6,6 +6,7 @@ import '../../../shared/deeplink/deep_link.dart';
 import '../../../shared/mentions/mention_bindings.dart';
 import '../message_media.dart';
 import 'buzz_link_label.dart';
+import 'channel_token_pattern.dart';
 import 'link_normalizer.dart';
 
 /// One piece of a message preview: plain text or an inline token that renders
@@ -291,7 +292,7 @@ class _PreviewBuilder {
   final Map<String, String> customEmoji;
   final Map<String, String> channelNames;
   final Map<String, ImetaEntry> imetaByUrl;
-  late final RegExp _channel = _channelPattern(channelNames.keys);
+  late final RegExp _channel = channelTokenPattern(channelNames.keys);
   final pieces = <PreviewPiece>[];
 
   _PreviewBuilder({
@@ -484,21 +485,4 @@ class _PreviewBuilder {
       semanticsLabel: fullLabel,
     );
   }
-}
-
-/// The thread view's channel token: a known name, which may contain
-/// characters the generic token excludes, or any `#token`.
-RegExp _channelPattern(Iterable<String> knownNames) {
-  final names =
-      knownNames
-          .map((name) => name.trim())
-          .where((name) => name.isNotEmpty)
-          .toSet()
-          .toList()
-        ..sort((a, b) => b.length.compareTo(a.length));
-  const generic = r'[A-Za-z0-9_][A-Za-z0-9_-]*';
-  const leading = r'(?<![\w./:-])';
-  const trailing = r'(?=$|[\s,;.!?:)\]}])';
-  final alternatives = [...names.map(RegExp.escape), generic].join('|');
-  return RegExp('$leading#(?:$alternatives)$trailing', caseSensitive: false);
 }
