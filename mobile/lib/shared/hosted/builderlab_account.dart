@@ -109,7 +109,12 @@ class BuilderlabAccountClient {
     return result;
   }
 
-  Future<BuilderlabAccount?> restore() => _serial(() async {
+  /// Concurrent callers share one restore, so a second one cannot replace the
+  /// account the first adopted while its callers still hold that session.
+  Future<BuilderlabAccount?> restore() =>
+      _restoring ??= _restore().whenComplete(() => _restoring = null);
+  Future<BuilderlabAccount?>? _restoring;
+  Future<BuilderlabAccount?> _restore() => _serial(() async {
     final record = await _readRecord();
     if (record == null) return null;
     try {
