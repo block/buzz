@@ -156,6 +156,61 @@ void main() {
     expect(find.text('B'), findsOneWidget);
   });
 
+  testWidgets('missing thumbnails stay bounded and out of the cooldown', (
+    tester,
+  ) async {
+    const relay = 'https://relay.example';
+    MediaImageProvider.debugResetCooldowns();
+    MediaImage.debugResetMissingThumbnails();
+    addTearDown(MediaImageProvider.debugResetCooldowns);
+    addTearDown(MediaImage.debugResetMissingThumbnails);
+    final client = http_testing.MockClient(
+      (request) async => http.Response('', 404),
+    );
+    tester.view.devicePixelRatio = 3;
+    addTearDown(tester.view.resetDevicePixelRatio);
+    String avatar(int i) =>
+        '$relay/media/${i.toRadixString(16).padLeft(64, '0')}.png';
+    for (var batch = 0; batch < 6; batch++) {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            mediaGetAuthServiceProvider.overrideWithValue(
+              MediaGetAuthService(baseUrl: relay, nsec: null),
+            ),
+            mediaHttpClientProvider.overrideWithValue(client),
+          ],
+          child: MaterialApp(
+            home: Wrap(
+              children: [
+                for (var i = batch * 50; i < (batch + 1) * 50; i++)
+                  AvatarImage(
+                    imageUrl: avatar(i),
+                    radius: 20,
+                    fallback: const Text('?'),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      );
+      for (var i = 0; i < 4; i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pump();
+      }
+    }
+
+    expect(MediaImage.debugMissingThumbnailCount, 256);
+    expect(
+      MediaImageProvider.debugCooldownUrls.where(
+        (url) => url.endsWith('.thumb.jpg'),
+      ),
+      isEmpty,
+    );
+  });
+
   testWidgets('clips agents to the desktop squircle', (tester) async {
     await tester.pumpWidget(subject(null, isAgent: true));
 

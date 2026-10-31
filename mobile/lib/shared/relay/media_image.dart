@@ -76,6 +76,9 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   @visibleForTesting
   static void debugResetCooldowns() => _cooldownUntil.clear();
 
+  @visibleForTesting
+  static Iterable<String> get debugCooldownUrls => _cooldownUntil.keys;
+
   @override
   Future<MediaImageProvider> obtainKey(ImageConfiguration configuration) {
     return SynchronousFuture<MediaImageProvider>(this);
@@ -359,6 +362,10 @@ class MediaImage extends ConsumerWidget {
   static const _maxMissingThumbnails = 256;
 
   static void _rememberMissingThumbnail(String url) {
+    // This set now stands in for the 404's failure cooldown. Drop that, or
+    // nothing would fetch the URL again to clear it, and an entry evicted
+    // here during its cooldown would show the fallback, not the original.
+    MediaImageProvider._cooldownUntil.remove(url);
     _missingThumbnails
       ..remove(url)
       ..add(url);
@@ -371,8 +378,7 @@ class MediaImage extends ConsumerWidget {
   static int get debugMissingThumbnailCount => _missingThumbnails.length;
 
   @visibleForTesting
-  static void debugRememberMissingThumbnail(String url) =>
-      _rememberMissingThumbnail(url);
+  static void debugResetMissingThumbnails() => _missingThumbnails.clear();
 
   bool _fitsThumbnail(BuildContext context, BoxConstraints constraints) {
     if (!constraints.hasBoundedWidth || !constraints.hasBoundedHeight) {
