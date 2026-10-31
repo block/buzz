@@ -56,6 +56,7 @@ void main() {
     _channel('both'),
     _channel('dm', type: 'dm'),
     _channel('forced'),
+    _channel('forced-backlog'),
   ];
   final notifier = _Channels({
     'backlog': [_event('m1')],
@@ -64,13 +65,17 @@ void main() {
     'both': [_event('m2'), _event('r2', reply: true)],
     'dm': [_event('d1', type: 'dm', reply: true)],
     'forced': [_event('p2', mention: true)],
+    'forced-backlog': [_event('m3')],
   });
   const readState = ReadStateState(
     isReady: true,
     pubkey: 'pk',
     contexts: {},
     version: 0,
-    forcedUnreadContexts: {'forced': 'forced'},
+    forcedUnreadContexts: {
+      'forced': 'forced',
+      'forced-backlog': 'forced-backlog',
+    },
   );
 
   test('the channel list bolds backlog and dots replies and mentions', () {
@@ -79,8 +84,15 @@ void main() {
       readState: readState,
       channelsNotifier: notifier,
     );
-    expect(highlights.unread, {'backlog', 'both', 'dm', 'forced'});
-    expect(highlights.attention, {'reply', 'mention', 'both'});
+    expect(highlights.unread, {
+      'backlog',
+      'both',
+      'dm',
+      'forced',
+      'forced-backlog',
+    });
+    // A manual mark keeps real attention's dot without fabricating one.
+    expect(highlights.attention, {'reply', 'mention', 'both', 'dm', 'forced'});
   });
 
   test('Solo highlights still bold for every unread event', () {
@@ -90,7 +102,7 @@ void main() {
         readState: readState,
         channelsNotifier: notifier,
       ),
-      {'backlog', 'reply', 'mention', 'both', 'dm', 'forced'},
+      {'backlog', 'reply', 'mention', 'both', 'dm', 'forced', 'forced-backlog'},
     );
   });
 
@@ -107,6 +119,7 @@ void main() {
           'both': 20,
           'dm': 20,
           'forced': 20,
+          'forced-backlog': 20,
         },
         version: 0,
       ),

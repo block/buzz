@@ -19,8 +19,9 @@ Set<String> computeUnreadChannelIds({
 /// Channel-list highlights, following the desktop sidebar (`buzz-app`'s
 /// `docs/unread.md`). Ordinary unread backlog bolds a channel ([unread]).
 /// Unread thread replies, mentions and broadcasts only add an attention dot
-/// ([attention]), so a channel the reader caught up on stays regular. A DM
-/// bolds for anything. A channel marked unread bolds without a dot.
+/// ([attention]), so a channel the reader caught up on stays regular. An
+/// unread DM bolds and dots. Marking a channel unread bolds it without
+/// fabricating attention, but keeps any real attention's dot.
 ({Set<String> unread, Set<String> attention}) computeChannelListHighlights({
   required Iterable<Channel> channels,
   required ReadStateState readState,
@@ -49,7 +50,6 @@ Set<String> computeUnreadChannelIds({
   for (final channel in channels) {
     if (readState.locallyForcedChannelIds.contains(channel.id)) {
       unread.add(channel.id);
-      continue;
     }
 
     final latestObserved = latestObservedByChannel[channel.id];
@@ -69,7 +69,8 @@ Set<String> computeUnreadChannelIds({
       if (readAt != null && event.createdAt <= readAt) continue;
       if (!separateAttention || channel.isDm || event.channelCatchUp) {
         unread.add(channel.id);
-      } else {
+      }
+      if (separateAttention && (channel.isDm || !event.channelCatchUp)) {
         attention.add(channel.id);
       }
     }
