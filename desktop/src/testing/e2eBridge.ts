@@ -48,9 +48,11 @@ import { getMarkdownParseCount } from "@/shared/ui/markdown/nodeCache";
 import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStore";
 import { recordTimeoutFromRejection } from "@/features/moderation/lib/timeoutStore";
 import {
+  ingestArchivedObserverEvents,
   injectObserverEventsForE2E,
   syncAgentObserverEvents,
 } from "@/features/agents/observerRelayStore";
+import type { ObserverEvent } from "@/features/agents/ui/agentSessionTypes";
 import {
   CUSTOM_EMOJI_SET_D_TAG,
   KIND_EMOJI_SET,
@@ -1538,6 +1540,14 @@ declare global {
         payload: unknown;
       }>;
     }) => void;
+    // Seeds frames into the mocked local observer archive that
+    // `read_archived_observer_events_for_channel` pages over. With `ingest`,
+    // also loads them into the observer store as a panel's hydration would.
+    __BUZZ_E2E_SEED_ARCHIVED_OBSERVER_FRAMES__?: (input: {
+      agentPubkey: string;
+      frames: ObserverEvent[];
+      ingest?: boolean;
+    }) => Promise<void>;
     __BUZZ_E2E_EMIT_MOCK_READ_STATE__?: (input: {
       clientId: string;
       contexts: Record<string, number>;
@@ -3403,6 +3413,8 @@ type MockSaveSubscriptionRow = {
   kinds: string; // JSON-encoded integer array, e.g. "[9,40002]"
 };
 let mockSaveSubscriptions: MockSaveSubscriptionRow[] = [];
+// Mocked local observer archive: raw kind-24200 rows per channel, newest first.
+const mockArchivedObserverRows = new Map<string, RelayEvent[]>();
 
 // Stateful mock canvas: an append-only revision stream keyed by channel, newest
 // first, mirroring the relay's 40100 history. `get_canvas` returns the head,
@@ -3553,6 +3565,7 @@ function resetMockObservedUnread() {
 }
 
 function resetMockSaveSubscriptions(config: E2eConfig | undefined) {
+  mockArchivedObserverRows.clear();
   mockSaveSubscriptions = (config?.mock?.saveSubscriptions ?? []).map((s) => ({
     ...s,
   }));
@@ -12025,6 +12038,37 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_SEED_OBSERVER_EVENTS__ = ({ agentPubkey, events }) => {
     injectObserverEventsForE2E(agentPubkey, events);
   };
+  window.__BUZZ_E2E_SEED_ARCHIVED_OBSERVER_FRAMES__ = async ({
+    agentPubkey,
+    frames,
+    ingest,
+  }) => {
+    const rows = frames.map((frame) =>
+      createMockEvent(
+        KIND_AGENT_OBSERVER_FRAME,
+        JSON.stringify(frame),
+        [
+          ["p", DEFAULT_MOCK_IDENTITY.pubkey],
+          ["agent", agentPubkey],
+          ["frame", "telemetry"],
+        ],
+        agentPubkey,
+        Math.floor(Date.parse(frame.timestamp) / 1000),
+      ),
+    );
+    for (const row of rows) {
+      const channelId = JSON.parse(row.content).channelId as string;
+      const channelRows = mockArchivedObserverRows.get(channelId) ?? [];
+      channelRows.push(row);
+      channelRows.sort(
+        (a, b) => b.created_at - a.created_at || a.id.localeCompare(b.id),
+      );
+      mockArchivedObserverRows.set(channelId, channelRows);
+    }
+    if (ingest) {
+      await ingestArchivedObserverEvents(rows);
+    }
+  };
   const meshModelName = (modelId: string) => {
     const basename = modelId.split("/").at(-1) ?? modelId;
     return basename
@@ -15054,6 +15098,35 @@ export function maybeInstallE2eTauriMocks() {
       // union / delete-row-when-empty semantics as the real Rust commands
       // (see `archive/store.rs::merge_owner_p_kinds` / `remove_owner_p_kind`)
       // so specs can drive default-on seeding and toggle ON/OFF flows.
+      case "read_unindexed_observer_rows":
+        // Seeded rows are indexed by channel on insert.
+        return [];
+      case "index_observer_channel_id":
+        return null;
+      case "read_archived_observer_events_for_channel": {
+        const { channelId, beforeCreatedAt, beforeId, limit } = payload as {
+          channelId: string;
+          beforeCreatedAt: number | null;
+          beforeId: string | null;
+          limit: number | null;
+        };
+        const win = window as unknown as Record<string, unknown>;
+        win.__BUZZ_E2E_IPC_COUNTERS__ ??= {};
+        const counters = win.__BUZZ_E2E_IPC_COUNTERS__ as Record<
+          string,
+          number
+        >;
+        counters[command] = (counters[command] ?? 0) + 1;
+        const rows = (mockArchivedObserverRows.get(channelId) ?? []).filter(
+          (row) =>
+            beforeCreatedAt === null ||
+            row.created_at < beforeCreatedAt ||
+            (row.created_at === beforeCreatedAt && row.id > (beforeId ?? "")),
+        );
+        return rows
+          .slice(0, limit ?? rows.length)
+          .map((row) => JSON.stringify(row));
+      }
       case "list_save_subscriptions": {
         const win = window as unknown as Record<string, unknown>;
         if (!win.__BUZZ_E2E_IPC_COUNTERS__) {

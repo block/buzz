@@ -93,21 +93,55 @@ const evictionFloorByAgent = new Map<
 //
 // Bounded by channel, not by event: a panel hydrates ~2000 frames per channel
 // and pages older on demand, so trimming events would undo loads the pager has
-// already moved its cursor past. Instead the map keeps only the
-// MAX_ARCHIVED_CHANNELS most recently used channels (Map insertion order is
-// the recency order). Reads mark a channel used, so a mounted panel, which
-// re-reads its channel on every store notification, keeps its archive. An
-// evicted channel re-hydrates when a panel opens it again.
+// already moved its cursor past. Mounted panels register as viewers
+// (`retainArchivedChannel`), and a viewed channel is never evicted. Of the
+// channels nobody is viewing, only the MAX_ARCHIVED_CHANNELS most recently used
+// are kept (Map insertion order is the recency order), so a quick revisit is
+// instant. An evicted channel re-hydrates when a panel opens it again.
 const archiveEventsByChannel = new Map<string, ObserverEvent[]>();
+const archiveViewersByChannel = new Map<string, number>();
 const MAX_ARCHIVED_CHANNELS = 4;
 
-function touchArchivedChannel(key: string): ObserverEvent[] | undefined {
+function markArchivedChannelUsed(key: string) {
   const events = archiveEventsByChannel.get(key);
   if (events) {
     archiveEventsByChannel.delete(key);
     archiveEventsByChannel.set(key, events);
   }
-  return events;
+}
+
+function evictUnviewedArchivedChannels() {
+  for (const key of archiveEventsByChannel.keys()) {
+    if (archiveEventsByChannel.size <= MAX_ARCHIVED_CHANNELS) return;
+    if (!archiveViewersByChannel.has(key)) archiveEventsByChannel.delete(key);
+  }
+}
+
+/**
+ * Keep a channel's archive resident while a panel shows it. Returns the release
+ * function; the channel becomes the most recently used unviewed one when its
+ * last viewer releases it.
+ */
+export function retainArchivedChannel(
+  agentPubkey: string,
+  channelId: string,
+): () => void {
+  const key = archiveChannelKey(agentPubkey, channelId);
+  const retainedGeneration = generation;
+  archiveViewersByChannel.set(key, (archiveViewersByChannel.get(key) ?? 0) + 1);
+  return () => {
+    // A reset already dropped every viewer; a late release must not touch the
+    // counts of panels mounted after it.
+    if (retainedGeneration !== generation) return;
+    const viewers = (archiveViewersByChannel.get(key) ?? 1) - 1;
+    if (viewers > 0) {
+      archiveViewersByChannel.set(key, viewers);
+      return;
+    }
+    archiveViewersByChannel.delete(key);
+    markArchivedChannelUsed(key);
+    evictUnviewedArchivedChannels();
+  };
 }
 
 // Per-agent, per-channel latest-live-session-id.
@@ -369,7 +403,7 @@ function archiveChannelKey(agentPubkey: string, channelId: string): string {
  * Append a decoded archived observer event to the channel-scoped archive
  * event journal. Unlike `appendAgentEvent`, this path never trims a channel's
  * window — it grows only by explicit paged loads from SQLite. Memory is bounded
- * by evicting whole least-recently-used channels (MAX_ARCHIVED_CHANNELS).
+ * by evicting whole least-recently-used channels that no panel is viewing.
  *
  * Deduplicates on `(seq, timestamp)` — identical to `appendAgentEvent` — so
  * events that arrive on the live relay before the archive page is loaded are
@@ -385,7 +419,8 @@ function appendArchivedChannelEvent(
   event: ObserverEvent,
 ): boolean {
   const key = archiveChannelKey(agentPubkey, channelId);
-  const current = touchArchivedChannel(key) ?? [];
+  markArchivedChannelUsed(key);
+  const current = archiveEventsByChannel.get(key) ?? [];
 
   // Dedup: skip if (seq, timestamp) already present in the archive window.
   if (
@@ -402,10 +437,7 @@ function appendArchivedChannelEvent(
   // order for consumers that call buildTranscriptState over the window.
   const sorted = [...current, event].sort(compareObserverEvents);
   archiveEventsByChannel.set(key, sorted);
-  for (const oldest of archiveEventsByChannel.keys()) {
-    if (archiveEventsByChannel.size <= MAX_ARCHIVED_CHANNELS) break;
-    archiveEventsByChannel.delete(oldest);
-  }
+  evictUnviewedArchivedChannels();
   return true;
 }
 
@@ -424,7 +456,7 @@ export function getArchivedChannelEvents(
 ): ObserverEvent[] {
   if (!agentPubkey || !channelId) return EMPTY_EVENTS;
   return (
-    touchArchivedChannel(archiveChannelKey(agentPubkey, channelId)) ??
+    archiveEventsByChannel.get(archiveChannelKey(agentPubkey, channelId)) ??
     EMPTY_EVENTS
   );
 }
@@ -961,6 +993,7 @@ export function resetAgentObserverStore() {
   evictionFloorByAgent.clear();
   snapshotByAgent.clear();
   archiveEventsByChannel.clear();
+  archiveViewersByChannel.clear();
   knownAgentPubkeys.clear();
   knownAgentsBySubscription.clear();
   pendingUnknownAgentFrames.length = 0;

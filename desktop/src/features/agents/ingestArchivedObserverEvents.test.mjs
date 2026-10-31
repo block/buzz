@@ -1193,7 +1193,8 @@ describe("raw-event-level merge: stateful aggregates across live/archive boundar
 // Each channel opened in a session panel hydrates up to 2000 archived frames,
 // and nothing dropped them when the user moved to another channel, so the
 // archive grew with every channel ever opened. The archive keeps only the most
-// recently used channels; a channel a mounted panel keeps reading stays.
+// recently used channels nobody is viewing. Viewed channels are covered by
+// ui/useArchivedChannelEvents.jsdom-test.mjs.
 
 describe("archive window memory bound", () => {
   const CHANNELS = 20;
@@ -1239,23 +1240,6 @@ describe("archive window memory bound", () => {
     assert.ok(
       retained.filter((n) => n > 0).length < CHANNELS / 2,
       `archive must be bounded, retained per channel: ${retained.join(",")}`,
-    );
-  });
-
-  it("test_archive_keeps_channel_a_mounted_panel_reads", async () => {
-    await ingestArchivedObserverEvents(channelPage("chan-0"), decryptContent);
-    for (let c = 1; c < CHANNELS; c++) {
-      await ingestArchivedObserverEvents(
-        channelPage(`chan-${c}`),
-        decryptContent,
-      );
-      // A mounted panel re-reads its channel on every store notification.
-      getArchivedChannelEvents(AGENT_PUBKEY, "chan-0");
-    }
-    assert.equal(
-      _testGetArchivedChannelEvents(AGENT_PUBKEY, "chan-0").length,
-      PAGE,
-      "a channel still being read must not be evicted",
     );
   });
 
