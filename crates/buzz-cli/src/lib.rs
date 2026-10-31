@@ -1781,6 +1781,55 @@ pub enum PrCmd {
         #[arg(long = "to")]
         to: Vec<String>,
     },
+    /// Comment on a PR, optionally on one diff line
+    #[command(
+        after_help = "Examples:\n  buzz pr comment --pr <event> --content 'Looks good overall'\n  buzz pr comment --pr <event> --content 'Rename this' --file src/lib.rs --line 42 --side new"
+    )]
+    Comment {
+        /// Pull request event id (64-char hex)
+        #[arg(long)]
+        pr: String,
+        /// Comment markdown. Use '-' to read from stdin.
+        #[arg(long)]
+        content: String,
+        /// Extra pubkey (hex or npub) to notify — can be specified multiple times
+        #[arg(long = "mention")]
+        mention: Vec<String>,
+        /// Repo-relative file path for an inline comment — requires --line
+        #[arg(long, requires = "line")]
+        file: Option<String>,
+        /// 1-based line number for an inline comment — requires --file
+        #[arg(long, requires = "file", value_parser = clap::value_parser!(u64).range(1..))]
+        line: Option<u64>,
+        /// Diff side for an inline comment (default: new) — requires --file
+        #[arg(long, requires = "file", value_parser = ["old", "new"])]
+        side: Option<String>,
+    },
+    /// Request a review, approve, or request changes on a PR. Decisions bind
+    /// to the PR's current tip commit; clients ignore decisions from anyone
+    /// but a requested reviewer or the repo owner.
+    #[command(
+        group(clap::ArgGroup::new("action").required(true).multiple(false).args(["request", "approve", "request_changes"])),
+        after_help = "Examples:\n  buzz pr review --pr <event> --request <pubkey> --request <pubkey>\n  buzz pr review --pr <event> --approve\n  buzz pr review --pr <event> --request-changes --content 'Handle the empty case'"
+    )]
+    Review {
+        /// Pull request event id (64-char hex)
+        #[arg(long)]
+        pr: String,
+        /// Reviewer pubkey (hex or npub) to request — can be specified multiple
+        /// times. Only the PR author or repo owner may request.
+        #[arg(long = "request")]
+        request: Vec<String>,
+        /// Approve the PR's current tip commit
+        #[arg(long)]
+        approve: bool,
+        /// Request changes on the PR's current tip commit — requires --content
+        #[arg(long, requires = "content")]
+        request_changes: bool,
+        /// Note body. Use '-' to read from stdin. Optional except with --request-changes.
+        #[arg(long)]
+        content: Option<String>,
+    },
     /// Get a PR by event id
     Get {
         /// PR event id (64-char hex)
@@ -1841,6 +1890,18 @@ pub enum PrCmd {
 
 #[derive(Subcommand)]
 pub enum IssuesCmd {
+    /// Comment on an issue
+    Comment {
+        /// Issue event id (64-char hex)
+        #[arg(long)]
+        issue: String,
+        /// Comment markdown. Use '-' to read from stdin.
+        #[arg(long)]
+        content: String,
+        /// Extra pubkey (hex or npub) to notify — can be specified multiple times
+        #[arg(long = "mention")]
+        mention: Vec<String>,
+    },
     /// Create a git issue (NIP-34 kind:1621)
     Create {
         /// Repo owner pubkey (64-char hex). Optional when `--channel` (or
@@ -2622,7 +2683,7 @@ mod tests {
         assert_eq!(protect_names, vec!["list", "remove", "set"]);
         assert_eq!(
             names(&cmd, "pr"),
-            vec!["get", "list", "open", "status", "update"]
+            vec!["comment", "get", "list", "open", "review", "status", "update"]
         );
         assert_eq!(
             names(&cmd, "patches"),
@@ -2643,7 +2704,7 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "issues"),
-            vec!["assign", "create", "get", "list", "status", "unassign"]
+            vec!["assign", "comment", "create", "get", "list", "status", "unassign"]
         );
         assert_eq!(names(&cmd, "media"), vec!["get"]);
         assert_eq!(names(&cmd, "upload"), vec!["file"]);
@@ -2672,12 +2733,12 @@ mod tests {
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
-            ("issues", 6),
+            ("issues", 7),
             ("media", 1),
             ("messages", 8),
             ("pack", 2),
             ("patches", 4),
-            ("pr", 5),
+            ("pr", 7),
             ("projects", 8),
             ("reactions", 3),
             ("repos", 6),
