@@ -559,6 +559,31 @@ void main() {
       expect(feed.activity.map((item) => item.id), ['dm-older']);
     });
 
+    test('overlapping matches past a window stay on later pages', () async {
+      // 50 quiet channel mentions fill the mention window. 30 older quiet DM
+      // mentions match it too, through the DM filter, and fill its next page
+      // with 20 more quiet channel mentions, so the real one is a page later.
+      final session = _RecordingSessionNotifier()
+        ..seed(message('real', 1, channel: 'channel-1'));
+      for (var i = 0; i < 20; i++) {
+        session.seed(
+          message('older-quiet-$i', 20 + i, channel: 'channel-1', quiet: true),
+        );
+      }
+      for (var i = 0; i < 50; i++) {
+        session.seed(
+          message('quiet-$i', 500 + i, channel: 'channel-1', quiet: true),
+        );
+      }
+      for (var i = 0; i < 30; i++) {
+        session.seed(
+          message('dm-quiet-$i', 100 + i, channel: 'dm-1', quiet: true),
+        );
+      }
+      final feed = await load(session);
+      expect(feed.mentions.map((item) => item.id), ['real']);
+    });
+
     test('a DM-only event never moves the mention cursor', () async {
       // The mention window: one quiet and 49 real channel mentions. An
       // older addressed DM comes back only through the DM filter, and a

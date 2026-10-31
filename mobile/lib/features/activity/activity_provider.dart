@@ -601,10 +601,21 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
     final found = <NostrEvent>[];
     for (final filter in filters) {
       final seen = <String>{};
-      List<NostrEvent> window(Iterable<NostrEvent> events) => _relayOrder([
-        for (final event in events)
-          if (_matchesFilter(filter, event) && seen.add(event.id)) event,
-      ]).take(filter.limit).toList();
+      // Only the retained window is marked seen: matches past the cap came
+      // from overlapping sources and may still belong on a later page.
+      List<NostrEvent> window(Iterable<NostrEvent> events) {
+        final ids = <String>{};
+        final kept = _relayOrder([
+          for (final event in events)
+            if (_matchesFilter(filter, event) &&
+                !seen.contains(event.id) &&
+                ids.add(event.id))
+              event,
+        ]).take(filter.limit).toList();
+        seen.addAll(kept.map((event) => event.id));
+        return kept;
+      }
+
       var page = window(fetched);
       var visible = page.where((e) => !isQuietAgentMessage(e.tags)).length;
       for (var i = 0; i < maxPages; i++) {
