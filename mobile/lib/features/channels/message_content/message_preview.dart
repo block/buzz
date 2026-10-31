@@ -40,7 +40,7 @@ class MessagePreview extends HookConsumerWidget {
       () {
         final source = messagePreviewSource(content, maxLines: maxLines);
         return messagePreviewPieces(
-          normalizeBareLinks(source),
+          normalizeMarkdownLinks(source),
           maxLines: maxLines,
           mentionBindings: renderedMentionBindings(
             source,

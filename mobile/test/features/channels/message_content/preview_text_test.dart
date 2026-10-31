@@ -237,6 +237,33 @@ void main() {
       );
     });
 
+    test('bare and angle URLs preview like links showing their URL', () {
+      final message = 'buzz://message?channel=$_channelId&id=${'ab' * 32}';
+      expect(
+        _pieces(
+          'see $_channelLink, $message. <$message> and https://x.y/a_b_c?q=@alice#general!',
+          mentionBindings: {
+            'alice': {_alice},
+          },
+          channelNames: {'general': _channelId},
+        ),
+        [
+          const PreviewText('see '),
+          const PreviewChannel('general'),
+          const PreviewText(
+            ', general · abababab. general · abababab and '
+            'https://x.y/a_b_c?q=@alice#general!',
+          ),
+        ],
+      );
+      expect(_text('`https://x.y/*a*` **b**'), 'https://x.y/*a* b');
+      expect(_pieces('clip: https://x.y/b.mp4.'), [
+        const PreviewText('clip: '),
+        const PreviewMedia(MessageMediaKind.video),
+        const PreviewText('.'),
+      ]);
+    });
+
     test('media links become their kind', () {
       expect(_pieces('look ![](https://x.y/a.png) [clip](https://x.y/b.mp4)'), [
         const PreviewText('look '),

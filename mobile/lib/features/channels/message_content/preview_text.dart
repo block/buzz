@@ -229,6 +229,10 @@ String _blockPrefix(String line) {
 }
 
 final _link = RegExp(r'(!?)\[([^\]]*)\]\(<?([^)\s>]+)>?(?:\s+"[^"]*")?\)');
+final _bareUrl = RegExp(
+  r'<((?:https?|buzz)://[^\s<>]+)>|(?<![\w(\]=/])(?:https?|buzz)://[^\s<>)\]]+',
+);
+final _urlTrailingPunctuation = RegExp(r'[.,!?:;*_~]+$');
 
 // Emphasis is unwrapped only when its delimiters hug the text, and `_` only
 // at word boundaries, so snake_case names and emoji shortcodes survive.
@@ -379,37 +383,70 @@ class _PreviewBuilder {
     final source = _shield(text);
     var start = 0;
     for (final match in _link.allMatches(source)) {
-      _tokens(_unwrapEmphasis(source.substring(start, match.start)));
+      _prose(source.substring(start, match.start));
       start = match.end;
-      final isImage = match[1]!.isNotEmpty;
       final label = _reescape(match[2]!);
       final url = _reescape(match[3]!);
-      final imeta = imetaByUrl[normalizeMarkdownDestination(url)];
-      final kind =
-          classifyMediaUrl(url, imeta: imeta) ??
-          (isImage ? MessageMediaKind.image : null);
-      if (kind != null) {
-        add(PreviewMedia(kind));
-        continue;
-      }
-      final uri = Uri.tryParse(url);
-      final deepLink = uri?.scheme == 'buzz'
-          ? parseBuzzDeepLink(uri!) ?? parseEntityDeepLink(uri)
-          : null;
-      if (deepLink is ChannelDeepLink) {
-        add(PreviewChannel(buzzChannelLabel(deepLink.channelId, _channelName)));
-        continue;
-      }
       final shown = label.isEmpty ? url : decodeMarkdownLabelSyntax(label);
-      // As in the thread view, a link showing its own URL shows a short label.
-      final short = shown == url ? buzzLinkLabel(deepLink, _channelName) : null;
-      if (short != null) {
-        this.text(short);
+      if (_linkTarget(
+        url,
+        image: match[1]!.isNotEmpty,
+        showsUrl: shown == url,
+      )) {
         continue;
       }
       _tokens(_unwrapEmphasis(_shield(shown)));
     }
+    _prose(source.substring(start));
+  }
+
+  /// [_shield]ed text between links. Bare and `<angle>` URLs preview like
+  /// links showing their own URL, as the thread view autolinks them; the URL
+  /// itself is literal, so no mention or channel token matches inside it.
+  void _prose(String source) {
+    var start = 0;
+    for (final match in _bareUrl.allMatches(source)) {
+      var url = match[1];
+      var end = match.end;
+      if (url == null) {
+        // Trailing punctuation stays outside the link, as in GFM.
+        url = match[0]!.replaceFirst(_urlTrailingPunctuation, '');
+        end = match.start + url.length;
+      }
+      _tokens(_unwrapEmphasis(source.substring(start, match.start)));
+      start = end;
+      if (!_linkTarget(_reescape(url), image: false, showsUrl: true)) {
+        text(_unshield(url));
+      }
+    }
     _tokens(_unwrapEmphasis(source.substring(start)));
+  }
+
+  /// Adds the piece a link to [url] previews as when it is media, a channel,
+  /// or a Buzz link that [showsUrl]. Returns false when the link previews as
+  /// its label instead.
+  bool _linkTarget(String url, {required bool image, required bool showsUrl}) {
+    final imeta = imetaByUrl[normalizeMarkdownDestination(url)];
+    final kind =
+        classifyMediaUrl(url, imeta: imeta) ??
+        (image ? MessageMediaKind.image : null);
+    if (kind != null) {
+      add(PreviewMedia(kind));
+      return true;
+    }
+    final uri = Uri.tryParse(url);
+    final deepLink = uri?.scheme == 'buzz'
+        ? parseBuzzDeepLink(uri!) ?? parseEntityDeepLink(uri)
+        : null;
+    if (deepLink is ChannelDeepLink) {
+      add(PreviewChannel(buzzChannelLabel(deepLink.channelId, _channelName)));
+      return true;
+    }
+    // As in the thread view, a link showing its own URL shows a short label.
+    final short = showsUrl ? buzzLinkLabel(deepLink, _channelName) : null;
+    if (short == null) return false;
+    text(short);
+    return true;
   }
 
   String? _channelName(String channelId) {
