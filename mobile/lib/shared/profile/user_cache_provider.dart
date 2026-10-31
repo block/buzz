@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../relay/relay.dart';
+import '../verified_profiles/verified_profile_directory.dart';
 import 'user_profile.dart';
 import 'profile_event_parser.dart';
 
@@ -42,6 +43,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
   /// Request a profile for [pubkey]. Returns immediately from cache if
   /// available, otherwise schedules a batch fetch.
   UserProfile? get(String pubkey) {
+    _trackVerified([pubkey]);
     final cached = state[pubkey.toLowerCase()];
     if (cached != null) return cached;
     _scheduleFetch(pubkey.toLowerCase());
@@ -88,6 +90,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
   /// Preload profiles for a list of pubkeys (e.g. channel members).
   /// Returns whether the batch completed successfully.
   Future<bool> preload(List<String> pubkeys) {
+    _trackVerified(pubkeys);
     final normalized = pubkeys.map((pk) => pk.toLowerCase()).toSet();
     final alreadyPending = normalized.any(_pending.contains);
     final uncached = normalized
@@ -138,6 +141,10 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     final updated = Map<String, UserProfile>.from(state);
     if (_cacheProfileEvent(event, updated)) state = updated;
   }
+
+  /// Anyone whose name is needed may also have a NIP-FI verified name.
+  void _trackVerified(Iterable<String> pubkeys) =>
+      ref.read(verifiedProfilesProvider.notifier).track(pubkeys);
 
   void _scheduleFetch(String pubkey) {
     if (state.containsKey(pubkey) || _pending.contains(pubkey)) return;

@@ -46,6 +46,7 @@ import '../../shared/widgets/flapping_bee.dart';
 import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
 import '../../shared/widgets/load_error_view.dart';
 import '../../shared/widgets/message_author_meta.dart';
+import '../../shared/widgets/verified_mark.dart';
 import '../../shared/widgets/skeleton.dart';
 import '../profile/presence_cache_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';

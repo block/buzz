@@ -43,6 +43,9 @@ class MessageAuthorMeta extends StatelessWidget {
   /// Base text style for [timestamp], with [metadataColor] applied.
   final TextStyle timestampStyle;
 
+  /// Optional verification mark drawn right after the name, outside its text.
+  final Widget? mark;
+
   /// Mirrors metadata order without changing text reading direction.
   final bool reversed;
 
@@ -57,6 +60,7 @@ class MessageAuthorMeta extends StatelessWidget {
     required this.nameColor,
     required this.metadataColor,
     this.username,
+    this.mark,
     this.alignment = MainAxisAlignment.start,
     this.reversed = false,
     this.showTimestamp = true,
@@ -101,6 +105,7 @@ class MessageAuthorMeta extends StatelessWidget {
 
         final children = <Widget>[
           Flexible(child: authorName),
+          ?mark,
           if (showUsername) ...[
             const SizedBox(width: Grid.half),
             ConstrainedBox(

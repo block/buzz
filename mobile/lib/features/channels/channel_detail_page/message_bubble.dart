@@ -266,6 +266,7 @@ class _MessageBubble extends HookConsumerWidget {
                                         children: [
                                           Expanded(
                                             child: MessageAuthorMeta(
+                                              mark: VerifiedMark(pubkey: pk),
                                               showTimestamp: true,
                                               reversed: false,
                                               alignment: ownMessage
