@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:buzz/shared/relay/relay_socket.dart';
+import 'package:buzz/shared/relay/relay_websocket.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -40,16 +41,62 @@ Future<ServerSocket> _silentAfterHandshakeServer() async {
   return server;
 }
 
+/// A server that accepts TCP connections and then never answers, like a
+/// stalled TLS or upgrade handshake on a congested network.
+Future<ServerSocket> _stalledHandshakeServer() async {
+  final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+  server.listen((client) => client.listen((_) {}, onError: (_) {}));
+  return server;
+}
+
 void main() {
   const testPingInterval = Duration(milliseconds: 150);
+  const testConnectTimeout = Duration(milliseconds: 200);
 
   setUp(() {
     RelaySocket.debugPingInterval = testPingInterval;
+    RelaySocket.debugConnectTimeout = testConnectTimeout;
   });
 
   tearDown(() {
     RelaySocket.debugPingInterval = RelaySocket.pingInterval;
+    RelaySocket.debugConnectTimeout = relayWebSocketConnectTimeout;
   });
+
+  for (final scoped in [false, true]) {
+    test('gives up on a handshake that never completes '
+        '(${scoped ? 'scoped headers' : 'no headers'})', () async {
+      final server = await _stalledHandshakeServer();
+
+      final disconnected = Completer<Object?>();
+      final socket = RelaySocket(
+        wsUrl: 'ws://127.0.0.1:${server.port}',
+        nsec: null,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (error) {
+          if (!disconnected.isCompleted) disconnected.complete(error);
+        },
+      );
+      if (scoped) {
+        socket.headers = {'Nostr-Federated-Identity': 'Bearer synthetic'};
+      }
+      unawaited(socket.connect());
+
+      final error = await disconnected.future.timeout(
+        testConnectTimeout * 10,
+        onTimeout: () => fail(
+          'RelaySocket must fail a stalled handshake so the session can '
+          'schedule a reconnect',
+        ),
+      );
+      expect(socket.state, SocketState.disconnected);
+      expect(error.toString(), contains('Relay connection timed out'));
+
+      socket.dispose();
+      await server.close();
+    });
+  }
 
   test('detects a peer that stops answering pings', () async {
     final server = await _silentAfterHandshakeServer();
