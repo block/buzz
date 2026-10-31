@@ -119,6 +119,15 @@ pub const KIND_PUSH_LEASE: u32 = 30350;
 /// the owner's key to itself and contains the runnable identity/configuration
 /// plus exact public projection bindings. See `docs/nips/NIP-PMA.md`.
 pub const KIND_PRIVATE_MANAGED_AGENT: u32 = 30179;
+/// NIP-UG: user group (parameterized replaceable) — a named, mentionable set of
+/// community members, like a Slack user group (`@ios-team`).
+///
+/// `d` is the normalized handle. Members are `p` tags. Unlike other
+/// parameterized kinds the live head for a handle is community-wide: authorized
+/// editors who are not the original author supersede the previous head, and the
+/// relay refuses a handle that another author already holds. See
+/// `docs/nips/NIP-UG.md` and [`crate::user_group`].
+pub const KIND_USER_GROUP: u32 = 30182;
 
 /// Kinds whose stored events are readable only by their author.
 ///
@@ -633,8 +642,6 @@ pub const KIND_WORKFLOW_APPROVAL_GRANTED: u32 = 46011;
 /// A pending workflow approval was denied.
 pub const KIND_WORKFLOW_APPROVAL_DENIED: u32 = 46012;
 
-// User groups (47000–47999)
-
 // System / admin custom range (48000–48999)
 /// An audit log entry was recorded.
 pub const KIND_AUDIT_ENTRY: u32 = 48001;
@@ -711,6 +718,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_MANAGED_AGENT,
     KIND_TEAM_CATALOG,
     KIND_PRIVATE_MANAGED_AGENT,
+    KIND_USER_GROUP,
     KIND_REPORT,
     KIND_PRODUCT_FEEDBACK,
     KIND_NIP29_PUT_USER,
@@ -920,6 +928,7 @@ const _: () = assert!(is_parameterized_replaceable(KIND_TEAM)); // 30176 ∈ 300
 const _: () = assert!(is_parameterized_replaceable(KIND_MANAGED_AGENT)); // 30177 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_TEAM_CATALOG)); // 30178 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_PRIVATE_MANAGED_AGENT)); // 30179 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_USER_GROUP)); // 30182 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 30300 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999

@@ -42,6 +42,8 @@ pub mod relay;
 pub mod tenant;
 /// NIP-CW thread-mode normalized newest-first window contract.
 pub mod thread_window;
+/// NIP-UG user groups — parsing, write authorization, and group mentions.
+pub mod user_group;
 /// Schnorr signature and event ID verification.
 pub mod verification;
 

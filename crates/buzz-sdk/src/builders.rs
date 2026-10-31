@@ -12,7 +12,7 @@ use buzz_core::{
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
         KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_PROJECT,
-        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_USER_GROUP, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -2571,6 +2571,74 @@ pub fn build_delete_addressable(
     let coord = format!("{kind}:{pk}:{d}");
     let tags = vec![tag(&["a", &coord])?];
     Ok(EventBuilder::new(Kind::Custom(KIND_DELETION as u16), "").tags(tags))
+}
+
+/// Build a user group head event (kind:30182, NIP-UG).
+///
+/// Validates every field with the same rules the relay applies, so a group the
+/// builder accepts is a group the relay parses. The caller signs. A write over
+/// an existing group keeps `creator` from the current head.
+pub fn build_user_group(
+    group: &buzz_core::user_group::UserGroup,
+) -> Result<EventBuilder, SdkError> {
+    group
+        .validate()
+        .map_err(|e| SdkError::InvalidInput(e.to_string()))?;
+    let tags = group
+        .tags()
+        .iter()
+        .map(|parts| {
+            let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
+            tag(&parts)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(EventBuilder::new(
+        Kind::Custom(KIND_USER_GROUP as u16),
+        group.description.clone(),
+    )
+    .tags(tags)
+    .allow_self_tagging())
+}
+
+/// Build the NIP-09 deletion request for a user group head authored by `author`.
+pub fn build_user_group_deletion(author_hex: &str, handle: &str) -> Result<EventBuilder, SdkError> {
+    let author = check_pubkey_hex(author_hex, "group author")?;
+    let handle = buzz_core::user_group::normalize_handle(handle)
+        .map_err(|e| SdkError::InvalidInput(e.to_string()))?;
+    let coordinate = format!("{KIND_USER_GROUP}:{author}:{handle}");
+    Ok(
+        EventBuilder::new(Kind::Custom(KIND_DELETION as u16), "").tags([
+            tag(&["a", &coordinate])?,
+            tag(&["k", &KIND_USER_GROUP.to_string()])?,
+        ]),
+    )
+}
+
+/// The `p` tags that mention every member of `group`, each marked
+/// `group:<handle>` (NIP-UG). Add them to a message with `EventBuilder::tags`.
+///
+/// They sit outside the [`crate::mentions::MENTION_CAP`] that
+/// [`build_message`] applies to explicit mentions. A disabled or empty group
+/// is an error: it would notify no one.
+pub fn group_mention_tags(group: &buzz_core::user_group::UserGroup) -> Result<Vec<Tag>, SdkError> {
+    if group.disabled {
+        return Err(SdkError::InvalidInput(format!(
+            "user group @{} is disabled",
+            group.handle
+        )));
+    }
+    if group.members.is_empty() {
+        return Err(SdkError::InvalidInput(format!(
+            "user group @{} has no members",
+            group.handle
+        )));
+    }
+    let marker = buzz_core::user_group::group_mention_marker(&group.handle);
+    group
+        .members
+        .iter()
+        .map(|member| tag(&["p", member, "", &marker]))
+        .collect()
 }
 
 #[cfg(test)]
@@ -5668,5 +5736,83 @@ mod tests {
 
         assert_eq!(accept_count, 11, "expected 11 accept cases");
         assert_eq!(reject_count, 20, "expected 20 reject cases");
+    }
+
+    fn sample_group() -> buzz_core::user_group::UserGroup {
+        buzz_core::user_group::UserGroup {
+            handle: "ios-team".into(),
+            name: "iOS Team".into(),
+            description: "Builds the app".into(),
+            creator: "11".repeat(32),
+            admins: vec![],
+            members: vec!["22".repeat(32), "33".repeat(32)],
+            policy: buzz_core::user_group::EditPolicy::Admins,
+            disabled: false,
+        }
+    }
+
+    #[test]
+    fn user_group_round_trips_through_the_core_parser() {
+        let group = sample_group();
+        let ev = sign(build_user_group(&group).unwrap());
+        assert_eq!(ev.kind.as_u16() as u32, KIND_USER_GROUP);
+        assert_eq!(buzz_core::user_group::parse_user_group(&ev).unwrap(), group);
+
+        let bad = buzz_core::user_group::UserGroup {
+            name: String::new(),
+            ..group
+        };
+        assert!(build_user_group(&bad).is_err());
+    }
+
+    #[test]
+    fn user_group_keeps_a_signer_who_is_also_a_member() {
+        let signer = keys().public_key().to_hex();
+        let group = buzz_core::user_group::UserGroup {
+            members: vec!["22".repeat(32), signer.clone()],
+            ..sample_group()
+        };
+        let ev = sign(build_user_group(&group).unwrap());
+        let parsed = buzz_core::user_group::parse_user_group(&ev).unwrap();
+        assert!(parsed.members.contains(&signer), "{:?}", parsed.members);
+    }
+
+    #[test]
+    fn user_group_deletion_names_the_coordinate() {
+        let author = "ab".repeat(32);
+        let ev = sign(build_user_group_deletion(&author, "@iOS-Team").unwrap());
+        assert_eq!(ev.kind.as_u16(), 5);
+        assert!(has_tag(&ev, "a", &format!("30182:{author}:ios-team")));
+        assert!(build_user_group_deletion("nope", "x").is_err());
+    }
+
+    #[test]
+    fn group_mentions_mark_every_member_and_skip_the_mention_cap() {
+        let mut group = sample_group();
+        group.members = (0..120u32).map(|i| format!("{i:064x}")).collect();
+        let tags = group_mention_tags(&group).unwrap();
+        assert_eq!(tags.len(), 120);
+        assert!(tags.iter().all(|t| t.as_slice()[3] == "group:ios-team"));
+
+        let ev = sign(
+            build_message(Uuid::new_v4(), "hi @ios-team", None, &[], false, &[], &[])
+                .unwrap()
+                .tags(tags),
+        );
+        assert_eq!(
+            buzz_core::user_group::group_marked_p_tags(&ev)["ios-team"].len(),
+            120
+        );
+
+        let disabled = buzz_core::user_group::UserGroup {
+            disabled: true,
+            ..sample_group()
+        };
+        assert!(group_mention_tags(&disabled).is_err());
+        let empty = buzz_core::user_group::UserGroup {
+            members: vec![],
+            ..sample_group()
+        };
+        assert!(group_mention_tags(&empty).is_err());
     }
 }
