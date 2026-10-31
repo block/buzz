@@ -68,7 +68,8 @@ class HostedRelayAuth extends ChangeNotifier {
     BuilderlabAccount account,
   })?
   _cached;
-  Future<void>? _pending;
+  // Per account client, so a stalled issuer never delays an unrelated one.
+  final _pending = <BuilderlabAccountClient, Future<void>>{};
   bool _disposed = false;
   String? failedRelay;
   String? failedPubkey;
@@ -141,7 +142,7 @@ class HostedRelayAuth extends ChangeNotifier {
           cached.expiry.isAfter(_now())) {
         return {'Nostr-Federated-Identity': 'Bearer ${cached.token}'};
       }
-      final pending = _pending;
+      final pending = _pending[client];
       if (pending != null) {
         // Different communities share account restoration, never assertions.
         try {
@@ -152,11 +153,11 @@ class HostedRelayAuth extends ChangeNotifier {
         continue;
       }
       final operation = _issue(config, client, relay, pubkey);
-      _pending = operation;
+      _pending[client] = operation;
       try {
         await operation;
       } finally {
-        _pending = null;
+        if (identical(_pending[client], operation)) _pending.remove(client);
       }
     }
     throw AccountFailure.unavailable;
