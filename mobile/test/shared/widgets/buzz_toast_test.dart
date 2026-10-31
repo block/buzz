@@ -2,11 +2,83 @@ import 'dart:ui' show SemanticsAction;
 import 'package:buzz/shared/clipboard_utils.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/buzz_toast.dart';
+import 'package:buzz/shared/widgets/buzz_toast_host.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  final binding = TestWidgetsFlutterBinding.ensureInitialized();
+  setUp(() {
+    binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform_views,
+      (_) async => null,
+    );
+  });
+  tearDown(() {
+    binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform_views,
+      null,
+    );
+  });
+  testWidgets('toast stays above app chrome and subsequently pushed routes', (
+    tester,
+  ) async {
+    final navigator = GlobalKey<NavigatorState>();
+    var retries = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        navigatorKey: navigator,
+        builder: (context, child) => BuzzToastHost(
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              child!,
+              const Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                height: 160,
+                child: ModalBarrier(color: Colors.blue, dismissible: false),
+              ),
+            ],
+          ),
+        ),
+        home: Scaffold(
+          body: Builder(
+            builder: (context) => Center(
+              child: TextButton(
+                onPressed: () => showBuzzToast(
+                  context,
+                  'Try again',
+                  onRetry: () => retries++,
+                ),
+                child: const Text('Show'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Show'));
+    await tester.pumpAndSettle();
+    expect(find.text('Retry').hitTestable(), findsOneWidget);
+
+    navigator.currentState!.push(
+      MaterialPageRoute<void>(
+        builder: (_) => const Scaffold(body: Text('Next route')),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Next route'), findsOneWidget);
+    expect(find.text('Retry').hitTestable(), findsOneWidget);
+    await tester.tap(find.text('Retry'));
+    await tester.pumpAndSettle();
+    expect(retries, 1);
+    expect(find.text('Try again'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets(
     'iPhone toast automatically expands from the island and returns',
     (tester) async {
@@ -40,6 +112,9 @@ void main() {
         expect(find.text('Island preview'), findsNothing);
         await tester.pump();
       }
+      final layer = tester.widget<UiKitView>(find.byType(UiKitView));
+      expect(layer.viewType, 'buzz/toast_layer');
+      expect(tester.getSize(find.byType(UiKitView)), const Size(1, 1));
       expect(tester.widget<PhysicalShape>(surface).color, Colors.transparent);
       expect(tester.getRect(surface).center.dy, closeTo(origin.center.dy, 1));
       await tester.pump(const Duration(milliseconds: 140));
