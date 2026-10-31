@@ -856,7 +856,27 @@ class ThreadDetailPage extends HookConsumerWidget {
     // Typing now occupies the timeline, so follow its changing height only
     // when the reader was already following the tail.
     useEffect(() {
-      realignThreadTailAfterMetricsChange();
+      final shouldFollow =
+          isMember &&
+          !isArchived &&
+          initialTailSettle.isComplete &&
+          !tailIntent.isDragging &&
+          !userOptedOutOfTailFollow.value &&
+          (followsThreadTail.value || threadTailIsVisible());
+      if (shouldFollow) followsThreadTail.value = true;
+      // Positioned-list item positions still describe the old row height in
+      // this frame. Correct after layout rather than accepting that stale
+      // tail position as proof the new typing group is visible.
+      tailIntent.schedule(
+        allowed: shouldFollow,
+        revalidate: () =>
+            context.mounted &&
+            itemScrollController.isAttached &&
+            !tailIntent.isDragging &&
+            !userOptedOutOfTailFollow.value &&
+            followsThreadTail.value,
+        action: correctThreadTailInstantly,
+      );
       return null;
     }, [threadTyping.isNotEmpty]);
 
