@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:buzz/shared/relay/media_auth.dart';
 import 'package:buzz/shared/relay/media_image.dart';
@@ -111,6 +112,60 @@ void main() {
   });
 
   group('MediaImageProvider fetching', () {
+    test(
+      'oversized image streams abort before decode and preserve the client',
+      () async {
+        for (final declared in [true, false]) {
+          var cancelled = false;
+          var aborted = false;
+          var delivered = false;
+          final controller = StreamController<List<int>>(
+            onCancel: () => cancelled = true,
+          );
+          final client = _StreamingClient((request) async {
+            if (request.url.path.endsWith('valid.png')) {
+              return http.StreamedResponse(Stream.value(_pngBytes), 200);
+            }
+            (request as http.AbortableRequest).abortTrigger!.then((_) {
+              aborted = true;
+            });
+            // Never finish: the loader must stop as soon as the cap is crossed.
+            controller.add(Uint8List(MediaImageProvider.maxResponseBytes));
+            controller.add([0]);
+            return http.StreamedResponse(
+              controller.stream,
+              200,
+              contentLength: declared
+                  ? MediaImageProvider.maxResponseBytes + 1
+                  : null,
+            );
+          });
+          final provider = MediaImageProvider(
+            url: 'https://avatar.example/$declared.png',
+            auth: _auth(),
+            client: client,
+            onBytesLoaded: (_) => delivered = true,
+          );
+          final error = await _waitError(
+            provider.resolve(ImageConfiguration.empty),
+          ).timeout(const Duration(seconds: 2));
+          expect(error, isA<FormatException>());
+          expect(cancelled, isTrue);
+          expect(aborted, isTrue);
+          expect(delivered, isFalse);
+          await controller.close();
+          await _wait(
+            MediaImageProvider(
+              url: 'https://avatar.example/valid.png',
+              auth: _auth(),
+              client: client,
+            ).resolve(ImageConfiguration.empty),
+          );
+          PaintingBinding.instance.imageCache.clear();
+        }
+      },
+    );
+
     test('resolves one fetch for repeated resolves of the same key', () async {
       var fetches = 0;
       final client = http_testing.MockClient((request) async {
@@ -241,4 +296,12 @@ Future<Object?> _waitError(ImageStream stream) async {
   } catch (e) {
     return e;
   }
+}
+
+class _StreamingClient extends http.BaseClient {
+  _StreamingClient(this.respond);
+  final Future<http.StreamedResponse> Function(http.BaseRequest) respond;
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) =>
+      respond(request);
 }

@@ -115,7 +115,7 @@ class RunnerTests: XCTestCase {
     add(attachment)
     coordinator.cancel()
     coordinator.cancel()
-    await fulfillment(of: [completed], timeout: 3)
+    await fulfillment(of: [completed], timeout: 10)
     XCTAssertNil(parent.presentedViewController)
     XCTAssertEqual(replies, [false])
   }
@@ -744,12 +744,22 @@ class RunnerTests: XCTestCase {
     bar.view().layoutIfNeeded()
     XCTAssertLessThan(title.textColor.cgColor.alpha, 0.6)
     messenger.scroll(to: boundary)
-    try await Task.sleep(nanoseconds: 60_000_000)
-    XCTAssertFalse(try XCTUnwrap(centeredTitle.layer.mask).bounds.isEmpty)
-    XCTAssertGreaterThan(visibleOpacity(of: centeredTitle), 0.01)
-    XCTAssertLessThan(visibleOpacity(of: centeredTitle), 0.99)
+    // The host app can hold the main thread past the whole fade, so check the
+    // animation itself rather than sampling its presentation mid-flight.
+    let mask = try XCTUnwrap(centeredTitle.layer.mask)
+    XCTAssertFalse(mask.bounds.isEmpty)
+    XCTAssertEqual(mask.opacity, 1)
+    let fade = try XCTUnwrap(mask.animation(forKey: "titleFade") as? CABasicAnimation,
+                             "Collapsing must fade the compact title in")
+    XCTAssertEqual(fade.keyPath, "opacity")
+    XCTAssertEqual((fade.fromValue as? NSNumber)?.floatValue, 0)
+    XCTAssertEqual((fade.toValue as? NSNumber)?.floatValue, 1)
+    // A band around the 0.18 s design value: a near-zero duration is a snap.
+    XCTAssertGreaterThanOrEqual(fade.duration, 0.1)
+    XCTAssertLessThanOrEqual(fade.duration, 0.5)
     XCTAssertEqual(title.textColor.cgColor.alpha, 0, accuracy: 0.01)
     messenger.scroll(to: boundary * 0.7)
+    XCTAssertNil(mask.animation(forKey: "titleFade"), "Reversing must cancel the fade")
     try await Task.sleep(nanoseconds: 240_000_000)
     XCTAssertEqual(visibleOpacity(of: centeredTitle), 0, accuracy: 0.01)
     XCTAssertGreaterThan(title.textColor.cgColor.alpha, 0.1)

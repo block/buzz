@@ -152,24 +152,17 @@ class _ThreadTailIntent {
   }
 }
 
-/// Thread-scoped typing status with optional size animation.
+/// Desktop's conversation activity above the thread composer, animated
+/// in size unless motion is reduced.
 class _ThreadTypingIndicator extends StatelessWidget {
-  final String channelId;
-  final List<TypingEntry> entries;
-  final bool animated;
+  final ActivityScope scope;
 
-  const _ThreadTypingIndicator({
-    required this.channelId,
-    required this.entries,
-    this.animated = true,
-  });
+  const _ThreadTypingIndicator({required this.scope});
 
   @override
   Widget build(BuildContext context) {
-    final child = entries.isEmpty
-        ? const SizedBox.shrink()
-        : ChannelTypingIndicator(channelId: channelId, entries: entries);
-    if (!animated || MediaQuery.disableAnimationsOf(context)) return child;
+    final child = ConversationActivity(scope: scope);
+    if (MediaQuery.disableAnimationsOf(context)) return child;
     return AnimatedSize(
       duration: const Duration(milliseconds: 180),
       curve: Curves.easeOutCubic,

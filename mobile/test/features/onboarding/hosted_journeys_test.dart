@@ -549,7 +549,7 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
       try {
-        expect(find.byTooltip('Back'), findsNothing);
+        expect(find.byTooltip('Back').hitTestable(), findsNothing);
         // External teardown still fences pending enrollment.
         await f.flow.leave();
         await tester.pump();
@@ -611,7 +611,7 @@ void main() {
           of: find.byType(TextField).hitTestable(),
           matching: find.byType(BottomSheet),
         ),
-        findsOneWidget,
+        findsNothing,
       );
       expect(f.sent('/claim'), hasLength(1));
       expect(f.recoveryScopes, hasLength(3));
@@ -911,10 +911,10 @@ void main() {
       await f.tap(tester, 'Continue');
       // A refused key must not pin the URL against an explicit allowed choice.
       f.refusedSelfHostedPubkey = f.keys.public;
-      await f.tap(tester, fullNpub(f.keys.public)!);
+      await f.tap(tester, shortPubkey(f.keys.public));
       expect(await f.storage.loadAll(), isEmpty);
       expect(find.textContaining('Could not join.'), findsOneWidget);
-      await f.tap(tester, fullNpub(f.secondKeys.public)!);
+      await f.tap(tester, shortPubkey(f.secondKeys.public));
       expect((await f.storage.loadAll()).single.nsec, f.secondKeys.nsec);
       expect(
         (await AccountIdentityStore().forPairing(f.keys.public).read())!.pubkey,

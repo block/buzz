@@ -163,7 +163,7 @@ class _AddCommunityConnection extends HookWidget {
               key: const Key('add-community-link-action'),
               style: FilledButton.styleFrom(
                 backgroundColor: Color.lerp(
-                  context.colors.surface,
+                  Colors.transparent,
                   context.colors.primary,
                   progress,
                 ),
@@ -172,9 +172,7 @@ class _AddCommunityConnection extends HookWidget {
                   context.colors.onPrimary,
                   progress,
                 ),
-                side: BorderSide(
-                  color: context.colors.outline.withValues(alpha: 1 - progress),
-                ),
+                side: BorderSide.none,
               ),
               onPressed: busy || (enteringLink && !canSubmit)
                   ? null
@@ -196,7 +194,7 @@ class _AddCommunityConnection extends HookWidget {
               ),
             ),
             if (pairingVisible.value && !enteringLink)
-              OutlinedButton(
+              TextButton(
                 onPressed: busy ? null : onPairing,
                 child: const Text('Use a pairing code'),
               ),

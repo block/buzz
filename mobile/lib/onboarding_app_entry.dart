@@ -94,7 +94,7 @@ class OnboardingAppEntry extends HookConsumerWidget {
         : flow.noCommunitiesToAdd
         ? 'No communities available to add. Scan a QR code or use an invite link.'
         : connected
-        ? 'Connected to Builderlab.'
+        ? 'Scan a QR code or enter a community link.'
         : null;
     final handlingBack = useRef(false);
     void back() {

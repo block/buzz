@@ -88,6 +88,21 @@ jobs:
         uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11 # zizmor: ignore[cache-poisoning] Bounded trial: only PR 5224 writes to its isolated merge-ref scope; trusted pushes retain production writes.
         with:
           version: v0.16.0
+      # The sccache server checks its GHA cache storage at startup and refuses to
+      # start when that fails (egress over the account limit, a failed read),
+      # which used to fail cargo's first `sccache rustc -vV` and the build.
+      # SCCACHE_IGNORE_SERVER_IO_ERROR doesn't cover startup in v0.16.0, so start
+      # it here and build with plain rustc if it won't start.
+      - name: Start sccache
+        id: sccache
+        if: steps.relay-artifacts-cache.outputs.cache-hit != 'true'
+        run: |
+          if sccache --start-server; then
+            echo "wrapper=sccache" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::sccache did not start; building without it"
+            echo "wrapper=" >> "$GITHUB_OUTPUT"
+          fi
       - name: Install cargo-nextest
         if: steps.relay-artifacts-cache.outputs.cache-hit != 'true' && matrix.artifact != 'relay-binaries'
         uses: taiki-e/install-action@0fd46367812ee04360509b4169d9f659d6892bb2 # v2.79.15
@@ -96,12 +111,12 @@ jobs:
       - name: Build relay binaries
         if: steps.relay-artifacts-cache.outputs.cache-hit != 'true' && matrix.artifact == 'relay-binaries'
         env:
-          RUSTC_WRAPPER: sccache
+          RUSTC_WRAPPER: ${{ steps.sccache.outputs.wrapper }}
         run: cargo build --profile ci -p buzz-relay -p git-credential-nostr
       - name: Build backend integration test archive
         if: steps.relay-artifacts-cache.outputs.cache-hit != 'true' && matrix.artifact == 'backend-integration-tests'
         env:
-          RUSTC_WRAPPER: sccache
+          RUSTC_WRAPPER: ${{ steps.sccache.outputs.wrapper }}
         run: |
           cargo nextest archive \
             --cargo-profile ci \
@@ -116,7 +131,7 @@ jobs:
       - name: Build PostgreSQL test archive
         if: steps.relay-artifacts-cache.outputs.cache-hit != 'true' && matrix.artifact == 'postgres-tests'
         env:
-          RUSTC_WRAPPER: sccache
+          RUSTC_WRAPPER: ${{ steps.sccache.outputs.wrapper }}
         run: |
           postgres_package_args=()
           while IFS= read -r package; do
@@ -191,6 +206,9 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      # pgschema has no --version; --help exits 0 once Hermit has fetched it.
+      - name: Fetch Hermit tools
+        run: scripts/ci-hermit-retry.sh ./bin/pgschema --help
       - name: Tune disposable PostgreSQL
         env:
           PGPASSWORD: ${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}
@@ -243,6 +261,9 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      # pgschema has no --version; --help exits 0 once Hermit has fetched it.
+      - name: Fetch Hermit tools
+        run: scripts/ci-hermit-retry.sh ./bin/pgschema --help
       - name: Start integration services
         run: |
           for attempt in 1 2 3; do
@@ -433,6 +454,9 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      # pgschema has no --version; --help exits 0 once Hermit has fetched it.
+      - name: Fetch Hermit tools
+        run: scripts/ci-hermit-retry.sh ./bin/pgschema --help
       - name: Install cargo-nextest
         uses: taiki-e/install-action@0fd46367812ee04360509b4169d9f659d6892bb2 # v2.79.15
         with:
