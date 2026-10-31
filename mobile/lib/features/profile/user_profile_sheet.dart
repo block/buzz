@@ -383,8 +383,6 @@ class UserProfileSheet extends HookConsumerWidget {
                       const SizedBox(height: Grid.sm),
                       if (agentIdentity != null)
                         Builder(builder: agentIdentity!),
-                      if (agentSettings != null)
-                        Builder(builder: agentSettings!),
                       AppListCard(
                         label: 'Public key',
                         horizontalPadding: 0,
@@ -448,6 +446,8 @@ class UserProfileSheet extends HookConsumerWidget {
                           ),
                         ],
                       ),
+                      if (agentSettings != null)
+                        Builder(builder: agentSettings!),
                     ] else ...[
                       Row(
                         children: [

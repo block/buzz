@@ -7,6 +7,8 @@ import '../../shared/community/community_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/app_list.dart';
+import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/buzz_navigation_metrics.dart';
 import '../../shared/theme/buzz_icons.dart';
@@ -92,11 +94,15 @@ class DeleteAgentAction extends HookConsumerWidget {
     }
 
     if (asSettingsRow) {
-      return TextButton.icon(
-        onPressed: controller.busy ? null : remove,
-        style: TextButton.styleFrom(foregroundColor: context.colors.error),
-        icon: const Icon(BuzzIcons.trash2, size: 18),
-        label: Text(controller.busy ? 'Deleting…' : 'Delete agent'),
+      return SheetActionSection(
+        children: [
+          AppListRow(
+            onTap: controller.busy ? null : remove,
+            titleColor: context.colors.error,
+            icon: BuzzIcons.trash2,
+            title: controller.busy ? 'Deleting…' : 'Delete agent',
+          ),
+        ],
       );
     }
     if (Theme.of(context).platform == TargetPlatform.iOS) {

@@ -1,4 +1,5 @@
 import 'package:flutter/services.dart';
+import 'package:buzz/shared/widgets/app_list_card.dart';
 import 'package:buzz/shared/agents/remote_agents.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/me/default_agent.dart';
@@ -212,6 +213,19 @@ void main() {
       );
       await tester.pumpAndSettle();
       await tester.ensureVisible(find.text('Delete agent'));
+      expect(
+        tester.getTopLeft(find.text('Delete agent')).dy,
+        greaterThan(tester.getTopLeft(find.text('Public key')).dy),
+      );
+      final deleteCard = find.ancestor(
+        of: find.text('Delete agent'),
+        matching: find.byType(AppListCard),
+      );
+      expect(deleteCard, findsOneWidget);
+      expect(
+        find.descendant(of: deleteCard, matching: find.text('Public key')),
+        findsNothing,
+      );
       await tester.tap(find.text('Delete agent'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Cancel'));
