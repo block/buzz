@@ -43,10 +43,22 @@ Future<ServerSocket> _silentAfterHandshakeServer() async {
 
 /// A server that accepts TCP connections and then never answers, like a
 /// stalled TLS or upgrade handshake on a congested network.
-Future<ServerSocket> _stalledHandshakeServer() async {
+/// Accepts TCP and never answers the upgrade. [closed] completes when the
+/// client drops the connection.
+Future<(ServerSocket server, Future<void> closed)>
+_stalledHandshakeServer() async {
   final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
-  server.listen((client) => client.listen((_) {}, onError: (_) {}));
-  return server;
+  final closed = Completer<void>();
+  server.listen(
+    (client) => client.listen(
+      (_) {},
+      onError: (_) {},
+      onDone: () {
+        if (!closed.isCompleted) closed.complete();
+      },
+    ),
+  );
+  return (server, closed.future);
 }
 
 void main() {
@@ -66,7 +78,7 @@ void main() {
   for (final scoped in [false, true]) {
     test('gives up on a handshake that never completes '
         '(${scoped ? 'scoped headers' : 'no headers'})', () async {
-      final server = await _stalledHandshakeServer();
+      final (server, clientClosed) = await _stalledHandshakeServer();
 
       final disconnected = Completer<Object?>();
       final socket = RelaySocket(
@@ -92,6 +104,11 @@ void main() {
       );
       expect(socket.state, SocketState.disconnected);
       expect(error.toString(), contains('Relay connection timed out'));
+      // The abandoned handshake is closed, not left for the OS to time out.
+      await clientClosed.timeout(
+        testConnectTimeout * 10,
+        onTimeout: () => fail('the timed-out handshake was left open'),
+      );
 
       socket.dispose();
       await server.close();

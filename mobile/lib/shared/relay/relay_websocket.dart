@@ -10,33 +10,20 @@ const relayWebSocketConnectTimeout = Duration(seconds: 10);
 
 /// WebSocket's default HTTP client follows redirects, including custom headers.
 /// Keep key-bound assertions at their original origin and bound upgrade time.
+///
+/// Each attempt gets its own HTTP client so a timed-out handshake can be
+/// force-closed instead of left running until the OS gives up on it.
 Future<WebSocket> openRelayWebSocket(
   Uri uri, {
   required Map<String, String> headers,
   required Duration pingInterval,
   Duration connectTimeout = relayWebSocketConnectTimeout,
 }) async {
-  if (headers.isEmpty) {
-    final connecting = WebSocket.connect(uri.toString());
-    return connecting
-        .then((socket) => socket..pingInterval = pingInterval)
-        .timeout(
-          connectTimeout,
-          onTimeout: () {
-            // The default client is shared, so close only a socket that
-            // finishes connecting after the caller has given up on it.
-            unawaited(
-              connecting.then((late) => late.close(), onError: (_) => null),
-            );
-            throw TimeoutException('Relay connection timed out');
-          },
-        );
-  }
-  final client = _UpgradeClient();
+  final HttpClient client = headers.isEmpty ? HttpClient() : _UpgradeClient();
   try {
     return await WebSocket.connect(
           uri.toString(),
-          headers: headers,
+          headers: headers.isEmpty ? null : headers,
           customClient: client,
         )
         .then((socket) => socket..pingInterval = pingInterval)
