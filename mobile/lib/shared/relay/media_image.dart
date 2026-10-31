@@ -90,17 +90,25 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     MediaImageProvider key,
     ImageDecoderCallback decode,
   ) {
+    final abandoned = Completer<void>();
+    // The image cache listens to a pending load, so this fires mid-download
+    // only once a consumer evicts the entry and stops listening, as the iOS
+    // carousel does for a preview scrolled past. Abort the download then.
     return MultiFrameImageStreamCompleter(
-      codec: _loadAsync(key, decode),
+      codec: _loadAsync(key, decode, abandoned.future),
       scale: key.scale,
       debugLabel: url,
-    );
+    )..addOnLastListenerRemovedCallback(() {
+      if (!abandoned.isCompleted) abandoned.complete();
+    });
   }
 
   Future<ui.Codec> _loadAsync(
     MediaImageProvider key,
     ImageDecoderCallback decode,
+    Future<void> abandoned,
   ) async {
+    var wasAbandoned = false;
     try {
       final until = _cooldownUntil[url];
       if (until != null) {
@@ -126,6 +134,13 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
         final deadline = Timer(maxFetchDuration, () {
           if (!abort.isCompleted) abort.complete();
         });
+        unawaited(
+          abandoned.then((_) {
+            if (abort.isCompleted) return;
+            wasAbandoned = true;
+            abort.complete();
+          }),
+        );
         StreamIterator<List<int>>? body;
         try {
           final request = http.AbortableRequest(
@@ -157,7 +172,10 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
           unawaited(body?.cancel());
         }
       } catch (_) {
-        _cooldownUntil[url] = debugNow().add(_defaultCooldown);
+        // Nobody wanted the image any more; the URL itself did not fail.
+        if (!wasAbandoned) {
+          _cooldownUntil[url] = debugNow().add(_defaultCooldown);
+        }
         rethrow;
       }
       if (response.statusCode != 200) {
@@ -176,6 +194,10 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
       return await decode(buffer);
     } catch (_) {
+      // An abandoned load has no listener left to report to, and an error
+      // would surface as an unhandled image error. The consumer already
+      // evicted it; leave the codec unresolved.
+      if (wasAbandoned) return Completer<ui.Codec>().future;
       // Match NetworkImage: make sure an errored key is not retained in the
       // cache. The cooldown map (not the cache) throttles retries.
       scheduleMicrotask(() {
