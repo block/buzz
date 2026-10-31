@@ -702,6 +702,9 @@ mod postgres_tests {
                 if let Some((start, at)) = crossing {
                     self.clock.set(start);
                     *self.advance_on_acquire.lock().unwrap() = Some(at);
+                    // The clock moves when the tenant lookup acquires a
+                    // connection, so the lookup must miss the host cache.
+                    self.pod.state.tenant_host_cache.invalidate_all();
                 }
                 outcomes.push(
                     self.pod

@@ -1310,7 +1310,7 @@ mod postgres_tests {
                 vec![Tag::public_key(target.public_key())],
             ),
         ] {
-            state.restriction_cache.insert(
+            state.seed_restriction(
                 key.clone(),
                 buzz_db::moderation::RestrictionState::default(),
             );
@@ -1320,7 +1320,7 @@ mod postgres_tests {
             .await
             .unwrap_or_else(|e| panic!("kind {} must apply: {e:?}", event.kind.as_u16()));
             assert_eq!(
-                state.restriction_cache.get(&key),
+                state.restriction_cache.get(&key).map(|cached| cached.state),
                 None,
                 "kind {} must drop the cached row",
                 event.kind.as_u16()

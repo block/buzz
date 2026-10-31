@@ -349,7 +349,7 @@ async fn feedback_attachment(
     // Resolve the tenant from server-owned feedback provenance, then assert the
     // resolved row still agrees with the feedback FK. Client input never names
     // a community, host, object key, extension, or upstream URL.
-    let tenant = crate::tenant::bind_community(&state.db, community_host)
+    let tenant = crate::tenant::bind_community(&*state, community_host)
         .await
         .map_err(|_| ApiError::not_found())?;
     if tenant.community().as_uuid() != &community_id {
@@ -504,7 +504,7 @@ async fn resolve_report(
     };
 
     // Bind tenant from server-owned report provenance (never from client input).
-    let tenant = crate::tenant::bind_community(&state.db, &report_detail.report.community_host)
+    let tenant = crate::tenant::bind_community(&*state, &report_detail.report.community_host)
         .await
         .map_err(|_| ApiError::internal())?;
 
@@ -688,7 +688,7 @@ async fn reopen_report(
         .ok_or_else(ApiError::not_found)?;
 
     // Bind tenant from server-owned report provenance (never from client input).
-    let tenant = crate::tenant::bind_community(&state.db, &report_detail.report.community_host)
+    let tenant = crate::tenant::bind_community(&*state, &report_detail.report.community_host)
         .await
         .map_err(|_| ApiError::internal())?;
 
@@ -765,7 +765,7 @@ async fn cancel_report(
         .ok_or_else(ApiError::not_found)?;
 
     // Bind tenant from server-owned report provenance (never from client input).
-    let tenant = crate::tenant::bind_community(&state.db, &report_detail.report.community_host)
+    let tenant = crate::tenant::bind_community(&*state, &report_detail.report.community_host)
         .await
         .map_err(|_| ApiError::internal())?;
 
@@ -1164,7 +1164,7 @@ async fn community_for_host(
     state: &crate::state::AppState,
     host: &str,
 ) -> Result<buzz_core::CommunityId, ApiError> {
-    match crate::tenant::bind_community(&state.db, host).await {
+    match crate::tenant::bind_community(state, host).await {
         Ok(tenant) => Ok(tenant.community()),
         Err(crate::tenant::BindError::UnmappedHost) => Err(ApiError::bad_request(
             "unknown_community_host",
