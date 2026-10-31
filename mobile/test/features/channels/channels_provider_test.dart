@@ -13,6 +13,7 @@ import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 
 part 'channels_provider_live_cases.dart';
+part 'channels_provider_deletion_cases.dart';
 part 'channels_provider_terminal_cases.dart';
 part 'channels_provider_readiness_cases.dart';
 part 'channels_provider_request_path_cases.dart';
@@ -31,6 +32,7 @@ part 'channels_provider_request_path_cases.dart';
 /// events on demand.
 void main() {
   _unreadReadinessCases();
+  _unreadDeletionCases();
   _requestPathCases();
   const myPk = 'me';
 
@@ -2761,6 +2763,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     this.hiddenDmEvents = const [],
     this.huddleStarts = const [],
     this.recentMessages = const [],
+    this.deletionChannels = const {},
     this.membershipFailures = 0,
   });
 
@@ -2776,6 +2779,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
   final List<NostrEvent> hiddenDmEvents;
   final List<NostrEvent> huddleStarts;
   List<NostrEvent> recentMessages;
+  final Map<String, String> deletionChannels;
   int membershipFailures;
   int directoryFailures = 0;
   bool failClaimedMemberMetadataQuery = false;
@@ -3188,6 +3192,13 @@ class _FakeRelaySession extends RelaySessionNotifier {
           final tagName = entry.key.startsWith('#')
               ? entry.key.substring(1)
               : entry.key;
+          // Relay #h matching uses stored channel metadata for h-less NIP-09.
+          if (tagName == 'h' &&
+              event.kind == EventKind.deletion &&
+              event.channelId == null &&
+              entry.value.contains(deletionChannels[event.id])) {
+            continue;
+          }
           if (!event.tags.any(
             (tag) =>
                 tag.length > 1 &&

@@ -23,6 +23,7 @@ import 'unread_badge/observed_unread_event.dart';
 import 'unread_badge/should_notify_for_event.dart';
 
 part 'channel_directory.dart';
+part 'channel_unread_deletions.dart';
 part 'channel_snapshot.dart';
 part 'channel_member_snapshots.dart';
 part 'channels_provider_lifecycle.dart';
@@ -62,6 +63,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   final Map<String, int> _latestObservedByChannel = {};
   final Map<String, Map<String, ObservedUnreadEvent>>
   _observedUnreadEventsByChannel = {};
+  final Map<String, Set<String>> _unreadDeletedIdsByChannel = {};
+  final Set<String> _unscopedUnreadDeletedIds = {};
   Set<String> _participatedRootIds = {};
   Set<String> _authoredRootIds = {};
   String? _threadInterestPubkey;
@@ -232,6 +235,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _clearLiveSubscriptions();
       _latestObservedByChannel.clear();
       _observedUnreadEventsByChannel.clear();
+      _unreadDeletedIdsByChannel.clear();
+      _unscopedUnreadDeletedIds.clear();
       _backstopTimer?.cancel();
       _backstopTimer = null;
     });
@@ -768,7 +773,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       final filters = [
         for (final channel in activeChannels)
           NostrFilter(
-            kinds: EventKind.channelMessageEventKinds,
+            kinds: [
+              ...EventKind.channelMessageEventKinds,
+              EventKind.deletion,
+              EventKind.nip29DeleteEvent,
+            ],
             tags: {
               '#h': [channel.id],
             },
@@ -791,8 +800,18 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         return;
       }
 
+      var appliedDeletion = false;
       for (final event in events) {
-        if (event.pubkey.toLowerCase() == myPk.toLowerCase()) {
+        final channelId = event.channelId;
+        if (channelById.containsKey(channelId) ||
+            (channelId == null && event.kind == EventKind.deletion)) {
+          appliedDeletion = _applyUnreadDeletion(event) || appliedDeletion;
+        }
+      }
+
+      for (final event in events) {
+        if (EventKind.channelMessageEventKinds.contains(event.kind) &&
+            event.pubkey.toLowerCase() == myPk.toLowerCase()) {
           _recordSelfThreadInterest(event, myPk);
         }
       }
@@ -817,7 +836,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         )) {
           continue;
         }
-        _recordUnreadEvent(channel, event, myPk);
+        if (!_recordUnreadEvent(channel, event, myPk)) continue;
         recordedAtByChannel[channelId] = max(
           recordedAtByChannel[channelId] ?? 0,
           event.createdAt,
@@ -830,7 +849,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       // from here, so a second check would be dead code.
       // Recorded events also advance `lastMessageAt`, as live events do: a
       // deadline-unavailable latest-message batch leaves it unset.
-      if (recordedAtByChannel.isNotEmpty) {
+      if (recordedAtByChannel.isNotEmpty || appliedDeletion) {
         state = state.whenData(
           (channels) => [
             for (final channel in channels)
@@ -863,6 +882,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   }
 
   void _handleLiveEvent(NostrEvent event) {
+    if (_applyUnreadDeletion(event)) {
+      state = state.whenData((channels) => List<Channel>.of(channels));
+      return;
+    }
     final channelId = event.channelId;
     if (channelId == null) return;
 
@@ -891,8 +914,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
             authoredRootIds: _authoredRootIds,
             mutedChannelIds: mutedChannelIds,
             channelId: channel.id,
-          )) {
-        _recordUnreadEvent(channel, event, myPk);
+          ) &&
+          _recordUnreadEvent(channel, event, myPk)) {
         final eventTime = DateTime.fromMillisecondsSinceEpoch(
           event.createdAt * 1000,
           isUtc: true,

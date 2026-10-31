@@ -1,0 +1,97 @@
+part of 'channels_provider_test.dart';
+
+void _unreadDeletionCases() {
+  for (final format in [(5, true), (5, false), (9005, true)]) {
+    test(
+      'deleted mentions stop unread (kind ${format.$1}, h ${format.$2})',
+      () async {
+        NostrEvent message(String id, int at) => NostrEvent(
+          id: id,
+          pubkey: 'alice',
+          createdAt: at,
+          kind: 9,
+          tags: const [
+            ['h', _channelA],
+            ['p', 'me'],
+          ],
+          content: 'hello',
+          sig: 'sig',
+        );
+        NostrEvent deletion(String id, String target, int at) => NostrEvent(
+          id: id,
+          pubkey: 'alice',
+          createdAt: at,
+          kind: format.$1,
+          tags: [
+            if (format.$2) ['h', _channelA],
+            ['e', target],
+          ],
+          content: '',
+          sig: 'sig',
+        );
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, 'me')],
+          metadata: [_meta(id: _channelA, name: 'general')],
+          deletionChannels: const {'missed-deletion': _channelA},
+        );
+        final container = _buildContainer(session: session);
+        addTearDown(container.dispose);
+        await container.read(channelsProvider.future);
+        await _settle();
+        final mention = message('deleted-mention', 50);
+        session.emit(mention);
+        await _settle();
+        final notifier = container.read(channelsProvider.notifier);
+        expect(
+          notifier.observedUnreadEventsByChannel[_channelA],
+          contains(mention.id),
+        );
+        session.emit(deletion('delete', mention.id, 60));
+        await _settle();
+        expect(
+          notifier.observedUnreadEventsByChannel[_channelA] ?? {},
+          isEmpty,
+        );
+        expect(notifier.latestObservedByChannel, isNot(contains(_channelA)));
+
+        // A late history result must not restore the deleted message.
+        session.recentMessages = [mention];
+        await notifier.refresh();
+        await notifier.waitForUnreadCatchUp();
+        expect(
+          notifier.observedUnreadEventsByChannel[_channelA] ?? {},
+          isEmpty,
+        );
+
+        // Deletion can also arrive before its message.
+        session.emit(deletion('delete-before-message', 'late-mention', 70));
+        session.emit(message('late-mention', 65));
+        await _settle();
+        expect(
+          notifier.observedUnreadEventsByChannel[_channelA] ?? {},
+          isEmpty,
+        );
+
+        // Recover a deletion missed offline. The batch order must not matter.
+        final missed = message('offline-mention', 80);
+        session.emit(missed);
+        await _settle();
+        expect(
+          notifier.observedUnreadEventsByChannel[_channelA],
+          contains(missed.id),
+        );
+        session.recentMessages = [
+          missed,
+          deletion('missed-deletion', missed.id, 90),
+        ];
+        await notifier.refresh();
+        await notifier.waitForUnreadCatchUp();
+        expect(
+          notifier.observedUnreadEventsByChannel[_channelA] ?? {},
+          isEmpty,
+        );
+        expect(notifier.latestObservedByChannel, isNot(contains(_channelA)));
+      },
+    );
+  }
+}

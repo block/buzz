@@ -536,7 +536,11 @@ String _encodeRootIdSet(Set<String> values) => jsonEncode(values.toList());
 /// ceiling enforced by `just file-size-check`. Private members stay reachable:
 /// a part shares its parent's library.
 extension _ObservedUnreadRecording on ChannelsNotifier {
-  void _recordUnreadEvent(Channel channel, NostrEvent event, String myPk) {
+  bool _recordUnreadEvent(Channel channel, NostrEvent event, String myPk) {
+    if (_unscopedUnreadDeletedIds.contains(event.id) ||
+        _unreadDeletedIdsByChannel[channel.id]?.contains(event.id) == true) {
+      return false;
+    }
     final isThreadedReply =
         event.threadReference.parentId != null && !_isBroadcastReply(event);
     final isHighPriority =
@@ -559,5 +563,6 @@ extension _ObservedUnreadRecording on ChannelsNotifier {
     if (event.createdAt > current) {
       _latestObservedByChannel[channel.id] = event.createdAt;
     }
+    return true;
   }
 }
