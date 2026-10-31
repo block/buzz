@@ -2,7 +2,7 @@
 name: buzz-cli
 description: >
   Buzz CLI for relay operations: owner-reviewed agent drafts, messaging,
-  channels, DMs, users, user groups, workflows, feed, reactions, canvas, social, repos,
+  channels, DMs, users, workflows, feed, reactions, canvas, social, repos,
   uploads, and agent memory.
 version: 1
 ---
@@ -67,9 +67,6 @@ Output varies by command group — `--help` shows flags but not response shapes.
 | `mem hash` | SHA-256 hex string |
 | `mem set/patch/rm` | nothing to stdout; progress to stderr |
 | `mem ls` | tab-delimited (`slug\tcreated_at\tevent_id`) by default; `--json` for JSON array |
-| `groups list` | `[{handle, name, description, creator, member_count, policy, status, event_id, author, updated_at}]` (no member lists) |
-| `groups get` | the same fields plus `admins` and `members` (hex pubkeys) |
-| `groups create/update/add-member/remove-member/delete` | `{event_id, accepted, message, handle, member_count}`; `"message": "unchanged"` when nothing changed |
 | `reactions get` | `{"reactions": [{emoji, count, pubkeys}]}` — aggregated, not raw events |
 | `pack validate/inspect` | human-readable text, not JSON |
 
