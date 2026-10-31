@@ -252,6 +252,18 @@ class CreateAgentPage extends HookConsumerWidget {
                   ],
                 ),
                 const SizedBox(height: Grid.sm),
+                AgentModelPicker(
+                  controller: controller,
+                  catalog: catalog,
+                  onRetry: retryCatalog,
+                  modelId: model.value,
+                  effort: effort.value,
+                  onChanged: (id, value) {
+                    model.value = id;
+                    effort.value = value;
+                  },
+                ),
+                const SizedBox(height: Grid.sm),
                 SheetActionSection(
                   label: 'Instructions',
                   children: [
@@ -274,17 +286,6 @@ class CreateAgentPage extends HookConsumerWidget {
                   ],
                 ),
                 const SizedBox(height: Grid.sm),
-                AgentModelPicker(
-                  controller: controller,
-                  catalog: catalog,
-                  onRetry: retryCatalog,
-                  modelId: model.value,
-                  effort: effort.value,
-                  onChanged: (id, value) {
-                    model.value = id;
-                    effort.value = value;
-                  },
-                ),
                 if (busy) ...[
                   const SizedBox(height: Grid.xs),
                   const LinearProgressIndicator(),
