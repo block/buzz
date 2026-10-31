@@ -12,12 +12,19 @@ const _wantedLimit = 1024;
 const _eoseTimeout = Duration(seconds: 10);
 const _discoveryRefresh = Duration(minutes: 5);
 
+/// A relay returns one current projection per subject; a few duplicates are
+/// tolerated, a flood before EOSE fails the batch instead of buffering it.
+const _maxEarlyPerSubject = 4;
+
 class _Batch {
   _Batch(this.subjects);
   final List<String> subjects;
   final List<NostrEvent> early = [];
   Future<void> tail = Future.value();
   void Function()? unsubscribe;
+
+  /// Retires this batch so the next sync can reopen it.
+  void Function() fail = () {};
   Timer? timeout;
   bool active = true;
   bool ready = false;
@@ -223,8 +230,11 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
       if (_batches[id] == batch) _batches.remove(id);
       _checked.removeAll(chunk);
       _publish();
-      // No hot retry: reconnect or the next tracked subject restarts it.
+      // No hot retry: the next discovery refresh, reconnect or tracked
+      // subject reopens it.
     }
+
+    batch.fail = fail;
 
     batch.timeout = Timer(_eoseTimeout, fail);
     try {
@@ -266,6 +276,11 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
     final subject = verifiedProfileSubject(event, authority);
     if (subject == null || !batch.subjects.contains(subject)) return;
     if (!batch.ready) {
+      if (batch.early.length >= batch.subjects.length * _maxEarlyPerSubject) {
+        debugPrint('[VerifiedProfiles] too many events before EOSE');
+        batch.fail();
+        return;
+      }
       batch.candidates++;
       batch.early.add(event);
       return;
@@ -320,7 +335,9 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
       try {
         await job();
       } catch (error) {
+        // Retire the batch so a later sync reconciles it again.
         debugPrint('[VerifiedProfiles] batch job failed: $error');
+        batch.fail();
       }
     });
   }
