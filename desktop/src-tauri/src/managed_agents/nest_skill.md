@@ -67,10 +67,6 @@ Output varies by command group — `--help` shows flags but not response shapes.
 | `mem hash` | SHA-256 hex string |
 | `mem set/patch/rm` | nothing to stdout; progress to stderr |
 | `mem ls` | tab-delimited (`slug\tcreated_at\tevent_id`) by default; `--json` for JSON array |
-| `emoji search <prefix>` | `[{shortcode, url, author, event_id, created_at, other_authors?}]` — catalog emoji, prefix of at least 2 chars, `--limit` 1-50 (default 20) |
-| `emoji resolve <name>...` | `{"found": [{shortcode, url, author, event_id, created_at, other_authors?}], "missing": [name]}` |
-| `emoji list` | `{"emojis": [{shortcode, url}]}` — legacy union only; find catalog emoji with `emoji search` |
-| `emoji migrate plan/run/verify/rollback` | pretty-printed JSON report on stdout (counts, `failures`); progress on stderr; exits 4 when any item was rejected or any check failed |
 | `reactions get` | `{"reactions": [{emoji, count, pubkeys}]}` — aggregated, not raw events |
 | `pack validate/inspect` | human-readable text, not JSON |
 
@@ -133,7 +129,6 @@ buzz messages send --channel <UUID> \
 6. **`users get` always returns an array** — even for a single pubkey lookup. Never expect a bare object.
 7. **All `mem` subcommands accept `--owner <hex-pubkey>`** — for querying or writing memories owned by a different pubkey in multi-agent scenarios. Defaults to the owner from `BUZZ_AUTH_TAG`.
 8. **`mem rm` cannot delete `core`** — use `mem set core ''` instead.
-9. **Never run `emoji import` with a large list (for example a Slack export)** — it builds one oversized event the relay rejects, and stdin input is cut at 10 MB. Catalog emoji are one event each and are not published by `emoji import`. To load a large catalog use `emoji migrate` (an operator task: `plan --dry-run`, a 1,000-name pilot on staging, `run`, `verify`; `rollback` undoes it). Do not run `emoji migrate run` or `rollback` unless the user asked for it by name; `plan` is read-only.
 
 ## Forum Posts
 
