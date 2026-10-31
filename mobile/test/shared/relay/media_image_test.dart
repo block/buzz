@@ -75,10 +75,10 @@ void main() {
     final hash = 'ab' * 32;
     final auth = _auth();
 
-    test('maps relay JPEG blobs to the thumbnail', () {
-      for (final ext in ['jpg', 'jpeg']) {
+    test('maps relay blobs of any format to the thumbnail', () {
+      for (final ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif', '']) {
         expect(
-          relayThumbnailUrl('$_relayBase/media/$hash.$ext', auth),
+          relayThumbnailUrl('$_relayBase/media/$hash$ext', auth),
           '$_relayBase/media/$hash.thumb.jpg',
         );
       }
@@ -91,11 +91,7 @@ void main() {
         '$_relayBase/media/$hash.jpg?v=2',
         '$_relayBase/media/not-a-hash.jpg',
         '$_relayBase/avatars/$hash.jpg',
-        // The thumbnail drops transparency and animation.
-        '$_relayBase/media/$hash.png',
-        '$_relayBase/media/$hash.webp',
-        '$_relayBase/media/$hash.gif',
-        '$_relayBase/media/$hash',
+        '$_relayBase/media/$hash.JPG',
       ]) {
         expect(relayThumbnailUrl(url, auth), isNull, reason: url);
       }

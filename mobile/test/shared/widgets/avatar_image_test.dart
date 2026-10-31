@@ -59,7 +59,7 @@ void main() {
   testWidgets('small relay avatars load the relay thumbnail', (tester) async {
     const relay = 'https://relay.example';
     final hash = 'ab' * 32;
-    final original = '$relay/media/$hash.jpg';
+    final original = '$relay/media/$hash.png';
     final requested = <String>[];
     final client = http_testing.MockClient((request) async {
       requested.add(request.url.toString());

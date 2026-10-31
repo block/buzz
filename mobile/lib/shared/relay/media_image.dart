@@ -220,19 +220,19 @@ class MediaImageCooldownException implements Exception {
       'MediaImageCooldownException: $url is cooling down until $until';
 }
 
-final _relayJpegBlobPath = RegExp(r'^/media/([0-9a-f]{64})\.jpe?g$');
+final _relayBlobPath = RegExp(r'^/media/([0-9a-f]{64})(?:\.[a-z0-9]{1,8})?$');
 
-/// The relay's generated thumbnail for a relay-hosted JPEG, or null when
+/// The relay's generated thumbnail for a relay-hosted image, or null when
 /// [url] is not one. Every image uploaded to a relay gets a JPEG thumbnail at
-/// `/media/<sha256>.thumb.jpg`, at most 320px on its longer side. Only JPEG
-/// originals qualify: the relay drops the alpha channel without compositing
-/// it, so a transparent PNG or WebP would lose its background, and an
-/// animated GIF would lose its animation.
+/// `/media/<sha256>.thumb.jpg`, at most 320px on its longer side. This
+/// matches desktop's small avatars (buzz-app `mediaUrl`), including the cost:
+/// the thumbnail is a still JPEG, so transparent areas render black and
+/// animation is lost.
 String? relayThumbnailUrl(String url, MediaGetAuthService auth) {
   if (!auth.isRelayMediaUrl(url)) return null;
   final uri = Uri.parse(url);
   if (uri.hasQuery || uri.hasFragment) return null;
-  final match = _relayJpegBlobPath.firstMatch(uri.path);
+  final match = _relayBlobPath.firstMatch(uri.path);
   if (match == null) return null;
   return uri.replace(path: '/media/${match[1]}.thumb.jpg').toString();
 }
@@ -249,7 +249,7 @@ String? relayThumbnailUrl(String url, MediaGetAuthService auth) {
 /// - [boundDecodeToLayout] false and no [decodeWidth]: full-resolution decode
 ///   (the zoomable full-screen viewer).
 ///
-/// With [preferThumbnail], a relay JPEG laid out small enough loads the
+/// With [preferThumbnail], a relay image laid out small enough loads the
 /// relay's generated thumbnail instead of the original upload, falling back
 /// to the original when the relay has no thumbnail for it.
 class MediaImage extends ConsumerWidget {
