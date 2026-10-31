@@ -444,9 +444,17 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
             : NativeTabler.image($0, size: 24)
         }
         let action = UIAction(title: item["label"] as? String ?? "", image: symbol,
-                        attributes: item["enabled"] as? Bool == true ? [] : [.disabled]) { [weak self] _ in
-          self?.button.pendingMenuAction = { [weak self] in
+                        attributes: item["enabled"] as? Bool == true ? [] : [.disabled],
+                        state: item["checked"] as? Bool == true ? .on : .off) { [weak self] _ in
+          let select = { [weak self] in
             self?.channel.invokeMethod("menuAction", arguments: item["id"])
+          }
+          if arguments?["deferMenuActions"] as? Bool == false {
+            // Value changes do not navigate. Deliver them directly: UIKit may
+            // begin dismissing the menu before invoking its selected UIAction.
+            select()
+          } else {
+            self?.button.pendingMenuAction = { select() }
           }
         }
         groups[groups.count - 1].append(action)

@@ -71,6 +71,7 @@ class HostedJourneyFixture {
   final socketHeaders = <Map<String, String>>[];
   bool offerProfile = true;
   bool profileUnavailable = false;
+  int profileSaveFailures = 0;
   bool rejectList = false;
   int saveFailures = 0;
   final knownSaved = <String>{};
@@ -318,9 +319,15 @@ class HostedJourneyFixture {
   Future<void> mount(
     WidgetTester tester, {
     bool openEntry = true,
+    bool addingCommunity = true,
     PairingCredentialValidator? pairingValidator,
+    PairingSocketFactory? pairingSocketFactory,
   }) async {
     await tester.binding.setSurfaceSize(const Size(440, 1100));
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('buzz/browser_auth'),
+      (_) async => null,
+    );
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
       const MethodChannel('buzz/hosted_hpke'),
       (call) async => call.method == 'isSupported'
@@ -335,9 +342,12 @@ class HostedJourneyFixture {
         disableAnimations: true,
         overrides: [
           hostedFlowProvider.overrideWith(createFlow),
-          if (pairingValidator != null)
+          if (pairingValidator != null || pairingSocketFactory != null)
             pairingProvider.overrideWith(
-              () => PairingNotifier(credentialValidator: pairingValidator),
+              () => PairingNotifier(
+                credentialValidator: pairingValidator,
+                socketFactory: pairingSocketFactory,
+              ),
             ),
           if (relayAuthEnabled) ...[
             hostedRelayAuthProvider.overrideWith((ref) {
@@ -395,7 +405,7 @@ class HostedJourneyFixture {
                 onPressed: () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
                     builder: (_) =>
-                        const OnboardingAppEntry(addingCommunity: true),
+                        OnboardingAppEntry(addingCommunity: addingCommunity),
                   ),
                 ),
                 child: const Text('Community home'),
@@ -475,6 +485,10 @@ class HostedJourneyFixture {
     await tester.pump();
     PendingDeepLinkNotifier.debugUriStreamOverride = null;
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('buzz/browser_auth'),
+      null,
+    );
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
       const MethodChannel('buzz/hosted_hpke'),
       null,
     );
@@ -518,11 +532,19 @@ class _Profile extends ProfileNotifier {
 
   @override
   Future<void> updateDisplayName(String name) async {
+    if (fixture.profileSaveFailures > 0) {
+      fixture.profileSaveFailures--;
+      throw StateError('profile save unavailable');
+    }
     fixture.profileWrites.add(name);
   }
 
   @override
   Future<void> updateSetup(String name, String? avatarUrl) async {
+    if (fixture.profileSaveFailures > 0) {
+      fixture.profileSaveFailures--;
+      throw StateError('profile save unavailable');
+    }
     fixture.profileWrites.add(name);
     fixture.profileAvatars.add(avatarUrl);
   }

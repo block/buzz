@@ -151,6 +151,14 @@ class _AddCommunityConnection extends HookWidget {
             ),
           ),
           actions: [
+            if (!enteringLink && errorMessage != null)
+              Semantics(
+                liveRegion: true,
+                child: Text(
+                  errorMessage!,
+                  style: TextStyle(color: context.colors.error),
+                ),
+              ),
             ExcludeSemantics(
               excluding: enteringLink,
               child: ExcludeFocus(
