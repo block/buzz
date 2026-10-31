@@ -543,7 +543,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       if let label = args["ephemeralLabel"] as? String {
         button.setEphemeralStatus(label)
       }
-      refreshBar.color = color
+      refreshBar.color = args["titleRefreshColor"] is NSNumber ? Self.color(args["titleRefreshColor"]) : color
       button.attachRefreshBar(refreshBar)
       button.frame.size = button.intrinsicContentSize
       item.titleView = button

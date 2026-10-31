@@ -2258,11 +2258,10 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        final view = tester.widget<UiKitView>(
-          find.byWidgetPredicate(
-            (w) => w is UiKitView && w.viewType == 'buzz/ios_navigation_bar',
-          ),
+        final navigationBar = find.byWidgetPredicate(
+          (w) => w is UiKitView && w.viewType == 'buzz/ios_navigation_bar',
         );
+        final view = tester.widget<UiKitView>(navigationBar);
         Map<Object?, Object?> payload = view.creationParams! as Map;
         expect(payload['titleRefreshing'], isFalse);
         const channel = MethodChannel('buzz/ios_navigation_bar/198');
@@ -2285,6 +2284,10 @@ void main() {
         relaySession.setReconnecting();
         await tester.pump();
         expect(payload['titleRefreshing'], isTrue);
+        expect(
+          payload['titleRefreshColor'],
+          ChatColors.of(tester.element(navigationBar)).outgoing.toARGB32(),
+        );
 
         relaySession.connect();
         await tester.pumpAndSettle();

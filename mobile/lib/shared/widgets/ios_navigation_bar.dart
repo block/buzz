@@ -9,6 +9,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../relay/relay.dart';
+import '../theme/mobile_appearance.dart';
 import '../theme/theme_extensions.dart';
 import '../animated_avatar.dart';
 import 'avatar_image.dart';
@@ -314,6 +315,7 @@ class IosNavigationBar extends HookConsumerWidget {
           : encodeAction(titleAvatar!, 'titleAvatar'),
       'titlePresenceColor': titlePresenceColor?.toARGB32(),
       'titleRefreshing': titleRefreshing,
+      'titleRefreshColor': ChatColors.of(context).outgoing.toARGB32(),
       'titleEnabled': onTitlePressed != null,
       'largeTitle': largeTitle,
       'alwaysFrosted': alwaysFrosted,
