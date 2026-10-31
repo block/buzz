@@ -153,6 +153,9 @@ class HostedAppGate extends HookConsumerWidget {
                 ).copyWith(bottom: mobileTabBarTop(context) + Grid.xxs),
               ),
               child: Stack(
+                // Banners with their own Stack need the full layer to place
+                // bottom-anchored content inside hit-testable bounds.
+                fit: StackFit.expand,
                 children: [
                   if (authenticated && !visible)
                     const OrganizationSignInBanner(),
