@@ -7,6 +7,7 @@ import '../../shared/hosted/hosted_community_creation.dart';
 import '../../shared/hosted/hosted_environment.dart';
 import '../../shared/hosted/hosted_flow_problem_message.dart';
 import 'dart:math' show sqrt2;
+import 'dart:math' as math;
 import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
@@ -16,6 +17,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
@@ -36,6 +38,9 @@ import '../../shared/widgets/onboarding_step_page.dart';
 import 'pairing_qr_scanner.dart';
 
 part 'pairing_page/onboarding_background.dart';
+part 'pairing_page/website_welcome_background.dart';
+part 'pairing_page/website_bee_swarm.dart';
+part 'pairing_page/website_bee_motion.dart';
 part 'pairing_page/onboarding_colors.dart';
 part 'pairing_page/onboarding_glass_button.dart';
 part 'pairing_page/pairing_welcome_view.dart';
@@ -171,8 +176,16 @@ class PairingPage extends HookConsumerWidget {
     }
 
     final isVerifyingSas = pairingState.status == PairingStatus.confirmingSas;
+    final websiteWelcome =
+        connectionLanding &&
+        !addingCommunity &&
+        !existingUser &&
+        !enteringCommunityLink &&
+        !creatingCommunity &&
+        setupContent == null &&
+        !isVerifyingSas;
     final onboardingSystemOverlayStyle =
-        (context._onboardingIsDark
+        (context._onboardingIsDark && !websiteWelcome
                 ? SystemUiOverlayStyle.light
                 : SystemUiOverlayStyle.dark)
             .copyWith(statusBarColor: Colors.transparent);
@@ -339,6 +352,7 @@ class PairingPage extends HookConsumerWidget {
             key: const Key('pairing-onboarding-system-overlay'),
             value: onboardingSystemOverlayStyle,
             child: _OnboardingBackground(
+              websiteWelcome: websiteWelcome,
               child: Scaffold(
                 resizeToAvoidBottomInset:
                     hostedFlow?.stage != HostedFlowStage.profile,
