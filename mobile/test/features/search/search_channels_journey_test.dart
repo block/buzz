@@ -171,10 +171,22 @@ void main() {
       const ValueKey('search-channel-row-4things-id'),
     );
 
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(SearchPage)),
+    );
+    final directoryStatus = container.read(
+      channelDirectoryLoadStatusProvider.notifier,
+    );
+
     // A bare "#" lists joined channels, like desktop. The directory finishing
     // last must still stop the spinner.
     await tester.enterText(find.byType(TextField), '#');
-    await tester.pump(const Duration(milliseconds: 300));
+    // Before search first loads the directory, an unloaded directory is not
+    // a failure, even when its status changes during the debounce.
+    directoryStatus.markIdle('http://elsewhere.test:');
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(failed, findsNothing);
+    await tester.pump(const Duration(milliseconds: 200));
     session.searches.removeAt(0).complete(const []);
     actions.searches.removeAt(0).complete(const []);
     await tester.pump();
@@ -201,14 +213,22 @@ void main() {
     expect(failed, findsOneWidget);
     expect(find.text("No results for 'zzzz'"), findsNothing);
 
-    // A membership refresh that displaces the load is not a failure: search
-    // loads it again once. A second displacement offers Retry, not a loop.
+    // A membership refresh that retires the load is not a failure: search
+    // loads it again once, whether the load was retired before it started
+    // loading or after. A second displacement offers Retry, not a loop.
     await tester.enterText(find.byType(TextField), 'zzz');
     await tester.pump(const Duration(milliseconds: 300));
     expect(channels.directoryRequests, 3);
     session.searches.removeAt(0).complete(const []);
     actions.searches.removeAt(0).complete(const []);
-    channels.displaceDirectory();
+    final scope = channelDirectoryScope(
+      'http://community.test',
+      container.read(myPubkeyProvider),
+    );
+    // Start from no status for this community, as after launch, so the
+    // earlier failure does not decide the retry.
+    directoryStatus.markIdle('http://elsewhere.test:');
+    channels.retireDirectory();
     await tester.pump();
     expect(channels.directoryRequests, 4);
     expect(spinner, findsOneWidget);
@@ -219,6 +239,13 @@ void main() {
     expect(spinner, findsNothing);
     expect(failed, findsOneWidget);
     expect(find.text("No results for 'zzz'"), findsNothing);
+    // Another caller loading the directory clears the notice.
+    directoryStatus.markLoaded(scope);
+    await tester.pump();
+    expect(failed, findsNothing);
+    directoryStatus.markError(scope);
+    await tester.pump();
+    expect(failed, findsOneWidget);
 
     // When it fails again, the member match stays beside the notice.
     await tester.enterText(find.byType(TextField), '4things');
@@ -270,6 +297,32 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
     expect(channels.directoryRequests, 8);
     expect(general, findsNothing);
+    // A message hit must not take its channel name from that old list.
+    session.searches.removeLast().complete([
+      NostrEvent(
+        id: 'a' * 64,
+        pubkey: 'b' * 64,
+        createdAt: 1,
+        kind: 9,
+        tags: const [
+          ['h', 'general-id'],
+        ],
+        content: 'general notes',
+        sig: '',
+      ),
+    ]);
+    actions.searches.removeLast().complete(const []);
+    await tester.pump();
+    expect(
+      find.byKey(ValueKey('search-message-row-${'a' * 64}')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(ValueKey('search-message-channel-${'a' * 64}')),
+      findsNothing,
+    );
+    // The row's channel role lookup arms a relay subscription timeout.
+    await tester.pump(const Duration(milliseconds: 500));
     reload.complete();
     await tester.pump();
     expect(general, findsOneWidget);
@@ -347,6 +400,25 @@ void main() {
     status.markError(scope);
     await tester.pump();
     expect(spinner, findsNothing);
+
+    // A membership refresh that starts before the load marks the directory
+    // loading retires the load and writes no status. Search loads it again
+    // once, through the real refresh.
+    status.markIdle('http://elsewhere.test:test');
+    await tester.enterText(find.byType(TextField), 'dev');
+    await tester.pump(const Duration(milliseconds: 300));
+    session.searches.removeAt(0).complete(const []);
+    actions.searches.removeAt(0).complete(const []);
+    await tester.pump();
+    expect(session.memberships, hasLength(2));
+    unawaited(container.read(channelsProvider.notifier).refresh());
+    await tester.pump();
+    expect(session.memberships, hasLength(3));
+    session.memberships[1].complete(const []);
+    await tester.pump();
+    expect(session.memberships, hasLength(4));
+    expect(spinner, findsOneWidget);
+    expect(find.byKey(const Key('search-channels-failed')), findsNothing);
   });
 }
 
@@ -414,9 +486,15 @@ class _DirectoryChannels extends ChannelsNotifier {
   void failDirectory() =>
       _directories.removeAt(0).complete(_DirectoryOutcome.failed);
 
-  /// A membership refresh retires the load, as production marks it idle.
+  /// A membership refresh retires the load after it started loading, so
+  /// production marks it idle.
   void displaceDirectory() =>
       _directories.removeAt(0).complete(_DirectoryOutcome.displaced);
+
+  /// A membership refresh retires the load before it started loading, so
+  /// production writes no status at all.
+  void retireDirectory() =>
+      _directories.removeAt(0).complete(_DirectoryOutcome.retired);
 
   /// Holds the next list load, like a community switch waiting on the relay.
   Completer<void>? holdBuild;
@@ -460,6 +538,8 @@ class _DirectoryChannels extends ChannelsNotifier {
       case _DirectoryOutcome.displaced:
         status.markIdle(scope);
         return;
+      case _DirectoryOutcome.retired:
+        return;
       case _DirectoryOutcome.loaded:
         break;
     }
@@ -469,7 +549,7 @@ class _DirectoryChannels extends ChannelsNotifier {
   }
 }
 
-enum _DirectoryOutcome { loaded, failed, displaced }
+enum _DirectoryOutcome { loaded, failed, displaced, retired }
 
 class _NoRecentSearches extends RecentSearchesNotifier {
   @override

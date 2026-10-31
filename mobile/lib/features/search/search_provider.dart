@@ -163,10 +163,9 @@ class SearchNotifier extends Notifier<SearchState> {
   // newer one.
   Object? _directoryLoad;
 
-  // A membership refresh retired this search's directory load twice in a
-  // row. Nothing failed at the relay, but the open channels are still
-  // missing, so search offers Retry as it does for a failure.
-  bool _directoryDisplaced = false;
+  // This search has loaded, or tried to load, the directory. Until then an
+  // unloaded directory is not a failure to report.
+  bool _directoryAttempted = false;
 
   // Bumped by every new query, clear and rebuild. A lookup writes its result
   // only while its generation is current, so a late reply to an earlier query,
@@ -175,15 +174,14 @@ class SearchNotifier extends Notifier<SearchState> {
 
   @override
   SearchState build() {
-    // Watch the community and identity so search state resets when either
-    // changes.
+    // Watch relayConfig so search state resets on a community or identity
+    // switch: myPubkeyProvider derives from its nsec.
     ref.watch(relayConfigProvider);
-    ref.watch(myPubkeyProvider);
     _generation++;
     _messagesPending = false;
     _usersPending = false;
     _directoryLoad = null;
-    _directoryDisplaced = false;
+    _directoryAttempted = false;
     // Channel rows come from the loaded channel list, which gains open
     // channels when the directory arrives. Re-rank whenever either changes;
     // the directory status for this community also drives the spinner.
@@ -232,18 +230,26 @@ class SearchNotifier extends Notifier<SearchState> {
       _messagesPending ||
       _usersPending ||
       _directoryLoad != null ||
-      _directoryIs(ChannelDirectoryLoadStatus.loading);
+      _directoryStatus == ChannelDirectoryLoadStatus.loading;
 
-  /// Whether this community's directory load is in [status].
-  bool _directoryIs(ChannelDirectoryLoadStatus status) {
+  /// This community's directory status, or null when the status describes
+  /// another community or no load has started.
+  ChannelDirectoryLoadStatus? get _directoryStatus {
     final directory = ref.read(channelDirectoryLoadStatusProvider);
-    return directory.status == status &&
-        directory.scope ==
-            channelDirectoryScope(
-              ref.read(relayConfigProvider).baseUrl,
-              ref.read(myPubkeyProvider),
-            );
+    final scope = channelDirectoryScope(
+      ref.read(relayConfigProvider).baseUrl,
+      ref.read(myPubkeyProvider),
+    );
+    return directory.scope == scope ? directory.status : null;
   }
+
+  /// Whether this community's directory is not loaded and no load for it is
+  /// running: it failed, or a newer channel refresh retired the load.
+  bool get _directoryMissing => switch (_directoryStatus) {
+    ChannelDirectoryLoadStatus.loaded ||
+    ChannelDirectoryLoadStatus.loading => false,
+    _ => true,
+  };
 
   /// Loads the directory again after it failed, like desktop's Retry channels.
   void retryChannels() {
@@ -256,27 +262,25 @@ class SearchNotifier extends Notifier<SearchState> {
   void _loadDirectory() {
     if (_directoryLoad != null) return;
     final load = _directoryLoad = Object();
-    _directoryDisplaced = false;
+    _directoryAttempted = true;
     final channels = ref.read(channelsProvider.notifier);
     Future<void> ensure() =>
         channels.ensureDirectoryLoaded(maxAge: searchDirectoryMaxAge);
     unawaited(
       ensure()
           .then((_) {
-            // A membership refresh that starts during the load retires it and
-            // marks the directory idle. Load it again once; a second
-            // displacement offers Retry instead of looping.
+            // A membership refresh that starts during the load retires it.
+            // Nothing failed, so the load ends with no status for this
+            // community, or idle. Load it again once; if that is retired
+            // too, search offers Retry instead of looping. A relay error
+            // ends in error and is not retried automatically.
             if (!ref.mounted ||
                 _directoryLoad != load ||
-                !_directoryIs(ChannelDirectoryLoadStatus.idle)) {
+                !_directoryMissing ||
+                _directoryStatus == ChannelDirectoryLoadStatus.error) {
               return null;
             }
-            return ensure().then((_) {
-              if (!ref.mounted || _directoryLoad != load) return;
-              _directoryDisplaced = _directoryIs(
-                ChannelDirectoryLoadStatus.idle,
-              );
-            });
+            return ensure();
           })
           .catchError((Object error) {
             debugPrint(
@@ -362,11 +366,10 @@ class SearchNotifier extends Notifier<SearchState> {
         ref.read(channelsProvider).asData?.value ?? const <Channel>[],
         state.query,
       ),
-      // An earlier failure stays hidden while our next load runs.
+      // An earlier failure stays hidden while our next load runs, and the
+      // notice clears when another caller loads the directory.
       channelSearchFailed:
-          _directoryLoad == null &&
-          (_directoryDisplaced ||
-              _directoryIs(ChannelDirectoryLoadStatus.error)),
+          _directoryAttempted && _directoryLoad == null && _directoryMissing,
       isLoading: _isLoading,
     );
   }
