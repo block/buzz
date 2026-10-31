@@ -7,6 +7,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../../shared/agents/remote_agents.dart';
 import '../../shared/community/community_provider.dart';
+import '../../shared/me/default_agent.dart';
 import '../../shared/hosted/hosted_flow.dart';
 import '../../shared/hosted/hosted_flow_provider.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
@@ -151,6 +152,7 @@ class AgentsPage extends HookConsumerWidget {
       return null;
     }, [flow.stage]);
     final community = ref.watch(activeCommunityProvider).asData?.value;
+    final bestie = ref.watch(defaultAgentProvider).asData?.value;
     final directory = ref.watch(agentDirectoryProvider);
     final ownedDirectory = ref.watch(ownedAgentDirectoryProvider);
     final candidates = {
@@ -347,6 +349,7 @@ class AgentsPage extends HookConsumerWidget {
                     return AgentCard(
                       key: ValueKey(key),
                       name: names.labelFor(key),
+                      isBestie: key == bestie,
                       imageUrl:
                           profiles[key]?.avatarUrl ??
                           ownedDirectory.asData?.value

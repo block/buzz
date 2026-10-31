@@ -6,6 +6,7 @@ import 'package:buzz/shared/me/default_agent.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/default_agent_launcher.dart';
 import 'package:buzz/features/agents/agents_page.dart';
+import 'package:buzz/features/agents/agent_card.dart';
 import 'package:buzz/features/profile/user_profile_sheet.dart';
 import 'package:flutter/material.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -195,6 +196,17 @@ void main() {
     expect(find.byType(UserProfileSheet), findsNothing);
     expect(find.byKey(ValueKey(existing)), findsOneWidget);
     expect(tester.element(find.byType(AgentsPage)), same(list));
+    expect(
+      tester.widget<AgentCard>(find.byKey(ValueKey(existing))).isBestie,
+      isTrue,
+    );
+    expect(
+      find.descendant(
+        of: find.byKey(ValueKey(existing)),
+        matching: find.byIcon(Icons.star),
+      ),
+      findsOneWidget,
+    );
     if (supportsRemoteAgents(h.community)) {
       h.registry.listed = [
         {
@@ -239,6 +251,14 @@ void main() {
       expect(decodeDefaultAgent(h.relay.events.single, savedSync), fakeAgent);
       await tester.tap(find.byTooltip('Close sheet'));
       await tester.pumpAndSettle();
+      expect(
+        tester.widget<AgentCard>(find.byKey(ValueKey(existing))).isBestie,
+        isFalse,
+      );
+      expect(
+        tester.widget<AgentCard>(find.byKey(ValueKey(fakeAgent))).isBestie,
+        isTrue,
+      );
     }
     ScaffoldMessenger.of(list).clearSnackBars();
     await tester.tap(find.byTooltip('Close agents'));
