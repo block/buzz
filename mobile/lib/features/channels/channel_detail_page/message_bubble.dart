@@ -482,7 +482,7 @@ class _MessageBubble extends HookConsumerWidget {
       isArchived: isArchived,
       child: content,
     );
-    return message.isAgentAudience
+    return message.shouldFoldAgentAudience
         ? _AgentAudienceFold(
             message: message,
             channelId: currentChannelId,

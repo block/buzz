@@ -9,6 +9,12 @@ import 'channel_window.dart';
 import 'message_media.dart';
 import 'message_content/bubble_segments.dart';
 
+/// Disable with --dart-define=BUZZ_COLLAPSE_AGENT_MESSAGES=false.
+const collapseAgentMessages = bool.fromEnvironment(
+  'BUZZ_COLLAPSE_AGENT_MESSAGES',
+  defaultValue: true,
+);
+
 enum SystemEventType {
   memberJoined,
   memberLeft,
@@ -213,10 +219,13 @@ class TimelineMessage {
     this.rootId,
   });
 
-  /// Agent-to-agent messages collapse in the timeline, as on desktop.
+  /// Whether the message targets agents.
   bool get isAgentAudience => tags.any(
     (tag) => tag.length > 1 && tag[0] == 'audience' && tag[1] == 'agents',
   );
+
+  /// Fold unless the build disables agent-message collapsing.
+  bool get shouldFoldAgentAudience => collapseAgentMessages && isAgentAudience;
 
   /// Attachment messages stay visually distinct from surrounding messages,
   /// even when several are sent by the same author in quick succession.

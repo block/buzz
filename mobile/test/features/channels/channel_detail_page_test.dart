@@ -714,7 +714,7 @@ void main() {
     );
   });
 
-  testWidgets('collapses messages between agents until tapped', (tester) async {
+  testWidgets('agent audience folding follows the build flag', (tester) async {
     final scout = 'a' * 64, helper = 'b' * 64;
     await tester.pumpWidget(
       _buildTestable(
@@ -739,6 +739,30 @@ void main() {
     await tester.pumpAndSettle();
 
     final fold = find.byKey(const ValueKey('agent-audience-m1'));
+    if (!collapseAgentMessages) {
+      expect(fold, findsNothing);
+      expect(find.byKey(const ValueKey('message-row-m1')), findsOneWidget);
+      expect(
+        find.text('@Helper Progress on the build', findRichText: true),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('message-author-m2')), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('message-row-m1')),
+          matching: find.byType(MessageMediaAvatar),
+        ),
+        findsNothing,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('message-row-m2')),
+          matching: find.byType(MessageMediaAvatar),
+        ),
+        findsOneWidget,
+      );
+      return;
+    }
     expect(fold, findsOneWidget);
     expect(find.byKey(const ValueKey('message-row-m1')), findsNothing);
     expect(
@@ -792,7 +816,10 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const ValueKey('agent-audience-m1')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('agent-audience-m1')),
+      collapseAgentMessages ? findsOneWidget : findsNothing,
+    );
     expect(tester.takeException(), isNull);
   });
 

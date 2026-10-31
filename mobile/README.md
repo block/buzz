@@ -35,6 +35,10 @@ setup. `BUZZ_BUILDERLAB_URL` still selects the trusted account environment.
 and reconnect sign-in **only for `BUZZ_AUTH_DOMAINS` matches**. It defaults off: configure backend assertion issuance
 before enabling mobile authentication, and enable relay enforcement last.
 
+## Agent-message collapsing
+
+Messages tagged `audience: agents` collapse to one expandable row by default. Build with `--dart-define=BUZZ_COLLAPSE_AGENT_MESSAGES=false` to disable the feature entirely, including its author and avatar grouping. Disabled builds render these messages as ordinary message bubbles. This is a build-time flag; changing it requires rebuilding the app.
+
 ## Setup
 
 Use the Flutter SDK pinned by the repository. Activate Hermit from the repo
