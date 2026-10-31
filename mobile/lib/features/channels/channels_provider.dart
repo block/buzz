@@ -799,11 +799,14 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       }
 
       final recordedAtByChannel = <String, int>{};
+      final windowSizeByChannel = <String, int>{};
+      final oldestQuietByChannel = <String, NostrEvent>{};
       for (final event in events) {
         final channelId = event.channelId;
         if (channelId == null) continue;
         final channel = channelById[channelId];
         if (channel == null) continue;
+        windowSizeByChannel.update(channelId, (n) => n + 1, ifAbsent: () => 1);
         final readAt = readAtByChannel[channelId];
         if (event.pubkey.toLowerCase() == myPk.toLowerCase()) continue;
         if (readAt != null && event.createdAt <= readAt) continue;
@@ -818,11 +821,35 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         )) {
           continue;
         }
+        if (isQuietAgentMessage(event.tags)) {
+          final oldest = oldestQuietByChannel[channelId];
+          if (oldest == null || event.createdAt < oldest.createdAt) {
+            oldestQuietByChannel[channelId] = event;
+          }
+          continue;
+        }
         _recordUnreadEvent(channel, event, myPk);
         recordedAtByChannel[channelId] = max(
           recordedAtByChannel[channelId] ?? 0,
           event.createdAt,
         );
+      }
+      // A full window of quiet agent messages can hide an older unread event,
+      // and every refresh asks for the same window. Count its oldest quiet
+      // message instead, so the channel stays unread until it is opened.
+      for (final MapEntry(key: channelId, value: quiet)
+          in oldestQuietByChannel.entries) {
+        if (recordedAtByChannel.containsKey(channelId)) continue;
+        if ((windowSizeByChannel[channelId] ?? 0) < _unreadCatchUpLimit) {
+          continue;
+        }
+        _recordUnreadEvent(
+          channelById[channelId]!,
+          quiet,
+          myPk,
+          countQuiet: true,
+        );
+        recordedAtByChannel[channelId] = quiet.createdAt;
       }
       // Republish only when this catch-up actually changed unread state. A
       // batch that recorded nothing has nothing to show, and a failed or

@@ -2053,6 +2053,34 @@ void main() {
       expect(notifier.latestObservedByChannel[_channelA], 50);
     });
 
+    // Quiet messages that fill the bounded catch-up window can hide an older
+    // unread event, so the full window still counts its oldest one.
+    for (final (count, expected) in [
+      (999, <String>[]),
+      (1000, ['quiet-0']),
+    ]) {
+      test('$count quiet catch-up messages record $expected', () async {
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [_meta(id: _channelA, name: 'general')],
+          recentMessages: [
+            for (var i = count - 1; i >= 0; i--)
+              message('quiet-$i', 100 + i, quiet: true),
+          ],
+        );
+        final container = _buildContainer(session: session);
+        addTearDown(container.dispose);
+        await container.read(channelsProvider.future);
+        await _waitUntil(() => session.queryBatches.any(isUnread));
+        await _settle();
+        final notifier = container.read(channelsProvider.notifier);
+        expect(
+          notifier.observedUnreadEventsByChannel[_channelA]?.keys ?? const [],
+          expected,
+        );
+      });
+    }
+
     // HTTP fails ordinarily, then a per-filter websocket fallback times out:
     // the batch is unavailable and no later chunk is sent.
     test('a websocket fallback deadline makes the batch unavailable', () async {
