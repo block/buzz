@@ -472,6 +472,19 @@ pub enum BanRefusal {
     Unavailable,
 }
 
+/// Classify identity-fencing failures without changing unrelated write errors.
+pub(crate) fn event_write_error(error: &buzz_db::DbError) -> Option<IngestError> {
+    match error {
+        buzz_db::DbError::UserDeletionRestricted => Some(IngestError::Rejected(
+            "restricted: identity is restricted for user deletion".into(),
+        )),
+        buzz_db::DbError::EventAuthorOwnershipChanged => Some(IngestError::Internal(
+            "error: agent ownership changed; retry the write".into(),
+        )),
+        _ => None,
+    }
+}
+
 impl IngestError {
     /// A ban refusal answered with `legacy` outside NIP-FI agent HTTP.
     pub(crate) fn ban(refusal: BanRefusal, legacy: IngestError) -> Self {
@@ -3069,15 +3082,19 @@ async fn ingest_event_inner(
         None
     };
 
-    // Processed here (verify consent, mutate archived_identities, emit the
-    // relay-signed 8002/8003 delta + 13535 snapshot), then — unlike the
-    // NIP-43 admin commands above — the request itself falls through to normal
-    // storage so the delta's `["e", request_id]` audit reference resolves.
-    if is_identity_archive_request_kind(kind_u32) {
-        crate::handlers::identity_archive::handle_identity_archive_event(tenant, state, &event)
+    // Consent validation has no side effects. Persistence below commits the
+    // request, archive mutation and relay delta in one guarded transaction.
+    let identity_archive = if is_identity_archive_request_kind(kind_u32) {
+        Some(
+            crate::handlers::identity_archive::validate_identity_archive_event(
+                tenant, state, &event,
+            )
             .await
-            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
-    }
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?,
+        )
+    } else {
+        None
+    };
 
     if kind_u32 == KIND_DELETION {
         // The target's archived channel blocks the deletion, so it must
@@ -3466,8 +3483,10 @@ async fn ingest_event_inner(
                 emoji,
             )
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
-        {
+            .map_err(|e| {
+                event_write_error(&e)
+                    .unwrap_or_else(|| IngestError::Internal(format!("error: {e}")))
+            })? {
             buzz_db::ReactionEventInsertOutcome::TargetMissing => {
                 return Err(IngestError::Rejected(format!(
                     "invalid: {REACTION_TARGET_NOT_FOUND}"
@@ -3558,8 +3577,10 @@ async fn ingest_event_inner(
             .db
             .create_channel_with_event(tenant.community(), create.channel_id, channel, &event)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
-        {
+            .map_err(|e| {
+                event_write_error(&e)
+                    .unwrap_or_else(|| IngestError::Internal(format!("error: {e}")))
+            })? {
             buzz_db::channel::ChannelCreate::Created(stored) => {
                 metrics::counter!(
                     "buzz_channels_created_total",
@@ -3584,13 +3605,31 @@ async fn ingest_event_inner(
                 });
             }
         }
+    } else if let Some(plan) = identity_archive {
+        crate::handlers::identity_archive::persist_identity_archive_event(
+            tenant, state, &event, plan,
+        )
+        .await
+        .map_err(|e| {
+            e.downcast_ref::<buzz_db::DbError>()
+                .and_then(event_write_error)
+                .unwrap_or_else(|| {
+                    IngestError::Internal(format!("error: archive write failed: {e}"))
+                })
+        })?
     } else if workflow_deletion {
         // A single commit owns public acceptance, domain mutation, and dispatch.
         // Failure rolls everything back; identical concurrent requests cannot
         // divide insertion and repair ownership between two relay workers.
         crate::handlers::side_effects::persist_workflow_deletion(tenant, &event, state)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: workflow deletion failed: {e}")))?
+            .map_err(|e| {
+                e.downcast_ref::<buzz_db::DbError>()
+                    .and_then(event_write_error)
+                    .unwrap_or_else(|| {
+                        IngestError::Internal(format!("error: workflow deletion failed: {e}"))
+                    })
+            })?
     } else if let Some(plan) = put_user {
         // One commit stores the event and applies its membership changes. A
         // failure stores nothing, so the client is told and can resend it.
@@ -3605,11 +3644,15 @@ async fn ingest_event_inner(
             thread_params,
         )
         .await
-        .map_err(|e| match e.downcast_ref::<buzz_db::DbError>() {
-            Some(buzz_db::DbError::AccessDenied(reason)) => {
-                IngestError::Rejected(format!("invalid: {reason}"))
-            }
-            _ => IngestError::Internal(format!("error: membership write failed: {e}")),
+        .map_err(|e| {
+            e.downcast_ref::<buzz_db::DbError>()
+                .and_then(event_write_error)
+                .unwrap_or_else(|| match e.downcast_ref::<buzz_db::DbError>() {
+                    Some(buzz_db::DbError::AccessDenied(reason)) => {
+                        IngestError::Rejected(format!("invalid: {reason}"))
+                    }
+                    _ => IngestError::Internal(format!("error: membership write failed: {e}")),
+                })
         })?;
         message = ok_message;
         (stored, inserted)
@@ -3620,11 +3663,15 @@ async fn ingest_event_inner(
         // that is not archived) is the client's error; anything else is ours.
         crate::handlers::side_effects::persist_edit_metadata(tenant, &event, state)
             .await
-            .map_err(|e| match e.downcast_ref::<buzz_db::DbError>() {
-                Some(buzz_db::DbError::AccessDenied(reason)) => {
-                    IngestError::Rejected(format!("invalid: {reason}"))
-                }
-                _ => IngestError::Internal(format!("error: channel update failed: {e}")),
+            .map_err(|e| {
+                e.downcast_ref::<buzz_db::DbError>()
+                    .and_then(event_write_error)
+                    .unwrap_or_else(|| match e.downcast_ref::<buzz_db::DbError>() {
+                        Some(buzz_db::DbError::AccessDenied(reason)) => {
+                            IngestError::Rejected(format!("invalid: {reason}"))
+                        }
+                        _ => IngestError::Internal(format!("error: channel update failed: {e}")),
+                    })
             })?
     } else if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
@@ -3665,7 +3712,10 @@ async fn ingest_event_inner(
             .db
             .insert_canvas_head_checked(tenant.community(), &event, channel, precondition)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
+            .map_err(|e| {
+                event_write_error(&e)
+                    .unwrap_or_else(|| IngestError::Internal(format!("error: {e}")))
+            })?;
         match status {
             buzz_db::ChannelHeadWriteStatus::RevisionMissing => {
                 return Err(IngestError::CanvasConflict(
@@ -3703,7 +3753,9 @@ async fn ingest_event_inner(
                     buzz_db::DbError::AuthEventRejected => {
                         IngestError::Rejected("invalid: AUTH events cannot be stored".into())
                     }
-                    other => IngestError::Internal(format!("error: database error: {other}")),
+                    other => event_write_error(&other).unwrap_or_else(|| {
+                        IngestError::Internal(format!("error: database error: {other}"))
+                    }),
                 });
             }
         }

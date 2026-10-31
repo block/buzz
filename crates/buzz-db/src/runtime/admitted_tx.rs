@@ -145,6 +145,15 @@ impl AdmittedTx {
         &mut self.tx
     }
 
+    pub(crate) async fn guard_event_author(&mut self, event: &nostr::Event) -> Result<()> {
+        crate::store::user_deletion_write_guard::guard_event_author(
+            &mut self.tx,
+            self.community,
+            event,
+        )
+        .await
+    }
+
     /// Record that an event committed with this transaction belongs to
     /// `channel_id`, so [`AdmittedTx::commit`] refreshes the channel's TTL.
     pub(crate) fn record_channel_event(&mut self, channel_id: Option<Uuid>, kind: i32) {

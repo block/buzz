@@ -5,13 +5,14 @@
 //! relay access, or repository permissions.
 //! All pubkey and event ID values are lowercase hex strings.
 
-use buzz_core::CommunityId;
+use buzz_core::{CommunityId, StoredEvent};
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
+use nostr::Event;
 use sqlx::{PgPool, Row as _};
 
 use crate::error::Result;
-use crate::Db;
+use crate::{AdmittedTx, Db};
 
 /// A single archived identity record.
 #[derive(Debug, Clone)]
@@ -70,6 +71,31 @@ pub async fn archive(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    let changed = archive_on(
+        &mut tx,
+        pubkey,
+        consent_path,
+        actor,
+        reason,
+        replaced_by,
+        request_event_id,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(changed)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn archive_on(
+    tx: &mut AdmittedTx,
+    pubkey: &str,
+    consent_path: &str,
+    actor: &str,
+    reason: Option<&str>,
+    replaced_by: Option<&str>,
+    request_event_id: &str,
+) -> Result<bool> {
+    let community_id = tx.community();
     let result = sqlx::query(
         "INSERT INTO archived_identities \
          (community_id, pubkey, consent_path, actor, reason, replaced_by, request_event_id) \
@@ -85,7 +111,6 @@ pub async fn archive(
     .bind(request_event_id)
     .execute(tx.conn())
     .await?;
-    tx.commit().await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -100,13 +125,19 @@ pub async fn unarchive(pool: &PgPool, community_id: CommunityId, pubkey: &str) -
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    let changed = unarchive_on(&mut tx, pubkey).await?;
+    tx.commit().await?;
+    Ok(changed)
+}
+
+async fn unarchive_on(tx: &mut AdmittedTx, pubkey: &str) -> Result<bool> {
+    let community_id = tx.community();
     let result =
         sqlx::query("DELETE FROM archived_identities WHERE community_id = $1 AND pubkey = $2")
             .bind(community_id.as_uuid())
             .bind(pubkey)
             .execute(tx.conn())
             .await?;
-    tx.commit().await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -148,7 +179,68 @@ fn row_to_archived_identity(
     })
 }
 
+/// Validated archive mutation accompanying a signed identity request.
+pub struct IdentityArchiveChange<'a> {
+    /// Identity whose archive state changes.
+    pub target: &'a str,
+    /// Whether to archive (`true`) or unarchive (`false`).
+    pub archive: bool,
+    /// Validated consent path: self, owner, or admin.
+    pub consent_path: &'a str,
+    /// Optional reason supplied by the actor.
+    pub reason: Option<&'a str>,
+    /// Optional replacement identity.
+    pub replaced_by: Option<&'a str>,
+}
+
 impl Db {
+    /// Atomically persist the signed request, archive mutation, and relay delta.
+    ///
+    /// The request passes the shared author fence before any archive mutation.
+    /// Duplicate requests never reapply a mutation; the persisted delta is
+    /// returned for post-commit delivery when newly inserted. Stored deltas
+    /// remain available for replay; duplicate requests emit no new delta.
+    pub async fn apply_identity_archive_event(
+        &self,
+        community: CommunityId,
+        request: &Event,
+        change: IdentityArchiveChange<'_>,
+        delta: &Event,
+    ) -> Result<(StoredEvent, bool, Option<StoredEvent>)> {
+        let mut tx = self.begin_event_write_transaction(community).await?;
+        let (stored, inserted) =
+            crate::event::insert_event_in_transaction(&mut tx, request, None).await?;
+        let notification = if inserted {
+            let changed = if change.archive {
+                archive_on(
+                    &mut tx,
+                    change.target,
+                    change.consent_path,
+                    &request.pubkey.to_hex(),
+                    change.reason,
+                    change.replaced_by,
+                    &request.id.to_hex(),
+                )
+                .await?
+            } else {
+                unarchive_on(&mut tx, change.target).await?
+            };
+            if changed {
+                Some(
+                    crate::event::insert_event_in_transaction(&mut tx, delta, None)
+                        .await?
+                        .0,
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        tx.commit().await?;
+        Ok((stored, inserted, notification))
+    }
+
     /// Returns `true` if `pubkey` (64-char hex) is archived in `community_id`.
     #[datastore_span(name = "is_archived", system = "postgresql")]
     pub async fn is_archived(&self, community_id: CommunityId, pubkey: &str) -> Result<bool> {
