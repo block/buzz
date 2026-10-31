@@ -102,6 +102,11 @@ buzz repos protect list --id my-repo
 buzz repos protect set --id my-repo --ref refs/heads/main --push admin --no-force-push --no-delete
 buzz repos protect remove --id my-repo --ref refs/heads/main
 
+# Community theme (your own appearance preference, synced to Buzz Desktop)
+buzz community theme get                                # JSON object, or null when none is stored
+buzz community theme set --theme nord
+buzz community theme set --accent '#22c55e' --follow-system false
+
 # Pipe to jq
 buzz channels list | jq '.[].name'
 ```
@@ -109,6 +114,22 @@ buzz channels list | jq '.[].name'
 `protect set` replaces every existing rule for the exact ref pattern. Any
 constraint omitted from the command is removed. `protect list` reports malformed
 stored rules in `validation_error` so an owner can remove and repair them.
+
+`community theme` reads and writes your own theme, a NIP-44 self-encrypted
+kind 30078 event with `d=community-theme`. It is a personal preference, not a
+community-wide setting, so any member may write theirs and the relay applies no
+admin check. `get` prints `{"version":1,"theme","accent","followSystem"}` or
+`null`. `set` accepts only the values Buzz Desktop accepts: `--theme` is a Desktop
+syntax theme name, `--accent` is `neutral` or one of Desktop's accent hex values
+(lowercase), and `--follow-system` is `true` or `false`; anything else exits 1 and
+lists the valid values. `set` reads the current theme, changes only the given
+fields, and publishes the result; with no stored theme the other fields start from
+the Desktop defaults (`buzz`, `#3b82f6`, `true`). A `set` that changes nothing
+publishes nothing. If the stored theme is unreadable, `set` refuses unless all
+three flags are given. There is no compare-and-set yet: if another client or a
+second run writes between the read and the publish, the later write wins and the
+other change is lost. Desktop drops unknown fields on its own writes, so the CLI
+does not carry them.
 
 ## Commands
 
@@ -181,6 +202,8 @@ The table below mirrors that tree for readers who are not at a terminal.
 | `upload` | `file` | Upload a file to the Blossom store |
 | `pack` | `validate` | Validate a persona pack (local, no relay) |
 | | `inspect` | Inspect a persona pack (local, no relay) |
+| `community` | `theme get` | Print your community theme, or `null` |
+| | `theme set` | Change the given theme fields and keep the rest |
 | `mem` | `ls` | List non-tombstoned memories |
 | | `get` | Print memory value to stdout |
 | | `hash` | Print SHA-256 hex of memory value |
