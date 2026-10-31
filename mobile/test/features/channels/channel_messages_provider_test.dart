@@ -2191,6 +2191,49 @@ void main() {
     );
   });
 
+  test(
+    'a failed catch-up after reconnecting tells listeners it ended',
+    () async {
+      final reconnectPage = Completer<List<NostrEvent>>();
+      final session = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'first', createdAt: 10), _bounds()],
+          reconnectPage.future,
+        ],
+      );
+      final container = _buildContainer(session);
+      addTearDown(container.dispose);
+      container.listen(channelMessagesProvider(_channelId), (_, _) {});
+      await _pumpEventQueue();
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      session.setConnected(false);
+      await _pumpEventQueue();
+      session.setConnected(true);
+      await _pumpEventQueue();
+      expect(notifier.isCatchingUp, isTrue);
+
+      final catchingUpWhenNotified = <bool>[];
+      container.listen(channelMessagesProvider(_channelId), (_, _) {
+        catchingUpWhenNotified.add(notifier.isCatchingUp);
+      });
+      reconnectPage.completeError(
+        RelayException(503, '{"error":"query timed out"}'),
+      );
+      await _pumpEventQueue();
+      expect(notifier.isCatchingUp, isFalse);
+      expect(catchingUpWhenNotified, [false]);
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value!
+            .map((event) => event.id),
+        ['first'],
+      );
+    },
+  );
+
   test('reconnect evicts reply evidence outside the newest window', () async {
     final session = _RecordingRelaySessionNotifier(
       queryResults: [

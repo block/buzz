@@ -277,6 +277,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         );
         _initInFlight = false;
         state = AsyncData(fallbackMessages);
+        // The fallback is usually the list already on screen, which Riverpod
+        // treats as unchanged. Notify anyway so the page sees catch-up end.
+        ref.notifyListeners();
         return;
       }
       _initInFlight = false;
