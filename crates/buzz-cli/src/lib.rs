@@ -460,7 +460,7 @@ buzz agents archived"
 pub enum MessagesCmd {
     /// Send a message to a channel
     #[command(
-        after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -"
+        after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -\n  buzz messages send --channel <UUID> --content \"decision: ship it\" --from-thread <ROOT_EVENT_ID>"
     )]
     Send {
         /// Channel UUID (from 'buzz channels list')
@@ -475,6 +475,9 @@ pub enum MessagesCmd {
         /// Event ID to reply to (creates a thread)
         #[arg(long)]
         reply_to: Option<String>,
+        /// Thread root event ID: send this as a new top-level message tagged as sent from that thread (like desktop's "Send to channel")
+        #[arg(long, conflicts_with_all = ["reply_to", "broadcast"])]
+        from_thread: Option<String>,
         /// Also publish to the Nostr network
         #[arg(long, default_value_t = false)]
         broadcast: bool,
@@ -2359,6 +2362,29 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn messages_send_from_thread_conflicts_with_reply_and_broadcast() {
+        let base = [
+            "buzz",
+            "messages",
+            "send",
+            "--channel",
+            "123e4567-e89b-12d3-a456-426614174000",
+            "--content",
+            "x",
+            "--from-thread",
+        ];
+        let with = |extra: &[&'static str]| {
+            let mut args = base.to_vec();
+            args.push("a");
+            args.extend(extra);
+            Cli::try_parse_from(args)
+        };
+        assert!(with(&[]).is_ok());
+        assert!(with(&["--reply-to", "b"]).is_err());
+        assert!(with(&["--broadcast"]).is_err());
     }
 
     #[test]
