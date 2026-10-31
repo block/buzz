@@ -10,6 +10,7 @@ class _WebsiteWelcomeBackground extends HookWidget {
   @override
   Widget build(BuildContext context) {
     final pointer = useRef<Offset?>(null);
+    final theme = AppTheme.light();
     return MouseRegion(
       onHover: (event) => pointer.value = event.localPosition,
       onExit: (_) => pointer.value = null,
@@ -39,7 +40,18 @@ class _WebsiteWelcomeBackground extends HookWidget {
                     ),
                   ),
                 ),
-              Theme(data: AppTheme.light(), child: child),
+              Theme(
+                data: theme.copyWith(
+                  textButtonTheme: TextButtonThemeData(
+                    style: theme.textButtonTheme.style?.copyWith(
+                      backgroundColor: const WidgetStatePropertyAll(
+                        Color(0xFFD7D72E),
+                      ),
+                    ),
+                  ),
+                ),
+                child: child,
+              ),
             ],
           ),
         ),
