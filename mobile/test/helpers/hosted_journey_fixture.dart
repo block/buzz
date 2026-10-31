@@ -321,6 +321,7 @@ class HostedJourneyFixture {
     bool openEntry = true,
     bool addingCommunity = true,
     PairingCredentialValidator? pairingValidator,
+    PairingSocketFactory? pairingSocketFactory,
   }) async {
     await tester.binding.setSurfaceSize(const Size(440, 1100));
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
@@ -341,9 +342,12 @@ class HostedJourneyFixture {
         disableAnimations: true,
         overrides: [
           hostedFlowProvider.overrideWith(createFlow),
-          if (pairingValidator != null)
+          if (pairingValidator != null || pairingSocketFactory != null)
             pairingProvider.overrideWith(
-              () => PairingNotifier(credentialValidator: pairingValidator),
+              () => PairingNotifier(
+                credentialValidator: pairingValidator,
+                socketFactory: pairingSocketFactory,
+              ),
             ),
           if (relayAuthEnabled) ...[
             hostedRelayAuthProvider.overrideWith((ref) {

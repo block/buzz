@@ -1,3 +1,4 @@
+import '../../helpers/controllable_pairing_socket.dart';
 import 'package:buzz/shared/widgets/buzz_toast.dart';
 import 'package:buzz/features/onboarding/hosted_reconnect_banner.dart';
 import 'package:buzz/shared/hosted/hosted_community_creation.dart';
@@ -9,6 +10,7 @@ import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
 import 'dart:async';
 import 'dart:convert';
+import 'package:nostr/nostr.dart' as nostr;
 
 import 'package:buzz/features/profile/profile_setup_page.dart';
 import 'package:buzz/features/profile/profile_setup_avatar_editor.dart';
@@ -395,9 +397,86 @@ void main() {
   }
 
   journey(
-    'QR credentials enter without an account when domain is not required',
+    'QR credentials preserve an existing hosted identity or enter an opt-out community',
     (tester, f) async {
-      if (HostedEnvironment.requiresAuth('paired.communities.buzz.xyz')) return;
+      if (HostedEnvironment.requiresAuth('paired.communities.buzz.xyz')) {
+        await f.initialize();
+        final original = Community.create(
+          name: 'One',
+          relayUrl: 'https://one.communities.buzz.xyz',
+          pubkey: f.keys.public,
+          nsec: f.keys.nsec,
+        );
+        await f.storage.save(original);
+        await f.storage.saveActiveId(original.id);
+        late ControllablePairingSocket socket;
+        await f.mount(
+          tester,
+          pairingSocketFactory:
+              ({
+                required wsUrl,
+                required ephemeralPrivkey,
+                required onMessage,
+                required onDisconnected,
+              }) {
+                return socket = ControllablePairingSocket(
+                  ephemeralPrivkey: ephemeralPrivkey,
+                  onMessage: onMessage,
+                  onDisconnected: onDisconnected,
+                );
+              },
+        );
+        final transferred = nostr.Keys('2'.padLeft(64, '0'));
+        const sessionSecret =
+            'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';
+        final notifier = f.container.read(pairingProvider.notifier);
+        await notifier.pair(
+          'nostrpair://${transferred.public}?secret=$sessionSecret&relay=wss%3A%2F%2Fpairing.buzz.xyz&v=1',
+        );
+        notifier.setProtectSensitiveActions(false);
+        notifier.confirmSas();
+        socket.sendSourceMessage(
+          sourceSecret: transferred.secret,
+          sessionSecretHex: sessionSecret,
+          message: {'type': 'sas-confirm'},
+          includeTranscriptHash: true,
+        );
+        await f.settle(tester);
+        socket.sendSourceMessage(
+          sourceSecret: transferred.secret,
+          sessionSecretHex: sessionSecret,
+          message: {
+            'type': 'payload',
+            'payload_type': 'credentials',
+            'payload': jsonEncode({
+              'relayUrl': 'https://paired.communities.buzz.xyz',
+              'nsec': transferred.nsec,
+              'pubkey': transferred.public,
+            }),
+          },
+        );
+        await f.settle(tester);
+        const message =
+            'This device uses a different identity. Your saved identity has been kept.';
+        expect(find.text(message).hitTestable(), findsOneWidget);
+        expect(find.text('Scan a QR code').hitTestable(), findsOneWidget);
+        final announcement = find.ancestor(
+          of: find.text(message),
+          matching: find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics && widget.properties.liveRegion == true,
+          ),
+        );
+        expect(announcement, findsOneWidget);
+        final saved = (await f.storage.loadAll()).single;
+        expect(saved.pubkey, f.keys.public);
+        expect(saved.nsec, f.keys.nsec);
+        expect((await f.store.read())?.pubkey, f.keys.public);
+        await tester.tap(find.byTooltip('Back').hitTestable());
+        await f.settle(tester);
+        expect(find.text('Community home').hitTestable(), findsOneWidget);
+        return;
+      }
       // Seed a previous account session: an opt-out build must not restore it.
       await f.initialize(localIdentity: false);
       f.requests.clear();
