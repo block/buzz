@@ -84,6 +84,50 @@ void main() {
     );
   }
 
+  testWidgets('closing the carousel aborts its pending downloads', (
+    tester,
+  ) async {
+    final client = (await tester.runAsync(() async => _TrackingClient()))!;
+    final server = await tester.runAsync(
+      () => HttpServer.bind(InternetAddress.loopbackIPv4, 0),
+    );
+    addTearDown(() async {
+      client.close();
+      await server!.close(force: true);
+      MediaImageProvider.debugResetCooldowns();
+    });
+    final base = 'http://127.0.0.1:${server!.port}';
+    final auth = MediaGetAuthService(baseUrl: base, nsec: null);
+    // Requests never get a response: only disposal can release them.
+    await tester.runAsync(() async => server.listen((_) {}));
+    final harness = await _mount(
+      tester,
+      List.generate(
+        4,
+        (index) => MediaImageProvider(
+          url: '$base/$index',
+          auth: auth,
+          client: client,
+          stallTimeout: const Duration(minutes: 1),
+        ),
+      ),
+    );
+    await tester.runAsync(() async {
+      for (var index = 0; index < 4; index++) {
+        await harness.send('subscribeImage', {'id': '$index', 'index': index});
+      }
+      for (var i = 0; i < 100 && client.started < 4; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+    });
+    expect(client.started, 4);
+    await tester.pumpWidget(const SizedBox());
+    await tester.runAsync(
+      () => client.retired.future.timeout(const Duration(seconds: 5)),
+    );
+    expect(client.aborted, 4);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
   testWidgets('native callbacks and disposal release subscribed images', (
     tester,
   ) async {

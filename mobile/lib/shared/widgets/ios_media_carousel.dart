@@ -129,8 +129,8 @@ class IosMediaCarousel extends HookWidget {
 }
 
 // Keep native subscriptions and unresolved provider loads bounded together.
-// A load cancelled before its first frame evicts its pending cache entry and
-// stops listening; with no listener left, MediaImageProvider aborts its
+// A load cancelled or disposed before its first frame evicts its pending cache
+// entry and stops listening; with no listener left, MediaImageProvider aborts its
 // download, so the slot is released at once.
 class _CarouselImages {
   _CarouselImages(this.channel);
@@ -159,15 +159,20 @@ class _CarouselImages {
     image.cancelled = true;
     image.nextFrame?.dispose();
     image.nextFrame = null;
-    if (!image.receivedFrame) {
-      unawaited(
-        image.provider.obtainKey(image.config).then((key) {
-          PaintingBinding.instance.imageCache.evict(key);
-        }),
-      );
-    }
+    _releasePending(image);
     image.detach();
     if (!image.encoding) _finish(image);
+  }
+
+  // Before its first frame, the image cache holds its own listener on the
+  // load, so removing ours alone would leave the download running.
+  void _releasePending(_CarouselImage image) {
+    if (image.receivedFrame) return;
+    unawaited(
+      image.provider.obtainKey(image.config).then((key) {
+        PaintingBinding.instance.imageCache.evict(key);
+      }),
+    );
   }
 
   void _drain() {
@@ -259,6 +264,7 @@ class _CarouselImages {
     _queued.clear();
     for (final image in _running.values.toList()) {
       image.cancelled = true;
+      _releasePending(image);
       _finish(image);
     }
   }
