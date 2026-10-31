@@ -191,13 +191,11 @@ class _HuddleButton extends ConsumerWidget {
   }
 }
 
-IosNavigationAction _huddleNavigationAction(
-  BuildContext context,
-  WidgetRef ref,
-  Channel channel,
+({_HuddleInvite? activeStart, bool isCurrentParent}) _huddleTarget(
+  HuddleSessionState session,
+  String channelId,
   List<NostrEvent> events,
 ) {
-  final session = ref.watch(huddleSessionProvider);
   final latestStart = _activeHuddleStart(events);
   final unavailableFailure =
       session.phase == HuddleSessionPhase.failed &&
@@ -208,10 +206,21 @@ IosNavigationAction _huddleNavigationAction(
       ? null
       : latestStart;
   final isCurrentParent =
-      session.parentChannelId == channel.id &&
+      session.parentChannelId == channelId &&
       session.ephemeralChannelId != null &&
       session.phase != HuddleSessionPhase.idle &&
       !unavailableFailure;
+  return (activeStart: activeStart, isCurrentParent: isCurrentParent);
+}
+
+IosNavigationAction _huddleNavigationAction(
+  BuildContext context,
+  WidgetRef ref,
+  Channel channel,
+  List<NostrEvent> events,
+) {
+  final session = ref.watch(huddleSessionProvider);
+  final target = _huddleTarget(session, channel.id, events);
   final disabledByOtherHuddle =
       session.isInSession && session.parentChannelId != channel.id;
 
@@ -220,46 +229,12 @@ IosNavigationAction _huddleNavigationAction(
     onPressed: disabledByOtherHuddle
         ? null
         : () async {
-            if (isCurrentParent) {
-              _showMobileHuddleCall(
-                context: context,
-                ref: ref,
-                invite: _HuddleInvite(
-                  parentChannelId: channel.id,
-                  ephemeralChannelId: session.ephemeralChannelId!,
-                  startedBy: session.isCreator
-                      ? session.currentPubkey ?? ''
-                      : '',
-                  startedEventId: session.startedEventId ?? '',
-                ),
-              );
-              return;
-            }
-            if (activeStart != null) {
-              _openMobileHuddle(
-                context: context,
-                ref: ref,
-                invite: activeStart,
-              );
-              return;
-            }
             try {
-              await ref
-                  .read(mobileHuddleControllerProvider.notifier)
-                  .start(parentChannelId: channel.id);
-              if (!context.mounted) return;
-              final started = ref.read(huddleSessionProvider);
-              final ephemeralChannelId = started.ephemeralChannelId;
-              if (ephemeralChannelId == null) return;
-              _showMobileHuddleCall(
+              await _openOrStartHuddle(
                 context: context,
                 ref: ref,
-                invite: _HuddleInvite(
-                  parentChannelId: channel.id,
-                  ephemeralChannelId: ephemeralChannelId,
-                  startedBy: started.currentPubkey ?? '',
-                  startedEventId: started.startedEventId ?? '',
-                ),
+                channelId: channel.id,
+                events: events,
               );
             } catch (error) {
               if (!context.mounted) return;
@@ -270,9 +245,82 @@ IosNavigationAction _huddleNavigationAction(
           },
     label: disabledByOtherHuddle
         ? 'Leave your current Huddle first'
-        : activeStart != null || isCurrentParent
+        : target.activeStart != null || target.isCurrentParent
         ? 'Open Huddle'
         : 'Start Huddle',
+  );
+}
+
+Future<void> _openOrStartHuddle({
+  required BuildContext context,
+  required WidgetRef ref,
+  required String channelId,
+  required List<NostrEvent> events,
+}) async {
+  final target = _huddleTarget(
+    ref.read(huddleSessionProvider),
+    channelId,
+    events,
+  );
+  if (target.isCurrentParent) {
+    final session = ref.read(huddleSessionProvider);
+    _showMobileHuddleCall(
+      context: context,
+      ref: ref,
+      invite: _HuddleInvite(
+        parentChannelId: channelId,
+        ephemeralChannelId: session.ephemeralChannelId!,
+        startedBy: session.isCreator ? session.currentPubkey ?? '' : '',
+        startedEventId: session.startedEventId ?? '',
+      ),
+    );
+    return;
+  }
+  final activeStart = target.activeStart;
+  if (activeStart != null) {
+    _openMobileHuddle(context: context, ref: ref, invite: activeStart);
+    return;
+  }
+  await ref
+      .read(mobileHuddleControllerProvider.notifier)
+      .start(parentChannelId: channelId);
+  if (!context.mounted) return;
+  final started = ref.read(huddleSessionProvider);
+  final ephemeralChannelId = started.ephemeralChannelId;
+  if (ephemeralChannelId == null) return;
+  _showMobileHuddleCall(
+    context: context,
+    ref: ref,
+    invite: _HuddleInvite(
+      parentChannelId: channelId,
+      ephemeralChannelId: ephemeralChannelId,
+      startedBy: started.currentPubkey ?? '',
+      startedEventId: started.startedEventId ?? '',
+    ),
+  );
+}
+
+/// Opens the Huddle already running in [channelId], or starts one, exactly as
+/// the channel's Huddle button does. Failures throw instead of showing a
+/// snackbar. Callers must read [ref] and [context] before awaiting this and
+/// must not call it while another channel's Huddle is active.
+Future<void> startOrOpenChannelHuddle({
+  required BuildContext context,
+  required WidgetRef ref,
+  required String channelId,
+}) async {
+  final messages =
+      ref.read(channelMessagesProvider(channelId)).value ??
+      const <NostrEvent>[];
+  final lifecycle = await ref.read(huddleLifecycleProvider(channelId).future);
+  if (!context.mounted) {
+    throw StateError('The Huddle did not start because the page closed.');
+  }
+  await _openOrStartHuddle(
+    context: context,
+    ref: ref,
+    channelId: channelId,
+    events: [...messages, ...lifecycle],
   );
 }
 
