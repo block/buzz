@@ -21,6 +21,7 @@ import {
   useUpdateProjectPullRequestStatusMutation,
 } from "@/features/projects/pullRequestReviews";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { isRepositoryMaintainer } from "@/features/projects/projectModels";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import {
@@ -67,9 +68,11 @@ export function PullRequestReviewCard({
   const viewer = viewerPubkey ? normalizePubkey(viewerPubkey) : null;
   const isAuthor = viewer === normalizePubkey(pullRequest.author);
   const isOwner = viewer === normalizePubkey(project.owner);
+  const isMaintainer = isRepositoryMaintainer(project, viewer);
   const isManagedAgentOwner = useIsManagedAgent(project.owner) === true;
   const canChangeStatus =
-    Boolean(viewer) && (isAuthor || isOwner || isManagedAgentOwner);
+    Boolean(viewer) &&
+    (isAuthor || isOwner || isMaintainer || isManagedAgentOwner);
   const hasApproved = Boolean(
     viewer &&
       pullRequest.approvals.some(

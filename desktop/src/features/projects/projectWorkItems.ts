@@ -26,6 +26,8 @@ import {
 
 type RepositoryReference = {
   repoAddress: string;
+  /** NIP-34 `maintainers`: trusted for status/assignment like the owner. */
+  maintainers?: string[];
 };
 
 type ProjectReference = {
@@ -177,6 +179,7 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
           updatesByRepo.get(repository.repoAddress) ?? [],
           commentsByRepo.get(repository.repoAddress) ?? [],
           statusesByRepo.get(repository.repoAddress) ?? [],
+          repository.maintainers ?? [],
         ).map((pullRequest) => ({ project, pullRequest, repository })),
       ),
     )
@@ -210,6 +213,7 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
           ),
           statusesByRepo.get(repository.repoAddress) ?? [],
           commentsByRepo.get(repository.repoAddress) ?? [],
+          repository.maintainers ?? [],
         ).map((issue) => ({ issue, project, repository })),
       ),
     )
