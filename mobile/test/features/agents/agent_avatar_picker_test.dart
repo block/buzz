@@ -67,6 +67,21 @@ void main() {
     await tester.pumpAndSettle();
     expect(selection.url, isNot(agentAvatarCatalog.first.url));
     final character = selection.url;
+    // Every preview uses the same squircle the agent gets once created.
+    void expectSquirclePreview() {
+      final previewClip = tester.widget<ClipPath>(
+        find.descendant(
+          of: find.bySemanticsLabel('Selected agent avatar'),
+          matching: find.byType(ClipPath),
+        ),
+      );
+      expect(
+        (previewClip.clipper! as ShapeBorderClipper).shape,
+        avatarShape(isAgent: true),
+      );
+    }
+
+    expectSquirclePreview();
     await tester.runAsync(() async {
       rendered = Completer<void>();
       tester
@@ -77,17 +92,7 @@ void main() {
 
     await tester.pumpAndSettle();
     expect(selection.bytes, isNotNull);
-    // The preview uses the same squircle the agent gets once created.
-    final previewClip = tester.widget<ClipPath>(
-      find.descendant(
-        of: find.bySemanticsLabel('Selected agent avatar'),
-        matching: find.byType(ClipPath),
-      ),
-    );
-    expect(
-      (previewClip.clipper! as ShapeBorderClipper).shape,
-      avatarShape(isAgent: true),
-    );
+    expectSquirclePreview();
     expect(
       (tester
                   .widget<GridView>(
