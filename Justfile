@@ -508,7 +508,8 @@ test-unit:
         # #[ignore]d Postgres suites — so these non-ignored tests ran in no lane
         # and a red one could ship green (exactly how a broken admin test slipped
         # past every gate once). Scoped to api::admin, not the whole buzz-relay
-        # --lib, because api::media has non-ignored tests that require Postgres.
+        # --lib, because much of handlers::req has non-ignored tests that require
+        # Postgres.
         # DB-backed api::admin tests are #[ignore]d and run in the PostgreSQL
         # lane; the non-ignored ones reject before touching the database. Any
         # new non-ignored test here must stay DB-free: without a database, a
