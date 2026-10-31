@@ -71,6 +71,37 @@ void main() {
     });
   });
 
+  group('relayThumbnailUrl', () {
+    final hash = 'ab' * 32;
+    final auth = _auth();
+
+    test('maps relay JPEG blobs to the thumbnail', () {
+      for (final ext in ['jpg', 'jpeg']) {
+        expect(
+          relayThumbnailUrl('$_relayBase/media/$hash.$ext', auth),
+          '$_relayBase/media/$hash.thumb.jpg',
+        );
+      }
+    });
+
+    test('leaves everything else alone', () {
+      for (final url in [
+        'https://elsewhere.example/media/$hash.jpg',
+        '$_relayBase/media/$hash.thumb.jpg',
+        '$_relayBase/media/$hash.jpg?v=2',
+        '$_relayBase/media/not-a-hash.jpg',
+        '$_relayBase/avatars/$hash.jpg',
+        // The thumbnail drops transparency and animation.
+        '$_relayBase/media/$hash.png',
+        '$_relayBase/media/$hash.webp',
+        '$_relayBase/media/$hash.gif',
+        '$_relayBase/media/$hash',
+      ]) {
+        expect(relayThumbnailUrl(url, auth), isNull, reason: url);
+      }
+    });
+  });
+
   group('MediaImageProvider cache identity', () {
     test('equal url + same auth service => equal keys', () {
       final auth = _auth(nsec: nostr.Keys.generate().nsec);

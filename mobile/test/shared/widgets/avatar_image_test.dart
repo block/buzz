@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:buzz/shared/relay/media_auth.dart';
+import 'package:buzz/shared/relay/media_image.dart';
 import 'package:buzz/shared/widgets/avatar_shape.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:buzz/shared/emoji/native_emoji_glyph.dart';
@@ -7,6 +9,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart' as http_testing;
 
 void main() {
   const svg =
@@ -50,6 +54,54 @@ void main() {
         expect(scale, findsNothing);
       }
     }
+  });
+
+  testWidgets('small relay avatars load the relay thumbnail', (tester) async {
+    const relay = 'https://relay.example';
+    final hash = 'ab' * 32;
+    final original = '$relay/media/$hash.jpg';
+    final requested = <String>[];
+    final client = http_testing.MockClient((request) async {
+      requested.add(request.url.toString());
+      return http.Response('', 404);
+    });
+    tester.view.devicePixelRatio = 3;
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          mediaGetAuthServiceProvider.overrideWithValue(
+            MediaGetAuthService(baseUrl: relay, nsec: null),
+          ),
+          mediaHttpClientProvider.overrideWithValue(client),
+        ],
+        child: MaterialApp(
+          home: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // 40pt = 120px, within the thumbnail.
+              AvatarImage(
+                imageUrl: original,
+                radius: 20,
+                fallback: const Text('R'),
+              ),
+              // 120pt = 360px, larger than the thumbnail.
+              AvatarImage(
+                imageUrl: original,
+                radius: 60,
+                fallback: const Text('R'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    final shown = tester.widgetList<Image>(find.byType(Image)).map((image) {
+      final provider = (image.image as ResizeImage).imageProvider;
+      return (provider as MediaImageProvider).url;
+    });
+    expect(shown, ['$relay/media/$hash.thumb.jpg', original]);
   });
 
   testWidgets('clips agents to the desktop squircle', (tester) async {
