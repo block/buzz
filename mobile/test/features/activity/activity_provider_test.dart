@@ -65,7 +65,7 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
         activeMentionFetches -= 1;
       }
     }
-    return _history.where((event) => _matches(filter, event)).toList();
+    return _window(filter);
   }
 
   @override
@@ -102,9 +102,7 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
         activeMentionFetches -= 1;
       }
     }
-    return _history
-        .where((event) => filters.any((filter) => _matches(filter, event)))
-        .toList();
+    return {for (final filter in filters) ..._window(filter)}.toList();
   }
 
   @override
@@ -168,8 +166,17 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
 
   void seed(NostrEvent event) => _history.add(event);
 
+  /// The newest [NostrFilter.limit] matches, as a relay returns them.
+  List<NostrEvent> _window(NostrFilter filter) =>
+      (_history.where((event) => _matches(filter, event)).toList()
+            ..sort((a, b) => b.createdAt.compareTo(a.createdAt)))
+          .take(filter.limit)
+          .toList();
+
   bool _matches(NostrFilter filter, NostrEvent event) {
     if (!filter.kinds.contains(event.kind)) return false;
+    final until = filter.until;
+    if (until != null && event.createdAt > until) return false;
     for (final entry in filter.tags.entries) {
       final tagName = entry.key.startsWith('#')
           ? entry.key.substring(1)
@@ -358,22 +365,25 @@ void main() {
   });
 
   test('quiet agent messages never become Activity items', () async {
-    NostrEvent mention(String id, {bool quiet = false}) => NostrEvent(
-      id: id,
-      pubkey: 'agent_pk',
-      createdAt: 1_700_000_001,
-      kind: 9,
-      tags: [
-        ['p', 'me_pk'],
-        ['h', 'channel-1'],
-        if (quiet) ['audience', 'agents'],
-      ],
-      content: 'progress',
-      sig: '',
-    );
-    final session = _RecordingSessionNotifier()
-      ..seed(mention('quiet-mention', quiet: true))
-      ..seed(mention('mention'));
+    NostrEvent mention(String id, {bool quiet = false, int at = 0}) =>
+        NostrEvent(
+          id: id,
+          pubkey: 'agent_pk',
+          createdAt: 1_700_000_001 + at,
+          kind: 9,
+          tags: [
+            ['p', 'me_pk'],
+            ['h', 'channel-1'],
+            if (quiet) ['audience', 'agents'],
+          ],
+          content: 'progress',
+          sig: '',
+        );
+    // A full mention window of quiet messages hides the older real one.
+    final session = _RecordingSessionNotifier()..seed(mention('mention'));
+    for (var i = 1; i <= 50; i++) {
+      session.seed(mention('quiet-$i', quiet: true, at: i));
+    }
     final container = ProviderContainer(
       overrides: [
         relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -464,15 +465,16 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
         if (channel.isDm && channel.isMember) channel.id,
     ];
 
+    final mentionFilter = NostrFilter(
+      kinds: const [9, 40002, 1, 45001, 45003],
+      tags: {
+        '#p': [myPk],
+      },
+      limit: 50,
+    );
     final filters = <NostrFilter>[
       // Mentions of me on user-visible channel content.
-      NostrFilter(
-        kinds: const [9, 40002, 1, 45001, 45003],
-        tags: {
-          '#p': [myPk],
-        },
-        limit: 50,
-      ),
+      mentionFilter,
       // Workflow approvals addressed to me.
       NostrFilter(
         kinds: const [46010, 46011, 46012],
@@ -500,9 +502,11 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
     // otherwise compete with channel and preference startup sync.
     // Quiet agent messages (`audience: agents`) are coordination between
     // agents and never become Activity items, even when they tag the reader.
+    final fetched = await _queryWithWebSocketFallback(session, filters);
     final events = [
-      for (final event in await _queryWithWebSocketFallback(session, filters))
+      for (final event in fetched)
         if (!isQuietAgentMessage(event.tags)) event,
+      ...await _mentionsPastQuiet(session, mentionFilter, fetched, myPk),
     ];
 
     bool isFromOther(NostrEvent e) =>
@@ -582,6 +586,45 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
           if (i.category == 'agent_activity') i,
       ],
     );
+  }
+
+  /// Quiet agent messages still count against the relay's mention limit, so a
+  /// window full of them can hide an older mention. Pages past a full window
+  /// that lost mentions to the quiet filter, a few pages at most, and returns
+  /// the non-quiet mentions found there.
+  Future<List<NostrEvent>> _mentionsPastQuiet(
+    RelaySessionNotifier session,
+    NostrFilter filter,
+    List<NostrEvent> fetched,
+    String myPk,
+  ) async {
+    const maxPages = 3;
+    final pubkey = myPk.toLowerCase();
+    bool matches(NostrEvent event) =>
+        filter.kinds.contains(event.kind) &&
+        event.tags.any(
+          (tag) =>
+              tag.length > 1 && tag[0] == 'p' && tag[1].toLowerCase() == pubkey,
+        );
+    var page = fetched.where(matches).toList();
+    var visible = page.where((e) => !isQuietAgentMessage(e.tags)).length;
+    final found = <NostrEvent>[];
+    for (var i = 0; i < maxPages; i++) {
+      if (page.length < filter.limit || visible >= filter.limit) break;
+      final oldest = page.map((e) => e.createdAt).reduce(min);
+      page = (await _queryWithWebSocketFallback(session, [
+        NostrFilter(
+          kinds: filter.kinds,
+          tags: filter.tags,
+          limit: filter.limit,
+          until: oldest - 1,
+        ),
+      ])).where(matches).toList();
+      final kept = page.where((e) => !isQuietAgentMessage(e.tags));
+      found.addAll(kept);
+      visible += kept.length;
+    }
+    return found;
   }
 
   Future<List<NostrEvent>> _queryWithWebSocketFallback(
