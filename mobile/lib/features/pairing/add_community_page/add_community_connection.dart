@@ -171,7 +171,7 @@ class _AddCommunityConnection extends HookWidget {
               key: const Key('add-community-link-action'),
               style: FilledButton.styleFrom(
                 backgroundColor: Color.lerp(
-                  onboarding ? context.controlSurface : Colors.transparent,
+                  context.controlSurface,
                   context.colors.primary,
                   progress,
                 ),
