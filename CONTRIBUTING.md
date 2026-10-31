@@ -487,15 +487,18 @@ to existing clients.
 ## Ecosystem
 
 Buzz is developed across multiple repositories. This repo (`block/buzz`)
-is the open-source home for all application code — the relay, desktop app,
-mobile app, CLI, and agent harness. Internal repositories handle
+is the open-source home for the relay, mobile app, CLI, and agent harness.
+It also holds `desktop/`, the deprecated Buzz 0.X desktop app. The Buzz 1.0
+desktop and web app lives in [block/buzz-app](https://github.com/block/buzz-app),
+and all new desktop feature work goes there. Internal repositories handle
 enterprise-signed builds and infrastructure deployment.
 
 See [AGENTS.md § Ecosystem](AGENTS.md#ecosystem) for the full repo table and
 dependency diagram.
 
-**External contributors:** Fork `block/buzz`, open a PR, and CI runs
-automatically. No special access is required.
+**External contributors:** Fork `block/buzz` (or `block/buzz-app` for
+desktop work), open a PR, and CI runs automatically. No special access is
+required.
 
 **Block team members:** See the internal
 [sprout-releases CONTRIBUTING.md](https://github.com/squareup/sprout-releases/blob/main/CONTRIBUTING.md)
