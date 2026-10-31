@@ -122,6 +122,24 @@ fn revision_precondition_failure(
     }
 }
 
+/// Status for an insert that collided with a retained, non-live row of the
+/// same event ID.
+///
+/// The live-head replay already returned `Duplicate`, so the row is
+/// soft-deleted. A revision-tagged write must not be acknowledged: its event
+/// did not become the head.
+fn retired_row_status(
+    precondition: ParameterizedReplacePrecondition<'_>,
+) -> ParameterizedReplaceStatus {
+    match precondition {
+        ParameterizedReplacePrecondition::ExpectedRevision(_)
+        | ParameterizedReplacePrecondition::ExpectNoHead => {
+            ParameterizedReplaceStatus::RevisionMismatch
+        }
+        _ => ParameterizedReplaceStatus::Duplicate,
+    }
+}
+
 /// Replace a parameterized event in a caller-owned transaction.
 ///
 /// This function acquires a transaction-scoped advisory lock but never commits
@@ -382,7 +400,7 @@ async fn replace_parameterized_event_in_transaction_impl(
             sqlx::query("ROLLBACK TO SAVEPOINT parameterized_replace")
                 .execute(tx.conn())
                 .await?;
-            ParameterizedReplaceStatus::Duplicate
+            retired_row_status(precondition)
         }
         Err(error) => {
             // Restore the caller's transaction; the original error is the
@@ -605,7 +623,7 @@ impl Db {
                             channel_id,
                             false,
                         ),
-                        ParameterizedReplaceStatus::Duplicate,
+                        retired_row_status(precondition),
                     ));
                 }
 
@@ -1599,6 +1617,83 @@ mod postgres_tests {
         .expect("caller transaction remains usable after duplicate");
         assert_eq!(live_id, old.id.as_bytes().to_vec());
         tx.rollback().await.expect("roll back caller transaction");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn tagged_replay_of_a_retired_event_is_a_conflict_not_a_duplicate() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let db = setup_db().await;
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let keys = Keys::generate();
+        let d_tag = format!("retired-project-{}", Uuid::new_v4().simple());
+        let project = EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_PROJECT as u16), "p")
+            .tags(vec![Tag::parse(["d", d_tag.as_str()]).expect("d tag")])
+            .sign_with_keys(&keys)
+            .expect("sign project");
+        let profile = EventBuilder::new(Kind::Metadata, "{}")
+            .custom_created_at(Timestamp::now())
+            .sign_with_keys(&keys)
+            .expect("sign profile");
+
+        assert!(
+            db.replace_parameterized_event(community, &project, &d_tag, None)
+                .await
+                .expect("insert project")
+                .1
+        );
+        assert!(
+            db.replace_addressable_event(community, &profile, None)
+                .await
+                .expect("insert profile")
+                .1
+        );
+        sqlx::query("UPDATE events SET deleted_at=NOW() WHERE community_id=$1 AND pubkey=$2")
+            .bind(community.as_uuid())
+            .bind(keys.public_key().to_bytes())
+            .execute(&db.pool)
+            .await
+            .expect("retire both heads");
+
+        let (_, status) = db
+            .replace_parameterized_event_checked(
+                community,
+                &project,
+                &d_tag,
+                None,
+                replaceable::ParameterizedReplacePrecondition::ExpectNoHead,
+            )
+            .await
+            .expect("replay retired project");
+        assert_eq!(
+            status,
+            replaceable::ParameterizedReplaceStatus::RevisionMismatch
+        );
+
+        let (_, status) = db
+            .replace_addressable_event_checked(
+                community,
+                &profile,
+                None,
+                replaceable::ParameterizedReplacePrecondition::ExpectNoHead,
+            )
+            .await
+            .expect("replay retired profile");
+        assert_eq!(
+            status,
+            replaceable::ParameterizedReplaceStatus::RevisionMismatch
+        );
+
+        let live: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events WHERE community_id=$1 AND pubkey=$2 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .fetch_one(&db.pool)
+        .await
+        .expect("count live heads");
+        assert_eq!(live, 0);
     }
 
     #[tokio::test]
