@@ -10693,37 +10693,104 @@ void main() {
   });
 
   group('Edits', () {
-    testWidgets('edited message shows updated content and (edited) label', (
+    testWidgets('edited messages show updated content and (edited) label', (
       tester,
     ) async {
       final messages = [
         _textMsg(
-          id: 'msg1',
+          id: threadIdRoot,
           pubkey: 'alice',
           content: 'Original text',
           createdAt: 1000,
         ),
+        // A grouped follow-up draws no author header, so the marker must
+        // follow the body, not the header.
+        _textMsg(
+          id: 'msg2',
+          pubkey: 'alice',
+          content: 'Draft',
+          createdAt: 1010,
+        ),
+        _textMsg(
+          id: 'msg3',
+          pubkey: 'alice',
+          content: 'Plain',
+          createdAt: 1020,
+        ),
         _edit(
           id: 'edit1',
-          targetId: 'msg1',
+          targetId: threadIdRoot,
           content: 'Edited text',
           createdAt: 1100,
         ),
+        _edit(id: 'edit2', targetId: 'msg2', content: 'Final', createdAt: 1110),
+        _textMsg(
+          id: 'reply1',
+          pubkey: 'bob',
+          content: 'Typo',
+          createdAt: 1030,
+          extraTags: const [
+            ['e', threadIdRoot, '', 'reply'],
+          ],
+        ),
+        _edit(
+          id: 'edit3',
+          targetId: 'reply1',
+          content: 'Fixed',
+          createdAt: 1120,
+        ),
       ];
+      final clipboardTexts = <String>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+            if (call.method == 'Clipboard.setData') {
+              clipboardTexts.add((call.arguments as Map)['text'] as String);
+            }
+            return null;
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, null),
+      );
 
       await tester.pumpWidget(
         _buildTestable(
           messages: messages,
           users: {
             'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
           },
         ),
       );
       await tester.pumpAndSettle();
 
-      expect(findRichText('Edited text'), findsOneWidget);
+      expect(findRichText('Edited text (edited)'), findsOneWidget);
       expect(findRichText('Original text'), findsNothing);
-      expect(find.text('(edited)'), findsOneWidget);
+      expect(findRichText('Final (edited)'), findsOneWidget);
+      expect(findRichText('Plain'), findsOneWidget);
+      expect(findRichText('Plain (edited)'), findsNothing);
+
+      // Copy takes the edited text, never the marker.
+      await tester.longPress(findRichText('Edited text (edited)'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Copy text'));
+      await tester.pumpAndSettle();
+      expect(clipboardTexts, ['Edited text']);
+
+      // The thread marks its edited head and its edited reply.
+      await tester.tap(
+        find.byKey(const ValueKey('thread-summary-$threadIdRoot')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(ThreadDetailPage), findsOneWidget);
+      final thread = find.byType(ThreadDetailPage);
+      for (final text in ['Edited text (edited)', 'Fixed (edited)']) {
+        expect(
+          find.descendant(of: thread, matching: findRichText(text)),
+          findsOneWidget,
+          reason: text,
+        );
+      }
     });
 
     testWidgets('latest edit wins when multiple edits exist', (tester) async {
