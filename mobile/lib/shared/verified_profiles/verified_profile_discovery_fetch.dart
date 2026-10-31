@@ -21,27 +21,41 @@ final verifiedProfileHttpClientProvider = Provider<http.Client>((ref) {
   return client;
 });
 
-/// Reads the NIP-11 document at [uri] with a size cap and timeout.
+/// Reads the NIP-11 document at [uri] with a size cap. One wall-clock
+/// deadline covers headers and the whole body, so a relay trickling bytes
+/// cannot keep discovery in flight forever.
 Future<VerifiedProfileDiscovery> fetchVerifiedProfileDiscovery(
   http.Client client,
-  Uri uri,
-) async {
-  final response = await client
-      .send(
-        http.Request('GET', uri)..headers['Accept'] = 'application/nostr+json',
-      )
-      .timeout(_discoveryTimeout);
-  if (response.statusCode != 200) {
-    throw http.ClientException('NIP-11 status ${response.statusCode}', uri);
-  }
-  final bytes = <int>[];
-  await response.stream.timeout(_discoveryTimeout).forEach((chunk) {
-    if (bytes.length + chunk.length > _maxInfoBytes) {
-      throw const FormatException('NIP-11 exceeds size limit');
+  Uri uri, {
+  Duration deadline = _discoveryTimeout,
+}) async {
+  final abort = Completer<void>();
+  final request = http.AbortableRequest('GET', uri, abortTrigger: abort.future)
+    ..headers['Accept'] = 'application/nostr+json';
+  StreamIterator<List<int>>? body;
+  Future<List<int>> read() async {
+    final response = await client.send(request);
+    final iterator = body = StreamIterator(response.stream);
+    if (response.statusCode != 200) {
+      throw http.ClientException('NIP-11 status ${response.statusCode}', uri);
     }
-    bytes.addAll(chunk);
-  });
-  return parseVerifiedProfileDiscovery(jsonDecode(utf8.decode(bytes)));
+    final bytes = <int>[];
+    while (await iterator.moveNext()) {
+      if (bytes.length + iterator.current.length > _maxInfoBytes) {
+        throw const FormatException('NIP-11 exceeds size limit');
+      }
+      bytes.addAll(iterator.current);
+    }
+    return bytes;
+  }
+
+  try {
+    final bytes = await read().timeout(deadline);
+    return parseVerifiedProfileDiscovery(jsonDecode(utf8.decode(bytes)));
+  } finally {
+    if (!abort.isCompleted) abort.complete();
+    unawaited(body?.cancel());
+  }
 }
 
 final verifiedProfileDiscoveryFetchProvider =
