@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../theme/buzz_icons.dart';
 import '../theme/theme.dart';
 import 'anchored_popover_menu.dart';
+import 'app_list.dart';
 
 /// One choice in a [BuzzSettingMenu].
 class BuzzSettingMenuOption<T> {
@@ -28,6 +29,12 @@ class BuzzSettingMenu<T> extends StatelessWidget {
   final IconData? valueIcon;
   final String valueLabel;
 
+  /// Use the same borderless row as Settings inside a shared card.
+  final bool grouped;
+
+  /// Affordance for opening the menu.
+  final IconData trailingIcon;
+
   const BuzzSettingMenu({
     super.key,
     required this.controlKey,
@@ -38,10 +45,18 @@ class BuzzSettingMenu<T> extends StatelessWidget {
     required this.value,
     this.valueIcon,
     required this.valueLabel,
+    this.grouped = false,
+    this.trailingIcon = BuzzIcons.chevronDown,
   });
 
   @override
   Widget build(BuildContext context) {
+    void toggleMenu(MenuController menu) {
+      if (menu.isOpen) return menu.close();
+      FocusManager.instance.primaryFocus?.unfocus();
+      menu.open();
+    }
+
     final shape = RoundedRectangleBorder(
       side: BorderSide(color: context.colors.outlineVariant),
       borderRadius: BorderRadius.circular(Radii.container),
@@ -102,70 +117,80 @@ class BuzzSettingMenu<T> extends StatelessWidget {
           child: Tooltip(
             message: '$label: $valueLabel',
             // Draw on an ink surface so the tap ripple shows inside the border.
-            child: Material(
-              color: context.colors.surface,
-              shape: shape,
-              clipBehavior: Clip.antiAlias,
-              child: InkWell(
-                onTap: enabled
-                    ? () {
-                        if (menu.isOpen) return menu.close();
-                        // Drop the keyboard so it can't cover the menu.
-                        FocusManager.instance.primaryFocus?.unfocus();
-                        menu.open();
-                      }
-                    : null,
-                child: Padding(
-                  key: controlKey,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: Grid.twelve,
-                    vertical: Grid.xs,
-                  ),
-                  child: Opacity(
+            child: grouped
+                ? Opacity(
                     opacity: enabled ? 1 : 0.5,
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            label,
-                            style: context.textTheme.labelLarge?.copyWith(
-                              color: context.colors.onSurface,
-                              fontWeight: FontWeight.w600,
-                            ),
+                    child: AppListRow(
+                      key: controlKey,
+                      title: label,
+                      value: valueLabel,
+                      trailing: Icon(
+                        trailingIcon,
+                        size: 16,
+                        color: context.colors.onSurfaceVariant,
+                      ),
+                      onTap: enabled ? () => toggleMenu(menu) : null,
+                    ),
+                  )
+                : Material(
+                    color: context.colors.surface,
+                    shape: shape,
+                    clipBehavior: Clip.antiAlias,
+                    child: InkWell(
+                      onTap: enabled ? () => toggleMenu(menu) : null,
+                      child: Padding(
+                        key: controlKey,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: Grid.twelve,
+                          vertical: Grid.xs,
+                        ),
+                        child: Opacity(
+                          opacity: enabled ? 1 : 0.5,
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  label,
+                                  style: context.textTheme.labelLarge?.copyWith(
+                                    color: context.colors.onSurface,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                              if (valueIcon case final icon?) ...[
+                                Icon(
+                                  icon,
+                                  size: 16,
+                                  color: context.colors.onSurfaceVariant,
+                                ),
+                                const SizedBox(width: Grid.half),
+                              ],
+                              // Long values truncate instead of squeezing the label.
+                              ConstrainedBox(
+                                constraints: const BoxConstraints(
+                                  maxWidth: 180,
+                                ),
+                                child: Text(
+                                  valueLabel,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: context.textTheme.bodyMedium?.copyWith(
+                                    color: context.colors.onSurface,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: Grid.half),
+                              Icon(
+                                trailingIcon,
+                                size: 16,
+                                color: context.colors.onSurfaceVariant,
+                              ),
+                            ],
                           ),
                         ),
-                        if (valueIcon case final icon?) ...[
-                          Icon(
-                            icon,
-                            size: 16,
-                            color: context.colors.onSurfaceVariant,
-                          ),
-                          const SizedBox(width: Grid.half),
-                        ],
-                        // Long values truncate instead of squeezing the label.
-                        ConstrainedBox(
-                          constraints: const BoxConstraints(maxWidth: 180),
-                          child: Text(
-                            valueLabel,
-                            overflow: TextOverflow.ellipsis,
-                            style: context.textTheme.bodyMedium?.copyWith(
-                              color: context.colors.onSurface,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: Grid.half),
-                        Icon(
-                          BuzzIcons.chevronDown,
-                          size: 16,
-                          color: context.colors.onSurfaceVariant,
-                        ),
-                      ],
+                      ),
                     ),
                   ),
-                ),
-              ),
-            ),
           ),
         ),
       ),

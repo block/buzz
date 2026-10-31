@@ -36,12 +36,23 @@ void main() {
       final createContext = tester.element(find.byType(CreateAgentPage));
       expect(Navigator.of(list), same(Navigator.of(createContext)));
 
-      await tester.ensureVisible(find.text('Model'));
-      await tester.tap(find.text('Model'));
+      expect(find.text('Speed'), findsOneWidget);
+      expect(find.byIcon(Icons.unfold_more), findsNWidgets(2));
+      expect(
+        tester.getTopLeft(find.text('Name')).dy,
+        lessThan(tester.getTopLeft(find.text('Mode')).dy),
+      );
+      expect(
+        tester.getTopLeft(find.text('Mode')).dy,
+        lessThan(tester.getTopLeft(find.text('Instructions')).dy),
+      );
+
+      await tester.ensureVisible(find.text('Mode'));
+      await tester.tap(find.text('Mode'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Test model').last);
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Reasoning effort'));
+      await tester.tap(find.text('Speed'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('high').last);
       await tester.pumpAndSettle();
@@ -60,7 +71,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Test model').last);
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Reasoning effort'));
+      await tester.tap(find.text('Speed'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('high').last);
       await tester.pumpAndSettle();
