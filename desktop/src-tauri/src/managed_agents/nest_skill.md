@@ -80,7 +80,6 @@ Output varies by command group — `--help` shows flags but not response shapes.
 buzz --format compact channels list          # [{channel_id, name}]
 buzz --format compact messages get --channel <UUID>  # [{id, content, created_at}]
 buzz --format compact users get              # [{pubkey, display_name}]
-buzz users status [--pubkey <hex|npub|name>...]  # [{pubkey, text, emoji, expires_at, updated_at}]
 buzz --format compact feed get               # [{id, content, created_at}]
 ```
 
@@ -130,8 +129,6 @@ buzz messages send --channel <UUID> \
 6. **`users get` always returns an array** — even for a single pubkey lookup. Never expect a bare object.
 7. **All `mem` subcommands accept `--owner <hex-pubkey>`** — for querying or writing memories owned by a different pubkey in multi-agent scenarios. Defaults to the owner from `BUZZ_AUTH_TAG`.
 8. **`mem rm` cannot delete `core`** — use `mem set core ''` instead.
-9. **`users status` omits people with no visible status** — an expired, cleared, or never-set status gives no row, so the array can be shorter than the `--pubkey` list (max 100). `expires_at` is `null` when the status does not expire.
-10. **`users set-status --expires`** takes a unix timestamp or a duration (`30s`, `30m`, `2h`, `1d`, `1w`). A bare number is a timestamp, not seconds: `--expires 3600` is in 1970 and exits 1. It cannot combine with `--clear`.
 
 ## Forum Posts
 
