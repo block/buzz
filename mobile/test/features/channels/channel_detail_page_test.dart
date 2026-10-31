@@ -11480,7 +11480,16 @@ void main() {
         tester
             .getTopLeft(find.byKey(const ValueKey('typing-avatar-cluster')))
             .dy,
-        greaterThan(tester.getBottomLeft(findRichText('hi')).dy),
+        greaterThan(
+          tester
+              .getBottomLeft(
+                find.descendant(
+                  of: find.byKey(const ValueKey('thread-message-group-reply')),
+                  matching: findRichText('hi'),
+                ),
+              )
+              .dy,
+        ),
       );
       typing.setEntries(const []);
       await tester.pumpAndSettle();
