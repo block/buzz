@@ -1,9 +1,10 @@
 # Slash commands
 
 Composer slash commands give Slack users the shortcuts they already know,
-mapped to the Buzz action that already exists. This document is the shared
-contract for desktop and mobile: recognition, autocomplete, execution, and the
-command set. Platforms differ only where a command is marked unavailable.
+mapped to the Buzz action that already exists. This document is the contract
+for the mobile app: recognition, autocomplete, execution, and the command set.
+Any other Buzz client that adds slash commands follows it too, so a command
+behaves the same everywhere.
 
 A command never adds a capability. It is a typed entry point to an action the
 app already performs from its normal UI, through the same code path, the same
@@ -18,18 +19,17 @@ to the agent's ACP connector (`extract_slash_command` in
 
 - A draft that starts with a mention is never a Buzz command. `@Eva /status`
   sends a message to Eva. The thread address lock's `@Agent ` prefix counts.
-- A draft whose first token is not a Buzz command on this platform sends as a
-  normal message, unchanged. In a DM with an agent, `/review` still reaches the
+- A draft whose first token is not a Buzz command sends as a normal message,
+  unchanged. In a DM with an agent, `/review` still reaches the
   agent. There is no "not a valid command" error.
 - To send an agent a command whose name is also a Buzz command, mention the
   agent first.
 
 ## Where commands run
 
-| Platform | Composers with commands | Composers without |
-|---|---|---|
-| Desktop | Channel and DM main composer, thread reply composer | Edit, forum, new message, inbox reply, project agent chat |
-| Mobile | Channel and DM compose bar, thread compose bar | Forum post and forum thread compose bars, edit sheet |
+Commands run in the channel and DM compose bar and in the thread compose bar.
+They do not run in the forum post and forum thread compose bars or in the edit
+sheet.
 
 In a thread, a channel-scoped command acts on the thread's channel. `/shrug`
 in a thread posts a thread reply.
@@ -37,8 +37,8 @@ in a thread posts a thread reply.
 ## Recognition
 
 Trim leading whitespace from the draft. The draft is a command when its first
-token is `/` followed by a registered name or alias that is available on this
-platform and in this composer, and the token ends at whitespace or the end of
+token is `/` followed by a registered name or alias that is available in this
+composer, and the token ends at whitespace or the end of
 the draft. Matching is case-insensitive. `//away`, `/away-now`, and
 `/usr/bin/foo` are not commands.
 
@@ -53,7 +53,7 @@ nothing is published and the draft and attachments stay.
 
 - Opens while the caret is in the first token and that token is `/` plus zero
   or more name characters, with only whitespace before it.
-- Lists commands available on this platform, in this composer and context, and
+- Lists commands available in this composer and context, and
   not known to be denied to this user (see the permission column below).
   Hidden aliases are never listed, but an exact alias still runs its command.
 - Order: commands whose name starts with the typed text, alphabetical by name.
@@ -61,8 +61,7 @@ nothing is published and the draft and attachments stay.
 - Each row shows `/name`, the argument hint, and a one-line description.
 - Choosing a row inserts `/name ` (with a trailing space). It never runs the
   command; send runs it.
-- Keyboard and screen-reader behavior matches `@` autocomplete on the same
-  platform: arrow keys move, Enter and Tab choose, Escape dismisses, one
+- Keyboard and screen-reader behavior matches `@` autocomplete: arrow keys move, Enter and Tab choose, Escape dismisses, one
   accessible label per row.
 - Arguments reuse the existing `@` and `#` autocompletes and their exact-key
   resolution (see [mention-editor.md](mention-editor.md)). An ambiguous typed
@@ -83,52 +82,50 @@ nothing is published and the draft and attachments stay.
   path already shows (for example, archive). Commands add no new confirmations.
   Cancelling that confirmation is neither success nor failure: the draft stays
   and nothing is shown.
-- Success feedback uses the platform's existing toast or snackbar (for example
-  "Status set"). Commands that navigate (`/dm`, `/join`, `/who`, `/gif`,
-  `/huddle`) show no toast.
+- Success feedback uses the existing snackbar (for example "Status set").
+  Commands that navigate (`/dm`, `/join`, `/who`, `/huddle`) show no
+  snackbar.
 
 ## Command set
 
 Context: **any** = channel, DM, or thread; **channel** = a non-DM channel or a
 thread in one.
 
-| Command | Hidden aliases | Arguments | Behavior | Context | Hidden when | Desktop | Mobile |
-|---|---|---|---|---|---|---|---|
-| `/away` | | — | Set the manual presence override to away. | any | — | ✅ | ✅ |
-| `/active` | | — | Clear the override (desktop `auto`, mobile online). | any | — | ✅ | ✅ |
-| `/status` | | `[emoji] <text>` \| `clear` | Set custom status with no expiry, or clear it. No arguments opens the existing set-status dialog or sheet. | any | — | ✅ | ✅ |
-| `/invite` | | `@user…` | Add the users to the channel. | channel | user cannot add members | ✅ | ✅ |
-| `/remove` | `/kick` | `@user…` | Remove the users from the channel. | channel | user is not owner or admin | ✅ | ✅ |
-| `/join` | | `#channel` | Join the open channel and open it. Already a member: open it. | any | — | ✅ | ✅ |
-| `/leave` | `/part` | — | Leave the channel. | channel | — | ✅ | ✅ |
-| `/who` | `/members` | — | Open the member list. | any | — | ✅ | ✅ |
-| `/topic` | | `<text>` | Set the channel topic. | channel | user may not post | ✅ | — |
-| `/rename` | | `<name>` | Rename the channel. | channel | user cannot manage the channel | ✅ | ✅ |
-| `/archive` | | — | Archive the channel. | channel | user cannot manage the channel | ✅ | ✅ |
-| `/mute` | | — | Toggle mute for the channel. | any | — | ✅ | ✅ |
-| `/dm` | `/msg` | `@user… [message]` | Open the DM (up to the DM participant limit) and open it. With a message, send it there first. | any | — | ✅ | ✅ |
-| `/huddle` | | — | Start a huddle in the channel, or join the one already running. | any | — | ✅ | ✅ |
-| `/gif` | `/giphy` | `[query]` | Open the GIF picker, pre-filled with the query. | any | relay has no GIF endpoint | ✅ | — |
-| `/shrug` | | `[text]` | Send `<text> ¯\\\_(ツ)\_/¯` (see below). | any | — | ✅ | ✅ |
-| `/remind` | | `me <what> <when>` | Create a standalone reminder. See below. | any | — | ✅ | ✅ |
+| Command | Hidden aliases | Arguments | Behavior | Context | Hidden when |
+|---|---|---|---|---|---|
+| `/away` | | — | Set the manual presence override to away. | any | — |
+| `/active` | | — | Clear the override, so presence is online again. | any | — |
+| `/status` | | `[emoji] <text>` \| `clear` | Set custom status with no expiry, or clear it. No arguments opens the existing set-status sheet. | any | — |
+| `/invite` | | `@user…` | Add the users to the channel. | channel | user cannot add members |
+| `/remove` | `/kick` | `@user…` | Remove the users from the channel. | channel | user is not owner or admin |
+| `/join` | | `#channel` | Join the open channel and open it. Already a member: open it. | any | — |
+| `/leave` | `/part` | — | Leave the channel. | channel | — |
+| `/who` | `/members` | — | Open the member list. | any | — |
+| `/rename` | | `<name>` | Rename the channel. | channel | user cannot manage the channel |
+| `/archive` | | — | Archive the channel. | channel | user cannot manage the channel |
+| `/mute` | | — | Toggle mute for the channel. | any | — |
+| `/dm` | `/msg` | `@user… [message]` | Open the DM (up to the DM participant limit) and open it. With a message, send it there first. | any | — |
+| `/huddle` | | — | Start a huddle in the channel, or join the one already running. | any | — |
+| `/shrug` | | `[text]` | Send `<text> ¯\\\_(ツ)\_/¯` (see below). | any | — |
+| `/remind` | | `me <what> <when>` | Create a standalone reminder. See below. | any | — |
 
 `/status` emoji: the first argument is the emoji when it is a `:shortcode:` that
-resolves on this platform or a single emoji grapheme; otherwise the whole
+resolves in the app or a single emoji grapheme; otherwise the whole
 argument string is the text and the status has no emoji.
 
 `/shrug` content: the wire form is CommonMark-escaped so every conforming
-renderer shows ¯\\\_(ツ)\_/¯ exactly. Both platforms send the same bytes:
+renderer shows ¯\\\_(ツ)\_/¯ exactly. Every client sends the same bytes:
 `<text> ` (omitted when there is no text) followed by `¯\\\_(ツ)\_/¯` : `\\`
 (an escaped backslash) and `\_` (an escaped underscore) before `(ツ)`, and
 `\_` after it.
 
-`/topic` ships on desktop only if desktop displays the channel topic somewhere.
-If it does not, leave `/topic` out; a command must not change state the user
-cannot see.
+Not mapped, because the mobile app has no way to show or set a channel topic
+or to pick a GIF: `/topic`, `/gif` (Slack `/giphy`). A command must not change
+state the user cannot see, and commands add no new UI.
 
 Not mapped, because Buzz has no equivalent: `/dnd`, `/collapse`, `/expand`,
 `/me`, `/feed`, `/apps`, `/shortcuts`, `/prefs`. `/search` is not mapped
-because neither app can open search with a query.
+because the app cannot open search with a query.
 
 ## `/remind`
 
@@ -169,7 +166,7 @@ ambiguous.
 ### Vectors
 
 Now is Wednesday 2026-10-28 10:00 local, in `America/Chicago` (DST ends
-2026-11-01). Both platforms must pass all rows.
+2026-11-01). Every implementation must pass all rows.
 
 | `<when>` | Due |
 |---|---|
