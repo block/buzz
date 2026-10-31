@@ -1187,3 +1187,89 @@ describe("raw-event-level merge: stateful aggregates across live/archive boundar
     assert.equal(archived[0].seq, 31);
   });
 });
+
+// ── Archive memory bound ──────────────────────────────────────────────────────
+//
+// Each channel opened in a session panel hydrates up to 2000 archived frames,
+// and nothing dropped them when the user moved to another channel, so the
+// archive grew with every channel ever opened. The archive keeps only the most
+// recently used channels; a channel a mounted panel keeps reading stays.
+
+describe("archive window memory bound", () => {
+  const CHANNELS = 20;
+  const PAGE = 200;
+  const PAYLOAD = "x".repeat(1024);
+
+  // One raw event per observer frame; content carries the decoded frame so the
+  // injected decrypt fn is a pure JSON.parse.
+  function channelPage(channelId) {
+    return Array.from({ length: PAGE }, (_, i) =>
+      makeRawEvent({
+        content: JSON.stringify(
+          makeObserverEvent({
+            seq: i + 1,
+            timestamp: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(),
+            channelId,
+            payload: { output: PAYLOAD },
+          }),
+        ),
+      }),
+    );
+  }
+  const decryptContent = (raw) => Promise.resolve(JSON.parse(raw.content));
+
+  beforeEach(() => {
+    resetAgentObserverStore();
+    _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY]);
+  });
+
+  it("test_archive_drops_least_recently_used_channels", async () => {
+    for (let c = 0; c < CHANNELS; c++) {
+      await ingestArchivedObserverEvents(
+        channelPage(`chan-${c}`),
+        decryptContent,
+      );
+    }
+    const retained = Array.from(
+      { length: CHANNELS },
+      (_, c) => _testGetArchivedChannelEvents(AGENT_PUBKEY, `chan-${c}`).length,
+    );
+    assert.equal(retained[0], 0, "oldest channel's archive must be dropped");
+    assert.equal(retained[CHANNELS - 1], PAGE, "newest channel kept whole");
+    assert.ok(
+      retained.filter((n) => n > 0).length < CHANNELS / 2,
+      `archive must be bounded, retained per channel: ${retained.join(",")}`,
+    );
+  });
+
+  it("test_archive_keeps_channel_a_mounted_panel_reads", async () => {
+    await ingestArchivedObserverEvents(channelPage("chan-0"), decryptContent);
+    for (let c = 1; c < CHANNELS; c++) {
+      await ingestArchivedObserverEvents(
+        channelPage(`chan-${c}`),
+        decryptContent,
+      );
+      // A mounted panel re-reads its channel on every store notification.
+      getArchivedChannelEvents(AGENT_PUBKEY, "chan-0");
+    }
+    assert.equal(
+      _testGetArchivedChannelEvents(AGENT_PUBKEY, "chan-0").length,
+      PAGE,
+      "a channel still being read must not be evicted",
+    );
+  });
+
+  it("test_archive_eviction_never_touches_live_events", async () => {
+    injectObserverEventsForE2E(AGENT_PUBKEY, [
+      makeObserverEvent({ seq: 1, channelId: null }),
+      makeObserverEvent({ seq: 2, channelId: null }),
+    ]);
+    for (let c = 0; c < CHANNELS; c++) {
+      await ingestArchivedObserverEvents(
+        channelPage(`chan-${c}`),
+        decryptContent,
+      );
+    }
+    assert.equal(getAgentObserverSnapshot(AGENT_PUBKEY, true).events.length, 2);
+  });
+});
