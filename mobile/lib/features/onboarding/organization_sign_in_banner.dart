@@ -46,9 +46,13 @@ class OrganizationSignInBanner extends HookConsumerWidget {
           ),
         ];
       case OrganizationSessionStatus.signedOut:
-        message = signIn.failure == null
-            ? 'Sign in with your organization to stay connected to this community.'
-            : 'Organization sign-in did not finish. Try again.';
+        message = switch (signIn.failure) {
+          null =>
+            'Sign in with your organization to stay connected to this community.',
+          AccountFailure.storage =>
+            'Your saved organization sign-in could not be read. Sign in again to replace it.',
+          _ => 'Organization sign-in did not finish. Try again.',
+        };
         actions = [
           TextButton(
             onPressed: () => unawaited(signIn.signIn()),

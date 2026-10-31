@@ -50,6 +50,10 @@ class OrganizationSignIn extends ChangeNotifier {
   Object? failure;
 
   final _subscriptions = <StreamSubscription<Object>>[];
+
+  /// Advanced by every start or cancel, so an exchange from an abandoned
+  /// attempt can never change the state of a newer one.
+  int _attempt = 0;
   bool _initialized = false;
   bool _disposed = false;
 
@@ -68,15 +72,29 @@ class OrganizationSignIn extends ChangeNotifier {
             ? OrganizationSessionStatus.signedOut
             : OrganizationSessionStatus.signedIn,
       );
-    } on AccountFailure {
+    } on AccountFailure catch (error) {
       // Unknown, for example offline. Relay connection retries the restore.
+      // An unreadable record is kept so the next sign-in can replace it.
+      if (error == AccountFailure.storage) failure = error;
       _set(OrganizationSessionStatus.signedOut);
     }
   }
 
   Future<void> signIn() async {
     if (_disposed || status == OrganizationSessionStatus.signingIn) return;
+    if (failure == AccountFailure.storage && account.account == null) {
+      // An unreadable saved session blocks every exchange, and its subject is
+      // unknown. Signing in again explicitly replaces only that session.
+      try {
+        await account.clearLocalSession();
+      } on AccountFailure catch (error) {
+        failure = error;
+        _set(_currentStatus());
+        return;
+      }
+    }
     failure = null;
+    ++_attempt;
     _set(OrganizationSessionStatus.signingIn);
     try {
       await browser.start(const {'purpose': 'organization'});
@@ -101,25 +119,37 @@ class OrganizationSignIn extends ChangeNotifier {
   }
 
   Future<void> cancel() async {
-    await browser.cancel();
-    _set(_currentStatus());
+    ++_attempt;
+    try {
+      await browser.cancel();
+    } on BrowserAuthFailure catch (error) {
+      failure = error;
+    } finally {
+      _set(_currentStatus());
+    }
   }
 
   Future<void> _exchange(BrowserAuthCode code) async {
+    final attempt = _attempt;
     try {
       await account.exchange(code: code.code, verifier: code.verifier);
-      await browser.clearIntent();
-      if (_disposed) return;
-      failure = null;
-      _set(OrganizationSessionStatus.signedIn);
-      await reconnect();
     } on AccountFailure catch (error) {
+      if (attempt != _attempt) return;
       failure = error;
       _set(_currentStatus());
-    } on BrowserAuthFailure catch (error) {
-      failure = error;
-      _set(_currentStatus());
+      return;
     }
+    if (_disposed || attempt != _attempt) return;
+    failure = null;
+    try {
+      await browser.clearIntent();
+    } on BrowserAuthFailure catch (error) {
+      // The session is saved; a leftover intent must not keep sign-in busy.
+      failure = error;
+    }
+    if (_disposed || attempt != _attempt) return;
+    _set(OrganizationSessionStatus.signedIn);
+    await reconnect();
   }
 
   void _onBrowserFailure(BrowserAuthFailure error) {
