@@ -133,6 +133,21 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('image-source-camera')));
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('image-avatar-camera')), findsOneWidget);
+    // The camera cutout keeps the agent shape while shooting and reviewing.
+    final cameraClip = tester.widget(
+      find
+          .descendant(
+            of: find.byKey(const ValueKey('image-camera-preview-size')),
+            matching: find.byWidgetPredicate(
+              (widget) => widget is ClipPath || widget is ClipOval,
+            ),
+          )
+          .first,
+    );
+    expect(
+      ((cameraClip as ClipPath).clipper! as ShapeBorderClipper).shape,
+      avatarShape(isAgent: true),
+    );
     await tester.ensureVisible(
       find.byKey(const ValueKey('image-camera-left-action')),
     );

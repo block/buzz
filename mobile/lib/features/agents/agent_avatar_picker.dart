@@ -360,6 +360,7 @@ class AgentAvatarPicker extends HookConsumerWidget {
                       height: imageHeight - cameraTop,
                       disposalBarrier: cameraDisposal,
                       initialPreview: preview,
+                      isAgent: true,
                       onAccepted: acceptCameraImage,
                       onClosed: () {
                         cameraActive.value = false;
