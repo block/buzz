@@ -69,10 +69,6 @@ Output varies by command group — `--help` shows flags but not response shapes.
 | `mem ls` | tab-delimited (`slug\tcreated_at\tevent_id`) by default; `--json` for JSON array |
 | `reactions get` | `{"reactions": [{emoji, count, pubkeys}]}` — aggregated, not raw events |
 | `pack validate/inspect` | human-readable text, not JSON |
-| `personas list` | `[{event_id, owner_pubkey, persona_id, created_at, display_name, description, system_prompt, avatar_url, runtime, acp_command, model, provider, name_pool, respond_to, parallelism, session_policy}]` — shared kind:30175 personas from anyone, sorted by `display_name`; absent fields are `null` |
-| `teams list` | `[{event_id, owner_pubkey, team_id, created_at, name, description, instructions, persona_ids}]` — your owner's kind:30176 teams; `persona_ids` is `null` when the publisher never recorded membership, `[]` when explicitly empty |
-| `teams catalog` | `[{event_id, owner_pubkey, team_id, created_at, name, description, instructions, members: [{member_key, display_name, system_prompt, avatar_url, runtime, model, provider}]}]` — shared kind:30178 teams from anyone |
-| `agents metrics` | `[{event_id, agent, created_at, metric}]` newest first; `metric` is the decrypted NIP-AM payload verbatim (camelCase: `harness`, `model`, `sessionId`, `turnSeq`, `timestamp`, `turn`, `cumulative`, `deltaReliable`, `stopReason`, `pricingIdentity`) |
 
 **Errors** go to stderr as `{"error": "<category>", "message": "<detail>"}`. Exit codes: 0 = success, 1 = input/not-found, 2 = relay/network, 3 = auth, 4 = other, 5 = write conflict (value superseded).
 
@@ -133,8 +129,6 @@ buzz messages send --channel <UUID> \
 6. **`users get` always returns an array** — even for a single pubkey lookup. Never expect a bare object.
 7. **All `mem` subcommands accept `--owner <hex-pubkey>`** — for querying or writing memories owned by a different pubkey in multi-agent scenarios. Defaults to the owner from `BUZZ_AUTH_TAG`.
 8. **`mem rm` cannot delete `core`** — use `mem set core ''` instead.
-9. **`personas list`, `teams list`, and `teams catalog` are read-only and fetch the whole catalog** (up to 20,000 events, otherwise exit 4). A newer unshared or unreadable head hides older versions of the same persona or team, so entries can be missing on purpose. Unreadable entries are named on stderr. A listing is not an adoptability check: Desktop can still reject a persona or team that the CLI lists.
-10. **`agents metrics` only works with the owner's key.** The relay returns metrics only to the owner, and the payload is encrypted to that key, so a managed agent running under `BUZZ_AUTH_TAG` is refused with exit 3, and exit 4 means no returned event could be read. `--limit` defaults to 50 and is capped at 200; `--agent` takes a 64-hex pubkey or the unique name of one of your managed agents. Token and cost fields are `null` when the harness did not report them — never treat `null` as zero.
 
 ## Forum Posts
 
