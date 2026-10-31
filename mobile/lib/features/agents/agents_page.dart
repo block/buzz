@@ -190,7 +190,14 @@ class AgentsPage extends HookConsumerWidget {
           agent['agent_pubkey'] as String: agent['agent_name'] as String,
       },
     );
-    keys.sort((a, b) => names.labelFor(a).compareTo(names.labelFor(b)));
+    // Buzz App orders names without case and uses the identity as a stable tie.
+    keys.sort((a, b) {
+      final byName = names
+          .labelFor(a)
+          .toLowerCase()
+          .compareTo(names.labelFor(b).toLowerCase());
+      return byName != 0 ? byName : a.compareTo(b);
+    });
     final profiles = ref.watch(userCacheProvider);
     final creating = useState(false);
     final failed =
