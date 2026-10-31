@@ -2322,6 +2322,7 @@ async fn serve(
     let tcp_listener = tokio::net::TcpListener::bind(&config.bind_addr)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to bind {}: {e}", config.bind_addr))?;
+    let tcp_listener = with_tcp_nodelay(tcp_listener);
     info!(addr = %config.bind_addr, "buzz-relay TCP listening");
     step.finish();
 
@@ -3224,6 +3225,24 @@ async fn emit_db_usage_metrics(
     }
 
     Ok(())
+}
+
+/// Disable Nagle's algorithm on every accepted TCP connection. Relay replies are small
+/// WebSocket frames written back to back (`EVENT`s, then `EOSE`); with Nagle on, a frame that
+/// follows an unacknowledged one waits for the peer's delayed ACK (40 ms on Linux). axum 0.8
+/// dropped `Serve::tcp_nodelay`; `ListenerExt::tap_io` is its documented replacement.
+fn with_tcp_nodelay(
+    listener: tokio::net::TcpListener,
+) -> axum::serve::TapIo<
+    tokio::net::TcpListener,
+    impl FnMut(&mut tokio::net::TcpStream) + Send + 'static,
+> {
+    use axum::serve::ListenerExt as _;
+    listener.tap_io(|stream| {
+        if let Err(error) = stream.set_nodelay(true) {
+            warn!(%error, "Failed to enable TCP_NODELAY on accepted connection");
+        }
+    })
 }
 
 #[cfg(test)]
@@ -4673,6 +4692,18 @@ mod tests {
 
         cancel.cancel();
         task.await.expect("refresh loop task");
+    }
+
+    #[tokio::test]
+    async fn accepted_tcp_connections_have_nodelay() {
+        use axum::serve::Listener as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut listener = super::with_tcp_nodelay(listener);
+        let client = tokio::net::TcpStream::connect(addr);
+        let ((stream, _), client) = tokio::join!(listener.accept(), client);
+        client.unwrap();
+        assert!(stream.nodelay().unwrap());
     }
 }
 
