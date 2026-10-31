@@ -26,10 +26,13 @@ class AvatarClip extends StatelessWidget {
   final Widget child;
 
   @override
-  Widget build(BuildContext context) => ClipPath(
-    clipper: ShapeBorderClipper(shape: avatarShape(isAgent: isAgent)),
-    child: child,
-  );
+  Widget build(BuildContext context) => isAgent
+      ? ClipPath(
+          clipper: ShapeBorderClipper(shape: avatarShape(isAgent: true)),
+          child: child,
+        )
+      // People keep the dedicated oval clip, the fast path in dense lists.
+      : ClipOval(child: child);
 }
 
 Path _agentSquirclePath(Rect rect) {
