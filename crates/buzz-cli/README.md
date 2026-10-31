@@ -79,6 +79,10 @@ buzz emoji resolve wave party_parrot    # exact lookup; {"found": [...], "missin
 # export). It builds one very large event that the relay rejects, and stdin
 # input is cut at 10 MB.
 
+# Bulk-migrate a Slack catalog (one kind:30180 event per emoji): see
+# "Migrating a Slack emoji catalog" below.
+buzz emoji migrate plan --slack-json emoji.json --dry-run
+
 # Users & Presence
 buzz users get                          # your own profile
 buzz users get --pubkey <hex>           # single user
@@ -244,3 +248,119 @@ The signer must be a current channel member and a repository manager, directly
 or through an unrestricted, valid NIP-OA owner attestation; permission to push is
 not permission to change the default. See the
 [protocol and authorization contract](../../docs/git-on-object-storage.md#default-branch-management).
+
+## Migrating a Slack emoji catalog
+
+`buzz emoji migrate {plan,run,verify,rollback}` loads a large Slack catalog
+(tens of thousands of emoji) as one kind:30180 event per emoji. Use it instead
+of `emoji import`, which builds one event and cannot carry a catalog this size.
+Every command takes `--work-dir` (default `./emoji-migration`), which holds:
+
+| File | Written by | Meaning |
+|------|------------|---------|
+| `plan.json` | `plan` | the names and image sources `run` will migrate |
+| `rejects.jsonl` | `plan` | one line per skipped name with a `reason` |
+| `dry-run-rejects.jsonl` | `plan --dry-run` | images that failed to fetch or sanitize |
+| `journal.jsonl` | `run`, `verify`, `rollback` | append-only record of every state change; the source of truth |
+| `snapshot.json` | `run` | state counts for the operator (replay never reads it) |
+| `run-rejects.jsonl` | `run` | items the run gave up on, with a reason |
+| `blobs/` | `run` | sanitized bytes waiting for upload; safe to delete when no run is active |
+
+**Input.** `--slack-json emoji.json` takes the Slack `emoji.list` shape,
+`{"emoji": {"name": "<url>", "alias": "alias:name"}}`. `--images-dir dir`
+takes a directory of images (names come from file names), optionally with
+`--name-map map.json` (`{"name": "file.png", "other": "alias:name"}`; file names
+only, no paths). Names follow the relay's shortcode rules (lowercase, `a-z0-9_-`,
+64 bytes). A name that breaks them, such as `+1`, is rejected with `invalid_name`;
+the tool never renames. An alias becomes a second entry that shares the target's
+image. Alias chains longer than 5 hops, cycles and dangling aliases go to
+`rejects.jsonl`. An alias to a standard Unicode emoji is reported as
+`alias_dangling` unless `--unicode-names list.txt` (one shortcode per line)
+lets the tool report it as `alias_to_unicode`.
+
+**Safe by default.** `plan` never writes to Buzz. It reads the relay only to
+find names that already exist (`--on-conflict skip|overwrite`, default `skip`).
+`--no-conflict-check` skips even that read. `run` needs the key of a community
+member; use one dedicated migration key, because the community then owns the
+emoji under that key and members cannot delete them. Sanitizing is a structural
+strip of metadata chunks (PNG text, EXIF, ICC; GIF comments; JPEG APPn; WebP
+EXIF/XMP/ICC) and never re-encodes pixels. The relay's own validator checks every
+result before upload. Images are de-duplicated by the SHA-256 of the sanitized
+bytes.
+
+**Limits and pacing.** `--uploads-per-minute` (default 30, at most 2 uploads at
+once), `--events-per-minute` (default 240) and `--queries-per-minute` (default
+120) pace each action evenly, with no burst, and a relay `retry in Ns` hint
+pauses the action. `--concurrency` (default 8) bounds items in flight,
+`--max-bytes` (default 1 MiB) caps each download, and `--max-attempts` (default
+3) bounds retries per item and stage; an item that runs out becomes `rejected`.
+A 401 or 403 stops the whole run instead of rejecting items. The tool works at
+the default rates. Ask the relay operator to raise
+`BUZZ_MEDIA_UPLOADS_PER_MINUTE` and `BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN` to
+shorten a very large run.
+
+**Resuming.** `run` replays `journal.jsonl` and continues after any stop,
+including a crash or a power loss. It writes a record, syncs it to disk, and only
+then takes the next action. It refuses a journal that belongs to a different
+`plan.json`; `--force-new-plan` moves the old journal aside (it is never
+deleted). Keep the journal until `verify` passes with zero failures.
+
+### Runbook
+
+1. **Dry run.** Fetches and sanitizes every image and writes `plan.json`.
+   Nothing is written to Buzz.
+
+   ```bash
+   buzz emoji migrate plan --slack-json emoji.json --dry-run --work-dir ./mig
+   ```
+
+   Read the JSON report: `rejected_by_reason`, `duplicate_ratio`,
+   `bytes_to_upload` and `estimate` (seconds under the rate flags). Read
+   `rejects.jsonl` and `dry-run-rejects.jsonl`. For a faster look at a huge export
+   use `--dry-run --sample 2000`, which extrapolates (`estimate_basis` says so).
+2. **Pilot of 1,000 on staging.** Point `BUZZ_RELAY_URL` and `BUZZ_PRIVATE_KEY`
+   at staging and the dedicated migration key. Cut a 1,000-name Slack file
+   (for example `jq '{emoji: (.emoji | to_entries | .[:1000] | from_entries)}'
+   emoji.json > pilot.json`), then:
+
+   ```bash
+   buzz emoji migrate plan --slack-json pilot.json --work-dir ./pilot
+   buzz emoji migrate run --work-dir ./pilot
+   buzz emoji migrate verify --work-dir ./pilot --probe-blobs 25
+   ```
+
+   Spot-check with `buzz emoji search <prefix>` and in the desktop picker.
+3. **Rollback test.** Delete the pilot and confirm it is gone:
+
+   ```bash
+   buzz emoji migrate rollback --work-dir ./pilot --dry-run   # counts only
+   buzz emoji migrate rollback --work-dir ./pilot --yes
+   buzz emoji resolve <a pilot name>                           # now "missing"
+   ```
+
+   Blobs stay on the relay. A later `run` on the same work dir publishes the
+   entries again without uploading.
+4. **Full run.** Use a fresh work dir for the real plan, then run. Re-run the same
+   command after any interruption.
+
+   ```bash
+   buzz emoji migrate plan --slack-json emoji.json --work-dir ./mig
+   buzz emoji migrate run --work-dir ./mig
+   ```
+
+   `run` exits non-zero if any item was rejected; the reasons are in
+   `run-rejects.jsonl`.
+5. **Verify.**
+
+   ```bash
+   buzz emoji migrate verify --work-dir ./mig --probe-blobs 50
+   ```
+
+   `verify` checks every published name with `#d` lookups (50 names per query),
+   compares each URL with the journal, probes `--probe-blobs` random blobs with a
+   `HEAD` request (default 0, because a relay's `HEAD` behavior is not confirmed),
+   and runs `--prefix-searches` (default 20) random prefix searches. A search whose
+   result list is full without the name is counted as inconclusive, not failed. It
+   exits non-zero on any failure and lists each one. Only after it passes with zero
+   failures may you archive the work dir.
+

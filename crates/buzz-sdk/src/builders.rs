@@ -598,6 +598,28 @@ pub fn build_emoji_entry(shortcode: &str, url: &str) -> Result<EventBuilder, Sdk
     .tags(tags))
 }
 
+/// Build a NIP-09 deletion (kind 5) of the caller's kind:30180 emoji entry.
+///
+/// Targets the coordinate `30180:<author>:<shortcode>` with one `a` tag, which
+/// is the form the relay requires for an addressable target. `author_hex` is
+/// the signer's public key; the relay rejects a delete signed by anyone else.
+pub fn build_delete_emoji_entry(
+    author_hex: &str,
+    shortcode: &str,
+) -> Result<EventBuilder, SdkError> {
+    let shortcode = normalize_custom_emoji_shortcode(shortcode)?;
+    if author_hex.len() != 64 || !author_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(SdkError::InvalidInput(
+            "author must be a 64-character hex public key".into(),
+        ));
+    }
+    let coordinate = format!(
+        "{KIND_EMOJI_ENTRY}:{}:{shortcode}",
+        author_hex.to_lowercase()
+    );
+    Ok(EventBuilder::new(Kind::Custom(5), "").tags(vec![tag(&["a", &coordinate])?]))
+}
+
 /// Build a canvas update event (kind 40100).
 ///
 /// When `expected_revision` is set, an `["expected-revision", …]` tag is
@@ -3359,6 +3381,28 @@ mod tests {
         assert_eq!(ev.kind.as_u16(), 30030);
         assert!(has_tag(&ev, "d", CUSTOM_EMOJI_SET_D_TAG));
         assert!(has_tag(&ev, "emoji", "party"));
+    }
+
+    #[test]
+    fn delete_emoji_entry_targets_the_coordinate_with_one_a_tag() {
+        let author = "ab".repeat(32);
+        let ev = sign(build_delete_emoji_entry(&author, ":Party_Parrot:").unwrap());
+        assert_eq!(ev.kind.as_u16(), 5);
+        let tags: Vec<_> = ev.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+        assert_eq!(
+            tags,
+            vec![vec![
+                "a".to_string(),
+                format!("30180:{author}:party_parrot")
+            ]]
+        );
+        for (a, s) in [
+            ("short", "ok"),
+            (author.as_str(), "bad name"),
+            (author.as_str(), ""),
+        ] {
+            assert!(build_delete_emoji_entry(a, s).is_err(), "{a} {s}");
+        }
     }
 
     #[test]

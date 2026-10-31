@@ -66,6 +66,12 @@ infer = "0.19"
 # URL parsing — extract server domain for Blossom auth tag
 url = { workspace = true }
 
+# Offline image validation and structural metadata strip for `emoji migrate`
+buzz-media = { workspace = true }
+
+# Bounded-concurrency streams for the migration pipeline
+futures-util = { workspace = true }
+
 # Persona pack parsing, validation, and resolution
 buzz-persona = { path = "../buzz-persona" }
 

@@ -98,6 +98,28 @@ pub struct MediaConfig {
 }
 
 impl MediaConfig {
+    /// Config for running [`validate_content`](crate::validation::validate_content)
+    /// offline, with the relay's default image (50 MB) and GIF (10 MB) caps.
+    /// The storage fields are empty and unused by validation.
+    pub fn offline_validation() -> Self {
+        Self {
+            s3_endpoint: String::new(),
+            s3_access_key: String::new(),
+            s3_secret_key: String::new(),
+            s3_bucket: String::new(),
+            s3_region: default_s3_region(),
+            s3_addressing_style: S3AddressingStyle::default(),
+            max_image_bytes: 52_428_800,
+            max_gif_bytes: 10_485_760,
+            max_video_bytes: default_max_video_bytes(),
+            max_file_bytes: default_max_file_bytes(),
+            public_base_url: String::new(),
+            upload_records_enabled: false,
+            upload_ip_header: None,
+            upload_port_header: None,
+        }
+    }
+
     /// Validate configuration at startup. Returns an error on invalid config.
     pub fn validate(&self) -> Result<(), String> {
         if !self.public_base_url.ends_with("/media") {
