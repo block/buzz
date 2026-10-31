@@ -760,7 +760,7 @@ mod route_integration_tests {
 
     // ES256 key pair — same material as command.rs tests, known-good.
     const TEST_PRIVATE_KEY_PEM: &str =
-        "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\nWZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\nzhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n-----END PRIVATE KEY-----\n";
+        "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\nWZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\nzhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n-----END PRIVATE KEY-----\n"; // sadscan:disable np.pem.1 kingfisher.privkey.2 -- unchanged public ES256 test fixture
 
     const TEST_ISS: &str = "https://idp.test.example.com";
     const TEST_AUD: &str = "https://relay.test.example.com";
@@ -1939,6 +1939,7 @@ mod route_integration_tests {
             },
         )];
         config.nip_fi = NipFiRelayConfig {
+            profile_policies: Vec::new(),
             source: Default::default(),
             mode: NipFiMode::Enforce,
             registry: registry.clone(),
@@ -3565,6 +3566,7 @@ mod route_integration_tests {
                 },
             )];
             config.nip_fi = NipFiRelayConfig {
+                profile_policies: Vec::new(),
                 source: Default::default(),
                 mode: NipFiMode::Shadow,
                 registry: registry.clone(),

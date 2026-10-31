@@ -62,6 +62,7 @@ class WidgetDiscoveryAccount extends BuilderlabAccountClient {
     Map<String, dynamic> body, {
     String? expectedSubject,
   }) async {
+    fixture.requests.add(path);
     if (path.endsWith('/current')) {
       if (fixture.rejectCurrent) throw AccountFailure.denied;
       return {

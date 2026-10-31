@@ -1,4 +1,5 @@
 import '../storage/serial_queue.dart';
+
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
@@ -69,6 +70,27 @@ typedef HostedCommunityAdmission =
       bool Function() isCurrent,
     );
 
+/// Reopens the completed Add destination after restoring older memberships.
+typedef HostedCommunityReturn =
+    Future<void> Function(bool Function() isCurrent);
+
+/// Account-scoped picker state retained while the Add route is open.
+class HostedCommunityChoices {
+  HostedCommunityChoices._(
+    this._subject,
+    this._communities,
+    this._selectedRelays,
+    this._landingRelay,
+    this._addedRelays,
+  );
+
+  final String _subject;
+  final List<AddCommunityDeepLink> _communities;
+  final Set<String> _selectedRelays;
+  final String? _landingRelay;
+  final Set<String> _addedRelays;
+}
+
 /// App-scoped owner: callback subscriptions must outlive any individual page.
 /// Only public progress reaches widgets; pending auth secrets remain in BrowserAuth.
 class HostedFlow extends ChangeNotifier {
@@ -79,6 +101,7 @@ class HostedFlow extends ChangeNotifier {
     required this.identity,
     required this.enterCommunity,
     this.openLandingCommunity,
+    this.captureAddedCommunity,
     Future<bool> Function(Uri)? openWeb,
   }) : _openWeb =
            openWeb ??
@@ -89,6 +112,14 @@ class HostedFlow extends ChangeNotifier {
   final HostedIdentityService identity;
   final HostedCommunityAdmission enterCommunity;
   final HostedCommunityAdmission? openLandingCommunity;
+
+  /// Captures the persisted Add destination before restoring older memberships.
+  final Future<HostedCommunityReturn> Function()? captureAddedCommunity;
+  bool _returnToAddedCommunity = false;
+  HostedCommunityReturn? _openAddedCommunity;
+
+  /// Restoring older memberships must not replace the newly added destination.
+  bool get restoringAfterAdd => _returnToAddedCommunity;
   bool get canRetry =>
       problem == null ||
       problem == HostedFlowProblem.retry ||
@@ -109,7 +140,6 @@ class HostedFlow extends ChangeNotifier {
   String? landingRelay;
   final Set<String> _addedRelays = {};
   bool _addingCommunities = false;
-  Completer<bool>? _pendingAdd;
   String? _batchSubject;
   String? _conflictingRelay;
   String? _failedRelay;
@@ -673,34 +703,56 @@ class HostedFlow extends ChangeNotifier {
         !communities.any((item) => item.relayUrl == relay)) {
       return;
     }
+    _returnToAddedCommunity = false;
+    _openAddedCommunity = null;
     selectedRelays = Set.unmodifiable({...selectedRelays, relay});
     landingRelay = relay;
     notifyListeners();
   }
 
-  /// Restore existing memberships before presenting a separate Add route.
-  Future<bool> prepareToAddCommunity() {
-    if (_pendingAdd != null || stage != HostedFlowStage.chooseCommunities) {
-      return Future.value(false);
+  /// Capture only a current account's discovered community choices.
+  HostedCommunityChoices? captureCommunityChoices() {
+    if (stage != HostedFlowStage.chooseCommunities ||
+        _batchSubject == null ||
+        account.account?.subject != _batchSubject) {
+      return null;
     }
-    if (selectedRelays.isEmpty) return Future.value(true);
-    final pending = _pendingAdd = Completer<bool>();
-    unawaited(addSelectedCommunities());
-    return pending.future;
+    return HostedCommunityChoices._(
+      _batchSubject!,
+      List.unmodifiable(communities),
+      Set.unmodifiable(selectedRelays),
+      landingRelay,
+      Set.unmodifiable(_addedRelays),
+    );
   }
 
-  void _finishPreparingAdd(bool ready) {
-    final pending = _pendingAdd;
-    _pendingAdd = null;
-    pending?.complete(ready);
+  /// Return from Add without repeating account discovery or relay admission.
+  /// A changed or expired account must go through sign-in again.
+  bool restoreCommunityChoices(HostedCommunityChoices choices) {
+    if (_disposed || account.account?.subject != choices._subject) return false;
+    _nextGeneration();
+    _target = null;
+    _pairedPubkey = null;
+    pairedSensitiveActionPolicy = null;
+    reconnecting = false;
+    accountOnly = true;
+    _clearCommunityBatch();
+    _batchSubject = choices._subject;
+    communities = choices._communities;
+    selectedRelays = choices._selectedRelays;
+    landingRelay = choices._landingRelay;
+    _addedRelays.addAll(choices._addedRelays);
+    _set(HostedFlowStage.chooseCommunities);
+    return true;
   }
 
-  Future<void> addSelectedCommunities() {
+  Future<void> addSelectedCommunities({bool returnToAddedCommunity = false}) {
     if (!accountOnly ||
         stage != HostedFlowStage.chooseCommunities ||
         selectedRelays.isEmpty) {
       return Future.value();
     }
+    _returnToAddedCommunity = returnToAddedCommunity || _returnToAddedCommunity;
     _addingCommunities = true;
     final generation = _nextGeneration();
     _set(HostedFlowStage.working);
@@ -710,7 +762,6 @@ class HostedFlow extends ChangeNotifier {
   /// Keep completed additions while allowing a different landing choice.
   void backToCommunityChoices() {
     if (!canChangeCommunities) return;
-    _finishPreparingAdd(false);
     _nextGeneration();
     _conflictingRelay = null;
     addingCommunityName = null;
@@ -767,6 +818,13 @@ class HostedFlow extends ChangeNotifier {
       _set(HostedFlowStage.chooseCommunities);
       return;
     }
+    if (_returnToAddedCommunity && _openAddedCommunity == null) {
+      final capture = captureAddedCommunity;
+      if (capture == null) throw AccountFailure.unavailable;
+      final open = await capture();
+      if (!current()) return;
+      _openAddedCommunity = open;
+    }
     _failedRelay = null;
     final ordered = [
       ...communities.where((item) => item.relayUrl == landingRelay),
@@ -796,9 +854,11 @@ class HostedFlow extends ChangeNotifier {
     }
     if (!current()) return;
     addingCommunityName = null;
-    if (_pendingAdd != null) {
-      _set(HostedFlowStage.chooseCommunities);
-      _finishPreparingAdd(true);
+    if (_openAddedCommunity != null) {
+      await _openAddedCommunity!(current);
+      if (!current()) return;
+      await browser.clearIntent();
+      if (current()) _set(HostedFlowStage.complete);
       return;
     }
     if (_addedRelays.isEmpty) {
@@ -922,7 +982,8 @@ class HostedFlow extends ChangeNotifier {
   bool noCommunitiesToAdd = false;
 
   void _clearCommunityBatch() {
-    _finishPreparingAdd(false);
+    _returnToAddedCommunity = false;
+    _openAddedCommunity = null;
     noCommunitiesToAdd = false;
     communities = const [];
     selectedRelays = const {};
@@ -999,7 +1060,6 @@ class HostedFlow extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
-    _finishPreparingAdd(false);
     _cancelPolicy();
     _cancelProfile();
     _nextGeneration();

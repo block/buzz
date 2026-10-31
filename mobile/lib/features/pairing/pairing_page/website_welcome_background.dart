@@ -4,8 +4,12 @@ part of '../pairing_page.dart';
 // The bee layer uses the website’s flight model and remains decorative.
 class _WebsiteWelcomeBackground extends HookWidget {
   final Widget child;
+  final ValueListenable<double> scannerProgress;
 
-  const _WebsiteWelcomeBackground({required this.child});
+  const _WebsiteWelcomeBackground({
+    required this.child,
+    required this.scannerProgress,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -29,11 +33,28 @@ class _WebsiteWelcomeBackground extends HookWidget {
                 Positioned.fill(
                   child: IgnorePointer(
                     child: ExcludeSemantics(
-                      child: LayoutBuilder(
-                        builder: (context, constraints) => RepaintBoundary(
-                          child: _WebsiteBeeSwarm(
-                            size: constraints.biggest,
-                            pointer: pointer,
+                      child: ValueListenableBuilder<double>(
+                        valueListenable: scannerProgress,
+                        builder: (context, progress, child) => Opacity(
+                          key: const Key('scanner-bees-opacity'),
+                          opacity: 1 - progress,
+                          child: Transform.scale(
+                            key: const Key('scanner-bees-scale'),
+                            scale: MediaQuery.disableAnimationsOf(context)
+                                ? 1
+                                : 1 - 0.04 * progress,
+                            child: TickerMode(
+                              enabled: progress < 1,
+                              child: child!,
+                            ),
+                          ),
+                        ),
+                        child: LayoutBuilder(
+                          builder: (context, constraints) => RepaintBoundary(
+                            child: _WebsiteBeeSwarm(
+                              size: constraints.biggest,
+                              pointer: pointer,
+                            ),
                           ),
                         ),
                       ),

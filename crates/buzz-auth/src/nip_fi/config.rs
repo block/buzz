@@ -84,7 +84,7 @@ pub(crate) const MAX_JTI_BYTES: usize = 512;
 /// type, which requires a `nostr_owner_pubkey` claim (a valid lowercase key
 /// distinct from the asserted key); a `nip-fi+jwt` or `at+jwt` token carrying
 /// `nostr_owner_pubkey` with any value, `null` included, is rejected.
-pub(crate) const VERIFIER_CONTRACT_VERSION: u32 = 3;
+pub(crate) const VERIFIER_CONTRACT_VERSION: u32 = 4;
 
 /// The transport-contract fingerprint folded into [`TransportContractId`].
 /// **Bump on any change** to the client-attached parsing, attachment,
@@ -391,6 +391,8 @@ pub struct IssuerPolicy {
     /// transport, refresh schedule, or hard-deadline rule changes the policy
     /// ID and invalidates all prepared evidence.
     jwks_source_contract: JwksSourceContract,
+    public_profile: bool,
+    public_issuer_label: Option<String>,
     id: AssertionPolicyId,
 }
 
@@ -502,11 +504,21 @@ impl IssuerPolicy {
             maximum_assertion_age_seconds,
             maximum_status_age_seconds,
             jwks_source_contract,
+            public_profile: false,
+            public_issuer_label: None,
             // Placeholder, overwritten from the fully built policy below.
             id: AssertionPolicyId([0u8; 32]),
         };
         policy.id = derive_assertion_policy_id(&policy);
         Ok(policy)
+    }
+
+    /// Bind output-only profile policy into prepared-evidence identity.
+    pub fn with_public_profile(mut self, enabled: bool, label: Option<String>) -> Self {
+        self.public_profile = enabled;
+        self.public_issuer_label = label;
+        self.id = derive_assertion_policy_id(&self);
+        self
     }
 
     /// The policy ID an assertion verified for the community expecting
@@ -679,6 +691,8 @@ fn derive_assertion_policy_id(policy: &IssuerPolicy) -> AssertionPolicyId {
         maximum_assertion_age_seconds,
         maximum_status_age_seconds,
         jwks_source_contract,
+        public_profile,
+        public_issuer_label,
         id: _,
     } = policy;
     let mut hasher = Sha256::new();
@@ -700,6 +714,15 @@ fn derive_assertion_policy_id(policy: &IssuerPolicy) -> AssertionPolicyId {
     ] {
         hasher.update((bound as u64).to_be_bytes());
     }
+    hasher.update([u8::from(*public_profile)]);
+    hasher.update([u8::from(public_issuer_label.is_some())]);
+    hash_field(
+        &mut hasher,
+        public_issuer_label
+            .as_deref()
+            .unwrap_or_default()
+            .as_bytes(),
+    );
     hash_field(&mut hasher, issuer.as_bytes());
     hash_seq(&mut hasher, command_audiences.iter().map(String::as_bytes));
     hash_field(&mut hasher, token_class.discriminant().as_bytes());
@@ -803,7 +826,7 @@ mod jwks_transport_identity_tests {
 
         assert_eq!(
             hex::encode(policy(contract).id().as_bytes()),
-            "29ecb98c34dc7574616d72caf1565cda35585a15f682f0d30f6c011342a555d8",
+            "41616c071239652badb7f75ea060f6ad20de4dee1af665d942b0fdee3dc32c0b",
             "public_https mode omits the mesh transport tag"
         );
     }
@@ -819,7 +842,7 @@ mod jwks_transport_identity_tests {
 
         assert_eq!(
             hex::encode(policy(contract).id().as_bytes()),
-            "da846eec66b2e084ac3557d8e5c2a3a2faf12946e965c82d2ef46f91b6fa014e",
+            "14f2cc8f50b6ce76008936321794642dfa1a79fa99150bff7f0f0479b5e7d06f",
             "mesh transport is part of policy identity"
         );
     }
