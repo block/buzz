@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 
 import '../theme/buzz_icons.dart';
 import '../theme/theme.dart';
 import 'anchored_popover_menu.dart';
 import 'app_list.dart';
+import 'ios_message_create_button.dart';
 
 /// One choice in a [BuzzSettingMenu].
 class BuzzSettingMenuOption<T> {
@@ -51,6 +53,53 @@ class BuzzSettingMenu<T> extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (grouped && defaultTargetPlatform == TargetPlatform.iOS) {
+      return Stack(
+        children: [
+          ExcludeSemantics(
+            child: Opacity(
+              opacity: enabled ? 1 : 0.5,
+              child: AppListRow(
+                title: label,
+                value: valueLabel,
+                trailing: Icon(
+                  trailingIcon,
+                  size: 16,
+                  color: context.colors.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ),
+          Positioned.fill(
+            child: LayoutBuilder(
+              builder: (context, constraints) => IosMessageCreateButton(
+                key: controlKey,
+                label: '',
+                accessibilityLabel: '$label: $valueLabel',
+                width: constraints.maxWidth,
+                height: constraints.maxHeight,
+                enabled: enabled,
+                eagerGestures: false,
+                selectedIndex: options.indexWhere(
+                  (option) => option.value == value,
+                ),
+                actions: [
+                  for (final option in options)
+                    (
+                      label: option.label,
+                      symbol: '',
+                      onPressed: enabled
+                          ? () => onSelected(option.value)
+                          : null,
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
     void toggleMenu(MenuController menu) {
       if (menu.isOpen) return menu.close();
       FocusManager.instance.primaryFocus?.unfocus();

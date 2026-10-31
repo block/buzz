@@ -24,6 +24,9 @@ class IosMessageCreateButton extends HookWidget {
     this.width = 64,
     this.height = 48,
     this.plain = true,
+    this.enabled = true,
+    this.selectedIndex,
+    this.eagerGestures = true,
     this.showIconWithLabel = false,
   });
 
@@ -35,6 +38,15 @@ class IosMessageCreateButton extends HookWidget {
   final String accessibilityLabel;
   final double width, height;
   final bool plain;
+
+  /// Whether the native trigger and its actions are interactive.
+  final bool enabled;
+
+  /// Option marked with the native menu selection checkmark.
+  final int? selectedIndex;
+
+  /// Capture gestures immediately; disable for rows inside a scroll view.
+  final bool eagerGestures;
   final bool showIconWithLabel;
 
   final List<({String label, String symbol, VoidCallback? onPressed})> actions;
@@ -78,7 +90,8 @@ class IosMessageCreateButton extends HookWidget {
           'dividerBefore': dividerBefore.contains(i),
           'label': actions[i].label,
           'symbol': actions[i].symbol,
-          'enabled': actions[i].onPressed != null,
+          'enabled': enabled && actions[i].onPressed != null,
+          'checked': i == selectedIndex,
         },
     ];
     final content = <String, Object>{
@@ -97,11 +110,11 @@ class IosMessageCreateButton extends HookWidget {
         if (call.method != 'menuAction') return;
         final index = call.arguments as int;
         if (index >= 0 && index < latest.value.length) {
-          latest.value[index].onPressed?.call();
+          if (enabled) latest.value[index].onPressed?.call();
         }
       });
       return () => current.setMethodCallHandler(null);
-    }, [channel.value]);
+    }, [channel.value, enabled]);
     useEffect(
       () {
         final current = channel.value;
@@ -111,7 +124,7 @@ class IosMessageCreateButton extends HookWidget {
             current.invokeMethod<void>('setAppearance', {
               'brightness': brightness.name,
               'foregroundColor': foreground,
-              'enabled': true,
+              'enabled': enabled,
             }),
           );
         }
@@ -124,7 +137,11 @@ class IosMessageCreateButton extends HookWidget {
         label,
         labelFontSize,
         accessibilityLabel,
-        ...actions.map((a) => a.onPressed != null),
+        enabled,
+        selectedIndex,
+        showIconWithLabel,
+        ...dividerBefore,
+        ...actions.expand((a) => [a.label, a.symbol, a.onPressed != null]),
         brightness,
         foreground,
       ],
@@ -140,7 +157,8 @@ class IosMessageCreateButton extends HookWidget {
       child: UiKitView(
         viewType: 'buzz/navigation_glass',
         gestureRecognizers: {
-          Factory<EagerGestureRecognizer>(EagerGestureRecognizer.new),
+          if (eagerGestures)
+            Factory<EagerGestureRecognizer>(EagerGestureRecognizer.new),
         },
         creationParams: {
           ...content,
@@ -152,7 +170,7 @@ class IosMessageCreateButton extends HookWidget {
           'hitTargetHeight': height,
           'brightness': brightness.name,
           'foregroundColor': foreground,
-          'enabled': true,
+          'enabled': enabled,
         },
         creationParamsCodec: const StandardMessageCodec(),
         onPlatformViewCreated: (id) =>
