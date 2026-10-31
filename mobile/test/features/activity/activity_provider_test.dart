@@ -357,6 +357,44 @@ void main() {
     expect(feed.mentions.map((item) => item.id), ['mentions-owner']);
   });
 
+  test('quiet agent messages never become Activity items', () async {
+    NostrEvent mention(String id, {bool quiet = false}) => NostrEvent(
+      id: id,
+      pubkey: 'agent_pk',
+      createdAt: 1_700_000_001,
+      kind: 9,
+      tags: [
+        ['p', 'me_pk'],
+        ['h', 'channel-1'],
+        if (quiet) ['audience', 'agents'],
+      ],
+      content: 'progress',
+      sig: '',
+    );
+    final session = _RecordingSessionNotifier()
+      ..seed(mention('quiet-mention', quiet: true))
+      ..seed(mention('mention'));
+    final container = ProviderContainer(
+      overrides: [
+        relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+        myPubkeyProvider.overrideWithValue('me_pk'),
+        relaySessionProvider.overrideWith(() => session),
+        channelsProvider.overrideWith(
+          () => _FixedChannelsNotifier(const <Channel>[]),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(channelsProvider.future);
+    final feed = await container.read(activityProvider.future);
+
+    expect(feed.all.map((item) => item.id), ['mention']);
+    expect(container.read(inboxItemsProvider).map((item) => item.id), [
+      'mention',
+    ]);
+  });
+
   test(
     'refreshes the inbox projection when addressed activity arrives',
     () async {

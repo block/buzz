@@ -8,6 +8,7 @@ import '../../shared/relay/relay.dart';
 import '../channels/channel.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/channels_provider.dart';
+import '../channels/unread_badge/is_quiet_agent_message.dart';
 import 'dm_resurface.dart';
 import 'feed_item.dart';
 import 'inbox_item.dart';
@@ -497,7 +498,12 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
     // executing the batch with bounded server-side concurrency. One request
     // here replaces the four simultaneous websocket history subscriptions that
     // otherwise compete with channel and preference startup sync.
-    final events = await _queryWithWebSocketFallback(session, filters);
+    // Quiet agent messages (`audience: agents`) are coordination between
+    // agents and never become Activity items, even when they tag the reader.
+    final events = [
+      for (final event in await _queryWithWebSocketFallback(session, filters))
+        if (!isQuietAgentMessage(event.tags)) event,
+    ];
 
     bool isFromOther(NostrEvent e) =>
         e.pubkey.toLowerCase() != myPk.toLowerCase();
