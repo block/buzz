@@ -94,13 +94,24 @@ class SearchState {
 
 class SearchNotifier extends Notifier<SearchState> {
   Timer? _debounce;
+  int _generation = 0;
+  int _scopeGeneration = 0;
+  bool _lookupsPending = false;
+  Future<void>? _directoryLoad;
 
   @override
   SearchState build() {
     // Watch relayConfig so search state resets on community switch.
     ref.watch(relayConfigProvider);
+    ref.watch(myPubkeyProvider);
+    _directoryLoad = null;
+    _lookupsPending = false;
+    ref.listen(channelsProvider, (_, _) => _updateChannels());
+    ref.listen(channelDirectoryLoadStatusProvider, (_, _) => _updateChannels());
     ref.onDispose(() {
       _debounce?.cancel();
+      _generation++;
+      _scopeGeneration++;
     });
     return const SearchState.initial();
   }
@@ -108,30 +119,37 @@ class SearchNotifier extends Notifier<SearchState> {
   void search(String query) {
     _debounce?.cancel();
 
+    final generation = ++_generation;
     final trimmed = query.trim();
     if (trimmed.isEmpty) {
       state = const SearchState.initial();
       return;
     }
 
+    _lookupsPending = true;
     state = SearchState(query: trimmed, isLoading: true);
 
     _debounce = Timer(const Duration(milliseconds: 300), () {
-      _executeSearch(trimmed);
+      _executeSearch(trimmed, generation);
     });
   }
 
-  Future<void> _executeSearch(String query) async {
-    // If the query changed while debouncing, bail out.
-    if (state.query != query) return;
+  bool _isCurrent(int generation) => ref.mounted && generation == _generation;
 
-    // Fire all three lookups in parallel.
-    _searchMessages(query);
-    _searchUsers(query);
-    _searchChannels(query);
+  Future<void> _executeSearch(String query, int generation) async {
+    if (!_isCurrent(generation)) return;
+    _updateChannels();
+    await Future.wait([
+      _searchMessages(query, generation),
+      _searchUsers(query, generation),
+      _searchChannels(generation),
+    ]);
+    if (!_isCurrent(generation)) return;
+    _lookupsPending = false;
+    _updateChannels();
   }
 
-  Future<void> _searchMessages(String query) async {
+  Future<void> _searchMessages(String query, int generation) async {
     try {
       final session = ref.read(relaySessionProvider.notifier);
       final events = await session.fetchHistory(
@@ -142,10 +160,13 @@ class SearchNotifier extends Notifier<SearchState> {
         ),
       );
 
+      if (!_isCurrent(generation)) return;
+
       // Channel-name lookup from the cached channels list — not all hits
       // will have a known channel (e.g. ones we're not a member of).
       final channelsById = {
-        for (final c in ref.read(channelsProvider).value ?? const <Channel>[])
+        for (final c
+            in ref.read(channelsProvider).asData?.value ?? const <Channel>[])
           c.id: c.name,
       };
 
@@ -167,47 +188,86 @@ class SearchNotifier extends Notifier<SearchState> {
           )
           .toList();
 
-      if (state.query != query) return;
-      state = state.copyWith(messageResults: hits, isLoading: false);
+      if (!_isCurrent(generation)) return;
+      state = state.copyWith(messageResults: hits);
     } catch (e) {
-      if (state.query != query) return;
-      state = state.copyWith(isLoading: false, error: e.toString());
+      if (!_isCurrent(generation)) return;
+      state = state.copyWith(error: 'Couldn’t load messages.');
     }
   }
 
-  Future<void> _searchUsers(String query) async {
+  Future<void> _searchUsers(String query, int generation) async {
     try {
       final users = await ref
           .read(channelActionsProvider)
           .searchUsers(query, limit: 8);
 
-      if (state.query != query) return;
-      state = state.copyWith(
-        userResults: users,
-        isLoading: state.messageResults.isEmpty && state.channelResults.isEmpty,
-      );
+      if (!_isCurrent(generation)) return;
+      state = state.copyWith(userResults: users);
     } catch (_) {
       // User search failure is non-critical — keep existing results.
     }
   }
 
-  void _searchChannels(String query) {
-    final channels = ref.read(channelsProvider).value ?? [];
-    final lowerQuery = query.toLowerCase();
+  Future<void> _loadDirectory() async {
+    final scopeGeneration = _scopeGeneration;
+    if (ref.read(relaySessionProvider).status != SessionStatus.connected) {
+      throw StateError('Channel discovery requires a connection');
+    }
+    // Wait for membership startup before discovery takes refresh ownership.
+    // A failed startup can be recovered by the directory refresh below.
+    try {
+      await ref.read(channelsProvider.future);
+    } catch (_) {
+      // ensureDirectoryLoaded retries membership loading too.
+    }
+    if (!ref.mounted || scopeGeneration != _scopeGeneration) return;
+    await ref.read(channelsProvider.notifier).ensureDirectoryLoaded();
+  }
+
+  Future<void> _searchChannels(int generation) async {
+    try {
+      final request = _directoryLoad ??= _loadDirectory();
+      try {
+        await request;
+      } finally {
+        if (identical(_directoryLoad, request)) _directoryLoad = null;
+      }
+    } catch (_) {
+      if (!_isCurrent(generation)) return;
+      state = state.copyWith(error: 'Couldn’t load channels.');
+    }
+  }
+
+  void _updateChannels() {
+    if (!ref.mounted || state.query.isEmpty) return;
+    // A reload can retain the previous community’s value in AsyncLoading.
+    // Only installed data belongs to the current search scope.
+    final channels = ref.read(channelsProvider).asData?.value ?? [];
+    final lowerQuery = state.query.toLowerCase();
     final matches = channels.where((c) {
       if (c.isDm) return false;
       return c.name.toLowerCase().contains(lowerQuery) ||
           c.description.toLowerCase().contains(lowerQuery);
     }).toList();
-
-    if (state.query != query) return;
+    final directory = ref.read(channelDirectoryLoadStatusProvider);
+    final scope = channelDirectoryScope(
+      ref.read(relayConfigProvider).baseUrl,
+      ref.read(myPubkeyProvider),
+    );
+    final status = directory.scope == scope ? directory.status : null;
     state = state.copyWith(
       channelResults: matches,
-      isLoading: state.messageResults.isEmpty && state.userResults.isEmpty,
+      isLoading:
+          _lookupsPending || status == ChannelDirectoryLoadStatus.loading,
+      error: !_lookupsPending && status == ChannelDirectoryLoadStatus.error
+          ? 'Couldn’t load channels.'
+          : null,
     );
   }
 
   void clear() {
+    _generation++;
     _debounce?.cancel();
     state = const SearchState.initial();
   }

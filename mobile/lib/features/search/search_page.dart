@@ -319,7 +319,7 @@ class _SearchBody extends ConsumerWidget {
     void recordResultSelection() =>
         ref.read(recentSearchesProvider.notifier).record(state.query);
 
-    if (!state.isLoading && !hasAnyResults) {
+    if (!state.isLoading && state.error == null && !hasAnyResults) {
       return Padding(
         key: const Key('search-no-results-state'),
         padding: EdgeInsets.only(
@@ -348,6 +348,25 @@ class _SearchBody extends ConsumerWidget {
           ),
           sliver: SliverMainAxisGroup(
             slivers: [
+              if (state.error != null)
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: Grid.gutter,
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(child: Text(state.error!)),
+                        TextButton(
+                          onPressed: () => ref
+                              .read(searchProvider.notifier)
+                              .search(state.query),
+                          child: const Text('Retry'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
               if (showChannels && state.channelResults.isNotEmpty)
                 _ChannelsSection(
                   channels: state.channelResults,
