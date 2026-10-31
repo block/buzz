@@ -268,11 +268,19 @@ class BrowserAuth {
         /* No session may be active. */
       }
     }
-    await _serial(() => _storage.delete(key: _attemptKey));
+    await _delete(_attemptKey);
   }
 
   /// Call only after completing or explicitly abandoning the retained intent.
-  Future<void> clearIntent() => _serial(() => _storage.delete(key: _intentKey));
+  Future<void> clearIntent() => _delete(_intentKey);
+
+  Future<void> _delete(String key) => _serial(() async {
+    try {
+      await _storage.delete(key: key);
+    } catch (_) {
+      throw BrowserAuthFailure.storage;
+    }
+  });
 
   /// Whether another live owner has a saved attempt with this state.
   Future<bool> _peerOwns(String? state) async {
