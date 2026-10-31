@@ -178,9 +178,8 @@ void main() {
       channelDirectoryLoadStatusProvider.notifier,
     );
 
-    // A bare "#" lists joined channels, like desktop. The directory finishing
-    // last must still stop the spinner.
-    await tester.enterText(find.byType(TextField), '#');
+    // The directory finishing last must still stop the spinner.
+    await tester.enterText(find.byType(TextField), 'gen');
     // Before search first loads the directory, an unloaded directory is not
     // a failure, even when its status changes during the debounce.
     directoryStatus.markIdle('http://elsewhere.test:');
@@ -210,6 +209,30 @@ void main() {
       ),
       findsOneWidget,
     );
+
+    // A bare "#" lists joined channels without the directory, like desktop:
+    // no load, no spinner for it, and no notice, even after a failure or
+    // while another caller loads the directory.
+    final communityScope = channelDirectoryScope(
+      'http://community.test',
+      container.read(myPubkeyProvider),
+    );
+    directoryStatus.markLoading(communityScope);
+    await tester.enterText(find.byType(TextField), '#');
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(channels.directoryRequests, 1);
+    session.searches.removeAt(0).complete(const []);
+    actions.searches.removeAt(0).complete(const []);
+    await tester.pump();
+    expect(spinner, findsNothing);
+    directoryStatus.markError(communityScope);
+    await tester.pump();
+    expect(failed, findsNothing);
+    expect(
+      find.byKey(const ValueKey('search-channel-row-general-id')),
+      findsOneWidget,
+    );
+    expect(unjoined, findsNothing);
 
     // Each query tries the directory again. A failure must not read as
     // "No results".

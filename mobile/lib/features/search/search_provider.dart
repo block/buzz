@@ -101,6 +101,14 @@ class SearchState {
   );
 }
 
+/// The channel name text a search [query] matches: lowercased, without a
+/// leading "#".
+String _channelNeedle(String query) =>
+    query.trim().toLowerCase().replaceFirst(RegExp(r'^#'), '');
+
+/// Whether [query] searches open channels. A bare "#" does not, as on desktop.
+bool _searchesOpenChannels(String query) => _channelNeedle(query).isNotEmpty;
+
 /// Most channel rows one query shows, ranked best first.
 const searchChannelResultLimit = 8;
 
@@ -114,7 +122,7 @@ const searchDirectoryMaxAge = Duration(seconds: 30);
 /// channels in list order before open ones by name. A bare "#" lists joined
 /// channels only, since desktop does not search open channels for it.
 List<Channel> rankSearchChannels(Iterable<Channel> channels, String query) {
-  final needle = query.trim().toLowerCase().replaceFirst(RegExp(r'^#'), '');
+  final needle = _channelNeedle(query);
   final ranked = <({Channel channel, double rank, int order})>[];
   for (final channel in channels) {
     if (channel.isDm) continue;
@@ -220,7 +228,8 @@ class SearchNotifier extends Notifier<SearchState> {
   void _executeSearch(String query, int generation) {
     if (generation != _generation) return;
 
-    _loadDirectory();
+    // Like desktop, a bare "#" lists joined channels without the directory.
+    if (_searchesOpenChannels(query)) _loadDirectory();
     _refreshChannels();
     _searchMessages(query, generation);
     _searchUsers(query, generation);
@@ -229,8 +238,9 @@ class SearchNotifier extends Notifier<SearchState> {
   bool get _isLoading =>
       _messagesPending ||
       _usersPending ||
-      _directoryLoad != null ||
-      _directoryStatus == ChannelDirectoryLoadStatus.loading;
+      (_searchesOpenChannels(state.query) &&
+          (_directoryLoad != null ||
+              _directoryStatus == ChannelDirectoryLoadStatus.loading));
 
   /// This community's directory status, or null when the status describes
   /// another community or no load has started.
@@ -369,7 +379,10 @@ class SearchNotifier extends Notifier<SearchState> {
       // An earlier failure stays hidden while our next load runs, and the
       // notice clears when another caller loads the directory.
       channelSearchFailed:
-          _directoryAttempted && _directoryLoad == null && _directoryMissing,
+          _searchesOpenChannels(state.query) &&
+          _directoryAttempted &&
+          _directoryLoad == null &&
+          _directoryMissing,
       isLoading: _isLoading,
     );
   }
