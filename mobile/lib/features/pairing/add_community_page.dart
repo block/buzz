@@ -24,6 +24,9 @@ class AddCommunityPage extends StatelessWidget {
     required this.onScan,
     required this.onOpenCommunity,
     required this.onSubmitPairing,
+    this.onboarding = false,
+    this.onFindCommunities,
+    this.onCreateCommunity,
     this.enteringCommunityLink = false,
     this.existingUser = false,
     this.scannerProgress = 0,
@@ -40,6 +43,9 @@ class AddCommunityPage extends StatelessWidget {
   final VoidCallback? onScan;
   final ValueChanged<Uri> onOpenCommunity;
   final ValueChanged<String> onSubmitPairing;
+  final bool onboarding;
+  final VoidCallback? onFindCommunities;
+  final VoidCallback? onCreateCommunity;
   final bool enteringCommunityLink;
   final bool existingUser;
   final double scannerProgress;
@@ -60,6 +66,9 @@ class AddCommunityPage extends StatelessWidget {
         ? _AddCommunityConnection(
             key: const ValueKey('add-community-connection'),
             enteringLink: enteringCommunityLink,
+            onboarding: onboarding,
+            onFindCommunities: onFindCommunities,
+            onCreateCommunity: onCreateCommunity,
             scannerProgress: scannerProgress,
             accountStatus: accountStatus,
             onBack: onBack,

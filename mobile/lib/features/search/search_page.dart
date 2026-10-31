@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -672,10 +673,9 @@ Future<void> _openSearchChannel(BuildContext context, Channel channel) async {
     );
   } catch (_) {
     if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Couldn’t open this conversation. Try again.'),
-      ),
+    ScaffoldMessenger.of(context).showFeedbackSnackBar(
+      const SnackBar(content: Text('Couldn’t open conversation')),
+      kind: ToastKind.error,
     );
   }
 }

@@ -2,11 +2,18 @@ part of '../pairing_page.dart';
 
 class _OnboardingBackground extends StatelessWidget {
   final Widget child;
+  final bool websiteWelcome;
 
-  const _OnboardingBackground({required this.child});
+  const _OnboardingBackground({
+    required this.child,
+    this.websiteWelcome = false,
+  });
 
   @override
   Widget build(BuildContext context) {
+    if (websiteWelcome) {
+      return _WebsiteWelcomeBackground(child: child);
+    }
     final isDark = context._onboardingIsDark;
     return DecoratedBox(
       key: const Key('pairing-onboarding-background'),

@@ -331,17 +331,21 @@ test.describe("config bridge screenshots", () => {
     await page.getByTestId("channel-agents").click();
     await expect(page.getByTestId("chat-title")).toHaveText("agents");
 
-    // Click an agent avatar in a full message row to open the profile side panel.
+    // Click Charlie's avatar to open the profile side panel. Pick the row by
+    // its text: each avatar fallback mounts on its own 200 ms timer after its
+    // row, so "the last row with an avatar" can still be nadia's.
     await page
       .getByTestId("message-row")
-      .filter({ has: page.locator('[data-testid^="message-avatar-"]') })
-      .last()
+      .filter({ hasText: "Charlie reporting in." })
       .getByRole("button")
       .first()
       .click();
 
     const panel = page.getByTestId("user-profile-panel");
     await expect(panel).toBeVisible({ timeout: 10_000 });
+    await expect(panel.getByTestId("user-profile-name-row")).toContainText(
+      /charlie/i,
+    );
 
     // Editable configuration lives inside the Runtime tab.
     await panel.getByRole("tab", { name: "Runtime" }).click();

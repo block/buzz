@@ -8,6 +8,7 @@ import 'package:hooks_riverpod/misc.dart' show ProviderListenable;
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/animated_avatar.dart';
+import '../../shared/widgets/buzz_toast.dart';
 import '../../shared/identity_names/identity_names.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/relay/relay.dart';
@@ -157,7 +158,7 @@ class UserProfileSheet extends HookConsumerWidget {
       await Clipboard.setData(ClipboardData(text: npub));
       if (!context.mounted) return;
       copied.value = true;
-      _showProfileCopyToast(context);
+      showBuzzToast(context, 'Public key copied', kind: ToastKind.success);
       unawaited(
         Future<void>.delayed(const Duration(seconds: 2), () {
           if (context.mounted) copied.value = false;
@@ -372,47 +373,6 @@ class UserProfileSheet extends HookConsumerWidget {
       ),
     );
   }
-}
-
-/// Shows clipboard feedback above the bottom-sheet route. A regular SnackBar
-/// belongs to the page Scaffold, which sits behind the modal sheet.
-void _showProfileCopyToast(BuildContext context) {
-  final overlay = Overlay.of(context, rootOverlay: true);
-  final colors = context.colors;
-  final textStyle = context.textTheme.bodyMedium?.copyWith(
-    color: colors.onInverseSurface,
-  );
-  late final OverlayEntry entry;
-  entry = OverlayEntry(
-    builder: (overlayContext) => Positioned(
-      left: Grid.gutter,
-      right: Grid.gutter,
-      bottom: MediaQuery.viewPaddingOf(overlayContext).bottom + Grid.xs,
-      child: Material(
-        color: colors.inverseSurface,
-        elevation: 6,
-        borderRadius: BorderRadius.circular(Radii.lg),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: Grid.xs,
-            vertical: Grid.twelve,
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(BuzzIcons.check, size: 18, color: colors.onInverseSurface),
-              const SizedBox(width: Grid.xxs),
-              Text('Public key copied', style: textStyle),
-            ],
-          ),
-        ),
-      ),
-    ),
-  );
-  overlay.insert(entry);
-  Future<void>.delayed(const Duration(seconds: 2), () {
-    if (entry.mounted) entry.remove();
-  });
 }
 
 /// The read-only version of the presence control in Settings. A viewed profile

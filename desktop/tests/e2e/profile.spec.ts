@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { npubEncode } from "nostr-tools/nip19";
 
 import {
@@ -1525,27 +1525,35 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
       0,
     );
   }
-  await page.getByTestId("user-profile-duplicate-agent-row").click();
+  // The Stop and Start success toasts can stack over these rows, and a
+  // pointer over them pauses their dismissal. Press the rows with the
+  // keyboard, which the toasts cannot intercept.
+  const pressActionRow = async (row: Locator) => {
+    await expect(row).toBeEnabled();
+    await row.focus();
+    await row.press("Enter");
+  };
+  await pressActionRow(page.getByTestId("user-profile-duplicate-agent-row"));
   const duplicateDialog = page.getByTestId("persona-dialog");
   await expect(duplicateDialog).toBeVisible();
   await duplicateDialog.getByRole("button", { name: "Cancel" }).click();
-  await page.getByTestId("user-profile-export-agent-row").click();
+  await pressActionRow(page.getByTestId("user-profile-export-agent-row"));
   const exportDialog = page.getByTestId("agent-snapshot-export-dialog");
   await expect(exportDialog).toBeVisible();
   await exportDialog.getByRole("button", { name: "Cancel" }).click();
-  await page.getByTestId("user-profile-create-card-row").click();
+  await pressActionRow(page.getByTestId("user-profile-create-card-row"));
   const cardMintDialog = page.getByTestId("agent-card-mint-dialog");
   await expect(cardMintDialog).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(cardMintDialog).toHaveCount(0);
   const archiveAgentRow = page.getByTestId("user-profile-archive-agent-row");
   await expect(archiveAgentRow).toHaveText(/Archive agent/);
-  await archiveAgentRow.click();
+  await pressActionRow(archiveAgentRow);
   await expect(page.getByTestId("archive-confirm-dialog")).toBeVisible();
   await page.getByRole("button", { name: "Cancel" }).click();
   const deleteAgentRow = page.getByTestId("user-profile-delete-agent-row");
   await expect(deleteAgentRow).toHaveText("Delete agent");
-  await deleteAgentRow.click();
+  await pressActionRow(deleteAgentRow);
   await expect(page.getByTestId("agent-delete-confirm-dialog")).toBeVisible();
   await page.getByRole("button", { name: "Cancel" }).click();
   await expect(page.getByTestId("user-profile-tab-memories")).toHaveText(

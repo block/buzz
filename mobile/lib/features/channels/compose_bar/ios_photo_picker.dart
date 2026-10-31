@@ -55,13 +55,13 @@ class _IOSInlinePhotoPicker extends HookWidget {
           case 'didFail':
             isPreparingSelection.value = false;
             if (!context.mounted) return;
-            ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
               SnackBar(
                 content: Text(
-                  call.arguments as String? ??
-                      'Unable to prepare the selected photos.',
+                  call.arguments as String? ?? 'Couldn’t prepare photos',
                 ),
               ),
+              kind: ToastKind.error,
             );
         }
       });
@@ -103,8 +103,9 @@ class _IOSInlinePhotoPicker extends HookWidget {
         }
       } catch (_) {
         if (context.mounted) {
-          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-            const SnackBar(content: Text('Unable to open your photo library.')),
+          ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+            const SnackBar(content: Text('Couldn’t open photo library')),
+            kind: ToastKind.error,
           );
         }
       } finally {

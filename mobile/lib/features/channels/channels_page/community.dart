@@ -99,8 +99,9 @@ Future<void> _confirmRemoveCommunity(
       Navigator.of(context).pop();
     }
   } catch (e) {
-    messenger.showSnackBar(
+    messenger.showFeedbackSnackBar(
       SnackBar(content: Text('Failed to remove community: $e')),
+      kind: ToastKind.error,
     );
   }
 }

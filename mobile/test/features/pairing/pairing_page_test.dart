@@ -21,6 +21,65 @@ import '../../helpers/widget_helpers.dart';
 void main() {
   group('PairingPage', () {
     testWidgets(
+      'signed-in onboarding has ordered actions and switcher Add stays separate',
+      (tester) async {
+        var found = false;
+        var created = false;
+        for (final hasCommunities in [true, false]) {
+          await tester.pumpWidget(
+            WidgetHelpers.testable(
+              child: PairingPage(
+                connectionLanding: true,
+                signedInOnboarding: true,
+                hasKnownCommunities: hasCommunities,
+                onBuilderlab: () => found = true,
+                onCreateCommunity: () => created = true,
+                onCommunityLink: () {},
+                onWelcomeBack: () {},
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+          expect(find.bySemanticsLabel('Buzz'), findsNothing);
+          expect(find.text('Scan a QR code'), findsOneWidget);
+          expect(find.text('Enter community link'), findsOneWidget);
+          expect(find.text('Create a community'), findsOneWidget);
+          expect(
+            find.text('Find my communities'),
+            hasCommunities ? findsOneWidget : findsNothing,
+          );
+          expect(
+            tester.getTopLeft(find.text('Scan a QR code')).dy,
+            lessThan(tester.getTopLeft(find.text('Enter community link')).dy),
+          );
+          if (hasCommunities) {
+            await tester.tap(find.text('Find my communities'));
+            expect(found, isTrue);
+          }
+          await tester.tap(find.text('Create a community'));
+          expect(created, isTrue);
+        }
+        await tester.pumpWidget(
+          WidgetHelpers.testable(
+            child: PairingPage(
+              connectionLanding: true,
+              addingCommunity: true,
+              onWelcomeBack: () {},
+              onCommunityLink: () {},
+              onBuilderlab: () {},
+              onCreateCommunity: () {},
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Scan a QR code'), findsOneWidget);
+        expect(find.text('Enter a community link'), findsOneWidget);
+        expect(find.text('Find my communities'), findsNothing);
+        expect(find.text('Create a community'), findsNothing);
+      },
+    );
+
+    testWidgets(
       'verified pairing stays on loading through transfer and import',
       (tester) async {
         final notifier = _ConfirmingSasPairingNotifier();

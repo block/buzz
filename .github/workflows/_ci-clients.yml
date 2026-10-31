@@ -177,6 +177,13 @@ jobs:
             ~/.gradle/wrapper
           key: gradle-${{ runner.os }}-${{ hashFiles('mobile/android/**/*.gradle*', 'mobile/android/gradle/wrapper/gradle-wrapper.properties', 'mobile/pubspec.lock') }}
           restore-keys: gradle-${{ runner.os }}-
+      # The Hermit package cache above holds only Flutter, so the build's first
+      # just and cmake calls download them.
+      - name: Fetch Hermit tools
+        if: matrix.lane == 'android'
+        run: |
+          scripts/ci-hermit-retry.sh ./bin/just --version
+          scripts/ci-hermit-retry.sh ./bin/cmake --version
       # SDK component and plugin downloads intermittently fail on hosted
       # runners; retry once only for those, so real build failures still fail.
       - name: Build Android debug APK
