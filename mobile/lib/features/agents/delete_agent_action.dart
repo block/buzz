@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/agents/owned_agent_directory.dart';
 import '../../shared/agents/remote_agents.dart';
 import '../../shared/community/community_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
@@ -70,6 +71,7 @@ class DeleteAgentAction extends HookConsumerWidget {
       );
       if (!context.mounted) return;
       ref.invalidate(agentDirectoryProvider);
+      ref.invalidate(ownedAgentDirectoryProvider);
       if (success) {
         Navigator.of(context).pop();
       } else {

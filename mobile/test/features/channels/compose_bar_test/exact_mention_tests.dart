@@ -78,6 +78,7 @@ void exactMentionTests() {
     'tainted',
     'non-member human',
     'non-member denied agent',
+    'non-member unlisted own agent',
   ]) {
     testWidgets('persisted selection restore to signed send: $scenario', (
       tester,
@@ -146,6 +147,7 @@ void exactMentionTests() {
           'removed',
           'non-member human',
           'non-member denied agent',
+          'non-member unlisted own agent',
         ].contains(scenario))
           ChannelMember(
             pubkey: first,
@@ -162,9 +164,13 @@ void exactMentionTests() {
               UserProfile(
                 pubkey: first,
                 displayName: 'Renamed',
-                ownerPubkey: scenario == 'non-member denied agent'
-                    ? second
-                    : null,
+                // An agent only an earlier Buzz runs is the viewer's own,
+                // but the Agents page does not list it.
+                ownerPubkey: switch (scenario) {
+                  'non-member denied agent' => second,
+                  'non-member unlisted own agent' => signer.public,
+                  _ => null,
+                },
               ),
             );
         await tester.pumpAndSettle();
