@@ -858,7 +858,7 @@ void main() {
         findsOneWidget,
       );
       final firstSaved = (await f.storage.loadAll()).firstWhere(
-        (c) => c.name == 'one.communities.buzz.xyz',
+        (c) => c.relayUrl == 'wss://one.communities.buzz.xyz',
       );
       Navigator.of(
         tester.element(find.byType(ProfileSetupPage, skipOffstage: false)),
@@ -882,16 +882,18 @@ void main() {
         isTrue,
       );
       expect(
-        saved.singleWhere((c) => c.name == 'one.communities.buzz.xyz').id,
+        saved
+            .singleWhere((c) => c.relayUrl == 'wss://one.communities.buzz.xyz')
+            .id,
         firstSaved.id,
       );
       expect(await f.storage.loadActiveId(), firstSaved.id);
       expect(
-        f.probes.where((c) => c.name == 'one.communities.buzz.xyz'),
+        f.probes.where((c) => c.relayUrl == 'wss://one.communities.buzz.xyz'),
         hasLength(1),
       );
       expect(
-        f.probes.where((c) => c.name == 'two.communities.buzz.xyz'),
+        f.probes.where((c) => c.relayUrl == 'wss://two.communities.buzz.xyz'),
         hasLength(2),
       );
       expect(find.byType(OnboardingAppEntry), findsNothing);
@@ -947,11 +949,14 @@ void main() {
         final communities = await f.storage.loadAll();
         expect(communities, hasLength(2));
         expect(
-          communities.map((c) => c.name),
-          containsAll(['one.communities.buzz.xyz', 'two.communities.buzz.xyz']),
+          communities.map((c) => c.relayUrl),
+          containsAll([
+            'wss://one.communities.buzz.xyz',
+            'wss://two.communities.buzz.xyz',
+          ]),
         );
         final saved = communities.singleWhere(
-          (c) => c.name == 'two.communities.buzz.xyz',
+          (c) => c.relayUrl == 'wss://two.communities.buzz.xyz',
         );
         expect(saved.nsec, f.keys.nsec);
         expect(saved.pubkey, f.keys.public);
