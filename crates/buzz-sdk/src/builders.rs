@@ -546,21 +546,81 @@ pub fn build_remove_reaction(reaction_event_id: nostr::EventId) -> Result<EventB
     Ok(EventBuilder::new(Kind::Custom(5), "").tags(tags))
 }
 
-/// d-tag for a member's own custom emoji set. Each member publishes one
-/// user-signed kind:30030 under this d-tag; the workspace palette is the
-/// client-side union of every member's set.
+/// d-tag for part 0 of a member's own custom emoji set. Each member publishes
+/// user-signed kind:30030 parts; the workspace palette is the client-side
+/// union of every member's parts. Part 0 keeps this legacy d-tag so clients
+/// that only know one set still see it.
 pub const CUSTOM_EMOJI_SET_D_TAG: &str = "buzz:custom-emoji";
+
+/// Highest part number a member's custom emoji set may use.
+pub const MAX_CUSTOM_EMOJI_SET_PART: u32 = 9999;
+
+/// Tag bytes one authored part may hold (~450 emoji). One event per part keeps
+/// every publish far below the relay's frame and body limits.
+pub const CUSTOM_EMOJI_PART_BYTES: usize = 60 * 1024;
+
+/// d-tag for one part of a member's custom emoji set: part 0 is the legacy
+/// `buzz:custom-emoji`, part n is `buzz:custom-emoji:n`.
+pub fn custom_emoji_set_d_tag(part: u32) -> String {
+    if part == 0 {
+        CUSTOM_EMOJI_SET_D_TAG.to_string()
+    } else {
+        format!("{CUSTOM_EMOJI_SET_D_TAG}:{part}")
+    }
+}
+
+/// Part number of a custom emoji set d-tag, or `None` for any other d-tag.
+/// Only canonical coordinates count: no leading zeros, no `:0`, at most
+/// [`MAX_CUSTOM_EMOJI_SET_PART`].
+pub fn custom_emoji_set_part(d_tag: &str) -> Option<u32> {
+    if d_tag == CUSTOM_EMOJI_SET_D_TAG {
+        return Some(0);
+    }
+    let digits = d_tag
+        .strip_prefix(CUSTOM_EMOJI_SET_D_TAG)?
+        .strip_prefix(':')?;
+    if digits.is_empty()
+        || digits.len() > 4
+        || digits.starts_with('0')
+        || !digits.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// Approximate serialized bytes of one `["emoji", shortcode, url]` tag, as
+/// counted against [`CUSTOM_EMOJI_PART_BYTES`].
+pub fn custom_emoji_tag_bytes(emoji: &CustomEmoji) -> usize {
+    emoji.shortcode.len() + emoji.url.len() + r#"["emoji","",""],"#.len()
+}
 
 /// Build a member's own custom emoji set event (kind:30030, NIP-30/NIP-51).
 ///
-/// User-signed and parameterized-replaceable, keyed by `(pubkey, 30030,
-/// "buzz:custom-emoji")`. Replaces the caller's prior set. The workspace
-/// palette shown in clients is the union of every member's set, deduped by
-/// `(shortcode, url)` on read. Add/remove is read-own-set → mutate → rebuild.
+/// Equivalent to [`build_custom_emoji_set_part`] for part 0.
 pub fn build_custom_emoji_set(emojis: &[CustomEmoji]) -> Result<EventBuilder, SdkError> {
+    build_custom_emoji_set_part(0, emojis)
+}
+
+/// Build one part of a member's own custom emoji set (kind:30030).
+///
+/// User-signed and parameterized-replaceable, keyed by `(pubkey, 30030,
+/// custom_emoji_set_d_tag(part))`. Replaces the caller's prior copy of that
+/// part only. The workspace palette shown in clients is the union of every
+/// member's parts. Shortcodes must be unique within the part; callers keep
+/// them unique across parts.
+pub fn build_custom_emoji_set_part(
+    part: u32,
+    emojis: &[CustomEmoji],
+) -> Result<EventBuilder, SdkError> {
+    if part > MAX_CUSTOM_EMOJI_SET_PART {
+        return Err(SdkError::InvalidInput(format!(
+            "emoji set part exceeds {MAX_CUSTOM_EMOJI_SET_PART} (got {part})"
+        )));
+    }
     let mut seen = std::collections::HashSet::with_capacity(emojis.len());
     let mut tags = Vec::with_capacity(emojis.len() + 1);
-    tags.push(tag(&["d", CUSTOM_EMOJI_SET_D_TAG])?);
+    tags.push(tag(&["d", &custom_emoji_set_d_tag(part)])?);
     for emoji in emojis {
         let shortcode = normalize_custom_emoji_shortcode(&emoji.shortcode)?;
         check_custom_emoji_url(&emoji.url)?;
@@ -3335,6 +3395,35 @@ mod tests {
         assert_eq!(ev.kind.as_u16(), 30030);
         assert!(has_tag(&ev, "d", CUSTOM_EMOJI_SET_D_TAG));
         assert!(has_tag(&ev, "emoji", "party"));
+    }
+
+    #[test]
+    fn custom_emoji_set_parts_keep_a_legacy_part_zero() {
+        assert_eq!(custom_emoji_set_d_tag(0), CUSTOM_EMOJI_SET_D_TAG);
+        assert_eq!(custom_emoji_set_d_tag(42), "buzz:custom-emoji:42");
+        for (d, part) in [
+            ("buzz:custom-emoji", Some(0)),
+            ("buzz:custom-emoji:1", Some(1)),
+            ("buzz:custom-emoji:9999", Some(9999)),
+            ("buzz:custom-emoji:0", None),
+            ("buzz:custom-emoji:01", None),
+            ("buzz:custom-emoji:10000", None),
+            ("buzz:custom-emoji:+1", None),
+            ("buzz:custom-emoji:", None),
+            ("buzz:custom-emojis", None),
+            ("someone-elses-pack", None),
+        ] {
+            assert_eq!(custom_emoji_set_part(d), part, "{d}");
+        }
+        let emoji = CustomEmoji {
+            shortcode: "Party".to_string(),
+            url: "https://example.com/party.png".to_string(),
+        };
+        let ev = sign(build_custom_emoji_set_part(3, std::slice::from_ref(&emoji)).unwrap());
+        assert_eq!(ev.kind.as_u16(), 30030);
+        assert!(has_tag(&ev, "d", "buzz:custom-emoji:3"));
+        assert!(has_tag(&ev, "emoji", "party"));
+        assert!(build_custom_emoji_set_part(MAX_CUSTOM_EMOJI_SET_PART + 1, &[emoji]).is_err());
     }
 
     #[test]

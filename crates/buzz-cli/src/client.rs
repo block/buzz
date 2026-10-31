@@ -152,7 +152,7 @@ fn env_duration_secs(name: &str, default: u64) -> Duration {
 /// and the character `s`. Works on both extracted field values (`rate-limited:
 /// quota exceeded; retry in 4s`) and substrings of raw relay JSON bodies.
 /// Returns `None` when the pattern is absent or the digit sequence is empty.
-fn parse_retry_hint_text(text: &str) -> Option<u64> {
+pub(crate) fn parse_retry_hint_text(text: &str) -> Option<u64> {
     const PREFIX: &str = "retry in ";
     let after = text.find(PREFIX).map(|i| &text[i + PREFIX.len()..])?;
     let end = after
@@ -1215,7 +1215,12 @@ impl BuzzClient {
 
         let bytes = std::fs::read(file_path)
             .map_err(|e| CliError::Other(format!("failed to read {file_path}: {e}")))?;
+        self.upload_bytes(bytes).await
+    }
 
+    /// Upload in-memory bytes to the relay's Blossom endpoint.
+    /// Returns a BlobDescriptor on success.
+    pub async fn upload_bytes(&self, bytes: Vec<u8>) -> Result<BlobDescriptor, CliError> {
         // 2. Detect MIME from magic bytes
         let mime = infer::get(&bytes)
             .map(|t| t.mime_type().to_string())
