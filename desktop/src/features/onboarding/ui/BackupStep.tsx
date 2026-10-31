@@ -154,13 +154,13 @@ export function BackupStep({
 
   const storageDescription =
     identityStorage === "system-keyring"
-      ? "Buzz keeps your identity key in your system keychain. Your computer may ask for your password when Buzz needs to read the key."
+      ? "Buzz keeps your identity key in the configured machine-local secret provider. Buzz never asks the operating-system keychain to unlock it."
       : identityStorage === "local-file"
-        ? "Your system keychain wasn’t available, so Buzz keeps your identity key in a private file on this device."
+        ? "This legacy installation stores the identity in a private device file. Re-import it to migrate into the local secret provider."
         : "Buzz keeps your identity key protected on this device. Make a separate backup in case you lose access.";
   const storageTitle =
     identityStorage === "system-keyring"
-      ? "Protected by your system keychain"
+      ? "Protected by the local secret provider"
       : identityStorage === "local-file"
         ? "Stored in private device storage"
         : "Protected in private device storage";

@@ -82,6 +82,7 @@ export function rustFile(file) {
 export const nodeTestArgs = (file) =>
   file.endsWith(".jsdom-test.mjs")
     ? [
+        "--no-experimental-webstorage",
         "--import",
         "./test-jsdom-setup.mjs",
         "--import",
@@ -90,7 +91,13 @@ export const nodeTestArgs = (file) =>
         "--test-force-exit",
         "--test",
       ]
-    : ["--import", "./test-loader.mjs", "--experimental-strip-types", "--test"];
+    : [
+        "--no-experimental-webstorage",
+        "--import",
+        "./test-loader.mjs",
+        "--experimental-strip-types",
+        "--test",
+      ];
 // Mirrors the mobile test shards in .github/workflows/_ci-clients.yml.
 export const dartDefine =
   "--dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example";
