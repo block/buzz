@@ -543,17 +543,21 @@ extension _ObservedUnreadRecording on ChannelsNotifier {
     bool countQuiet = false,
   }) {
     if (!countQuiet && isQuietAgentMessage(event.tags)) return;
+    // A counted quiet event is only a backlog marker: it never earns attention
+    // through its mentions or thread.
     final isThreadedReply =
-        event.threadReference.parentId != null && !_isBroadcastReply(event);
+        !countQuiet &&
+        event.threadReference.parentId != null &&
+        !_isBroadcastReply(event);
     final isHighPriority =
-        channel.isDm || isHighPriorityEvent(event.tags, myPk);
+        channel.isDm || (!countQuiet && isHighPriorityEvent(event.tags, myPk));
     recordObservedUnreadEvent(
       _observedUnreadEventsByChannel,
       channel.id,
       makeObservedUnreadEvent(
         id: event.id,
         createdAt: event.createdAt,
-        rootId: _observedUnreadRootId(event),
+        rootId: countQuiet ? null : _observedUnreadRootId(event),
         highPriority: isHighPriority,
         channelType: channel.channelType,
         isThreadedReply: isThreadedReply,

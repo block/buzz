@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
@@ -2054,7 +2055,8 @@ void main() {
     });
 
     // Quiet messages that fill the bounded catch-up window can hide an older
-    // unread event, so the full window still counts its oldest one.
+    // unread event, so the full window still counts its oldest one, as plain
+    // backlog even when it mentions the reader.
     for (final (count, expected) in [
       (999, <String>[]),
       (1000, ['quiet-0']),
@@ -2065,7 +2067,7 @@ void main() {
           metadata: [_meta(id: _channelA, name: 'general')],
           recentMessages: [
             for (var i = count - 1; i >= 0; i--)
-              message('quiet-$i', 100 + i, quiet: true),
+              message('quiet-$i', 100 + i, mention: true, quiet: true),
           ],
         );
         final container = _buildContainer(session: session);
@@ -2078,6 +2080,12 @@ void main() {
           notifier.observedUnreadEventsByChannel[_channelA]?.keys ?? const [],
           expected,
         );
+        for (final event
+            in notifier.observedUnreadEventsByChannel[_channelA]?.values ??
+                const <ObservedUnreadEvent>[]) {
+          expect(event.highPriority, isFalse);
+          expect(event.channelCatchUp, isTrue);
+        }
       });
     }
 
