@@ -75,6 +75,7 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | **Join request (kind:9021)** | ✅ | Open channels only. Adds the joiner with the channel's `join_role` (`member` by default), emits system message + group discovery events + kind:44100 membership notification. Private channels rejected at ingest. |
 | **Edits (kind:40003)** | ⚠️ | Works on the wire but Buzz-only — no standard NIP-29 client renders these |
 | **Rich content (kind:40002)** | ⚠️ | Works on the wire but Buzz-only — no standard NIP-29 client renders these |
+| **Pinned messages (kind:40004)** | ⚠️ | Buzz-only. `h` = channel, one `e` = a live message of that channel; unpin = delete the pin event (kind:5 by its author, kind:9005 by a channel admin) |
 
 ### What Doesn't Work
 

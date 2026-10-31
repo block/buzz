@@ -38,6 +38,10 @@ pub mod moderation_authz;
 pub mod moderation_commands;
 /// Relay-signed moderation notice DMs.
 pub mod moderation_notices;
+/// kind:40004 pinned-message validation.
+pub(crate) mod pins;
+#[cfg(test)]
+mod pins_postgres_tests;
 /// Product-feedback validation + deployment sidecar persistence.
 pub mod product_feedback;
 #[allow(dead_code, missing_docs)]
