@@ -293,7 +293,8 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     }.withRenderingMode(.alwaysOriginal)
   }
 
-  /// Mirrors avatar_shape.dart and desktop's avatar-squircle.svg.
+  /// Mirrors avatar_shape.dart and desktop's `ROUNDED_SQUIRCLE_PATH`
+  /// (desktop/src/shared/ui/AvatarClipPaths.tsx).
   private static func agentSquircle(_ rect: CGRect) -> UIBezierPath {
     func at(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
       CGPoint(x: rect.minX + rect.width * x, y: rect.minY + rect.height * y)
