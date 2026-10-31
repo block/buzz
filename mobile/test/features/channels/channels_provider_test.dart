@@ -83,6 +83,84 @@ void main() {
     expect(session.directoryQueryFilters, hasLength(reads * 2));
   });
 
+  test(
+    'ensureDirectoryLoaded reads again after the community switches away and back',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: const [],
+        metadata: [_meta(id: _channelA, name: 'general')],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      final config = container.read(relayConfigProvider.notifier);
+      final communityA = container.read(relayConfigProvider).baseUrl;
+      const maxAge = Duration(hours: 1);
+
+      await container
+          .read(channelsProvider.notifier)
+          .ensureDirectoryLoaded(maxAge: maxAge);
+      expect(container.read(channelsProvider).requireValue.map((c) => c.id), [
+        _channelA,
+      ]);
+
+      // Switch to B without loading its directory, then back to A. The switch
+      // drops A's cached directory, so A's earlier load no longer serves it.
+      config.update(baseUrl: 'https://community-b.example');
+      await container.read(channelsProvider.future);
+      config.update(baseUrl: communityA);
+      await container.read(channelsProvider.future);
+      final reads = session.directoryQueryFilters.length;
+
+      await container
+          .read(channelsProvider.notifier)
+          .ensureDirectoryLoaded(maxAge: maxAge);
+      expect(session.directoryQueryFilters.length, greaterThan(reads));
+      expect(container.read(channelsProvider).requireValue.map((c) => c.id), [
+        _channelA,
+      ]);
+    },
+  );
+
+  test('a directory load during the first channel load waits for it', () async {
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk)],
+      metadata: [
+        _meta(id: _channelA, name: 'general'),
+        _meta(id: _channelB, name: 'discoverable'),
+      ],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+    final sub = container.listen(channelsProvider, (_, _) {});
+    addTearDown(sub.close);
+
+    // Search starts while the first load's member metadata is held.
+    session.pauseNextMemberMetadataQuery();
+    container.read(channelsProvider);
+    await session.nextMemberMetadataQueryStarted;
+    final directory = container
+        .read(channelsProvider.notifier)
+        .ensureDirectoryLoaded(maxAge: const Duration(seconds: 30));
+    await _settle();
+
+    // The first load's reply arrives last. It must not replace the list.
+    session.resumePausedMemberMetadataQuery();
+    await directory;
+    await _settle();
+
+    final state = container.read(channelsProvider);
+    expect(state.hasError, isFalse);
+    expect(
+      state.requireValue.map((c) => c.id),
+      unorderedEquals([_channelA, _channelB]),
+    );
+    expect(
+      container.read(channelDirectoryLoadStatusProvider).status,
+      ChannelDirectoryLoadStatus.loaded,
+    );
+  });
+
   test('paginates channel discovery with a composite cursor', () async {
     final firstPage = List.generate(
       500,

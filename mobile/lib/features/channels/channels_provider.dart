@@ -76,6 +76,9 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   String? _memberSnapshotPubkey;
   Map<String, List<ChannelMember>> _memberSnapshotsByChannelId = const {};
   List<NostrEvent> _directoryMetas = const [];
+  // The scope [_directoryMetas] came from. A community switch drops them, so
+  // the directory status alone cannot say this scope's directory is cached.
+  String? _directoryMetasScope;
   Set<String> _hiddenDmIds = const {};
 
   /// Fences directory responses to the relay and identity that requested them.
@@ -173,6 +176,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _memberSnapshotPubkey = pubkey;
       _memberSnapshotsByChannelId = const {};
       _directoryMetas = const [];
+      _directoryMetasScope = null;
       _hiddenDmIds = const {};
       // Retire any in-flight directory request: its response describes the
       // previous relay or identity and must not reach this scope's state.
@@ -340,7 +344,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // ever regresses. The composite cursor preserves tied-timestamp rows.
     if (fetchDirectory) {
       final metas = await _refreshCoordinator.loadDirectory(session, fence);
-      if (metas != null) _directoryMetas = metas;
+      if (metas != null) {
+        _directoryMetas = metas;
+        _directoryMetasScope = fence.scope;
+      }
     }
 
     // Merge and dedupe by `d` tag. Kind:39000 is parameterized-replaceable,
@@ -1073,6 +1080,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     final loadedAt = directoryState.loadedAt;
     final fresh =
         directoryState.status == ChannelDirectoryLoadStatus.loaded &&
+        _directoryMetasScope == scope &&
         (maxAge == null ||
             (loadedAt != null && DateTime.now().difference(loadedAt) < maxAge));
     if (directoryState.scope == scope &&
@@ -1085,7 +1093,6 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
   /// Retries channel discovery while retaining the current channel list.
   Future<void> retryDirectory() async {
-    final previousChannels = state.value;
     final directoryStatus = ref.read(
       channelDirectoryLoadStatusProvider.notifier,
     );
@@ -1102,6 +1109,16 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       directoryStatus.markError(scope);
       return;
     }
+    // Let a pending first load finish, as fetchFresh does. This request
+    // would retire it, and its late failure would replace the list.
+    final generation = _buildGeneration;
+    try {
+      await future;
+    } catch (_) {
+      // A failed first load must not prevent the directory request.
+    }
+    if (!ref.mounted || generation != _buildGeneration) return;
+    final previousChannels = state.value;
     try {
       state = AsyncData(
         await _fetch(subscribeLive: true, fetchDirectory: true),
