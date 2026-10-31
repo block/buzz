@@ -36,16 +36,21 @@ class _MessageGalleryPrecache extends HookWidget {
   }
 }
 
+// Loads that leave the window are abandoned, so scrolling past previews on a
+// slow link frees both workers instead of finishing downloads nobody needs.
 class _GalleryPrecache {
   BuildContext? _context;
   List<ImageProvider<Object>> _window = [];
   final _ready = <ImageProvider<Object>>{};
-  final _loading = <ImageProvider<Object>>{};
+  final _loading = <ImageProvider<Object>, _PrecacheLoad>{};
 
   void update(BuildContext context, List<ImageProvider<Object>> window) {
     _context = context;
     _window = window;
     _ready.removeWhere((provider) => !window.contains(provider));
+    for (final provider in _loading.keys.toList()) {
+      if (!window.contains(provider)) _loading.remove(provider)!.cancel();
+    }
     _drain();
   }
 
@@ -54,17 +59,18 @@ class _GalleryPrecache {
     if (context == null || !context.mounted) return;
     for (final provider in _window) {
       if (_loading.length >= 2) break;
-      if (_ready.contains(provider) || _loading.contains(provider)) continue;
-      _loading.add(provider);
-      unawaited(_load(context, provider));
+      if (_ready.contains(provider) || _loading.containsKey(provider)) continue;
+      final load = _loading[provider] = _PrecacheLoad(
+        provider,
+        createLocalImageConfiguration(context),
+        () => _finish(provider),
+      );
+      // A cached image settles synchronously, so start once it is tracked.
+      load.start();
     }
   }
 
-  Future<void> _load(
-    BuildContext context,
-    ImageProvider<Object> provider,
-  ) async {
-    await precacheImage(provider, context, onError: (_, _) {});
+  void _finish(ImageProvider<Object> provider) {
     _loading.remove(provider);
     if (_window.contains(provider)) _ready.add(provider);
     _drain();
@@ -74,6 +80,45 @@ class _GalleryPrecache {
     _context = null;
     _window = [];
     _ready.clear();
+    for (final load in _loading.values) {
+      load.cancel();
+    }
+    _loading.clear();
+  }
+}
+
+// Like precacheImage, but cancellable before the first frame.
+class _PrecacheLoad {
+  _PrecacheLoad(this.provider, this.config, this.onDone);
+
+  final ImageProvider<Object> provider;
+  final ImageConfiguration config;
+  final VoidCallback onDone;
+  late final _stream = provider.resolve(config);
+  late final _listener = ImageStreamListener((image, _) {
+    image.dispose();
+    _settle();
+  }, onError: (_, _) => _settle());
+  bool _settled = false;
+
+  void start() => _stream.addListener(_listener);
+
+  void _settle() {
+    if (_settled) return;
+    _settled = true;
+    // Like precacheImage, keep listening until the end of the frame so a
+    // widget can subscribe before the image cache may drop the live image.
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _stream.removeListener(_listener),
+    );
+    onDone();
+  }
+
+  void cancel() {
+    if (_settled) return;
+    _settled = true;
+    _stream.removeListener(_listener);
+    abandonPendingImage(provider, config);
   }
 }
 

@@ -7,6 +7,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
+import '../relay/media_image.dart';
+
 /// UIKit's horizontally scrolling photo strip, using the app's image providers.
 /// Authentication and image-cache isolation remain owned by Flutter.
 class IosMediaCarousel extends HookWidget {
@@ -164,15 +166,8 @@ class _CarouselImages {
     if (!image.encoding) _finish(image);
   }
 
-  // Before its first frame, the image cache holds its own listener on the
-  // load, so removing ours alone would leave the download running.
   void _releasePending(_CarouselImage image) {
-    if (image.receivedFrame) return;
-    unawaited(
-      image.provider.obtainKey(image.config).then((key) {
-        PaintingBinding.instance.imageCache.evict(key);
-      }),
-    );
+    if (!image.receivedFrame) abandonPendingImage(image.provider, image.config);
   }
 
   void _drain() {

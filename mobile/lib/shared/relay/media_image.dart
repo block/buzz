@@ -233,6 +233,21 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       'MediaImageProvider("$url", scale: ${scale.toStringAsFixed(1)})';
 }
 
+/// Stops waiting for [provider]'s image before its first frame arrives.
+///
+/// Until then the image cache holds its own listener on the load, so removing
+/// a caller's listener alone leaves the download running. Evicting the pending
+/// entry drops that listener; once no other listener remains, a
+/// [MediaImageProvider] load aborts its download.
+void abandonPendingImage(
+  ImageProvider<Object> provider,
+  ImageConfiguration config,
+) {
+  unawaited(
+    provider.obtainKey(config).then(PaintingBinding.instance.imageCache.evict),
+  );
+}
+
 /// Thrown when a fetch is suppressed because the URL recently failed.
 class MediaImageCooldownException implements Exception {
   final String url;
