@@ -1905,6 +1905,38 @@ void main() {
         expect(tester.getSize(popover()).height, height);
       });
 
+      testWidgets('the chooser shows at most three rows, then scrolls', (
+        tester,
+      ) async {
+        final people = [
+          for (final (i, name) in ['Saba', 'Sage', 'Sasha', 'Selma'].indexed)
+            UserProfile(pubkey: '${'a' * 63}$i', displayName: '$name Person'),
+        ];
+        await pumpMembers(tester, [
+          'Sam',
+        ], searchPeople: (query) async => query == 'S' ? people : const []);
+        await tester.enterText(find.byType(TextField), '@S');
+        await tester.pump();
+        await settleSearch(tester);
+        final row = tester.getSize(
+          find.widgetWithText(ListTile, 'Saba Person'),
+        );
+        expect(tester.getSize(popover()).height, row.height * 3 + Grid.xxs * 2);
+      });
+
+      testWidgets('a running search shows a progress bar on the chooser', (
+        tester,
+      ) async {
+        final progress = find.byKey(const ValueKey('mention-search-progress'));
+        await pumpMembers(tester, ['Sam']);
+        await tester.enterText(find.byType(TextField), '@S');
+        await tester.pump();
+        expect(progress, findsOneWidget);
+        expect(tester.getTopLeft(progress).dy, tester.getTopLeft(popover()).dy);
+        await settleSearch(tester);
+        expect(progress, findsNothing);
+      });
+
       testWidgets('a DM finds directory people too, marked not in DM', (
         tester,
       ) async {

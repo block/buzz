@@ -1,6 +1,10 @@
 part of '../compose_bar.dart';
 
-const _mentionChooserHeight = 240.0;
+/// A mention row with its info line: a dense, compact two-line `ListTile`.
+const _mentionRowHeight = 59.0;
+
+/// The chooser shows at most three rows, then scrolls.
+const _mentionChooserHeight = _mentionRowHeight * 3 + Grid.xxs * 2;
 
 class _MentionSuggestions extends StatelessWidget {
   final List<MentionCandidate> suggestions;
@@ -14,6 +18,10 @@ class _MentionSuggestions extends StatelessWidget {
   /// Hold the full height, rows at the top, so rows that join late fill
   /// empty space instead of pushing the shown rows up.
   final bool reserveHeight;
+
+  /// The directory search is still running: show a thin progress bar on the
+  /// top edge. It overlays the rows, so it never changes the height.
+  final bool searching;
   final VoidCallback? onRetry;
   final Map<String, UserProfile> userCache;
   final String? currentPubkey;
@@ -25,6 +33,7 @@ class _MentionSuggestions extends StatelessWidget {
     this.unavailable = const {},
     this.searchFailed = false,
     this.reserveHeight = false,
+    this.searching = false,
     this.onRetry,
     required this.userCache,
     required this.currentPubkey,
@@ -43,76 +52,96 @@ class _MentionSuggestions extends StatelessWidget {
       shadowColor: appPopoverShadowColor(context),
       shape: appPopoverShape(context),
       clipBehavior: Clip.hardEdge,
-      child: ConstrainedBox(
-        constraints: BoxConstraints(
-          minHeight: reserveHeight ? _mentionChooserHeight : 0,
-          maxHeight: _mentionChooserHeight,
-        ),
-        child: ListView.separated(
-          shrinkWrap: true,
-          padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
-          itemCount: suggestions.length + (searchFailed ? 1 : 0),
-          separatorBuilder: (_, _) => const SizedBox.shrink(),
-          itemBuilder: (context, index) {
-            if (index == suggestions.length) {
-              return ListTile(
-                key: const ValueKey('mention-search-error'),
-                dense: true,
-                visualDensity: VisualDensity.compact,
-                title: Text(
-                  'Could not search community people.',
-                  style: context.textTheme.bodySmall?.copyWith(
-                    color: context.colors.error,
-                  ),
-                ),
-                trailing: TextButton(
-                  onPressed: onRetry == null
-                      ? null
-                      : () => _runComposerAction(onRetry!),
-                  child: const Text('Retry'),
-                ),
-              );
-            }
-            final candidate = suggestions[index];
-            final name = candidate.pickerLabel;
-            final avatarUrl =
-                candidate.avatarUrl ?? userCache[candidate.pubkey]?.avatarUrl;
+      child: Stack(
+        children: [
+          _rows(context),
+          if (searching)
+            const Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: LinearProgressIndicator(
+                key: ValueKey('mention-search-progress'),
+                minHeight: 2,
+                backgroundColor: Colors.transparent,
+                semanticsLabel: 'Searching people',
+              ),
+            ),
+        ],
+      ),
+    );
+  }
 
-            final available = !unavailable.contains(candidate.pubkey);
+  Widget _rows(BuildContext context) {
+    return ConstrainedBox(
+      constraints: BoxConstraints(
+        minHeight: reserveHeight ? _mentionChooserHeight : 0,
+        maxHeight: _mentionChooserHeight,
+      ),
+      child: ListView.separated(
+        shrinkWrap: true,
+        padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+        itemCount: suggestions.length + (searchFailed ? 1 : 0),
+        separatorBuilder: (_, _) => const SizedBox.shrink(),
+        itemBuilder: (context, index) {
+          if (index == suggestions.length) {
             return ListTile(
-              enabled: available,
+              key: const ValueKey('mention-search-error'),
               dense: true,
               visualDensity: VisualDensity.compact,
-              leading: AvatarImage(
-                imageUrl: avatarUrl,
-                radius: 18,
-                backgroundColor: context.controlSurface,
-                fallback: Text(
-                  // Name-derived for named candidates; keyed to the hex
-                  // public key for unnamed ones so the compact-npub label
-                  // doesn't render `N` for everyone.
-                  candidate.initial,
-                  style: context.textTheme.labelMedium?.copyWith(
-                    color: context.colors.onPrimaryContainer,
-                    fontWeight: FontWeight.w600,
-                  ),
+              title: Text(
+                'Could not search community people.',
+                style: context.textTheme.bodySmall?.copyWith(
+                  color: context.colors.error,
                 ),
-                isAgent: candidate.isAgent,
               ),
-              title: Text(name, style: context.textTheme.titleSmall),
-              subtitle: _MentionSuggestionInfo.build(
-                context,
-                candidate: candidate,
-                currentPubkey: currentPubkey,
-                isDmChannel: isDmChannel,
-                userCache: userCache,
+              trailing: TextButton(
+                onPressed: onRetry == null
+                    ? null
+                    : () => _runComposerAction(onRetry!),
+                child: const Text('Retry'),
               ),
-              onTap: available
-                  ? () => _runComposerAction(() => onSelect(candidate))
-                  : null,
             );
-          },
-        ),
+          }
+          final candidate = suggestions[index];
+          final name = candidate.pickerLabel;
+          final avatarUrl =
+              candidate.avatarUrl ?? userCache[candidate.pubkey]?.avatarUrl;
+
+          final available = !unavailable.contains(candidate.pubkey);
+          return ListTile(
+            enabled: available,
+            dense: true,
+            visualDensity: VisualDensity.compact,
+            leading: AvatarImage(
+              imageUrl: avatarUrl,
+              radius: 18,
+              backgroundColor: context.controlSurface,
+              fallback: Text(
+                // Name-derived for named candidates; keyed to the hex
+                // public key for unnamed ones so the compact-npub label
+                // doesn't render `N` for everyone.
+                candidate.initial,
+                style: context.textTheme.labelMedium?.copyWith(
+                  color: context.colors.onPrimaryContainer,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              isAgent: candidate.isAgent,
+            ),
+            title: Text(name, style: context.textTheme.titleSmall),
+            subtitle: _MentionSuggestionInfo.build(
+              context,
+              candidate: candidate,
+              currentPubkey: currentPubkey,
+              isDmChannel: isDmChannel,
+              userCache: userCache,
+            ),
+            onTap: available
+                ? () => _runComposerAction(() => onSelect(candidate))
+                : null,
+          );
+        },
       ),
     );
   }

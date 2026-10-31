@@ -9,11 +9,13 @@ part of '../compose_bar.dart';
 /// for this query, `reserveHeight` holds the chooser at full height so a
 /// late row fills empty space instead of moving the row under a finger.
 /// The reservation lasts until the query or the opening changes.
+/// `searching` is true only while that search is still running.
 typedef _MentionRows = ({
   List<MentionCandidate> rows,
   Set<String> unavailable,
   bool searchFailed,
   bool reserveHeight,
+  bool searching,
 });
 
 _MentionRows _useMentionRows(
@@ -30,6 +32,7 @@ _MentionRows _useMentionRows(
       unavailable: const {},
       searchFailed: false,
       reserveHeight: false,
+      searching: false,
     );
   }
   final args = (channelId: channelId, query: query, opening: opening);
@@ -46,6 +49,7 @@ _MentionRows _useMentionRows(
     unavailable: result.unavailable,
     searchFailed: searchFailed,
     reserveHeight: reserveHeight,
+    searching: pending,
   );
 }
 
