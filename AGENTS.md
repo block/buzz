@@ -833,8 +833,8 @@ silently to all identities sharing a name. See `docs/mention-editor.md`.
 
 ### Slash command contract
 
-Composer slash commands are typed entry points to existing actions, shared by
-desktop and mobile. A draft that starts with a mention, or whose first token is
+Composer slash commands in the mobile app are typed entry points to existing
+actions. A draft that starts with a mention, or whose first token is
 not a Buzz command, sends unchanged so agents keep their own `/commands`.
 Failures keep the draft. See `docs/slash-commands.md` for recognition,
 autocomplete, the command set, and the `/remind` time grammar and vectors.
