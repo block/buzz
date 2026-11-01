@@ -44,6 +44,7 @@ void main() {
     );
     expect(find.byKey(ValueKey(otherAgentKeys.public)), findsNothing);
     expect(find.byKey(ValueKey('b' * 64)), findsNothing);
+    expect(find.byKey(ValueKey(oldAppAgentKeys.public)), findsNothing);
     if (!supportsRemoteAgents(h.community)) {
       expect(find.text('Sign in to create an agent'), findsNothing);
       for (final button in tester.widgetList<IconButton>(

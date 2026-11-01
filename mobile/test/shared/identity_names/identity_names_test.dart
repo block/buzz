@@ -2,6 +2,7 @@ import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
 import 'package:buzz/features/channels/mentions/mention_ranking.dart';
+import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/utils/string_utils.dart';
@@ -212,6 +213,7 @@ void main() {
         UserProfile(pubkey: myScout, displayName: 'Scout', ownerPubkey: _logan),
       ],
       currentPubkey: _logan,
+      ownedAgents: [OwnedAgentDirectoryEntry(pubkey: myScout)],
     );
     expect(candidates.map((c) => c.pubkey), [scout, myScout]);
     final names = mentionPickerNames(sources, candidates);
