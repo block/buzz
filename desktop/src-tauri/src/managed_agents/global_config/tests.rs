@@ -153,6 +153,19 @@ fn validate_accepts_valid_provider_and_model() {
     assert!(validate_global_config(&config).is_ok());
 }
 
+#[test]
+fn validate_rejects_provider_url_with_publishable_credentials() {
+    let config = GlobalAgentConfig {
+        provider: Some("https://user:secret@example.com/v1".to_string()),
+        ..Default::default()
+    };
+
+    let error = validate_global_config(&config).expect_err("unsafe provider URL must be rejected");
+
+    assert!(error.contains("cannot include credentials"));
+    assert!(!error.contains("secret"));
+}
+
 // ── normalize_global_config_fields ───────────────────────────────────────────
 
 #[test]

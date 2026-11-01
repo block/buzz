@@ -348,6 +348,13 @@ with a TypeScript lookup table or an id comparison in a component.
     for resets; owner replay of a redacted head preserves only a nonportable
     local override. That local path is not synchronized through catalog heads.
 
+20. **Provider translation belongs to runtime metadata.** When Buzz's canonical
+    provider ID or env names differ from what a harness reads, declare the
+    mapping on `KnownAcpRuntime` and apply it after effective config precedence
+    is resolved. Do not duplicate provider aliases in UI components or
+    individual readiness, discovery, and spawn call sites.
+
+
 ## Channel-only runtime controls
 
 Desktop observer controls identify a channel, not a thread session. The harness
