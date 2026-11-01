@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:buzz/features/channels/me/me_assistant_list.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/shared/me/default_agent.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -288,7 +289,7 @@ void main() {
       expect(find.text('Mobile app'), findsWidgets);
       await tester.tap(find.byKey(const ValueKey('new-session-project')));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Chats').last);
+      await tester.tap(find.text('No Workspace').last);
       await tester.pumpAndSettle();
       await tester.tap(find.text('Create chat'));
       await tester.pumpAndSettle();
@@ -390,10 +391,20 @@ void main() {
       expect(agentAction.label, 'Agent: Owner Name');
       expect(agentAction.sharesBackground, isFalse);
       final workspaceAction = chatBar.nativeActions!.first;
-      expect(workspaceAction.label, 'Workspace: Chats');
-      expect(workspaceAction.icon, BuzzIcons.folder);
+      expect(workspaceAction.label, 'Workspace: No Workspace');
+      expect(workspaceAction.icon, BuzzIcons.workspace);
       expect(workspaceAction.children.first.selected, isTrue);
       expect(workspaceAction.sharesBackground, isFalse);
+      agentAction.onPressed!();
+      await tester.pumpAndSettle();
+      expect(find.byType(BottomSheet), findsOneWidget);
+      expect(
+        tester.getSize(find.byType(MeAssistantList)).height,
+        lessThan(200),
+      );
+      await tester.tap(find.text('Owner Name').last);
+      await tester.pumpAndSettle();
+      expect(find.byType(BottomSheet), findsNothing);
       workspaceAction.children.last.onPressed!();
       await tester.pumpAndSettle();
       expect(

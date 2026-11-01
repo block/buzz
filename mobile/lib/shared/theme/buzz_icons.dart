@@ -5,6 +5,9 @@ import 'package:flutter/widgets.dart';
 /// Semantic names preserve existing call sites; artwork matches buzz-app.
 /// Native iOS controls share Tabler artwork except Back and Close navigation.
 abstract final class BuzzIcons {
+  /// Tabler `cube-3d-sphere`, matching the workspace control.
+  static const workspace = IconData(0xecd7, fontFamily: 'BuzzTabler');
+
   /// Tabler `filter-2`. Referenced from Dart so release icon pruning retains it.
   static const filter2 = IconData(0x1014b, fontFamily: 'BuzzTabler');
 

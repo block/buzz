@@ -43,7 +43,7 @@ class _Header extends HookConsumerWidget {
 
 void main() {
   testWidgets(
-    'workspace menu moves a chat into a workspace and back to Chats',
+    'workspace menu moves a chat into a workspace and back to No Workspace',
     (tester) async {
       final sync = _Sync();
       await tester.pumpWidget(
@@ -66,7 +66,7 @@ void main() {
       expect(sync.groups.assignments['chat'], 'work');
       await tester.tap(find.byType(PopupMenuButton<String>));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Chats'));
+      await tester.tap(find.text('No Workspace'));
       await tester.pumpAndSettle();
       expect(sync.groups.assignments.containsKey('chat'), isFalse);
       expect(sync.groups.assignments['other'], 'work');

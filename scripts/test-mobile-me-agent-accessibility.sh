@@ -7,8 +7,15 @@ flutter_root=$(sed -n 's/^FLUTTER_ROOT=//p' "$repo_root/mobile/ios/Flutter/Gener
 frameworks="$flutter_root/bin/cache/artifacts/engine/ios/Flutter.xcframework/ios-arm64_x86_64-simulator"
 fixture=$(mktemp -d)
 trap 'rm -r "$fixture"' EXIT
+# The standalone executable has no Flutter asset manifest. Keep the production
+# renderer and font, adjusting only asset lookup for this test bundle.
+mkdir -p "$fixture/flutter_assets/assets/fonts"
+cp "$repo_root/mobile/assets/fonts/TablerIcons.ttf" "$fixture/flutter_assets/assets/fonts/"
+sed 's/FlutterDartProject.lookupKey(forAsset: "assets\/fonts\/TablerIcons.ttf")/"flutter_assets\/assets\/fonts\/TablerIcons.ttf"/' \
+  "$repo_root/mobile/ios/Runner/NativeTabler.swift" > "$fixture/NativeTabler.swift"
 # Compile in one file to exercise the private production controller directly.
-cat "$repo_root/mobile/ios/Runner/MeAvatarLoader.swift" \
+cat "$fixture/NativeTabler.swift" \
+  "$repo_root/mobile/ios/Runner/MeAvatarLoader.swift" \
   "$repo_root/mobile/ios/Runner/NativeProfileTextEditor.swift" \
   "$repo_root/mobile/ios/NativeControlTests/MeAgentAccessibilityTests.swift" > "$fixture/test.swift"
 xcrun --sdk iphonesimulator swiftc -parse-as-library \

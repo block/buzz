@@ -47,7 +47,7 @@ class _ReadyMeChat extends HookConsumerWidget {
     final workspaceLabel =
         workspaces.where((g) => g['id'] == workspace.value).firstOrNull?['name']
             as String? ??
-        'Chats';
+        'No Workspace';
     return FrostedScaffold(
       appBar: FrostedAppBar(
         title: const Text('New chat'),
@@ -55,13 +55,13 @@ class _ReadyMeChat extends HookConsumerWidget {
         nativeActions: [
           IosNavigationAction(
             label: 'Workspace: $workspaceLabel',
-            icon: BuzzIcons.folder,
+            icon: BuzzIcons.workspace,
             sharesBackground: false,
             children: locked
                 ? const []
                 : [
                     IosNavigationAction(
-                      label: 'Chats',
+                      label: 'No Workspace',
                       selected: workspace.value == null,
                       onPressed: () => workspace.value = null,
                     ),
@@ -91,14 +91,14 @@ class _ReadyMeChat extends HookConsumerWidget {
           PopupMenuButton<String>(
             key: const ValueKey('new-session-project'),
             tooltip: 'Workspace: $workspaceLabel',
-            icon: const Icon(BuzzIcons.folder),
+            icon: const Icon(BuzzIcons.workspace),
             enabled: !locked,
             onSelected: (v) => workspace.value = v.isEmpty ? null : v,
             itemBuilder: (_) => [
               CheckedPopupMenuItem(
                 value: '',
                 checked: workspace.value == null,
-                child: const Text('Chats'),
+                child: const Text('No Workspace'),
               ),
               for (final group in workspaces)
                 CheckedPopupMenuItem(

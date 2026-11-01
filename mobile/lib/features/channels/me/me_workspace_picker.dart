@@ -20,7 +20,7 @@ import '../../../shared/widgets/ios_navigation_bar.dart';
   final label =
       groups?.groups.where((g) => g['id'] == current).firstOrNull?['name']
           as String? ??
-      'Chats';
+      'No Workspace';
   Future<void> choose(String? value) async {
     if (busy.value) return;
     busy.value = true;
@@ -53,13 +53,13 @@ import '../../../shared/widgets/ios_navigation_bar.dart';
   return (
     nativeAction: IosNavigationAction(
       label: 'Workspace: $label',
-      icon: BuzzIcons.folder,
+      icon: BuzzIcons.workspace,
       sharesBackground: false,
       children: !available
           ? const []
           : [
               IosNavigationAction(
-                label: 'Chats',
+                label: 'No Workspace',
                 selected: current == null,
                 onPressed: () => choose(null),
               ),
@@ -73,14 +73,14 @@ import '../../../shared/widgets/ios_navigation_bar.dart';
     ),
     action: PopupMenuButton<String>(
       tooltip: 'Workspace: $label',
-      icon: const Icon(BuzzIcons.folder),
+      icon: const Icon(BuzzIcons.workspace),
       enabled: available,
       onSelected: (v) => choose(v.isEmpty ? null : v),
       itemBuilder: (_) => [
         CheckedPopupMenuItem(
           value: '',
           checked: current == null,
-          child: const Text('Chats'),
+          child: const Text('No Workspace'),
         ),
         for (final group in groups?.groups ?? const <Map<String, dynamic>>[])
           CheckedPopupMenuItem(

@@ -654,8 +654,8 @@ private final class NativeProfileTextEditorViewController:
       let workspace = UIButton(type: .system)
       var workspaceStyle = chatControlConfiguration()
       workspaceStyle.baseForegroundColor = .label
-      workspaceStyle.image = UIImage(systemName: "folder")
-      workspaceStyle.title = projects.first { $0["id"] == selectedProject }?["name"] ?? (selectedProject == nil ? "Chats" : "Unavailable workspace")
+      workspaceStyle.image = NativeTabler.image("workspace")
+      workspaceStyle.title = projects.first { $0["id"] == selectedProject }?["name"] ?? (selectedProject == nil ? "No Workspace" : "Unavailable workspace")
       workspaceStyle.imagePlacement = .top
       workspaceStyle.imagePadding = 8
       workspace.tintColor = .label
@@ -667,7 +667,7 @@ private final class NativeProfileTextEditorViewController:
       workspace.accessibilityIdentifier = "new-session-project"
       workspace.isEnabled = !fieldsLocked
       workspace.showsMenuAsPrimaryAction = true
-      let choices = [["id": "", "name": "Chats"]] + projects
+      let choices = [["id": "", "name": "No Workspace"]] + projects
       workspace.menu = UIMenu(children: choices.map { project in
         let id = project["id"] ?? ""
         return UIAction(title: project["name"] ?? "Workspace", state: id == (selectedProject ?? "") ? .on : .off) { [weak self] _ in

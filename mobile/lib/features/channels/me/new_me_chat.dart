@@ -124,7 +124,7 @@ class _NewMeChat extends HookConsumerWidget {
                     PopupMenuButton<String>(
                       key: const ValueKey('new-session-project'),
                       tooltip: 'Workspace',
-                      icon: const Icon(BuzzIcons.folder),
+                      icon: const Icon(BuzzIcons.workspace),
                       initialValue: project.value ?? '',
                       enabled:
                           !busy.value &&
@@ -133,7 +133,10 @@ class _NewMeChat extends HookConsumerWidget {
                       onSelected: (value) =>
                           project.value = value.isEmpty ? null : value,
                       itemBuilder: (_) => [
-                        const PopupMenuItem(value: '', child: Text('Chats')),
+                        const PopupMenuItem(
+                          value: '',
+                          child: Text('No Workspace'),
+                        ),
                         for (final group
                             in groups.asData?.value.groups ??
                                 <Map<String, dynamic>>[])
@@ -145,7 +148,7 @@ class _NewMeChat extends HookConsumerWidget {
                     ),
                     Text(
                       project.value == null
-                          ? 'Chats'
+                          ? 'No Workspace'
                           : (groups.asData?.value.groups ??
                                         <Map<String, dynamic>>[])
                                     .where(

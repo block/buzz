@@ -35,11 +35,11 @@ struct MeAgentAccessibilityTests {
         precondition(agent.configuration?.image != nil)
         precondition(agent.isEnabled == !(locked || empty))
         precondition(project.accessibilityLabel == "Workspace")
-        precondition(project.accessibilityValue == "Chats")
+        precondition(project.accessibilityValue == "No Workspace")
         precondition(project.configuration?.image != nil)
         precondition(project.isEnabled == !locked)
         precondition(project.showsMenuAsPrimaryAction && project.menu != nil)
-        precondition((project.menu?.children.first as? UIAction)?.title == "Chats")
+        precondition((project.menu?.children.first as? UIAction)?.title == "No Workspace")
         let canSubmit = locked || !empty
         precondition(controller.navigationItem.rightBarButtonItem?.isEnabled == canSubmit)
         // Invoke the action even when disabled to check its independent gate.
