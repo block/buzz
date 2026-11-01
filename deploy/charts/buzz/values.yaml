@@ -37,6 +37,20 @@ image:
 # in Postgres. Each replica can use its own ReadWriteOnce volume (or none).
 replicaCount: 1
 
+# Relay Deployment update strategy. The default surges one extra pod and never
+# drops below the desired count, so a rollout briefly runs old and new pods side
+# by side. Switch to `type: Recreate` when that overlap is the problem:
+#   - the database sits behind a client-capped pooler (each relay pod holds its
+#     own writer/audit/search pools, so a rollout doubles connection demand), or
+#   - the ReadWriteOnce git PVC cannot attach to a second node mid-rollout.
+# Recreate trades that for a short outage on every rollout. `rollingUpdate` is
+# ignored when type is Recreate.
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 1
+    maxUnavailable: 0
+
 # ── Autoscaling ──────────────────────────────────────────────────────────────
 # Requires Metrics Server for CPU. Optional WebSocket scaling additionally
 # requires a custom-metrics adapter exposing its pod-level Prometheus gauge.
