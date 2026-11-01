@@ -100,9 +100,19 @@ pub struct RateLimitConfig {
     /// Maximum WebSocket events per second for human users. Default: 10.
     #[serde(default = "default_human_ws")]
     pub human_ws_events_per_sec: u64,
-    /// Maximum messages per minute for standard-tier agent tokens. Default: 120.
-    #[serde(default = "default_agent_std_msg")]
-    pub agent_standard_messages_per_min: u64,
+    /// Non-ephemeral events per minute that one owner's agents may publish
+    /// into one channel, shared by every agent key that owner has. Events
+    /// naming no channel share one more such budget. Default: 120.
+    #[serde(
+        default = "default_agent_channel_events",
+        alias = "agent_standard_messages_per_min"
+    )]
+    pub agent_channel_events_per_min: u64,
+    /// Non-ephemeral events per minute that one owner's agents may publish
+    /// across every channel, shared by every agent key that owner has.
+    /// Default: 600.
+    #[serde(default = "default_agent_owner_events")]
+    pub agent_owner_events_per_min: u64,
     /// Maximum HTTP API calls per minute for standard-tier agent tokens. Default: 600.
     #[serde(default = "default_agent_std_api")]
     pub agent_standard_api_calls_per_min: u64,
@@ -126,8 +136,11 @@ fn default_human_api() -> u64 {
 fn default_human_ws() -> u64 {
     10
 }
-fn default_agent_std_msg() -> u64 {
+fn default_agent_channel_events() -> u64 {
     120
+}
+fn default_agent_owner_events() -> u64 {
+    600
 }
 fn default_agent_std_api() -> u64 {
     600
@@ -146,12 +159,51 @@ impl Default for RateLimitConfig {
             gif_searches_per_min: default_gif_searches(),
             human_api_calls_per_min: default_human_api(),
             human_ws_events_per_sec: default_human_ws(),
-            agent_standard_messages_per_min: default_agent_std_msg(),
+            agent_channel_events_per_min: default_agent_channel_events(),
+            agent_owner_events_per_min: default_agent_owner_events(),
             agent_standard_api_calls_per_min: default_agent_std_api(),
             agent_elevated_messages_per_min: default_agent_elev_msg(),
             agent_platform_messages_per_min: default_agent_plat_msg(),
         }
     }
+}
+
+/// The two fixed-window budgets an agent's event is admitted against.
+///
+/// Both are keyed by the agent's owner, not the agent key, so every agent key
+/// an owner has draws on the same budgets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentEventBudget {
+    /// Window length in seconds, shared by both budgets.
+    pub window_secs: u64,
+    /// Events per window for one owner in one channel.
+    pub channel_limit: u64,
+    /// Events per window for one owner across all channels.
+    pub owner_limit: u64,
+}
+
+/// The agent event budget that refused an event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentBudgetScope {
+    /// The owner's budget in the event's channel.
+    Channel,
+    /// The owner's budget across all channels.
+    Owner,
+}
+
+/// Outcome of [`RateLimiter::check_agent_event`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentEventVerdict {
+    /// Both budgets had room; both counters advanced.
+    Admitted,
+    /// A budget was full; neither counter advanced.
+    Exceeded {
+        /// The budget that refused the event. When both are full this is
+        /// [`AgentBudgetScope::Owner`].
+        scope: AgentBudgetScope,
+        /// Seconds until every full budget's window resets.
+        reset_in_secs: u64,
+    },
 }
 
 /// Async rate-limiting interface.
@@ -165,6 +217,10 @@ impl Default for RateLimitConfig {
 /// key is community-prefixed (`buzz:{community}:ratelimit:{pubkey}:{suffix}`). The
 /// same pubkey active in two communities consumes two independent quotas — that is
 /// the correct behavior under multi-tenant isolation (S1 cross-community fence).
+///
+/// Agent event budgets ([`check_agent_event`]) are keyed by the agent's owner,
+/// also community-prefixed. Every agent key an owner has in a community draws
+/// on the same budgets, so minting more agent keys does not add capacity.
 ///
 /// IP-keyed limits ([`check_ip_connection`]) are **operator-global** by design. They
 /// gate connection acceptance at the network edge, before host→community resolution
@@ -190,6 +246,21 @@ pub trait RateLimiter: Send + Sync {
         window_secs: u64,
         limit: u64,
     ) -> impl std::future::Future<Output = Result<RateLimitResult, AuthError>> + Send;
+
+    /// Admit one agent event against its owner's budget in `channel` and its
+    /// owner's budget across all channels, both in `ctx`'s community.
+    ///
+    /// The check is atomic across relay instances. Both counters advance
+    /// together or not at all: a refused event consumes neither, so a channel
+    /// that is out of budget cannot spend the owner's budget for its other
+    /// channels. `channel` is `None` for an event that names no channel.
+    fn check_agent_event(
+        &self,
+        ctx: &TenantContext,
+        owner: &PublicKey,
+        channel: Option<uuid::Uuid>,
+        budget: AgentEventBudget,
+    ) -> impl std::future::Future<Output = Result<AgentEventVerdict, AuthError>> + Send;
 
     /// Increment the per-IP connection counter and return whether the connection
     /// is within `limit` for the given `window_secs`.
@@ -218,6 +289,36 @@ pub fn rate_limit_key(ctx: &TenantContext, pubkey: &PublicKey, limit_type: &Limi
     )
 }
 
+/// Redis key for an owner's agent events in one channel:
+/// `buzz:{community}:ratelimit:agent-owner:{{owner_hex}}:channel:{channel}`,
+/// where `{channel}` is `none` for events that name no channel.
+///
+/// The braces around the owner are a Redis Cluster hash tag. They put this key
+/// and [`agent_owner_budget_key`] in one slot, as the two-key admission
+/// script requires.
+pub fn agent_channel_budget_key(
+    ctx: &TenantContext,
+    owner: &PublicKey,
+    channel: Option<uuid::Uuid>,
+) -> String {
+    let channel = channel.map_or_else(|| "none".to_owned(), |channel| channel.to_string());
+    format!(
+        "buzz:{}:ratelimit:agent-owner:{{{}}}:channel:{channel}",
+        ctx.community(),
+        owner.to_hex()
+    )
+}
+
+/// Redis key for an owner's agent events across all channels:
+/// `buzz:{community}:ratelimit:agent-owner:{{owner_hex}}:all`.
+pub fn agent_owner_budget_key(ctx: &TenantContext, owner: &PublicKey) -> String {
+    format!(
+        "buzz:{}:ratelimit:agent-owner:{{{}}}:all",
+        ctx.community(),
+        owner.to_hex()
+    )
+}
+
 /// Redis key for IP-based rate limit: `buzz:ratelimit:ip:{ip}:conn`.
 ///
 /// Operator-global by design — see [`RateLimiter`] docs.
@@ -240,6 +341,16 @@ impl RateLimiter for AlwaysAllowRateLimiter {
         limit: u64,
     ) -> Result<RateLimitResult, AuthError> {
         Ok(RateLimitResult::allowed(1, limit, window_secs))
+    }
+
+    async fn check_agent_event(
+        &self,
+        _ctx: &TenantContext,
+        _owner: &PublicKey,
+        _channel: Option<uuid::Uuid>,
+        _budget: AgentEventBudget,
+    ) -> Result<AgentEventVerdict, AuthError> {
+        Ok(AgentEventVerdict::Admitted)
     }
 
     async fn check_ip_connection(
@@ -325,6 +436,73 @@ mod tests {
                 "rate-limit key {key} must be all-lowercase ASCII"
             );
         }
+    }
+
+    #[test]
+    fn agent_budget_keys_are_scoped_by_community_owner_and_channel() {
+        let owner = Keys::generate().public_key();
+        let ctx_a = fixture_ctx("relay-a.example");
+        let ctx_b = fixture_ctx("relay-b.example");
+        let (one, two) = (Uuid::new_v4(), Uuid::new_v4());
+
+        let channel_one = agent_channel_budget_key(&ctx_a, &owner, Some(one));
+        assert_eq!(
+            channel_one,
+            format!(
+                "buzz:{}:ratelimit:agent-owner:{{{}}}:channel:{one}",
+                ctx_a.community(),
+                owner.to_hex()
+            )
+        );
+        assert_eq!(
+            agent_owner_budget_key(&ctx_a, &owner),
+            format!(
+                "buzz:{}:ratelimit:agent-owner:{{{}}}:all",
+                ctx_a.community(),
+                owner.to_hex()
+            )
+        );
+        let distinct = [
+            channel_one,
+            agent_channel_budget_key(&ctx_a, &owner, Some(two)),
+            agent_channel_budget_key(&ctx_a, &owner, None),
+            agent_owner_budget_key(&ctx_a, &owner),
+            agent_channel_budget_key(&ctx_b, &owner, Some(one)),
+            agent_owner_budget_key(&ctx_b, &owner),
+            agent_owner_budget_key(&ctx_a, &Keys::generate().public_key()),
+        ];
+        let unique: std::collections::HashSet<_> = distinct.iter().collect();
+        assert_eq!(unique.len(), distinct.len(), "{distinct:#?}");
+    }
+
+    #[test]
+    fn agent_budget_keys_share_one_cluster_hash_tag() {
+        // The admission script touches both keys, which Redis Cluster allows
+        // only when they hash to one slot.
+        fn hash_tag(key: &str) -> &str {
+            let open = key.find('{').expect("hash tag opens");
+            let close = key[open..].find('}').expect("hash tag closes") + open;
+            &key[open + 1..close]
+        }
+        let ctx = fixture_ctx("relay-a.example");
+        let owner = Keys::generate().public_key();
+        let channel = agent_channel_budget_key(&ctx, &owner, Some(Uuid::new_v4()));
+        let all = agent_owner_budget_key(&ctx, &owner);
+        assert_eq!(hash_tag(&channel), owner.to_hex());
+        assert_eq!(hash_tag(&all), owner.to_hex());
+    }
+
+    #[test]
+    fn agent_budget_defaults_and_legacy_config_name() {
+        let defaults = RateLimitConfig::default();
+        assert_eq!(defaults.agent_channel_events_per_min, 120);
+        assert_eq!(defaults.agent_owner_events_per_min, 600);
+        // A config written for the per-agent-key budget keeps meaning one
+        // agent's allowance in a channel.
+        let legacy: RateLimitConfig =
+            serde_json::from_str(r#"{"agent_standard_messages_per_min": 90}"#).unwrap();
+        assert_eq!(legacy.agent_channel_events_per_min, 90);
+        assert_eq!(legacy.agent_owner_events_per_min, 600);
     }
 
     #[test]

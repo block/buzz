@@ -801,6 +801,15 @@ impl ConnectionManager {
         }
     }
 
+    /// Owner recorded for the agent admitted on `conn_id`: its proven NIP-OA
+    /// or token owner, else its stored `users.agent_owner_pubkey`. `None` for
+    /// a socket with no agent owner, or before AUTH records one.
+    pub fn admitted_owner(&self, conn_id: Uuid) -> Option<[u8; 32]> {
+        self.connections
+            .get(&conn_id)
+            .and_then(|entry| entry.admitted_owner.get().copied())
+    }
+
     /// Mark `conn_id` admitted, once AUTH has succeeded.
     pub fn mark_admitted(&self, conn_id: Uuid) {
         if let Some(entry) = self.connections.get(&conn_id) {
@@ -1387,6 +1396,13 @@ pub struct AppState {
     /// first-write-wins and set during auth before an agent's first event,
     /// so a short TTL only bounds staleness for the rare backfill race.
     pub author_type_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), bool>>,
+    /// Stored agent owner (`users.agent_owner_pubkey`) that HTTP-published
+    /// agent events are budgeted to. Key: (community, agent pubkey). Value:
+    /// the owner, or `None` for a key with no owner. An owner, once stored,
+    /// never changes; the 60s TTL bounds how long a key linked on another pod
+    /// keeps a cached `None`. Lookup errors are not cached.
+    #[allow(clippy::type_complexity)]
+    pub agent_owner_cache: Arc<moka::sync::Cache<(CommunityId, [u8; 32]), Option<[u8; 32]>>>,
     /// Ephemeral-path cache of `is_serving_active` (community not archived or
     /// deleted). Key: community. TTL only (10s). Persistent ingest keeps the
     /// uncached read as its durable write fence; on the ephemeral path archive
@@ -1672,6 +1688,12 @@ impl AppState {
                 moka::sync::Cache::builder()
                     .max_capacity(10_000)
                     .time_to_live(std::time::Duration::from_secs(300))
+                    .build(),
+            ),
+            agent_owner_cache: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(100_000)
+                    .time_to_live(std::time::Duration::from_secs(60))
                     .build(),
             ),
             serving_active_cache: Arc::new(

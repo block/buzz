@@ -11,7 +11,10 @@ use std::net::IpAddr;
 
 use buzz_auth::{
     error::AuthError,
-    rate_limit::{LimitType, RateLimitResult, RateLimiter},
+    rate_limit::{
+        AgentBudgetScope, AgentEventBudget, AgentEventVerdict, LimitType, RateLimitResult,
+        RateLimiter,
+    },
 };
 use buzz_core::TenantContext;
 use nostr::PublicKey;
@@ -28,6 +31,45 @@ if count == 1 then
 end
 local ttl = redis.call('TTL', KEYS[1])
 return {count, ttl}
+"#;
+
+/// Admit one event against an agent owner's channel counter (`KEYS[1]`) and
+/// overall counter (`KEYS[2]`), all or nothing.
+///
+/// `ARGV` is the window in seconds, then the channel and owner limits. Returns
+/// `{refused, reset}`: `refused` has bit 1 set when the channel budget is full
+/// and bit 2 when the owner budget is full, and `reset` is the longest
+/// remaining window among the full budgets. When neither is full, both
+/// counters advance and `{0, 0}` is returned. A refused event advances
+/// neither counter. A counter found without an expiry gets one, so it cannot
+/// refuse forever.
+const AGENT_EVENT_SCRIPT: &str = r#"
+local window = tonumber(ARGV[1])
+local limits = {tonumber(ARGV[2]), tonumber(ARGV[3])}
+local refused, reset = 0, 0
+for i, key in ipairs(KEYS) do
+    local count = tonumber(redis.call('GET', key) or '0')
+    if count >= limits[i] then
+        refused = refused + i
+        local ttl = redis.call('TTL', key)
+        if ttl < 0 then
+            if ttl == -1 then
+                redis.call('EXPIRE', key, window)
+            end
+            ttl = window
+        end
+        reset = math.max(reset, ttl)
+    end
+end
+if refused ~= 0 then
+    return {refused, reset}
+end
+for _, key in ipairs(KEYS) do
+    if redis.call('INCR', key) == 1 or redis.call('TTL', key) < 0 then
+        redis.call('EXPIRE', key, window)
+    end
+end
+return {0, 0}
 "#;
 
 /// Run the atomic rate-limit Lua script against `key` and return a
@@ -107,6 +149,42 @@ impl RateLimiter for RedisRateLimiter {
     ) -> Result<RateLimitResult, AuthError> {
         let key = buzz_auth::rate_limit::rate_limit_key(ctx, pubkey, &limit_type);
         run_rate_limit(&self.pool, &key, window_secs, limit).await
+    }
+
+    async fn check_agent_event(
+        &self,
+        ctx: &TenantContext,
+        owner: &PublicKey,
+        channel: Option<uuid::Uuid>,
+        budget: AgentEventBudget,
+    ) -> Result<AgentEventVerdict, AuthError> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AuthError::Internal(format!("Redis pool: {e}")))?;
+        let (refused, reset_in_secs): (u8, u64) = Script::new(AGENT_EVENT_SCRIPT)
+            .key(buzz_auth::rate_limit::agent_channel_budget_key(
+                ctx, owner, channel,
+            ))
+            .key(buzz_auth::rate_limit::agent_owner_budget_key(ctx, owner))
+            .arg(budget.window_secs)
+            .arg(budget.channel_limit)
+            .arg(budget.owner_limit)
+            .invoke_async(&mut *conn)
+            .await
+            .map_err(|e| AuthError::Internal(format!("Redis agent event script: {e}")))?;
+        Ok(match refused {
+            0 => AgentEventVerdict::Admitted,
+            1 => AgentEventVerdict::Exceeded {
+                scope: AgentBudgetScope::Channel,
+                reset_in_secs,
+            },
+            _ => AgentEventVerdict::Exceeded {
+                scope: AgentBudgetScope::Owner,
+                reset_in_secs,
+            },
+        })
     }
 
     async fn check_ip_connection(
