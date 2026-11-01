@@ -20,6 +20,23 @@ pub(crate) fn bound_runtime_key(
     ManagedAgentRuntimeKey::new(record.pubkey.clone(), &relay_url)
 }
 
+/// The (canonical key, dial URL) pair for one spawn.
+///
+/// The runtime-pair key is canonical so loopback spellings share one
+/// runtime/log identity, but the child must *connect* with the workspace relay
+/// exactly as configured: the relay binds its community to the literal
+/// connection authority, where `localhost:3000` and `127.0.0.1:3000` are
+/// distinct tenants. Dialing the canonicalized host would land the harness in
+/// a community the desktop never writes to — it would discover zero channels
+/// and sit idle despite being mentioned.
+pub(crate) fn spawn_relay_identity(
+    pubkey: &str,
+    workspace_relay: &str,
+) -> Result<(ManagedAgentRuntimeKey, String), String> {
+    let key = ManagedAgentRuntimeKey::new(pubkey, workspace_relay)?;
+    Ok((key, workspace_relay.trim().to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::bound_runtime_key;
@@ -65,6 +82,18 @@ mod tests {
             key.relay_url, workspace,
             "the production spawn key must be unrepresentable for the post-switch tenant"
         );
+    }
+
+    #[test]
+    fn child_dials_the_configured_spelling_while_the_key_stays_canonical() {
+        // Regression: spawn used to dial `key.relay_url`, which rewrites
+        // `localhost` to `127.0.0.1`. The relay binds communities to the
+        // literal authority, so the child joined an empty tenant and logged
+        // "discovered 0 channel(s) — agent will sit idle".
+        let (key, dial_url) =
+            super::spawn_relay_identity(&"aa".repeat(32), "ws://localhost:3000").expect("identity");
+        assert_eq!(key.relay_url, "ws://127.0.0.1:3000");
+        assert_eq!(dial_url, "ws://localhost:3000");
     }
 
     #[test]
