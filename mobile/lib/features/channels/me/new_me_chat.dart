@@ -59,70 +59,107 @@ class _NewMeChat extends HookConsumerWidget {
             onChanged: (_) => error.value = null,
           ),
           const SizedBox(height: Grid.xs),
-          DropdownButtonFormField<String>(
-            key: const ValueKey('new-session-project'),
-            initialValue: project.value ?? '',
-            isExpanded: true,
-            decoration: const InputDecoration(labelText: 'Project'),
-            items: [
-              const DropdownMenuItem(value: '', child: Text('No project')),
-              for (final group
-                  in groups.asData?.value.groups ?? <Map<String, dynamic>>[])
-                DropdownMenuItem(
-                  value: group['id'] as String,
-                  child: Text(group['name'] as String),
-                ),
-              if (project.value != null &&
-                  !(groups.asData?.value.groups ?? []).any(
-                    (group) => group['id'] == project.value,
-                  ))
-                DropdownMenuItem(
-                  value: project.value,
-                  child: const Text('Unavailable project'),
-                ),
-            ],
-            onChanged:
-                busy.value || frozenName.value != null || !groups.hasValue
-                ? null
-                : (value) => project.value = value == '' ? null : value,
-          ),
-          const SizedBox(height: Grid.xs),
-          AppListRowRaw(
-            key: const ValueKey('new-session-assistant'),
-            leading: chosen == null
-                ? const Icon(BuzzIcons.plus)
-                : AvatarImage(
-                    imageUrl: profile?.avatarUrl,
-                    radius: 20,
-                    isAgent: true,
-                    backgroundColor: context.controlSurface,
-                    fallback: Text(
-                      chosen.displayName?.trim().isNotEmpty == true
-                          ? chosen.displayName!.trim()[0].toUpperCase()
-                          : profile?.initial ?? 'A',
-                    ),
-                  ),
-            title: Text(chosen?.displayName ?? 'Choose an agent'),
-            trailing: const Icon(BuzzIcons.chevronRight, size: 20),
-            onTap: busy.value || frozenName.value != null
-                ? null
-                : () async {
-                    FocusScope.of(context).unfocus();
-                    if (!context.mounted) return;
-                    final picked = await showBuzzModalBottomSheet<String>(
-                      context: context,
-                      title: 'Agent',
-                      isScrollControlled: true,
-                      showDragHandle: true,
-                      builder: (_) => MeAssistantList(
-                        choices: choices,
-                        selected: selected.value,
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Column(
+                  children: [
+                    Semantics(
+                      label:
+                          'Agent: ${chosen?.displayName ?? 'Choose an agent'}',
+                      child: IconButton(
+                        key: const ValueKey('new-session-assistant'),
+                        tooltip:
+                            'Agent: ${chosen?.displayName ?? 'Choose an agent'}',
+                        icon: ExcludeSemantics(
+                          child: chosen == null
+                              ? const Icon(BuzzIcons.bot)
+                              : AvatarImage(
+                                  imageUrl: profile?.avatarUrl,
+                                  radius: 18,
+                                  isAgent: true,
+                                  backgroundColor: context.controlSurface,
+                                  fallback: Text(
+                                    chosen.displayName?.trim().isNotEmpty ==
+                                            true
+                                        ? chosen.displayName!
+                                              .trim()[0]
+                                              .toUpperCase()
+                                        : profile?.initial ?? 'A',
+                                  ),
+                                ),
+                        ),
+                        onPressed: busy.value || frozenName.value != null
+                            ? null
+                            : () async {
+                                FocusScope.of(context).unfocus();
+                                final picked =
+                                    await showBuzzModalBottomSheet<String>(
+                                      context: context,
+                                      title: 'Agent',
+                                      isScrollControlled: true,
+                                      showDragHandle: true,
+                                      builder: (_) => MeAssistantList(
+                                        choices: choices,
+                                        selected: selected.value,
+                                      ),
+                                    );
+                                if (context.mounted && picked != null) {
+                                  selected.value = picked;
+                                }
+                              },
                       ),
-                    );
-                    if (context.mounted && picked != null) {
-                      selected.value = picked;
-                    }
-                  },
+                    ),
+                    Text(
+                      chosen?.displayName ?? 'Choose an agent',
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: Column(
+                  children: [
+                    PopupMenuButton<String>(
+                      key: const ValueKey('new-session-project'),
+                      tooltip: 'Workspace',
+                      icon: const Icon(BuzzIcons.folder),
+                      initialValue: project.value ?? '',
+                      enabled:
+                          !busy.value &&
+                          frozenName.value == null &&
+                          groups.hasValue,
+                      onSelected: (value) =>
+                          project.value = value.isEmpty ? null : value,
+                      itemBuilder: (_) => [
+                        const PopupMenuItem(value: '', child: Text('Chats')),
+                        for (final group
+                            in groups.asData?.value.groups ??
+                                <Map<String, dynamic>>[])
+                          PopupMenuItem(
+                            value: group['id'] as String,
+                            child: Text(group['name'] as String),
+                          ),
+                      ],
+                    ),
+                    Text(
+                      project.value == null
+                          ? 'Chats'
+                          : (groups.asData?.value.groups ??
+                                        <Map<String, dynamic>>[])
+                                    .where(
+                                      (group) => group['id'] == project.value,
+                                    )
+                                    .map((group) => group['name'] as String)
+                                    .firstOrNull ??
+                                'Unavailable workspace',
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
           if (directory.isLoading) const LinearProgressIndicator(),
           if (directory.hasError)

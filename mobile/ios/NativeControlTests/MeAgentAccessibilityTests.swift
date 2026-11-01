@@ -20,54 +20,57 @@ struct MeAgentAccessibilityTests {
           onCancel: {}, onSet: { submitted = $0 as? [String: String] }
         )
         controller.loadViewIfNeeded()
-        precondition(controller.numberOfSections(in: controller.tableView) == 3)
-        let projectCell = controller.tableView(controller.tableView, cellForRowAt: IndexPath(row: 0, section: 1))
-        let project = projectCell.accessoryView as! UIButton
-        precondition(project.accessibilityLabel == "Project")
-        precondition(project.accessibilityValue == "No project")
-        precondition(project.titleColor(for: .normal) == .label)
+        precondition(controller.numberOfSections(in: controller.tableView) == 2)
+        precondition(controller.navigationItem.leftBarButtonItem?.accessibilityLabel == "Back")
+        precondition(controller.navigationItem.leftBarButtonItem?.image != nil)
+        let cell = controller.tableView(controller.tableView, cellForRowAt: IndexPath(row: 0, section: 1))
+        let controls = cell.contentView.subviews.compactMap { $0 as? UIStackView }.first!
+        let agent = controls.arrangedSubviews[0] as! UIButton
+        let project = controls.arrangedSubviews[1] as! UIButton
+        precondition(agent.accessibilityLabel == "Agent")
+        precondition(agent.accessibilityValue == (empty ? (locked ? savedName : "Choose an agent") : "Agent"))
+        precondition(agent.configuration?.image != nil)
+        precondition(agent.isEnabled == !(locked || empty))
+        precondition(project.accessibilityLabel == "Workspace")
+        precondition(project.accessibilityValue == "Chats")
+        precondition(project.configuration?.image != nil)
         precondition(project.isEnabled == !locked)
         precondition(project.showsMenuAsPrimaryAction && project.menu != nil)
-        let cell = controller.tableView(controller.tableView, cellForRowAt: IndexPath(row: 0, section: 2))
-        let content = cell.contentConfiguration as! UIListContentConfiguration
-        precondition(content.text == (empty ? (locked ? savedName : "Choose an agent") : "Agent"))
-        precondition((content.image != nil) == (locked || !empty))
-        let disabled = locked || empty
-        precondition(cell.accessibilityTraits.contains(.notEnabled) == disabled)
-        precondition(cell.accessibilityTraits.contains(.button) == !disabled)
-        precondition((cell.selectionStyle == .none) == disabled)
+        precondition((project.menu?.children.first as? UIAction)?.title == "Chats")
         let canSubmit = locked || !empty
         precondition(controller.navigationItem.rightBarButtonItem?.isEnabled == canSubmit)
         // Invoke the action even when disabled to check its independent gate.
         _ = controller.perform(NSSelectorFromString("setTapped"))
         precondition(submitted?["assistant"] == (canSubmit ? "agent" : nil))
+        if canSubmit { precondition(submitted?["project"] == "") }
         if empty && !locked {
           controller.tableView.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
           controller.tableView.reloadData()
           controller.tableView.layoutIfNeeded()
-          precondition(controller.tableView(controller.tableView, titleForFooterInSection: 1) == nil)
-          precondition(controller.tableView(controller.tableView, titleForFooterInSection: 2) == "Loading agents…")
+          precondition(controller.tableView(controller.tableView, titleForFooterInSection: 1) == "Loading agents…")
           controller.updateChatAssistants([
             "presentationId": "test",
             "assistants": [["id": "agent", "name": "Agent"]],
           ])
           controller.tableView.layoutIfNeeded()
-          let updated = controller.tableView.cellForRow(at: IndexPath(row: 0, section: 2))!
-          precondition(updated.accessibilityTraits.contains(.button))
-          precondition(!updated.accessibilityTraits.contains(.notEnabled))
-          precondition(controller.tableView(controller.tableView, titleForFooterInSection: 2) == nil)
+          let updated = controller.tableView.cellForRow(at: IndexPath(row: 0, section: 1))!
+          let updatedControls = updated.contentView.subviews.compactMap { $0 as? UIStackView }.first!
+          precondition((updatedControls.arrangedSubviews[0] as! UIButton).isEnabled)
+          precondition(controller.tableView(controller.tableView, titleForFooterInSection: 1) == nil)
         }
         submitted = nil
         controller.updateChatAssistants([
           "presentationId": "test",
           "assistants": empty ? [] : [["id": "agent", "name": "Agent"]],
         ])
-        let refreshedCell = controller.tableView(controller.tableView, cellForRowAt: IndexPath(row: 0, section: 2))
-        let refreshed = refreshedCell.contentConfiguration as! UIListContentConfiguration
-        precondition(refreshed.text == (empty ? (locked ? savedName : "Choose an agent") : "Agent"))
+        let refreshedCell = controller.tableView(controller.tableView, cellForRowAt: IndexPath(row: 0, section: 1))
+        let refreshedControls = refreshedCell.contentView.subviews.compactMap { $0 as? UIStackView }.first!
+        let refreshed = refreshedControls.arrangedSubviews[0] as! UIButton
+        precondition(refreshed.accessibilityValue == (empty ? (locked ? savedName : "Choose an agent") : "Agent"))
         precondition(controller.navigationItem.rightBarButtonItem?.isEnabled == canSubmit)
         _ = controller.perform(NSSelectorFromString("setTapped"))
         precondition(submitted?["assistant"] == (canSubmit ? "agent" : nil))
+        if canSubmit { precondition(submitted?["project"] == "") }
       }
     }
     avatarTests()

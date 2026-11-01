@@ -13,7 +13,6 @@ import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
-import 'package:buzz/shared/widgets/app_list.dart';
 import 'package:flutter/foundation.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
@@ -248,8 +247,11 @@ void main() {
           await tester.pump();
           expect(find.text('Choose an agent'), findsNothing);
           expect(find.text(agent.public), findsOneWidget);
-          expect(find.bySemanticsLabel(agent.public), findsOneWidget);
-          expect(tester.widget<AppListRowRaw>(row).onTap, isNull);
+          expect(
+            find.bySemanticsLabel('Agent: ${agent.public}'),
+            findsOneWidget,
+          );
+          expect(tester.widget<IconButton>(row).onPressed, isNull);
           final container = ProviderScope.containerOf(tester.element(row));
           container
               .read(userCacheProvider.notifier)
@@ -258,8 +260,8 @@ void main() {
               );
           await tester.pumpAndSettle();
           expect(find.text('Saved agent'), findsOneWidget);
-          expect(find.bySemanticsLabel('Saved agent'), findsOneWidget);
-          expect(tester.widget<AppListRowRaw>(row).onTap, isNull);
+          expect(find.bySemanticsLabel('Agent: Saved agent'), findsOneWidget);
+          expect(tester.widget<IconButton>(row).onPressed, isNull);
           semantics.dispose();
           await tester.tap(find.text('Retry'));
         } else {

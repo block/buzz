@@ -9,7 +9,6 @@ import 'package:uuid/uuid.dart';
 import '../../../shared/profile/user_cache_provider.dart';
 import '../../../shared/mentions/agent_identity_provider.dart';
 import '../../../shared/animated_avatar.dart';
-import '../../../shared/widgets/app_list.dart';
 import '../../../shared/widgets/concentric_sheet_surface.dart';
 import '../../../shared/widgets/bee_refresh_indicator.dart';
 import 'me_assistant_list.dart';

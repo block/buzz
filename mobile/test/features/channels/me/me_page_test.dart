@@ -276,7 +276,7 @@ void main() {
       expect(find.text('Mobile app'), findsWidgets);
       await tester.tap(find.byKey(const ValueKey('new-session-project')));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('No project').last);
+      await tester.tap(find.text('Chats').last);
       await tester.pumpAndSettle();
       await tester.tap(find.text('Create chat'));
       await tester.pumpAndSettle();
@@ -288,10 +288,7 @@ void main() {
       await tester.tap(find.text('Owner Name').last);
       await tester.pumpAndSettle();
       final row = find.byKey(const ValueKey('new-session-assistant'));
-      expect(
-        find.descendant(of: row, matching: find.text('Owner Name')),
-        findsOneWidget,
-      );
+      expect(find.text('Owner Name'), findsOneWidget);
       expect(
         find.descendant(of: row, matching: find.text('O')),
         findsOneWidget,

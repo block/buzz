@@ -385,6 +385,13 @@ private final class NativeProfileTextEditorViewController:
       target: self,
       action: #selector(cancelTapped)
     )
+    if isChatEditor && !isProjectEditor {
+      navigationItem.leftBarButtonItem = UIBarButtonItem(
+        image: UIImage(systemName: "chevron.backward"), style: .plain,
+        target: self, action: #selector(cancelTapped)
+      )
+      navigationItem.leftBarButtonItem?.accessibilityLabel = "Back"
+    }
     navigationItem.rightBarButtonItem = UIBarButtonItem(
       title: isChatEditor ? (fieldsLocked ? "Retry" : "Create") : (isChannelEditor ? "Save" : "Set"),
       style: .done,
@@ -445,7 +452,7 @@ private final class NativeProfileTextEditorViewController:
     chatOptions?["assistants"] = arguments["assistants"]
     chatOptions?["assistantsLoading"] = false
     chatOptions?["assistantError"] = arguments["assistantError"]
-    tableView.reloadSections(IndexSet(integer: 2), with: .none)
+    tableView.reloadSections(IndexSet(integer: 1), with: .none)
     updateNavigation()
   }
 
@@ -538,21 +545,25 @@ private final class NativeProfileTextEditorViewController:
 
   override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
     tableView.deselectRow(at: indexPath, animated: true)
-    if isChatEditor && indexPath.section == 2 {
-      guard !fieldsLocked && !assistants.isEmpty else { return }
-      view.endEditing(true)
-      let picker = MeAssistantListController(assistants: assistants, selected: selectedAssistant, pageColor: pageBackgroundColor, rowColor: containerBackgroundColor, avatars: assistantAvatars) { [weak self] id, avatar in
-        self?.selectedAssistantAvatar = avatar
-        self?.selectedAssistant = id
-        self?.tableView.reloadSections(IndexSet(integer: 2), with: .none)
-        self?.updateNavigation()
-      }
-      navigationController?.pushViewController(picker, animated: true)
-      return
-    }
     guard isChannelEditor && canEditCanvas else { return }
     if indexPath.section == 2 { editCanvasTapped() }
     if indexPath.section == 3 { removeCanvasTapped() }
+  }
+
+  @objc private func chooseAssistant() {
+    guard !fieldsLocked && !assistants.isEmpty else { return }
+    view.endEditing(true)
+    let picker = MeAssistantListController(assistants: assistants, selected: selectedAssistant, pageColor: pageBackgroundColor, rowColor: containerBackgroundColor, avatars: assistantAvatars) { [weak self] id, avatar in
+      self?.selectedAssistantAvatar = avatar
+      self?.selectedAssistant = id
+      self?.tableView.reloadSections(IndexSet(integer: 1), with: .none)
+      self?.updateNavigation()
+    }
+    let sheet = UINavigationController(rootViewController: picker)
+    picker.navigationItem.leftBarButtonItem = UIBarButtonItem(systemItem: .close, primaryAction: UIAction { [weak sheet] _ in sheet?.dismiss(animated: true) })
+    sheet.sheetPresentationController?.detents = [.medium(), .large()]
+    sheet.sheetPresentationController?.prefersGrabberVisible = true
+    present(sheet, animated: true)
   }
 
   func textFieldShouldReturn(_ textField: UITextField) -> Bool {
@@ -564,10 +575,10 @@ private final class NativeProfileTextEditorViewController:
     return false
   }
 
-  override func numberOfSections(in tableView: UITableView) -> Int { isProjectEditor ? 1 : isChatEditor ? 3 : isChannelEditor ? (hasCanvas && canEditCanvas ? 4 : 3) : 1 }
+  override func numberOfSections(in tableView: UITableView) -> Int { isProjectEditor ? 1 : isChatEditor ? 2 : isChannelEditor ? (hasCanvas && canEditCanvas ? 4 : 3) : 1 }
 
   override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
-    guard isChatEditor && section == 2 else { return nil }
+    guard isChatEditor && section == 1 else { return nil }
     if chatOptions?["assistantsLoading"] as? Bool == true { return "Loading agents…" }
     if let error = chatOptions?["assistantError"] as? String { return error }
     if let error = chatOptions?["error"] as? String { return error }
@@ -585,7 +596,7 @@ private final class NativeProfileTextEditorViewController:
     _ tableView: UITableView,
     heightForRowAt indexPath: IndexPath
   ) -> CGFloat {
-    if isChatEditor && indexPath.section == 2 && selectedAssistant != nil { return 64 }
+    if isChatEditor && indexPath.section == 1 { return UITableView.automaticDimension }
     if isChannelEditor && indexPath.section >= 2 { return UITableView.automaticDimension }
     return (isChannelEditor ? indexPath.section == 1 : multiline) ? 132 : 52
   }
@@ -601,52 +612,64 @@ private final class NativeProfileTextEditorViewController:
     cell.layer.cornerCurve = .continuous
     cell.clipsToBounds = true
     if isChatEditor && indexPath.section == 1 {
-      var content = cell.defaultContentConfiguration()
-      content.text = "Project"
-      content.textProperties.font = .preferredFont(forTextStyle: .body)
-      cell.contentConfiguration = content
-      let selected = projects.first { $0["id"] == selectedProject }
-      let name = selected?["name"] ?? (selectedProject == nil ? "No project" : "Unavailable project")
-      let button = UIButton(type: .system)
-      button.setTitle(name, for: .normal)
-      button.setTitleColor(.label, for: .normal)
-      button.setTitleColor(.secondaryLabel, for: .disabled)
-      button.titleLabel?.font = .preferredFont(forTextStyle: .body)
-      button.titleLabel?.adjustsFontForContentSizeCategory = true
-      button.accessibilityLabel = "Project"
-      button.accessibilityValue = name
-      button.isEnabled = !fieldsLocked
-      button.showsMenuAsPrimaryAction = true
-      let choices = [["id": "", "name": "No project"]] + projects
-      button.menu = UIMenu(children: choices.map { project in
-        let id = project["id"] ?? ""
-        return UIAction(title: project["name"] ?? "Project", state: id == (selectedProject ?? "") ? .on : .off) { [weak self] _ in
-          self?.view.endEditing(true)
-          self?.selectedProject = id.isEmpty ? nil : id
-          self?.tableView.reloadSections(IndexSet(integer: 1), with: .none)
-        }
-      })
-      button.titleLabel?.lineBreakMode = .byTruncatingTail
-      button.sizeToFit()
-      button.frame.size.width = min(button.frame.width, tableView.bounds.width * 0.55)
-      cell.accessoryView = button
-    } else if isChatEditor && indexPath.section == 2 {
-      var content = cell.defaultContentConfiguration()
       let saved = chatOptions?["savedAssistant"] as? [String: String]
       let fallback = fieldsLocked ? selectedAssistant.map {
         saved.flatMap { $0["id"] == selectedAssistant ? $0 : nil } ?? ["id": $0, "name": $0]
       } : nil
       let selected = assistants.first { $0["id"] == selectedAssistant } ?? fallback
-      content.text = selected?["name"] ?? "Choose an agent"
-      content.textProperties.numberOfLines = 0
-      if let selected {
-        content.image = selectedAssistantAvatar ?? MeAssistantListController.avatarImage(selected, photo: nil)
-      }
-      content.textProperties.font = .preferredFont(forTextStyle: .body)
-      cell.contentConfiguration = content
-      cell.accessoryType = .disclosureIndicator
-      cell.selectionStyle = fieldsLocked || assistants.isEmpty ? .none : .default
-      cell.accessibilityTraits = fieldsLocked || assistants.isEmpty ? .notEnabled : .button
+      let agent = UIButton(type: .system)
+      var agentStyle = UIButton.Configuration.plain()
+      agentStyle.baseForegroundColor = .label
+      agentStyle.image = selected.map { selectedAssistantAvatar ?? MeAssistantListController.avatarImage($0, photo: nil) } ?? UIImage(systemName: "person.crop.square")
+      agentStyle.title = selected?["name"] ?? "Choose an agent"
+      agentStyle.imagePlacement = .top
+      agentStyle.imagePadding = 8
+      agent.configuration = agentStyle
+      agent.titleLabel?.numberOfLines = 0
+      agent.titleLabel?.adjustsFontForContentSizeCategory = true
+      agent.accessibilityLabel = "Agent"
+      agent.accessibilityValue = agentStyle.title
+      agent.accessibilityIdentifier = "new-session-assistant"
+      agent.isEnabled = !fieldsLocked && !assistants.isEmpty
+      agent.addTarget(self, action: #selector(chooseAssistant), for: .touchUpInside)
+
+      let workspace = UIButton(type: .system)
+      var workspaceStyle = UIButton.Configuration.plain()
+      workspaceStyle.baseForegroundColor = .label
+      workspaceStyle.image = UIImage(systemName: "folder")
+      workspaceStyle.title = projects.first { $0["id"] == selectedProject }?["name"] ?? (selectedProject == nil ? "Chats" : "Unavailable workspace")
+      workspaceStyle.imagePlacement = .top
+      workspaceStyle.imagePadding = 8
+      workspace.configuration = workspaceStyle
+      workspace.titleLabel?.numberOfLines = 0
+      workspace.titleLabel?.adjustsFontForContentSizeCategory = true
+      workspace.accessibilityLabel = "Workspace"
+      workspace.accessibilityValue = workspaceStyle.title
+      workspace.accessibilityIdentifier = "new-session-project"
+      workspace.isEnabled = !fieldsLocked
+      workspace.showsMenuAsPrimaryAction = true
+      let choices = [["id": "", "name": "Chats"]] + projects
+      workspace.menu = UIMenu(children: choices.map { project in
+        let id = project["id"] ?? ""
+        return UIAction(title: project["name"] ?? "Workspace", state: id == (selectedProject ?? "") ? .on : .off) { [weak self] _ in
+          self?.view.endEditing(true)
+          self?.selectedProject = id.isEmpty ? nil : id
+          self?.tableView.reloadSections(IndexSet(integer: 1), with: .none)
+        }
+      })
+      let controls = UIStackView(arrangedSubviews: [agent, workspace])
+      controls.distribution = .fillEqually
+      controls.spacing = 16
+      controls.translatesAutoresizingMaskIntoConstraints = false
+      cell.contentView.addSubview(controls)
+      NSLayoutConstraint.activate([
+        controls.leadingAnchor.constraint(equalTo: cell.contentView.layoutMarginsGuide.leadingAnchor),
+        controls.trailingAnchor.constraint(equalTo: cell.contentView.layoutMarginsGuide.trailingAnchor),
+        controls.topAnchor.constraint(equalTo: cell.contentView.topAnchor, constant: 8),
+        controls.bottomAnchor.constraint(equalTo: cell.contentView.bottomAnchor, constant: -8),
+        agent.heightAnchor.constraint(greaterThanOrEqualToConstant: 64),
+        workspace.heightAnchor.constraint(greaterThanOrEqualToConstant: 64),
+      ])
     } else if isChannelEditor && indexPath.section >= 2 {
       var content = cell.defaultContentConfiguration()
       content.textProperties.font = .preferredFont(forTextStyle: .body)
@@ -811,6 +834,6 @@ private final class MeAssistantListController: UITableViewController {
   override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
     guard let id = assistants[indexPath.row]["id"] else { return }
     onSelect(id, Self.avatarImage(assistants[indexPath.row], photo: avatars.image(for: avatarURL(assistants[indexPath.row]))))
-    navigationController?.popViewController(animated: true)
+    navigationController?.dismiss(animated: true)
   }
 }
