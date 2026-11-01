@@ -815,8 +815,8 @@ export function AppShell() {
                           onSetNotifyWhileViewing={
                             notificationSettings.setNotifyWhileViewing
                           }
-                          onSetAllSlotAlertsEnabled={
-                            notificationSettings.setAllSlotAlertsEnabled
+                          onSetSoundEnabled={
+                            notificationSettings.setSoundEnabled
                           }
                           onSetSoundForSlot={
                             notificationSettings.setSoundForSlot
