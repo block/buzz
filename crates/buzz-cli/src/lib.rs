@@ -548,6 +548,31 @@ pub enum MessagesCmd {
         #[arg(long)]
         public_reason: Option<String>,
     },
+    /// Report a message or user to the community moderators (NIP-56)
+    #[command(
+        group = clap::ArgGroup::new("target").required(true).args(["event", "pubkey"]),
+        after_help = "Examples:\n  buzz messages report --event <EVENT_ID> --reason spam\n  buzz messages report --channel <UUID> --event <EVENT_ID> --reason other --note \"off-topic ads\"\n  buzz messages report --pubkey <PUBKEY> --reason impersonation\n\nReasons: illegal, nudity, malware, spam, impersonation, profanity, other.\nA report goes to the moderation queue only; it is never shown in the channel."
+    )]
+    Report {
+        /// Channel UUID the message is in; checked against the message when given
+        #[arg(long, conflicts_with = "pubkey")]
+        channel: Option<String>,
+        /// Event ID of the message to report (64-char hex)
+        #[arg(long)]
+        event: Option<String>,
+        /// Pubkey of a user to report without a message (64-char hex)
+        #[arg(long)]
+        pubkey: Option<String>,
+        /// Why you are reporting
+        #[arg(
+            long,
+            value_parser = clap::builder::PossibleValuesParser::new(buzz_sdk::REPORT_TYPES)
+        )]
+        reason: String,
+        /// Optional note for the moderators
+        #[arg(long)]
+        note: Option<String>,
+    },
     /// Retrieve messages from a channel
     #[command(
         after_help = "Examples:\n  buzz messages get --channel <UUID>\n  buzz messages get --channel <UUID> --limit 50 --kinds 1,1984"
@@ -2532,6 +2557,7 @@ mod tests {
                 "delete",
                 "edit",
                 "get",
+                "report",
                 "search",
                 "send",
                 "send-diff",
@@ -2674,7 +2700,7 @@ mod tests {
             ("feed", 1),
             ("issues", 6),
             ("media", 1),
-            ("messages", 8),
+            ("messages", 9),
             ("pack", 2),
             ("patches", 4),
             ("pr", 5),
