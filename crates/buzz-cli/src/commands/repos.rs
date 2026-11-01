@@ -58,6 +58,52 @@ fn has_tag_name(tag: &Tag, name: &str) -> bool {
     tag.as_slice().first().map(String::as_str) == Some(name)
 }
 
+/// Pubkeys named in the repository's `maintainers` tags (the NIP-34
+/// multi-value tag), lowercased and deduplicated in announcement order.
+/// Malformed values are skipped rather than failing the read: a foreign or
+/// hand-edited announcement must still list and update cleanly.
+pub(crate) fn maintainers_from_event(event: &Event) -> Vec<String> {
+    let mut maintainers: Vec<String> = Vec::new();
+    for tag in event
+        .tags
+        .iter()
+        .filter(|tag| has_tag_name(tag, "maintainers"))
+    {
+        for value in &tag.as_slice()[1..] {
+            if crate::validate::validate_hex64(value).is_err() {
+                continue;
+            }
+            let value = value.to_ascii_lowercase();
+            if !maintainers.contains(&value) {
+                maintainers.push(value);
+            }
+        }
+    }
+    maintainers
+}
+
+/// Build the single `["maintainers", <pk>, ...]` tag for `pubkeys`, or
+/// `None` when the list is empty so an announcement without maintainers
+/// carries no tag at all. Every pubkey is shape-validated and lowercased;
+/// duplicates collapse.
+fn maintainers_tag(pubkeys: &[String]) -> Result<Option<Tag>, CliError> {
+    let mut values: Vec<String> = Vec::with_capacity(pubkeys.len() + 1);
+    for pubkey in pubkeys {
+        crate::validate::validate_hex64(pubkey).map_err(|_| {
+            CliError::Usage(format!("maintainer must be a 64-char hex pubkey: {pubkey}"))
+        })?;
+        let pubkey = pubkey.to_ascii_lowercase();
+        if !values.contains(&pubkey) {
+            values.push(pubkey);
+        }
+    }
+    if values.is_empty() {
+        return Ok(None);
+    }
+    values.insert(0, "maintainers".to_string());
+    Tag::parse(values).map(Some).map_err(tag_error)
+}
+
 fn build_protection_tag(
     ref_pattern: &str,
     push_role: Option<&str>,
@@ -90,30 +136,50 @@ enum RepoChange {
     /// Bind (or rebind) the repo to a channel: replaces every existing
     /// `buzz-channel` tag with exactly one carrying the validated UUID.
     BindChannel(String),
+    /// Replace the maintainer list: every existing `maintainers` tag is
+    /// dropped and exactly one is written (none when the list is empty).
+    SetMaintainers(Vec<String>),
 }
 
 fn build_updated_repo_announcement(
     existing: &Event,
     change: RepoChange,
 ) -> Result<EventBuilder, CliError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| CliError::Other(format!("read system clock: {error}")))?
+        .as_secs();
+    build_updated_repo_announcement_at(existing, change, now)
+}
+
+/// `now` is the wall clock in seconds; split out so the timestamp rule is
+/// unit-testable without a real clock.
+fn build_updated_repo_announcement_at(
+    existing: &Event,
+    change: RepoChange,
+    now: u64,
+) -> Result<EventBuilder, CliError> {
     let repo_id = repo_id_from_event(existing)?;
     // What to strip beyond `auth` (always stripped), and what to append.
-    let (removed_pattern, removed_channel, replacement) = match change {
+    let (removed_pattern, removed_tag_name, replacement) = match change {
         RepoChange::SetProtection(tag) => {
             let pattern = protection_pattern(&tag)
                 .ok_or_else(|| CliError::Other("replacement is not a protection tag".into()))?
                 .to_string();
-            (Some(pattern), false, Some(*tag))
+            (Some(pattern), None, Some(*tag))
         }
         RepoChange::RemoveProtection(pattern) => {
             RefPattern::parse(&pattern)
                 .map_err(|error| CliError::Usage(format!("invalid ref pattern: {error}")))?;
-            (Some(pattern), false, None)
+            (Some(pattern), None, None)
         }
         RepoChange::BindChannel(channel) => {
             crate::validate::validate_uuid(&channel)?;
             let tag = Tag::parse(["buzz-channel", channel.as_str()]).map_err(tag_error)?;
-            (None, true, Some(tag))
+            (None, Some("buzz-channel"), Some(tag))
+        }
+        RepoChange::SetMaintainers(pubkeys) => {
+            (None, Some("maintainers"), maintainers_tag(&pubkeys)?)
         }
     };
 
@@ -124,7 +190,7 @@ fn build_updated_repo_announcement(
             if has_tag_name(tag, "auth") {
                 return false;
             }
-            if removed_channel && has_tag_name(tag, "buzz-channel") {
+            if removed_tag_name.is_some_and(|name| has_tag_name(tag, name)) {
                 return false;
             }
             removed_pattern.is_none() || protection_pattern(tag) != removed_pattern.as_deref()
@@ -142,13 +208,19 @@ fn build_updated_repo_announcement(
         ))
     })?;
 
-    // Advance only the observed head. Using wall-clock time here would let a
-    // delayed writer leapfrog an intervening update and silently erase metadata.
+    // Stamp the update at wall-clock time, but never at or behind the observed
+    // head: relays accept replaceable events only within a short drift window
+    // of their own clock (±15 minutes on buzz-relay), so "head + 1" is refused
+    // for every announcement older than that, and anything at or below the
+    // head would lose the NIP-33 last-write-wins race to it. The read happens
+    // in the same invocation as the write, so an intervening update still
+    // surfaces as the relay's conflict reply rather than being leapfrogged.
     let next_created_at = existing
         .created_at
         .as_secs()
         .checked_add(1)
-        .ok_or_else(|| CliError::Other("repository timestamp cannot be advanced".into()))?;
+        .ok_or_else(|| CliError::Other("repository timestamp cannot be advanced".into()))?
+        .max(now);
     buzz_sdk::build_repo_announcement_with_tags(repo_id, &existing.content, tags)
         .map_err(|error| CliError::Other(format!("failed to build repository update: {error}")))
         .map(|builder| builder.custom_created_at(Timestamp::from(next_created_at)))
@@ -208,6 +280,9 @@ async fn submit_repo_update(client: &BuzzClient, builder: EventBuilder) -> Resul
 /// (issue #3527: without it the relay 404s every clone/fetch/push), so the
 /// UUID is shape-validated here and its existence/membership is the relay's
 /// authority at git-access time, same posture as `repos bind`.
+///
+/// `maintainers` become one NIP-34 `maintainers` tag; clients trust issue and
+/// pull-request lifecycle events from those pubkeys as they do the owner's.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_create_announcement(
     repo_id: &str,
@@ -217,6 +292,7 @@ pub(crate) fn build_create_announcement(
     web_url: Option<&str>,
     relays: &[String],
     channel: Option<&str>,
+    maintainers: &[String],
 ) -> Result<EventBuilder, CliError> {
     validate_repo_id(repo_id)?;
 
@@ -237,6 +313,9 @@ pub(crate) fn build_create_announcement(
         crate::validate::validate_uuid(channel)?;
         builder = builder.tag(Tag::parse(["buzz-channel", channel]).map_err(tag_error)?);
     }
+    if let Some(tag) = maintainers_tag(maintainers)? {
+        builder = builder.tag(tag);
+    }
     Ok(builder)
 }
 
@@ -250,6 +329,7 @@ pub async fn cmd_create_repo(
     web_url: Option<&str>,
     relays: &[String],
     channel: Option<&str>,
+    maintainers: &[String],
 ) -> Result<(), CliError> {
     let builder = build_create_announcement(
         repo_id,
@@ -259,6 +339,7 @@ pub async fn cmd_create_repo(
         web_url,
         relays,
         channel,
+        maintainers,
     )?;
     let event = client.sign_event(builder)?;
     let owner = event.pubkey.to_hex();
@@ -415,8 +496,74 @@ async fn cmd_bind_repo(client: &BuzzClient, repo_id: &str, channel: &str) -> Res
     submit_repo_update(client, builder).await
 }
 
+fn maintainers_json(event: &Event) -> Result<serde_json::Value, CliError> {
+    Ok(serde_json::json!({
+        "repo_id": repo_id_from_event(event)?,
+        "owner": event.pubkey.to_hex(),
+        "maintainers": maintainers_from_event(event),
+    }))
+}
+
+async fn cmd_maintainers_list(client: &BuzzClient, repo_id: &str) -> Result<(), CliError> {
+    let event = current_repo(client, repo_id).await?;
+    println!("{}", maintainers_json(&event)?);
+    Ok(())
+}
+
+/// Add maintainers to one of your repositories. Already-listed pubkeys are
+/// kept in place; the owner never needs listing and is dropped if given.
+async fn cmd_maintainers_add(
+    client: &BuzzClient,
+    repo_id: &str,
+    pubkeys: &[String],
+) -> Result<(), CliError> {
+    for pubkey in pubkeys {
+        crate::validate::validate_hex64(pubkey)?;
+    }
+    let event = current_repo(client, repo_id).await?;
+    let owner = event.pubkey.to_hex();
+    let mut maintainers = maintainers_from_event(&event);
+    for pubkey in pubkeys {
+        let pubkey = pubkey.to_ascii_lowercase();
+        if pubkey != owner && !maintainers.contains(&pubkey) {
+            maintainers.push(pubkey);
+        }
+    }
+    if maintainers == maintainers_from_event(&event) {
+        println!("{}", maintainers_json(&event)?);
+        return Ok(());
+    }
+    let builder = build_updated_repo_announcement(&event, RepoChange::SetMaintainers(maintainers))?;
+    submit_repo_update(client, builder).await
+}
+
+async fn cmd_maintainers_remove(
+    client: &BuzzClient,
+    repo_id: &str,
+    pubkeys: &[String],
+) -> Result<(), CliError> {
+    for pubkey in pubkeys {
+        crate::validate::validate_hex64(pubkey)?;
+    }
+    let event = current_repo(client, repo_id).await?;
+    let current = maintainers_from_event(&event);
+    let removed: Vec<String> = pubkeys.iter().map(|p| p.to_ascii_lowercase()).collect();
+    let maintainers: Vec<String> = current
+        .iter()
+        .filter(|pubkey| !removed.contains(pubkey))
+        .cloned()
+        .collect();
+    if maintainers.len() == current.len() {
+        return Err(CliError::NotFound(format!(
+            "repository {repo_id:?} lists none of the given pubkeys as maintainers"
+        )));
+    }
+    let builder = build_updated_repo_announcement(&event, RepoChange::SetMaintainers(maintainers))?;
+    submit_repo_update(client, builder).await
+}
+
 pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), CliError> {
-    use crate::{ReposCmd, ReposProtectCmd};
+    use crate::{ReposCmd, ReposMaintainersCmd, ReposProtectCmd};
     match cmd {
         ReposCmd::Create {
             id,
@@ -426,6 +573,7 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
             web,
             relays,
             channel,
+            maintainers,
         } => {
             cmd_create_repo(
                 client,
@@ -436,6 +584,7 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
                 web.as_deref(),
                 &relays,
                 channel.as_deref(),
+                &maintainers,
             )
             .await
         }
@@ -470,6 +619,15 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
                 cmd_protect_remove(client, &id, &ref_pattern).await
             }
         },
+        ReposCmd::Maintainers(command) => match command {
+            ReposMaintainersCmd::List { id } => cmd_maintainers_list(client, &id).await,
+            ReposMaintainersCmd::Add { id, pubkeys } => {
+                cmd_maintainers_add(client, &id, &pubkeys).await
+            }
+            ReposMaintainersCmd::Remove { id, pubkeys } => {
+                cmd_maintainers_remove(client, &id, &pubkeys).await
+            }
+        },
     }
 }
 
@@ -479,7 +637,8 @@ mod tests {
 
     use super::{
         build_create_announcement, build_protection_tag, build_updated_repo_announcement,
-        protection_rules_json, validate_write_response, RepoChange,
+        build_updated_repo_announcement_at, protection_rules_json, validate_write_response,
+        RepoChange,
     };
 
     fn signed_repo(tags: Vec<Tag>, content: &str, created_at: u64) -> nostr::Event {
@@ -512,9 +671,10 @@ mod tests {
         let replacement = build_protection_tag("refs/heads/main", Some("admin"), true, true, false)
             .expect("valid replacement");
 
-        let updated = build_updated_repo_announcement(
+        let updated = build_updated_repo_announcement_at(
             &existing,
             RepoChange::SetProtection(Box::new(replacement)),
+            0,
         )
         .expect("build update")
         .sign_with_keys(&Keys::generate())
@@ -708,11 +868,14 @@ mod tests {
             100,
         );
 
-        let updated =
-            build_updated_repo_announcement(&existing, RepoChange::BindChannel(channel.clone()))
-                .expect("build bind update")
-                .sign_with_keys(&Keys::generate())
-                .expect("sign bind update");
+        let updated = build_updated_repo_announcement_at(
+            &existing,
+            RepoChange::BindChannel(channel.clone()),
+            0,
+        )
+        .expect("build bind update")
+        .sign_with_keys(&Keys::generate())
+        .expect("sign bind update");
 
         assert_eq!(updated.content, "repository content");
         assert_eq!(updated.created_at.as_secs(), 101);
@@ -748,11 +911,14 @@ mod tests {
         let channel = uuid::Uuid::new_v4().to_string();
         let existing = signed_repo(vec![tag(&["d", "demo"])], "", 10);
 
-        let updated =
-            build_updated_repo_announcement(&existing, RepoChange::BindChannel(channel.clone()))
-                .expect("build bind update")
-                .sign_with_keys(&Keys::generate())
-                .expect("sign bind update");
+        let updated = build_updated_repo_announcement_at(
+            &existing,
+            RepoChange::BindChannel(channel.clone()),
+            0,
+        )
+        .expect("build bind update")
+        .sign_with_keys(&Keys::generate())
+        .expect("sign bind update");
 
         assert!(updated
             .tags
@@ -785,6 +951,7 @@ mod tests {
             None,
             &[],
             Some(&channel),
+            &[],
         )
         .expect("build create announcement")
         .sign_with_keys(&Keys::generate())
@@ -808,7 +975,7 @@ mod tests {
 
     #[test]
     fn create_without_channel_emits_no_binding_tag() {
-        let event = build_create_announcement("demo", None, None, &[], None, &[], None)
+        let event = build_create_announcement("demo", None, None, &[], None, &[], None, &[])
             .expect("build create announcement")
             .sign_with_keys(&Keys::generate())
             .expect("sign create announcement");
@@ -824,9 +991,197 @@ mod tests {
 
     #[test]
     fn create_rejects_malformed_channel_uuid() {
-        let error = build_create_announcement("demo", None, None, &[], None, &[], Some("nope"))
-            .expect_err("malformed channel id must not build an announcement");
+        let error =
+            build_create_announcement("demo", None, None, &[], None, &[], Some("nope"), &[])
+                .expect_err("malformed channel id must not build an announcement");
         assert!(matches!(error, crate::error::CliError::Usage(_)));
+    }
+
+    #[test]
+    fn create_with_maintainers_emits_one_multi_value_tag() {
+        let alice = "a".repeat(64);
+        let bob = "B".repeat(64);
+        let event = build_create_announcement(
+            "demo",
+            None,
+            None,
+            &[],
+            None,
+            &[],
+            None,
+            &[alice.clone(), bob.clone(), alice.clone()],
+        )
+        .expect("build create announcement")
+        .sign_with_keys(&Keys::generate())
+        .expect("sign create announcement");
+
+        let tags: Vec<_> = event
+            .tags
+            .iter()
+            .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("maintainers"))
+            .collect();
+        assert_eq!(tags.len(), 1, "exactly one maintainers tag");
+        assert_eq!(
+            tags[0].as_slice(),
+            [
+                "maintainers",
+                alice.as_str(),
+                bob.to_ascii_lowercase().as_str()
+            ],
+            "lowercased, deduplicated, announcement order"
+        );
+        assert_eq!(
+            super::maintainers_from_event(&event),
+            vec![alice, bob.to_ascii_lowercase()]
+        );
+    }
+
+    #[test]
+    fn create_without_maintainers_emits_no_tag() {
+        let event = build_create_announcement("demo", None, None, &[], None, &[], None, &[])
+            .expect("build create announcement")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign create announcement");
+        assert!(!event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice().first().map(String::as_str) == Some("maintainers")));
+        assert!(super::maintainers_from_event(&event).is_empty());
+    }
+
+    #[test]
+    fn create_rejects_malformed_maintainer() {
+        let error =
+            build_create_announcement("demo", None, None, &[], None, &[], None, &["nope".into()])
+                .expect_err("malformed maintainer pubkey must not build an announcement");
+        assert!(matches!(error, crate::error::CliError::Usage(_)));
+    }
+
+    #[test]
+    fn set_maintainers_replaces_every_existing_tag_and_preserves_the_rest() {
+        let old = "1".repeat(64);
+        let kept = "2".repeat(64);
+        let added = "3".repeat(64);
+        let existing = signed_repo(
+            vec![
+                tag(&["d", "demo"]),
+                tag(&["name", "Demo"]),
+                tag(&["buzz-channel", "channel-id"]),
+                tag(&["auth", &"a".repeat(64), "", &"b".repeat(128)]),
+                tag(&["buzz-protect", "refs/heads/main", "push:member"]),
+                tag(&["maintainers", &old]),
+                tag(&["maintainers", &kept, &old]),
+            ],
+            "repository content",
+            100,
+        );
+        assert_eq!(
+            super::maintainers_from_event(&existing),
+            vec![old.clone(), kept.clone()]
+        );
+
+        let updated = build_updated_repo_announcement_at(
+            &existing,
+            RepoChange::SetMaintainers(vec![kept.clone(), added.clone()]),
+            0,
+        )
+        .expect("build update")
+        .sign_with_keys(&Keys::generate())
+        .expect("sign update");
+
+        assert_eq!(updated.content, "repository content");
+        assert_eq!(updated.created_at.as_secs(), 101);
+        let tags: Vec<_> = updated
+            .tags
+            .iter()
+            .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("maintainers"))
+            .collect();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(
+            tags[0].as_slice(),
+            ["maintainers", kept.as_str(), added.as_str()]
+        );
+        assert!(!updated
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice().first().map(String::as_str) == Some("auth")));
+        assert!(updated
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["buzz-channel", "channel-id"]));
+        assert!(updated
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["buzz-protect", "refs/heads/main", "push:member"]));
+        assert!(updated
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["name", "Demo"]));
+    }
+
+    #[test]
+    fn update_is_stamped_at_wall_clock_but_never_behind_the_head() {
+        let existing = signed_repo(vec![tag(&["d", "demo"])], "", 100);
+        // Old head: a "head + 1" stamp would be refused by the relay's drift
+        // window, so the update carries the wall clock.
+        let updated = build_updated_repo_announcement_at(
+            &existing,
+            RepoChange::SetMaintainers(vec!["1".repeat(64)]),
+            5_000,
+        )
+        .expect("build update")
+        .sign_with_keys(&Keys::generate())
+        .expect("sign update");
+        assert_eq!(updated.created_at.as_secs(), 5_000);
+
+        // Head ahead of the clock (skewed writer): stay strictly after it so
+        // the replaceable write still wins last-write-wins.
+        let skewed = signed_repo(vec![tag(&["d", "demo"])], "", 10_000);
+        let updated = build_updated_repo_announcement_at(
+            &skewed,
+            RepoChange::SetMaintainers(vec!["1".repeat(64)]),
+            5_000,
+        )
+        .expect("build update")
+        .sign_with_keys(&Keys::generate())
+        .expect("sign update");
+        assert_eq!(updated.created_at.as_secs(), 10_001);
+    }
+
+    #[test]
+    fn set_maintainers_empty_drops_the_tag() {
+        let existing = signed_repo(
+            vec![tag(&["d", "demo"]), tag(&["maintainers", &"1".repeat(64)])],
+            "",
+            100,
+        );
+        let updated =
+            build_updated_repo_announcement(&existing, RepoChange::SetMaintainers(vec![]))
+                .expect("build update")
+                .sign_with_keys(&Keys::generate())
+                .expect("sign update");
+        assert!(!updated
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice().first().map(String::as_str) == Some("maintainers")));
+        assert!(updated
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["d", "demo"]));
+    }
+
+    #[test]
+    fn maintainers_from_event_skips_malformed_values() {
+        let good = "4".repeat(64);
+        let existing = signed_repo(
+            vec![
+                tag(&["d", "demo"]),
+                tag(&["maintainers", "npub1notahexkey", &good]),
+            ],
+            "",
+            100,
+        );
+        assert_eq!(super::maintainers_from_event(&existing), vec![good]);
     }
 
     #[test]

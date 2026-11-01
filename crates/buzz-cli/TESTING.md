@@ -617,6 +617,9 @@ buzz channels delete --channel "$FORUM_ID" | jq .
 | 52 | `repos protect list` | ☐ | Empty/populated rules; unknown rules visible; malformed rule reported in validation_error |
 | 53 | `repos protect set` | ☐ | Create and replace complete exact-ref rule; verify metadata is preserved |
 | 54 | `repos protect remove` | ☐ | Remove exact ref; missing rule → NotFound |
+| 54a | `repos maintainers list` | ☐ | Empty and populated; values lowercased |
+| 54b | `repos maintainers add` | ☐ | Adds, keeps existing, no-op when already listed, owner pubkey dropped; `--maintainer` on `repos create` emits the same tag |
+| 54c | `repos maintainers remove` | ☐ | Removes; none listed → NotFound; a maintainer's `issues status`/`assign` then stops being trusted |
 | 55 | `upload file` | ☐ | |
 | 56 | `pack validate` | ☐ | Local, no relay |
 | 57 | `pack inspect` | ☐ | Local, no relay |

@@ -155,6 +155,39 @@ test("accepts updates signed by the repo owner", () => {
   assert.equal(pullRequest.commit, "3333333333333333333333333333333333333333");
 });
 
+test("accepts updates and status changes signed by a repo maintainer", () => {
+  const MAINTAINER = "d".repeat(64);
+  const update = updateEvent({
+    pubkey: MAINTAINER,
+    createdAt: 200,
+    commit: "4444444444444444444444444444444444444444",
+  });
+  const closed = statusEvent({
+    kind: 1632,
+    pubkey: MAINTAINER,
+    createdAt: 300,
+  });
+
+  const untrusted = eventToProjectPullRequest(
+    pullRequestEvent(),
+    [update],
+    [],
+    [closed],
+  );
+  assert.equal(untrusted.commit, "1111111111111111111111111111111111111111");
+  assert.equal(untrusted.status, "Open");
+
+  const trusted = eventToProjectPullRequest(
+    pullRequestEvent(),
+    [update],
+    [],
+    [closed],
+    [MAINTAINER],
+  );
+  assert.equal(trusted.commit, "4444444444444444444444444444444444444444");
+  assert.equal(trusted.status, "Closed");
+});
+
 test("ignores a later update from a different pubkey", () => {
   const authorUpdate = updateEvent({
     pubkey: AUTHOR,

@@ -54,6 +54,25 @@ export function isExplicitProject(project: Project): boolean {
   return !project.legacy;
 }
 
+/**
+ * Whether `pubkey` is named in the repository's NIP-34 `maintainers` tag.
+ * Maintainers manage the repository's issues and pull requests (status,
+ * assignments, review requests) like the owner; they do not gain git push
+ * rights or merge authority from this alone.
+ */
+export function isRepositoryMaintainer(
+  repository: Pick<Repository, "maintainers">,
+  pubkey: string | null | undefined,
+): boolean {
+  if (!pubkey) return false;
+  const normalized = pubkey.toLowerCase();
+  return Boolean(
+    repository.maintainers?.some(
+      (maintainer) => maintainer.toLowerCase() === normalized,
+    ),
+  );
+}
+
 type BuildProjectReadModelsInput = {
   projectEvents: RelayEvent[];
   repositoryEvents: RelayEvent[];

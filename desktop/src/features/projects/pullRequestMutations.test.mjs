@@ -37,6 +37,15 @@ test("only the repository owner or PR author can publish an update", () => {
     canPublishProjectPullRequestUpdate(REVIEWER, project, pullRequest),
     false,
   );
+  assert.equal(
+    canPublishProjectPullRequestUpdate(
+      REVIEWER,
+      { ...project, maintainers: [REVIEWER.toUpperCase()] },
+      pullRequest,
+    ),
+    true,
+    "a repo maintainer may publish updates like the owner",
+  );
 });
 
 test("projectPullRequestTags builds a NIP-34 kind 1618 tag set", () => {

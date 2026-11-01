@@ -15,6 +15,7 @@ import {
   KIND_TEXT_NOTE,
 } from "@/shared/constants/kinds";
 import type { Repository as Project } from "./hooks";
+import { isRepositoryMaintainer } from "./projectModels";
 import {
   nextProjectPullRequestStatusCreatedAt,
   type ProjectPullRequest,
@@ -160,6 +161,7 @@ export function canReviewProjectPullRequest(
   if (viewer === normalizePubkey(pullRequest.author)) return false;
   return (
     viewer === normalizePubkey(project.owner) ||
+    isRepositoryMaintainer(project, viewer) ||
     pullRequest.reviewers.some(
       (reviewer) => normalizePubkey(reviewer) === viewer,
     )
