@@ -415,6 +415,26 @@ async fn mint_invite_inner(
     })))
 }
 
+/// A claim just recorded the claimant's agent owner, after its transaction
+/// committed. Do what first AUTH does when it records an owner: update this
+/// relay's owner caches, make sockets opened without the owner reconnect with
+/// it, and republish the claimant's rosters in the background, because
+/// rosters show `bot` for an owned agent.
+fn owner_recorded_by_claim(
+    state: &Arc<AppState>,
+    tenant: &buzz_core::TenantContext,
+    claimant: &nostr::PublicKey,
+    owner: &nostr::PublicKey,
+) {
+    super::relay_members::remember_agent_owner(state, tenant, claimant, owner);
+    state.disconnect_unowned_agent_clusterwide(tenant, claimant.as_bytes());
+    crate::handlers::side_effects::spawn_agent_roster_republish(
+        tenant,
+        Arc::clone(state),
+        claimant.to_bytes().to_vec(),
+    );
+}
+
 /// Claim an invite code — `POST /api/invites/claim`, NIP-98 signed by the
 /// *joining* pubkey. Exempt from the relay-membership gate by design.
 ///
@@ -481,8 +501,8 @@ pub async fn claim_invite(
             .map_err(map_claim_error)?;
         metrics::counter!("buzz_users_created_total", "community" => tenant.host().to_owned())
             .increment(write.outcome.users_created);
-        if write.outcome.owner_link_created {
-            state.disconnect_unowned_agent_clusterwide(&tenant, pubkey.as_bytes());
+        if let (true, Some(owner)) = (write.outcome.owner_link_created, verified_owner.as_ref()) {
+            owner_recorded_by_claim(&state, &tenant, &pubkey, owner);
         }
         // The member-added delta and the auto-join only on Joined, never on
         // other outcomes; the membership-list fan-out on every outcome.
@@ -576,8 +596,8 @@ pub async fn claim_invite(
         .map_err(map_claim_error)?;
     metrics::counter!("buzz_users_created_total", "community" => tenant.host().to_owned())
         .increment(write.outcome.users_created);
-    if write.outcome.owner_link_created {
-        state.disconnect_unowned_agent_clusterwide(&tenant, pubkey.as_bytes());
+    if let (true, Some(owner)) = (write.outcome.owner_link_created, verified_owner.as_ref()) {
+        owner_recorded_by_claim(&state, &tenant, &pubkey, owner);
     }
     let was_inserted = write.outcome.inserted;
     finish_committed_claim(&tenant, &state, &claimer_hex, write.snapshot, was_inserted).await;

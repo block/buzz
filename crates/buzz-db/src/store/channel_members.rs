@@ -22,7 +22,8 @@ pub struct MemberRecord {
     pub channel_id: Uuid,
     /// Compressed public key bytes of the member.
     pub pubkey: Vec<u8>,
-    /// Role string (e.g. `"owner"`, `"member"`, `"bot"`).
+    /// Role string (e.g. `"owner"`, `"member"`, `"bot"`), as
+    /// [`member_role_label`] shows it.
     pub role: String,
     /// When the member joined.
     pub joined_at: DateTime<Utc>,
@@ -31,6 +32,35 @@ pub struct MemberRecord {
     /// When the member was removed, if applicable.
     pub removed_at: Option<DateTime<Utc>>,
 }
+
+/// SQL for the role that a `channel_members` row aliased `cm` shows.
+///
+/// `member` and `bot` are one role with the same permissions. The relay
+/// stores `member` for both, and an ordinary member shows `bot` exactly when
+/// its key has a recorded agent owner in the community. Older relays stored
+/// `bot` when a client asked for it, so a stored `bot` follows the same rule.
+/// `owner`, `admin` and `guest` show as stored. An agent owner is recorded
+/// once and never changes, so the label of a key changes at most once.
+///
+/// One exception: the `users` foreign key to the owner is `ON DELETE SET
+/// NULL`, so deleting the owner's `users` row clears the agent's owner. Today
+/// only community deletion deletes `users` rows, and it removes every row of
+/// the community. A user deletion that purges `users` rows must republish the
+/// rosters of the deleted owner's agents, or they keep showing `bot`.
+///
+/// Every read of a member's role uses this, so rosters, member lists and role
+/// checks agree.
+macro_rules! member_role_label {
+    () => {
+        "(CASE WHEN cm.role IN ('member', 'bot') THEN \
+            CASE WHEN EXISTS (SELECT 1 FROM users u_owner \
+                WHERE u_owner.community_id = cm.community_id AND u_owner.pubkey = cm.pubkey \
+                  AND u_owner.agent_owner_pubkey IS NOT NULL) \
+            THEN 'bot' ELSE 'member' END \
+         ELSE cm.role::text END)"
+    };
+}
+pub(crate) use member_role_label;
 
 /// Namespace for the per-channel membership advisory lock. Serializes the
 /// role-authorization + last-owner-count + write sequences in [`add_member`]
@@ -85,6 +115,10 @@ pub(crate) async fn acquire_channel_membership_lock(
 ///
 /// On failure, DO raises the PostgreSQL error that migration 0032's retired
 /// trigger raised, so callers see the same SQLSTATE and message.
+///
+/// `member` and `bot` count as one role here: the label a roster shows is
+/// computed when the roster is captured ([`member_role_label`]), and an agent
+/// owner recorded between capture and insert changes only that label.
 pub(crate) async fn validate_channel_roster_snapshot(
     tx: &mut AdmittedTx,
     channel_id: Uuid,
@@ -102,14 +136,17 @@ pub(crate) async fn validate_channel_roster_snapshot(
                       NOT IN ('owner', 'admin', 'bot', 'member', 'guest'))
         ) THEN 1
         WHEN
-            (SELECT COALESCE(array_agg(encode(cm.pubkey, 'hex') || ':' || cm.role::text
+            (SELECT COALESCE(array_agg(encode(cm.pubkey, 'hex') || ':' ||
+                                        CASE WHEN cm.role IN ('member', 'bot') THEN 'member'
+                                             ELSE cm.role::text END
                                         ORDER BY cm.pubkey), ARRAY[]::text[])
              FROM channel_members cm
              WHERE cm.community_id = $1 AND cm.channel_id = $2
                AND cm.removed_at IS NULL)
             IS DISTINCT FROM
             (SELECT COALESCE(array_agg(lower(roster_tag.tag_json->>1) || ':' ||
-                                        (roster_tag.tag_json->>3)
+                                        CASE WHEN roster_tag.tag_json->>3 IN ('member', 'bot')
+                                             THEN 'member' ELSE roster_tag.tag_json->>3 END
                                         ORDER BY decode(roster_tag.tag_json->>1, 'hex')),
                              ARRAY[]::text[])
              FROM jsonb_array_elements($3::jsonb) AS roster_tag(tag_json)
@@ -492,6 +529,31 @@ impl LockedMemberSnapshot {
     }
 }
 
+/// Refuse to serve until migration 0081 has retired the 0032 roster trigger.
+///
+/// This relay shows the computed `member`/`bot` label in kind:39002 rosters.
+/// The 0032 trigger compares roster labels with the stored role exactly, so
+/// while it is installed it refuses every roster that shows `bot` for a stored
+/// `member`. Membership changes would still commit, but those channels'
+/// rosters would stop updating.
+pub async fn verify_channel_roster_trigger_retired<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+) -> Result<()> {
+    let installed: bool = sqlx::query_scalar(
+        "SELECT to_regprocedure('public.guard_channel_roster_snapshot()') IS NOT NULL \
+         OR EXISTS (SELECT 1 FROM pg_trigger \
+                    WHERE tgname = 'trg_events_guard_channel_roster_snapshot')",
+    )
+    .fetch_one(executor)
+    .await?;
+    if installed {
+        return Err(DbError::InvalidData(
+            "the 0032 channel roster trigger is still installed; apply migration 0081".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Capture all active members while holding the same per-channel lock used by
 /// membership writers.
 ///
@@ -527,15 +589,17 @@ pub async fn lock_member_snapshot(
     )
     .await?;
     acquire_channel_membership_lock(tx.conn(), community_id, channel_id).await?;
-    let rows = sqlx::query(
+    let rows = sqlx::query(concat!(
+        "SELECT cm.channel_id, cm.pubkey, ",
+        member_role_label!(),
+        " AS role, cm.joined_at, cm.invited_by, cm.removed_at",
         r#"
-        SELECT cm.channel_id, cm.pubkey, cm.role::text AS role, cm.joined_at, cm.invited_by, cm.removed_at
         FROM channel_members cm
         JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL
         WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.removed_at IS NULL
         ORDER BY cm.joined_at ASC
-        "#,
-    )
+        "#
+    ))
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .fetch_all(tx.conn())
@@ -857,10 +921,13 @@ async fn put_members_on(
     if let Some(actor) = invited_by {
         involved.push(actor.to_vec());
     }
-    let mut roles: std::collections::HashMap<Vec<u8>, String> = sqlx::query(
-        "SELECT pubkey, role::text AS role FROM channel_members \
-         WHERE community_id = $1 AND channel_id = $2 AND pubkey = ANY($3) AND removed_at IS NULL",
-    )
+    let mut roles: std::collections::HashMap<Vec<u8>, String> = sqlx::query(concat!(
+        "SELECT cm.pubkey, ",
+        member_role_label!(),
+        " AS role FROM channel_members cm \
+         WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.pubkey = ANY($3) \
+           AND cm.removed_at IS NULL"
+    ))
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .bind(&involved)
@@ -959,25 +1026,33 @@ async fn put_members_on(
         .zip(&decided)
         .filter_map(|(target, decision)| {
             let (_, role) = decision.as_ref().ok()?;
-            Some((target.pubkey.to_vec(), role.as_str()))
+            // Store `member` for both ordinary roles; reads show `bot` for an
+            // owned agent (see `member_role_label`).
+            let stored = if role.is_ordinary_member() {
+                MemberRole::Member
+            } else {
+                *role
+            };
+            Some((target.pubkey.to_vec(), stored.as_str()))
         })
         .unzip();
     let mut written: std::collections::HashMap<Vec<u8>, MemberRecord> =
         std::collections::HashMap::with_capacity(write_keys.len());
     if !write_keys.is_empty() {
-        let rows = sqlx::query(
+        let rows = sqlx::query(concat!(
             r#"
-            INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
+            INSERT INTO channel_members AS cm (community_id, channel_id, pubkey, role, invited_by)
             SELECT $1, $2, t.pubkey, t.role::member_role, $5
             FROM UNNEST($3::bytea[], $4::text[]) AS t(pubkey, role)
             ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
-                sync_modified_at = CASE WHEN channel_members.removed_at IS NOT NULL THEN clock_timestamp() ELSE channel_members.sync_modified_at END,
+                sync_modified_at = CASE WHEN cm.removed_at IS NOT NULL THEN clock_timestamp() ELSE cm.sync_modified_at END,
                 removed_at = NULL,
                 removed_by = NULL,
                 role = EXCLUDED.role
-            RETURNING channel_id, pubkey, role::text AS role, joined_at, invited_by, removed_at
-            "#,
-        )
+            RETURNING cm.channel_id, cm.pubkey, "#,
+            member_role_label!(),
+            " AS role, cm.joined_at, cm.invited_by, cm.removed_at"
+        ))
         .bind(community_id.as_uuid())
         .bind(channel_id)
         .bind(&write_keys)
@@ -1386,15 +1461,17 @@ async fn get_members_with_operation(
     operation: crate::observability::WriterOperation,
 ) -> Result<Vec<MemberRecord>> {
     let mut connection = crate::observability::acquire_writer(pool, operation).await?;
-    let rows = sqlx::query(
+    let rows = sqlx::query(concat!(
+        "SELECT cm.channel_id, cm.pubkey, ",
+        member_role_label!(),
+        " AS role, cm.joined_at, cm.invited_by, cm.removed_at",
         r#"
-        SELECT cm.channel_id, cm.pubkey, cm.role::text AS role, cm.joined_at, cm.invited_by, cm.removed_at
         FROM channel_members cm
         JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL
         WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.removed_at IS NULL
         ORDER BY cm.joined_at ASC
-        "#,
-    )
+        "#
+    ))
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .fetch_all(&mut *connection)
@@ -1422,15 +1499,17 @@ pub async fn get_members_bulk(
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
-    let rows = sqlx::query(
+    let rows = sqlx::query(concat!(
+        "SELECT cm.channel_id, cm.pubkey, ",
+        member_role_label!(),
+        " AS role, cm.joined_at, cm.invited_by, cm.removed_at",
         r#"
-        SELECT cm.channel_id, cm.pubkey, cm.role::text AS role, cm.joined_at, cm.invited_by, cm.removed_at
         FROM channel_members cm
         JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL
         WHERE cm.community_id = $1 AND cm.channel_id = ANY($2) AND cm.removed_at IS NULL
         ORDER BY cm.joined_at ASC
-        "#,
-    )
+        "#
+    ))
     .bind(community_id.as_uuid())
     .bind(channel_ids)
     .fetch_all(&mut *connection)
@@ -1746,6 +1825,33 @@ pub async fn list_large_channel_rosters_needing_reconciliation(
         .collect()
 }
 
+/// The channels where `pubkey` is an active ordinary member (`member` or
+/// `bot`). Recording an agent owner changes the label these rows show, so
+/// their rosters are republished.
+pub async fn list_ordinary_member_channels(
+    pool: &PgPool,
+    community_id: CommunityId,
+    pubkey: &[u8],
+) -> Result<Vec<Uuid>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    Ok(sqlx::query_scalar(
+        "SELECT cm.channel_id FROM channel_members cm \
+         JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id \
+           AND c.deleted_at IS NULL \
+         WHERE cm.community_id = $1 AND cm.pubkey = $2 AND cm.role IN ('member', 'bot') \
+           AND cm.removed_at IS NULL \
+         ORDER BY cm.channel_id",
+    )
+    .bind(community_id.as_uuid())
+    .bind(pubkey)
+    .fetch_all(&mut *connection)
+    .await?)
+}
+
 /// Transaction-aware variant of [`get_active_role_tx`].
 async fn get_active_role_tx(
     tx: &mut PgConnection,
@@ -1753,10 +1859,13 @@ async fn get_active_role_tx(
     channel_id: Uuid,
     pubkey: &[u8],
 ) -> Result<Option<String>> {
-    let row = sqlx::query(
-        "SELECT role::text AS role FROM channel_members \
-         WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3 AND removed_at IS NULL",
-    )
+    let row = sqlx::query(concat!(
+        "SELECT ",
+        member_role_label!(),
+        " AS role FROM channel_members cm \
+         WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.pubkey = $3 \
+           AND cm.removed_at IS NULL"
+    ))
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .bind(pubkey)
@@ -1915,7 +2024,8 @@ pub async fn get_accessible_channels(
         .collect()
 }
 
-/// Returns all bot-role members with their channel memberships in one community.
+/// Returns all members that show the `bot` role (ordinary members with a
+/// recorded agent owner) with their channel memberships in one community.
 ///
 /// Channels are returned as a JSON array of `{name, id}` objects via `json_agg`,
 /// preserving the 1:1 name↔UUID pairing. No separate string_agg ordering issues.
@@ -1936,7 +2046,8 @@ pub async fn get_bot_members(
         FROM channel_members cm
         LEFT JOIN users u ON cm.community_id = u.community_id AND cm.pubkey = u.pubkey
         JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL
-        WHERE cm.community_id = $1 AND cm.role = 'bot' AND cm.removed_at IS NULL
+        WHERE cm.community_id = $1 AND cm.role IN ('member', 'bot') AND cm.removed_at IS NULL
+          AND u.agent_owner_pubkey IS NOT NULL
         GROUP BY cm.pubkey, u.display_name, u.agent_type, u.capabilities
         LIMIT 1000
         "#,
@@ -2112,11 +2223,13 @@ pub async fn get_member_role(
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
-    let row = sqlx::query(
-        "SELECT cm.role::text AS role FROM channel_members cm \
+    let row = sqlx::query(concat!(
+        "SELECT ",
+        member_role_label!(),
+        " AS role FROM channel_members cm \
          JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL \
-         WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.pubkey = $3 AND cm.removed_at IS NULL",
-    )
+         WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.pubkey = $3 AND cm.removed_at IS NULL"
+    ))
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .bind(pubkey)
@@ -2126,6 +2239,18 @@ pub async fn get_member_role(
 }
 
 impl Db {
+    /// Fail unless migration 0081 has retired the 0032 roster trigger. See
+    /// [`verify_channel_roster_trigger_retired`].
+    #[datastore_span(name = "verify_channel_roster_trigger_retired", system = "postgresql")]
+    pub async fn verify_channel_roster_trigger_retired(&self) -> Result<()> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Bootstrap,
+        )
+        .await?;
+        verify_channel_roster_trigger_retired(&mut *connection).await
+    }
+
     /// Capture the active roster while holding the membership-writer lock.
     #[datastore_span(name = "lock_member_snapshot", system = "postgresql")]
     pub async fn lock_member_snapshot(
@@ -2402,6 +2527,16 @@ impl Db {
     ) -> Result<Vec<LargeChannelRoster>> {
         list_large_channel_rosters_needing_reconciliation(&self.pool, minimum_members, relay_pubkey)
             .await
+    }
+
+    /// Returns the channels where `pubkey` is an active ordinary member.
+    #[datastore_span(name = "list_ordinary_member_channels", system = "postgresql")]
+    pub async fn list_ordinary_member_channels(
+        &self,
+        community_id: CommunityId,
+        pubkey: &[u8],
+    ) -> Result<Vec<Uuid>> {
+        list_ordinary_member_channels(&self.pool, community_id, pubkey).await
     }
 
     /// Returns full channel records for all channels a user can access.
@@ -2934,7 +3069,7 @@ mod postgres_tests {
         .expect("insert large roster");
 
         // The roster check requires canonical four-field p tags
-        // whose roles exactly match channel_members, including the creator's
+        // whose roles match channel_members, including the creator's
         // owner row created by create_test_channel.
         let creator_hex = hex::encode(&creator);
         let stale_tags: Vec<serde_json::Value> =
@@ -3581,7 +3716,8 @@ mod postgres_tests {
         let role = get_member_role(&pool, community, channel.id, &agent)
             .await
             .expect("read role");
-        assert_eq!(role.as_deref(), Some("member"));
+        // The agent has a recorded owner, so its ordinary role shows `bot`.
+        assert_eq!(role.as_deref(), Some("bot"));
     }
 
     /// `put_members` decides each person as though each were its own write:
@@ -4764,6 +4900,34 @@ mod postgres_tests {
         for role in ["owner", "admin", "bot", "member", "guest"] {
             cases.push((role, json!([["p", owner_hex, "", role]]), Some(role), None));
         }
+        // `member` and `bot` are one role; which label a roster shows is
+        // decided at read time, so the check does not compare them.
+        cases.extend([
+            (
+                "stored member shown as bot",
+                json!([["p", owner_hex, "", "bot"]]),
+                Some("member"),
+                None,
+            ),
+            (
+                "stored bot shown as member",
+                json!([["p", owner_hex, "", "member"]]),
+                Some("bot"),
+                None,
+            ),
+            (
+                "guest shown as member",
+                json!([["p", owner_hex, "", "member"]]),
+                Some("guest"),
+                Some(mismatch),
+            ),
+            (
+                "member shown as guest",
+                json!([["p", owner_hex, "", "guest"]]),
+                Some("member"),
+                Some(mismatch),
+            ),
+        ]);
         assert_ne!(
             owner_hex,
             owner_hex.to_uppercase(),
@@ -5465,28 +5629,19 @@ mod postgres_tests {
         .expect("create channel");
     }
 
-    /// Migration 0081 retires the 0032 roster trigger. Before it, the trigger
-    /// and its function are installed; after it, both are gone and the
+    /// Migration 0081 retires the 0032 roster trigger: after migrating, the
     /// database accepts a raw kind:39002 insert that disagrees with
-    /// membership, because only the app-side check guards rosters now.
+    /// membership, because only the app-side check guards rosters now. The
+    /// startup check refuses a database where the trigger is still
+    /// installed and accepts it after 0081.
     ///
-    /// Mutation: remove the DROP statements from 0081 → the trigger refuses
-    /// the insert → RED.
+    /// Mutations: remove the DROP statements from 0081 → the trigger refuses
+    /// the insert → RED; make the startup check always pass → the pre-0081
+    /// database is accepted → RED.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn migration_0081_retires_the_roster_trigger() {
+    async fn migrations_retire_the_roster_trigger() {
         use nostr::{EventBuilder, Keys, Kind, Tag};
-
-        async fn roster_trigger_installed(pool: &PgPool) -> bool {
-            sqlx::query_scalar(
-                "SELECT to_regprocedure('public.guard_channel_roster_snapshot()') IS NOT NULL \
-                 OR EXISTS (SELECT 1 FROM pg_trigger \
-                            WHERE tgname = 'trg_events_guard_channel_roster_snapshot')",
-            )
-            .fetch_one(pool)
-            .await
-            .expect("look up the roster trigger")
-        }
 
         let (pool, _scratch) = ScratchDb::migrated_through(
             &crate::test_support::database_url(),
@@ -5494,17 +5649,28 @@ mod postgres_tests {
             80,
         )
         .await;
+        let db = Db::from_pool(pool.clone());
+        let error = db
+            .verify_channel_roster_trigger_retired()
+            .await
+            .expect_err("before 0081 the trigger is installed");
         assert!(
-            roster_trigger_installed(&pool).await,
-            "before 0081 the trigger is installed"
+            error.to_string().contains("apply migration 0081"),
+            "the startup check must name the missing migration: {error}"
         );
         migration::run_migrations(&pool)
             .await
             .expect("apply migration 0081");
-        assert!(
-            !roster_trigger_installed(&pool).await,
-            "0081 must drop the roster trigger and its function"
-        );
+        db.verify_channel_roster_trigger_retired()
+            .await
+            .expect("0081 retires the trigger");
+        let function: Option<String> = sqlx::query_scalar(
+            "SELECT to_regprocedure('public.guard_channel_roster_snapshot()')::text",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("look up the roster function");
+        assert_eq!(function, None, "0081 must drop the roster function");
 
         let community_uuid = Uuid::new_v4();
         let channel = Uuid::new_v4();
@@ -5532,5 +5698,341 @@ mod postgres_tests {
         .execute(&pool)
         .await
         .expect("without the trigger, a raw roster insert is not checked");
+    }
+
+    async fn stored_role(
+        pool: &PgPool,
+        community_id: Uuid,
+        channel_id: Uuid,
+        pubkey: &[u8],
+    ) -> String {
+        sqlx::query_scalar(
+            "SELECT role::text FROM channel_members \
+             WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+        )
+        .bind(community_id)
+        .bind(channel_id)
+        .bind(pubkey)
+        .fetch_one(pool)
+        .await
+        .expect("read stored role")
+    }
+
+    async fn open_test_channel(pool: &PgPool, community_id: Uuid, creator: &[u8]) -> Uuid {
+        create_test_channel(
+            pool,
+            community_id,
+            "ordinary-role",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            creator,
+            None,
+        )
+        .await
+        .expect("create channel")
+        .id
+    }
+
+    /// Every read shows an ordinary member as `bot` exactly when the key has
+    /// a recorded agent owner, whichever ordinary role a client asked for or
+    /// an older relay stored. Writes store `member`, so recording the owner
+    /// changes the label without touching any row. Elevated and guest roles
+    /// show as stored.
+    ///
+    /// Mutations: read the stored role in any of the readers → the agent
+    /// shows `member` after its owner is recorded → RED; store the requested
+    /// role → the stored `bot` assertion fails → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn ordinary_member_label_follows_the_recorded_agent_owner() {
+        let pool = setup_pool().await;
+        let db = Db::from_pool(pool.clone());
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let relay_pubkey = random_pubkey();
+        let creator = random_pubkey();
+        let owner = random_pubkey();
+        let agent = random_pubkey();
+        let person = random_pubkey();
+        let legacy = random_pubkey();
+        for key in [&creator, &owner, &agent, &person, &legacy] {
+            ensure_user(&pool, community, key)
+                .await
+                .expect("ensure user");
+        }
+        let channel = open_test_channel(&pool, community_id, &creator).await;
+        let guest_channel = open_test_channel(&pool, community_id, &creator).await;
+        add_member(&pool, community, channel, &agent, MemberRole::Bot, None)
+            .await
+            .expect("add unowned agent asking for bot");
+        add_member(&pool, community, channel, &person, MemberRole::Member, None)
+            .await
+            .expect("add person");
+        add_member(
+            &pool,
+            community,
+            guest_channel,
+            &agent,
+            MemberRole::Guest,
+            None,
+        )
+        .await
+        .expect("add agent as guest");
+        // An older relay stored `bot` when a client asked for it.
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey, role) \
+             VALUES ($1, $2, $3, 'bot')",
+        )
+        .bind(community_id)
+        .bind(channel)
+        .bind(&legacy)
+        .execute(&pool)
+        .await
+        .expect("seed legacy bot row");
+
+        // Every reader of a role, keyed by pubkey.
+        let labels = |channel: Uuid| {
+            let (pool, db, relay_pubkey) = (pool.clone(), db.clone(), relay_pubkey.clone());
+            async move {
+                let mut views: Vec<std::collections::HashMap<Vec<u8>, String>> = Vec::new();
+                views.push(
+                    get_members(&pool, community, channel)
+                        .await
+                        .expect("get members")
+                        .into_iter()
+                        .map(|m| (m.pubkey, m.role))
+                        .collect(),
+                );
+                views.push(
+                    get_members_bulk(&pool, community, &[channel])
+                        .await
+                        .expect("get members bulk")
+                        .into_iter()
+                        .map(|m| (m.pubkey, m.role))
+                        .collect(),
+                );
+                let snapshot = db
+                    .lock_member_snapshot(community, channel, &relay_pubkey)
+                    .await
+                    .expect("lock member snapshot");
+                views.push(
+                    snapshot
+                        .members
+                        .iter()
+                        .map(|m| (m.pubkey.clone(), m.role.clone()))
+                        .collect(),
+                );
+                snapshot.release().await.expect("release snapshot");
+                let mut single = std::collections::HashMap::new();
+                for key in views[0].keys() {
+                    let role = get_member_role(&pool, community, channel, key)
+                        .await
+                        .expect("get member role")
+                        .expect("active member");
+                    single.insert(key.clone(), role);
+                }
+                views.push(single);
+                for view in &views[1..] {
+                    assert_eq!(view, &views[0], "every reader shows the same labels");
+                }
+                views.swap_remove(0)
+            }
+        };
+        let bots = |pool: PgPool| async move {
+            get_bot_members(&pool, community)
+                .await
+                .expect("get bot members")
+                .into_iter()
+                .map(|b| b.pubkey)
+                .collect::<Vec<_>>()
+        };
+
+        let before = labels(channel).await;
+        assert_eq!(before[&agent], "member");
+        assert_eq!(before[&person], "member");
+        assert_eq!(
+            before[&legacy], "member",
+            "a stored bot without an owner is a member"
+        );
+        assert_eq!(
+            stored_role(&pool, community_id, channel, &agent).await,
+            "member"
+        );
+        assert!(bots(pool.clone()).await.is_empty());
+
+        set_agent_owner(&pool, community, &agent, &owner)
+            .await
+            .expect("record agent owner");
+        let after = labels(channel).await;
+        assert_eq!(after[&agent], "bot");
+        assert_eq!(after[&person], "member");
+        assert_eq!(
+            stored_role(&pool, community_id, channel, &agent).await,
+            "member"
+        );
+        assert_eq!(labels(guest_channel).await[&agent], "guest");
+        assert_eq!(bots(pool.clone()).await, vec![agent.clone()]);
+
+        // Asking for the other ordinary role is not a role change: an
+        // unprivileged self re-add succeeds, changes nothing, and reports the
+        // computed label before and after.
+        let put = put_members(
+            &pool,
+            community,
+            channel,
+            &[MemberPut {
+                pubkey: &agent,
+                requested: Some(MemberRole::Member),
+            }],
+            Some(&agent),
+        )
+        .await
+        .expect("re-add owned agent")
+        .pop()
+        .expect("one result")
+        .expect("re-add allowed");
+        assert_eq!(put.prior_role.as_deref(), Some("bot"));
+        assert_eq!(put.member.role, "bot");
+        assert_eq!(
+            stored_role(&pool, community_id, channel, &agent).await,
+            "member"
+        );
+    }
+
+    /// The roster check treats `member` and `bot` as one role, so an owner
+    /// recorded between roster capture and insert does not refuse the
+    /// publication; the background republish then replaces the stale label.
+    ///
+    /// Mutation: compare labels exactly in `validate_channel_roster_snapshot`
+    /// → the captured roster is refused → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_record_during_roster_publication_converges() {
+        let pool = setup_pool().await;
+        let db = Db::from_pool(pool.clone());
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let relay_keys = Keys::generate();
+        let relay_pubkey = relay_keys.public_key().to_bytes();
+        let creator = random_pubkey();
+        let owner = random_pubkey();
+        let agent = random_pubkey();
+        for key in [&creator, &owner, &agent] {
+            ensure_user(&pool, community, key)
+                .await
+                .expect("ensure user");
+        }
+        let channel = open_test_channel(&pool, community_id, &creator).await;
+        add_member(&pool, community, channel, &agent, MemberRole::Member, None)
+            .await
+            .expect("add unowned agent");
+        let roster = |snapshot: &LockedMemberSnapshot, created_at: u64| {
+            let tags =
+                std::iter::once(nostr::Tag::parse(["d", &channel.to_string()]).expect("d tag"))
+                    .chain(snapshot.members.iter().map(|m| {
+                        nostr::Tag::parse(["p", &hex::encode(&m.pubkey), "", &m.role])
+                            .expect("p tag")
+                    }))
+                    .collect::<Vec<_>>();
+            nostr::EventBuilder::new(nostr::Kind::Custom(39002), "")
+                .tags(tags)
+                .custom_created_at(nostr::Timestamp::from(created_at))
+                .sign_with_keys(&relay_keys)
+                .expect("sign roster")
+        };
+        let agent_label = |tags: &serde_json::Value| {
+            tags.as_array()
+                .expect("tags")
+                .iter()
+                .find(|tag| tag[0] == "p" && tag[1] == hex::encode(&agent))
+                .map(|tag| tag[3].as_str().expect("role").to_owned())
+        };
+        let live_tags = || async {
+            sqlx::query_scalar::<_, serde_json::Value>(
+                "SELECT tags FROM events WHERE community_id = $1 AND channel_id = $2 \
+                 AND kind = 39002 AND deleted_at IS NULL",
+            )
+            .bind(community_id)
+            .bind(channel)
+            .fetch_one(&pool)
+            .await
+            .expect("read live roster")
+        };
+        let at = nostr::Timestamp::now().as_secs();
+
+        let mut snapshot = db
+            .lock_member_snapshot(community, channel, &relay_pubkey)
+            .await
+            .expect("capture roster");
+        let captured = roster(&snapshot, at);
+        // The owner record does not take the membership lock, so it commits
+        // while the publisher holds it.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            set_agent_owner(&pool, community, &agent, &owner),
+        )
+        .await
+        .expect("owner record must not wait on the membership lock")
+        .expect("record owner");
+        assert!(
+            snapshot
+                .replace_member_event(&captured)
+                .await
+                .expect("a roster captured before the record is accepted")
+                .1
+        );
+        snapshot.release().await.expect("commit captured roster");
+        assert_eq!(agent_label(&live_tags().await).as_deref(), Some("member"));
+
+        // The background republish after the owner record.
+        let mut snapshot = db
+            .lock_member_snapshot(community, channel, &relay_pubkey)
+            .await
+            .expect("capture roster for republish");
+        let republished = roster(&snapshot, at + 1);
+        snapshot
+            .replace_member_event(&republished)
+            .await
+            .expect("republish");
+        snapshot.release().await.expect("commit republish");
+        assert_eq!(agent_label(&live_tags().await).as_deref(), Some("bot"));
+    }
+
+    /// The republish after an owner record lists the agent's active ordinary
+    /// memberships only.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn ordinary_member_channels_list_only_active_ordinary_rows() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let creator = random_pubkey();
+        let agent = random_pubkey();
+        for key in [&creator, &agent] {
+            ensure_user(&pool, community, key)
+                .await
+                .expect("ensure user");
+        }
+        let member = open_test_channel(&pool, community_id, &creator).await;
+        let removed = open_test_channel(&pool, community_id, &creator).await;
+        let guest = open_test_channel(&pool, community_id, &creator).await;
+        for channel in [member, removed] {
+            add_member(&pool, community, channel, &agent, MemberRole::Member, None)
+                .await
+                .expect("add agent");
+        }
+        add_member(&pool, community, guest, &agent, MemberRole::Guest, None)
+            .await
+            .expect("add agent as guest");
+        remove_member(&pool, community, removed, &agent, &agent)
+            .await
+            .expect("agent leaves");
+        assert_eq!(
+            list_ordinary_member_channels(&pool, community, &agent)
+                .await
+                .expect("list channels"),
+            vec![member]
+        );
     }
 }

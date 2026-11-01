@@ -1856,6 +1856,17 @@ impl PutUserReport {
     }
 }
 
+/// Whether a re-add left a member's role unchanged. `member` and `bot` are
+/// one role: both labels are computed from the agent owner record, and the
+/// first owner record can commit between the prior-role read and the write,
+/// so the same row can read `member` and then `bot`.
+fn member_role_unchanged(prior: &str, current: &str) -> bool {
+    match (prior.parse::<MemberRole>(), current.parse::<MemberRole>()) {
+        (Ok(prior), Ok(current)) => prior.is_same_role(current),
+        _ => prior == current,
+    }
+}
+
 /// Store a validated kind:9000 and apply it, returning the stored event,
 /// whether it was new, and its OK message.
 ///
@@ -1956,7 +1967,9 @@ pub(crate) async fn persist_put_user(
             // A no-op re-add posts no second "joined" notice, but still sends
             // the member-added notification, which re-signals an agent that
             // missed the first one.
-            Some(prior) if prior == put.member.role => report.already_member.push(target_hex),
+            Some(prior) if member_role_unchanged(&prior, &put.member.role) => {
+                report.already_member.push(target_hex)
+            }
             prior => {
                 if let Err(e) = emit_system_message(
                     tenant,
@@ -4069,50 +4082,105 @@ pub async fn reconcile_large_channel_member_snapshots(
             &relay_pubkey.to_bytes(),
         )
         .await?;
+    let summary = republish_roster_candidates(
+        state,
+        candidates
+            .into_iter()
+            .map(|candidate| (candidate.community_id, candidate.host, candidate.channel_id))
+            .collect(),
+        "large channel roster reconciliation failed",
+    )
+    .await;
+    metrics::counter!("buzz_channel_roster_reconciliations_total")
+        .increment(summary.repaired as u64);
+    Ok(summary)
+}
+
+/// Republish each `(community, host, channel)` roster under its membership
+/// lock, counting failures instead of stopping. Each roster first takes a
+/// relay-wide republish permit, so concurrent callers share a small bound on
+/// the writer connections they hold.
+async fn republish_roster_candidates(
+    state: &Arc<AppState>,
+    candidates: Vec<(buzz_core::CommunityId, String, uuid::Uuid)>,
+    failure_message: &'static str,
+) -> ReconcileSummary {
+    let relay_pubkey = state.relay_keypair.public_key();
     let relay_pubkey_hex = relay_pubkey.to_hex();
     let mut reconciled = 0usize;
     let mut failed = 0usize;
 
-    for candidate in candidates {
+    for (community_id, host, channel_id) in candidates {
         let result = async {
-            let channel_id = candidate.channel_id;
+            let _permit = Arc::clone(&state.roster_republish_semaphore)
+                .acquire_owned()
+                .await?;
             // Hold the membership-writer lock from roster capture through
             // replacement. Otherwise a rolling deployment can publish stale
             // roster A after another relay commits and publishes roster B.
             let mut member_snapshot = state
                 .db
-                .lock_member_snapshot(candidate.community_id, channel_id, &relay_pubkey.to_bytes())
+                .lock_member_snapshot(community_id, channel_id, &relay_pubkey.to_bytes())
                 .await?;
-            let tenant = TenantContext::resolved(candidate.community_id, candidate.host.clone());
+            let tenant = TenantContext::resolved(community_id, host.clone());
             let stored_members = store_group_members_event(state, &mut member_snapshot).await?;
             member_snapshot.release().await?;
             dispatch_group_members_event(&tenant, state, stored_members, &relay_pubkey_hex).await;
-            Ok::<bool, anyhow::Error>(true)
+            Ok::<(), anyhow::Error>(())
         }
         .await;
 
         match result {
-            Ok(true) => reconciled += 1,
-            Ok(false) => {}
+            Ok(()) => reconciled += 1,
             Err(error) => {
                 failed += 1;
                 metrics::counter!("buzz_channel_roster_reconciliation_failures_total").increment(1);
-                warn!(
-                    community_id = %candidate.community_id,
-                    host = %candidate.host,
-                    channel_id = %candidate.channel_id,
-                    %error,
-                    "large channel roster reconciliation failed"
-                );
+                warn!(%community_id, %host, %channel_id, %error, "{failure_message}");
             }
         }
     }
 
-    metrics::counter!("buzz_channel_roster_reconciliations_total").increment(reconciled as u64);
-    Ok(ReconcileSummary {
+    ReconcileSummary {
         repaired: reconciled,
         failed,
-    })
+    }
+}
+
+/// Republish, in the background, the kind:39002 roster of every channel
+/// where `agent` is an active ordinary member. Call it after recording the
+/// agent's owner: rosters show `bot` for an owned agent, so each of those
+/// rosters now shows the wrong label.
+///
+/// The channels are listed inside the task, after the owner record has
+/// committed, so a channel the agent joins concurrently is either listed here
+/// or published by its own join with the new label. Each roster is captured
+/// and replaced under the channel's membership lock, like every other roster
+/// writer. That lock can wait up to the lock timeout, so the caller does not
+/// wait: first AUTH must finish inside its own deadline. A failure is logged
+/// and counted and does not stop the other channels. A roster left stale (for
+/// example by a relay that stopped first) shows only the wrong label, which
+/// has the same permissions; the next membership change repairs it.
+pub fn spawn_agent_roster_republish(tenant: &TenantContext, state: Arc<AppState>, agent: Vec<u8>) {
+    let (community_id, host) = (tenant.community(), tenant.host().to_owned());
+    tokio::spawn(async move {
+        let channels = match state
+            .db
+            .list_ordinary_member_channels(community_id, &agent)
+            .await
+        {
+            Ok(channels) => channels,
+            Err(error) => {
+                metrics::counter!("buzz_channel_roster_reconciliation_failures_total").increment(1);
+                warn!(%community_id, %error, "listing an agent's channels for roster republish failed");
+                return;
+            }
+        };
+        let candidates = channels
+            .into_iter()
+            .map(|channel_id| (community_id, host.clone(), channel_id))
+            .collect();
+        republish_roster_candidates(&state, candidates, "channel roster republish failed").await;
+    });
 }
 
 /// Reconcile channels that exist in the DB but don't have kind:39000 events.
@@ -4545,6 +4613,27 @@ pub async fn publish_nipia_unarchived(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Mutation: compare the labels exactly → `member` then `bot` is
+    /// reported as a change → RED.
+    #[test]
+    fn re_add_treats_member_and_bot_as_one_role() {
+        assert!(member_role_unchanged("member", "bot"));
+        assert!(member_role_unchanged("bot", "member"));
+        assert!(member_role_unchanged("admin", "admin"));
+        for (prior, current) in [
+            ("guest", "member"),
+            ("guest", "bot"),
+            ("member", "admin"),
+            ("bot", "owner"),
+            ("admin", "member"),
+        ] {
+            assert!(
+                !member_role_unchanged(prior, current),
+                "{prior} -> {current}"
+            );
+        }
+    }
 
     fn create_with(creator: &nostr::Keys, tags: Vec<Vec<String>>) -> Event {
         nostr::EventBuilder::new(nostr::Kind::Custom(9007), "")

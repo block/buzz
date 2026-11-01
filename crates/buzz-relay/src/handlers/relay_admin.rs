@@ -1131,9 +1131,11 @@ mod postgres_tests {
             )
             .await
             .expect("agent owner");
+        // The owned agent joins as a member; its recorded owner makes the
+        // role read as `bot`.
         for (agent, expected) in [
             (&refusing, [None, None]),
-            (&owned, [Some("member".to_string()), None]),
+            (&owned, [Some("bot".to_string()), None]),
         ] {
             let add = EventBuilder::new(Kind::Custom(RELAY_ADMIN_ADD_MEMBER as u16), "")
                 .tags(vec![Tag::public_key(agent.public_key())])

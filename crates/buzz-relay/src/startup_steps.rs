@@ -73,6 +73,8 @@ pub enum StartupStep {
     MeshInitialReconcile,
     /// Run the git object-store conformance probe (when enabled).
     GitConformanceProbe,
+    /// Verify that migration 0081 retired the 0032 roster trigger.
+    ChannelRosterTriggerRetired,
     /// Repair large NIP-29 channel roster snapshots.
     LargeRosterReconcile,
     /// Bind the private health listener.
@@ -99,6 +101,7 @@ impl StartupStep {
         Self::MeshPublish,
         Self::MeshInitialReconcile,
         Self::GitConformanceProbe,
+        Self::ChannelRosterTriggerRetired,
         Self::LargeRosterReconcile,
         Self::HealthBind,
         Self::ListenerBind,
@@ -122,6 +125,7 @@ impl StartupStep {
             Self::MeshPublish => "mesh_publish",
             Self::MeshInitialReconcile => "mesh_initial_reconcile",
             Self::GitConformanceProbe => "git_conformance_probe",
+            Self::ChannelRosterTriggerRetired => "channel_roster_trigger_retired",
             Self::LargeRosterReconcile => "large_roster_reconcile",
             Self::HealthBind => "health_bind",
             Self::ListenerBind => "listener_bind",
