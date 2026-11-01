@@ -66,12 +66,21 @@ class _WorkspaceHeader extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     return Scaffold(
       body: TextButton(
-        onPressed: () => createMeProject(
-          context,
-          ref,
-          workspace: true,
-          channelId: '10000000-0000-4000-8000-000000000001',
-        ),
+        onPressed: () async {
+          try {
+            await createMeProject(
+              context,
+              ref,
+              workspace: true,
+              channelId: '10000000-0000-4000-8000-000000000001',
+            );
+          } on StateError catch (error) {
+            expect(
+              error.message,
+              contains('Project setup saved on this phone'),
+            );
+          }
+        },
         child: const Text('Open workspace creation'),
       ),
     );
