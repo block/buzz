@@ -217,5 +217,21 @@ mod tests {
         );
         assert!(codex.adapter_install_instructions_url.contains("codex-acp"));
         assert!(codex.cli_install_hint.contains("Codex CLI"));
+
+        // Meta is the one builtin whose CLI *is* the adapter: no separate
+        // adapter install, and the install builds the bridge from this repo.
+        let meta = known_acp_runtime_exact("meta").unwrap();
+        assert_eq!(meta.commands, &["muse-acp"]);
+        assert!(meta.adapter_install_commands.is_empty());
+        assert!(meta.adapter_install_instructions_url.is_empty());
+        assert!(meta
+            .cli_install_commands
+            .iter()
+            .any(|command| command.contains("cargo install --git")));
+        assert!(meta.cli_install_hint.contains("muse-acp"));
+        assert_eq!(
+            meta.auth_probe_args,
+            Some(&["muse-acp", "auth", "status"][..])
+        );
     }
 }
