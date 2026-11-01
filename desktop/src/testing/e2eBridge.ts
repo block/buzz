@@ -13636,6 +13636,10 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "take_pending_entity_deep_link":
         return mockPendingEntityDeepLinks[0] ?? null;
+      case "take_pending_nostr_bind_deep_link":
+        return null;
+      case "acknowledge_pending_nostr_bind_deep_link":
+        return false;
       case "acknowledge_pending_entity_deep_link": {
         const { id } = payload as { id: string };
         if (mockPendingEntityDeepLinks[0]?.id !== id) {

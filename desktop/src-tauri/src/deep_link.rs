@@ -170,6 +170,61 @@ impl PendingEntityDeepLinks {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PendingNostrBindDeepLink {
+    id: String,
+    payload: NostrBindDeepLinkPayload,
+}
+
+#[derive(Default)]
+pub(crate) struct PendingNostrBindDeepLinks(Mutex<VecDeque<PendingNostrBindDeepLink>>);
+
+const MAX_PENDING_NOSTR_BIND_LINKS: usize = 32;
+
+impl PendingNostrBindDeepLinks {
+    fn enqueue(&self, payload: NostrBindDeepLinkPayload) -> Option<PendingNostrBindDeepLink> {
+        let mut queue = self.0.lock().expect("pending deep-link queue poisoned");
+        queue.retain(|item| nostr_bind::validate_expires_at(&item.payload.expires_at).is_ok());
+        if nostr_bind::validate_expires_at(&payload.expires_at).is_err() {
+            return None;
+        }
+        // A duplicate cold-launch/open callback must not replace a challenge
+        // with different signing fields before the user sees it.
+        if let Some(existing) = queue.iter().find(|item| {
+            item.payload.challenge_id == payload.challenge_id
+                && item.payload.origin == payload.origin
+        }) {
+            return Some(existing.clone());
+        }
+        let pending = PendingNostrBindDeepLink {
+            id: uuid::Uuid::new_v4().to_string(),
+            payload,
+        };
+        if queue.len() == MAX_PENDING_NOSTR_BIND_LINKS {
+            return None;
+        }
+        queue.push_back(pending.clone());
+        Some(pending)
+    }
+
+    fn first(&self) -> Option<PendingNostrBindDeepLink> {
+        let mut queue = self.0.lock().expect("pending deep-link queue poisoned");
+        queue.retain(|item| nostr_bind::validate_expires_at(&item.payload.expires_at).is_ok());
+        queue.front().cloned()
+    }
+
+    fn acknowledge(&self, id: &str) -> bool {
+        let mut queue = self.0.lock().expect("pending deep-link queue poisoned");
+        if queue.front().is_some_and(|item| item.id == id) {
+            queue.pop_front();
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[tauri::command]
 pub(crate) fn take_pending_community_deep_link(
     pending: State<'_, PendingCommunityDeepLinks>,
@@ -196,6 +251,21 @@ pub(crate) fn take_pending_entity_deep_link(
 pub(crate) fn acknowledge_pending_entity_deep_link(
     id: String,
     pending: State<'_, PendingEntityDeepLinks>,
+) -> bool {
+    pending.acknowledge(&id)
+}
+
+#[tauri::command]
+pub(crate) fn take_pending_nostr_bind_deep_link(
+    pending: State<'_, PendingNostrBindDeepLinks>,
+) -> Option<PendingNostrBindDeepLink> {
+    pending.first()
+}
+
+#[tauri::command]
+pub(crate) fn acknowledge_pending_nostr_bind_deep_link(
+    id: String,
+    pending: State<'_, PendingNostrBindDeepLinks>,
 ) -> bool {
     pending.acknowledge(&id)
 }
@@ -499,7 +569,7 @@ fn parse_add_community_deep_link(url: &Url) -> Option<AddCommunityDeepLinkPayloa
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct NostrBindDeepLinkPayload {
+pub(crate) struct NostrBindDeepLinkPayload {
     challenge_id: String,
     nonce: String,
     verification_code: String,
@@ -706,7 +776,9 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
         Some("nostr-bind") => match parse_nostr_bind_deep_link(&url) {
             Ok(payload) => {
                 activate_main_window(app);
-                let _ = app.emit("deep-link-nostr-bind", payload);
+                if let Some(pending) = app.state::<PendingNostrBindDeepLinks>().enqueue(payload) {
+                    let _ = app.emit("deep-link-nostr-bind", pending);
+                }
             }
             Err(error) => {
                 eprintln!("buzz-desktop: rejecting nostr-bind deep link: {error}: {url_str}");
