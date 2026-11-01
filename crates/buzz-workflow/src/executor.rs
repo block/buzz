@@ -50,15 +50,31 @@ impl TriggerContext {
     ///
     /// Returns `Some(&str)` for known fields; for webhook triggers, also
     /// checks `webhook_fields`. Returns `None` for unknown names.
+    ///
+    /// A built-in field that the trigger actually populated always wins, so a
+    /// webhook body cannot spoof `author` or `channel_id` on a trigger that
+    /// sets them. A webhook trigger leaves every built-in but `channel_id`
+    /// empty, though, so a body key named after one — `text` is the obvious
+    /// one — would otherwise resolve to that empty default and the posted
+    /// value would be unreachable from a template. Fall back to the body in
+    /// exactly that case: the built-in carries nothing to shadow it with.
     pub fn get_field(&self, name: &str) -> Option<&str> {
-        match name {
+        let builtin = match name {
             "text" => Some(&self.text),
             "author" => Some(&self.author),
             "channel_id" => Some(&self.channel_id),
             "timestamp" => Some(&self.timestamp),
             "emoji" => Some(&self.emoji),
             "message_id" => Some(&self.message_id),
-            other => self.webhook_fields.get(other).map(|s| s.as_str()),
+            _ => None,
+        };
+        match builtin {
+            Some(value) if !value.is_empty() => Some(value),
+            _ => self
+                .webhook_fields
+                .get(name)
+                .map(|s| s.as_str())
+                .or(builtin.map(|s| s.as_str())),
         }
     }
 }
@@ -279,8 +295,9 @@ pub fn build_eval_context(
     )
     .map_err(|e| WorkflowError::ConditionError(e.to_string()))?;
 
-    // Register webhook fields first as `trigger_FIELD` so that standard trigger
-    // fields inserted below always take precedence and cannot be spoofed.
+    // Register webhook fields first as `trigger_FIELD` so that populated
+    // standard trigger fields inserted below take precedence and cannot be
+    // spoofed.
     for (key, val) in &trigger_ctx.webhook_fields {
         // Skip any key that would collide with a standard trigger_ or steps_ variable.
         if key.starts_with("trigger_") || key.starts_with("steps_") {
@@ -292,16 +309,21 @@ pub fn build_eval_context(
     }
 
     let trigger_fields = [
-        ("trigger_text", trigger_ctx.text.as_str()),
-        ("trigger_author", trigger_ctx.author.as_str()),
-        ("trigger_channel_id", trigger_ctx.channel_id.as_str()),
-        ("trigger_timestamp", trigger_ctx.timestamp.as_str()),
-        ("trigger_emoji", trigger_ctx.emoji.as_str()),
-        ("trigger_message_id", trigger_ctx.message_id.as_str()),
+        ("trigger_text", "text"),
+        ("trigger_author", "author"),
+        ("trigger_channel_id", "channel_id"),
+        ("trigger_timestamp", "timestamp"),
+        ("trigger_emoji", "emoji"),
+        ("trigger_message_id", "message_id"),
     ];
 
-    for (name, val) in &trigger_fields {
-        ctx.set_value((*name).into(), Value::String((*val).to_owned()))
+    // Resolved through `get_field`, so a condition sees the same value a
+    // template does: a populated built-in still overwrites the webhook entry
+    // registered above, but an empty one no longer blanks a body key that
+    // happens to share its name.
+    for (var_name, field) in &trigger_fields {
+        let val = trigger_ctx.get_field(field).unwrap_or_default();
+        ctx.set_value((*var_name).into(), Value::String(val.to_owned()))
             .map_err(|e| WorkflowError::ConditionError(e.to_string()))?;
     }
 
@@ -1410,6 +1432,70 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, "abc123def456 said: P1 incident in production");
+    }
+
+    /// A webhook trigger populates `channel_id` from the workflow and leaves
+    /// every other built-in empty; the body lands in `webhook_fields`.
+    fn make_webhook_trigger(body: &[(&str, &str)]) -> TriggerContext {
+        TriggerContext {
+            channel_id: "channel-uuid-here".to_owned(),
+            webhook_fields: body
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resolve_webhook_field_named_after_a_builtin() {
+        let ctx = make_webhook_trigger(&[("text", "hello world")]);
+        let out = resolve_template("{{trigger.text}}", &ctx, &HashMap::new()).unwrap();
+        assert_eq!(out, "hello world");
+    }
+
+    #[test]
+    fn webhook_body_cannot_shadow_a_populated_builtin() {
+        let mut ctx = make_trigger();
+        ctx.webhook_fields
+            .insert("author".to_owned(), "spoofed".to_owned());
+        ctx.webhook_fields
+            .insert("text".to_owned(), "spoofed".to_owned());
+        let out =
+            resolve_template("{{trigger.author}}/{{trigger.text}}", &ctx, &HashMap::new()).unwrap();
+        assert_eq!(out, "abc123def456/P1 incident in production");
+    }
+
+    #[test]
+    fn builtin_with_no_webhook_field_still_resolves_empty() {
+        let ctx = make_webhook_trigger(&[]);
+        let out = resolve_template("[{{trigger.text}}]", &ctx, &HashMap::new()).unwrap();
+        assert_eq!(out, "[]");
+    }
+
+    #[tokio::test]
+    async fn condition_reads_webhook_field_named_after_a_builtin() {
+        let ctx = make_webhook_trigger(&[("text", "P1 incident")]);
+        let result =
+            evaluate_condition("str_contains(trigger_text, \"P1\")", &ctx, &HashMap::new())
+                .await
+                .unwrap();
+        assert!(result);
+    }
+
+    #[tokio::test]
+    async fn condition_keeps_a_populated_builtin_over_the_webhook_body() {
+        let mut ctx = make_trigger();
+        ctx.webhook_fields
+            .insert("text".to_owned(), "P1 incident".to_owned());
+        let result = evaluate_condition(
+            "str_contains(trigger_text, \"production\")",
+            &ctx,
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert!(result);
     }
 
     #[test]
