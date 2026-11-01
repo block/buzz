@@ -1,0 +1,29 @@
+{
+  "baseline_ns": 10296926.416666666,
+  "current_ns": 7559903.401960785,
+  "accepted": 2,
+  "interrupted": false,
+  "attempts": [
+    {
+      "cycle": 1,
+      "job": "20261015-002505-opt1-codex",
+      "verdict": "accepted (22.1% better)",
+      "ns": 8018924.928571428,
+      "elapsed_secs": 502
+    },
+    {
+      "cycle": 2,
+      "job": "20261015-003344-opt2-codex",
+      "verdict": "accepted (5.7% better)",
+      "ns": 7559903.401960785,
+      "elapsed_secs": 978
+    },
+    {
+      "cycle": 3,
+      "job": "20261015-005020-opt3-codex",
+      "verdict": "not faster (-0.2%, needed 3.0%)",
+      "ns": 7576494.69,
+      "elapsed_secs": 136
+    }
+  ]
+}

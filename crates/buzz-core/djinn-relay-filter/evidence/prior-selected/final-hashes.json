@@ -1,0 +1,19 @@
+{
+  "crates/buzz-core/src/lib.rs": "2ca89688d1759bfbb10d5511dcac6e8b52a81b177656615e8b4f91c6ff419e29",
+  "crates/buzz-core/src/prepared_filter.rs": "2160fbb55e335536a694b7a5d9ee413f4bbaea0f0fdef65f75d45c6cf4c31f4e",
+  "crates/buzz-relay/src/subscription.rs": "841ae020858cecee3bf3ad264a5b0b91ac11765eba5ee9775629fc3b4d113353",
+  "experiments/djinn-relay-filter/src/spec.rs": "e511336a76eb89e9ff4ab9ff04c901bddcdb966857f8a60f141c566eb3f3f9eb",
+  "experiments/djinn-relay-filter/src/input.rs": "7b382b2f32579fc543c5be2422e9a656b9255fc698db9e1eaf9432af74f96cbf",
+  "experiments/djinn-relay-filter/src/adapter.rs": "b64d8c726eff9083dd113d724420394b44ad2631e35ce4e6ec7aad7a8772602d",
+  "experiments/djinn-relay-filter/src/bench.rs": "72197ced9aa8df135c341f54fa8f2ce6f11fd0f3685ab3be67434a01c7d0158c",
+  "experiments/djinn-relay-filter/baseline/src/fanout.rs": "57f1fda92a78483bf23cf5f4c64d955c51d8de95025855a9d0f88ab7612217b0",
+  "experiments/djinn-relay-filter/djinn/solution/mod.rs": "c4ddd3602eb5c65e9e04ac639f68cd3d7fb34b468b28f61775638579cab509bd",
+  "experiments/djinn-relay-filter/djinn/proofs/RelayFilter/Spec.lean": "d12a605d71b0f547b3c9ce8fc0ca116786e1567f746bfb57498e1ba0179fccb8",
+  "experiments/djinn-relay-filter/djinn/proofs/RelayFilter/Proofs.lean": "fafb4d8b777d5d20922c84154bb874e4d97f50d1cde66133ebd369e0113b710d",
+  "experiments/djinn-relay-filter/djinn/proofs/RelayFilter/Obligations.lean": "1b3db00d1da40d72bc169084cd63167720d1590e5a4904e56e809c3445a8726c",
+  "experiments/djinn-relay-filter/djinn/proofs/RelayFilter/Code/Types.lean": "c9a281aa097b7842052688820aad407909e542f68e4af2f11fbb637c942a10cd",
+  "experiments/djinn-relay-filter/djinn/proofs/RelayFilter/Code/Funs.lean": "4b9913ba906f324196fa6d09e5c57ce3bbca50f14fa5b1901c1311fa1b4456be",
+  "experiments/djinn-relay-filter/djinn/report.toml": "87132f797e1f03f25fc83952f79fb5ae50ecd607aa8407e5e68dc7e13d1e5715",
+  "experiments/djinn-relay-filter/Cargo.lock": "3386563ace927f8347af57ce5b67030d3ac9612c5a705675f520144bdd648d8f",
+  "experiments/djinn-relay-filter/baseline/Cargo.lock": "df90b316e1908e9f37ae0f115175b0e134c9076a63e5bbe7484d524e6a94142f"
+}

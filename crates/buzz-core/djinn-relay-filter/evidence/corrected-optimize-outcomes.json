@@ -1,0 +1,21 @@
+{
+  "baseline_ns": 5837856.0,
+  "current_ns": 5837856.0,
+  "accepted": 0,
+  "interrupted": false,
+  "attempts": [
+    {
+      "cycle": 1,
+      "job": "20261015-011748-opt1-codex",
+      "verdict": "not faster (-1.0%, needed 3.5%)",
+      "ns": 5897641.890625,
+      "points": [],
+      "summary": "Combined explicit-tag matching and key-presence detection into one scan, preserving contentless lowercase `h` fallback blocking. Removed redundant trailing-byte checks, added matcher inlining, and proved the new loop invariant.\n\nVerification: **PASS, 16/16 obligations; axiom audit clean.**\n\n`./bench`: **5.697 ms**, versus 5.838 ms baseline\u2014**2.4% faster**, with 0.9% spread. This is below the required 3.5% gain; the driver will decide acceptance or reversion.",
+      "cost_usd": 0.430967875,
+      "cost_is_estimate": true,
+      "tokens_in": 1758674,
+      "tokens_out": 12417,
+      "elapsed_secs": 491
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+[package]
+name = "relay-filter-baseline"
+version = "0.1.0"
+edition = "2021"
+[workspace]
+[dependencies]
+buzz-core = { path = "../..", features = ["test-utils"] }
+nostr = "=0.44.7"
+uuid = "1"
+chrono = "0.4"
+serde_json = "1"
+dashmap = "6"
+metrics = "0.24"
+tracing = "0.1"
+
+[features]
+first-generated = []

@@ -1,0 +1,7 @@
+{
+  "cycle": 1,
+  "job": "20261015-002505-opt1-codex",
+  "verdict": "accepted (22.1% better)",
+  "ns": 8018924.928571428,
+  "elapsed_secs": 502
+}

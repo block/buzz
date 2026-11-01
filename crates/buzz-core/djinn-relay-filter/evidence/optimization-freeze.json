@@ -1,0 +1,19 @@
+{
+  "source_sha256": {
+    "experiments/djinn-relay-filter/src/spec.rs": "7470ade85e419bc3196da145c1023d42d6003752e9bf14f8b1b428b904fc33b3",
+    "experiments/djinn-relay-filter/src/input.rs": "7b382b2f32579fc543c5be2422e9a656b9255fc698db9e1eaf9432af74f96cbf",
+    "experiments/djinn-relay-filter/src/adapter.rs": "b64d8c726eff9083dd113d724420394b44ad2631e35ce4e6ec7aad7a8772602d",
+    "experiments/djinn-relay-filter/src/fixtures.rs": "0f0d472a3bac0a42ee500c873d73441f0ef333190df07772aff12605b90c22f7",
+    "experiments/djinn-relay-filter/src/bench.rs": "72197ced9aa8df135c341f54fa8f2ce6f11fd0f3685ab3be67434a01c7d0158c",
+    "experiments/djinn-relay-filter/src/timing.rs": "97b56fce1568b0b8282d4702fb9298c235fde57b67d0ac751f85458a772eccfe",
+    "experiments/djinn-relay-filter/baseline/src/fanout.rs": "57f1fda92a78483bf23cf5f4c64d955c51d8de95025855a9d0f88ab7612217b0",
+    "experiments/djinn-relay-filter/baseline/src/historical_subscription.rs": "f06f8c48adf03d9bea248ad0cf0227ae66df8cfd1741f0be5459b5d403044b53",
+    "experiments/djinn-relay-filter/src/historical.rs": "195cc281465f426333f197638752aa0176262dfba5030872a4ad2099fe970549",
+    "experiments/djinn-relay-filter/djinn/solution/mod.rs": "66704f8413d7476d595c782b4a76f8862b96ead3d0331a333845e1d921e4c50e",
+    "crates/buzz-relay/src/subscription.rs": "841ae020858cecee3bf3ad264a5b0b91ac11765eba5ee9775629fc3b4d113353",
+    "crates/buzz-core/src/prepared_filter.rs": "2f738183b1af307790b8a035de56281012aa38b5df7e54bf91c04a075b1e5111",
+    "experiments/djinn-relay-filter/baseline/Cargo.toml": "f3918f88527532793c2b9405ca2a752a58666935c5e4954159159e4f653ae05e",
+    "experiments/djinn-relay-filter/Cargo.toml": "aed2f4fa94ae6425e35317b270a3717d2f4cc410472bd8dcc182734b5b82078f"
+  },
+  "note": "Public tuple alias retained and private entry renamed after first measurements, with identical layout/method bodies; no matcher change. First exact wrapper snapshot preserved separately."
+}
