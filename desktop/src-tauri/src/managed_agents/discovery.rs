@@ -1042,6 +1042,7 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime, force: bool) -
             mcp_command: runtime.mcp_command.map(str::to_string),
             model_env_var: runtime.model_env_var.map(str::to_string),
             provider_env_var: runtime.provider_env_var.map(str::to_string),
+            provider_inventory: runtime.provider_inventory,
             thinking_env_var: runtime.thinking_env_var.map(str::to_string),
             effort_canonical_values: runtime
                 .effort_normalization
@@ -1184,6 +1185,7 @@ pub fn discover_acp_runtimes_from(
                 mcp_command: None,
                 model_env_var: None,
                 provider_env_var: None,
+                provider_inventory: false,
                 thinking_env_var: None,
                 effort_canonical_values: None,
                 max_tokens_env_var: None,
