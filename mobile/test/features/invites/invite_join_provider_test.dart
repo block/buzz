@@ -365,6 +365,112 @@ void main() {
     },
   );
 
+  test(
+    'taken starter names are skipped or converged instead of failing the invite',
+    () async {
+      const refusal = 'invalid: an open channel named "general" already exists';
+      final archivedGeneral = _channel(
+        id: 'old-general',
+        name: 'General',
+        archivedAt: DateTime.utc(2025),
+      );
+      final forumGeneral = _channel(
+        id: 'forum-general',
+        name: 'general',
+        channelType: 'forum',
+      );
+      for (final namesake in [archivedGeneral, forumGeneral]) {
+        final created = <String>[];
+        final joined = <String>[];
+        var loadCount = 0;
+        final recovery = MobileInviteJoinRecovery(
+          loadChannels: () async {
+            loadCount++;
+            return [namesake];
+          },
+          createChannel:
+              ({
+                required channelId,
+                required name,
+                required channelType,
+                required visibility,
+                description,
+                ttlSeconds,
+              }) async {
+                created.add(name);
+                if (name == 'general') throw Exception(refusal);
+                return _channel(id: channelId, name: name, isMember: true);
+              },
+          joinChannel: (channelId) async => joined.add(channelId),
+          relayHttpOrigin: 'https://relay.example.com',
+        );
+
+        final focusChannelId = await recovery.ensureStarterChannels();
+
+        // The unusable namesake is neither joined nor retried; the other
+        // starter is still created and focused.
+        expect(created, ['general', 'welcome-everyone'], reason: namesake.id);
+        expect(joined, isEmpty, reason: namesake.id);
+        expect(loadCount, 2, reason: namesake.id);
+        expect(
+          focusChannelId,
+          desktopStarterChannelId(
+            relayHttpOrigin: 'https://relay.example.com',
+            slug: 'welcome-everyone',
+          ),
+        );
+      }
+
+      // A usable open channel that appeared after the first load (lost race)
+      // is joined rather than skipped.
+      var loadCount = 0;
+      final joined = <String>[];
+      final raced = MobileInviteJoinRecovery(
+        loadChannels: () async => ++loadCount == 1
+            ? const []
+            : [_channel(id: 'raced', name: 'general')],
+        createChannel:
+            ({
+              required channelId,
+              required name,
+              required channelType,
+              required visibility,
+              description,
+              ttlSeconds,
+            }) async => name == 'general'
+            ? throw Exception(refusal)
+            : _channel(id: channelId, name: name, isMember: true),
+        joinChannel: (channelId) async => joined.add(channelId),
+        relayHttpOrigin: 'https://relay.example.com',
+      );
+      await raced.ensureStarterChannels();
+      expect(joined, ['raced']);
+
+      // The scope fence still holds after a refusal.
+      var current = true;
+      final fenced = MobileInviteJoinRecovery(
+        loadChannels: () async {
+          final channels = [archivedGeneral];
+          if (loadCount++ > 1) current = false;
+          return channels;
+        },
+        createChannel:
+            ({
+              required channelId,
+              required name,
+              required channelType,
+              required visibility,
+              description,
+              ttlSeconds,
+            }) async => throw Exception(refusal),
+        joinChannel: (_) async => fail('scope changed'),
+        relayHttpOrigin: 'https://relay.example.com',
+        isScopeCurrent: () => current,
+      );
+      await expectLater(fenced.ensureStarterChannels(), throwsStateError);
+    },
+  );
+
   test('starter setup surfaces an unavailable starter for recovery', () async {
     final joined = <String>[];
     final recovery = MobileInviteJoinRecovery(
@@ -935,10 +1041,13 @@ Channel _channel({
   required String name,
   String visibility = 'open',
   bool isMember = false,
+  String channelType = 'stream',
+  DateTime? archivedAt,
 }) => Channel(
   id: id,
   name: name,
-  channelType: 'stream',
+  channelType: channelType,
+  archivedAt: archivedAt,
   visibility: visibility,
   description: '',
   createdBy: 'me',
