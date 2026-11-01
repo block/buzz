@@ -10569,7 +10569,10 @@ fn startup_subscription_rules(config: &Config) -> Result<Vec<SubscriptionRule>> 
             vec![SubscriptionRule {
                 name: "all".into(),
                 channels: filter::ChannelScope::All("all".into()),
-                kinds: config.kinds_override.clone().unwrap_or_default(),
+                kinds: config
+                    .kinds_override
+                    .clone()
+                    .unwrap_or_else(config::default_mention_kinds),
                 require_mention: false,
                 filter: None,
                 compiled_filter: None,
