@@ -11,7 +11,8 @@
 //!    lock, then the catch-all, in the order writers take them, waiting only on
 //!    the parent and failing fast on any other contention;
 //! 3. re-audits under those locks and refuses if the plan changed; and
-//! 4. re-audits the changed catalog and verifies index and constraint
+//! 4. copies the parent's explicit table-level SELECT grants to new children;
+//! 5. re-audits the changed catalog and verifies index and constraint
 //!    inheritance before commit.
 //!
 //! A populated catch-all is always refused before any lock is taken: moving
@@ -732,6 +733,14 @@ async fn apply_change(
         .await?;
     }
 
+    grant_parent_readers(
+        &mut transaction,
+        parent.oid,
+        &parent.schema,
+        &expected.target_names(table),
+    )
+    .await?;
+
     let after = audit_table_on(&mut transaction, table, months_ahead, now).await?;
     let verified = verify_applied(&locked, &after, &expected).and(
         verify_inheritance(&mut transaction, parent.oid, &expected.target_names(table)).await?,
@@ -744,6 +753,37 @@ async fn apply_change(
     }
     transaction.commit().await?;
     Ok(LockedAttempt::Committed(expected))
+}
+
+/// The parent ACL is the reader policy; never copy writes or grant options.
+/// PostgreSQL quotes catalog role names, including names containing quotes.
+/// PUBLIC is an ACL grantee too, but must remain an unquoted SQL keyword.
+async fn grant_parent_readers(
+    connection: &mut PgConnection,
+    parent_oid: i64,
+    schema: &str,
+    children: &[String],
+) -> Result<()> {
+    let grants: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT pg_catalog.format(\
+             'GRANT SELECT ON TABLE %I.%I TO %s', $2::text, child, \
+             CASE WHEN acl.grantee = 0 THEN 'PUBLIC' \
+                  ELSE pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(acl.grantee)) END) \
+         FROM pg_catalog.pg_class parent \
+         CROSS JOIN LATERAL pg_catalog.aclexplode(parent.relacl) acl \
+         CROSS JOIN pg_catalog.unnest($3::text[]) child \
+         WHERE parent.oid = $1::bigint::oid \
+           AND acl.privilege_type = 'SELECT' AND acl.grantee <> parent.relowner",
+    )
+    .bind(parent_oid)
+    .bind(schema)
+    .bind(children)
+    .fetch_all(&mut *connection)
+    .await?;
+    for grant in grants {
+        execute_ddl(connection, grant).await?;
+    }
+    Ok(())
 }
 
 async fn configure_maintenance_transaction(connection: &mut PgConnection) -> Result<()> {
