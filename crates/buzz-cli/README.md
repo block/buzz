@@ -102,6 +102,12 @@ buzz repos protect list --id my-repo
 buzz repos protect set --id my-repo --ref refs/heads/main --push admin --no-force-push --no-delete
 buzz repos protect remove --id my-repo --ref refs/heads/main
 
+# Agent catalogs and metrics (read-only)
+buzz personas list | jq '.[].display_name'
+buzz teams list
+buzz teams catalog
+buzz agents metrics --agent Scout --since 1767225600 --limit 20
+
 # Pipe to jq
 buzz channels list | jq '.[].name'
 ```
@@ -178,6 +184,10 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `protect list` | List branch and tag protection rules |
 | | `protect set` | Create or replace a protection rule |
 | | `protect remove` | Remove a protection rule |
+| `personas` | `list` | List shared agent personas (kind:30175, read-only) |
+| `teams` | `list` | List your agent teams (kind:30176, read-only) |
+| | `catalog` | List teams shared with the community, with members (kind:30178, read-only) |
+| `agents` | `metrics` | Read decrypted agent turn metrics (kind:44200; owner key only; `--agent`, `--since`, `--limit` up to 200) |
 | `upload` | `file` | Upload a file to the Blossom store |
 | `pack` | `validate` | Validate a persona pack (local, no relay) |
 | | `inspect` | Inspect a persona pack (local, no relay) |
@@ -187,6 +197,15 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `set` | Write a memory value (use `-` for stdin) |
 | | `patch` | Apply unified diff to memory value |
 | | `rm` | Publish a tombstone to delete memory |
+
+`personas list` and `teams catalog` print one entry per shared head, sorted by
+name; a newer unshared or unreadable head hides older versions. A listing is
+not an adoptability check: the CLI checks only that the name is present, and
+Desktop can still reject an entry the CLI lists. `teams list`
+prints `persona_ids: null` when the publisher never recorded membership.
+`agents metrics` prints `{event_id, agent, created_at, metric}` with the
+decrypted NIP-AM payload in `metric`; it needs the owner's own key (exit 3 under an agent
+identity) and exits 4 when no returned event can be read. Unreadable entries are named on stderr.
 
 ## Architecture
 
