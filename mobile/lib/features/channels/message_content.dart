@@ -34,6 +34,7 @@ import '../../shared/emoji/emoji_only.dart';
 import 'channel_ids_by_name_provider.dart';
 import 'local_send_bubble_surface.dart';
 import 'media_viewer_page.dart';
+import 'message_content/backslash_escapes.dart';
 import 'message_content/link_normalizer.dart';
 import 'message_content/preview_text.dart';
 import 'message_media.dart';
@@ -264,9 +265,10 @@ class MessageContent extends HookConsumerWidget {
       for (final entry in parseImetaTags(tags).entries)
         normalizeMarkdownDestination(entry.key): entry.value,
     };
-    final normalizedContent = useMemoized(() => normalizeBareLinks(content), [
-      content,
-    ]);
+    final normalizedContent = useMemoized(
+      () => normalizeBareLinks(shieldBackslashEscapes(content)),
+      [content],
+    );
     final trailingGallery = maxLines == null
         ? extractTrailingImageGallery(normalizedContent, imetaByUrl)
         : null;
@@ -384,24 +386,30 @@ class MessageContent extends HookConsumerWidget {
           bubble: bubble,
           ink: bubble && ownMessage ? ownTextColor : null,
         ),
-        linkBuilder: (context, linkText, url, linkStyle) => _buildLink(
-          context,
-          ref,
-          linkText,
-          url,
-          imetaByUrl[url],
-          linkStyle,
-          style,
-          resolvedChannelTap,
-          resolvedChannelNames,
-        ),
-        imageBuilder: (context, imageUrl, _, _) => _buildMedia(
-          context,
-          imageUrl,
-          imetaByUrl[imageUrl],
-          onReply: onMediaReply == null ? null : mediaReply,
-          onMore: onMediaMore == null ? null : mediaMore,
-        ),
+        linkBuilder: (context, linkText, destination, linkStyle) {
+          final url = unshieldBackslashEscapes(destination);
+          return _buildLink(
+            context,
+            ref,
+            linkText,
+            url,
+            imetaByUrl[url],
+            linkStyle,
+            style,
+            resolvedChannelTap,
+            resolvedChannelNames,
+          );
+        },
+        imageBuilder: (context, destination, _, _) {
+          final imageUrl = unshieldBackslashEscapes(destination);
+          return _buildMedia(
+            context,
+            imageUrl,
+            imetaByUrl[imageUrl],
+            onReply: onMediaReply == null ? null : mediaReply,
+            onMore: onMediaMore == null ? null : mediaMore,
+          );
+        },
         textAlign: textAlign,
         maxLines: maxLines,
         inlineComponents: inlineComponents,
