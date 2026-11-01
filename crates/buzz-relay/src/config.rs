@@ -294,6 +294,10 @@ pub struct Config {
     /// Configured operator-listener identities and their HTTP(S) delivery URLs.
     pub operator_listener_delivery_urls: HashMap<String, url::Url>,
 
+    /// Endpoint receiving each new per-community storage snapshot
+    /// (`BUZZ_STORAGE_USAGE_URL`). Unset disables storage-usage delivery.
+    pub storage_usage_delivery_url: Option<url::Url>,
+
     /// Allow NIP-OA owner attestation for relay membership.
     ///
     /// When `true` and `require_relay_membership` is also `true`, agents
@@ -931,6 +935,18 @@ impl Config {
                 )));
             }
         };
+        let storage_usage_delivery_url = match std::env::var("BUZZ_STORAGE_USAGE_URL") {
+            Ok(raw) => Some(
+                crate::storage_usage_delivery::parse_delivery_url(&raw)
+                    .map_err(ConfigError::InvalidValue)?,
+            ),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(error) => {
+                return Err(ConfigError::InvalidValue(format!(
+                    "BUZZ_STORAGE_USAGE_URL must be valid UTF-8: {error}"
+                )));
+            }
+        };
         if !operator_listener_delivery_urls.is_empty() && relay_operator_api_origin.is_none() {
             error!(
                 "BUZZ_OPERATOR_LISTENERS is set but RELAY_OPERATOR_API_ORIGIN is not — operator-listener registration requests will reject every request until RELAY_OPERATOR_API_ORIGIN is set"
@@ -1465,6 +1481,7 @@ impl Config {
             relay_operator_api_origin,
             relay_operator_pubkeys,
             operator_listener_delivery_urls,
+            storage_usage_delivery_url,
             allow_nip_oa_auth,
             klipy,
             media,
