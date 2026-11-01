@@ -102,9 +102,25 @@ buzz repos protect list --id my-repo
 buzz repos protect set --id my-repo --ref refs/heads/main --push admin --no-force-push --no-delete
 buzz repos protect remove --id my-repo --ref refs/heads/main
 
+# Reminders (private, NIP-ER; shared with the desktop and mobile reminder lists)
+buzz reminders add --event <event-id> --at 2h --note "check the deploy"
+buzz reminders add --at 2030-01-02T09:00:00Z --note "renew passport"
+buzz reminders list --status all
+buzz reminders snooze --reminder <id> --at 1d
+buzz reminders done --reminder <id>
+buzz reminders cancel --reminder <id>
+
 # Pipe to jq
 buzz channels list | jq '.[].name'
 ```
+
+`reminders --at` takes unix seconds, an ISO-8601 instant with an explicit
+offset (`Z` or `+01:00`), or a duration from now (`30m`, `2h`, `1d`, `1w`).
+Past times and times beyond the relay's `max_not_before_delta` are rejected
+before anything is published. `add` and `snooze` refuse relays that do not
+advertise `nip-er`. Reminder content is NIP-44 encrypted to your own key; only
+the due time is visible to the relay. `done` and `cancel` publish a replacement
+event with an `expiration` 30-90 days out. They never delete the reminder.
 
 `protect set` replaces every existing rule for the exact ref pattern. Any
 constraint omitted from the command is removed. `protect list` reports malformed
@@ -171,6 +187,11 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `event` | Get a Nostr event |
 | | `notes` | Get notes for a user |
 | | `contacts` | Get NIP-02 contact list |
+| `reminders` | `list` | List your reminders, soonest due first |
+| | `add` | Create a reminder about a message, a note, or both |
+| | `done` | Mark a pending reminder done |
+| | `snooze` | Move a pending reminder to a later time |
+| | `cancel` | Cancel a pending reminder |
 | `repos` | `create` | Announce a git repository (NIP-34) |
 | | `get` | Get a repository announcement |
 | | `list` | List repository announcements |
