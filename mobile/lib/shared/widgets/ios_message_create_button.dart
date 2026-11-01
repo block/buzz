@@ -31,6 +31,7 @@ class IosMessageCreateButton extends HookWidget {
     this.eagerGestures = true,
     this.deferMenuActions = true,
     this.showIconWithLabel = false,
+    this.onMenuVisibilityChanged,
   });
 
   final Set<int> dividerBefore;
@@ -56,6 +57,7 @@ class IosMessageCreateButton extends HookWidget {
   /// Wait for menu dismissal before actions that navigate to another route.
   final bool deferMenuActions;
   final bool showIconWithLabel;
+  final ValueChanged<bool>? onMenuVisibilityChanged;
 
   final List<({String label, String symbol, VoidCallback? onPressed})> actions;
 
@@ -91,6 +93,8 @@ class IosMessageCreateButton extends HookWidget {
     final avatar = useFuture(avatarFuture, preserveState: false).data;
     final channel = useState<MethodChannel?>(null);
     final latest = useRef(actions)..value = actions;
+    final latestVisibility = useRef(onMenuVisibilityChanged)
+      ..value = onMenuVisibilityChanged;
     final latestEnabled = useRef(enabled)..value = enabled;
     final menu = [
       for (var i = 0; i < actions.length; i++)
@@ -120,6 +124,10 @@ class IosMessageCreateButton extends HookWidget {
       final current = channel.value;
       if (current == null) return null;
       current.setMethodCallHandler((call) async {
+        if (call.method == 'menuVisibilityChanged') {
+          latestVisibility.value?.call(call.arguments as bool);
+          return;
+        }
         if (call.method != 'menuAction') return;
         final index = call.arguments as int;
         if (index >= 0 && index < latest.value.length) {

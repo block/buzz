@@ -43,6 +43,7 @@ private final class JumpToLatestGlassButton: UIButton {
 final class NavigationGlassButton: UIButton {
   var hitTargetInsets = UIEdgeInsets.zero
   var pendingMenuAction: (() -> Void)?
+  var menuVisibilityChanged: ((Bool) -> Void)?
 
   override func contextMenuInteraction(
     _ interaction: UIContextMenuInteraction,
@@ -50,6 +51,7 @@ final class NavigationGlassButton: UIButton {
     animator: UIContextMenuInteractionAnimating?
   ) {
     super.contextMenuInteraction(interaction, willDisplayMenuFor: configuration, animator: animator)
+    menuVisibilityChanged?(true)
     UIImpactFeedbackGenerator(style: .light).impactOccurred()
   }
 
@@ -59,6 +61,7 @@ final class NavigationGlassButton: UIButton {
     animator: UIContextMenuInteractionAnimating?
   ) {
     super.contextMenuInteraction(interaction, willEndFor: configuration, animator: animator)
+    menuVisibilityChanged?(false)
     let action = pendingMenuAction
     pendingMenuAction = nil
     // Flutter routes must start after UIKit removes the glass menu and its
@@ -220,6 +223,9 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     )
     super.init()
 
+    button.menuVisibilityChanged = { [weak self] visible in
+      self?.channel.invokeMethod("menuVisibilityChanged", arguments: visible)
+    }
     containerView.backgroundColor = .clear
     containerView.isOpaque = false
     let arguments = args as? [String: Any]

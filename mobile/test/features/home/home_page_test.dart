@@ -283,6 +283,24 @@ void main() {
             .map((a) => a.label),
         ['New chat', 'New workspace', 'New DM', 'New channel'],
       );
+      final creationMenu = tester.widget<IosMessageCreateButton>(
+        find.byWidgetPredicate(
+          (w) => w is IosMessageCreateButton && w.label == 'New',
+        ),
+      );
+      final search = find.byTooltip('Search');
+      final initialX = tester.getCenter(search).dx;
+      creationMenu.onMenuVisibilityChanged!(true);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 90));
+      final midwayX = tester.getCenter(search).dx;
+      expect(midwayX, greaterThan(initialX + 2));
+      expect(midwayX, lessThan(initialX + 4));
+      await tester.pumpAndSettle();
+      expect(tester.getCenter(search).dx, closeTo(initialX + 4, .01));
+      creationMenu.onMenuVisibilityChanged!(false);
+      await tester.pumpAndSettle();
+      expect(tester.getCenter(search).dx, closeTo(initialX, .01));
       final communityMenu = tester.widget<IosMessageCreateButton>(
         find.byWidgetPredicate(
           (w) =>

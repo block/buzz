@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/theme/buzz_icons.dart';
@@ -11,7 +12,7 @@ import '../../shared/widgets/android_expanding_menu_button.dart';
 import '../../shared/widgets/ios_message_create_button.dart';
 
 /// Separate glass shortcuts for search and creation.
-class MessagesNavigationBar extends StatelessWidget {
+class MessagesNavigationBar extends HookWidget {
   const MessagesNavigationBar({
     super.key,
     required this.onSearch,
@@ -24,47 +25,71 @@ class MessagesNavigationBar extends StatelessWidget {
   creationActions;
 
   @override
-  Widget build(BuildContext context) => Builder(
-    builder: (controlsContext) => Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        NavigationButtonSurface(
-          child: SizedBox.square(
-            dimension: 56,
-            child: IconButton(
-              tooltip: 'Search',
-              onPressed: () {
-                unawaited(HapticFeedback.lightImpact());
-                onSearch();
-              },
-              color: context.colors.onSurface,
-              icon: const Icon(BuzzIcons.search300, size: 24),
+  Widget build(BuildContext context) {
+    final menuOpen = useState(false);
+    final nudge = menuOpen.value ? 4.0 : 0.0;
+    return Builder(
+      builder: (controlsContext) => Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _MenuNudge(
+            offset: nudge,
+            child: NavigationButtonSurface(
+              child: SizedBox.square(
+                dimension: 56,
+                child: IconButton(
+                  tooltip: 'Search',
+                  onPressed: () {
+                    unawaited(HapticFeedback.lightImpact());
+                    onSearch();
+                  },
+                  color: context.colors.onSurface,
+                  icon: const Icon(BuzzIcons.search300, size: 24),
+                ),
+              ),
             ),
           ),
-        ),
-        const SizedBox(width: Grid.xs),
-        if (defaultTargetPlatform == TargetPlatform.iOS)
-          IosMessageCreateButton(
-            actions: creationActions,
-            dividerBefore: const {2},
-            sectionTitles: const {0: 'Solo', 2: 'Team'},
-            label: 'New',
-            showIconWithLabel: true,
-            accessibilityLabel: 'New',
-            width: 112,
-            height: 56,
-            plain: false,
-          )
-        else
-          AndroidExpandingMenuButton(
-            expansionBoundsContext: controlsContext,
-            actions: creationActions,
-            dividerBefore: const {2},
-            sectionTitles: const {0: 'Solo', 2: 'Team'},
-          ),
-        const SizedBox(width: Grid.xs),
-        agent,
-      ],
-    ),
+          const SizedBox(width: Grid.xs),
+          if (defaultTargetPlatform == TargetPlatform.iOS)
+            IosMessageCreateButton(
+              onMenuVisibilityChanged: (visible) => menuOpen.value = visible,
+              actions: creationActions,
+              dividerBefore: const {2},
+              sectionTitles: const {0: 'Solo', 2: 'Team'},
+              label: 'New',
+              showIconWithLabel: true,
+              accessibilityLabel: 'New',
+              width: 112,
+              height: 56,
+              plain: false,
+            )
+          else
+            AndroidExpandingMenuButton(
+              expansionBoundsContext: controlsContext,
+              actions: creationActions,
+              dividerBefore: const {2},
+              sectionTitles: const {0: 'Solo', 2: 'Team'},
+            ),
+          const SizedBox(width: Grid.xs),
+          _MenuNudge(offset: -nudge, child: agent),
+        ],
+      ),
+    );
+  }
+}
+
+class _MenuNudge extends StatelessWidget {
+  const _MenuNudge({required this.offset, required this.child});
+  final double offset;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => AnimatedContainer(
+    duration: MediaQuery.disableAnimationsOf(context)
+        ? Duration.zero
+        : const Duration(milliseconds: 180),
+    curve: Curves.easeOutCubic,
+    transform: Matrix4.translationValues(offset, 0, 0),
+    child: child,
   );
 }
