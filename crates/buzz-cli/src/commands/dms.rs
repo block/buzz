@@ -55,6 +55,11 @@ pub async fn cmd_open_dm(client: &BuzzClient, pubkeys: &[String]) -> Result<(), 
     for pk in pubkeys {
         validate_hex64(pk)?;
     }
+    // Relays match p-tags byte-exactly; desktop/SDK always write lowercase.
+    let pubkeys: Vec<String> = pubkeys
+        .iter()
+        .map(|pk| pk.to_ascii_lowercase())
+        .collect();
     let dm_id = Uuid::new_v4().to_string();
     let refs: Vec<&str> = pubkeys.iter().map(String::as_str).collect();
 
