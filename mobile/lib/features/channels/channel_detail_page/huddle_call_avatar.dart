@@ -12,6 +12,7 @@ class _HuddleCallAvatar extends HookConsumerWidget {
     required this.preparingResponse,
     required this.onTap,
     this.contextualLabel,
+    this.isHuddleAgent = false,
     this.isSelf = false,
     this.frameSize = _huddleAvatarFrameSize,
   });
@@ -22,6 +23,9 @@ class _HuddleCallAvatar extends HookConsumerWidget {
 
   /// The huddle-scoped identity label, when resolved.
   final String? contextualLabel;
+
+  /// Whether the Huddle roster counts this participant as an agent.
+  final bool isHuddleAgent;
   final bool active;
   final double speakerLevel;
   final bool preparingResponse;
@@ -129,7 +133,8 @@ class _HuddleCallAvatar extends HookConsumerWidget {
       contextualLabel: contextualLabel,
       isSelf: isSelf,
     );
-    final isAgent = profile?.isAgent == true || fallbackLabel != null;
+    final isAgent =
+        isHuddleAgent || profile?.isAgent == true || fallbackLabel != null;
 
     final semanticStates = [
       label,
