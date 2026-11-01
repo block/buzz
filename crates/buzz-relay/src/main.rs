@@ -1780,12 +1780,17 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Longest wait between JWKS fetches while no snapshot exists and NIP-FI fails closed.
+const JWKS_COLD_RETRY_CAP_SECS: u64 = 5;
+
 /// Cadence state after a failed JWKS refresh (no live snapshot exists).
 ///
 /// Recovery is urgent once the relay is failing closed, so the issuer drops
 /// to the cold fast-retry cadence regardless of prior warm state: a previously
 /// warm issuer resets to 5 s; an already-cold issuer doubles its backoff,
-/// capped at 300 s.
+/// capped at [`JWKS_COLD_RETRY_CAP_SECS`]. Every federated request is refused
+/// until a snapshot lands, so the cap stays short: an issuer that comes up a
+/// moment after the relay must not leave members locked out for minutes.
 ///
 /// Returns `(new_warmed, new_backoff_secs, retry_secs)`; `new_warmed` is
 /// always `false`.
@@ -1796,7 +1801,7 @@ fn jwks_next_retry_after_failed_refresh(
     if was_warmed {
         (false, 5, 5)
     } else {
-        let new_backoff = (current_backoff_secs * 2).min(300);
+        let new_backoff = (current_backoff_secs * 2).min(JWKS_COLD_RETRY_CAP_SECS);
         (false, new_backoff, new_backoff)
     }
 }
@@ -3244,6 +3249,7 @@ mod tests {
         run_jwks_refresh_supervisor, run_periodic_until_cancelled, startup_partition_audit,
         EmissionScope, FleetUsageSchedule, InMemoryMetricKey, PartitionAuditSchedule,
         FLEET_ACTIVITY_COLLECTION_DEADLINE, FLEET_STOCK_COLLECTION_DEADLINE,
+        JWKS_COLD_RETRY_CAP_SECS,
     };
     use buzz_db::DbConfig;
     use metrics::GaugeFn;
@@ -4230,17 +4236,21 @@ mod tests {
     fn cold_issuer_doubles_backoff() {
         // Already cold (warmed=false), snapshot still unavailable: backoff doubles.
         let (new_warmed, new_backoff, retry_secs) =
-            jwks_next_retry_after_failed_refresh(false, 10u64);
+            jwks_next_retry_after_failed_refresh(false, 2u64);
         assert!(!new_warmed);
-        assert_eq!(new_backoff, 20, "cold backoff doubles");
-        assert_eq!(retry_secs, 20);
+        assert_eq!(new_backoff, 4, "cold backoff doubles");
+        assert_eq!(retry_secs, 4);
     }
 
     #[test]
-    fn cold_issuer_backoff_capped_at_300() {
-        let (_, new_backoff, retry_secs) = jwks_next_retry_after_failed_refresh(false, 200u64);
-        assert_eq!(new_backoff, 300, "cold backoff capped at 300 s");
-        assert_eq!(retry_secs, 300);
+    fn cold_issuer_backoff_capped_at_a_few_seconds() {
+        // Failing closed refuses every member, so retries never stretch to minutes.
+        for previous in [5u64, 10, 200] {
+            let (_, new_backoff, retry_secs) =
+                jwks_next_retry_after_failed_refresh(false, previous);
+            assert_eq!(new_backoff, JWKS_COLD_RETRY_CAP_SECS);
+            assert_eq!(retry_secs, JWKS_COLD_RETRY_CAP_SECS);
+        }
     }
 
     // ── F1 production-seam test ───────────────────────────────────────────────
@@ -4477,7 +4487,7 @@ mod tests {
     }
 
     /// Success waits a full interval; failure (no live snapshot) retries at
-    /// the fast cadence — 5 s after a warm issuer dies, then doubling.
+    /// the fast cadence — 5 s after a warm issuer dies, never longer than the cap.
     #[tokio::test(start_paused = true)]
     async fn jwks_refresh_success_waits_interval_failure_uses_fast_backoff() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -4524,10 +4534,10 @@ mod tests {
         expect_at(120, 2, "second refresh (fails) one interval after success").await;
         expect_at(124, 2, "no retry before the 5 s fast cadence").await;
         expect_at(125, 3, "warm→dead retries after 5 s, not a full interval").await;
-        expect_at(134, 3, "cold backoff doubles to 10 s").await;
-        expect_at(135, 4, "cold retry (ok) at +10 s").await;
-        expect_at(194, 4, "recovered issuer waits a full interval again").await;
-        expect_at(195, 5, "next refresh one interval after recovery").await;
+        expect_at(129, 3, "cold backoff stays at the 5 s cap").await;
+        expect_at(130, 4, "cold retry (ok) at +5 s").await;
+        expect_at(189, 4, "recovered issuer waits a full interval again").await;
+        expect_at(190, 5, "next refresh one interval after recovery").await;
 
         cancel.cancel();
         task.await.expect("refresh loop task");
