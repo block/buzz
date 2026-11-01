@@ -7,6 +7,39 @@ Set<String> _agentMentionLabels({
     if (entry.value.isAgent) entry.key,
 };
 
+/// The agents a sent message notified, under the names they were selected by.
+/// Like desktop, they become the next draft so a conversation keeps them.
+Map<String, MentionCandidate> _notifiedAgentMentions(
+  Map<String, MentionCandidate> bindings,
+  List<MentionCandidate> selected,
+  List<String> notified,
+) {
+  final agents = {
+    for (final c in selected)
+      if (c.isAgent && notified.contains(c.pubkey.toLowerCase()))
+        c.pubkey.toLowerCase(): c,
+  };
+  return {
+    for (final MapEntry(:key, :value) in bindings.entries)
+      key: ?agents.remove(value.pubkey.toLowerCase()),
+  };
+}
+
+/// Starts an empty composer with [agents] mentioned.
+void _prefillAgentMentions(
+  TextEditingController controller,
+  Map<String, MentionCandidate> mentionMap,
+  Map<String, MentionCandidate> agents,
+) {
+  if (agents.isEmpty || controller.text.isNotEmpty) return;
+  final text = agents.keys.map((name) => '@$name ').join();
+  mentionMap.addAll(agents);
+  controller.value = TextEditingValue(
+    text: text,
+    selection: TextSelection.collapsed(offset: text.length),
+  );
+}
+
 List<MentionCandidate> _resolveComposerMentions(
   String text,
   Map<String, MentionCandidate> selected,

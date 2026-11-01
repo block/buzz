@@ -12,6 +12,7 @@ Future<void> _sendTextOnlyDraft({
   required _ComposeDraftPayload payload,
   required _OutgoingMentions outgoing,
   required ComposeBarOnSend onSend,
+  required void Function(Map<String, MentionCandidate> sent) onSent,
   required ScaffoldMessengerState? messenger,
 }) async {
   TextEditingValue? clearedDraftText;
@@ -57,6 +58,9 @@ Future<void> _sendTextOnlyDraft({
       outgoing.pubkeys,
       mediaTags: [...payload.mediaTags, ...outgoing.referenceTags],
     );
+    if (context.mounted && draftRevision.value == clearedDraftRevision) {
+      onSent(clearedDraftMentions!);
+    }
   } on StateError {
     restoreClearedDraft();
     _reportSendCancelledByCommunitySwitch(messenger);

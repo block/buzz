@@ -20,6 +20,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../shared/community/community_storage_test.dart';
 
+final _pushSwitch = find.descendant(
+  of: find.byKey(const ValueKey('push-notifications-setting')),
+  matching: find.byType(Switch),
+);
+
 void main() {
   for (final outcome in ['loading', 'absent', 'error']) {
     testWidgets('enabled community can turn push off with $outcome capability', (
@@ -109,15 +114,15 @@ void main() {
         reason:
             '${container.read(activeCommunityProvider)} / ${container.read(communityListProvider)}',
       );
-      expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
-      await tester.tap(find.byType(Switch));
+      expect(tester.widget<Switch>(_pushSwitch).value, isTrue);
+      await tester.tap(_pushSwitch);
       await tester.pumpAndSettle();
       final stored = (await storage.loadAll()).single;
       expect(stored.pushNotificationsEnabled, isFalse);
       expect(stored.pushSubscriptionState.pendingTombstoneGeneration, 8);
       expect(tombstones, [8]);
       expect(snapshots.last.single.pushNotificationsEnabled, isFalse);
-      final offSwitch = tester.widget<Switch>(find.byType(Switch));
+      final offSwitch = tester.widget<Switch>(_pushSwitch);
       expect(offSwitch.value, isFalse);
       expect(offSwitch.onChanged, isNull);
       relayAvailable = true;

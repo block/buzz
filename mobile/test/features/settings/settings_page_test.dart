@@ -8,6 +8,7 @@ import 'package:buzz/features/settings/settings_page.dart';
 import 'package:buzz/shared/community/community_membership_provider.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
+import 'package:buzz/shared/mentions/remember_mentioned_agents.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/shared/push/dev_push_lease.dart';
@@ -85,10 +86,18 @@ void main() {
         find.ancestor(of: version, matching: find.byType(ListView)),
         findsOneWidget,
       );
-      final beforeScroll = tester.getTopLeft(version).dy;
+      final position = tester
+          .state<ScrollableState>(
+            find.descendant(
+              of: find.byType(ListView),
+              matching: find.byType(Scrollable),
+            ),
+          )
+          .position;
+      final beforeScroll = position.pixels;
       await tester.drag(find.byType(ListView), const Offset(0, 100));
       await tester.pumpAndSettle();
-      expect(tester.getTopLeft(version).dy, greaterThan(beforeScroll));
+      expect(position.pixels, lessThan(beforeScroll));
       expect(tester.takeException(), isNull);
     });
   }
@@ -134,7 +143,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.text('Notifications'), findsNothing);
-      expect(find.byType(Switch), findsNothing);
+      expect(_pushSwitch, findsNothing);
       if (outcome == 'absent') {
         capability.complete(null);
       } else {
@@ -143,7 +152,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Notifications'), findsNothing);
       expect(find.text('Push notifications'), findsNothing);
-      expect(find.byType(Switch), findsNothing);
+      expect(_pushSwitch, findsNothing);
       expect(permissionReads, 0);
       expect(tester.takeException(), isNull);
       debugDefaultTargetPlatformOverride = null;
@@ -190,7 +199,7 @@ void main() {
       find.byKey(const ValueKey('push-notifications-enabled')),
       findsOneWidget,
     );
-    expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+    expect(tester.widget<Switch>(_pushSwitch).value, isTrue);
     debugDefaultTargetPlatformOverride = null;
   });
 
@@ -394,6 +403,42 @@ void main() {
     );
   });
 
+  testWidgets('saves Remember mentioned agents on this device', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final row = find.byKey(
+      const ValueKey('settings-remember-mentioned-agents'),
+    );
+    bool switchValue() => tester
+        .widget<Switch>(find.descendant(of: row, matching: find.byType(Switch)))
+        .value;
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [savedPrefsProvider.overrideWithValue(prefs)],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: SettingsPage(
+            profileHeader: const SizedBox.shrink(),
+            identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(switchValue(), isTrue);
+
+    await tester.tap(row);
+    await tester.pumpAndSettle();
+
+    expect(switchValue(), isFalse);
+    final restarted = ProviderContainer(
+      overrides: [savedPrefsProvider.overrideWithValue(prefs)],
+    );
+    addTearDown(restarted.dispose);
+    expect(restarted.read(rememberMentionedAgentsProvider), isFalse);
+  });
+
   testWidgets('keeps personal settings independent of community role errors', (
     tester,
   ) async {
@@ -505,4 +550,9 @@ const _pushDescriptor = BuzzPushLeaseDescriptor(
   maxPlaintextLength: 4096,
   maxEndpointLength: 2048,
   maxStringLength: 512,
+);
+
+final _pushSwitch = find.descendant(
+  of: find.byKey(const ValueKey('push-notifications-setting')),
+  matching: find.byType(Switch),
 );

@@ -18,6 +18,10 @@ class ComposeBar extends HookConsumerWidget {
   /// Optional thread IDs for thread-scoped typing indicators.
   final String? threadHeadId;
   final String? rootId;
+
+  /// Off where the conversation already remembers its agent, as a Solo chat's
+  /// header does; a carried-over mention would override a header change.
+  final bool remembersAgents;
   const ComposeBar({
     super.key,
     required this.channelId,
@@ -25,6 +29,7 @@ class ComposeBar extends HookConsumerWidget {
     this.hintText,
     this.threadHeadId,
     this.rootId,
+    this.remembersAgents = true,
     this.focusNode,
     this.onFocusRestorerChanged,
     this.onFocusRequested,
@@ -568,6 +573,23 @@ class ComposeBar extends HookConsumerWidget {
         return;
       }
       final outgoing = _OutgoingMentions(selectedMentions);
+      // A prefill is not typing: skip typing indicators and the mention picker.
+      void rememberNotifiedAgents(Map<String, MentionCandidate> sent) {
+        if (!remembersAgents || !ref.read(rememberMentionedAgentsProvider)) {
+          return;
+        }
+        isModifyingText.value = true;
+        try {
+          _prefillAgentMentions(
+            controller,
+            mentionMap.value,
+            _notifiedAgentMentions(sent, selectedMentions, outgoing.pubkeys),
+          );
+        } finally {
+          isModifyingText.value = false;
+        }
+      }
+
       // Read before any await. These actions belong to this community and
       // refuse to run after a switch, so an Invite answered after a switch
       // cannot add people in the new community.
@@ -642,6 +664,7 @@ class ComposeBar extends HookConsumerWidget {
             ),
             outgoing: outgoing,
             onSend: sendWithOrigin,
+            onSent: rememberNotifiedAgents,
             messenger: messenger,
           );
           return;
@@ -698,6 +721,10 @@ class ComposeBar extends HookConsumerWidget {
               outgoing.pubkeys,
               mediaTags: [...payload.mediaTags, ...outgoing.referenceTags],
             );
+            if (context.mounted &&
+                draftRevision.value == clearedDraftRevision) {
+              rememberNotifiedAgents(draftMentions);
+            }
           } catch (error) {
             if (cancellation.isCancelled) return;
             if (context.mounted) uploadError.value = _formatUploadError(error);
