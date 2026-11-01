@@ -800,6 +800,10 @@ final class MergingNavigationGlass: UIView {
       self.rightSurface.transform = open
         ? CGAffineTransform(translationX: -movement, y: 0).scaledBy(x: 0.9, y: 0.9) : .identity
     }
+    let opacity = { [weak self] in
+      self?.leftSurface.alpha = open ? 0 : 1
+      self?.rightSurface.alpha = open ? 0 : 1
+    }
     // The live Flutter artwork uses this same 180 ms easeOutCubic curve.
     // UIKit's menu animator has different timing, which makes the glass outrun
     // its artwork. Start both from the visibility callback instead.
@@ -809,7 +813,10 @@ final class MergingNavigationGlass: UIView {
     }
     movementAnimator = nil
     if UIAccessibility.isReduceMotionEnabled {
-      UIView.performWithoutAnimation(changes)
+      UIView.performWithoutAnimation {
+        changes()
+        opacity()
+      }
     } else {
       let timing = UICubicTimingParameters(
         controlPoint1: CGPoint(x: 0.215, y: 0.61),
@@ -817,6 +824,7 @@ final class MergingNavigationGlass: UIView {
       )
       let movement = UIViewPropertyAnimator(duration: 0.18, timingParameters: timing)
       movement.addAnimations(changes)
+      movement.addAnimations(opacity, delayFactor: open ? 0.5 : 0)
       movementAnimator = movement
       movement.startAnimation()
     }

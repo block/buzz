@@ -30,10 +30,12 @@ struct SettingMenuSelectionTests {
     precondition(merging.leftSurface.transform.tx == 100)
     precondition(merging.rightSurface.transform.tx == -100)
     precondition(merging.leftSurface.transform.a == 0.9)
-    precondition(merging.leftSurface.alpha == 1)
+    precondition(merging.leftSurface.alpha == 0 && merging.rightSurface.alpha == 0)
+    precondition(merging.centerSurface.alpha == 1)
     merging.setMenuOpen(false, animator: nil)
     precondition(merging.leftSurface.transform == .identity)
     precondition(merging.rightSurface.transform == .identity)
+    precondition(merging.leftSurface.alpha == 1 && merging.rightSurface.alpha == 1)
     UIView.setAnimationsEnabled(true)
 
     for deferred in [false, true] {
