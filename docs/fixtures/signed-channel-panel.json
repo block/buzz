@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "panelId": "exchange-outcome-demo",
+  "channelId": "00000000-0000-4000-8000-000000000001",
+  "title": "Documentation marker",
+  "description": "A bounded, read-only operational projection.",
+  "status": "active",
+  "updatedAt": 1760000000,
+  "sections": [
+    {
+      "id": "provider-pool",
+      "title": "Provider pool",
+      "status": "active",
+      "fields": [
+        {
+          "label": "Ferris",
+          "value": "Rust · available",
+          "presentation": "text"
+        },
+        {
+          "label": "Sable",
+          "value": "Security · available",
+          "presentation": "text"
+        },
+        {
+          "label": "Prism",
+          "value": "Frontend · available",
+          "presentation": "text"
+        },
+        {
+          "label": "Gauge",
+          "value": "Testing · available",
+          "presentation": "text"
+        },
+        {
+          "label": "Ledger",
+          "value": "Database · available",
+          "presentation": "text"
+        },
+        {
+          "label": "Hook",
+          "value": "Integration · available",
+          "presentation": "text"
+        }
+      ],
+      "links": []
+    },
+    {
+      "id": "outcome",
+      "title": "Outcome",
+      "status": "active",
+      "fields": [
+        {
+          "label": "Request",
+          "value": "Add a bounded documentation marker",
+          "presentation": "text"
+        },
+        {
+          "label": "Match",
+          "value": "Ferris selected",
+          "presentation": "status"
+        },
+        {
+          "label": "Evidence",
+          "value": "Patch hash and validation result",
+          "presentation": "monospace"
+        },
+        {
+          "label": "Decision",
+          "value": "Awaiting buyer acceptance",
+          "presentation": "status"
+        },
+        {
+          "label": "Settlement",
+          "value": "Pending acceptance",
+          "presentation": "status"
+        }
+      ],
+      "links": []
+    }
+  ],
+  "sourceEvents": [
+    {
+      "eventId": "1111111111111111111111111111111111111111111111111111111111111111",
+      "kind": 43001,
+      "channelId": "00000000-0000-4000-8000-000000000001",
+      "label": "Outcome request"
+    },
+    {
+      "eventId": "2222222222222222222222222222222222222222222222222222222222222222",
+      "kind": 43004,
+      "channelId": "00000000-0000-4000-8000-000000000001",
+      "label": "Evidence result"
+    }
+  ]
+}
