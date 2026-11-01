@@ -2162,6 +2162,79 @@ void main() {
       );
     });
 
+    test(
+      'a repeated catch-up starts near the newest message it already has',
+      () async {
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [_meta(id: _channelA, name: 'general')],
+          recentMessages: [message('seen', 10000, mention: true)],
+        );
+        final container = _buildContainer(session: session);
+        addTearDown(container.dispose);
+        final notifier = container.read(channelsProvider.notifier);
+        List<int?> lastUnreadSince() => [
+          for (final filter in session.queryBatches.lastWhere(isUnread))
+            filter.since,
+        ];
+
+        await container.read(channelsProvider.future);
+        await _waitUntil(() => session.queryBatches.any(isUnread));
+        await _settle();
+        // Never read: the first catch-up asks for the whole window.
+        expect(lastUnreadSince(), [0, 0]);
+
+        // A message lands while the app is away, then a refresh catches up.
+        session.recentMessages.add(message('missed', 10030, mention: true));
+        final before = session.queryBatches.where(isUnread).length;
+        await notifier.refresh();
+        await _waitUntil(
+          () => session.queryBatches.where(isUnread).length > before,
+        );
+        await _settle();
+        expect(lastUnreadSince(), [10000 - 60, 10000 - 60]);
+        expect(
+          notifier.observedUnreadEventsByChannel[_channelA]?.keys,
+          unorderedEquals(['seen', 'missed']),
+        );
+
+        // Each catch-up moves the start forward.
+        final again = session.queryBatches.where(isUnread).length;
+        await notifier.refresh();
+        await _waitUntil(
+          () => session.queryBatches.where(isUnread).length > again,
+        );
+        expect(lastUnreadSince(), [10030 - 60, 10030 - 60]);
+      },
+    );
+
+    test('a rebuilt channel list catches up over the whole window', () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+        recentMessages: [message('seen', 10000, mention: true)],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      await _waitUntil(() => session.queryBatches.any(isUnread));
+      await _settle();
+
+      container.invalidate(channelsProvider);
+      final before = session.queryBatches.where(isUnread).length;
+      await container.read(channelsProvider.future);
+      await _waitUntil(
+        () => session.queryBatches.where(isUnread).length > before,
+      );
+      expect(
+        [
+          for (final filter in session.queryBatches.lastWhere(isUnread))
+            filter.since,
+        ],
+        [0, 0],
+      );
+    });
+
     test('quiet agent messages never count as unread', () async {
       final session = _FakeRelaySession(
         memberships: [_membership(_channelA, myPk)],
