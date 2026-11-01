@@ -355,13 +355,6 @@ function getInboxThreadKey(
   );
 }
 
-function getStableConversationId(
-  item: FeedItem,
-  channelById: ReadonlyMap<string, InboxChannel>,
-) {
-  return getInboxThreadKey(item, channelById);
-}
-
 /**
  * Returns the stable conversation ID for any FeedItem or relay event. Buzz Git
  * roots include their repository coordinate; messages use the NIP-10 root,
@@ -411,7 +404,7 @@ export function findInboxItemByEventId(
   eventId: string,
 ): InboxItem | null {
   return (
-    items.find((item) => item.id === eventId) ??
+    items.find((item) => item.conversationId === eventId) ??
     items.find((item) =>
       item.groupItems.some((groupItem) => groupItem.id === eventId),
     ) ??
@@ -510,7 +503,6 @@ export function buildInboxItems({
     {
       items: FeedItem[];
       latestActivityAt: number;
-      rootItem: FeedItem | null;
     }
   >();
 
@@ -519,14 +511,10 @@ export function buildInboxItems({
     const group = threadGroups.get(threadKey) ?? {
       items: [],
       latestActivityAt: 0,
-      rootItem: null,
     };
 
     group.items.push(item);
     group.latestActivityAt = Math.max(group.latestActivityAt, item.createdAt);
-    if (item.id === getStableConversationId(item, channelById)) {
-      group.rootItem = item;
-    }
 
     threadGroups.set(threadKey, group);
   }
@@ -535,11 +523,7 @@ export function buildInboxItems({
     .sort(
       ([, left], [, right]) => right.latestActivityAt - left.latestActivityAt,
     )
-    .map(([, group]) => {
-      const conversationId = getStableConversationId(
-        group.items[0],
-        channelById,
-      );
+    .map(([conversationId, group]) => {
       const latestItem = group.items.reduce((latest, current) =>
         current.createdAt > latest.createdAt ? current : latest,
       );
@@ -606,7 +590,7 @@ export function buildInboxItems({
       return {
         avatarUrl: profiles?.[item.pubkey.toLowerCase()]?.avatarUrl ?? null,
         conversationId,
-        id: item.id,
+        id: conversationId,
         item: displayItem,
         categories,
         categoryLabel,
