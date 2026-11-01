@@ -112,8 +112,8 @@ class Channel {
 
   bool get isEphemeral => ttlSeconds != null || ttlDeadline != null;
 
-  /// Solo presentation is carried by NIP-CL metadata, not project filing.
-  bool get isSolo => isStream && isPrivate && labels.contains('buzz.solo');
+  /// Solo presentation follows NIP-CL metadata, independent of visibility.
+  bool get isSolo => isStream && labels.contains('buzz.solo');
 
   /// Keep old mobile-created chats visible while older clients migrate.
   bool isPersonalChat(String? viewer, Iterable<String> legacyChannels) => isSolo

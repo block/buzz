@@ -58,6 +58,10 @@ class FakeChannels extends ChannelsNotifier {
 }
 
 class LabeledChannels extends ChannelsNotifier {
+  LabeledChannels(this.visibility);
+
+  final String visibility;
+
   @override
   Future<List<Channel>> build() async => [
     for (final (id, name, owner, member) in [
@@ -70,7 +74,7 @@ class LabeledChannels extends ChannelsNotifier {
         id: id,
         name: name,
         channelType: 'stream',
-        visibility: 'private',
+        visibility: visibility,
         labels: const ['buzz.solo'],
         description: '',
         createdBy: owner,
@@ -82,40 +86,42 @@ class LabeledChannels extends ChannelsNotifier {
 }
 
 void main() {
-  testWidgets('label-only desktop chats appear in projects and unfiled chats', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
-          myPubkeyProvider.overrideWithValue('owner'),
-          channelsProvider.overrideWith(LabeledChannels.new),
-          meGroupsProvider.overrideWith(
-            (ref) => Stream.value(
-              const MeGroups(
-                groups: [
-                  {
-                    'id': 'project',
-                    'name': 'App work',
-                    'defaultTemplateId': '',
-                  },
-                ],
-                assignments: {'filed': 'project'},
+  for (final visibility in ['private', 'open']) {
+    testWidgets('$visibility Solo chats stay in projects and unfiled chats', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
+            myPubkeyProvider.overrideWithValue('owner'),
+            channelsProvider.overrideWith(() => LabeledChannels(visibility)),
+            meGroupsProvider.overrideWith(
+              (ref) => Stream.value(
+                const MeGroups(
+                  groups: [
+                    {
+                      'id': 'project',
+                      'name': 'App work',
+                      'defaultTemplateId': '',
+                    },
+                  ],
+                  assignments: {'filed': 'project'},
+                ),
               ),
             ),
-          ),
-        ],
-        child: MaterialApp(theme: AppTheme.light(), home: const MePage()),
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(find.text('Filed labeled chat'), findsOneWidget);
-    expect(find.text('Unfiled labeled chat'), findsOneWidget);
-    expect(find.text('Someone else chat'), findsNothing);
-    expect(find.text('Inaccessible labeled chat'), findsNothing);
-    expect(find.text('A place to work with your agents'), findsNothing);
-  });
+          ],
+          child: MaterialApp(theme: AppTheme.light(), home: const MePage()),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Filed labeled chat'), findsOneWidget);
+      expect(find.text('Unfiled labeled chat'), findsOneWidget);
+      expect(find.text('Someone else chat'), findsNothing);
+      expect(find.text('Inaccessible labeled chat'), findsNothing);
+      expect(find.text('A place to work with your agents'), findsNothing);
+    });
+  }
 
   testWidgets('empty workspace stays centered behind the New chat keyboard', (
     tester,
