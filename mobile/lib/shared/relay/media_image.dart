@@ -45,6 +45,13 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   /// Excluded from equality because it is a side effect, not cache identity.
   final ValueChanged<Uint8List>? onBytesLoaded;
 
+  /// Set when [url] is a thumbnail [MediaImage] chose in place of an
+  /// original: its 404 then records a missing thumbnail, so later builds load
+  /// the original, rather than a failure cooldown. Any other 404, including a
+  /// profile URL that is itself a thumbnail, keeps the cooldown. Excluded from
+  /// equality: it changes how a failure is handled, not the bytes.
+  final bool isThumbnailFallback;
+
   /// Excluded from equality: transport, not identity.
   final http.Client client;
 
@@ -62,6 +69,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     required this.auth,
     required this.client,
     this.onBytesLoaded,
+    this.isThumbnailFallback = false,
     this.scale = 1.0,
     this.stallTimeout = const Duration(seconds: 20),
     this.maxFetchDuration = const Duration(minutes: 5),
@@ -239,6 +247,14 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
         _cooldownUntil[url] = debugNow().add(_defaultCooldown);
       }
       rethrow;
+    }
+    if (response.statusCode == 404 && isThumbnailFallback) {
+      // Older or externally populated media may have no generated thumbnail.
+      // Record that here rather than in a widget's error builder: the widget
+      // that asked may be gone by the time a slow 404 arrives, and a
+      // cooldown would then keep every later build off the original.
+      MediaImage._rememberMissingThumbnail(url);
+      throw NetworkImageLoadException(statusCode: 404, uri: uri);
     }
     if (response.statusCode != 200) {
       _cooldownUntil[url] = debugNow().add(_cooldownFor(response));
@@ -468,11 +484,15 @@ class MediaImage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final auth = ref.watch(mediaGetAuthServiceProvider);
     final client = ref.watch(mediaHttpClientProvider);
-    MediaImageProvider providerFor(String source) => MediaImageProvider(
+    MediaImageProvider providerFor(
+      String source, {
+      bool isThumbnailFallback = false,
+    }) => MediaImageProvider(
       url: source,
       auth: auth,
       client: client,
       onBytesLoaded: onBytesLoaded,
+      isThumbnailFallback: isThumbnailFallback,
     );
 
     if (decodeWidth != null) {
@@ -496,17 +516,15 @@ class MediaImage extends ConsumerWidget {
             : candidate;
         if (thumbnail == null) return _image(providerFor(url), cacheWidth);
         return _image(
-          providerFor(thumbnail),
+          providerFor(thumbnail, isThumbnailFallback: true),
           cacheWidth,
           errorBuilder: (context, error, stackTrace) {
             if (error is! NetworkImageLoadException ||
                 error.statusCode != 404) {
               return errorBuilder!(context, error, stackTrace);
             }
-            // Older or externally populated media may have no generated
-            // thumbnail. Remember that, so later builds go straight to the
-            // original instead of hitting the thumbnail's failure cooldown.
-            _rememberMissingThumbnail(thumbnail);
+            // The fetch already recorded the missing thumbnail, so later
+            // builds go straight to the original.
             return _image(providerFor(url), cacheWidth);
           },
         );
@@ -520,11 +538,10 @@ class MediaImage extends ConsumerWidget {
   static final Set<String> _missingThumbnails = <String>{};
   static const _maxMissingThumbnails = 256;
 
+  /// Called by the fetch that got the 404, which puts no failure cooldown on
+  /// the thumbnail: this set stands in for it, and an entry evicted here then
+  /// costs one more 404 rather than showing the fallback.
   static void _rememberMissingThumbnail(String url) {
-    // This set now stands in for the 404's failure cooldown. Drop that, or
-    // nothing would fetch the URL again to clear it, and an entry evicted
-    // here during its cooldown would show the fallback, not the original.
-    MediaImageProvider._cooldownUntil.remove(url);
     _missingThumbnails
       ..remove(url)
       ..add(url);

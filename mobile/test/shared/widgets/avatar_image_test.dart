@@ -1,5 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
 
+import 'package:buzz/shared/community/community_avatar.dart';
+import 'package:buzz/shared/community/community_icon_provider.dart';
 import 'package:buzz/shared/relay/media_auth.dart';
 import 'package:buzz/shared/relay/media_image.dart';
 import 'package:buzz/shared/widgets/avatar_shape.dart';
@@ -9,8 +12,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
+
+// Minimal valid 1x1 transparent PNG.
+final _pngBytes = base64Decode(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAA'
+  'AAYAAjCB0C8AAAAASUVORK5CYII=',
+);
 
 void main() {
   const svg =
@@ -209,6 +219,161 @@ void main() {
       ),
       isEmpty,
     );
+  });
+
+  group('relay thumbnail journeys', () {
+    const relay = 'https://relay.example';
+    late List<String> requested;
+    late Future<http.Response> Function(String url) respond;
+    final valueOf = ValueNotifier<Widget>(const SizedBox());
+
+    setUp(() {
+      MediaImageProvider.debugResetCooldowns();
+      MediaImage.debugResetMissingThumbnails();
+      requested = [];
+      respond = (_) async => http.Response.bytes(_pngBytes, 200);
+      valueOf.value = const SizedBox();
+    });
+    tearDown(() {
+      MediaImageProvider.debugResetCooldowns();
+      MediaImage.debugResetMissingThumbnails();
+    });
+
+    Future<void> mount(
+      WidgetTester tester, {
+      List<Override> overrides = const [],
+    }) async {
+      tester.view.devicePixelRatio = 3;
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final client = http_testing.MockClient((request) {
+        final url = request.url.toString();
+        requested.add(url);
+        return respond(url);
+      });
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            mediaGetAuthServiceProvider.overrideWithValue(
+              MediaGetAuthService(baseUrl: relay, nsec: null),
+            ),
+            mediaHttpClientProvider.overrideWithValue(client),
+            ...overrides,
+          ],
+          child: MaterialApp(
+            home: Center(
+              child: ValueListenableBuilder<Widget>(
+                valueListenable: valueOf,
+                builder: (_, child, _) => child,
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    Future<void> show(WidgetTester tester, Widget child) async {
+      valueOf.value = child;
+      for (var i = 0; i < 4; i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pump();
+      }
+    }
+
+    String shownUrl(WidgetTester tester) {
+      final image = tester.widget<Image>(find.byType(Image));
+      final provider = (image.image as ResizeImage).imageProvider;
+      return (provider as MediaImageProvider).url;
+    }
+
+    testWidgets(
+      'an avatar that left before its thumbnail 404 later shows the original',
+      (tester) async {
+        final original = '$relay/media/${'12' * 32}.png';
+        final thumbnail = '$relay/media/${'12' * 32}.thumb.jpg';
+        final slow404 = Completer<http.Response>();
+        respond = (url) async => url == thumbnail
+            ? slow404.future
+            : http.Response.bytes(_pngBytes, 200);
+        await mount(tester);
+
+        // A 40pt avatar asks for the thumbnail on a slow link, then
+        // scrolls away before the relay's 404 arrives.
+        await show(
+          tester,
+          AvatarImage(
+            imageUrl: original,
+            radius: 20,
+            fallback: const Text('M'),
+          ),
+        );
+        expect(requested, [thumbnail]);
+        await show(tester, const SizedBox());
+        slow404.complete(http.Response('', 404));
+        await show(tester, const SizedBox());
+
+        // Back at another size, it loads and renders the original rather
+        // than the initials.
+        await show(
+          tester,
+          AvatarImage(
+            imageUrl: original,
+            radius: 16,
+            fallback: const Text('M'),
+          ),
+        );
+        expect(requested.where((url) => url == original), hasLength(1));
+        expect(shownUrl(tester), original);
+        expect(find.text('M'), findsNothing);
+        expect(MediaImageProvider.debugCooldownUrls, isEmpty);
+
+        // A profile URL that is itself thumbnail-shaped, on another host or
+        // this relay, is not a fallback MediaImage chose: its 404 keeps the
+        // cooldown, so showing it again does not request it again.
+        respond = (_) async => http.Response('', 404);
+        for (final (i, thumbShaped) in [
+          'https://elsewhere.example/media/${'56' * 32}.thumb.jpg',
+          '$relay/media/${'78' * 32}.thumb.jpg',
+        ].indexed) {
+          MediaImageProvider.debugResetCooldowns();
+          for (final radius in [16.0, 17.0]) {
+            await show(
+              tester,
+              AvatarImage(
+                key: ValueKey((i, radius)),
+                imageUrl: thumbShaped,
+                radius: radius,
+                fallback: const Text('E'),
+              ),
+            );
+            expect(find.text('E'), findsOneWidget);
+          }
+          expect(requested.where((url) => url == thumbShaped), hasLength(1));
+          expect(MediaImageProvider.debugCooldownUrls, [thumbShaped]);
+        }
+      },
+    );
+
+    testWidgets('community icons load the original, which keeps transparency', (
+      tester,
+    ) async {
+      final icon = '$relay/media/${'34' * 32}.png';
+      await mount(
+        tester,
+        overrides: [
+          communityIconPresentationProvider(relay).overrideWithValue(icon),
+        ],
+      );
+
+      // The channels header size, well within the thumbnail.
+      await show(
+        tester,
+        const CommunityAvatar(name: 'Buzz', relayUrl: relay, size: 36),
+      );
+      expect(requested, [icon]);
+      expect(shownUrl(tester), icon);
+    });
   });
 
   testWidgets('clips agents to the desktop squircle', (tester) async {

@@ -1,8 +1,10 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+
 import '../../shared/widgets/profile_action_chip.dart';
 import '../../shared/widgets/app_list_card.dart';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -602,6 +604,7 @@ class _ProfileAvatar extends HookWidget {
                   )
                 : AvatarImageContent(
                     imageUrl: animatedAvatar?.posterUrl ?? avatarUrl,
+                    preferThumbnail: true,
                     fallback: _AvatarFallback(initial: initial),
                   );
             return AvatarClip(

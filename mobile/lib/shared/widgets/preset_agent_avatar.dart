@@ -110,12 +110,17 @@ class PresetAgentAvatar extends HookWidget {
                   playing: playing,
                   fallback: AvatarImageContent(
                     imageUrl: poster,
+                    preferThumbnail: true,
                     fallback: fallback,
                   ),
                 )
               : controller != null && ready.value == controller
               ? VideoPlayer(controller)
-              : AvatarImageContent(imageUrl: poster, fallback: fallback),
+              : AvatarImageContent(
+                  imageUrl: poster,
+                  preferThumbnail: true,
+                  fallback: fallback,
+                ),
         ),
       ),
     );

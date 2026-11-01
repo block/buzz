@@ -45,6 +45,7 @@ class AvatarImage extends StatelessWidget {
       child: AvatarImageContent(
         imageUrl: animatedAvatar?.posterUrl ?? imageUrl,
         fallback: fallback,
+        preferThumbnail: true,
       ),
     );
     final clipped = AvatarClip(
@@ -77,11 +78,18 @@ class AvatarImageContent extends ConsumerStatefulWidget {
   final Widget fallback;
   final BoxFit fit;
 
+  /// Load the relay's small JPEG thumbnail for a small relay-hosted image
+  /// (see [MediaImage.preferThumbnail]). People and agent avatars set this,
+  /// matching desktop. Leave it off for images that may be transparent, such
+  /// as community icons: the thumbnail renders transparent areas black.
+  final bool preferThumbnail;
+
   const AvatarImageContent({
     super.key,
     required this.imageUrl,
     required this.fallback,
     this.fit = BoxFit.cover,
+    this.preferThumbnail = false,
   });
 
   @override
@@ -132,7 +140,7 @@ class _AvatarImageContentState extends ConsumerState<AvatarImageContent> {
       _NetworkAvatarSource(:final url) => MediaImage(
         url: url,
         fit: widget.fit,
-        preferThumbnail: true,
+        preferThumbnail: widget.preferThumbnail,
         errorBuilder: (_, _, _) => centeredFallback,
       ),
       null => centeredFallback,
