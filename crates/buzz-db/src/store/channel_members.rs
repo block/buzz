@@ -5114,9 +5114,10 @@ mod postgres_tests {
         assert_eq!(count, 0);
     }
 
-    /// A captured roster holds the same lock as membership writers until the
-    /// publisher explicitly releases it. This is the freshness fence used by
-    /// rolling-deploy reconciliation.
+    /// A captured snapshot holds the same lock as membership writers, and the
+    /// replacement keys of every group-state kind, until the publisher
+    /// explicitly releases it. This is the freshness fence used by group-state
+    /// publication and rolling-deploy reconciliation.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn locked_member_snapshot_blocks_post_capture_membership_mutation() {
@@ -5154,6 +5155,11 @@ mod postgres_tests {
         .await
         .expect("capture locked roster");
         assert_eq!(snapshot.members.len(), 1);
+        assert_eq!(
+            snapshot.channel.as_ref().map(|captured| captured.id),
+            Some(channel.id),
+            "the live channel row is captured behind the same locks"
+        );
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(39002), "")
             .tags(vec![
                 nostr::Tag::parse(["d", &channel.id.to_string()]).expect("d tag"),
@@ -5196,6 +5202,24 @@ mod postgres_tests {
             !acquired,
             "membership mutation must wait until the captured roster is published"
         );
+        // A relay that still replaces 39000 and 39001 on their own
+        // transactions takes these keys, so it waits for this publication too.
+        for kind in [39000, 39001] {
+            let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+                .bind(crate::replaceable::event_replacement_lock_key(
+                    community,
+                    kind,
+                    &relay_keys.public_key().to_bytes(),
+                    Some(channel.id.as_bytes()),
+                ))
+                .fetch_one(&mut *contender)
+                .await
+                .expect("try group-state replacement lock");
+            assert!(
+                !acquired,
+                "a kind:{kind} replacement must wait until the captured state is published"
+            );
+        }
         contender.rollback().await.expect("rollback contender");
 
         snapshot.release().await.expect("release snapshot fence");
