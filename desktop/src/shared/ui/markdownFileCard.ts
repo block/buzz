@@ -44,14 +44,14 @@ export type ResolvedSnapshotCard = {
 
 function snapshotDisplayName(filename: string, childText: string): string {
   const label = childText.trim();
-  const labelIsSnapshotFilename = /\.agent\.(?:json|png)$/i.test(label);
+  const labelIsSnapshotFilename = /\.(?:agent|team)\.(?:json|png)$/i.test(label);
   if (label && !labelIsSnapshotFilename) return label;
 
   const filenameStem = filename
-    .replace(/\.agent\.(?:json|png)$/i, "")
+    .replace(/\.(?:agent|team)\.(?:json|png)$/i, "")
     .replace(/[-_]+/g, " ")
     .trim();
-  if (!filenameStem) return "Agent";
+  if (!filenameStem) return /\.team\./i.test(filename) ? "Team" : "Agent";
 
   return filenameStem
     .split(/\s+/)
