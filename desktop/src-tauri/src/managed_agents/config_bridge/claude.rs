@@ -1,6 +1,8 @@
 use super::types::{ExtensionEntry, RuntimeFileConfig};
+use std::path::{Path, PathBuf};
 
-/// Read Claude Code config from `settings.json` and `.claude.json`.
+/// Read Claude Code config from `settings.json` and `.claude.json`, with the
+/// project's settings files layered on top.
 ///
 /// `config_dir` — when `Some`, reads both `settings.json` and `.claude.json`
 /// from that directory (the agent's effective `CLAUDE_CONFIG_DIR`).
@@ -11,20 +13,35 @@ use super::types::{ExtensionEntry, RuntimeFileConfig};
 /// ".claude.json")`, mirroring the `settings.json` resolver. A user-set
 /// `CLAUDE_CONFIG_DIR` therefore remaps both files — honoring only
 /// `settings.json` would misrepresent the agent's actual MCP config.
-pub(super) fn read_config_file(config_dir: Option<&std::path::Path>) -> Option<RuntimeFileConfig> {
+///
+/// Claude Code itself also reads every project scope and lets the narrower one
+/// win, so the panel must layer `<workdir>/.claude/settings.json` and
+/// `settings.local.json` on top of the user file — otherwise an agent whose
+/// nest sets `effortLevel: medium` really does run at medium while the panel
+/// reports the user-level `low` (#5826).
+pub(super) fn read_config_file(
+    config_dir: Option<&Path>,
+    workdir: Option<&Path>,
+) -> Option<RuntimeFileConfig> {
     let home = dirs::home_dir()?;
 
     // #3493: honor user-set CLAUDE_CONFIG_DIR for both settings.json and
     // .claude.json — the binary resolves both relative to CLAUDE_CONFIG_DIR.
-    // Panel reflects the actual config the agent reads.
-    let settings_path = config_dir
-        .map(|d| d.join("settings.json"))
-        .unwrap_or_else(|| home.join(".claude").join("settings.json"));
     let mcp_path = config_dir
         .map(|d| d.join(".claude.json"))
         .unwrap_or_else(|| home.join(".claude.json"));
 
-    let settings = read_json_file(&settings_path);
+    let settings = match config_dir {
+        Some(dir) => {
+            let user_path = dir.join("settings.json");
+            let mut settings = read_json_file(&user_path);
+            for path in project_settings_paths(workdir, &user_path) {
+                settings = merge_settings(settings, read_json_file(&path));
+            }
+            settings
+        }
+        None => read_settings(&home, workdir),
+    };
     let mcp_config = read_json_file(&mcp_path);
 
     if settings.is_none() && mcp_config.is_none() {
@@ -34,14 +51,7 @@ pub(super) fn read_config_file(config_dir: Option<&std::path::Path>) -> Option<R
     let mut cfg = RuntimeFileConfig::default();
 
     if let Some(ref s) = settings {
-        cfg.model = json_string(s, "model");
-
-        // effortLevel → thinking_effort (direct mapping per spec)
-        cfg.thinking_effort = json_string(s, "effortLevel");
-
-        // Config-driven extra fields — skip normalized keys to avoid double-counting.
-        let skip = &["model", "effortLevel"];
-        cfg.extra = super::schema_walker::extract_config_fields(s, skip);
+        apply_settings(&mut cfg, s);
     }
 
     // MCP servers from ~/.claude.json
@@ -62,6 +72,99 @@ pub(super) fn read_config_file(config_dir: Option<&std::path::Path>) -> Option<R
     Some(cfg)
 }
 
+/// Read and layer every settings scope Claude Code applies to a project, in
+/// the precedence order it documents: user `~/.claude/settings.json`, then the
+/// shared project `<workdir>/.claude/settings.json`, then the project-local
+/// `<workdir>/.claude/settings.local.json`, each winning over the last.
+///
+/// Stopping at the shared project file would still misreport a workspace whose
+/// local file is the one holding the model, effort, permission or hook
+/// override — that file is the highest-priority of the three.
+///
+/// <https://code.claude.com/docs/en/settings>
+fn read_settings(home: &Path, workdir: Option<&Path>) -> Option<serde_json::Value> {
+    let user_path = home.join(".claude").join("settings.json");
+    let mut settings = read_json_file(&user_path);
+    for path in project_settings_paths(workdir, &user_path) {
+        settings = merge_settings(settings, read_json_file(&path));
+    }
+    settings
+}
+
+/// The project scopes, lowest priority first.
+fn project_settings_paths(workdir: Option<&Path>, user_path: &Path) -> Vec<PathBuf> {
+    let Some(dir) = workdir else {
+        return Vec::new();
+    };
+    let claude = dir.join(".claude");
+    ["settings.json", "settings.local.json"]
+        .into_iter()
+        .map(|name| claude.join(name))
+        // A project file that *is* the user file (agent workdir == $HOME, the
+        // fallback in `default_agent_workdir`) must not be read twice.
+        .filter(|path| path != user_path)
+        .collect()
+}
+
+/// Layer a narrower settings scope over a wider one, the narrower winning.
+///
+/// Objects merge key by key rather than replacing wholesale, so a project file
+/// that sets one `env` var does not erase the rest of the user's `env`. Any
+/// other value replaces its counterpart outright — except arrays, which
+/// accumulate (see `merge_into`).
+fn merge_settings(
+    user: Option<serde_json::Value>,
+    project: Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    match (user, project) {
+        (Some(mut user), Some(project)) => {
+            merge_into(&mut user, project);
+            Some(user)
+        }
+        (user, None) => user,
+        (None, project) => project,
+    }
+}
+
+fn merge_into(base: &mut serde_json::Value, overlay: serde_json::Value) {
+    match (base, overlay) {
+        (serde_json::Value::Object(base), serde_json::Value::Object(overlay)) => {
+            for (key, value) in overlay {
+                match base.get_mut(&key) {
+                    Some(existing) => merge_into(existing, value),
+                    None => {
+                        base.insert(key, value);
+                    }
+                }
+            }
+        }
+        // Claude Code concatenates array-backed settings across scopes and
+        // de-duplicates them; a narrower scope adds to `permissions.allow` or
+        // a hook list, it does not discard what the wider scope granted.
+        // Replacing them here would show a configuration Claude never runs.
+        (serde_json::Value::Array(base), serde_json::Value::Array(overlay)) => {
+            for value in overlay {
+                if !base.contains(&value) {
+                    base.push(value);
+                }
+            }
+        }
+        (base, overlay) => *base = overlay,
+    }
+}
+
+/// Project the fields Buzz surfaces out of a Claude `settings.json` object.
+fn apply_settings(cfg: &mut RuntimeFileConfig, settings: &serde_json::Value) {
+    cfg.model = json_string(settings, "model");
+
+    // effortLevel → thinking_effort (direct mapping per spec)
+    cfg.thinking_effort = json_string(settings, "effortLevel");
+
+    // Config-driven extra fields — skip normalized keys to avoid double-counting.
+    let skip = &["model", "effortLevel"];
+    cfg.extra = super::schema_walker::extract_config_fields(settings, skip);
+}
+
 fn read_json_file(path: &std::path::Path) -> Option<serde_json::Value> {
     let raw = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&raw).ok()
@@ -79,20 +182,16 @@ fn json_string(val: &serde_json::Value, key: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// Parse a settings JSON string into a RuntimeFileConfig using the same
-    /// logic as read_config_file but without touching the filesystem.
+    /// Parse a settings JSON string into a RuntimeFileConfig through the same
+    /// projection `read_config_file` uses, without touching the filesystem.
     fn parse_settings(json: &str) -> RuntimeFileConfig {
         let val: serde_json::Value = serde_json::from_str(json).unwrap();
-        let skip = &["model", "effortLevel"];
-        RuntimeFileConfig {
-            model: json_string(&val, "model"),
-            thinking_effort: json_string(&val, "effortLevel"),
-            extra: super::super::schema_walker::extract_config_fields(&val, skip),
-            ..Default::default()
-        }
+        let mut cfg = RuntimeFileConfig::default();
+        apply_settings(&mut cfg, &val);
+        cfg
     }
 
-    /// #3493: read_config_file(Some(dir)) must read settings.json from the
+    /// #3493: read_config_file(Some(dir), None) must read settings.json from the
     /// custom dir, not ~/.claude/settings.json — proves CLAUDE_CONFIG_DIR
     /// actually remaps the settings read (not just the reported MCP path).
     #[test]
@@ -103,7 +202,7 @@ mod tests {
         f.write_all(br#"{"model": "claude-opus-4", "effortLevel": "high"}"#)
             .unwrap();
 
-        let cfg = read_config_file(Some(dir.path())).expect("settings.json in custom dir is read");
+        let cfg = read_config_file(Some(dir.path()), None).expect("settings.json in custom dir is read");
         assert_eq!(cfg.model.as_deref(), Some("claude-opus-4"));
         assert_eq!(cfg.thinking_effort.as_deref(), Some("high"));
     }
@@ -222,6 +321,170 @@ mod tests {
         let cfg = parse_settings(r#"{"model": "claude-opus-4", "effortLevel": "high"}"#);
         assert!(!cfg.extra.contains_key("model"));
         assert!(!cfg.extra.contains_key("effortLevel"));
+    }
+
+    fn merged(user: &str, project: &str) -> RuntimeFileConfig {
+        let merged = merge_settings(
+            serde_json::from_str(user).ok(),
+            serde_json::from_str(project).ok(),
+        )
+        .expect("merged settings");
+        let mut cfg = RuntimeFileConfig::default();
+        apply_settings(&mut cfg, &merged);
+        cfg
+    }
+
+    #[test]
+    fn project_settings_win_over_user_settings() {
+        // The reported case: the agent really runs at medium, the panel said low.
+        let cfg = merged(r#"{"effortLevel": "low"}"#, r#"{"effortLevel": "medium"}"#);
+        assert_eq!(cfg.thinking_effort.as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn user_settings_survive_keys_the_project_does_not_set() {
+        let cfg = merged(
+            r#"{"model": "claude-opus-4", "effortLevel": "low"}"#,
+            r#"{"effortLevel": "high"}"#,
+        );
+        assert_eq!(cfg.model.as_deref(), Some("claude-opus-4"));
+        assert_eq!(cfg.thinking_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn objects_merge_rather_than_replace() {
+        // A project file that sets one env var must not erase the others.
+        let cfg = merged(
+            r#"{"env": {"A": "user-a", "B": "user-b"}}"#,
+            r#"{"env": {"B": "project-b"}}"#,
+        );
+        assert_eq!(cfg.extra.get("env.A").map(|s| s.as_str()), Some("user-a"));
+        assert_eq!(
+            cfg.extra.get("env.B").map(|s| s.as_str()),
+            Some("project-b")
+        );
+    }
+
+    #[test]
+    fn arrays_concatenate_and_dedupe_rather_than_replace() {
+        // Claude Code accumulates array-backed settings across scopes, so a
+        // project file that adds one permission must not drop the user's.
+        let merged = merge_settings(
+            serde_json::from_str(r#"{"permissions": {"allow": ["Bash(ls:*)", "Read"]}}"#).ok(),
+            serde_json::from_str(r#"{"permissions": {"allow": ["Read", "Edit"]}}"#).ok(),
+        )
+        .expect("merged settings");
+        assert_eq!(
+            merged["permissions"]["allow"],
+            serde_json::json!(["Bash(ls:*)", "Read", "Edit"])
+        );
+    }
+
+    #[test]
+    fn hook_lists_accumulate_across_scopes() {
+        let merged = merge_settings(
+            serde_json::from_str(r#"{"hooks": {"PreToolUse": [{"command": "user"}]}}"#).ok(),
+            serde_json::from_str(r#"{"hooks": {"PreToolUse": [{"command": "project"}]}}"#).ok(),
+        )
+        .expect("merged settings");
+        assert_eq!(
+            merged["hooks"]["PreToolUse"],
+            serde_json::json!([{"command": "user"}, {"command": "project"}])
+        );
+    }
+
+    #[test]
+    fn the_three_settings_files_layer_in_documented_precedence() {
+        // The filesystem contract, at the real paths: user, shared project,
+        // then project-local, each winning over the one before.
+        let home = tempfile::tempdir().unwrap();
+        let workdir = tempfile::tempdir().unwrap();
+        write_settings(
+            &home.path().join(".claude").join("settings.json"),
+            r#"{
+                "model": "user-model",
+                "effortLevel": "low",
+                "permissions": {"allow": ["Read"]}
+            }"#,
+        );
+        write_settings(
+            &workdir.path().join(".claude").join("settings.json"),
+            r#"{
+                "effortLevel": "medium",
+                "permissions": {"allow": ["Edit"]}
+            }"#,
+        );
+        write_settings(
+            &workdir.path().join(".claude").join("settings.local.json"),
+            r#"{
+                "effortLevel": "high",
+                "permissions": {"allow": ["Bash(ls:*)"]}
+            }"#,
+        );
+
+        let settings = read_settings(home.path(), Some(workdir.path())).expect("layered settings");
+        let mut cfg = RuntimeFileConfig::default();
+        apply_settings(&mut cfg, &settings);
+
+        // The local file is the highest-priority scope, not the shared one.
+        assert_eq!(cfg.thinking_effort.as_deref(), Some("high"));
+        // A key only the user set survives all the way down.
+        assert_eq!(cfg.model.as_deref(), Some("user-model"));
+        assert_eq!(
+            settings["permissions"]["allow"],
+            serde_json::json!(["Read", "Edit", "Bash(ls:*)"])
+        );
+    }
+
+    #[test]
+    fn a_missing_project_file_leaves_the_wider_scope_untouched() {
+        let home = tempfile::tempdir().unwrap();
+        let workdir = tempfile::tempdir().unwrap();
+        write_settings(
+            &home.path().join(".claude").join("settings.json"),
+            r#"{"model": "user-model"}"#,
+        );
+        let settings = read_settings(home.path(), Some(workdir.path())).expect("user settings");
+        assert_eq!(settings["model"], serde_json::json!("user-model"));
+
+        // And with no settings anywhere there is nothing to report.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(read_settings(empty.path(), Some(workdir.path())).is_none());
+    }
+
+    #[test]
+    fn a_workdir_that_is_home_does_not_read_the_user_file_twice() {
+        // `default_agent_workdir` falls back to $HOME.
+        let home = tempfile::tempdir().unwrap();
+        write_settings(
+            &home.path().join(".claude").join("settings.json"),
+            r#"{"permissions": {"allow": ["Read"]}}"#,
+        );
+        let settings = read_settings(home.path(), Some(home.path())).expect("user settings");
+        assert_eq!(
+            settings["permissions"]["allow"],
+            serde_json::json!(["Read"])
+        );
+    }
+
+    fn write_settings(path: &std::path::Path, contents: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    #[test]
+    fn either_file_alone_is_used_as_is() {
+        let only_user = merge_settings(serde_json::from_str(r#"{"model": "u"}"#).ok(), None);
+        assert_eq!(
+            only_user.as_ref().and_then(|v| v.get("model")),
+            Some(&serde_json::Value::from("u"))
+        );
+        let only_project = merge_settings(None, serde_json::from_str(r#"{"model": "p"}"#).ok());
+        assert_eq!(
+            only_project.as_ref().and_then(|v| v.get("model")),
+            Some(&serde_json::Value::from("p"))
+        );
+        assert!(merge_settings(None, None).is_none());
     }
 
     #[test]
