@@ -299,17 +299,16 @@ class _SliverChannelsList extends HookConsumerWidget {
       });
     }, [readState.isReady, readState.pubkey, visibleChannels]);
 
-    final unreadState = computeUnreadChannelIds(
+    final highlights = computeChannelListHighlights(
       channels: visibleChannels,
       readState: readState,
       channelsNotifier: ref.read(channelsProvider.notifier),
     );
-    final unreadChannelIds = {
-      for (final channelId in unreadState)
-        if (seedCompleteForPubkey ||
-            readState.effectiveTimestamp(channelId) != null)
-          channelId,
-    };
+    bool seeded(String channelId) =>
+        seedCompleteForPubkey ||
+        readState.effectiveTimestamp(channelId) != null;
+    final unreadChannelIds = highlights.unread.where(seeded).toSet();
+    final attentionChannelIds = highlights.attention.where(seeded).toSet();
     // Build sorted user-defined sections and compute which stream channels
     // belong to each section. Channels not assigned to any valid section fall
     // through to the built-in "Channels" list.
@@ -378,6 +377,7 @@ class _SliverChannelsList extends HookConsumerWidget {
                 onToggle: () => starredExpanded.value = !starredExpanded.value,
                 channels: starredStreamChannels,
                 unreadChannelIds: unreadChannelIds,
+                attentionChannelIds: attentionChannelIds,
                 mutedChannelIds: mutedChannelIds,
                 currentPubkey: currentPubkey,
                 emptyLabel: '',
@@ -403,6 +403,7 @@ class _SliverChannelsList extends HookConsumerWidget {
                   sortState.sortModeFor(sectionSortGroupKey(section.id)),
                 ),
                 unreadChannelIds: unreadChannelIds,
+                attentionChannelIds: attentionChannelIds,
                 mutedChannelIds: mutedChannelIds,
                 currentPubkey: currentPubkey,
                 expanded: sectionExpanded(section.id),
@@ -490,6 +491,7 @@ class _SliverChannelsList extends HookConsumerWidget {
               onToggle: () => channelsExpanded.value = !channelsExpanded.value,
               channels: ungroupedStreamChannels,
               unreadChannelIds: unreadChannelIds,
+              attentionChannelIds: attentionChannelIds,
               mutedChannelIds: mutedChannelIds,
               currentPubkey: currentPubkey,
               emptyLabel: 'No stream channels yet',
@@ -504,6 +506,7 @@ class _SliverChannelsList extends HookConsumerWidget {
               onToggle: () => dmsExpanded.value = !dmsExpanded.value,
               channels: sortedDmChannels,
               unreadChannelIds: unreadChannelIds,
+              attentionChannelIds: attentionChannelIds,
               mutedChannelIds: mutedChannelIds,
               currentPubkey: currentPubkey,
               emptyLabel: 'No direct messages yet',
