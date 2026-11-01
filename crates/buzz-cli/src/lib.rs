@@ -284,6 +284,9 @@ enum Cmd {
     /// List, open, and manage direct messages
     #[command(subcommand)]
     Dms(DmsCmd),
+    /// List huddles and their participants (read-only)
+    #[command(subcommand)]
+    Huddles(HuddlesCmd),
     /// Look up users and manage profiles and presence
     #[command(subcommand)]
     Users(UsersCmd),
@@ -1126,6 +1129,31 @@ pub enum WorkflowsCmd {
         /// Optional note to include with the approval/denial
         #[arg(long)]
         note: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum HuddlesCmd {
+    /// List a channel's huddles with their state and start/end times
+    List {
+        /// Channel UUID the huddles were started in
+        #[arg(long)]
+        channel: String,
+        /// Only huddles that are still active
+        #[arg(long)]
+        active: bool,
+        /// Maximum number of huddles to return, newest first
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=200))]
+        limit: u32,
+    },
+    /// Show who is currently in a huddle
+    Participants {
+        /// Channel UUID the huddle was started in
+        #[arg(long)]
+        channel: String,
+        /// Huddle ID (the `huddle` field of `huddles list`)
+        #[arg(long)]
+        huddle: String,
     },
 }
 
@@ -2269,6 +2297,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Emoji(sub) => commands::emoji::dispatch(sub, &client).await,
         Cmd::Gifs(sub) => commands::gifs::dispatch(sub, &client).await,
         Cmd::Dms(sub) => commands::dms::dispatch(sub, &client).await,
+        Cmd::Huddles(sub) => commands::huddles::dispatch(sub, &client).await,
         Cmd::Users(sub) => commands::users::dispatch(sub, &client, &cli.format).await,
         Cmd::Workflows(sub) => commands::workflows::dispatch(sub, &client).await,
         Cmd::Feed(sub) => commands::feed::dispatch(sub, &client, &cli.format).await,
@@ -2459,6 +2488,7 @@ mod tests {
             "emoji",
             "feed",
             "gifs",
+            "huddles",
             "issues",
             "media",
             "mem",
@@ -2672,6 +2702,7 @@ mod tests {
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
+            ("huddles", 2),
             ("issues", 6),
             ("media", 1),
             ("messages", 8),

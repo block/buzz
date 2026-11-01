@@ -394,7 +394,7 @@ fn extract_owner_auth_tag(tags: &[serde_json::Value], signer_hex: &str) -> Optio
 /// normalize it to lowercase, so the archived-identities query filter and
 /// the author comparison in [`verify_archived_event`] agree regardless of
 /// the case the relay published `self` in.
-fn normalize_relay_self_hex(self_hex: &str) -> Result<String, CliError> {
+pub(crate) fn normalize_relay_self_hex(self_hex: &str) -> Result<String, CliError> {
     if self_hex.len() != 64 || !self_hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(CliError::Other(format!(
             "relay 'self' field is not a valid 64-hex pubkey: {self_hex}"
