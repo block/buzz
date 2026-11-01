@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:buzz/shared/relay/media_auth.dart';
+import 'package:buzz/shared/relay/media_image.dart';
 import 'package:buzz/shared/widgets/avatar_shape.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:buzz/shared/emoji/native_emoji_glyph.dart';
@@ -7,6 +9,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart' as http_testing;
 
 void main() {
   const svg =
@@ -50,6 +54,161 @@ void main() {
         expect(scale, findsNothing);
       }
     }
+  });
+
+  testWidgets('small relay avatars load the relay thumbnail', (tester) async {
+    const relay = 'https://relay.example';
+    final hash = 'ab' * 32;
+    final original = '$relay/media/$hash.png';
+    final requested = <String>[];
+    final client = http_testing.MockClient((request) async {
+      requested.add(request.url.toString());
+      return http.Response('', 404);
+    });
+    tester.view.devicePixelRatio = 3;
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          mediaGetAuthServiceProvider.overrideWithValue(
+            MediaGetAuthService(baseUrl: relay, nsec: null),
+          ),
+          mediaHttpClientProvider.overrideWithValue(client),
+        ],
+        child: MaterialApp(
+          home: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // 40pt = 120px, within the thumbnail.
+              AvatarImage(
+                imageUrl: original,
+                radius: 20,
+                fallback: const Text('R'),
+              ),
+              // 120pt = 360px, larger than the thumbnail.
+              AvatarImage(
+                imageUrl: original,
+                radius: 60,
+                fallback: const Text('R'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    final shown = tester.widgetList<Image>(find.byType(Image)).map((image) {
+      final provider = (image.image as ResizeImage).imageProvider;
+      return (provider as MediaImageProvider).url;
+    });
+    expect(shown, ['$relay/media/$hash.thumb.jpg', original]);
+  });
+
+  testWidgets('a missing thumbnail falls back to the original', (tester) async {
+    const relay = 'https://relay.example';
+    final missing = '$relay/media/${'cd' * 32}.jpg';
+    final broken = '$relay/media/${'ef' * 32}.jpg';
+    final requested = <String>[];
+    final client = http_testing.MockClient((request) async {
+      final url = request.url.toString();
+      requested.add(url);
+      if (url.startsWith(broken.replaceFirst('.jpg', ''))) {
+        return http.Response('', 500);
+      }
+      return http.Response('', 404);
+    });
+    tester.view.devicePixelRatio = 3;
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          mediaGetAuthServiceProvider.overrideWithValue(
+            MediaGetAuthService(baseUrl: relay, nsec: null),
+          ),
+          mediaHttpClientProvider.overrideWithValue(client),
+        ],
+        child: MaterialApp(
+          home: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final url in [missing, broken])
+                AvatarImage(
+                  imageUrl: url,
+                  radius: 20,
+                  fallback: Text(url == missing ? 'M' : 'B'),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+    for (var i = 0; i < 4; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 20)),
+      );
+      await tester.pump();
+    }
+
+    String thumb(String url) => url.replaceFirst('.jpg', '.thumb.jpg');
+    // A 404 retries the original; any other failure shows the fallback.
+    expect(requested, containsAll([thumb(missing), missing, thumb(broken)]));
+    expect(requested, isNot(contains(broken)));
+    expect(find.text('B'), findsOneWidget);
+  });
+
+  testWidgets('missing thumbnails stay bounded and out of the cooldown', (
+    tester,
+  ) async {
+    const relay = 'https://relay.example';
+    MediaImageProvider.debugResetCooldowns();
+    MediaImage.debugResetMissingThumbnails();
+    addTearDown(MediaImageProvider.debugResetCooldowns);
+    addTearDown(MediaImage.debugResetMissingThumbnails);
+    final client = http_testing.MockClient(
+      (request) async => http.Response('', 404),
+    );
+    tester.view.devicePixelRatio = 3;
+    addTearDown(tester.view.resetDevicePixelRatio);
+    String avatar(int i) =>
+        '$relay/media/${i.toRadixString(16).padLeft(64, '0')}.png';
+    for (var batch = 0; batch < 6; batch++) {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            mediaGetAuthServiceProvider.overrideWithValue(
+              MediaGetAuthService(baseUrl: relay, nsec: null),
+            ),
+            mediaHttpClientProvider.overrideWithValue(client),
+          ],
+          child: MaterialApp(
+            home: Wrap(
+              children: [
+                for (var i = batch * 50; i < (batch + 1) * 50; i++)
+                  AvatarImage(
+                    imageUrl: avatar(i),
+                    radius: 20,
+                    fallback: const Text('?'),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      );
+      for (var i = 0; i < 4; i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pump();
+      }
+    }
+
+    expect(MediaImage.debugMissingThumbnailCount, 256);
+    expect(
+      MediaImageProvider.debugCooldownUrls.where(
+        (url) => url.endsWith('.thumb.jpg'),
+      ),
+      isEmpty,
+    );
   });
 
   testWidgets('clips agents to the desktop squircle', (tester) async {
