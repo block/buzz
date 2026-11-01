@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -54,4 +55,36 @@ void main() {
       '[]',
     );
   });
+
+  test('a timed-out request is aborted, not left running', () async {
+    final aborted = Completer<void>();
+    final client = RelayHttpQueryClient(
+      client: _HangingClient(onAbort: aborted.complete),
+    );
+
+    await expectLater(
+      client.post(
+        Uri.parse('https://relay.example/query'),
+        headers: const {},
+        body: const [],
+        timeout: const Duration(milliseconds: 10),
+      ),
+      throwsA(isA<TimeoutException>()),
+    );
+    await aborted.future.timeout(const Duration(seconds: 5));
+  });
+}
+
+/// Never responds; reports when the request's abort trigger fires.
+class _HangingClient extends http.BaseClient {
+  _HangingClient({required this.onAbort});
+
+  final void Function() onAbort;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) {
+    final trigger = (request as http.Abortable).abortTrigger;
+    trigger?.then((_) => onAbort());
+    return Completer<http.StreamedResponse>().future;
+  }
 }

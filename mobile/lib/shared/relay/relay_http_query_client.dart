@@ -3,14 +3,17 @@ import 'dart:io';
 
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
+import 'package:buzz/shared/http/app_http_client.dart';
 
-/// The default transport. `dart:io` would inflate gzip responses on the
-/// calling isolate, so leave them compressed for the response decoder.
+/// The default transport. On iOS, the app-wide `NSURLSession` inflates gzip
+/// natively, off the Dart isolate. `dart:io` would inflate on the calling
+/// isolate, so leave its responses compressed for the response decoder.
 ///
 /// A non-`dart:io` client supplied through `http.runWithClient`, such as a
 /// `MockClient`, is used as is. An `IOClient` is replaced, not closed, since
 /// it may be shared.
-http.Client _gzipPassthroughClient() {
+http.Client _defaultTransport() {
+  if (Platform.isIOS) return newAppHttpClient();
   final client = http.Client();
   if (client is! IOClient) return client;
   return IOClient(HttpClient()..autoUncompress = false);
@@ -25,7 +28,7 @@ class RelayHttpQueryClient {
     http.Client? client,
     http.Client Function()? clientFactory,
   }) : _injectedClient = client,
-       _clientFactory = clientFactory ?? _gzipPassthroughClient;
+       _clientFactory = clientFactory ?? _defaultTransport;
 
   final http.Client? _injectedClient;
   final http.Client Function() _clientFactory;
@@ -44,12 +47,16 @@ class RelayHttpQueryClient {
         : null;
     generation?.acquire();
     var active = true;
+    // Retiring a generation cannot stop a request on a shared session, so a
+    // timed-out request is aborted rather than left holding bandwidth.
+    final abort = Completer<void>();
     try {
-      final request = http.Request('POST', url)
-        ..followRedirects = false
-        ..headers['Accept-Encoding'] = 'gzip'
-        ..headers.addAll(headers)
-        ..bodyBytes = body;
+      final request =
+          http.AbortableRequest('POST', url, abortTrigger: abort.future)
+            ..followRedirects = false
+            ..headers['Accept-Encoding'] = 'gzip'
+            ..headers.addAll(headers)
+            ..bodyBytes = body;
       final transport = _injectedClient ?? generation!.client;
       final client = decorate?.call(transport, () => active) ?? transport;
       return await client
@@ -57,6 +64,7 @@ class RelayHttpQueryClient {
           .then(http.Response.fromStream)
           .timeout(timeout);
     } on TimeoutException {
+      abort.complete();
       if (identical(_currentGeneration, generation)) {
         _currentGeneration = null;
       }
