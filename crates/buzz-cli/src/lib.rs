@@ -934,6 +934,21 @@ pub enum EmojiCmd {
         #[arg(long, default_value_t = false)]
         dry_run: bool,
     },
+    /// Import a Slack workspace's custom emoji into your own set (resumable)
+    ImportSlack {
+        /// Slack `emoji.list` response JSON (reads stdin when omitted)
+        #[arg(long)]
+        file: Option<String>,
+        /// Import at most this many new emoji (for a trial run)
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Images to download and upload at once
+        #[arg(long, default_value_t = 4)]
+        concurrency: usize,
+        /// Count what would be imported without uploading or publishing
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2567,7 +2582,7 @@ mod tests {
         assert_eq!(names(&cmd, "reactions"), vec!["add", "get", "remove"]);
         assert_eq!(
             names(&cmd, "emoji"),
-            vec!["export", "import", "list", "rm", "set"]
+            vec!["export", "import", "import-slack", "list", "rm", "set"]
         );
         assert_eq!(
             names(&cmd, "dms"),
@@ -2670,7 +2685,7 @@ mod tests {
             ("canvas", 4),
             ("channels", 16),
             ("dms", 4),
-            ("emoji", 5),
+            ("emoji", 6),
             ("feed", 1),
             ("issues", 6),
             ("media", 1),
