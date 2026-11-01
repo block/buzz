@@ -73,7 +73,11 @@ export function projectRepoUnavailableReason(
 
   if (!message) return "missing";
   if (
-    /\b(?:401|403)\b|authenticat|authoriz|permission denied|access denied/.test(
+    // `could not read Username/Password` is how git reports that no credential
+    // helper answered, so it never reaches the relay and never sees the 401 in
+    // the patterns above. Without this the message lands in `unknown` and the
+    // panel blames the project owner for what is a local credential failure.
+    /\b(?:401|403)\b|authenticat|authoriz|permission denied|access denied|could not read (?:username|password)/.test(
       message,
     )
   ) {
