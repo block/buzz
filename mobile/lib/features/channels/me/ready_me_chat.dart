@@ -54,14 +54,8 @@ class _ReadyMeChat extends HookConsumerWidget {
         nativeTitle: 'New chat',
         nativeActions: [
           IosNavigationAction(
-            label: 'Agent: $label',
-            symbol: 'person.crop.circle',
-            sharesBackground: false,
-            onPressed: locked ? null : chooseAgent,
-          ),
-          IosNavigationAction(
             label: 'Workspace: $workspaceLabel',
-            symbol: 'folder',
+            icon: BuzzIcons.folder,
             sharesBackground: false,
             children: locked
                 ? const []
@@ -80,14 +74,20 @@ class _ReadyMeChat extends HookConsumerWidget {
                       ),
                   ],
           ),
-        ],
-        actions: [
-          IconButton(
-            key: const ValueKey('new-session-assistant'),
-            tooltip: 'Agent: $label',
-            icon: const Icon(BuzzIcons.bot),
+          IosNavigationAction(
+            label: 'Agent: $label',
+            symbol: 'person.crop.circle',
+            avatarIdentity: agent,
+            avatarIsAgent: agent != null,
+            imageUrl: ref.watch(userCacheProvider)[agent]?.avatarUrl,
+            avatarInitial: label.isEmpty
+                ? 'A'
+                : label.characters.first.toUpperCase(),
+            sharesBackground: false,
             onPressed: locked ? null : chooseAgent,
           ),
+        ],
+        actions: [
           PopupMenuButton<String>(
             key: const ValueKey('new-session-project'),
             tooltip: 'Workspace: $workspaceLabel',
@@ -95,13 +95,24 @@ class _ReadyMeChat extends HookConsumerWidget {
             enabled: !locked,
             onSelected: (v) => workspace.value = v.isEmpty ? null : v,
             itemBuilder: (_) => [
-              const PopupMenuItem(value: '', child: Text('Chats')),
+              CheckedPopupMenuItem(
+                value: '',
+                checked: workspace.value == null,
+                child: const Text('Chats'),
+              ),
               for (final group in workspaces)
-                PopupMenuItem(
+                CheckedPopupMenuItem(
+                  checked: workspace.value == group['id'],
                   value: group['id'] as String,
                   child: Text(group['name'] as String),
                 ),
             ],
+          ),
+          IconButton(
+            key: const ValueKey('new-session-assistant'),
+            tooltip: 'Agent: $label',
+            icon: const Icon(BuzzIcons.bot),
+            onPressed: locked ? null : chooseAgent,
           ),
         ],
       ),

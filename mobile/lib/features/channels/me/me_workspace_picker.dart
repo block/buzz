@@ -53,7 +53,7 @@ import '../../../shared/widgets/ios_navigation_bar.dart';
   return (
     nativeAction: IosNavigationAction(
       label: 'Workspace: $label',
-      symbol: 'folder',
+      icon: BuzzIcons.folder,
       sharesBackground: false,
       children: !available
           ? const []
@@ -77,9 +77,14 @@ import '../../../shared/widgets/ios_navigation_bar.dart';
       enabled: available,
       onSelected: (v) => choose(v.isEmpty ? null : v),
       itemBuilder: (_) => [
-        const PopupMenuItem(value: '', child: Text('Chats')),
+        CheckedPopupMenuItem(
+          value: '',
+          checked: current == null,
+          child: const Text('Chats'),
+        ),
         for (final group in groups?.groups ?? const <Map<String, dynamic>>[])
-          PopupMenuItem(
+          CheckedPopupMenuItem(
+            checked: current == group['id'],
             value: group['id'] as String,
             child: Text(group['name'] as String),
           ),

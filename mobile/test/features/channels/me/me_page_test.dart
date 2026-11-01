@@ -386,11 +386,13 @@ void main() {
       final chatBar = tester
           .widgetList<FrostedAppBar>(find.byType(FrostedAppBar))
           .last;
-      final agentAction = chatBar.nativeActions!.first;
+      final agentAction = chatBar.nativeActions!.last;
       expect(agentAction.label, 'Agent: Owner Name');
       expect(agentAction.sharesBackground, isFalse);
-      final workspaceAction = chatBar.nativeActions!.last;
+      final workspaceAction = chatBar.nativeActions!.first;
       expect(workspaceAction.label, 'Workspace: Chats');
+      expect(workspaceAction.icon, BuzzIcons.folder);
+      expect(workspaceAction.children.first.selected, isTrue);
       expect(workspaceAction.sharesBackground, isFalse);
       workspaceAction.children.last.onPressed!();
       await tester.pumpAndSettle();
@@ -399,7 +401,7 @@ void main() {
             .widgetList<FrostedAppBar>(find.byType(FrostedAppBar))
             .last
             .nativeActions!
-            .last
+            .first
             .label,
         'Workspace: Mobile app',
       );

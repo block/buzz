@@ -741,9 +741,9 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
         },
         onNativeTitlePressed: openChannelDetails,
         nativeActions: [
-          if (personalChat) assistant.nativeAction,
+          if (personalChat) workspace.nativeAction,
           if (personalChat)
-            workspace.nativeAction
+            assistant.nativeAction
           else if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)
             _huddleNavigationAction(context, ref, resolvedChannel, [
               ...messagesState.value ?? const [],
@@ -762,9 +762,9 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
           onTap: openChannelDetails,
         ),
         actions: [
-          if (personalChat) assistant.action,
+          if (personalChat) workspace.action,
           if (personalChat)
-            workspace.action
+            assistant.action
           else if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)
             _HuddleButton(
               channel: resolvedChannel,
