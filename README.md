@@ -259,7 +259,8 @@ All defaults work out of the box. Override via `.env`. Full reference in [`.env.
 ```bash
 just setup          # Docker, migrations, desktop deps
 just relay          # Run the relay
-just dev            # Run the desktop app
+just dev            # Run the relay + desktop app together
+just desktop-dev    # Run the desktop app frontend only (connects to an existing relay)
 just build          # Build the Rust workspace
 just check          # fmt + clippy + desktop check
 just test-unit      # Unit tests (no infra required)
