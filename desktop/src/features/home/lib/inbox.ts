@@ -22,6 +22,8 @@ import {
   formatDayGroupLabel,
   formatItemTimestamp,
 } from "@/shared/lib/datetime";
+import { customEmojiFromTags } from "@/shared/api/customEmoji";
+import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 
 export type InboxFilter =
@@ -43,6 +45,8 @@ export type InboxItem = {
    * continuity: scroll gating, draft keys, local-reply storage, and selection.
    */
   conversationId: string;
+  /** NIP-30 emoji declared by the previewed event, for `:shortcode:` rendering. */
+  customEmoji: CustomEmoji[];
   id: string;
   item: FeedItem;
   categories: FeedItemCategory[];
@@ -606,6 +610,7 @@ export function buildInboxItems({
       return {
         avatarUrl: profiles?.[item.pubkey.toLowerCase()]?.avatarUrl ?? null,
         conversationId,
+        customEmoji: customEmojiFromTags(item.tags),
         id: item.id,
         item: displayItem,
         categories,
