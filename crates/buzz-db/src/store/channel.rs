@@ -102,6 +102,63 @@ impl ChannelRecord {
     }
 }
 
+/// Whether channels of this type compete for a name. Users pick and browse
+/// stream and forum names, so those are unique per community. DM, workflow
+/// and system channel names are derived or internal and may collide.
+fn channel_name_competes(channel_type: &str) -> bool {
+    matches!(channel_type, "stream" | "forum")
+}
+
+/// The per-community advisory lock key serializing writers of one channel
+/// name, so a concurrent create or rename cannot slip past the uniqueness
+/// check before this transaction commits.
+fn channel_name_lock_key(community: CommunityId, name: &str) -> String {
+    format!(
+        "buzz_channel_name:{}:{}",
+        community.as_uuid(),
+        name.to_lowercase()
+    )
+}
+
+/// Refuses `name` when another live stream or forum channel in the community
+/// already uses it, compared case-insensitively. `exclude` names the channel
+/// the caller is writing, so an idempotent create resend or a rename to the
+/// channel's own name passes. Takes the name's advisory lock on `tx`, so two
+/// concurrent writers of one name serialize and the loser sees the winner's
+/// committed row.
+async fn ensure_channel_name_available(
+    tx: &mut crate::AdmittedTx,
+    name: &str,
+    exclude: Option<Uuid>,
+) -> Result<()> {
+    let community_id = tx.community();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(channel_name_lock_key(community_id, name))
+        .execute(tx.conn())
+        .await?;
+    let taken = sqlx::query(
+        r#"
+        SELECT 1 FROM channels
+        WHERE community_id = $1
+          AND lower(name) = lower($2)
+          AND channel_type IN ('stream', 'forum')
+          AND deleted_at IS NULL
+          AND ($3::uuid IS NULL OR id <> $3)
+        LIMIT 1
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(name)
+    .bind(exclude)
+    .fetch_optional(tx.conn())
+    .await?
+    .is_some();
+    if taken {
+        return Err(DbError::ChannelNameTaken(name.to_owned()));
+    }
+    Ok(())
+}
+
 /// Creates a new channel, bootstraps the creator as owner, and returns the record.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_channel(
@@ -136,6 +193,10 @@ pub async fn create_channel(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+
+    if channel_name_competes(channel_type.as_str()) {
+        ensure_channel_name_available(&mut tx, name, None).await?;
+    }
 
     sqlx::query(
         r#"
@@ -371,6 +432,12 @@ async fn insert_channel_rows(
     let name = buzz_core::channel::canonical_channel_name(name);
     if name.trim().is_empty() {
         return Err(DbError::InvalidData("channel name is required".into()));
+    }
+
+    if channel_name_competes(channel_type.as_str()) {
+        // Excluding `channel_id` keeps the idempotent resend path: the name
+        // "taken" by this same channel falls through to ON CONFLICT below.
+        ensure_channel_name_available(tx, name, Some(channel_id)).await?;
     }
 
     let rows_affected = sqlx::query(
@@ -883,6 +950,7 @@ pub(crate) struct ChannelSettingsWriter<'tx> {
     ttl: TtlLock,
     previous_visibility: String,
     archived: bool,
+    channel_type: String,
 }
 
 impl ChannelSettingsWriter<'_> {
@@ -983,8 +1051,8 @@ async fn lock_channel_row(
     // `FOR NO KEY UPDATE`, like a huddle join: it orders this write against
     // every other settings write and a huddle join, but not against the
     // `KEY SHARE` lock that a membership INSERT takes for its foreign key.
-    let (previous_visibility, archived): (String, bool) = sqlx::query_as(
-        "SELECT visibility::text, archived_at IS NOT NULL FROM channels \
+    let (previous_visibility, archived, channel_type): (String, bool, String) = sqlx::query_as(
+        "SELECT visibility::text, archived_at IS NOT NULL, channel_type::text FROM channels \
          WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL FOR NO KEY UPDATE",
     )
     .bind(community_id.as_uuid())
@@ -999,6 +1067,7 @@ async fn lock_channel_row(
         ttl,
         previous_visibility,
         archived,
+        channel_type,
     })
 }
 
@@ -1016,6 +1085,9 @@ async fn update_channel_on(
         *name = buzz_core::channel::canonical_channel_name(name).to_owned();
         if name.is_empty() {
             return Err(DbError::InvalidData("channel name is required".into()));
+        }
+        if channel_name_competes(&w.channel_type) {
+            ensure_channel_name_available(tx, name, Some(channel_id)).await?;
         }
     }
 

@@ -3558,8 +3558,13 @@ async fn ingest_event_inner(
             .db
             .create_channel_with_event(tenant.community(), create.channel_id, channel, &event)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
-        {
+            .map_err(|e| match e {
+                // Taking a live stream/forum name is the client's error.
+                buzz_db::DbError::ChannelNameTaken(_) => {
+                    IngestError::Rejected(format!("invalid: {e}"))
+                }
+                _ => IngestError::Internal(format!("error: {e}")),
+            })? {
             buzz_db::channel::ChannelCreate::Created(stored) => {
                 metrics::counter!(
                     "buzz_channels_created_total",
@@ -3623,6 +3628,10 @@ async fn ingest_event_inner(
             .map_err(|e| match e.downcast_ref::<buzz_db::DbError>() {
                 Some(buzz_db::DbError::AccessDenied(reason)) => {
                     IngestError::Rejected(format!("invalid: {reason}"))
+                }
+                // Renaming onto a live stream/forum name is the client's error.
+                Some(taken @ buzz_db::DbError::ChannelNameTaken(_)) => {
+                    IngestError::Rejected(format!("invalid: {taken}"))
                 }
                 _ => IngestError::Internal(format!("error: channel update failed: {e}")),
             })?
