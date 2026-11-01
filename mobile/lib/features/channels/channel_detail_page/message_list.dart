@@ -927,7 +927,9 @@ class _MessageList extends HookConsumerWidget {
                 final showAuthor =
                     !message.isSystem &&
                     (message.hasAttachments ||
+                        message.shouldFoldAgentAudience ||
                         prevMessage?.hasAttachments == true ||
+                        prevMessage?.shouldFoldAgentAudience == true ||
                         prevMessage == null ||
                         prevMessage.isSystem ||
                         showDayDivider ||
@@ -940,9 +942,11 @@ class _MessageList extends HookConsumerWidget {
                     : null;
                 final showAvatar =
                     message.hasAttachments ||
+                    message.shouldFoldAgentAudience ||
                     nextMessage == null ||
                     nextMessage.isSystem ||
                     nextMessage.hasAttachments ||
+                    nextMessage.shouldFoldAgentAudience ||
                     !isSameDay(message.createdAt, nextMessage.createdAt) ||
                     nextMessage.pubkey.toLowerCase() !=
                         message.pubkey.toLowerCase() ||
