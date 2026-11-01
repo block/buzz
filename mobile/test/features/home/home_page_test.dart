@@ -66,6 +66,45 @@ void main() {
     );
   }
 
+  testWidgets('feedback clears floating navigation and wraps large text', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    tester.view.viewPadding = const FakeViewPadding(bottom: 34);
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(await buildHome());
+    await tester.pumpAndSettle();
+    final navigation = find.byType(MessagesNavigationBar);
+    final originalTop = tester.getTopLeft(navigation).dy;
+    final context = tester.element(find.text('General'));
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(const SnackBar(content: Text('Copied')));
+    await tester.pumpAndSettle();
+    expect(
+      tester.getBottomLeft(find.byType(SnackBar)).dy,
+      lessThanOrEqualTo(originalTop),
+    );
+    expect(tester.getTopLeft(navigation).dy, originalTop);
+    messenger.removeCurrentSnackBar();
+    messenger.showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Could not share this image. Please try again in a moment.',
+          textScaler: TextScaler.linear(2),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      tester.getBottomLeft(find.byType(SnackBar)).dy,
+      lessThanOrEqualTo(tester.getTopLeft(navigation).dy),
+    );
+    expect(tester.takeException(), isNull);
+    messenger.removeCurrentSnackBar();
+    await tester.pumpAndSettle();
+  });
+
   testWidgets(
     'Messages filters its inventory and opens Search and Settings above it',
     (tester) async {

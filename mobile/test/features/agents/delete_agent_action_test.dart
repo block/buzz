@@ -2,6 +2,8 @@ import 'package:buzz/features/agents/delete_agent_action.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
+import 'dart:async';
+import 'package:buzz/shared/widgets/app_list.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -30,7 +32,11 @@ void main() {
           home: Scaffold(
             body: Column(
               children: [
-                DeleteAgentAction(controller: controller, pubkey: agent),
+                DeleteAgentAction(
+                  controller: controller,
+                  pubkey: agent,
+                  asSettingsRow: true,
+                ),
                 DeleteAgentAction(controller: controller, pubkey: 'local'),
               ],
             ),
@@ -39,8 +45,17 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.byTooltip('Delete agent'), findsOneWidget);
-    await tester.tap(find.byTooltip('Delete agent'));
+    expect(find.text('Delete agent'), findsOneWidget);
+    final refresh = Completer<void>();
+    final refreshing = controller.run(() => refresh.future);
+    await tester.pump();
+    expect(find.text('Deleting…'), findsNothing);
+    expect(find.text('Delete agent'), findsOneWidget);
+    expect(tester.widget<AppListRow>(find.byType(AppListRow)).onTap, isNull);
+    refresh.complete();
+    await refreshing;
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete agent'));
     await tester.pumpAndSettle();
     expect(find.text('Delete Scout?'), findsOneWidget);
     await tester.tap(find.text('Cancel'));

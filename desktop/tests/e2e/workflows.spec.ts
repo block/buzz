@@ -3,6 +3,7 @@ import { parse as parseYaml } from "yaml";
 
 import { installMockBridge } from "../helpers/bridge";
 import { waitForAnimations } from "../helpers/animations";
+import { addSendMessageStep } from "../helpers/workflows";
 
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
@@ -100,21 +101,7 @@ async function createWorkflow(
       .click();
   }
 
-  await dialog.getByRole("button", { name: "Add step", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Send Message" }).click();
-  // The inspector swaps from the trigger to the new step after the click; an
-  // unscoped fill can land in the trigger's message-text condition instead.
-  // The "Action" header switches at once, but the trigger body stays mounted
-  // through its exit animation (AnimatePresence mode="wait"), so also wait
-  // for a control only the step body renders.
-  const stepInspector = dialog.getByTestId("workflow-node-inspector");
-  await expect(
-    stepInspector.getByRole("button", { name: "Action", exact: true }),
-  ).toBeVisible();
-  await expect(
-    stepInspector.getByRole("button", { name: "Step details" }),
-  ).toBeVisible();
-  await stepInspector.getByLabel("Message text").fill("Workflow notification");
+  await addSendMessageStep(dialog, "Workflow notification");
   if (options?.stepName) {
     await dialog.getByRole("button", { name: "Step details" }).click();
     await dialog.getByLabel("Name (optional)").fill(options.stepName);
@@ -721,9 +708,7 @@ test("captures the built editor at desktop and narrow widths", async ({
   const dialog = page.getByRole("dialog", { name: "Create workflow" });
   await selectWorkflowChannel(page, dialog);
   await editWorkflowName(dialog, "editor_screenshot");
-  await dialog.getByRole("button", { name: "Add step", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Send Message" }).click();
-  await dialog.getByLabel("Message text").fill("Notify the workflow channel");
+  await addSendMessageStep(dialog, "Notify the workflow channel");
   const inspector = dialog.getByTestId("workflow-node-inspector");
 
   for (const viewport of [
@@ -826,9 +811,7 @@ test("pane routes use stable IDs and Form/YAML changes stay synchronized", async
   await selectWorkflowChannel(page, dialog);
   await editWorkflowName(dialog, "pane_sync_test");
 
-  await dialog.getByRole("button", { name: "Add step", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Send Message" }).click();
-  await dialog.getByLabel("Message text").fill("first message");
+  await addSendMessageStep(dialog, "first message");
   await expect(page).toHaveURL(/pane=step%3Astep_1/);
 
   await dialog.getByRole("button", { name: "Add after Step 1" }).click();

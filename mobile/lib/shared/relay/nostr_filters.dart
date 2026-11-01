@@ -58,6 +58,62 @@ abstract final class NostrFilters {
     extensions: {'before_id': ?beforeId},
   );
 
+  /// A channel's system notices (kind:40099), newest first, below the
+  /// `until` + `before_id` cursor the channel-window pages use.
+  static NostrFilter channelNotices(
+    String channelId, {
+    int? until,
+    String? beforeId,
+  }) => NostrFilter(
+    kinds: const [EventKind.systemMessage],
+    tags: {
+      '#h': [channelId],
+    },
+    limit: channelNoticePageSize,
+    until: until,
+    extensions: {'before_id': ?beforeId},
+  );
+
+  /// Notices one [channelNotices] read asks for.
+  static const channelNoticePageSize = 500;
+
+  /// Reactions and deletions that target [eventIds]: the auxiliary events a
+  /// channel-window page returns with its rows (`include_aux`), newest first,
+  /// below the `until` + `before_id` cursor. Call again with the reaction ids,
+  /// asking only for [EventKind.deletion] and [EventKind.nip29DeleteEvent],
+  /// to read removed reactions.
+  ///
+  /// With [channelId], the read names the channel in `#h`: a system channel,
+  /// or an unlisted one for a non-member, shows its events only to a filter
+  /// that names it (NIP-CL). Without it, the read also finds deletions stored
+  /// with no channel.
+  static NostrFilter channelAux(
+    List<String> eventIds, {
+    String? channelId,
+    List<int> kinds = channelAuxKinds,
+    int? until,
+    String? beforeId,
+  }) => NostrFilter(
+    kinds: kinds,
+    tags: {
+      '#e': eventIds,
+      if (channelId != null) '#h': [channelId],
+    },
+    limit: channelAuxLimit,
+    until: until,
+    extensions: {'before_id': ?beforeId},
+  );
+
+  /// The kinds [channelAux] reads by default.
+  static const channelAuxKinds = [
+    EventKind.deletion,
+    EventKind.reaction,
+    EventKind.nip29DeleteEvent,
+  ];
+
+  /// Auxiliary events one [channelAux] read asks for.
+  static const channelAuxLimit = 1000;
+
   /// Huddle lifecycle state for one parent channel, independent of timeline paging.
   static NostrFilter huddleLifecycle(String channelId) => NostrFilter(
     kinds: [EventKind.huddleStarted, EventKind.huddleEnded],

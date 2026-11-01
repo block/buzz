@@ -6,8 +6,9 @@ import 'package:http/http.dart' as http;
 /// leaving the shared client usable for sign-out and subsequent attempts.
 Future<http.Response> boundedHttpResponse(
   http.Client client,
-  http.Request source,
-) async {
+  http.Request source, {
+  int maxBytes = 65536,
+}) async {
   final abort = Completer<void>();
   final request =
       http.AbortableRequest(
@@ -28,7 +29,7 @@ Future<http.Response> boundedHttpResponse(
     }
     final bytes = <int>[];
     while (await iterator.moveNext()) {
-      if (bytes.length + iterator.current.length > 65536) {
+      if (bytes.length + iterator.current.length > maxBytes) {
         throw const FormatException('Response too large');
       }
       bytes.addAll(iterator.current);

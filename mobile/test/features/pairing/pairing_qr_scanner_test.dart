@@ -314,9 +314,47 @@ void main() {
           ),
         ),
       );
-      await tester.pumpAndSettle();
+      await tester.pump();
       final opacity = find.byKey(const Key('scanner-welcome-opacity'));
       final scale = find.byKey(const Key('scanner-welcome-scale'));
+      void expectBeesMatchWelcome() {
+        if (adding) return;
+        expect(
+          tester
+              .widget<Opacity>(find.byKey(const Key('scanner-bees-opacity')))
+              .opacity,
+          tester.widget<Opacity>(opacity).opacity,
+        );
+        expect(
+          tester
+              .widget<Transform>(find.byKey(const Key('scanner-bees-scale')))
+              .transform
+              .storage[0],
+          tester.widget<Transform>(scale).transform.storage[0],
+        );
+      }
+
+      // The welcome swarm animates continuously. Wait for the scanner's
+      // observable transition endpoint rather than global frame idleness.
+      Future<void> waitForOpacity(double target) async {
+        for (
+          var frame = 0;
+          frame < 120 &&
+              (tester.widget<Opacity>(opacity).opacity != target ||
+                  (target == 1 &&
+                      find
+                          .byKey(
+                            const ValueKey('dynamic-island-qr-scanner-portal'),
+                          )
+                          .evaluate()
+                          .isNotEmpty));
+          frame++
+        ) {
+          await tester.pump(const Duration(milliseconds: 16));
+        }
+        expect(tester.widget<Opacity>(opacity).opacity, target);
+      }
+
       expect(tester.widget<Opacity>(opacity).opacity, 1);
       if (adding) {
         // Only foreground controls transition; the opaque page stays fixed.
@@ -351,7 +389,9 @@ void main() {
           closeTo(1 - 0.04 * progress, 0.001),
         );
       }
-      await tester.pumpAndSettle();
+      expectBeesMatchWelcome();
+      await waitForOpacity(0);
+      expectBeesMatchWelcome();
       expect(tester.widget<Opacity>(opacity).opacity, 0);
       expect(
         tester.widget<Transform>(scale).transform.storage[0],
@@ -367,7 +407,9 @@ void main() {
         findsNothing,
       );
       await tester.tapAt(const Offset(196.5, 700));
-      await tester.pumpAndSettle();
+      await tester.pump();
+      await waitForOpacity(1);
+      expectBeesMatchWelcome();
       expect(tester.widget<Opacity>(opacity).opacity, 1);
       expect(tester.widget<Transform>(scale).transform.storage[0], 1);
       expect(

@@ -3056,16 +3056,49 @@ Photos
         );
       });
 
-      testWidgets('unknown channel renders without tap', (tester) async {
+      testWidgets('unknown #token stays text', (tester) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'Took over #8700 from #general',
+              channelNames: {'general': 'ch-id-1'},
+            ),
+          ),
+        );
+
+        expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
+        expect(find.text('general'), findsOneWidget);
+        expect(_allRichText(tester), contains('Took over #8700 from'));
+      });
+
+      testWidgets('no #token becomes a chip before channel names load', (
+        tester,
+      ) async {
         await tester.pumpWidget(
           _testable(
             const MessageContent(content: 'Check #unknown', channelNames: {}),
           ),
         );
 
+        expect(find.byIcon(BuzzIcons.hash), findsNothing);
+        expect(_allRichText(tester), contains('Check #unknown'));
+      });
+
+      testWidgets('possessive #channel keeps the pill and the suffix', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: "See #general's pinned plan",
+              channelNames: {'general': 'ch-id-1'},
+            ),
+          ),
+        );
+
         expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
-        expect(find.text('unknown'), findsOneWidget);
-        expect(find.text('#unknown'), findsNothing);
+        expect(find.text('general'), findsOneWidget);
+        expect(_allRichText(tester), contains("'s pinned plan"));
       });
 
       testWidgets('does not treat URL fragments as channel links', (

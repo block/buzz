@@ -185,6 +185,7 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
     engine.registrar(forPlugin: "BuzzNativeSkinToneControl")?.register(NativeSkinToneControlFactory(messenger: messenger), withId: "buzz/native_skin_tone_control")
     let editor = FlutterViewController(engine: engine, nibName: nil, bundle: nil)
     avatarController = editor
+    engine.registrar(forPlugin: "BuzzToastLayer")?.register(ToastLayerFactory(), withId: "buzz/toast_layer")
     engine.registrar(forPlugin: "BuzzIosNavigationBar")?.register(IosNavigationBarFactory(messenger: messenger, parent: editor), withId: "buzz/ios_navigation_bar")
     editor.isViewOpaque = false
     editor.view.backgroundColor = .clear

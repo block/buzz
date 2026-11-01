@@ -211,23 +211,23 @@ void main() {
         await tester.tap(find.text('Copy public key (npub)'));
         await tester.pumpAndSettle();
         expect(copied, startsWith('npub1'));
-        final snackbar = find.byType(SnackBar);
-        expect(snackbar, findsOneWidget);
+        expect(find.byType(SnackBar), findsNothing);
         final settings = find.byType(SettingsPage);
-        expect(
-          find.descendant(of: settings, matching: snackbar),
-          findsOneWidget,
-        );
-        final message = find.text('Public key (npub) copied');
-        expect(message.hitTestable(), findsOneWidget);
+        final message = find.text('Public key copied');
+        expect(message, findsOneWidget);
+        // The shared toast is above the route, rather than inside its Scaffold.
+        expect(find.descendant(of: settings, matching: message), findsNothing);
         final toastSurface = find
-            .ancestor(of: message, matching: find.byType(Material))
+            .ancestor(of: message, matching: find.byType(PhysicalShape))
             .first;
-        expect(tester.getRect(toastSurface).bottom, lessThanOrEqualTo(810));
+        expect(tester.getRect(toastSurface).top, greaterThanOrEqualTo(0));
+        expect(tester.getRect(toastSurface).bottom, lessThan(160));
         await _capture(tester, '${platform.name}-copied');
         Navigator.of(tester.element(settings)).pop();
         await tester.pumpAndSettle();
-        expect(find.byType(SnackBar), findsNothing);
+        await tester.pump(const Duration(seconds: 4));
+        await tester.pumpAndSettle();
+        expect(message, findsNothing);
         expect(tester.takeException(), isNull);
         debugDefaultTargetPlatformOverride = null;
       },

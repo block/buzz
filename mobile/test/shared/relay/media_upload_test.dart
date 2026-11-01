@@ -1417,7 +1417,7 @@ void main() {
           pickGalleryImage: () async => null,
           transcodeVideoToMp4: (path) async {
             transcodeCalled = true;
-            final outDir = await Directory.systemTemp.createTemp('transcode_');
+            final outDir = await tempFile.parent.createTemp('transcode_');
             final outFile = File('${outDir.path}/out.mp4');
             await outFile.writeAsBytes(buildFtypHeader('isom'));
             return outFile.path;
@@ -1466,7 +1466,7 @@ void main() {
           transcodeVideoToMp4: (path) async {
             transcodeCalled = true;
             // Mock transcoding: write an "MP4" file
-            final outDir = await Directory.systemTemp.createTemp('transcode_');
+            final outDir = await tempFile.parent.createTemp('transcode_');
             final outFile = File('${outDir.path}/out.mp4');
             await outFile.writeAsBytes(buildFtypHeader('isom'));
             return outFile.path;
@@ -1576,9 +1576,7 @@ void main() {
             pickGalleryVideo: () async => xfile,
             pickGalleryImage: () async => null,
             transcodeVideoToMp4: (path) async {
-              final outDir = await Directory.systemTemp.createTemp(
-                'transcode_',
-              );
+              final outDir = await tempFile.parent.createTemp('transcode_');
               final outFile = File('${outDir.path}/out.mp4');
               await outFile.writeAsBytes(buildFtypHeader('isom'));
               return outFile.path;
@@ -1635,9 +1633,7 @@ void main() {
             pickGalleryVideo: () async => xfile,
             pickGalleryImage: () async => null,
             transcodeVideoToMp4: (path) async {
-              final outDir = await Directory.systemTemp.createTemp(
-                'transcode_',
-              );
+              final outDir = await tempFile.parent.createTemp('transcode_');
               final outFile = File('${outDir.path}/out.mp4');
               await outFile.writeAsBytes(buildFtypHeader('isom'));
               return outFile.path;

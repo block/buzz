@@ -9,6 +9,7 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/auth/auth.dart';
 import '../../shared/hosted/hosted_flow_provider.dart';
+import '../../shared/hosted/account_identity_store.dart';
 import '../../shared/hosted/hosted_environment.dart';
 import '../../shared/community/paired_community_landing.dart';
 import '../../shared/crypto/ecdh.dart';
@@ -789,7 +790,9 @@ class PairingNotifier extends Notifier<PairingState> {
       _cleanup();
       state = PairingState(
         status: PairingStatus.error,
-        errorMessage: 'Failed to import credentials: $e',
+        errorMessage: e == AccountIdentityFailure.mismatch
+            ? 'This device uses a different identity. Your saved identity has been kept.'
+            : 'Could not import the identity. Try pairing again.',
       );
     }
   }

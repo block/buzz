@@ -244,6 +244,7 @@ const scenarios = [
   ],
   ["Justfile", ["Justfile"], ["desktop", "mobile", "rust"]],
   ["CI apt retry", ["scripts/ci-apt-retry.sh"], ["desktop", "rust"]],
+  ["CI Hermit retry", ["scripts/ci-hermit-retry.sh"], ["mobile", "rust"]],
   ["integration services", ["docker-compose.yml"], ["rust"]],
   ["CI integration images", ["docker-compose.ci.yml"], ["rust"]],
   [

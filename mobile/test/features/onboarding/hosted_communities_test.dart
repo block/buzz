@@ -49,11 +49,11 @@ void main() {
             overrides: [hostedFlowProvider.overrideWithValue(f.flow)],
           ),
         );
-        await tester.pumpAndSettle();
+        await pumpUntilVisible(tester, find.bySemanticsLabel('Buzz'));
         await revealOptionsWithSemantics(tester);
-        await tester.pumpAndSettle();
+        await tester.pump();
         tester.view.physicalSize = const Size(420, 900);
-        await tester.pumpAndSettle();
+        await tester.pump();
         final linkCard = find.ancestor(
           of: find.text('Enter a community link').hitTestable(),
           matching: find.byType(InkWell),
@@ -72,7 +72,7 @@ void main() {
           greaterThanOrEqualTo(24),
         );
         tester.view.physicalSize = const Size(320, 640);
-        await tester.pumpAndSettle();
+        await tester.pump();
         final optionTop = tester
             .getTopLeft(find.text('Enter a community link').hitTestable())
             .dy;
@@ -118,7 +118,7 @@ void main() {
         }
         await tester.pump(const Duration(milliseconds: 50));
         await tester.binding.handlePopRoute();
-        await tester.pumpAndSettle();
+        await pumpUntilVisible(tester, find.text('Use a pairing code'));
         expect(tester.testTextInput.isVisible, isFalse);
         expect(find.text('Use a pairing code').hitTestable(), findsOneWidget);
         await tester.tap(find.text('Enter a community link').hitTestable());
@@ -150,7 +150,7 @@ void main() {
         expect(tester.takeException(), isNull);
         tester.view.viewInsets = const FakeViewPadding();
         await tester.binding.handlePopRoute();
-        await tester.pumpAndSettle();
+        await pumpUntilVisible(tester, find.text('Use a pairing code'));
         expect(tester.testTextInput.isVisible, isFalse);
         expect(find.text('Use pairing code'), findsNothing);
         await tester.tap(find.text('Use a pairing code').hitTestable());
@@ -162,7 +162,7 @@ void main() {
           findsOneWidget,
         );
         await tester.tap(find.text('Back').hitTestable());
-        await tester.pumpAndSettle();
+        await pumpUntilVisible(tester, find.text('or sign in with email'));
         expect(
           find.text('or sign in with email').hitTestable(),
           findsOneWidget,
@@ -249,7 +249,7 @@ void main() {
         await f.flow.signInAccount(openBrowser: false);
         await tester.pumpAndSettle();
         f.expired = true;
-        await tester.tap(find.text('Continue with Builderlab'));
+        await tester.tap(find.text('Find my communities'));
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 300));
         expect(f.flow.stage, HostedFlowStage.signIn);
@@ -265,9 +265,9 @@ void main() {
         await tester.pumpAndSettle();
         expect(f.flow.stage, HostedFlowStage.idle);
         await tester.pumpAndSettle();
-        expect(find.text('Continue with Builderlab'), findsOneWidget);
+        expect(find.text('Find my communities'), findsOneWidget);
         expect(find.byType(HostedConnectPage), findsNothing);
-        await tester.tap(find.text('Continue with Builderlab'));
+        await tester.tap(find.text('Find my communities'));
         await tester.pumpAndSettle();
         expect(f.flow.stage, HostedFlowStage.chooseCommunities);
         expect(find.byType(CommunityGridOption), findsWidgets);
@@ -285,7 +285,7 @@ void main() {
             throw const SavedCommunityIdentityConflict();
           }
         };
-        await tester.tap(find.text('Continue with Builderlab'));
+        await tester.tap(find.text('Find my communities'));
         await tester.pumpAndSettle();
         expect(f.flow.stage, HostedFlowStage.chooseCommunities);
         expect(find.byType(CommunityGridOption), findsWidgets);
@@ -301,7 +301,7 @@ void main() {
         f.beforeAdmission = (name) async {
           if (name == 'two.communities.buzz.xyz') throw AccountFailure.rejected;
         };
-        await tester.tap(find.text('Continue with Builderlab'));
+        await tester.tap(find.text('Find my communities'));
         await tester.pumpAndSettle();
         expect(f.flow.stage, HostedFlowStage.chooseCommunities);
         expect(find.byType(CommunityGridOption), findsWidgets);
@@ -379,10 +379,31 @@ Future<void> revealOptionsWithSemantics(WidgetTester tester) async {
       ui.SemanticsAction.customAction,
       actionIds.single,
     );
-    await tester.pumpAndSettle();
+    await pumpUntilVisible(tester, find.text('Use a pairing code'));
     expect(find.text('Enter a community link').hitTestable(), findsOneWidget);
     expect(find.text('Use a pairing code').hitTestable(), findsOneWidget);
   } finally {
     handle.dispose();
   }
+}
+
+// The welcome bees intentionally never settle. Wait for the requested control
+// and its ancestor fades to finish instead of waiting for every app animation.
+Future<void> pumpUntilVisible(WidgetTester tester, Finder target) async {
+  bool visible() {
+    final hit = target.hitTestable();
+    if (hit.evaluate().length != 1) return false;
+    return tester
+        .widgetList<Opacity>(
+          find.ancestor(of: hit, matching: find.byType(Opacity)),
+        )
+        .every((opacity) => opacity.opacity == 1);
+  }
+
+  for (var frame = 0; frame < 120; frame++) {
+    await tester.pump(const Duration(milliseconds: 16));
+    if (visible()) return;
+  }
+  expect(target.hitTestable(), findsOneWidget);
+  expect(visible(), isTrue, reason: 'The control must finish fading in');
 }

@@ -49,9 +49,10 @@ class _ConnectionSection extends ConsumerWidget {
               if (!context.mounted) return;
               final message = ref.read(pairingProvider).errorMessage;
               if (message != null) {
-                ScaffoldMessenger.of(
-                  context,
-                ).showSnackBar(SnackBar(content: Text(message)));
+                ScaffoldMessenger.of(context).showFeedbackSnackBar(
+                  SnackBar(content: Text(message)),
+                  kind: ToastKind.error,
+                );
               }
               return;
             }
@@ -61,12 +62,11 @@ class _ConnectionSection extends ConsumerWidget {
               final resumed = await _waitForResumedFrame();
               if (!resumed) {
                 if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  ScaffoldMessenger.of(context).showFeedbackSnackBar(
                     const SnackBar(
-                      content: Text(
-                        'Buzz did not return to the foreground. Try again.',
-                      ),
+                      content: Text('Couldn’t resume Buzz. Try again.'),
                     ),
+                    kind: ToastKind.error,
                   );
                 }
                 return;
@@ -147,9 +147,8 @@ class _IdentityRow extends StatelessWidget {
                 await copyToClipboard(
                   context,
                   npub,
-                  message: 'Public key (npub) copied',
+                  message: 'Public key copied',
                 );
-                await successHaptic();
               },
       ),
     );

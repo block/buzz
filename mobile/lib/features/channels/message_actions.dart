@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
@@ -408,12 +409,14 @@ Future<void> _saveImage(
     }
     final image = await _downloadImage(ref, imageUrl);
     await PhotoManager.editor.saveImage(image.bytes, filename: image.filename);
-    messenger?.showSnackBar(
-      const SnackBar(content: Text('Image saved to Photos')),
+    messenger?.showFeedbackSnackBar(
+      const SnackBar(content: Text('Saved to Photos')),
+      kind: ToastKind.success,
     );
   } catch (_) {
-    messenger?.showSnackBar(
+    messenger?.showFeedbackSnackBar(
       const SnackBar(content: Text('Could not save image')),
+      kind: ToastKind.error,
     );
   }
 }
@@ -436,8 +439,9 @@ Future<void> _shareImage(
       ShareParams(files: [XFile(file.path)], sharePositionOrigin: shareOrigin),
     );
   } catch (_) {
-    messenger?.showSnackBar(
+    messenger?.showFeedbackSnackBar(
       const SnackBar(content: Text('Could not share image')),
+      kind: ToastKind.error,
     );
   }
 }
@@ -893,8 +897,9 @@ void _confirmDelete({
                   .deleteMessage(channelId: channelId, eventId: messageId);
               onDeleted?.call();
             } catch (error) {
-              messenger.showSnackBar(
+              messenger.showFeedbackSnackBar(
                 SnackBar(content: Text('Failed to delete message: $error')),
+                kind: ToastKind.error,
               );
             }
           },

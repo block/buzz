@@ -86,8 +86,8 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
       } catch (_) {
         if (context.mounted) {
           actionError.value = selection.value.isEmpty
-              ? 'Unable to open your photo library.'
-              : 'Unable to prepare the selected photos.';
+              ? 'Couldn’t open photo library'
+              : 'Couldn’t prepare photos';
         }
       } finally {
         if (context.mounted) isResolving.value = false;
