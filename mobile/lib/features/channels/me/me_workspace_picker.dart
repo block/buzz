@@ -3,11 +3,9 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../../shared/me/me_sync.dart';
-import '../../../shared/theme/theme.dart';
 import '../../../shared/theme/buzz_icons.dart';
 import '../../../shared/widgets/feedback_snackbar.dart';
 import '../../../shared/widgets/frosted_app_bar.dart';
-import '../../../shared/widgets/modal_presentation.dart';
 import 'new_me_project.dart';
 
 /// The workspace control shared by draft and existing Solo conversations.
@@ -22,7 +20,8 @@ import 'new_me_project.dart';
 }) {
   final busy = useState(false);
   final sync = enabled ? ref.watch(meSyncProvider) : null;
-  final groups = enabled ? ref.watch(meGroupsProvider).value : null;
+  final groupState = enabled ? ref.watch(meGroupsProvider) : null;
+  final groups = groupState?.value;
   final current = channelId == null ? selected : groups?.assignments[channelId];
   final name =
       groups?.groups
@@ -32,18 +31,14 @@ import 'new_me_project.dart';
   final label = current == null
       ? 'Choose workspace'
       : 'Workspace: ${name ?? "Unavailable workspace"}';
-  Future<void> choose() async {
+  Future<void> choose(String picked) async {
     if (sync == null || busy.value) return;
+    if (picked == '+reload') {
+      ref.invalidate(meGroupsProvider);
+      return;
+    }
     busy.value = true;
     try {
-      final picked = await showBuzzModalBottomSheet<String>(
-        context: context,
-        title: 'Workspace',
-        isScrollControlled: true,
-        showDragHandle: true,
-        builder: (_) => _WorkspaceChoices(selected: current),
-      );
-      if (picked == null || !context.mounted) return;
       sync.check();
       final id = picked == '+create'
           ? await createMeProject(
@@ -81,66 +76,68 @@ import 'new_me_project.dart';
     }
   }
 
-  final onPressed = !enabled || locked || busy.value ? null : choose;
+  final available =
+      enabled &&
+      !locked &&
+      !busy.value &&
+      (groups != null || groupState?.hasError == true);
   return (
     busy: busy.value,
-    action: IconButton(
+    action: PopupMenuButton<String>(
       key: const ValueKey('me-workspace-button'),
       tooltip: label,
-      onPressed: onPressed,
+      enabled: available,
       icon: const Icon(BuzzIcons.workspace),
+      onSelected: choose,
+      itemBuilder: (_) => [
+        CheckedPopupMenuItem(
+          value: '',
+          checked: current == null,
+          child: const Text('No Workspace'),
+        ),
+        for (final group in groups?.groups ?? <Map<String, dynamic>>[])
+          CheckedPopupMenuItem(
+            value: group['id'] as String,
+            checked: current == group['id'],
+            child: Text(group['name'] as String),
+          ),
+        if (groupState?.hasError == true)
+          const PopupMenuItem(
+            value: '+reload',
+            child: Text('Reload workspaces'),
+          ),
+        const PopupMenuItem(value: '+create', child: Text('Create workspace')),
+      ],
     ),
     nativeAction: IosNavigationAction(
       label: label,
       icon: BuzzIcons.workspace,
-      onPressed: onPressed,
+      sharesBackground: false,
+      children: !available
+          ? const []
+          : [
+              IosNavigationAction(
+                label: 'No Workspace',
+                selected: current == null,
+                onPressed: () => choose(''),
+              ),
+              for (final group in groups?.groups ?? <Map<String, dynamic>>[])
+                IosNavigationAction(
+                  label: group['name'] as String,
+                  selected: current == group['id'],
+                  onPressed: () => choose(group['id'] as String),
+                ),
+              if (groupState?.hasError == true)
+                IosNavigationAction(
+                  label: 'Reload workspaces',
+                  onPressed: () => choose('+reload'),
+                ),
+              IosNavigationAction(
+                label: 'Create workspace',
+                icon: BuzzIcons.plus,
+                onPressed: () => choose('+create'),
+              ),
+            ],
     ),
   );
-}
-
-class _WorkspaceChoices extends ConsumerWidget {
-  const _WorkspaceChoices({required this.selected});
-  final String? selected;
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final groups = ref.watch(meGroupsProvider);
-    return SizedBox(
-      height: (MediaQuery.sizeOf(context).height * 0.6).clamp(0.0, 420.0),
-      child: Material(
-        type: MaterialType.transparency,
-        child: ListView(
-          padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
-          children: [
-            ListTile(
-              title: const Text('No workspace'),
-              selected: selected == null,
-              trailing: selected == null ? const Icon(BuzzIcons.check) : null,
-              onTap: () => Navigator.pop(context, ''),
-            ),
-            if (groups.isLoading) const LinearProgressIndicator(),
-            if (groups.hasError)
-              TextButton(
-                onPressed: () => ref.invalidate(meGroupsProvider),
-                child: const Text('Reload workspaces'),
-              ),
-            for (final group
-                in groups.value?.groups ?? <Map<String, dynamic>>[])
-              ListTile(
-                title: Text(group['name'] as String),
-                selected: selected == group['id'],
-                trailing: selected == group['id']
-                    ? const Icon(BuzzIcons.check)
-                    : null,
-                onTap: () => Navigator.pop(context, group['id'] as String),
-              ),
-            ListTile(
-              leading: const Icon(BuzzIcons.plus),
-              title: const Text('Create workspace'),
-              onTap: () => Navigator.pop(context, '+create'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 }

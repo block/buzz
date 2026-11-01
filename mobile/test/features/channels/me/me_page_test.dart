@@ -279,14 +279,25 @@ void main() {
         'Choose workspace',
         'Change agent: My Bestie',
       ]);
+      expect(bar.nativeLeading?.symbol, 'chevron.backward');
+      expect(
+        bar.nativeActions!.every((action) => !action.sharesBackground),
+        isTrue,
+      );
       await tester.tap(find.byTooltip('Choose workspace'));
       await tester.pumpAndSettle();
+      expect(find.byType(BottomSheet), findsNothing);
+      expect(
+        find.widgetWithText(CheckedPopupMenuItem<String>, 'No Workspace'),
+        findsOneWidget,
+      );
       expect(find.text('Create workspace'), findsOneWidget);
       await tester.tap(find.text('Mobile app').last);
       await tester.pumpAndSettle();
       expect(find.byTooltip('Workspace: Mobile app'), findsOneWidget);
       await tester.tap(find.byTooltip('Change agent: My Bestie'));
       await tester.pumpAndSettle();
+      expect(tester.getSize(find.byType(ListView).last).height, lessThan(300));
       await tester.tap(find.text('Other agent'));
       await tester.pumpAndSettle();
       bestie.add(null);

@@ -135,6 +135,11 @@ class _MeChatDraft extends HookConsumerWidget {
           leading: BackButton(
             onPressed: () => Navigator.of(context).maybePop(),
           ),
+          nativeLeading: IosNavigationAction(
+            label: 'Back',
+            symbol: 'chevron.backward',
+            onPressed: () => Navigator.of(context).maybePop(),
+          ),
           title: const Text('New chat'),
           nativeTitle: 'New chat',
           centerTitle: true,
@@ -143,6 +148,7 @@ class _MeChatDraft extends HookConsumerWidget {
             IosNavigationAction(
               label: label,
               symbol: 'person.crop.circle',
+              sharesBackground: false,
               avatarIdentity: selected,
               avatarIsAgent: selected != null,
               imageUrl: agent?.avatarUrl ?? profile?.avatarUrl,
