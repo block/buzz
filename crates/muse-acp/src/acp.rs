@@ -31,6 +31,7 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, warn};
 
 use crate::driver::{Driver, TurnOutcome};
+use crate::muse_web::{parse_channel_from_session_title, parse_channel_from_text};
 use crate::BridgeError;
 
 const PROTOCOL_VERSION: u64 = 2;
@@ -38,9 +39,34 @@ const AGENT_NAME: &str = "muse-acp";
 
 /// Per-session ACP state. Sessions are never removed: a session id that
 /// was allocated stays valid for the bridge's lifetime.
+/// Channel for a session, derived from `session/new` params: the
+/// `_meta.sessionTitle` (`Agent · #channel`) wins, the standing
+/// prompt's `Channel:` line is the fallback. Pure, so it is unit-tested
+/// directly; the driver also re-parses each turn's prompt text, so a
+/// wake that changes channel mid-session still routes correctly.
+fn extract_session_channel(params: &Value) -> Option<String> {
+    if let Some(title) = params
+        .get("_meta")
+        .and_then(|m| m.get("sessionTitle"))
+        .and_then(|s| s.as_str())
+    {
+        if let Some(channel) = parse_channel_from_session_title(title) {
+            return Some(channel);
+        }
+    }
+    params
+        .get("systemPrompt")
+        .and_then(|s| s.as_str())
+        .and_then(parse_channel_from_text)
+}
+
 struct SessionState {
     /// Standing prompt from `session/new`, if any.
     system_prompt: Option<String>,
+    /// Buzz channel this session belongs to, when known. Used only for
+    /// side-chat routing in the driver; it never alters the message
+    /// sent to Muse.
+    target_channel: Option<String>,
     /// Whether the standing prompt was already prepended to a turn. It is
     /// sent only on the first turn: the tab holds the conversation after
     /// that, and repeating the framing every turn would spam Muse with
@@ -184,16 +210,21 @@ async fn handle_request<D>(
             {
                 debug!("mcpServers are not forwarded: Muse web has its own tools");
             }
+            let target_channel = extract_session_channel(&params);
             let session_id = uuid::Uuid::new_v4().to_string();
             sessions.lock().await.insert(
                 session_id.clone(),
                 SessionState {
                     system_prompt,
+                    target_channel: target_channel.clone(),
                     system_prompt_sent: false,
                     cancel: Arc::new(AtomicBool::new(false)),
                     in_flight: false,
                 },
             );
+            if let Some(channel) = target_channel {
+                driver.set_session_channel(&session_id, &channel);
+            }
             let _ = frames_out.send(response(id, json!({ "sessionId": session_id })));
         }
         "session/prompt" => {
@@ -229,12 +260,23 @@ async fn handle_request<D>(
             session.in_flight = true;
             let cancel = Arc::new(AtomicBool::new(false));
             session.cancel = cancel.clone();
+            // A wake's own prompt text carries its channel, and it wins
+            // over the session/new value: a session reused across
+            // channels must route to the channel of this wake, not the
+            // first one it ever saw.
+            if let Some(channel) = parse_channel_from_text(&prompt_text) {
+                session.target_channel = Some(channel);
+            }
+            let target_channel = session.target_channel.clone();
             let (message, _sent_system) = compose_message(
                 &mut session.system_prompt,
                 &mut session.system_prompt_sent,
                 &prompt_text,
             );
             drop(sessions_guard);
+            if let Some(channel) = target_channel {
+                driver.set_session_channel(&session_id, &channel);
+            }
             spawn_turn(
                 session_id,
                 id,
@@ -521,6 +563,27 @@ mod tests {
         let (message, consumed) = compose_message(&mut standing, &mut sent, "again");
         assert_eq!(message, "again");
         assert!(!consumed);
+    }
+
+    #[test]
+    fn session_channel_prefers_session_title_over_system_prompt() {
+        let params = json!({
+            "_meta": { "sessionTitle": "Muse · #MASKY-CMO" },
+            "systemPrompt": "Channel: other-channel\nBe brief.",
+        });
+        assert_eq!(
+            extract_session_channel(&params),
+            Some("MASKY-CMO".to_string())
+        );
+        let params = json!({
+            "systemPrompt": "Channel: welcome-everyone (#2594a7a5-e290-4c06-bd38-ac0095819ea2)\nBe brief.",
+        });
+        assert_eq!(
+            extract_session_channel(&params),
+            Some("welcome-everyone".to_string())
+        );
+        let params = json!({ "systemPrompt": "Be brief." });
+        assert_eq!(extract_session_channel(&params), None);
     }
 
     #[test]

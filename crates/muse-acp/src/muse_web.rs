@@ -59,6 +59,141 @@ fn want_headless() -> bool {
     }
 }
 
+/// Chat URL override, for the mock-page simulation only. Production
+/// always uses `selectors::MUSE_CHAT_URL` (https://muse.ai/).
+const MUSE_URL_ENV: &str = "MUSE_ACP_MUSE_URL";
+
+fn muse_chat_url() -> String {
+    match std::env::var(MUSE_URL_ENV).ok().as_deref().map(str::trim) {
+        Some(url) if !url.is_empty() => url.to_string(),
+        _ => selectors::MUSE_CHAT_URL.to_string(),
+    }
+}
+
+/// How side-chat routing behaves when the target side chat is not found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SideChatMode {
+    /// Try the side chat; fall back to the tab's current conversation
+    /// (a fresh chat after the new-chat step) and log the candidates.
+    Auto,
+    /// Try the side chat; fail the turn loudly when it is not found.
+    Strict,
+    /// Never select a side chat; keep the pre-existing behaviour.
+    Off,
+}
+
+const SIDE_CHAT_MODE_ENV: &str = "MUSE_ACP_SIDE_CHAT_MODE";
+const SIDE_CHAT_MAP_ENV: &str = "MUSE_ACP_SIDE_CHAT_MAP";
+
+fn side_chat_mode() -> SideChatMode {
+    match std::env::var(SIDE_CHAT_MODE_ENV)
+        .ok()
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("off") | Some("disabled") | Some("0") | Some("false") | Some("no") => {
+            SideChatMode::Off
+        }
+        Some("strict") | Some("fail") | Some("required") => SideChatMode::Strict,
+        _ => SideChatMode::Auto,
+    }
+}
+
+/// Parse a Buzz channel name out of prompt / system-prompt text.
+///
+/// buzz-acp frames each wake with a line like:
+///
+/// ```text
+/// Channel: MASKY-CMO (#3043c06d-6cf1-42f8-b1b0-cb2d61711ea1)
+/// ```
+///
+/// or, in older framing, `Channel: welcome-everyone`. The UUID suffix,
+/// a leading `#`, and surrounding whitespace are all stripped. The
+/// first non-empty `Channel:` line wins; anything else returns `None`.
+pub fn parse_channel_from_text(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("Channel:") else {
+            continue;
+        };
+        let mut name = rest.trim();
+        if let Some(idx) = name.find(" (#") {
+            name = &name[..idx];
+        }
+        let name = name.trim().trim_start_matches('#').trim();
+        if !name.is_empty() {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+/// Parse a Buzz channel name out of a buzz-acp session title.
+///
+/// Titles are composed as `Agent · #channel`, or, for thread-scoped
+/// sessions, `Agent · #channel · <8-char thread root>`. The segment
+/// starting with `#` is the channel; a bare agent name has none.
+pub fn parse_channel_from_session_title(title: &str) -> Option<String> {
+    for part in title.split('·') {
+        let part = part.trim();
+        if let Some(name) = part.strip_prefix('#') {
+            let name = name.trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    // Fallback for a title that embeds `#channel` without the dot
+    // separator, e.g. `Muse #MASKY-CMO`.
+    if let Some(idx) = title.find('#') {
+        let rest = &title[idx + 1..];
+        let name: String = rest
+            .chars()
+            .take_while(|c| !c.is_whitespace() && *c != '·')
+            .collect();
+        if !name.is_empty() {
+            return Some(name);
+        }
+    }
+    None
+}
+
+/// Candidate Muse side-chat titles for a Buzz channel, in match order.
+///
+/// The bridge's own side chats are named `<channel> (buzz)` — e.g.
+/// `MASKY-CMO (buzz)` — so that is tried first, then the bare channel
+/// name. An explicit map (from `MUSE_ACP_SIDE_CHAT_MAP`, a
+/// comma-separated `channel=title` list) wins over both, and duplicates
+/// are removed case-insensitively. Matching itself is case-insensitive
+/// in the selection script, so title casing is not load-bearing.
+pub fn side_chat_titles(channel: &str, map: Option<&str>) -> Vec<String> {
+    let mut titles: Vec<String> = Vec::new();
+    let push_unique = |titles: &mut Vec<String>, title: String| {
+        if !titles.iter().any(|t| t.eq_ignore_ascii_case(&title)) {
+            titles.push(title);
+        }
+    };
+    if let Some(map) = map {
+        for entry in map.split(',') {
+            if let Some((key, value)) = entry.split_once('=') {
+                if key.trim().eq_ignore_ascii_case(channel) && !value.trim().is_empty() {
+                    push_unique(&mut titles, value.trim().to_string());
+                }
+            }
+        }
+    }
+    push_unique(&mut titles, format!("{channel} (buzz)"));
+    push_unique(&mut titles, channel.to_string());
+    titles
+}
+
+fn side_chat_titles_from_env(channel: &str) -> Vec<String> {
+    let map = std::env::var(SIDE_CHAT_MAP_ENV).ok();
+    side_chat_titles(channel, map.as_deref())
+}
+
 /// The Muse web driver: one Chromium instance, one tab per session.
 pub struct MuseWebDriver {
     /// Serializes session creation (browser launch + tab + login wait are
@@ -66,6 +201,14 @@ pub struct MuseWebDriver {
     creation: Mutex<()>,
     browser: Mutex<Option<Browser>>,
     tabs: Mutex<HashMap<String, Tab>>,
+    /// Buzz channel recorded for a session (from the ACP layer, or from
+    /// a turn's own prompt text). Plain `std` mutexes: these are only
+    /// ever held for a map lookup/insert, never across an await.
+    channels: std::sync::Mutex<HashMap<String, String>>,
+    /// Channel whose side chat a tab has already been routed to. A tab
+    /// is routed at most once per channel, so later turns in the same
+    /// conversation do not re-click the chat list and reset the view.
+    selected: std::sync::Mutex<HashMap<String, String>>,
 }
 
 impl MuseWebDriver {
@@ -75,6 +218,63 @@ impl MuseWebDriver {
             creation: Mutex::new(()),
             browser: Mutex::new(None),
             tabs: Mutex::new(HashMap::new()),
+            channels: std::sync::Mutex::new(HashMap::new()),
+            selected: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn stored_channel(&self, session_id: &str) -> Option<String> {
+        self.channels
+            .lock()
+            .ok()
+            .and_then(|map| map.get(session_id).cloned())
+    }
+
+    /// Route a tab to the Muse side chat for `channel`, if it is not
+    /// already there. Returns `Ok(true)` when the side chat was clicked,
+    /// `Ok(false)` when no candidate matched (the caller decides
+    /// whether that is a fallback or a failure), and `Err` only on a
+    /// DOM/transport failure.
+    async fn select_side_chat(&self, tab: &Tab, channel: &str) -> Result<bool, BridgeError> {
+        let titles = side_chat_titles_from_env(channel);
+        let result = tab
+            .evaluate_json(&selectors::select_chat_js(&titles))
+            .await?;
+        let clicked = result
+            .get("clicked")
+            .and_then(|c| c.as_bool())
+            .unwrap_or(false);
+        let matched = result
+            .get("matched")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_string();
+        let candidates: Vec<String> = result
+            .get("candidates")
+            .and_then(|c| c.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if clicked {
+            info!(channel, matched, "routed Muse tab to side chat");
+            // The click is a client-side navigation: give the chat a
+            // moment to load before the turn's baseline probe runs, so
+            // the baseline is the side chat's last message, not the
+            // previous conversation's.
+            for _ in 0..20 {
+                let probe = tab.evaluate_json(selectors::PROBE_JS).await?;
+                if probe.get("composer").and_then(|c| c.as_str()).is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Ok(true)
+        } else {
+            warn!(channel, candidates = ?candidates, "no Muse side chat matched channel; candidates seen in chat list");
+            Ok(false)
         }
     }
 
@@ -167,7 +367,7 @@ impl MuseWebDriver {
         let browser = browser_guard
             .as_ref()
             .ok_or_else(|| BridgeError::ChromeLaunch("browser vanished during launch".into()))?;
-        let tab = browser.new_tab(selectors::MUSE_CHAT_URL).await?;
+        let tab = browser.new_tab(&muse_chat_url()).await?;
         drop(browser_guard);
         self.tabs
             .lock()
@@ -200,6 +400,52 @@ impl MuseWebDriver {
         let tab = self.ensure_session_inner(session_id).await?;
         if cancel.load(Ordering::SeqCst) {
             return Ok(TurnOutcome::Cancelled);
+        }
+        // Side-chat routing: a tagged wake carries its channel (in the
+        // prompt text, or recorded from session/new), so route this tab
+        // to that channel's Muse side chat before taking the baseline.
+        // The new-chat step in ensure_session_inner is best-effort and
+        // runs first; a successful selection here wins over it, which is
+        // exactly the point — the side chat, not a fresh chat, holds the
+        // conversation this wake belongs to. Subsequent turns in the
+        // same channel skip the click: the tab is already there.
+        let target_channel =
+            parse_channel_from_text(submitted_text).or_else(|| self.stored_channel(session_id));
+        if let Some(channel) = target_channel {
+            if let Ok(mut channels) = self.channels.lock() {
+                channels.insert(session_id.to_string(), channel.clone());
+            }
+            let already_selected = self
+                .selected
+                .lock()
+                .ok()
+                .and_then(|map| map.get(session_id).cloned())
+                == Some(channel.clone());
+            if !already_selected && side_chat_mode() != SideChatMode::Off {
+                match self.select_side_chat(&tab, &channel).await {
+                    Ok(true) => {
+                        if let Ok(mut selected) = self.selected.lock() {
+                            selected.insert(session_id.to_string(), channel.clone());
+                        }
+                    }
+                    Ok(false) => {
+                        if side_chat_mode() == SideChatMode::Strict {
+                            return Err(BridgeError::WebDom(format!(
+                                "no Muse side chat found for Buzz channel {channel}; \
+                                 set MUSE_ACP_SIDE_CHAT_MAP to map it, or run with \
+                                 MUSE_ACP_SIDE_CHAT_MODE=auto to fall back to a fresh chat"
+                            )));
+                        }
+                        // Auto (default): fall through to the tab's
+                        // current conversation, which the new-chat step
+                        // already made fresh. The warning in
+                        // select_side_chat carries the candidates, so
+                        // an operator can fix the mapping without the
+                        // channel losing its reply.
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
         }
         // Baseline: the last message visible before this turn, so the
         // previous reply is never re-emitted as the new one.
@@ -353,6 +599,12 @@ impl Default for MuseWebDriver {
 }
 
 impl Driver for MuseWebDriver {
+    fn set_session_channel(&self, session_id: &str, channel: &str) {
+        if let Ok(mut channels) = self.channels.lock() {
+            channels.insert(session_id.to_string(), channel.to_string());
+        }
+    }
+
     fn ensure_session(
         &self,
         session_id: &str,
@@ -377,5 +629,72 @@ impl Driver for MuseWebDriver {
             self.run_turn_inner(&session_id, &message, cancel, chunks)
                 .await
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn channel_from_prompt_text_with_uuid_suffix() {
+        assert_eq!(
+            parse_channel_from_text(
+                "[Buzz @mention]\nChannel: MASKY-CMO (#3043c06d-6cf1-42f8-b1b0-cb2d61711ea1)\nFrom: npub1...\nMessage: hello"
+            ),
+            Some("MASKY-CMO".to_string())
+        );
+    }
+
+    #[test]
+    fn channel_from_prompt_text_bare_name() {
+        assert_eq!(
+            parse_channel_from_text("Channel: welcome-everyone\nMessage: hi"),
+            Some("welcome-everyone".to_string())
+        );
+    }
+
+    #[test]
+    fn channel_from_prompt_text_ignores_other_lines_and_empty() {
+        assert_eq!(parse_channel_from_text("hello\nno channel here"), None);
+        assert_eq!(parse_channel_from_text("Channel: \nMessage: hi"), None);
+        assert_eq!(
+            parse_channel_from_text("Channel: #general\nMessage: hi"),
+            Some("general".to_string())
+        );
+    }
+
+    #[test]
+    fn channel_from_session_title() {
+        assert_eq!(
+            parse_channel_from_session_title("Muse · #MASKY-CMO"),
+            Some("MASKY-CMO".to_string())
+        );
+        assert_eq!(
+            parse_channel_from_session_title("Muse · #MASKY-CMO · abcd1234"),
+            Some("MASKY-CMO".to_string())
+        );
+        assert_eq!(parse_channel_from_session_title("Muse"), None);
+    }
+
+    #[test]
+    fn side_chat_titles_default_and_map() {
+        assert_eq!(
+            side_chat_titles("MASKY-CMO", None),
+            vec!["MASKY-CMO (buzz)".to_string(), "MASKY-CMO".to_string()]
+        );
+        assert_eq!(
+            side_chat_titles("MASKY-CMO", Some("MASKY-CMO=My CMO chat,other=Other")),
+            vec![
+                "My CMO chat".to_string(),
+                "MASKY-CMO (buzz)".to_string(),
+                "MASKY-CMO".to_string()
+            ]
+        );
+        // Map lookup is case-insensitive; duplicates are dropped.
+        assert_eq!(
+            side_chat_titles("masky-cmo", Some("MASKY-CMO=MASKY-CMO (buzz)")),
+            vec!["MASKY-CMO (buzz)".to_string(), "masky-cmo".to_string()]
+        );
     }
 }

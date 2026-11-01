@@ -29,6 +29,14 @@ pub enum TurnOutcome {
 /// Sessions are independent: one Buzz channel session maps to one driver
 /// session, and sessions never share in-progress turn state.
 pub trait Driver: Send + Sync {
+    /// Record the Buzz channel a session belongs to, when the ACP layer
+    /// knows it (from the session title or a prompt's `Channel:` line).
+    /// The default implementation ignores it; the Muse web driver uses
+    /// it to route a tagged wake to that channel's Muse side chat.
+    /// Calling it is always safe: a later turn's own prompt text can
+    /// still override the stored channel.
+    fn set_session_channel(&self, _session_id: &str, _channel: &str) {}
+
     /// Prepare a session for turns (launch the browser on first use,
     /// navigate, sign in if needed). Idempotent.
     fn ensure_session(

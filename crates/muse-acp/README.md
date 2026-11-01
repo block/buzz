@@ -106,6 +106,73 @@ stale marker self-heals instead of stranding turns.
    forwarded verbatim — the bridge adds no paraphrase between the channel
    and Muse. Later turns send only the new message; the tab already holds
    the conversation.
+
+## Side-chat routing: a tagged wake goes to that channel's side chat
+
+A tagged wake should not land in yet another fresh Muse web chat. It
+should land in the Muse side chat that already holds that channel's
+conversation — the side chat a user would open by hand for that channel.
+
+`muse-acp` derives the channel on every wake, from three sources in
+order:
+
+1. The prompt text's `Channel:` line (buzz-acp frames each wake with
+   `Channel: MASKY-CMO (#<uuid>)`).
+2. The `session/new` `_meta.sessionTitle` (`Agent · #channel`).
+3. The `session/new` standing prompt's `Channel:` line, as a fallback.
+
+It then, on the first turn for that channel in a tab, clicks the side
+chat whose title matches, in order: an explicit
+`MUSE_ACP_SIDE_CHAT_MAP` entry, `<channel> (buzz)`, then the bare
+channel name. Matching is case-insensitive and by first text line, so a
+list item that shows a title plus metadata still matches. Later turns
+in the same channel skip the click — the tab is already there — and a
+wake for a different channel re-routes the tab.
+
+If no side chat matches, the default (`MUSE_ACP_SIDE_CHAT_MODE=auto`)
+falls back to the tab's current conversation (fresh after the new-chat
+step) and logs the chat-list titles it did see, so the mapping can be
+fixed without the channel losing its reply. `strict` fails the turn
+instead, and `off` disables routing entirely and restores the old
+fresh-chat-only behaviour.
+
+Caveat, stated plainly: the chat-list selectors are, like the rest of
+`src/selectors.rs`, unverified against the live logged-in muse.ai app
+until a signed-in run confirms them. The selection script is built to
+fail diagnostically — on a miss it reports the candidate titles it saw
+— rather than silently clicking the wrong chat. Until that run happens,
+treat side-chat routing as implemented and mock-tested, not
+live-verified (see "The DOM model" below).
+
+### Mock simulation (no Meta login needed)
+
+The routing can be exercised end to end without a Muse account, by
+pointing the bridge at a local page that mimics the shape of muse.ai —
+a sidebar of titled chat buttons, a composer, and an assistant message
+element — and feeding it ACP by hand:
+
+```sh
+# Serve a mock page (sidebar buttons, composer, assistant element)
+python3 -m http.server 8765 --directory /tmp/mock-muse
+
+# Build the bridge, then run it against the mock page
+cargo build -p muse-acp
+MUSE_ACP_MUSE_URL=http://127.0.0.1:8765/ \
+MUSE_ACP_CHROME=/opt/meta-chromium/chrome \
+MUSE_ACP_HEADLESS=1 \
+MUSE_ACP_PROFILE=/tmp/muse-acp-mock-profile \
+  ./target/debug/muse-acp <<'EOF'
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"_meta":{"sessionTitle":"Muse · #MASKY-CMO"}}}
+{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"<id from step 2>","prompt":[{"type":"text","text":"Channel: MASKY-CMO (#3043c06d-6cf1-42f8-b1b0-cb2d61711ea1)\nMessage: hello from buzz"}]}}
+EOF
+```
+
+A successful run streams a reply whose text names the selected side
+chat (`Reply from MASKY-CMO (buzz) ...` on the mock page) — proof the
+click happened before the submit, not just that a reply arrived.
+`MUSE_ACP_MUSE_URL` is a test seam only; production always uses
+https://muse.ai/.
 3. The bridge submits the message in the tab (composer + send, or Enter),
    polls the reply, and emits each text delta as an ACP
    `session/update` `agent_message_chunk`. It tracks message identity so
@@ -151,6 +218,9 @@ bridge depends on those strings.
 | `MUSE_ACP_CHROME` | Chromium binary path (default: `PATH` + well-known locations) |
 | `MUSE_ACP_HEADLESS` | `0`/`1` to force headed/headless (default: headed until a session is saved) |
 | `MUSE_ACP_LOG` | Log filter, e.g. `debug` (default `info`); logs go to stderr, never stdout |
+| `MUSE_ACP_SIDE_CHAT_MODE` | `auto` (default: side chat, fall back to fresh chat on a miss), `strict` (fail the turn on a miss), `off` (never select a side chat) |
+| `MUSE_ACP_SIDE_CHAT_MAP` | Comma-separated `channel=title` overrides, e.g. `MASKY-CMO=My CMO chat` (default titles are `<channel> (buzz)`, then `<channel>`) |
+| `MUSE_ACP_MUSE_URL` | Test seam only: override https://muse.ai/ with a mock page (see mock simulation above) |
 
 ## Limitations (v1)
 
