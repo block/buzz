@@ -28,6 +28,16 @@ void main() {
     expect(sessionClosed, isFalse);
     expect((await second.get(Uri.parse('https://relay.example/'))).body, 'ok');
   });
+
+  test('URLSession error codes map to user-facing failure kinds', () {
+    expect(urlErrorFailure(-1009), TransportFailure.unreachable);
+    expect(urlErrorFailure(-1004), TransportFailure.unreachable);
+    expect(urlErrorFailure(-1001), TransportFailure.timedOut);
+    expect(urlErrorFailure(-1200), TransportFailure.insecure);
+    expect(urlErrorFailure(-1202), TransportFailure.insecure);
+    expect(urlErrorFailure(-999), isNull);
+    expect(urlSessionFailure(http.ClientException('offline')), isNull);
+  });
 }
 
 class _ClosingMock extends MockClient {

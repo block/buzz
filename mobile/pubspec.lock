@@ -1016,7 +1016,7 @@ packages:
     source: hosted
     version: "2.0.0"
   objective_c:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: objective_c
       sha256: b7fb95a6d9a4f009edd63dc5ac69f07420b23a16161c6dd8660290b59c602e8e
