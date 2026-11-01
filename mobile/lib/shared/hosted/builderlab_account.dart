@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import 'package:http/http.dart' as http;
+import 'package:buzz/shared/http/app_http_client.dart';
 
 import '../storage/secure_storage.dart';
 
@@ -58,7 +59,7 @@ class BuilderlabAccountClient {
     http.Client? httpClient,
     FlutterSecureStorage? storage,
     Uri? accountOrigin,
-  }) : _http = httpClient ?? http.Client(),
+  }) : _http = httpClient ?? newAppHttpClient(),
        _storage = storage ?? defaultStorage,
        accountOrigin = accountOrigin ?? origin;
 

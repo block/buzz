@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
+import 'package:buzz/shared/http/app_http_client.dart';
 
 import 'community_icon_cache.dart';
 import 'community_icon_artwork.dart';
@@ -12,7 +13,7 @@ const _lookupTimeout = Duration(seconds: 5);
 
 /// Supplies the unauthenticated client for public NIP-11 documents and icons.
 final communityIconHttpClientProvider = Provider<http.Client>((ref) {
-  final client = http.Client();
+  final client = newAppHttpClient();
   ref.onDispose(client.close);
   return client;
 });
