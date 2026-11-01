@@ -44,18 +44,27 @@ http.Client _openUrlSession() {
 /// A caller's handle on an app-wide session. [close] leaves the session open
 /// for other callers; closing a `CupertinoClient` while any of its requests
 /// run would also throw.
+///
+/// App Transport Security blocks cleartext `URLSession` loads from public
+/// hosts, while saved community icons and remote media may still use
+/// `http://`. Those keep the handle's own `dart:io` client, as before.
 @visibleForTesting
 class SharedSessionClient extends http.BaseClient {
-  SharedSessionClient(this._session);
+  SharedSessionClient(this._session, {http.Client Function()? cleartext})
+    : _newCleartext = cleartext ?? http.Client.new;
 
   final http.Client _session;
+  final http.Client Function() _newCleartext;
+  http.Client? _cleartext;
 
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) =>
-      _session.send(request);
+      request.url.scheme == 'https'
+      ? _session.send(request)
+      : (_cleartext ??= _newCleartext()).send(request);
 
   @override
-  void close() {}
+  void close() => _cleartext?.close();
 }
 
 /// How an iOS transport request failed, for user-facing messages. `dart:io`
