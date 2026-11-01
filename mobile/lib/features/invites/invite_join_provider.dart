@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
+import 'package:buzz/shared/http/app_http_client.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:url_launcher/url_launcher.dart';
@@ -515,7 +516,8 @@ String _friendlyInviteError(Object error) {
   if (message.contains('join_policy_required')) {
     return 'Review this community’s join requirements in your browser, then return to Buzz.';
   }
-  if (message.contains('SocketException') ||
+  if (urlSessionFailure(error) == TransportFailure.unreachable ||
+      message.contains('SocketException') ||
       message.contains('Connection refused') ||
       message.contains('Network is unreachable') ||
       message.contains('No route to host')) {
@@ -526,7 +528,8 @@ String _friendlyInviteError(Object error) {
 
 String _friendlyStarterSetupError(Object error) {
   final message = error.toString();
-  if (message.contains('SocketException') ||
+  if (urlSessionFailure(error) == TransportFailure.unreachable ||
+      message.contains('SocketException') ||
       message.contains('Connection refused') ||
       message.contains('Network is unreachable') ||
       message.contains('No route to host')) {

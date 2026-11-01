@@ -2,6 +2,7 @@ import 'dart:io' show Platform;
 
 import 'package:cupertino_http/cupertino_http.dart';
 import 'package:http/http.dart' as http;
+import 'package:objective_c/objective_c.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 
 /// Which app-wide connection pool a request belongs to.
@@ -56,3 +57,33 @@ class SharedSessionClient extends http.BaseClient {
   @override
   void close() {}
 }
+
+/// How an iOS transport request failed, for user-facing messages. `dart:io`
+/// failures are recognized by their messages instead.
+enum TransportFailure { unreachable, insecure, timedOut }
+
+/// The [TransportFailure] for a `URLSession` error, or null for any other
+/// error.
+TransportFailure? urlSessionFailure(Object error) {
+  if (error is! NSErrorClientException) return null;
+  if (error.error.domain.toDartString() != 'NSURLErrorDomain') return null;
+  return urlErrorFailure(error.error.code);
+}
+
+/// Classifies an `NSURLErrorDomain` code.
+@visibleForTesting
+TransportFailure? urlErrorFailure(int code) => switch (code) {
+  -1001 => TransportFailure.timedOut,
+  // Cannot find host, cannot connect, connection lost, DNS lookup failed,
+  // international roaming off, cellular data not allowed, offline.
+  -1003 ||
+  -1004 ||
+  -1005 ||
+  -1006 ||
+  -1018 ||
+  -1020 ||
+  -1009 => TransportFailure.unreachable,
+  // Secure connection failed and the server certificate errors.
+  >= -1206 && <= -1200 => TransportFailure.insecure,
+  _ => null,
+};
