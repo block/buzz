@@ -65,9 +65,11 @@ function ReplyParentContext({
   );
   const fetchedProfile = parentProfileQuery.data ?? null;
   const parentDisplayName = parentNote
-    ? (cachedProfile?.displayName ??
-      fetchedProfile?.displayName ??
-      truncateNpub(parentNote.pubkey))
+    ? cachedProfile?.displayName?.trim() ||
+      cachedProfile?.name?.trim() ||
+      fetchedProfile?.displayName?.trim() ||
+      fetchedProfile?.name?.trim() ||
+      truncateNpub(parentNote.pubkey)
     : null;
   const parentAvatarUrl =
     cachedProfile?.avatarUrl ?? fetchedProfile?.avatarUrl ?? null;
@@ -149,7 +151,10 @@ export function NoteCard({
   members = [],
   actions,
 }: NoteCardProps) {
-  const displayName = profile?.displayName ?? truncateNpub(note.pubkey);
+  const displayName =
+    profile?.displayName?.trim() ||
+    profile?.name?.trim() ||
+    truncateNpub(note.pubkey);
   const avatarUrl = profile?.avatarUrl ?? null;
   const [isReplyComposerOpen, setIsReplyComposerOpen] = React.useState(false);
   const actionButtonClass =

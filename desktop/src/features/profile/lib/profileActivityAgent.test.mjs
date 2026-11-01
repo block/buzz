@@ -49,3 +49,11 @@ test("local managed runtime status still takes precedence", () => {
     "running",
   );
 });
+
+test("profile activity uses a Nostr name when display name is absent", () => {
+  const agent = resolveProfileActivityAgent({
+    ...input,
+    profile: { displayName: "  ", name: "ScoutHandle" },
+  });
+  assert.equal(agent.name, "ScoutHandle");
+});

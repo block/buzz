@@ -397,6 +397,7 @@ export function HuddleBar({
     () =>
       clampReactionName(
         profileQuery.data?.displayName?.trim() ||
+          profileQuery.data?.name?.trim() ||
           identityQuery.data?.displayName?.trim() ||
           fallbackNameForPubkey(currentPubkey),
       ),
@@ -404,6 +405,7 @@ export function HuddleBar({
       currentPubkey,
       identityQuery.data?.displayName,
       profileQuery.data?.displayName,
+      profileQuery.data?.name,
     ],
   );
 
@@ -718,8 +720,9 @@ export function HuddleBar({
                   selfProfileCache?.avatarDataUrl ??
                   null,
                 displayName:
-                  profileQuery.data?.displayName ??
-                  identityQuery.data?.displayName ??
+                  profileQuery.data?.displayName?.trim() ||
+                  profileQuery.data?.name?.trim() ||
+                  identityQuery.data?.displayName ||
                   null,
                 pubkey: currentPubkey,
               }}
