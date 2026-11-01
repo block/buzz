@@ -209,7 +209,10 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
         restartStallTimer();
         final iterator = body = StreamIterator(streamed.stream);
         final bytes = BytesBuilder(copy: false);
-        while (await iterator.moveNext()) {
+        // An error body is never shown, and reading a slow one could hold
+        // this load for the whole fetch cap before the fallback or
+        // Retry-After applies. Leave it unread; finally cancels the stream.
+        while (streamed.statusCode == 200 && await iterator.moveNext()) {
           restartStallTimer();
           final chunk = iterator.current;
           if (chunk.length > maxResponseBytes - bytes.length) {

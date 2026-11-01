@@ -467,40 +467,52 @@ void main() {
       expect(fetches, 2);
     });
 
-    test('honors Retry-After on 429 (capped)', () async {
-      var fetches = 0;
-      final client = http_testing.MockClient((request) async {
-        fetches += 1;
-        return http.Response(
-          'rate limited',
-          429,
-          headers: {'retry-after': '120'},
-        );
-      });
-      final auth = _auth(nsec: nostr.Keys.generate().nsec);
-      var current = DateTime.utc(2026, 7, 21, 12);
-      MediaImageProvider.debugNow = () => current;
+    test(
+      'honors Retry-After on 429 (capped) without reading the body',
+      () async {
+        var fetches = 0;
+        // A body that never ends: the error must not wait for it.
+        Stream<List<int>> endless() async* {
+          while (true) {
+            await Future<void>.delayed(const Duration(milliseconds: 20));
+            yield const [0];
+          }
+        }
 
-      Future<Object?> attempt() async {
-        final provider = MediaImageProvider(
-          url: _mediaUrl,
-          auth: auth,
-          client: client,
-        );
-        return _waitError(provider.resolve(ImageConfiguration.empty));
-      }
+        final client = _StreamingClient((request) async {
+          fetches += 1;
+          return http.StreamedResponse(
+            endless(),
+            429,
+            headers: {'retry-after': '120'},
+          );
+        });
+        final auth = _auth(nsec: nostr.Keys.generate().nsec);
+        var current = DateTime.utc(2026, 7, 21, 12);
+        MediaImageProvider.debugNow = () => current;
 
-      await attempt();
-      expect(fetches, 1);
+        Future<Object?> attempt() async {
+          final provider = MediaImageProvider(
+            url: _mediaUrl,
+            auth: auth,
+            client: client,
+          );
+          return _waitError(provider.resolve(ImageConfiguration.empty));
+        }
 
-      current = current.add(const Duration(seconds: 60));
-      expect(await attempt(), isA<MediaImageCooldownException>());
-      expect(fetches, 1);
+        final error = await attempt().timeout(const Duration(seconds: 3));
+        expect(error, isA<NetworkImageLoadException>());
+        expect(fetches, 1);
 
-      current = current.add(const Duration(seconds: 61));
-      await attempt();
-      expect(fetches, 2);
-    });
+        current = current.add(const Duration(seconds: 60));
+        expect(await attempt(), isA<MediaImageCooldownException>());
+        expect(fetches, 1);
+
+        current = current.add(const Duration(seconds: 61));
+        await attempt();
+        expect(fetches, 2);
+      },
+    );
   });
 }
 
