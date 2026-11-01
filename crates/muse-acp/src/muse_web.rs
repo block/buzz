@@ -30,7 +30,10 @@ use tracing::{debug, info, warn};
 
 use crate::auth;
 use crate::chrome::{self, Browser, Tab};
+use crate::dm::{dm_side_chat_title, parse_dm_from_text};
 use crate::driver::{Driver, TurnOutcome};
+use crate::handoff::{self, HandoffGate};
+use crate::mapping::ChannelSideChatMapping;
 use crate::selectors;
 use crate::BridgeError;
 
@@ -47,16 +50,21 @@ const NO_PROGRESS_LIMIT: Duration = Duration::from_secs(120);
 /// a turn, once activity was observed.
 const STABLE_POLLS_TO_FINISH: u32 = 3;
 
-/// Environment override for headed/headless: `0`/`false` forces a visible
-/// window (needed for first-run sign-in), `1`/`true` forces headless.
-const HEADLESS_ENV: &str = "MUSE_ACP_HEADLESS";
-
+/// Headed/headless decision, via the handoff gate (see
+/// [`crate::handoff`]): explicit `MUSE_ACP_HEADLESS` wins, otherwise
+/// headless iff a saved session exists. Routing never influences this.
 fn want_headless() -> bool {
-    match std::env::var(HEADLESS_ENV).ok().as_deref().map(str::trim) {
-        Some("0") | Some("false") | Some("no") => false,
-        Some("1") | Some("true") | Some("yes") => true,
-        _ => auth::has_saved_session(),
-    }
+    handoff::mode_from_env_and_saved_session(auth::has_saved_session())
+        == handoff::HandoffMode::Headless
+}
+
+/// The handoff gate for the current run, for callers that need the
+/// full gate (profile + mode) rather than just the boolean. Kept
+/// separate from routing: this function reads no channel state.
+fn current_handoff_gate() -> Option<HandoffGate> {
+    let profile = auth::profile_dir()?;
+    let mode = handoff::mode_from_env_and_saved_session(auth::has_saved_session());
+    Some(HandoffGate::new(profile, mode))
 }
 
 /// Chat URL override, for the mock-page simulation only. Production
@@ -230,15 +238,20 @@ impl MuseWebDriver {
             .and_then(|map| map.get(session_id).cloned())
     }
 
-    /// Route a tab to the Muse side chat for `channel`, if it is not
-    /// already there. Returns `Ok(true)` when the side chat was clicked,
-    /// `Ok(false)` when no candidate matched (the caller decides
-    /// whether that is a fallback or a failure), and `Err` only on a
-    /// DOM/transport failure.
-    async fn select_side_chat(&self, tab: &Tab, channel: &str) -> Result<bool, BridgeError> {
-        let titles = side_chat_titles_from_env(channel);
+    /// Route a tab to a side chat by explicit title list. Returns the
+    /// same bool as [`Self::select_side_chat`], plus the candidate
+    /// titles the UI showed, so the caller can persist a discovery or
+    /// record a creation (see [`crate::mapping`]) without re-scanning.
+    /// The `log_label` is only for diagnostics (channel name, or a DM
+    /// title); it never changes which titles are tried.
+    async fn select_side_chat_titles(
+        &self,
+        tab: &Tab,
+        titles: &[String],
+        log_label: &str,
+    ) -> Result<(bool, Vec<String>, String), BridgeError> {
         let result = tab
-            .evaluate_json(&selectors::select_chat_js(&titles))
+            .evaluate_json(&selectors::select_chat_js(titles))
             .await?;
         let clicked = result
             .get("clicked")
@@ -259,7 +272,7 @@ impl MuseWebDriver {
             })
             .unwrap_or_default();
         if clicked {
-            info!(channel, matched, "routed Muse tab to side chat");
+            info!(log_label, matched, "routed Muse tab to side chat");
             // The click is a client-side navigation: give the chat a
             // moment to load before the turn's baseline probe runs, so
             // the baseline is the side chat's last message, not the
@@ -271,10 +284,27 @@ impl MuseWebDriver {
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
-            Ok(true)
+            Ok((true, candidates, matched))
         } else {
-            warn!(channel, candidates = ?candidates, "no Muse side chat matched channel; candidates seen in chat list");
-            Ok(false)
+            warn!(log_label, candidates = ?candidates, "no Muse side chat matched; candidates seen in chat list");
+            Ok((false, candidates, String::new()))
+        }
+    }
+
+    /// Persist a channel -> side-chat mapping when a mapping file is
+    /// configured (`MUSE_ACP_SIDE_CHAT_MAP_FILE`). When no file is
+    /// configured, this is a no-op: the driver still resolves in
+    /// memory from `MUSE_ACP_SIDE_CHAT_MAP` and the default titles.
+    fn persist_mapping(&self, channel: &str, candidates: &[String]) {
+        let Some(path) = ChannelSideChatMapping::path_from_env() else {
+            return;
+        };
+        let mut mapping = ChannelSideChatMapping::load_or_empty(&path);
+        let (_, changed) = mapping.get_or_create(channel, candidates);
+        if changed {
+            if let Err(e) = mapping.save(&path) {
+                warn!("could not save side-chat mapping: {e}");
+            }
         }
     }
 
@@ -343,6 +373,12 @@ impl MuseWebDriver {
     }
 
     async fn ensure_session_inner(&self, session_id: &str) -> Result<Tab, BridgeError> {
+        // Handoff gate, separate from routing: a headless run without
+        // a saved session fails here, before any browser launch, with
+        // a clear NotSignedIn — it does not silently start unsigned.
+        if let Some(gate) = current_handoff_gate() {
+            gate.check(auth::has_saved_session())?;
+        }
         if let Some(tab) = self.tab_for(session_id).await {
             return Ok(tab);
         }
@@ -409,6 +445,60 @@ impl MuseWebDriver {
         // exactly the point — the side chat, not a fresh chat, holds the
         // conversation this wake belongs to. Subsequent turns in the
         // same channel skip the click: the tab is already there.
+        //
+        // Thread contract (see [`crate::threading`]): a wake may be
+        // addressed to a thread *in* a channel, not just to the channel.
+        // The thread never changes the side chat — it is per-turn
+        // context carried with the message, and the reply correlation
+        // (reply_to / thread_root) is what Buzz uses to thread the
+        // reply back. A DM wake is the same shape with a DM
+        // conversation instead of a channel.
+        let thread_ctx = crate::threading::parse_thread_from_text(submitted_text);
+        if thread_ctx.is_threaded() {
+            info!(
+                channel = ?thread_ctx.channel,
+                channel_id = ?thread_ctx.channel_id,
+                thread_root = ?thread_ctx.thread_root,
+                reply_to = ?thread_ctx.reply_to,
+                is_dm = thread_ctx.is_dm,
+                "threaded wake: thread context carried, side chat key unchanged"
+            );
+        }
+        // DM wakes first: a DM has no channel name, so its side chat
+        // is deterministic from the DM conversation (see [`crate::dm`]).
+        if let Some(dm_event) = parse_dm_from_text(submitted_text) {
+            let dm_title = dm_side_chat_title(&dm_event.dm_channel_id, &dm_event.sender);
+            let titles = vec![dm_title.clone(), "DM (buzz)".to_string()];
+            let already_selected = self
+                .selected
+                .lock()
+                .ok()
+                .and_then(|map| map.get(session_id).cloned())
+                == Some(dm_title.clone());
+            if !already_selected && side_chat_mode() != SideChatMode::Off {
+                match self.select_side_chat_titles(&tab, &titles, &dm_title).await {
+                    Ok((true, _, _)) => {
+                        if let Ok(mut selected) = self.selected.lock() {
+                            selected.insert(session_id.to_string(), dm_title.clone());
+                        }
+                    }
+                    Ok((false, _, _)) => {
+                        if side_chat_mode() == SideChatMode::Strict {
+                            return Err(BridgeError::WebDom(format!(
+                                "no Muse side chat found for Buzz DM {}; \
+                                 set MUSE_ACP_SIDE_CHAT_MAP to map it, or run with \
+                                 MUSE_ACP_SIDE_CHAT_MODE=auto to fall back to a fresh chat",
+                                dm_event.dm_channel_id
+                            )));
+                        }
+                        // Auto: fresh chat is the creation path for a DM
+                        // with no side chat yet; the DM title is the
+                        // intended title (see mapping docs).
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
         let target_channel =
             parse_channel_from_text(submitted_text).or_else(|| self.stored_channel(session_id));
         if let Some(channel) = target_channel {
@@ -422,13 +512,29 @@ impl MuseWebDriver {
                 .and_then(|map| map.get(session_id).cloned())
                 == Some(channel.clone());
             if !already_selected && side_chat_mode() != SideChatMode::Off {
-                match self.select_side_chat(&tab, &channel).await {
-                    Ok(true) => {
+                let titles = side_chat_titles_from_env(&channel);
+                match self.select_side_chat_titles(&tab, &titles, &channel).await {
+                    Ok((true, candidates, matched)) => {
                         if let Ok(mut selected) = self.selected.lock() {
                             selected.insert(session_id.to_string(), channel.clone());
                         }
+                        // Discovery: persist the title that actually
+                        // matched, so the next wake resolves without a
+                        // fresh DOM scan.
+                        if !matched.is_empty() {
+                            if let Some(path) = ChannelSideChatMapping::path_from_env() {
+                                let mut mapping = ChannelSideChatMapping::load_or_empty(&path);
+                                if mapping.get(&channel) != Some(matched.as_str()) {
+                                    mapping.insert(&channel, &matched);
+                                    if let Err(e) = mapping.save(&path) {
+                                        warn!("could not save side-chat mapping: {e}");
+                                    }
+                                }
+                            }
+                        }
+                        let _ = candidates;
                     }
-                    Ok(false) => {
+                    Ok((false, candidates, _)) => {
                         if side_chat_mode() == SideChatMode::Strict {
                             return Err(BridgeError::WebDom(format!(
                                 "no Muse side chat found for Buzz channel {channel}; \
@@ -438,10 +544,10 @@ impl MuseWebDriver {
                         }
                         // Auto (default): fall through to the tab's
                         // current conversation, which the new-chat step
-                        // already made fresh. The warning in
-                        // select_side_chat carries the candidates, so
-                        // an operator can fix the mapping without the
-                        // channel losing its reply.
+                        // already made fresh — that fresh chat is the
+                        // creation path. Record the deterministic
+                        // mapping so a later wake finds it by title.
+                        self.persist_mapping(&channel, &candidates);
                     }
                     Err(e) => return Err(e),
                 }

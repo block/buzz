@@ -22,9 +22,13 @@
 pub mod acp;
 pub mod auth;
 pub mod chrome;
+pub mod dm;
 pub mod driver;
+pub mod handoff;
+pub mod mapping;
 pub mod muse_web;
 pub mod selectors;
+pub mod threading;
 
 mod error;
 

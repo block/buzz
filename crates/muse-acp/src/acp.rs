@@ -32,6 +32,7 @@ use tracing::{debug, warn};
 
 use crate::driver::{Driver, TurnOutcome};
 use crate::muse_web::{parse_channel_from_session_title, parse_channel_from_text};
+use crate::threading::{parse_thread_from_text, ThreadContext};
 use crate::BridgeError;
 
 const PROTOCOL_VERSION: u64 = 2;
@@ -67,6 +68,14 @@ struct SessionState {
     /// side-chat routing in the driver; it never alters the message
     /// sent to Muse.
     target_channel: Option<String>,
+    /// Thread context for this session's current wake, when known.
+    /// A session reused across threads must route to *this* wake's
+    /// thread, not the first one it ever saw — so the prompt text's
+    /// thread context overwrites this on every turn, exactly as the
+    /// channel does. The thread never changes the side-chat key; it
+    /// is the correlation context for the reply (see
+    /// [`crate::threading`]).
+    target_thread: Option<ThreadContext>,
     /// Whether the standing prompt was already prepended to a turn. It is
     /// sent only on the first turn: the tab holds the conversation after
     /// that, and repeating the framing every turn would spam Muse with
@@ -211,12 +220,23 @@ async fn handle_request<D>(
                 debug!("mcpServers are not forwarded: Muse web has its own tools");
             }
             let target_channel = extract_session_channel(&params);
+            // Thread context from session/new, when present: the
+            // standing prompt's thread lines. The session title's
+            // 8-char thread prefix is only a hint (see threading
+            // docs) and is never recorded as a thread root; the
+            // per-turn prompt supplies the full root.
+            let mut target_thread = params
+                .get("systemPrompt")
+                .and_then(|s| s.as_str())
+                .map(parse_thread_from_text)
+                .filter(|ctx| ctx.is_threaded() || ctx.channel.is_some());
             let session_id = uuid::Uuid::new_v4().to_string();
             sessions.lock().await.insert(
                 session_id.clone(),
                 SessionState {
                     system_prompt,
                     target_channel: target_channel.clone(),
+                    target_thread: target_thread.take(),
                     system_prompt_sent: false,
                     cancel: Arc::new(AtomicBool::new(false)),
                     in_flight: false,
@@ -263,9 +283,15 @@ async fn handle_request<D>(
             // A wake's own prompt text carries its channel, and it wins
             // over the session/new value: a session reused across
             // channels must route to the channel of this wake, not the
-            // first one it ever saw.
+            // first one it ever saw. The same holds for its thread:
+            // a session reused across threads in the same channel
+            // must correlate to this wake's thread, not the first one.
             if let Some(channel) = parse_channel_from_text(&prompt_text) {
                 session.target_channel = Some(channel);
+            }
+            let prompt_thread = parse_thread_from_text(&prompt_text);
+            if prompt_thread.is_threaded() || prompt_thread.channel.is_some() {
+                session.target_thread = Some(prompt_thread);
             }
             let target_channel = session.target_channel.clone();
             let (message, _sent_system) = compose_message(
