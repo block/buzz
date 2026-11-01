@@ -227,6 +227,13 @@ mod tests {
         assert_eq!(agent_budget_channel(&event(9, &[])), None);
         let target = "0".repeat(64);
         assert_eq!(agent_budget_channel(&event(5, &[["e", &target]])), None);
+        // Ingest stores a reaction or a targeted deletion in its target's
+        // channel, but admission runs first and charges the channel the event
+        // claims. Its owner budget still bounds what it can spend.
+        for kind in [7, 5] {
+            let claimed = event(kind, &[["e", &target], h]);
+            assert_eq!(agent_budget_channel(&claimed), Some(channel), "kind {kind}");
+        }
         assert_eq!(agent_budget_channel(&event(0, &[h])), None, "profile");
         assert_eq!(
             agent_budget_channel(&event(9, &[["h", "not-a-uuid"], h])),

@@ -78,6 +78,11 @@ that the event claims:
   spends the owner budget, and ingest refuses events for channels that the
   agent cannot write to. Invented channels therefore cannot exceed the owner
   budget.
+- Reactions (kind 7) and deletions (kind 5) that target an event are the
+  exception. Ingest stores them in the target's channel and ignores their
+  `h` tag. An agent that changes the `h` tag on each one is charged to a
+  different per-channel budget each time. These events can therefore reach
+  one real channel at up to the owner budget, but never more.
 - Edits, votes, and NIP-AR artifacts (kind 45010) carry the `h` tag of their
   channel, and are charged to that channel.
 - An event without a channel shares one more per-channel-sized budget for the
