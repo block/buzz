@@ -81,6 +81,9 @@ class ReadStateManager {
   Completer<void>? _publishCompleter;
   bool _remoteUnsupported = false;
   int _maxFetchedCreatedAt = 0;
+  // When the last successful history fetch was sent. A later fetch and the
+  // live subscription ask only for blobs stored since then.
+  int? _lastFetchSentAt;
   final Map<String, int> _contextSourceCreatedAt = {};
   final Set<String> _pendingSyncedAdvances = {};
 
@@ -274,6 +277,7 @@ class ReadStateManager {
   }
 
   Future<bool> _fetchAndMerge() async {
+    final sentAt = currentUnixSeconds();
     try {
       final events = await _relaySession!.fetchHistory(
         NostrFilter(
@@ -282,11 +286,15 @@ class ReadStateManager {
           tags: const {
             '#t': ['read-state'],
           },
-          since: currentUnixSeconds() - readStateHorizonSeconds,
+          since: max(
+            sentAt - readStateHorizonSeconds,
+            _storedSinceLastFetch ?? 0,
+          ),
           limit: readStateFetchLimit,
         ),
       );
       _mergeEvents(events);
+      _lastFetchSentAt = sentAt;
       _persistLocalState();
       _onChanged();
       return true;
@@ -364,6 +372,16 @@ class ReadStateManager {
     return changed;
   }
 
+  /// The earliest `created_at` a blob stored since the last successful fetch
+  /// was sent can carry, or null before one. Merging takes the newest mark per
+  /// context, so blobs from before it add nothing. The relay rejects a
+  /// `created_at` more than 900s from its clock;
+  /// [relayLiveWindowSkewSeconds] adds 60s of client clock skew.
+  int? get _storedSinceLastFetch {
+    final sentAt = _lastFetchSentAt;
+    return sentAt == null ? null : sentAt - relayLiveWindowSkewSeconds;
+  }
+
   Future<bool> _startLiveSubscription() async {
     try {
       final unsub = await _relaySession!.subscribe(
@@ -373,6 +391,8 @@ class ReadStateManager {
           tags: const {
             '#t': ['read-state'],
           },
+          // The fetch just merged everything stored before this.
+          since: _storedSinceLastFetch,
           limit: readStateFetchLimit,
         ),
         _handleIncomingEvent,
