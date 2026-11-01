@@ -44,7 +44,9 @@ export function buildPrefixPattern(
       prefix === "@" ? mentionLabelPattern(name) : escapeRegExp(name),
     )
     .join("|");
-  const boundary = "(?=[\\s,;.!?:)\\]}]|$)";
+  // A possessive still mentions the person, so the apostrophe closes a
+  // mention. Straight and curly U+2019 (macOS) must match hasMention.
+  const boundary = "(?=[\\s,;.!?:)\\]}'\\u2019]|$)";
   return new RegExp(`${escapedPrefix}(?:${nameAlternatives})${boundary}`, "gi");
 }
 
