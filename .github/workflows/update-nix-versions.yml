@@ -1,0 +1,92 @@
+name: Update Nix Versions
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+
+permissions:
+  contents: read
+
+jobs:
+  update-versions:
+    if: github.repository == 'block/buzz'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Extract version from tag
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Invalid version '$VERSION' from tag '$TAG'"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Update buzzVersion in versions.nix
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          sed -i 's/^  buzzVersion = ".*";$/  buzzVersion = "'"$VERSION"'";/' nix/versions.nix
+          echo "Updated buzzVersion to $VERSION"
+          grep 'buzzVersion' nix/versions.nix
+
+      - name: Create release tagger token
+        id: release-tagger
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.BUZZ_RELEASE_TAGGER_CLIENT_ID }}
+          private-key: ${{ secrets.BUZZ_RELEASE_TAGGER_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Check for existing PR
+        id: existing
+        env:
+          GH_TOKEN: ${{ steps.release-tagger.outputs.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          PR_TITLE="chore(nix): update versions.nix to $VERSION"
+          EXISTING=$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --head update-nix-versions/v"$VERSION" \
+            --json number,title \
+            --jq '.[].number' 2>/dev/null)
+          if [ -n "$EXISTING" ]; then
+            echo "PR #$EXISTING already exists for v$VERSION — skipping"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create pull request
+        if: steps.existing.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ steps.release-tagger.outputs.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          BRANCH="update-nix-versions/v${VERSION}"
+          git config user.name "buzz-release-bot"
+          git config user.email "buzz-release-bot@block.xyz"
+          git checkout -b "$BRANCH"
+          git add nix/versions.nix
+          git commit -s -m "chore(nix): update versions.nix to ${VERSION}"
+          git push origin "$BRANCH"
+          gh pr create \
+            --repo "$GITHUB_REPOSITORY" \
+            --base main \
+            --head "$BRANCH" \
+            --title "chore(nix): update versions.nix to ${VERSION}" \
+            --body "Automated update of \`nix/versions.nix\` triggered by the \`v${VERSION}\` release tag.
+
+- Updates \`buzzVersion\` to \`${VERSION}\`
+- Dependency hashes are unchanged; regenerate with \`nix build\` if lockfiles changed."
