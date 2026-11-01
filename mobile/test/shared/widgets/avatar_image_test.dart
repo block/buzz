@@ -328,21 +328,30 @@ void main() {
         expect(find.text('M'), findsNothing);
         expect(MediaImageProvider.debugCooldownUrls, isEmpty);
 
-        // Another host's 404 keeps its cooldown, even at a path shaped like
-        // a relay thumbnail.
-        final elsewhere =
-            'https://elsewhere.example/media/${'56' * 32}.thumb.jpg';
+        // A profile URL that is itself thumbnail-shaped, on another host or
+        // this relay, is not a fallback MediaImage chose: its 404 keeps the
+        // cooldown, so showing it again does not request it again.
         respond = (_) async => http.Response('', 404);
-        await show(
-          tester,
-          AvatarImage(
-            imageUrl: elsewhere,
-            radius: 16,
-            fallback: const Text('E'),
-          ),
-        );
-        expect(find.text('E'), findsOneWidget);
-        expect(MediaImageProvider.debugCooldownUrls, [elsewhere]);
+        for (final (i, thumbShaped) in [
+          'https://elsewhere.example/media/${'56' * 32}.thumb.jpg',
+          '$relay/media/${'78' * 32}.thumb.jpg',
+        ].indexed) {
+          MediaImageProvider.debugResetCooldowns();
+          for (final radius in [16.0, 17.0]) {
+            await show(
+              tester,
+              AvatarImage(
+                key: ValueKey((i, radius)),
+                imageUrl: thumbShaped,
+                radius: radius,
+                fallback: const Text('E'),
+              ),
+            );
+            expect(find.text('E'), findsOneWidget);
+          }
+          expect(requested.where((url) => url == thumbShaped), hasLength(1));
+          expect(MediaImageProvider.debugCooldownUrls, [thumbShaped]);
+        }
       },
     );
 

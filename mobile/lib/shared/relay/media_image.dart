@@ -45,6 +45,13 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   /// Excluded from equality because it is a side effect, not cache identity.
   final ValueChanged<Uint8List>? onBytesLoaded;
 
+  /// Set when [url] is a thumbnail [MediaImage] chose in place of an
+  /// original: its 404 then records a missing thumbnail, so later builds load
+  /// the original, rather than a failure cooldown. Any other 404, including a
+  /// profile URL that is itself a thumbnail, keeps the cooldown. Excluded from
+  /// equality: it changes how a failure is handled, not the bytes.
+  final bool isThumbnailFallback;
+
   /// Excluded from equality: transport, not identity.
   final http.Client client;
 
@@ -62,6 +69,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     required this.auth,
     required this.client,
     this.onBytesLoaded,
+    this.isThumbnailFallback = false,
     this.scale = 1.0,
     this.stallTimeout = const Duration(seconds: 20),
     this.maxFetchDuration = const Duration(minutes: 5),
@@ -240,9 +248,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       }
       rethrow;
     }
-    if (response.statusCode == 404 &&
-        auth.isRelayMediaUrl(url) &&
-        _relayThumbnailPath.hasMatch(uri.path)) {
+    if (response.statusCode == 404 && isThumbnailFallback) {
       // Older or externally populated media may have no generated thumbnail.
       // Record that here rather than in a widget's error builder: the widget
       // that asked may be gone by the time a slow 404 arrives, and a
@@ -393,7 +399,6 @@ class MediaImageCooldownException implements Exception {
 }
 
 final _relayBlobPath = RegExp(r'^/media/([0-9a-f]{64})(?:\.[a-z0-9]{1,8})?$');
-final _relayThumbnailPath = RegExp(r'^/media/[0-9a-f]{64}\.thumb\.jpg$');
 
 /// The relay's generated thumbnail for a relay-hosted image, or null when
 /// [url] is not one. Every image uploaded to a relay gets a JPEG thumbnail at
@@ -479,11 +484,15 @@ class MediaImage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final auth = ref.watch(mediaGetAuthServiceProvider);
     final client = ref.watch(mediaHttpClientProvider);
-    MediaImageProvider providerFor(String source) => MediaImageProvider(
+    MediaImageProvider providerFor(
+      String source, {
+      bool isThumbnailFallback = false,
+    }) => MediaImageProvider(
       url: source,
       auth: auth,
       client: client,
       onBytesLoaded: onBytesLoaded,
+      isThumbnailFallback: isThumbnailFallback,
     );
 
     if (decodeWidth != null) {
@@ -507,7 +516,7 @@ class MediaImage extends ConsumerWidget {
             : candidate;
         if (thumbnail == null) return _image(providerFor(url), cacheWidth);
         return _image(
-          providerFor(thumbnail),
+          providerFor(thumbnail, isThumbnailFallback: true),
           cacheWidth,
           errorBuilder: (context, error, stackTrace) {
             if (error is! NetworkImageLoadException ||
