@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   buildTranscriptDisplayBlocks,
+  deriveTranscriptBlockIds,
   flattenDisplayBlocks,
   formatTurnSetupLabel,
   getDisplayBlockKey,
@@ -1872,4 +1873,59 @@ test("getDisplayBlockKey_firstTurnReorder_keysStableAcrossReorder", () => {
     fullKeys,
     "block key identities must be identical before and after session_resolved seals the open batch (order may differ)",
   );
+});
+
+test("deriveTranscriptBlockIds returns block keys in reverse chronological order (newest first)", () => {
+  const events = [
+    {
+      seq: 1,
+      timestamp: "2026-07-08T00:00:01.000Z",
+      kind: "acp_read",
+      agentIndex: 0,
+      channelId: "chan-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      payload: {
+        method: "session/update",
+        params: {
+          sessionId: "sess-1",
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "call-1",
+            toolName: "tool-1",
+            status: "completed",
+            args: "{}",
+            result: "ok",
+          },
+        },
+      },
+    },
+    {
+      seq: 2,
+      timestamp: "2026-07-08T00:00:02.000Z",
+      kind: "acp_read",
+      agentIndex: 0,
+      channelId: "chan-1",
+      sessionId: "sess-1",
+      turnId: "turn-2",
+      payload: {
+        method: "session/update",
+        params: {
+          sessionId: "sess-1",
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "call-2",
+            toolName: "tool-2",
+            status: "completed",
+            args: "{}",
+            result: "ok",
+          },
+        },
+      },
+    },
+  ];
+
+  const ids = deriveTranscriptBlockIds(events);
+  // Turn 2 (newest) must come before Turn 1 (oldest) in reverse activity order
+  assert.deepEqual(ids, ["turn:turn-2", "turn:turn-1"]);
 });
