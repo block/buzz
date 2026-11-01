@@ -1,4 +1,5 @@
-//! Per-agent text-to-speech choices for one local huddle session.
+//! Per-agent text-to-speech choices for a local huddle session. A voice chosen
+//! for an agent is saved, so it applies again in that agent's later huddles.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -9,8 +10,8 @@ use crate::app_state::AppState;
 
 use super::{
     tts_settings::{
-        pocket_voice_reference, resolve_voice_for_backend_in_registry, voice_registry,
-        VoiceRegistryEntry, POCKET_BACKEND_ID,
+        pocket_voice_reference, remember_agent_voice, resolve_voice_for_backend_in_registry,
+        voice_registry, VoiceRegistryEntry, POCKET_BACKEND_ID,
     },
     HuddlePhase, HuddleState,
 };
@@ -23,6 +24,7 @@ pub struct AgentVoiceSettings {
 
 struct AgentVoiceCatalog {
     default_voice_key: String,
+    saved_voices: BTreeMap<String, String>,
     voices: Vec<VoiceRegistryEntry>,
 }
 
@@ -50,6 +52,7 @@ fn catalog(app: &AppHandle, state: &AppState) -> Result<AgentVoiceCatalog, Strin
     .key;
     Ok(AgentVoiceCatalog {
         default_voice_key,
+        saved_voices: settings.agent_voices,
         voices,
     })
 }
@@ -66,6 +69,7 @@ pub(crate) fn sync_agent_voice_assignments(
     huddle: &mut HuddleState,
     agent_pubkeys: &[String],
     default_voice_key: &str,
+    saved_voices: &BTreeMap<String, String>,
     voices: &[VoiceRegistryEntry],
 ) -> bool {
     let previous = huddle.agent_voice_settings.clone();
@@ -81,6 +85,25 @@ pub(crate) fn sync_agent_voice_assignments(
         .values()
         .map(|settings| settings.voice_key.clone())
         .collect();
+    // Saved voices go first, so no other agent is given one by chance.
+    for pubkey in agent_pubkeys {
+        if huddle.agent_voice_settings.contains_key(pubkey) {
+            continue;
+        }
+        if let Some(voice_key) = saved_voices
+            .get(pubkey)
+            .filter(|key| available.contains(*key))
+        {
+            used.insert(voice_key.clone());
+            huddle.agent_voice_settings.insert(
+                pubkey.clone(),
+                AgentVoiceSettings {
+                    enabled: true,
+                    voice_key: voice_key.clone(),
+                },
+            );
+        }
+    }
     for (index, pubkey) in agent_pubkeys.iter().enumerate() {
         if huddle.agent_voice_settings.contains_key(pubkey) {
             continue;
@@ -141,7 +164,13 @@ fn ensure_with_catalog(
             agents.push(pubkey.to_owned());
         }
     }
-    sync_agent_voice_assignments(huddle, &agents, &catalog.default_voice_key, &catalog.voices)
+    sync_agent_voice_assignments(
+        huddle,
+        &agents,
+        &catalog.default_voice_key,
+        &catalog.saved_voices,
+        &catalog.voices,
+    )
 }
 
 fn require_active_huddle(huddle: &HuddleState) -> Result<(), String> {
@@ -194,7 +223,7 @@ pub fn set_huddle_agent_tts_enabled(
 }
 
 #[tauri::command]
-pub fn set_huddle_agent_voice(
+pub async fn set_huddle_agent_voice(
     agent_pubkey: String,
     voice_key: String,
     app: AppHandle,
@@ -212,10 +241,15 @@ pub fn set_huddle_agent_voice(
             .agent_voice_settings
             .get_mut(&agent_pubkey)
             .ok_or("Agent is not in the active huddle")?;
-        settings.voice_key = voice_key;
+        settings.voice_key = voice_key.clone();
         settings.clone()
     };
     state.emit_huddle_state_changed();
+    // The choice already applies to this huddle, so a failed save only costs
+    // the next one.
+    if let Err(error) = remember_agent_voice(&agent_pubkey, &voice_key, &app, &state).await {
+        eprintln!("buzz-desktop: could not save the agent's voice: {error}");
+    }
     Ok(settings)
 }
 
@@ -261,6 +295,7 @@ mod tests {
             &mut huddle,
             &agents,
             "pocket:vera",
+            &BTreeMap::new(),
             &bundled_voice_registry(),
         ));
 
@@ -281,7 +316,13 @@ mod tests {
         let agents = vec!["first".to_owned(), "second".to_owned()];
         let voices = bundled_voice_registry();
         let mut huddle = HuddleState::default();
-        sync_agent_voice_assignments(&mut huddle, &agents, "pocket:mary", &voices);
+        sync_agent_voice_assignments(
+            &mut huddle,
+            &agents,
+            "pocket:mary",
+            &BTreeMap::new(),
+            &voices,
+        );
         huddle
             .agent_voice_settings
             .get_mut("second")
@@ -297,6 +338,7 @@ mod tests {
             &mut huddle,
             &agents,
             "pocket:mary",
+            &BTreeMap::new(),
             &voices,
         ));
         assert_eq!(
@@ -305,6 +347,93 @@ mod tests {
                 enabled: false,
                 voice_key: "pocket:jane".into(),
             }
+        );
+    }
+
+    fn saved(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
+        entries
+            .iter()
+            .map(|(pubkey, voice)| ((*pubkey).to_owned(), (*voice).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn saved_voices_apply_in_every_new_huddle() {
+        let agents = vec!["first".to_owned(), "second".to_owned()];
+        let voices = bundled_voice_registry();
+        let saved = saved(&[("first", "pocket:jane"), ("second", "pocket:vera")]);
+
+        for huddle_generation in [1, 2] {
+            let mut huddle = HuddleState {
+                huddle_generation,
+                ..HuddleState::default()
+            };
+            sync_agent_voice_assignments(&mut huddle, &agents, "pocket:mary", &saved, &voices);
+
+            assert_eq!(
+                huddle.agent_voice_settings["first"].voice_key,
+                "pocket:jane"
+            );
+            assert_eq!(
+                huddle.agent_voice_settings["second"].voice_key,
+                "pocket:vera"
+            );
+        }
+    }
+
+    #[test]
+    fn other_agents_are_not_given_a_saved_voice() {
+        let agents = vec!["first".to_owned(), "second".to_owned()];
+        let voices = bundled_voice_registry();
+        let saved = saved(&[("second", "pocket:mary")]);
+        let mut huddle = HuddleState::default();
+
+        sync_agent_voice_assignments(&mut huddle, &agents, "pocket:mary", &saved, &voices);
+
+        assert_eq!(
+            huddle.agent_voice_settings["second"].voice_key,
+            "pocket:mary"
+        );
+        assert_ne!(
+            huddle.agent_voice_settings["first"].voice_key,
+            "pocket:mary"
+        );
+    }
+
+    #[test]
+    fn a_deleted_saved_voice_falls_back_to_an_assigned_voice() {
+        let agents = vec!["first".to_owned()];
+        let voices = bundled_voice_registry();
+        let saved = saved(&[("first", "pocket:imported:gone")]);
+        let mut huddle = HuddleState::default();
+
+        sync_agent_voice_assignments(&mut huddle, &agents, "pocket:mary", &saved, &voices);
+
+        assert_eq!(
+            huddle.agent_voice_settings["first"].voice_key,
+            "pocket:mary"
+        );
+    }
+
+    #[test]
+    fn a_session_choice_outranks_the_saved_voice() {
+        let agents = vec!["first".to_owned()];
+        let voices = bundled_voice_registry();
+        let saved = saved(&[("first", "pocket:vera")]);
+        let mut huddle = HuddleState::default();
+        huddle.agent_voice_settings.insert(
+            "first".to_owned(),
+            AgentVoiceSettings {
+                enabled: true,
+                voice_key: "pocket:jane".into(),
+            },
+        );
+
+        sync_agent_voice_assignments(&mut huddle, &agents, "pocket:mary", &saved, &voices);
+
+        assert_eq!(
+            huddle.agent_voice_settings["first"].voice_key,
+            "pocket:jane"
         );
     }
 }
