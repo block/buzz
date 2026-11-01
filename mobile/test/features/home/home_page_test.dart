@@ -10,6 +10,7 @@ import 'package:buzz/features/home/home_page.dart';
 import 'package:buzz/features/home/messages_filters.dart';
 import 'package:buzz/features/home/messages_navigation_bar.dart';
 import 'package:buzz/shared/widgets/ios_message_create_button.dart';
+import 'package:buzz/shared/widgets/expanding_menu_button.dart';
 import 'package:buzz/features/search/search_page.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/foundation.dart';
@@ -208,58 +209,65 @@ void main() {
     },
   );
 
-  for (final reduced in [false, true]) {
-    testWidgets('New opens creation actions with reduced motion $reduced', (
-      tester,
-    ) async {
-      ValueNotifier<VoidCallback?>? chat;
-      var created = 0;
-      await tester.pumpWidget(
-        await buildHome(
-          disableAnimations: reduced,
-          onNewChatAction: (value) => chat = value,
-        ),
+  for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    for (final reduced in [false, true]) {
+      testWidgets(
+        'New opens creation actions on $platform with reduced motion $reduced',
+        (tester) async {
+          debugDefaultTargetPlatformOverride = platform;
+          addTearDown(() => debugDefaultTargetPlatformOverride = null);
+          ValueNotifier<VoidCallback?>? chat;
+          var created = 0;
+          await tester.pumpWidget(
+            await buildHome(
+              disableAnimations: reduced,
+              onNewChatAction: (value) => chat = value,
+            ),
+          );
+          await tester.pumpAndSettle();
+          chat!.value = () => created++;
+          await tester.pumpAndSettle();
+          final controlsBounds = tester.getRect(
+            find.byType(MessagesNavigationBar),
+          );
+          await tester.tap(find.byTooltip('New'));
+          await tester.pumpAndSettle();
+          expect(find.text('New workspace'), findsOneWidget);
+          final menuBounds = tester.getRect(
+            find
+                .ancestor(
+                  of: find.text('New workspace'),
+                  matching: find.byType(Material),
+                )
+                .first,
+          );
+          expect(menuBounds.left, closeTo(controlsBounds.left, .01));
+          expect(menuBounds.right, closeTo(controlsBounds.right, .01));
+          expect(menuBounds.bottom, closeTo(controlsBounds.bottom, .01));
+          expect(
+            tester.getTopLeft(find.text('Solo').last).dy,
+            lessThan(tester.getTopLeft(find.text('New chat')).dy),
+          );
+          expect(
+            tester.getTopLeft(find.text('Team').last).dy,
+            greaterThan(tester.getBottomLeft(find.text('New workspace')).dy),
+          );
+          expect(
+            tester.getTopLeft(find.text('Team').last).dy,
+            lessThan(tester.getTopLeft(find.text('New DM')).dy),
+          );
+          expect(find.text('New DM'), findsOneWidget);
+          expect(find.text('New channel'), findsOneWidget);
+          await tester.tap(find.text('New chat'));
+          await tester.pumpAndSettle();
+          expect(created, 1);
+        },
       );
-      await tester.pumpAndSettle();
-      chat!.value = () => created++;
-      await tester.pumpAndSettle();
-      final controlsBounds = tester.getRect(find.byType(MessagesNavigationBar));
-      await tester.tap(find.byTooltip('New'));
-      await tester.pumpAndSettle();
-      expect(find.text('New workspace'), findsOneWidget);
-      final menuBounds = tester.getRect(
-        find
-            .ancestor(
-              of: find.text('New workspace'),
-              matching: find.byType(Material),
-            )
-            .first,
-      );
-      expect(menuBounds.left, closeTo(controlsBounds.left, .01));
-      expect(menuBounds.right, closeTo(controlsBounds.right, .01));
-      expect(menuBounds.bottom, closeTo(controlsBounds.bottom, .01));
-      expect(
-        tester.getTopLeft(find.text('Solo').last).dy,
-        lessThan(tester.getTopLeft(find.text('New chat')).dy),
-      );
-      expect(
-        tester.getTopLeft(find.text('Team').last).dy,
-        greaterThan(tester.getBottomLeft(find.text('New workspace')).dy),
-      );
-      expect(
-        tester.getTopLeft(find.text('Team').last).dy,
-        lessThan(tester.getTopLeft(find.text('New DM')).dy),
-      );
-      expect(find.text('New DM'), findsOneWidget);
-      expect(find.text('New channel'), findsOneWidget);
-      await tester.tap(find.text('New chat'));
-      await tester.pumpAndSettle();
-      expect(created, 1);
-    });
+    }
   }
 
   testWidgets(
-    'iOS shows Messages above filters with the native creation menu',
+    'iOS shows Messages above filters with the expanding creation menu',
     (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
@@ -274,11 +282,7 @@ void main() {
       expect(bar.bottomHeight, greaterThan(0));
       expect(
         tester
-            .widget<IosMessageCreateButton>(
-              find.byWidgetPredicate(
-                (w) => w is IosMessageCreateButton && w.label == 'New',
-              ),
-            )
+            .widget<ExpandingMenuButton>(find.byType(ExpandingMenuButton))
             .actions
             .map((a) => a.label),
         ['New chat', 'New workspace', 'New DM', 'New channel'],

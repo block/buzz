@@ -1,14 +1,12 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/theme/buzz_icons.dart';
 import '../../shared/widgets/navigation_button_surface.dart';
-import '../../shared/widgets/android_expanding_menu_button.dart';
-import '../../shared/widgets/ios_message_create_button.dart';
+import '../../shared/widgets/expanding_menu_button.dart';
 
 /// Separate glass shortcuts for search and creation.
 class MessagesNavigationBar extends StatelessWidget {
@@ -43,25 +41,12 @@ class MessagesNavigationBar extends StatelessWidget {
           ),
         ),
         const SizedBox(width: Grid.xs),
-        if (defaultTargetPlatform == TargetPlatform.iOS)
-          IosMessageCreateButton(
-            actions: creationActions,
-            dividerBefore: const {2},
-            sectionTitles: const {0: 'Solo', 2: 'Team'},
-            label: 'New',
-            showIconWithLabel: true,
-            accessibilityLabel: 'New',
-            width: 112,
-            height: 56,
-            plain: false,
-          )
-        else
-          AndroidExpandingMenuButton(
-            expansionBoundsContext: controlsContext,
-            actions: creationActions,
-            dividerBefore: const {2},
-            sectionTitles: const {0: 'Solo', 2: 'Team'},
-          ),
+        ExpandingMenuButton(
+          expansionBoundsContext: controlsContext,
+          actions: creationActions,
+          dividerBefore: const {2},
+          sectionTitles: const {0: 'Solo', 2: 'Team'},
+        ),
         const SizedBox(width: Grid.xs),
         agent,
       ],

@@ -1,4 +1,4 @@
-import '../../shared/widgets/android_expanding_menu_button.dart';
+import '../../shared/widgets/expanding_menu_button.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -137,7 +137,7 @@ class HomePage extends HookConsumerWidget {
                     height: 44,
                     plain: false,
                   )
-                : AndroidExpandingMenuButton(
+                : ExpandingMenuButton(
                     label: 'Community menu',
                     actions: moreActions,
                     dividerBefore: const {1},

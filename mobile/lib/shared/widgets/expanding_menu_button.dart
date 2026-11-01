@@ -10,9 +10,9 @@ import '../theme/theme.dart';
 import '../theme/buzz_icons.dart';
 import 'navigation_button_surface.dart';
 
-/// Expands an Android shortcut into a rounded, translucent action menu.
-class AndroidExpandingMenuButton extends HookWidget {
-  const AndroidExpandingMenuButton({
+/// Expands a navigation shortcut into a rounded, translucent action menu.
+class ExpandingMenuButton extends HookWidget {
+  const ExpandingMenuButton({
     required this.actions,
     this.label = 'New',
     this.expansionBoundsContext,
