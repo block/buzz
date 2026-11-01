@@ -30,6 +30,10 @@ import '../../../shared/widgets/frosted_app_bar.dart';
 import '../../../shared/widgets/frosted_scaffold.dart';
 import '../../../shared/widgets/buzz_loading_indicator.dart';
 import '../../../shared/widgets/modal_presentation.dart';
+import '../../../shared/me/default_agent.dart';
+import '../compose_bar.dart';
+import '../send_message_provider.dart';
+import 'me_assistant_picker.dart';
 import '../channel.dart';
 import '../channel_detail_page.dart';
 import '../channel_management_provider.dart';
@@ -38,6 +42,7 @@ import '../channels_provider.dart';
 part 'me_page_helpers.dart';
 part 'me_empty_state.dart';
 part 'new_me_chat.dart';
+part 'ready_me_chat.dart';
 part 'native_new_me_chat.dart';
 part 'new_me_project.dart';
 

@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'package:buzz/shared/me/default_agent.dart';
+import 'package:buzz/features/channels/compose_bar.dart';
 import 'dart:convert';
 
 import 'package:buzz/features/channels/channel.dart';
@@ -60,6 +62,20 @@ class _Relay extends RelaySessionNotifier {
 }
 
 void main() {
+  setUp(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('buzz/media_upload'),
+          (call) async => false,
+        );
+  });
+  tearDown(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('buzz/media_upload'),
+          null,
+        );
+  });
   for (final recoverExisting in [false, true]) {
     testWidgets(
       recoverExisting
@@ -186,6 +202,10 @@ void main() {
         await tester.pumpWidget(
           ProviderScope(
             overrides: [
+              savedPrefsProvider.overrideWithValue(prefs),
+              defaultAgentProvider.overrideWith(
+                (ref) => Stream.value(agent.public),
+              ),
               meSyncProvider.overrideWithValue(sync),
               relaySessionProvider.overrideWith(() => relay),
               meGroupsProvider.overrideWith(
@@ -264,6 +284,22 @@ void main() {
           expect(tester.widget<IconButton>(row).onPressed, isNull);
           semantics.dispose();
           await tester.tap(find.text('Retry'));
+        } else if (!recoverExisting) {
+          expect(forms, 0);
+          expect(find.byType(ComposeBar), findsOneWidget);
+          directory.complete([
+            AgentDirectoryEntry(
+              pubkey: agent.public,
+              displayName: 'Owned agent',
+            ),
+          ]);
+          await tester.pumpAndSettle();
+          unawaited(
+            tester
+                .widget<ComposeBar>(find.byType(ComposeBar))
+                .onSend('Mobile Solo', [])
+                .catchError((Object _) {}),
+          );
         } else {
           expect(
             forms,
@@ -296,12 +332,12 @@ void main() {
           attempts < 100 && relay.submitted.isEmpty;
           attempts++
         ) {
-          await tester.pumpAndSettle();
+          await tester.pump();
           await tester.runAsync(
             () => Future<void>.delayed(const Duration(milliseconds: 50)),
           );
         }
-        await tester.pumpAndSettle();
+        await tester.pump();
         final command = relay.submitted.single;
         if (recoverExisting) {
           expect(relay.submitted.where((event) => event.kind == 9007), isEmpty);

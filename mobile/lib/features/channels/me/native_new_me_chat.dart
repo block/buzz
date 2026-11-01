@@ -40,12 +40,18 @@ Future<(Channel, String)?> _showNewMeChat(
   if (defaultTargetPlatform == TargetPlatform.iOS) {
     final sync = ref.read(meSyncProvider);
     final pending = MeChatCreation.pending(sync);
-    final id = pending?.id ?? const Uuid().v4();
-    String name = pending?.name ?? '';
-    String? assistant = pending?.agent;
-    String? project = pending?.project;
-    String? error = pending == null ? null : 'Resume your unfinished chat.';
-    var retry = pending != null;
+    if (pending == null) {
+      return Navigator.of(context).push<(Channel, String)>(
+        MaterialPageRoute(builder: (_) => const _ReadyMeChat()),
+      );
+    }
+
+    final id = pending.id;
+    String name = pending.name;
+    String? assistant = pending.agent;
+    String? project = pending.project;
+    String? error = 'Resume your unfinished chat.';
+    var retry = true;
     while (context.mounted) {
       sync.check();
       final directory = ref.read(meAssistantsProvider).asData?.value;

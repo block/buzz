@@ -25,6 +25,7 @@ import '../../shared/me/me_sync.dart';
 import '../../shared/me/me_search_placement.dart';
 import 'me/me_assistant_picker.dart';
 import 'me/me_chat_assistant.dart';
+import 'me/me_workspace_picker.dart';
 import 'me/me_messages_provider.dart';
 import '../../shared/huddle/huddle.dart';
 import '../../shared/identity_names/identity_names.dart';
@@ -309,6 +310,12 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       channelId: channel.id,
       initial: initialAssistant,
       messages: messagesState.value ?? const [],
+    );
+    final workspace = useMeWorkspacePicker(
+      context,
+      ref,
+      channelId: channel.id,
+      enabled: personalChat,
     );
     final mePlacement = personalChat ? ref.watch(meGroupsProvider) : null;
     final detailsAsync = ref.watch(channelDetailsProvider(channel.id));
@@ -734,8 +741,9 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
         },
         onNativeTitlePressed: openChannelDetails,
         nativeActions: [
+          if (personalChat) assistant.nativeAction,
           if (personalChat)
-            assistant.nativeAction
+            workspace.nativeAction
           else if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)
             _huddleNavigationAction(context, ref, resolvedChannel, [
               ...messagesState.value ?? const [],
@@ -754,8 +762,9 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
           onTap: openChannelDetails,
         ),
         actions: [
+          if (personalChat) assistant.action,
           if (personalChat)
-            assistant.action
+            workspace.action
           else if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)
             _HuddleButton(
               channel: resolvedChannel,

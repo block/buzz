@@ -1,4 +1,6 @@
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/compose_bar.dart';
+import 'package:buzz/shared/me/default_agent.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/me/me_page.dart';
@@ -88,6 +90,8 @@ void main() {
         await tester.pumpWidget(
           ProviderScope(
             overrides: [
+              savedPrefsProvider.overrideWithValue(prefs),
+              defaultAgentProvider.overrideWith((ref) => Stream.value('agent')),
               meSyncProvider.overrideWith((ref) => sync),
               meGroupsProvider.overrideWith(
                 (ref) => Stream.value(const MeGroups()),
@@ -119,6 +123,19 @@ void main() {
             .firstWhere((a) => a.label == 'New chat')
             .onPressed!();
         await tester.pumpAndSettle();
+        final draftBar = tester
+            .widgetList<FrostedAppBar>(find.byType(FrostedAppBar))
+            .last;
+        // The first send, rather than a setup form, commits the creation intent.
+        expect(draftBar.nativeTitle, 'New chat');
+        final send = tester.widget<ComposeBar>(find.byType(ComposeBar)).onSend;
+        if (disconnect) {
+          relay.beforeRead = () {
+            expectSync(MeChatCreation.pending(sync)?.name, 'Saved chat');
+            sync.disposed = true;
+          };
+        }
+        await expectLater(send('Saved chat', []), throwsA(isA<StateError>()));
         final saved = MeChatCreation.pending(
           MeSync(relay, config, prefs: prefs),
         );
@@ -129,12 +146,12 @@ void main() {
         );
         expect(saved!.name, 'Saved chat');
         expect(saved.agent, 'agent');
-        expect(saved.project, 'mobile');
+        expect(saved.project, isNull);
         expect(
           prefs.getString(MeChatCreation.storageKey(sync)),
           isNot(contains('Saved chat')),
         );
-        expect(relay.reads, disconnect ? 0 : 1);
+        expect(relay.reads, 1);
       },
       variant: TargetPlatformVariant.only(TargetPlatform.iOS),
     );

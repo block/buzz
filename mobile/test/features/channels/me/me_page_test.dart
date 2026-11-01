@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'package:buzz/features/channels/compose_bar.dart';
+import 'package:buzz/shared/me/default_agent.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:buzz/shared/me/me_chat_creation.dart';
 import 'package:flutter/foundation.dart';
@@ -68,12 +70,18 @@ class LabeledChannels extends ChannelsNotifier {
 }
 
 void main() {
+  late SharedPreferences testPrefs;
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    testPrefs = await SharedPreferences.getInstance();
+  });
   testWidgets('label-only desktop chats appear in projects and unfiled chats', (
     tester,
   ) async {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          savedPrefsProvider.overrideWithValue(testPrefs),
           myPubkeyProvider.overrideWithValue('owner'),
           channelsProvider.overrideWith(LabeledChannels.new),
           meGroupsProvider.overrideWith(
@@ -112,6 +120,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          savedPrefsProvider.overrideWithValue(testPrefs),
           meGroupsProvider.overrideWith(
             (ref) => Stream.value(const MeGroups()),
           ),
@@ -141,6 +150,7 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
+            savedPrefsProvider.overrideWithValue(testPrefs),
             meGroupsProvider.overrideWith((ref) => updates.stream),
             channelsProvider.overrideWith(FakeChannels.new),
           ],
@@ -222,6 +232,7 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
+            savedPrefsProvider.overrideWithValue(testPrefs),
             meGroupsProvider.overrideWith(
               (ref) => Stream.value(
                 const MeGroups(
@@ -236,6 +247,7 @@ void main() {
               ),
             ),
             meSyncProvider.overrideWithValue(sync),
+            defaultAgentProvider.overrideWith((ref) => Stream.value('agent')),
             channelsProvider.overrideWith(FakeChannels.new),
             meAssistantsProvider.overrideWith(
               (ref) async => const [
@@ -297,96 +309,104 @@ void main() {
     },
   );
 
-  testWidgets('iOS new chat uses the native profile form with project choices', (
-    tester,
-  ) async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-    addTearDown(() => debugDefaultTargetPlatformOverride = null);
-    const channel = MethodChannel('buzz/profile_text_editor');
-    final calls = <MethodCall>[];
-    var directoryLoads = 0;
-    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
-      call,
-    ) async {
-      calls.add(call);
-      return null;
-    });
-    addTearDown(
-      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        channel,
-        null,
-      ),
-    );
-    final sync = MeSync(
-      RelaySessionNotifier(),
-      RelayConfig(
-        baseUrl: 'https://relay.test',
-        nsec: nostr.Nip19.encode(
-          prefix: nostr.Nip19Prefix.nsec,
-          data:
-              '0000000000000000000000000000000000000000000000000000000000000001',
+  testWidgets(
+    'iOS new chat opens a ready composer with Bestie and workspace menu',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      const channel = MethodChannel('buzz/profile_text_editor');
+      final calls = <MethodCall>[];
+      var directoryLoads = 0;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+        call,
+      ) async {
+        calls.add(call);
+        return null;
+      });
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          channel,
+          null,
         ),
-      ),
-    );
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          meGroupsProvider.overrideWith(
-            (ref) => Stream.value(
-              const MeGroups(
-                groups: [
-                  {
-                    'id': 'mobile',
-                    'name': 'Mobile app',
-                    'defaultTemplateId': '',
-                  },
-                ],
+      );
+      final sync = MeSync(
+        RelaySessionNotifier(),
+        RelayConfig(
+          baseUrl: 'https://relay.test',
+          nsec: nostr.Nip19.encode(
+            prefix: nostr.Nip19Prefix.nsec,
+            data:
+                '0000000000000000000000000000000000000000000000000000000000000001',
+          ),
+        ),
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            savedPrefsProvider.overrideWithValue(testPrefs),
+            meGroupsProvider.overrideWith(
+              (ref) => Stream.value(
+                const MeGroups(
+                  groups: [
+                    {
+                      'id': 'mobile',
+                      'name': 'Mobile app',
+                      'defaultTemplateId': '',
+                    },
+                  ],
+                ),
               ),
             ),
-          ),
-          meSyncProvider.overrideWithValue(sync),
-          channelsProvider.overrideWith(FakeChannels.new),
-          meAssistantsProvider.overrideWith((ref) async {
-            directoryLoads++;
-            return const [
-              AgentDirectoryEntry(pubkey: 'agent', displayName: 'Owner Name'),
-            ];
-          }),
-          userCacheProvider.overrideWith(_ConfusableProfiles.new),
-        ],
-        child: MaterialApp(theme: AppTheme.light(), home: const MePage()),
-      ),
-    );
-    await tester.pumpAndSettle();
+            meSyncProvider.overrideWithValue(sync),
+            defaultAgentProvider.overrideWith((ref) => Stream.value('agent')),
+            channelsProvider.overrideWith(FakeChannels.new),
+            meAssistantsProvider.overrideWith((ref) async {
+              directoryLoads++;
+              return const [
+                AgentDirectoryEntry(pubkey: 'agent', displayName: 'Owner Name'),
+              ];
+            }),
+            userCacheProvider.overrideWith(_ConfusableProfiles.new),
+          ],
+          child: MaterialApp(theme: AppTheme.light(), home: const MePage()),
+        ),
+      );
+      await tester.pumpAndSettle();
 
-    final bar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar));
-    bar.nativeActions!
-        .firstWhere((action) => action.label == 'New chat')
-        .onPressed!();
-    await tester.pumpAndSettle();
-    expect(directoryLoads, 1);
-    expect(calls, hasLength(1));
-    expect(calls.single.method, 'presentChat');
-    final args = calls.single.arguments as Map;
-    expect(args['title'], 'New chat');
-    expect(args['placeholder'], 'Chat name');
-    expect(args['assistants'], [
-      {
-        'id': 'agent',
-        'name': 'Owner Name',
-        'artworkScale': '1',
-        'avatarUrl': '',
-      },
-    ]);
-    expect(args['projects'], [
-      {'id': 'mobile', 'name': 'Mobile app'},
-    ]);
-    expect(args['selectedProject'], isNull);
-    expect(args['containerCornerRadius'], Radii.container);
-    expect(find.byType(BottomSheet), findsNothing);
-    await tester.pumpWidget(const SizedBox.shrink());
-    debugDefaultTargetPlatformOverride = null;
-  });
+      final bar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar));
+      bar.nativeActions!
+          .firstWhere((action) => action.label == 'New chat')
+          .onPressed!();
+      await tester.pumpAndSettle();
+      expect(directoryLoads, 1);
+      expect(calls, isEmpty);
+      expect(find.byType(BottomSheet), findsNothing);
+      expect(find.byType(ComposeBar), findsOneWidget);
+      expect(find.byKey(const ValueKey('new-session-name')), findsNothing);
+      final chatBar = tester
+          .widgetList<FrostedAppBar>(find.byType(FrostedAppBar))
+          .last;
+      final agentAction = chatBar.nativeActions!.first;
+      expect(agentAction.label, 'Agent: Owner Name');
+      expect(agentAction.sharesBackground, isFalse);
+      final workspaceAction = chatBar.nativeActions!.last;
+      expect(workspaceAction.label, 'Workspace: Chats');
+      expect(workspaceAction.sharesBackground, isFalse);
+      workspaceAction.children.last.onPressed!();
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widgetList<FrostedAppBar>(find.byType(FrostedAppBar))
+            .last
+            .nativeActions!
+            .last
+            .label,
+        'Workspace: Mobile app',
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
 
   for (final resume in [true, false]) {
     testWidgets('iOS new chat recovers a durable creation: resume=$resume', (
@@ -437,10 +457,12 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
+            savedPrefsProvider.overrideWithValue(testPrefs),
             meGroupsProvider.overrideWith(
               (ref) => Stream.value(const MeGroups()),
             ),
             meSyncProvider.overrideWithValue(restarted),
+            defaultAgentProvider.overrideWith((ref) => Stream.value('agent')),
             channelsProvider.overrideWith(FakeChannels.new),
             meAssistantsProvider.overrideWith((ref) async {
               directoryLoads++;
@@ -460,6 +482,14 @@ void main() {
       await tester.tap(find.text(resume ? 'Resume' : 'Discard setup'));
       await tester.pumpAndSettle();
       expect(directoryLoads, 1);
+      if (!resume) {
+        expect(calls, isEmpty);
+        expect(find.byType(ComposeBar), findsOneWidget);
+        expect(MeChatCreation.pending(restarted), isNull);
+        await tester.pumpWidget(const SizedBox.shrink());
+        debugDefaultTargetPlatformOverride = null;
+        return;
+      }
       expect(calls, hasLength(1));
       expect(calls.single.method, 'presentChat');
       final args = calls.single.arguments as Map;
@@ -488,6 +518,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          savedPrefsProvider.overrideWithValue(testPrefs),
           meGroupsProvider.overrideWith(
             (ref) => Stream<MeGroups>.error(StateError('offline')),
           ),
