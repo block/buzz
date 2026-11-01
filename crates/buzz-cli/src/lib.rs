@@ -649,6 +649,15 @@ pub enum ChannelsCmd {
         #[arg(long)]
         limit: Option<u32>,
     },
+    /// Mark channels read up to their newest top-level message
+    #[command(
+        after_help = "Examples:\n  buzz channels mark-read --channel <uuid>\n  buzz channels mark-read --channel <uuid> --channel <uuid>\n\nOutput: {event_id, accepted, published, message, channels: [{channel, cleared, advanced, marker, reason?}]}. Publishes one frontier-only NIP-RS slot owned by the CLI (id saved in <config dir>/buzz/read-state-cli.json); never lowers a marker and never writes manual-unread overrides. A channel whose manual mark-unread stays live is reported `cleared: false, reason: override`. Exits 4 when any channel is not cleared or a read-state slot cannot be read; nothing is published then for an unreadable slot."
+    )]
+    MarkRead {
+        /// Channel UUID to mark read (repeatable, at most 200)
+        #[arg(long, required = true)]
+        channel: Vec<String>,
+    },
     /// Get details for a single channel
     Get {
         /// Channel UUID
@@ -2563,6 +2572,7 @@ mod tests {
                 "join",
                 "leave",
                 "list",
+                "mark-read",
                 "members",
                 "purpose",
                 "remove-member",
@@ -2682,7 +2692,7 @@ mod tests {
         let expected: Vec<(&str, usize)> = vec![
             ("agents", 5),
             ("canvas", 4),
-            ("channels", 17),
+            ("channels", 18),
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
