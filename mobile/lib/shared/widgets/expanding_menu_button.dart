@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:math' as math;
-import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -9,6 +8,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import '../theme/theme.dart';
 import '../theme/buzz_icons.dart';
 import 'navigation_button_surface.dart';
+import 'expanding_menu_surface.dart';
 
 /// Expands a navigation shortcut into a rounded, translucent action menu.
 class ExpandingMenuButton extends HookWidget {
@@ -226,168 +226,157 @@ class _CreateMenuRoute extends PopupRoute<int> {
                 ),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(Radii.navigationCapsule),
-                  child: BackdropFilter(
-                    filter: ImageFilter.blur(sigmaX: 16 * t, sigmaY: 16 * t),
-                    child: Material(
-                      color: context.controlSurface.withValues(
-                        alpha: 1 - .12 * t,
-                      ),
-                      child: Stack(
-                        children: [
-                          Positioned.fill(
-                            child: IgnorePointer(
-                              child: Opacity(
-                                opacity: (1 - t * 4).clamp(0.0, 1.0),
-                                child: Center(child: trigger),
-                              ),
+                  child: ExpandingMenuSurface(
+                    progress: t,
+                    child: Stack(
+                      children: [
+                        Positioned.fill(
+                          child: IgnorePointer(
+                            child: Opacity(
+                              opacity: (1 - t * 4).clamp(0.0, 1.0),
+                              child: Center(child: trigger),
                             ),
                           ),
-                          Positioned.fill(
-                            child: OverflowBox(
-                              alignment: expandDown
-                                  ? Alignment.topCenter
-                                  : Alignment.bottomCenter,
-                              minWidth: width,
-                              maxWidth: width,
-                              minHeight: height,
-                              maxHeight: height,
-                              child: Opacity(
-                                opacity: contentOpacity,
-                                child: Semantics(
-                                  scopesRoute: true,
-                                  namesRoute: true,
-                                  label: label,
-                                  explicitChildNodes: true,
-                                  child: SingleChildScrollView(
-                                    padding: const EdgeInsets.symmetric(
-                                      vertical: Grid.xxs,
-                                    ),
-                                    child: Column(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        for (
-                                          var i = 0;
-                                          i < actions.length;
-                                          i++
-                                        ) ...[
-                                          if (dividerBefore.contains(i))
-                                            const Divider(height: 1),
-                                          if (sectionTitles[i]
-                                              case final title?)
-                                            SizedBox(
-                                              height: sectionHeight,
-                                              child: Padding(
-                                                padding:
-                                                    const EdgeInsets.symmetric(
-                                                      horizontal: Grid.gutter,
-                                                    ),
-                                                child: Align(
-                                                  alignment:
-                                                      Alignment.centerLeft,
-                                                  child: Semantics(
-                                                    header: true,
-                                                    child: Text(
-                                                      title,
-                                                      style: TextStyle(
-                                                        fontSize: 12,
-                                                        color: context
-                                                            .colors
-                                                            .onSurfaceVariant,
-                                                      ),
+                        ),
+                        Positioned.fill(
+                          child: OverflowBox(
+                            alignment: expandDown
+                                ? Alignment.topCenter
+                                : Alignment.bottomCenter,
+                            minWidth: width,
+                            maxWidth: width,
+                            minHeight: height,
+                            maxHeight: height,
+                            child: Opacity(
+                              opacity: contentOpacity,
+                              child: Semantics(
+                                scopesRoute: true,
+                                namesRoute: true,
+                                label: label,
+                                explicitChildNodes: true,
+                                child: SingleChildScrollView(
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: Grid.xxs,
+                                  ),
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      for (
+                                        var i = 0;
+                                        i < actions.length;
+                                        i++
+                                      ) ...[
+                                        if (dividerBefore.contains(i))
+                                          const Divider(height: 1),
+                                        if (sectionTitles[i] case final title?)
+                                          SizedBox(
+                                            height: sectionHeight,
+                                            child: Padding(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                    horizontal: Grid.gutter,
+                                                  ),
+                                              child: Align(
+                                                alignment: Alignment.centerLeft,
+                                                child: Semantics(
+                                                  header: true,
+                                                  child: Text(
+                                                    title,
+                                                    style: TextStyle(
+                                                      fontSize: 12,
+                                                      color: context
+                                                          .colors
+                                                          .onSurfaceVariant,
                                                     ),
                                                   ),
                                                 ),
                                               ),
                                             ),
-                                          SizedBox(
-                                            height: rowHeight,
-                                            child: InkWell(
-                                              onTap:
-                                                  actions[i].onPressed == null
-                                                  ? null
-                                                  : () => Navigator.of(
-                                                      context,
-                                                    ).pop(i),
-                                              child: Padding(
-                                                padding:
-                                                    const EdgeInsets.symmetric(
-                                                      horizontal: Grid.gutter,
-                                                    ),
-                                                child: Row(
-                                                  children: [
-                                                    Icon(switch (actions[i]
-                                                        .symbol) {
-                                                      '' => null,
-                                                      'checkmark' =>
-                                                        BuzzIcons.check,
-                                                      'star' =>
-                                                        Icons.star_border,
-                                                      'info.circle' =>
-                                                        Icons.info_outline,
-                                                      'desktopcomputer' =>
-                                                        Icons
-                                                            .desktop_windows_outlined,
-                                                      'square.and.pencil' =>
-                                                        BuzzIcons.edit,
-                                                      'workspace' =>
-                                                        BuzzIcons.workspace,
-                                                      'folder.badge.plus' =>
-                                                        BuzzIcons.folderPlus,
-                                                      'bubble.left' =>
-                                                        BuzzIcons.messageSquare,
-                                                      'number' =>
-                                                        BuzzIcons.hash,
-                                                      'arrow.left.arrow.right' =>
-                                                        BuzzIcons
-                                                            .arrowLeftRight,
-                                                      'person.badge.plus' =>
-                                                        BuzzIcons.userPlus,
-                                                      'circle.lefthalf.filled' =>
-                                                        BuzzIcons.sunMoon,
-                                                      'person.2' =>
-                                                        BuzzIcons.users,
-                                                      'gearshape' =>
-                                                        BuzzIcons.settings,
-                                                      _ => BuzzIcons.plus,
-                                                    }, size: 22),
-                                                    const SizedBox(
-                                                      width: Grid.sm,
-                                                    ),
-                                                    Expanded(
-                                                      child: Text(
-                                                        actions[i].label,
-                                                        style: TextStyle(
-                                                          color:
-                                                              actions[i]
-                                                                      .onPressed ==
-                                                                  null
-                                                              ? context
-                                                                    .colors
-                                                                    .onSurface
-                                                                    .withValues(
-                                                                      alpha: .4,
-                                                                    )
-                                                              : context
-                                                                    .colors
-                                                                    .onSurface,
-                                                        ),
+                                          ),
+                                        SizedBox(
+                                          height: rowHeight,
+                                          child: InkWell(
+                                            onTap: actions[i].onPressed == null
+                                                ? null
+                                                : () => Navigator.of(
+                                                    context,
+                                                  ).pop(i),
+                                            child: Padding(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                    horizontal: Grid.gutter,
+                                                  ),
+                                              child: Row(
+                                                children: [
+                                                  Icon(switch (actions[i]
+                                                      .symbol) {
+                                                    '' => null,
+                                                    'checkmark' =>
+                                                      BuzzIcons.check,
+                                                    'star' => Icons.star_border,
+                                                    'info.circle' =>
+                                                      Icons.info_outline,
+                                                    'desktopcomputer' =>
+                                                      Icons
+                                                          .desktop_windows_outlined,
+                                                    'square.and.pencil' =>
+                                                      BuzzIcons.edit,
+                                                    'workspace' =>
+                                                      BuzzIcons.workspace,
+                                                    'folder.badge.plus' =>
+                                                      BuzzIcons.folderPlus,
+                                                    'bubble.left' =>
+                                                      BuzzIcons.messageSquare,
+                                                    'number' => BuzzIcons.hash,
+                                                    'arrow.left.arrow.right' =>
+                                                      BuzzIcons.arrowLeftRight,
+                                                    'person.badge.plus' =>
+                                                      BuzzIcons.userPlus,
+                                                    'circle.lefthalf.filled' =>
+                                                      BuzzIcons.sunMoon,
+                                                    'person.2' =>
+                                                      BuzzIcons.users,
+                                                    'gearshape' =>
+                                                      BuzzIcons.settings,
+                                                    _ => BuzzIcons.plus,
+                                                  }, size: 22),
+                                                  const SizedBox(
+                                                    width: Grid.sm,
+                                                  ),
+                                                  Expanded(
+                                                    child: Text(
+                                                      actions[i].label,
+                                                      style: TextStyle(
+                                                        color:
+                                                            actions[i]
+                                                                    .onPressed ==
+                                                                null
+                                                            ? context
+                                                                  .colors
+                                                                  .onSurface
+                                                                  .withValues(
+                                                                    alpha: .4,
+                                                                  )
+                                                            : context
+                                                                  .colors
+                                                                  .onSurface,
                                                       ),
                                                     ),
-                                                  ],
-                                                ),
+                                                  ),
+                                                ],
                                               ),
                                             ),
                                           ),
-                                        ],
+                                        ),
                                       ],
-                                    ),
+                                    ],
                                   ),
                                 ),
                               ),
                             ),
                           ),
-                        ],
-                      ),
+                        ),
+                      ],
                     ),
                   ),
                 ),

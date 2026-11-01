@@ -11,6 +11,8 @@ import 'package:buzz/features/home/messages_filters.dart';
 import 'package:buzz/features/home/messages_navigation_bar.dart';
 import 'package:buzz/shared/widgets/ios_message_create_button.dart';
 import 'package:buzz/shared/widgets/expanding_menu_button.dart';
+import 'package:buzz/shared/widgets/expanding_menu_surface.dart';
+import 'package:buzz/shared/widgets/concentric_sheet_surface.dart';
 import 'package:buzz/features/search/search_page.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/foundation.dart';
@@ -235,6 +237,29 @@ void main() {
           await tester.tap(find.byTooltip('New'));
           await tester.pumpAndSettle();
           expect(find.text('New workspace'), findsOneWidget);
+          if (platform == TargetPlatform.iOS) {
+            final glass = tester.widget<ConcentricSheetSurface>(
+              find.descendant(
+                of: find.byType(ExpandingMenuSurface),
+                matching: find.byType(ConcentricSheetSurface),
+              ),
+            );
+            expect(glass.usesGlass, isTrue);
+            expect(glass.providesSheetSurface, isFalse);
+            expect(
+              tester
+                  .widget<Material>(
+                    find
+                        .descendant(
+                          of: find.byType(ExpandingMenuSurface),
+                          matching: find.byType(Material),
+                        )
+                        .last,
+                  )
+                  .type,
+              MaterialType.transparency,
+            );
+          }
           final menuBounds = tester.getRect(
             find
                 .ancestor(
