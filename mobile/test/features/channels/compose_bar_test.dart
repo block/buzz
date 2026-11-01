@@ -1952,6 +1952,33 @@ void main() {
         expect(tester.getSize(popover()).height, height);
       });
 
+      testWidgets(
+        'a short landscape view keeps the reserved chooser on screen',
+        (tester) async {
+          tester.view.devicePixelRatio = 1;
+          tester.view.physicalSize = const Size(844, 390);
+          tester.view.viewInsets = const FakeViewPadding(bottom: 170);
+          addTearDown(tester.view.reset);
+          await pumpMembers(tester, ['Sam']);
+          await tester.enterText(find.byType(TextField), '@S');
+          await tester.pump();
+
+          // The search is still running, so the chooser reserves its height,
+          // but no more than fits above the composer.
+          expect(
+            find.byKey(const ValueKey('mention-search-progress')),
+            findsOneWidget,
+          );
+          final sam = tester.getRect(find.widgetWithText(ListTile, 'Sam'));
+          expect(sam.top, greaterThanOrEqualTo(0));
+          expect(tester.getRect(popover()).top, greaterThanOrEqualTo(0));
+          await tester.tap(find.text('Sam'));
+          await tester.pump();
+          expect(find.textContaining('@Sam'), findsWidgets);
+          await settleSearch(tester);
+        },
+      );
+
       testWidgets('the chooser shows at most three rows, then scrolls', (
         tester,
       ) async {
