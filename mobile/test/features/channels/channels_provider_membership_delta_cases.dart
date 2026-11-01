@@ -41,16 +41,17 @@ void _membershipDeltaCases() {
       unorderedEquals([_channelA, _channelB, channelC, _channelD]),
     );
 
-    // B: removed. C: deleted. D: removed, then added back. E: joined.
+    // B: removed. C: deleted. D: removed, then added back, with the roster
+    // stamped by a relay clock behind the database's. E: joined.
     session.memberships = [
       _membership(_channelA, myPk, createdAt: 100),
-      _membership(_channelD, myPk, createdAt: 9700),
-      _membership(channelE, myPk, createdAt: 9800),
+      _membership(_channelD, myPk, createdAt: 10200),
+      _membership(channelE, myPk, createdAt: 10300),
     ];
     removed = [
-      {'channelId': _channelB, 'at': 9500, 'reason': 'removed'},
-      {'channelId': channelC, 'at': 9600, 'reason': 'deleted'},
-      {'channelId': _channelD, 'at': 9650, 'reason': 'removed'},
+      {'channelId': _channelB, 'at': 10100, 'reason': 'removed'},
+      {'channelId': channelC, 'at': 10150, 'reason': 'deleted'},
+      {'channelId': _channelD, 'at': 10250, 'reason': 'removed'},
     ];
     asOf = 10500;
     await container.read(channelsProvider.notifier).refresh();
@@ -64,7 +65,12 @@ void _membershipDeltaCases() {
       unorderedEquals([_channelA, _channelD, channelE]),
     );
 
-    // The next read starts from the new relay clock.
+    // The next read starts from the new relay clock. D's removal is still in
+    // its window, but D's roster was read after it.
+    session.memberships = [
+      _membership(_channelA, myPk, createdAt: 100),
+      _membership(channelE, myPk, createdAt: 10300),
+    ];
     await container.read(channelsProvider.notifier).refresh();
     expect(session.membershipQueryFilters.last.since, 10500 - 960);
     expect(
@@ -88,8 +94,8 @@ void _membershipDeltaCases() {
     expect(legacy.membershipQueryFilters.map((f) => f.since).toSet(), {null});
     expect(listedIds(legacyContainer), [_channelA]);
 
-    // Too many changes (413) costs only that read its shortcut: the anchor
-    // for the full read, which asks from now, still succeeds.
+    // Too many changes (413) costs only that read its shortcut: the rosters
+    // are read in full, and the anchor, which asks from now, still succeeds.
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     var tooMany = false;
     final session = _FakeRelaySession(
@@ -115,7 +121,7 @@ void _membershipDeltaCases() {
     await container.read(channelsProvider.notifier).refresh();
     expect(
       session.membershipQueryFilters.skip(before).map((f) => f.since).toSet(),
-      {now - 960, null},
+      {null},
     );
     expect(listedIds(container), [_channelB]);
 
@@ -127,5 +133,21 @@ void _membershipDeltaCases() {
       {now - 960},
     );
     expect(listedIds(container), [_channelB]);
+
+    // A relay clock far in the future is not trusted as a checkpoint.
+    final ahead = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk, createdAt: 100)],
+      metadata: [_meta(id: _channelA, name: 'a')],
+    );
+    ahead.membershipRemovals = (_) => {
+      'asOf': now + 3600,
+      'removed': const <Object>[],
+    };
+    final aheadContainer = _buildContainer(session: ahead);
+    addTearDown(aheadContainer.dispose);
+    await aheadContainer.read(channelsProvider.future);
+    await aheadContainer.read(channelsProvider.notifier).refresh();
+    expect(ahead.membershipQueryFilters.map((f) => f.since).toSet(), {null});
+    expect(listedIds(aheadContainer), [_channelA]);
   });
 }

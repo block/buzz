@@ -12,11 +12,19 @@ class _MembershipCache {
   final String scope;
 
   /// The latest kind:39002 roster tagging the reader, by channel id.
-  final Map<String, NostrEvent> rosters;
+  final Map<String, _CachedRoster> rosters;
 
   /// The relay's clock, in unix seconds, when the read's removal check ran.
   final int asOf;
 }
+
+/// A cached roster and the removal-clock time it is known current at.
+///
+/// The roster was read after a removed read answered with [currentAt], so
+/// it outranks any removal at or before then. Removal times come from the
+/// relay's database clock and roster `created_at` from its process clock, so
+/// the two are never compared with each other.
+typedef _CachedRoster = ({NostrEvent roster, int currentAt});
 
 /// A membership read: the rosters to list, and the cache to keep once the
 /// list built from them is installed. A null cache keeps none.
@@ -58,45 +66,37 @@ extension _MembershipDelta on ChannelsNotifier {
     final cached = _membershipCache;
     if (cached != null && cached.scope == fence.scope) {
       final since = max(0, cached.asOf - relayLiveWindowSkewSeconds);
-      final removalsRequest = _fetchMembershipRemovals(session, relay, since);
-      final changedRequest = _fetchChannelMemberships(
-        session,
-        myPk,
-        since: since,
-      );
-      await Future.wait(eagerError: true, [removalsRequest, changedRequest]);
-      final removals = await removalsRequest;
+      // Removals first: a roster read after them is current, so it outranks
+      // every removal they report.
+      final removals = await _fetchMembershipRemovals(session, relay, since);
       if (removals != null) {
         final rosters = _mergeRosters(
           cached.rosters,
-          await changedRequest,
-          removals.removedAt,
+          await _fetchChannelMemberships(session, myPk, since: since),
+          removals,
         );
         return (
-          rosters: rosters.values.toList(),
+          rosters: [for (final entry in rosters.values) entry.roster],
           cache: _MembershipCache(fence.scope, rosters, removals.asOf),
         );
       }
     }
     // The removed read anchors the next read to the relay's clock. Its
-    // answer is otherwise unused: the full read is authoritative. A failed
-    // anchor only costs the next read its shortcut.
-    final anchorRequest = _fetchMembershipRemovals(
+    // answer is otherwise unused: the full read after it is authoritative.
+    // A failed anchor only costs the next read its shortcut.
+    final anchor = await _fetchMembershipRemovals(
       session,
       relay,
       DateTime.now().millisecondsSinceEpoch ~/ 1000,
     ).catchError((Object _) => null);
-    final fullRequest = _fetchChannelMemberships(session, myPk);
-    await Future.wait(eagerError: true, [anchorRequest, fullRequest]);
-    final anchor = await anchorRequest;
-    final rosters = await fullRequest;
+    final rosters = await _fetchChannelMemberships(session, myPk);
     return (
       rosters: rosters,
       cache: anchor == null
           ? null
           : _MembershipCache(
               fence.scope,
-              _mergeRosters(const {}, rosters, const {}),
+              _mergeRosters(const {}, rosters, anchor),
               anchor.asOf,
             ),
     );
@@ -146,6 +146,12 @@ _MembershipRemovals _parseMembershipRemovals(Object? decoded) {
   final asOf = decoded['asOf'];
   final removed = decoded['removed'];
   if (asOf is! int || removed is! List) throw bad;
+  // A relay clock far ahead would start every later read past changes made
+  // once it is corrected.
+  final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+  if (asOf > now + relayLiveWindowSkewSeconds) {
+    throw const FormatException('Removed-memberships clock is in the future');
+  }
   final removedAt = <String, int>{};
   for (final row in removed) {
     if (row is! Map<String, dynamic>) throw bad;
@@ -157,19 +163,35 @@ _MembershipRemovals _parseMembershipRemovals(Object? decoded) {
   return (asOf: asOf, removedAt: removedAt);
 }
 
-/// Applies [changed] rosters over [cached] ones by channel id, newest first,
-/// then drops each channel whose roster is no newer than its removal.
+/// Applies [changed] rosters, read after [removals], over [cached] ones by
+/// channel id, then drops each cached channel removed since its roster was
+/// known current.
 ///
-/// A roster newer than the removal means the reader was added back.
-Map<String, NostrEvent> _mergeRosters(
-  Map<String, NostrEvent> cached,
+/// A changed roster was read after every removal reported, so it is kept:
+/// the reader was added back.
+Map<String, _CachedRoster> _mergeRosters(
+  Map<String, _CachedRoster> cached,
   List<NostrEvent> changed,
-  Map<String, int> removedAt,
-) => {
-  for (final roster in _latestChannelEvents([
-    ...cached.values,
-    ...changed,
-  ], kind: 39002))
-    if (roster.getTagValue('d') case final id?)
-      if (roster.createdAt > (removedAt[id] ?? -1)) id: roster,
-};
+  _MembershipRemovals removals,
+) {
+  // Both times are whole seconds, so a removal in the same second as
+  // [_CachedRoster.currentAt] may have come after the roster was read. It is
+  // taken as a removal: a re-added roster is returned again while the
+  // removal is still in the read window, and then outranks it.
+  final rosters = {
+    for (final MapEntry(:key, :value) in cached.entries)
+      if (value.currentAt > (removals.removedAt[key] ?? -1)) key: value,
+  };
+  for (final roster in _latestChannelEvents(changed, kind: 39002)) {
+    final id = roster.getTagValue('d');
+    if (id == null) continue;
+    final previous = rosters[id]?.roster;
+    rosters[id] = (
+      roster: previous != null && previous.createdAt > roster.createdAt
+          ? previous
+          : roster,
+      currentAt: removals.asOf,
+    );
+  }
+  return rosters;
+}
