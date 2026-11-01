@@ -193,6 +193,49 @@ test.describe("Pocket voice settings", () => {
     expect(audioCommands).toEqual([]);
   });
 
+  test("switches to Deutsch and selects Victoria without touching Pocket", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      ttsSettings: {
+        version: 1,
+        agentTextToSpeech: true,
+        voicePreferences: ["pocket:mary"],
+        speechLanguage: "en",
+      },
+    });
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await openSettings(page, "voice");
+
+    await expect(page.getByTestId("pocket-voice-controls")).toBeVisible();
+    await page.getByTestId("speech-language-selector").click();
+    await page.getByRole("menuitemradio", { name: "Deutsch" }).click();
+    await expect(page.getByTestId("speech-language-selector")).toContainText(
+      "Deutsch",
+    );
+    await expect(page.getByText("Kroko", { exact: true })).toBeVisible();
+    await expect(page.getByText("Kokoro", { exact: true })).toBeVisible();
+    await expect(page.getByTestId("pocket-voice-controls")).toBeHidden();
+
+    await page.getByTestId("german-voice-selector").click();
+    await page.getByRole("menuitemradio", { name: "Victoria" }).click();
+    await expect(page.getByTestId("german-voice-selector")).toContainText(
+      "Victoria",
+    );
+
+    const commands = await page.evaluate(() =>
+      (window.__BUZZ_E2E_COMMAND_LOG__ ?? [])
+        .filter((entry) =>
+          ["set_speech_language", "set_german_voice"].includes(entry.command),
+        )
+        .map((entry) => ({ command: entry.command, payload: entry.payload })),
+    );
+    expect(commands).toEqual([
+      { command: "set_speech_language", payload: { language: "de" } },
+      { command: "set_german_voice", payload: { voiceKey: "kokoro:de_victoria" } },
+    ]);
+  });
+
   test("surfaces invalid or unsupported WAV errors without changing selection", async ({
     page,
   }) => {
