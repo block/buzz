@@ -346,6 +346,11 @@ run_unit_tests() {
   run_test_step "buzz-relay Git transport Off-mode precedence tests" \
     cargo test -p buzz-relay --lib api::git::transport::off_mode_precedence_tests:: -- --nocapture
 
+  # Includes the opt-in live-MinIO ::probe tests, which skip without
+  # BUZZ_GIT_S3_PROBE=1.
+  run_test_step "buzz-relay Git object-store and conformance-probe tests" \
+    cargo test -p buzz-relay --lib api::git::store:: -- --nocapture
+
   run_test_step "buzz-relay NIP-FI upgrade tests" \
     cargo test -p buzz-relay --lib nip_fi_upgrade:: -- --nocapture
 

@@ -45,6 +45,11 @@ pub const DEFAULT_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 pub const DEFAULT_GOSSIP_INTERVAL: Duration = Duration::from_secs(2);
 /// Bound on queued control-stream frames per peer before backpressure.
 const CONTROL_QUEUE_DEPTH: usize = 64;
+/// Bound on one outbound connect attempt. Without it a dial to a dead
+/// address (a stale ready record left by a crashed pod) waits out QUIC's
+/// 30s idle timeout. Peers are in-cluster, so a live handshake takes
+/// milliseconds.
+pub const DIAL_TIMEOUT: Duration = Duration::from_secs(2);
 
 struct PeerEntry {
     peer: MeshPeer,
@@ -361,9 +366,14 @@ async fn reconcile_once(inner: &Arc<Inner>) {
 
     let candidates = dial_candidates(inner);
     metrics::gauge!(telemetry::RECONCILE_CANDIDATES).set(candidates.len() as f64);
-    for runtime_id in candidates {
-        dial_peer(inner, runtime_id).await;
-    }
+    // Dial concurrently so one unreachable peer cannot delay the rest. The
+    // candidate set is bounded by the membership table.
+    futures_util::future::join_all(
+        candidates
+            .into_iter()
+            .map(|runtime_id| dial_peer(inner, runtime_id)),
+    )
+    .await;
     metrics::histogram!(telemetry::RECONCILE_PASS_SECONDS).record(started.elapsed().as_secs_f64());
 }
 
@@ -384,8 +394,8 @@ fn dial_candidates(inner: &Inner) -> Vec<RuntimeId> {
         .collect()
 }
 
-/// Dial `runtime_id`'s addresses in turn. Each dial can take a minute against
-/// a dead runtime, so before every attempt this re-reads the record and stops
+/// Dial `runtime_id`'s addresses in turn. Each attempt is capped at
+/// `DIAL_TIMEOUT`, and before every attempt this re-reads the record and stops
 /// once it has expired or started draining, or a connection has landed
 /// (inbound accept, or a tie-break).
 async fn dial_peer(inner: &Arc<Inner>, runtime_id: RuntimeId) {
@@ -413,7 +423,13 @@ async fn dial_peer(inner: &Arc<Inner>, runtime_id: RuntimeId) {
             }
         };
         let started = Instant::now();
-        let result = inner.endpoint.connect(endpoint_addr).await;
+        let result =
+            match tokio::time::timeout(DIAL_TIMEOUT, inner.endpoint.connect(endpoint_addr)).await {
+                Ok(result) => result,
+                Err(_) => Err(MeshError::Transport(format!(
+                    "connect timed out after {DIAL_TIMEOUT:?}"
+                ))),
+            };
         telemetry::record_dial(result.is_ok(), started.elapsed());
         match result {
             Ok(peer) => {
@@ -1069,6 +1085,57 @@ mod tests {
         assert!(saw_candidates && saw_max_age);
         a.shutdown();
         b_accept.abort();
+    }
+
+    /// Regression: a stale ready record (a crashed pod's address) held the
+    /// boot-time reconcile pass for QUIC's 30s idle timeout, once per dead
+    /// peer. Each dial is bounded by `DIAL_TIMEOUT` and the pass dials
+    /// concurrently, so three dead peers cost one timeout and the live peer
+    /// still connects in the same pass.
+    #[tokio::test]
+    async fn reconcile_pass_bounds_dials_to_unresponsive_peers() {
+        let (a, _) = runtime_with(30, |membership| membership, QUIET).await;
+        let (live, live_addrs, live_accept) = accepting_endpoint(31, false).await;
+        a.membership()
+            .apply_gossip_record(GossipRecord::new(live.runtime_id(), live_addrs, 1));
+
+        // Bound UDP sockets that never read: handshakes vanish without an
+        // ICMP refusal, exactly like a vacated pod IP.
+        let mut black_holes = Vec::new();
+        let mut dead_ids = Vec::new();
+        for key_byte in 32..35u8 {
+            let socket = std::net::UdpSocket::bind(loopback_any()).unwrap();
+            let id = crate::endpoint::runtime_id_from_public_key(
+                SecretKey::from_bytes(&[key_byte; 32]).public(),
+            );
+            a.membership().apply_gossip_record(GossipRecord::new(
+                id,
+                vec![socket.local_addr().unwrap().to_string()],
+                1,
+            ));
+            black_holes.push(socket);
+            dead_ids.push(id);
+        }
+
+        let started = Instant::now();
+        timeout(DIAL_TIMEOUT * 2, a.reconcile_now())
+            .await
+            .expect("dead peers must cost one dial timeout, not one each");
+        assert!(
+            started.elapsed() >= DIAL_TIMEOUT,
+            "dead dials ran to the timeout"
+        );
+
+        assert_eq!(
+            state_of(&a, live.runtime_id()),
+            Some(ConnectionState::Connected)
+        );
+        for id in dead_ids {
+            assert_eq!(state_of(&a, id), Some(ConnectionState::Disconnected));
+        }
+        a.shutdown();
+        live_accept.abort();
+        drop(black_holes);
     }
 
     #[tokio::test]
