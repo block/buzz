@@ -107,9 +107,29 @@ export function hostedCommunityErrorMessage(
     : message;
 }
 
+/**
+ * Prefer Builderlab's `normalized_host`. When create responses omit it (or
+ * only return name/slug), synthesize the hosted community hostname so the
+ * post-create connect handoff still has a relay URL.
+ */
 export function hostedCommunityRelayUrl(community: HostedCommunity) {
-  const host = community.normalized_host?.trim();
-  return host ? `wss://${host.replace(/^wss?:\/\//, "")}` : null;
+  const rawHost =
+    community.normalized_host?.trim() ||
+    synthesizeHostedCommunityHost(community);
+  if (!rawHost) {
+    return null;
+  }
+  return `wss://${rawHost.replace(/^wss?:\/\//, "")}`;
+}
+
+function synthesizeHostedCommunityHost(
+  community: HostedCommunity,
+): string | null {
+  const label = (community.slug ?? community.name)?.trim().toLowerCase();
+  if (!label || !VALID_HOSTED_COMMUNITY_NAME.test(label)) {
+    return null;
+  }
+  return `${label}.${HOSTED_COMMUNITY_SUFFIX}`;
 }
 
 const BOUND_KEY_HEX_REGEX = /^[0-9a-f]{64}$/;
