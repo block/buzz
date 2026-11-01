@@ -194,6 +194,41 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+      final title = find.text('Messages');
+      final titleTop = tester.getTopLeft(title).dy;
+      final scroll = tester
+          .widget<CustomScrollView>(find.byType(CustomScrollView).first)
+          .controller!;
+      final expandedHeader = tester.widget<FrostedAppBar>(
+        find.byType(FrostedAppBar),
+      );
+      scroll.jumpTo(expandedHeader.bottomHeight / 4);
+      await tester.pump();
+      expect(
+        tester.getTopLeft(title).dy,
+        titleTop - expandedHeader.bottomHeight / 4,
+      );
+      expect(
+        tester
+            .widget<Opacity>(
+              find.ancestor(of: title, matching: find.byType(Opacity)).first,
+            )
+            .opacity,
+        closeTo(0.75, 0.01),
+      );
+      scroll.jumpTo(expandedHeader.bottomHeight);
+      await tester.pump();
+      expect(
+        tester
+            .widget<Opacity>(
+              find.ancestor(of: title, matching: find.byType(Opacity)).first,
+            )
+            .opacity,
+        0,
+      );
+      scroll.jumpTo(0);
+      await tester.pump();
+      expect(tester.getTopLeft(title).dy, titleTop);
       await tester.drag(
         find.byType(CustomScrollView).first,
         const Offset(0, -2000),

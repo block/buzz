@@ -629,14 +629,39 @@ class ChannelsPage extends HookConsumerWidget {
         automaticallyImplyLeading: messagesFilters == null,
         title: messagesFilters == null
             ? const SizedBox.shrink()
-            : ClipRect(
-                child: ExcludeSemantics(
-                  excluding: headerCollapse.value >= filterContentHeight,
-                  child: Opacity(
-                    opacity: 1 - headerCollapse.value / filterContentHeight,
-                    child: Transform.translate(
-                      offset: Offset(0, -headerCollapse.value),
-                      child: Text('Messages', style: headerTitleStyle),
+            : ExcludeSemantics(
+                excluding: headerCollapse.value >= filterContentHeight,
+                child: ShaderMask(
+                  blendMode: BlendMode.dstIn,
+                  shaderCallback: (bounds) => LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      headerCollapse.value == 0
+                          ? Colors.white
+                          : Colors.transparent,
+                      Colors.white,
+                    ],
+                    stops: [
+                      0,
+                      (headerCollapse.value.clamp(0.0, Grid.sm) / bounds.height)
+                          .clamp(0.0, 1.0),
+                    ],
+                  ).createShader(bounds),
+                  // Keep the original upward motion, but fade the glyphs at
+                  // status-area boundary instead of the text’s own tight bounds.
+                  child: ClipRect(
+                    child: Opacity(
+                      opacity: 1 - headerCollapse.value / filterContentHeight,
+                      child: SizedBox.expand(
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: Transform.translate(
+                            offset: Offset(0, -headerCollapse.value),
+                            child: Text('Messages', style: headerTitleStyle),
+                          ),
+                        ),
+                      ),
                     ),
                   ),
                 ),
