@@ -1151,6 +1151,7 @@ void main() {
       await _expandComposer(tester);
       final textField = tester.widget<TextField>(find.byType(TextField));
       expect(textField.keyboardType, TextInputType.multiline);
+      expect(textField.textCapitalization, TextCapitalization.sentences);
       expect(textField.textInputAction, TextInputAction.newline);
       expect(textField.onSubmitted, isNull);
 
