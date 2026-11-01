@@ -14,6 +14,8 @@ import { resolveProjectDefaultBranch } from "@/features/projects/lib/projectBran
 import type { ProjectHomeWorkspaceSheetTab } from "@/features/projects/lib/projectHomeWorkspaceSheet";
 import { useProjectCommitDiffQuery } from "@/features/projects/useProjectCommitDiff";
 import { useProjectRepositorySnapshots } from "@/features/projects/useProjectRepositorySnapshots";
+import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
+import { PROJECT_REPOSITORY_SEARCH_KEYS } from "./projectDetailHelpers";
 import { CreateProjectIssueDialog } from "./CreateProjectIssueDialog";
 import { CreatePullRequestDialog } from "./CreatePullRequestDialog";
 import { ProjectCommitDetailPanel } from "./ProjectCommitDetailPanel";
@@ -46,6 +48,10 @@ export type ProjectHomeWorkspaceDetail = {
 
 export function ProjectHomeWorkspaceSheet({
   identityPubkey,
+  initialCommitHash,
+  initialFilePath,
+  initialIssueId,
+  initialPullRequestId,
   onCreateActionChange,
   onDetailChange,
   onOpenCommit,
@@ -57,6 +63,10 @@ export function ProjectHomeWorkspaceSheet({
   tab,
 }: {
   identityPubkey?: string;
+  initialCommitHash?: string;
+  initialFilePath?: string;
+  initialIssueId?: string;
+  initialPullRequestId?: string;
   onCreateActionChange?: (
     action: ProjectHomeWorkspaceCreateAction | null,
   ) => void;
@@ -70,16 +80,19 @@ export function ProjectHomeWorkspaceSheet({
   tab: ProjectHomeWorkspaceSheetTab;
 }) {
   const { goProject } = useAppNavigation();
+  const { applyPatch: applyWorkspaceSearch } = useHistorySearchState(
+    PROJECT_REPOSITORY_SEARCH_KEYS,
+  );
   const { activeCommunity } = useCommunities();
   const [selectedIssueId, setSelectedIssueId] = React.useState<string | null>(
-    null,
+    initialIssueId ?? null,
   );
   const [selectedPullRequestId, setSelectedPullRequestId] = React.useState<
     string | null
-  >(null);
+  >(initialPullRequestId ?? null);
   const [selectedCommitHash, setSelectedCommitHash] = React.useState<
     string | null
-  >(null);
+  >(initialCommitHash ?? null);
   const [selectedCommitRepositoryId, setSelectedCommitRepositoryId] =
     React.useState<string | null>(null);
   const [filesContext, setFilesContext] = React.useState<{
@@ -90,6 +103,56 @@ export function ProjectHomeWorkspaceSheet({
   const [createIssueOpen, setCreateIssueOpen] = React.useState(false);
   const [createPullRequestOpen, setCreatePullRequestOpen] =
     React.useState(false);
+
+  React.useEffect(() => {
+    setSelectedIssueId(initialIssueId ?? null);
+  }, [initialIssueId]);
+  React.useEffect(() => {
+    setSelectedPullRequestId(initialPullRequestId ?? null);
+  }, [initialPullRequestId]);
+  React.useEffect(() => {
+    setSelectedCommitHash(initialCommitHash ?? null);
+    if (!initialCommitHash) setSelectedCommitRepositoryId(null);
+  }, [initialCommitHash]);
+
+  const selectIssue = React.useCallback(
+    (id: string | null) => {
+      setSelectedIssueId(id);
+      applyWorkspaceSearch({
+        commitHash: null,
+        filePath: null,
+        issueId: id,
+        pullRequestId: null,
+      });
+    },
+    [applyWorkspaceSearch],
+  );
+  const selectPullRequest = React.useCallback(
+    (id: string | null) => {
+      setSelectedPullRequestId(id);
+      applyWorkspaceSearch({
+        commitHash: null,
+        filePath: null,
+        issueId: null,
+        pullRequestId: id,
+      });
+    },
+    [applyWorkspaceSearch],
+  );
+  const selectCommit = React.useCallback(
+    (hash: string | null, nextRepositoryId?: string) => {
+      setSelectedCommitHash(hash);
+      setSelectedCommitRepositoryId(hash ? (nextRepositoryId ?? null) : null);
+      applyWorkspaceSearch({
+        commitHash: hash,
+        filePath: null,
+        issueId: null,
+        pullRequestId: null,
+        repositoryId: nextRepositoryId,
+      });
+    },
+    [applyWorkspaceSearch],
+  );
 
   const projectScope = React.useMemo(() => [project], [project]);
   const workItemsQuery = useProjectsWorkItemsQuery(projectScope);
@@ -181,9 +244,9 @@ export function ProjectHomeWorkspaceSheet({
         return;
       }
       await workItemsQuery.refetch();
-      setSelectedIssueId(issueId);
+      selectIssue(issueId);
     },
-    [goProject, project.id, workItemsQuery],
+    [goProject, project.id, selectIssue, workItemsQuery],
   );
   const handlePullRequestCreated = React.useCallback(
     async (
@@ -202,7 +265,7 @@ export function ProjectHomeWorkspaceSheet({
         onSelectRepository(createdRepository.id);
       }
       await pullRequestsQuery.refetch();
-      setSelectedPullRequestId(pullRequestId);
+      selectPullRequest(pullRequestId);
     },
     [
       goProject,
@@ -210,6 +273,7 @@ export function ProjectHomeWorkspaceSheet({
       project.id,
       pullRequestsQuery,
       repository.id,
+      selectPullRequest,
     ],
   );
   const detail = React.useMemo<ProjectHomeWorkspaceDetail | null>(() => {
@@ -220,14 +284,14 @@ export function ProjectHomeWorkspaceSheet({
           issueId: selectedIssueId,
           repositoryId: selectedIssueItem?.project.id,
         },
-        onBack: () => setSelectedIssueId(null),
+        onBack: () => selectIssue(null),
       };
     }
     if (tab === "prs" && selectedPullRequestId) {
       return {
         backLabel: "Back to Reviews",
         navigation: { pullRequestId: selectedPullRequestId },
-        onBack: () => setSelectedPullRequestId(null),
+        onBack: () => selectPullRequest(null),
       };
     }
     if (tab === "commits" && selectedCommitHash) {
@@ -237,10 +301,7 @@ export function ProjectHomeWorkspaceSheet({
           commitHash: selectedCommitHash,
           repositoryId: selectedCommitRepository.id,
         },
-        onBack: () => {
-          setSelectedCommitHash(null);
-          setSelectedCommitRepositoryId(null);
-        },
+        onBack: () => selectCommit(null),
       };
     }
     if (tab === "files" && filesContext?.onBack) {
@@ -253,6 +314,9 @@ export function ProjectHomeWorkspaceSheet({
     return null;
   }, [
     filesContext,
+    selectCommit,
+    selectIssue,
+    selectPullRequest,
     selectedCommitHash,
     selectedCommitRepository.id,
     selectedIssueId,
@@ -311,7 +375,7 @@ export function ProjectHomeWorkspaceSheet({
           error={workItemsQuery.error}
           isLoading={workItemsQuery.isLoading}
           issueItems={issueItems}
-          onSelectedIssueIdChange={setSelectedIssueId}
+          onSelectedIssueIdChange={selectIssue}
           profiles={people.profiles}
           project={selectedCommitRepository}
           selectedIssueId={selectedIssueId}
@@ -323,7 +387,7 @@ export function ProjectHomeWorkspaceSheet({
         <PullRequestsPanel
           error={pullRequestsQuery.error}
           isLoading={pullRequestsQuery.isLoading}
-          onSelectedPullRequestIdChange={setSelectedPullRequestId}
+          onSelectedPullRequestIdChange={selectPullRequest}
           profiles={people.profiles}
           project={repository}
           pullRequests={pullRequests}
@@ -346,8 +410,7 @@ export function ProjectHomeWorkspaceSheet({
       ) : (
         <ProjectHomeCommitsPanel
           onSelectCommit={(commit, commitRepository) => {
-            setSelectedCommitRepositoryId(commitRepository.id);
-            setSelectedCommitHash(commit.hash);
+            selectCommit(commit.hash, commitRepository.id);
           }}
           profiles={people.profiles}
           projectId={project.id}
@@ -361,7 +424,9 @@ export function ProjectHomeWorkspaceSheet({
       body = (
         <ProjectHomeCodebasePanel
           identityPubkey={identityPubkey}
+          initialPath={initialFilePath}
           onFilesContextChange={setFilesContext}
+          onPathChange={(path) => applyWorkspaceSearch({ filePath: path })}
           onOpenCommit={onOpenCommit}
           onRepositoryAdded={onRepositoryAdded}
           onSelectRepository={onSelectRepository}
