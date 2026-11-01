@@ -164,11 +164,11 @@ void main() {
       expect(find.text('Search chats'), findsNothing);
       expect(find.byType(TextField), findsNothing);
       expect(find.byIcon(BuzzIcons.edit), findsOneWidget);
-      expect(find.byIcon(BuzzIcons.folderPlus), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.workspace), findsOneWidget);
       final header = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar));
       expect(header.nativeLargeTitle, isTrue);
       expect(header.nativeActions!.map((action) => action.icon), [
-        BuzzIcons.folderPlus,
+        BuzzIcons.workspace,
         BuzzIcons.edit,
       ]);
       expect(find.text('App work'), findsOneWidget);
@@ -191,12 +191,12 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.text('No chats in this project'), findsOneWidget);
+      expect(find.text('No chats in this workspace yet'), findsOneWidget);
       expect(find.text('Design agent'), findsOneWidget);
       await tester.tap(find.text('Chats'));
       await tester.pumpAndSettle();
       expect(find.text('Design agent'), findsNothing);
-      expect(find.text('No chats in this project'), findsOneWidget);
+      expect(find.text('No chats in this workspace yet'), findsOneWidget);
       await tester.tap(find.text('Chats'));
       await tester.pumpAndSettle();
       expect(find.text('Design agent'), findsOneWidget);

@@ -240,8 +240,8 @@ class MePage extends HookConsumerWidget {
                         if (!visible.any(
                           (c) => organization.assignments[c.id] == group['id'],
                         ))
-                          const ListTile(
-                            title: Text('No chats in this project'),
+                          const _MeSectionEmpty(
+                            'No chats in this workspace yet',
                           ),
                       ],
                     ),
@@ -260,7 +260,7 @@ class MePage extends HookConsumerWidget {
                         if (!visible.any(
                           (c) => !organization.assignments.containsKey(c.id),
                         ))
-                          const ListTile(title: Text('No chats yet')),
+                          const _MeSectionEmpty('No chats yet'),
                       ],
                     ),
                 ],
@@ -323,8 +323,7 @@ class MePage extends HookConsumerWidget {
         nativeActions: [
           IosNavigationAction(
             label: 'New project',
-            symbol: 'folder.badge.plus',
-            icon: BuzzIcons.folderPlus,
+            icon: BuzzIcons.workspace,
             onPressed: newProject,
           ),
           if (newChatAction == null)
@@ -351,7 +350,7 @@ class MePage extends HookConsumerWidget {
                   children: [
                     IconButton(
                       tooltip: 'New project',
-                      icon: const Icon(BuzzIcons.folderPlus, size: 20),
+                      icon: const Icon(BuzzIcons.workspace, size: 20),
                       onPressed: newProject,
                     ),
                     if (newChatAction == null)

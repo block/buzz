@@ -88,11 +88,11 @@ import 'new_me_project.dart';
       key: const ValueKey('me-workspace-button'),
       tooltip: label,
       onPressed: onPressed,
-      icon: const Icon(BuzzIcons.folder),
+      icon: const Icon(BuzzIcons.workspace),
     ),
     nativeAction: IosNavigationAction(
       label: label,
-      symbol: 'folder',
+      icon: BuzzIcons.workspace,
       onPressed: onPressed,
     ),
   );

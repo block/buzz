@@ -113,3 +113,25 @@ MeSync _currentMeSync(WidgetRef ref, MeSync reviewed) {
   }
   return current;
 }
+
+class _MeSectionEmpty extends StatelessWidget {
+  const _MeSectionEmpty(this.label);
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(
+      horizontal: Grid.xxs,
+      vertical: Grid.half,
+    ),
+    child: Align(
+      alignment: Alignment.centerLeft,
+      child: Text(
+        label,
+        style: contentListBodyTextStyle.copyWith(
+          color: context.colors.onSurfaceVariant,
+        ),
+      ),
+    ),
+  );
+}
