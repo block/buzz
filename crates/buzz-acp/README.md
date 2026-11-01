@@ -117,7 +117,10 @@ All configuration is via environment variables (or CLI flags — every env var h
 | `BUZZ_ACP_AGENT_ARGS` | no | `acp` | Agent arguments (comma-separated). |
 | `BUZZ_ACP_MCP_COMMAND` | no | `""` (empty) | Path to an optional MCP server binary to provide to the agent subprocess. |
 | `BUZZ_ACP_IDLE_TIMEOUT` | no | `620` | Idle timeout: max seconds of silence before cancelling a turn. Resets on any agent stdout activity. |
+| `BUZZ_ACP_BACKGROUND_IDLE_TIMEOUT` | no | `7200` | Idle timeout for a turn held open by a background subagent (`run_in_background`). Never shorter than the idle timeout; clamped below the max turn duration. `0` = use `BUZZ_ACP_IDLE_TIMEOUT`. |
 | `BUZZ_ACP_MAX_TURN_DURATION` | no | `7200` | Absolute wall-clock cap per turn (safety valve). |
+| `BUZZ_ACP_NO_RESUME` | no | `false` | Disable the resume journal. When on, a session that dies (respawn or restart) while it has background work outstanding — a background subagent holding the turn, or an async task the adapter reported — gets one resume turn re-delivering its request. |
+| `BUZZ_ACP_RESUME_FILE` | no | `~/.config/buzz-acp/resume/<pubkey>.json` | Resume journal path. The file exists only while some session has outstanding background work. |
 | `BUZZ_API_TOKEN` | no | — | API token (required if relay enforces token auth). |
 
 **Note:** `BUZZ_ACP_AGENT_ARGS` splits on commas. For args with values, use: `-c,key="value"`.
