@@ -7,11 +7,15 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/deeplink/pending_deep_link_provider.dart';
 import '../../shared/relay/relay.dart';
+import '../../shared/share_inbox/share_inbox_provider.dart';
+import '../../shared/share_inbox/shared_payload.dart';
 import '../invites/invite_join_provider.dart';
 import '../invites/invite_join_sheet.dart';
 import 'channel.dart';
 import 'channel_detail_page.dart';
 import 'channels_provider.dart';
+import 'share_target_sheet.dart';
+import 'share_targets_sync.dart';
 
 /// Routes pending `buzz://message` deep links into the channel view.
 ///
@@ -50,6 +54,7 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
   bool _resolvingLink = false;
   bool _lookupInterrupted = false;
   ProviderSubscription<SessionState>? _session;
+  bool _presentingShare = false;
 
   @override
   void initState() {
@@ -57,17 +62,22 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _maybeDispatch(ref.read(pendingDeepLinkProvider));
+      if (widget.dispatchMessageLinks) {
+        _maybePresentShare(ref.read(pendingSharedPayloadProvider));
+      }
     });
   }
 
   @override
   void didUpdateWidget(DeepLinkDispatcher oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // A link parked while dispatch was off waits for this, not a new event.
+    // A link or share parked while dispatch was off waits for this, not a new
+    // event.
     if (widget.dispatchMessageLinks && !oldWidget.dispatchMessageLinks) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         _maybeDispatch(ref.read(pendingDeepLinkProvider));
+        _maybePresentShare(ref.read(pendingSharedPayloadProvider));
       });
     }
   }
@@ -81,10 +91,99 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
     if (widget.dispatchMessageLinks) {
       ref.listen<AsyncValue<List<Channel>>>(channelsProvider, (_, _) {
         _maybeDispatch(ref.read(pendingDeepLinkProvider));
+        _maybePresentShare(ref.read(pendingSharedPayloadProvider));
       });
+      ref.listen<SharedPayload?>(pendingSharedPayloadProvider, (_, payload) {
+        _maybePresentShare(payload);
+      });
+      // Keep the Share Extension's channel list current while signed in.
+      // Listen rather than watch: it changes as channels reorder.
+      ref.listen(shareTargetsSyncProvider, (_, _) {});
     }
 
     return widget.child;
+  }
+
+  /// Share-sheet hand-offs carry no destination: pull the staged payload and
+  /// let the user pick a channel. The link itself is consumed immediately; the
+  /// payload notifier owns the rest of the flow.
+  void _dispatchShareLink() {
+    ref.read(pendingDeepLinkProvider.notifier).consume();
+    unawaited(ref.read(pendingSharedPayloadProvider.notifier).sync());
+  }
+
+  void _maybePresentShare(SharedPayload? payload) {
+    if (payload == null || _presentingShare || !mounted) return;
+    _presentingShare = true;
+    final navigatorContext = context;
+    unawaited(() async {
+      try {
+        if (payload.hasTarget) {
+          final handled = await _dispatchTargetedShare(payload);
+          if (handled) return;
+          if (!navigatorContext.mounted ||
+              ref.read(pendingSharedPayloadProvider) != payload) {
+            return;
+          }
+        }
+        final channel = await showShareTargetSheet(navigatorContext, payload);
+        if (channel == null) {
+          // Dismissed: drop the payload so it does not resurface on resume.
+          await ref
+              .read(pendingSharedPayloadProvider.notifier)
+              .dismiss(payload.id);
+          return;
+        }
+        if (!navigatorContext.mounted) return;
+        _pushChannel(channel, ChannelDeepLink(channelId: channel.id));
+      } finally {
+        _presentingShare = false;
+        // A newer share that arrived while this one was presented was ignored
+        // by the listener; present it now.
+        if (mounted) {
+          final next = ref.read(pendingSharedPayloadProvider);
+          if (next != null && next != payload) _maybePresentShare(next);
+        }
+      }
+    }());
+  }
+
+  /// A payload whose destination was picked in the extension goes straight
+  /// into that channel. Returns false when the picker should take over
+  /// instead (community gone, channel gone). A community switch remounts the
+  /// subtree, whose dispatcher retries; channels still loading are retried by
+  /// the channelsProvider listener.
+  Future<bool> _dispatchTargetedShare(SharedPayload payload) async {
+    final notifier = ref.read(pendingSharedPayloadProvider.notifier);
+    final preparation = await notifier.prepareCommunity(payload.communityId!);
+    if (!mounted || ref.read(pendingSharedPayloadProvider) != payload) {
+      return true;
+    }
+    switch (preparation) {
+      case SharedPayloadCommunityPreparation.switched:
+        return true;
+      case SharedPayloadCommunityPreparation.unavailable:
+      case SharedPayloadCommunityPreparation.failed:
+        return false;
+      case SharedPayloadCommunityPreparation.ready:
+        break;
+    }
+    final channels = ref.read(channelsProvider).asData?.value;
+    if (channels == null) return true;
+    final channel = channels
+        .where(
+          (candidate) =>
+              candidate.id == payload.channelId &&
+              candidate.isMember &&
+              !candidate.isArchived,
+        )
+        .firstOrNull;
+    if (channel == null) return false;
+    seedComposerWithSharedPayload(ref, channel.id, payload);
+    await notifier.consume(payload.id);
+    if (!mounted) return true;
+    _pushChannel(channel, ChannelDeepLink(channelId: channel.id));
+    return true;
   }
 
   void _maybeDispatch(BuzzDeepLink? link) {
@@ -98,6 +197,10 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
     }
     if (link is InviteDeepLink) {
       _maybeDispatchInvite(link);
+      return;
+    }
+    if (link is ShareDeepLink) {
+      if (widget.dispatchMessageLinks) _dispatchShareLink();
       return;
     }
     if ((link is! MessageDeepLink && link is! ChannelDeepLink) ||

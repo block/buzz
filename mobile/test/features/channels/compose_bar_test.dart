@@ -24,6 +24,7 @@ import 'package:buzz/features/channels/photo_library.dart';
 import 'package:buzz/features/channels/voice_note_play_pause_icon.dart';
 import 'package:buzz/features/channels/voice_note_recording.dart';
 import 'package:buzz/features/channels/voice_note_waveform.dart';
+import 'package:buzz/shared/composer/composer_seed_provider.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
@@ -2611,6 +2612,53 @@ void main() {
         _setMockNativeAttachmentPopoverHandler(null);
         debugDefaultTargetPlatformOverride = previousPlatform;
       }
+    });
+
+    testWidgets('attaches files parked in the composer seed on mount', (
+      tester,
+    ) async {
+      final directory = Directory.systemTemp.createTempSync('buzz-seed-');
+      addTearDown(() => directory.deleteSync(recursive: true));
+      final seeded = File('${directory.path}/shared.png')
+        ..writeAsBytesSync(_pngBytes);
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        httpClient: http_testing.MockClient(
+          (request) async => http.Response('{}', 500),
+        ),
+        pickGalleryImage: () async => null,
+        pickGalleryVideo: () async => null,
+      );
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Remove attachment'), findsNothing);
+
+      // A share hand-off plants the seed before the destination composer
+      // mounts; remounting under a new key is that first mount.
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
+      );
+      container.read(composerSeedProvider.notifier).plant('channel-1', [
+        ComposerSeedFile(path: seeded.path, mimeType: 'image/png'),
+      ]);
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+          composeBarKey: 'compose-bar-seeded',
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('Remove attachment'), findsOneWidget);
+      expect(container.read(composerSeedProvider), isEmpty);
     });
 
     testWidgets('uploads an image and sends markdown plus imeta tags', (
