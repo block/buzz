@@ -647,11 +647,10 @@ void main() {
           .height,
       closeTo(
         frostedAppBarHeight(
-              tester.element(find.byType(FrostedAppBar).last),
-              titleStyle: titleStyle,
-              bottomHeight: appBar.bottomHeight,
-            ) -
-            1,
+          tester.element(find.byType(FrostedAppBar).last),
+          titleStyle: titleStyle,
+          bottomHeight: appBar.bottomHeight,
+        ),
         0.01,
       ),
     );
@@ -768,9 +767,7 @@ void main() {
       find.byType(FrostedAppBar).last,
     );
     expect(appBar.frosted, isFalse);
-    expect(appBar.frostedSurfaceOpacity, 0);
-    expect(appBar.frostedBlurSigma, 0);
-    expect(appBar.showBottomDivider, isFalse);
+
     expect(appBar.bottomHeight, Grid.xxs);
   });
 
@@ -806,14 +803,11 @@ void main() {
     await tester.pump();
     var appBar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar).last);
     expect(appBar.frosted, isTrue);
-    expect(appBar.frostedSurfaceOpacity, 0);
-    expect(appBar.frostedBlurSigma, closeTo(8.67, 0.001));
 
     scrollable.position.jumpTo(Grid.xxl);
     await tester.pump();
     appBar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar).last);
-    expect(appBar.frostedSurfaceOpacity, 0);
-    expect(appBar.frostedBlurSigma, 23.12);
+    expect(appBar.frosted, isTrue);
   });
 
   testWidgets('Home keeps header blur after returning from search', (
@@ -2221,7 +2215,11 @@ void main() {
           if (nativeHeader) {
             destinationRect = const Rect.fromLTWH(16, 68, 36, 36);
             final bar = tester.widget<FrostedAppBar>(
-              find.byType(FrostedAppBar),
+              find.byWidgetPredicate(
+                (widget) =>
+                    widget is FrostedAppBar &&
+                    widget.onNativeReadyChanged != null,
+              ),
             );
             bar.nativeLeading!.onAvatarBoundsChanged!(destinationRect);
             bar.nativeLeading!.onPressed!();
@@ -2274,7 +2272,13 @@ void main() {
           if (nativeHeader) {
             expect(
               tester
-                  .widget<FrostedAppBar>(find.byType(FrostedAppBar))
+                  .widget<FrostedAppBar>(
+                    find.byWidgetPredicate(
+                      (widget) =>
+                          widget is FrostedAppBar &&
+                          widget.onNativeReadyChanged != null,
+                    ),
+                  )
                   .nativeLeading!
                   .avatarHidden,
               isTrue,
@@ -2389,7 +2393,11 @@ void main() {
             // hold, and use fresh bounds rather than the old community's slot.
             expect(tester.getCenter(flyingAvatar), const Offset(195, 422));
             final header = tester.widget<FrostedAppBar>(
-              find.byType(FrostedAppBar),
+              find.byWidgetPredicate(
+                (widget) =>
+                    widget is FrostedAppBar &&
+                    widget.onNativeReadyChanged != null,
+              ),
             );
             header.nativeLeading!.onAvatarBoundsChanged!(
               const Rect.fromLTWH(24, 76, 36, 36),
@@ -2483,7 +2491,11 @@ void main() {
           );
           if (nativeHeader) {
             final bar = tester.widget<FrostedAppBar>(
-              find.byType(FrostedAppBar),
+              find.byWidgetPredicate(
+                (widget) =>
+                    widget is FrostedAppBar &&
+                    widget.onNativeReadyChanged != null,
+              ),
             );
             expect(bar.nativeTitle, '');
             expect(bar.nativeLargeTitle, isFalse);

@@ -177,7 +177,12 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        expect(find.byType(BackdropFilter), findsOneWidget);
+        expect(
+          find.byWidgetPredicate(
+            (widget) => widget is BackdropFilter && widget.enabled,
+          ),
+          findsOneWidget,
+        );
         await tester.tap(find.byType(TextField));
         tester.view.viewInsets = const FakeViewPadding(bottom: 300);
         await tester.enterText(
@@ -185,65 +190,98 @@ void main() {
           'One\nTwo\nThree\nFour\nFive',
         );
         await tester.pumpAndSettle();
-        expect(find.byType(BackdropFilter), findsOneWidget);
+        expect(
+          find.byWidgetPredicate(
+            (widget) => widget is BackdropFilter && widget.enabled,
+          ),
+          findsOneWidget,
+        );
         await tester.enterText(find.byType(TextField), '');
         await tester.pumpAndSettle();
-        expect(find.byType(BackdropFilter), findsOneWidget);
-        expect(_appBarBorder(tester)?.bottom.color.a, greaterThan(0));
+        expect(
+          find.byWidgetPredicate(
+            (widget) => widget is BackdropFilter && widget.enabled,
+          ),
+          findsOneWidget,
+        );
+        expect(_appBarBorder(tester), isNull);
         timeline.jumpTo(reverse ? timeline.position.maxScrollExtent : 0);
         await tester.pumpAndSettle();
-        expect(find.byType(BackdropFilter), findsNothing);
+        expect(
+          find.byWidgetPredicate(
+            (widget) => widget is BackdropFilter && widget.enabled,
+          ),
+          findsNothing,
+        );
         await tester.enterText(
           find.byType(TextField),
           'One\nTwo\nThree\nFour\nFive',
         );
         await tester.pumpAndSettle();
-        expect(find.byType(BackdropFilter), findsNothing);
+        expect(
+          find.byWidgetPredicate(
+            (widget) => widget is BackdropFilter && widget.enabled,
+          ),
+          findsNothing,
+        );
       },
     );
   }
 
-  testWidgets(
-    'page frost and divider appear only while content scrolls under header',
-    (tester) async {
-      await tester.pumpWidget(
-        MaterialApp(
-          theme: AppTheme.light(),
-          home: FrostedScaffold(
-            appBar: const FrostedAppBar(title: Text('Theme')),
-            body: ListView.builder(
-              key: const ValueKey('page-scroll-view'),
-              padding: const EdgeInsets.only(top: 57),
-              itemCount: 40,
-              itemBuilder: (_, index) =>
-                  SizedBox(height: 48, child: Text('Theme option $index')),
-            ),
+  testWidgets('page frost follows scrolling without a dividing line', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: FrostedScaffold(
+          appBar: const FrostedAppBar(title: Text('Theme')),
+          body: ListView.builder(
+            key: const ValueKey('page-scroll-view'),
+            padding: const EdgeInsets.only(top: 57),
+            itemCount: 40,
+            itemBuilder: (_, index) =>
+                SizedBox(height: 48, child: Text('Theme option $index')),
           ),
         ),
-      );
+      ),
+    );
 
-      expect(_appBarBorder(tester)?.bottom.color.a, 0);
-      expect(find.byType(BackdropFilter), findsNothing);
+    expect(_appBarBorder(tester), isNull);
+    expect(
+      find.byWidgetPredicate(
+        (widget) => widget is BackdropFilter && widget.enabled,
+      ),
+      findsNothing,
+    );
 
-      await tester.drag(
-        find.byKey(const ValueKey('page-scroll-view')),
-        const Offset(0, -120),
-      );
-      await tester.pumpAndSettle();
+    await tester.drag(
+      find.byKey(const ValueKey('page-scroll-view')),
+      const Offset(0, -120),
+    );
+    await tester.pumpAndSettle();
 
-      final border = _appBarBorder(tester);
-      expect(border, isNotNull);
-      expect(border!.bottom.color.a, greaterThan(0));
-      expect(find.byType(BackdropFilter), findsOneWidget);
+    final border = _appBarBorder(tester);
+    expect(border, isNull);
+    expect(
+      find.byWidgetPredicate(
+        (widget) => widget is BackdropFilter && widget.enabled,
+      ),
+      findsOneWidget,
+    );
 
-      await tester.drag(
-        find.byKey(const ValueKey('page-scroll-view')),
-        const Offset(0, 500),
-      );
-      await tester.pumpAndSettle();
+    await tester.drag(
+      find.byKey(const ValueKey('page-scroll-view')),
+      const Offset(0, 500),
+    );
+    await tester.pumpAndSettle();
 
-      expect(_appBarBorder(tester)?.bottom.color.a, 0);
-      expect(find.byType(BackdropFilter), findsNothing);
-    },
-  );
+    expect(_appBarBorder(tester), isNull);
+    expect(
+      find.byWidgetPredicate(
+        (widget) => widget is BackdropFilter && widget.enabled,
+      ),
+      findsNothing,
+    );
+  });
 }

@@ -41,8 +41,8 @@ class ChannelDetailPage extends ConsumerWidget {
         placement != ChannelRoutePlacement.ordinary &&
         groups == null &&
         lookup.isLoading) {
-      return Scaffold(
-        appBar: AppBar(title: Text(channel.name)),
+      return FrostedScaffold(
+        appBar: FrostedAppBar(title: Text(channel.name)),
         body: const Center(child: BuzzLoadingIndicator()),
       );
     }

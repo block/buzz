@@ -426,6 +426,7 @@ void main() {
     await tester.tap(find.text('Photo Library'));
     await _waitForAvatarCropToLoad(tester);
     expect(find.text('Position Photo'), findsOneWidget);
+    expect(tester.getSize(find.text('Position Photo')).width, greaterThan(0));
     final cancelButton = find.ancestor(
       of: find.text('Back'),
       matching: find.byType(TextButton),

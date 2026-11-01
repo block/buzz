@@ -472,8 +472,7 @@ class ActivityPage extends HookConsumerWidget {
         ],
         automaticallyImplyLeading: false,
         horizontalInset: Grid.gutter,
-        showBottomDivider: true,
-        bottomDividerOpacity: 0.07,
+
         title: Text('Inbox', style: headerTitleStyle),
         titleStyle: headerTitleStyle,
         actions: [

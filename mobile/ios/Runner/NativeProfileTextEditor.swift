@@ -370,18 +370,7 @@ private final class NativeProfileTextEditorViewController:
     tableView.backgroundColor = pageBackgroundColor
     tableView.keyboardDismissMode = .interactive
     tableView.alwaysBounceVertical = false
-    let navigationAppearance = UINavigationBarAppearance()
-    navigationAppearance.configureWithOpaqueBackground()
-    navigationAppearance.backgroundColor = pageBackgroundColor
-    navigationAppearance.shadowColor = UIColor.separator.withAlphaComponent(0.2)
-    let scrollEdgeAppearance = UINavigationBarAppearance()
-    scrollEdgeAppearance.configureWithOpaqueBackground()
-    scrollEdgeAppearance.backgroundColor = pageBackgroundColor
-    scrollEdgeAppearance.shadowColor = .clear
-    navigationItem.standardAppearance = navigationAppearance
-    navigationItem.scrollEdgeAppearance = scrollEdgeAppearance
-    navigationItem.compactAppearance = navigationAppearance
-    navigationItem.compactScrollEdgeAppearance = scrollEdgeAppearance
+    NavigationTopEdge.configure(tableView, item: navigationItem)
     navigationItem.leftBarButtonItem = UIBarButtonItem(
       barButtonSystemItem: .cancel,
       target: self,

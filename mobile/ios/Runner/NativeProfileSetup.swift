@@ -342,11 +342,21 @@ private final class NativeProfileSetupController: UIViewController, UITextFieldD
     view.tintColor = UIColor(red: CGFloat((argb >> 16) & 255) / 255, green: CGFloat((argb >> 8) & 255) / 255, blue: CGFloat(argb & 255) / 255, alpha: 1)
     let stack = UIStackView(); stack.axis = .vertical; stack.spacing = 16; stack.translatesAutoresizingMaskIntoConstraints = false
     let scroll = UIScrollView(); scroll.translatesAutoresizingMaskIntoConstraints = false
+    NavigationTopEdge.configure(scroll, item: navigationItem)
+    if #available(iOS 15.0, *) { setContentScrollView(scroll) }
     view.addSubview(scroll); scroll.addSubview(stack)
+    // Content keeps its original keyboard-aware height while the scroll view
+    // extends beneath navigation for the system soft edge.
+    let contentViewport = UILayoutGuide()
+    view.addLayoutGuide(contentViewport)
     NSLayoutConstraint.activate([
-      scroll.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor), scroll.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
+      contentViewport.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+      contentViewport.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
+      contentViewport.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+      contentViewport.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+      scroll.topAnchor.constraint(equalTo: view.topAnchor), scroll.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
       scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-      stack.heightAnchor.constraint(greaterThanOrEqualTo: scroll.frameLayoutGuide.heightAnchor, constant: -48),
+      stack.heightAnchor.constraint(greaterThanOrEqualTo: contentViewport.heightAnchor, constant: -48),
       stack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 24), stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -24),
       stack.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 24), stack.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -24)
     ])

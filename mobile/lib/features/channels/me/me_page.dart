@@ -335,8 +335,7 @@ class MePage extends HookConsumerWidget {
             ),
         ],
         horizontalInset: Grid.gutter,
-        showBottomDivider: true,
-        bottomDividerOpacity: 0.07,
+
         title: Text('Solo', style: headerTitleStyle),
         titleStyle: headerTitleStyle,
         actions: [
