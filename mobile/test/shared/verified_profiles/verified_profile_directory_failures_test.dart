@@ -149,13 +149,15 @@ void main() {
     });
   });
 
-  test('a replayed subscription is reconciled as a new snapshot', () {
+  test('a replay keeps cached records until a fresh snapshot', () {
     fakeAsync((async) {
       setUpContainer();
       session.history = [signedProjection(profileTags(subjectA))];
       expect(start(async)[subjectA]?.checked, isTrue);
+      expect(session.subscriptions, 1);
 
-      // The relay closes and replays the subscription without the record.
+      // The relay retries; its replay resumes after the record, so it omits it.
+      session.history = [];
       session.status!(RelaySubscriptionStatus.retrying);
       async.elapse(const Duration(milliseconds: 10));
       expect(
@@ -164,6 +166,14 @@ void main() {
       );
       session.status!(RelaySubscriptionStatus.ready);
       async.elapse(const Duration(milliseconds: 100));
+      expect(
+        container.read(verifiedProfilesProvider)[subjectA]?.checked,
+        isTrue,
+      );
+
+      // The next refresh resubscribes; the fresh snapshot proves absence.
+      async.elapse(const Duration(minutes: 5, seconds: 1));
+      expect(session.subscriptions, 2);
       expect(container.read(verifiedProfilesProvider), isEmpty);
     });
   });
