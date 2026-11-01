@@ -102,9 +102,33 @@ buzz repos protect list --id my-repo
 buzz repos protect set --id my-repo --ref refs/heads/main --push admin --no-force-push --no-delete
 buzz repos protect remove --id my-repo --ref refs/heads/main
 
+# Pull request and issue comments, reviews
+buzz pr comment --pr <event-id> --content "Looks good" --mention <pubkey|npub>
+buzz pr comment --pr <event-id> --content "Rename this" --file src/lib.rs --line 42 --side new
+buzz pr review --pr <event-id> --request <pubkey> --request <pubkey>
+buzz pr review --pr <event-id> --approve
+buzz pr review --pr <event-id> --request-changes --content "Handle the empty case"
+buzz issues comment --issue <event-id> --content "Reproduced on main"
+
 # Pipe to jq
 buzz channels list | jq '.[].name'
 ```
+
+`pr comment`, `pr review` and `issues comment` publish the same kind:1 notes
+Buzz Desktop publishes, so Desktop shows them in the pull request or issue.
+Each takes the repo from the root event, so no `--repo-owner` flag is needed.
+Reviews follow Desktop's trust rules, and the CLI refuses a note Desktop would
+ignore (exit 1):
+
+- `--request` works only for the PR author or repo owner, and cannot name the author.
+- `--approve` and `--request-changes` work only for a requested reviewer or the
+  repo owner, never the PR author, and only while the PR is open or draft.
+- A decision binds to the PR's current tip commit (the newest update from the
+  author or owner), so a new push makes earlier decisions historical.
+- `--request-changes` needs `--content`. `--approve` defaults to "Approved these changes".
+- `--mention` takes a hex pubkey or npub; names are not resolved because a PR has no channel.
+- Inline comments need `--file` and `--line`. The path must be repo-relative
+  with no `.`/`..`/empty segments, `\`, or NUL.
 
 `protect set` replaces every existing rule for the exact ref pattern. Any
 constraint omitted from the command is removed. `protect list` reports malformed
@@ -178,6 +202,9 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `protect list` | List branch and tag protection rules |
 | | `protect set` | Create or replace a protection rule |
 | | `protect remove` | Remove a protection rule |
+| `pr` | `comment` | Comment on a pull request, optionally on a diff line |
+| | `review` | Request reviewers, approve, or request changes |
+| `issues` | `comment` | Comment on an issue |
 | `upload` | `file` | Upload a file to the Blossom store |
 | `pack` | `validate` | Validate a persona pack (local, no relay) |
 | | `inspect` | Inspect a persona pack (local, no relay) |
