@@ -173,6 +173,28 @@ void main() {
     });
   });
 
+  test('an event with oversized id or signature is dropped before proof', () {
+    fakeAsync((async) {
+      setUpContainer();
+      final event = signedProjection(profileTags(subjectA));
+      NostrEvent copy({String? id, String? sig}) => NostrEvent(
+        id: id ?? event.id,
+        pubkey: event.pubkey,
+        createdAt: event.createdAt,
+        kind: event.kind,
+        tags: event.tags,
+        content: event.content,
+        sig: sig ?? event.sig,
+      );
+      session.history = [
+        copy(sig: event.sig * 1000),
+        copy(id: event.id * 1000),
+      ];
+      expect(start(async), isEmpty);
+      expect(provenEvents, 0);
+    });
+  });
+
   test('live events are coalesced to the newest per subject', () {
     fakeAsync((async) {
       setUpContainer();

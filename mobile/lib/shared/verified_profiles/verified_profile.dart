@@ -11,6 +11,7 @@ const verifiedProfileKind = 30382;
 const verifiedProfileBatchSize = 128;
 
 final RegExp _lowerHex64 = RegExp(r'^[0-9a-f]{64}$');
+final RegExp _lowerHex128 = RegExp(r'^[0-9a-f]{128}$');
 final RegExp _username = RegExp(r'^[a-z0-9._-]{1,64}$');
 final RegExp _decimal = RegExp(r'^[0-9]+$');
 final RegExp _prohibited = RegExp(
@@ -206,6 +207,9 @@ String? verifiedProfileSubject(
 ) {
   if (event.kind != verifiedProfileKind ||
       event.pubkey != authority.pubkey ||
+      // Metadata is bounded too: an id or signature is fixed-size hex.
+      !_lowerHex64.hasMatch(event.id) ||
+      !_lowerHex128.hasMatch(event.sig) ||
       _boundedSize(event) == null) {
     return null;
   }
