@@ -291,7 +291,7 @@ void main() {
         find.widgetWithText(CheckedPopupMenuItem<String>, 'No Workspace'),
         findsOneWidget,
       );
-      expect(find.text('Create workspace'), findsOneWidget);
+      expect(find.text('Create workspace'), findsNothing);
       await tester.tap(find.text('Mobile app').last);
       await tester.pumpAndSettle();
       expect(find.byTooltip('Workspace: Mobile app'), findsOneWidget);

@@ -6,7 +6,6 @@ import '../../../shared/me/me_sync.dart';
 import '../../../shared/theme/buzz_icons.dart';
 import '../../../shared/widgets/feedback_snackbar.dart';
 import '../../../shared/widgets/frosted_app_bar.dart';
-import 'new_me_project.dart';
 
 /// The workspace control shared by draft and existing Solo conversations.
 ({Widget action, IosNavigationAction nativeAction, bool busy}) useMeWorkspace(
@@ -40,20 +39,10 @@ import 'new_me_project.dart';
     busy.value = true;
     try {
       sync.check();
-      final id = picked == '+create'
-          ? await createMeProject(
-              context,
-              ref,
-              workspace: true,
-              channelId: channelId,
-            )
-          : picked;
-      if (id == null || !context.mounted) return;
-      sync.check();
-      final project = id.isEmpty ? null : id;
+      final project = picked.isEmpty ? null : picked;
       if (channelId == null) {
         onSelected?.call(project);
-      } else if (picked != '+create') {
+      } else {
         await sync.update(
           (groups) => groups.place(
             channelId,
@@ -106,7 +95,6 @@ import 'new_me_project.dart';
             value: '+reload',
             child: Text('Reload workspaces'),
           ),
-        const PopupMenuItem(value: '+create', child: Text('Create workspace')),
       ],
     ),
     nativeAction: IosNavigationAction(
@@ -132,11 +120,6 @@ import 'new_me_project.dart';
                   label: 'Reload workspaces',
                   onPressed: () => choose('+reload'),
                 ),
-              IosNavigationAction(
-                label: 'Create workspace',
-                icon: BuzzIcons.plus,
-                onPressed: () => choose('+create'),
-              ),
             ],
     ),
   );

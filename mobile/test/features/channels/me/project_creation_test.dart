@@ -1,7 +1,7 @@
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/me/me_page.dart';
-import 'package:buzz/features/channels/me/me_workspace_picker.dart';
+import 'package:buzz/features/channels/me/new_me_project.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
 import 'package:buzz/shared/me/me_groups.dart';
 import 'package:buzz/shared/me/me_project_creation.dart';
@@ -64,13 +64,17 @@ class _WorkspaceHeader extends HookConsumerWidget {
   const _WorkspaceHeader();
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final workspace = useMeWorkspace(
-      context,
-      ref,
-      enabled: true,
-      channelId: '10000000-0000-4000-8000-000000000001',
+    return Scaffold(
+      body: TextButton(
+        onPressed: () => createMeProject(
+          context,
+          ref,
+          workspace: true,
+          channelId: '10000000-0000-4000-8000-000000000001',
+        ),
+        child: const Text('Open workspace creation'),
+      ),
     );
-    return Scaffold(body: workspace.action);
   }
 }
 
@@ -105,9 +109,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       Future<void> open() async {
-        await tester.tap(find.byTooltip('Choose workspace'));
-        await tester.pumpAndSettle();
-        await tester.tap(find.text('Create workspace'));
+        await tester.tap(find.text('Open workspace creation'));
         await tester.pumpAndSettle();
       }
 
