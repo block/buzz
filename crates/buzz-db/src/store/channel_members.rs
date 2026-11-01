@@ -413,6 +413,135 @@ pub struct ChannelIdentity {
     pub created_by: Vec<u8>,
 }
 
+/// A channel row and active roster read while holding the replacement lock
+/// for one relay-authored group-state coordinate (kind 39000 or 39001).
+///
+/// Holding the coordinate lock across read, sign, and replace means a
+/// publisher that read older channel state cannot store its event after a
+/// publisher that read newer state: every state writer commits before it
+/// publishes, so the later publisher waits here and reads the committed row.
+pub struct LockedGroupStateSnapshot {
+    /// Channel row captured behind the lock.
+    pub channel: ChannelRecord,
+    /// Active members captured behind the lock.
+    pub members: Vec<MemberRecord>,
+    /// `created_at` (Unix seconds) of the live event at the locked coordinate.
+    pub latest_created_at: Option<u64>,
+    kind: i32,
+    relay_pubkey: Vec<u8>,
+    tx: AdmittedTx,
+}
+
+impl LockedGroupStateSnapshot {
+    /// Replace the locked coordinate's event, then commit and release the
+    /// lock. Returns `(event, false)`, rolling back, when the event is stale
+    /// or a duplicate; callers should skip fan-out in that case.
+    pub async fn replace_and_commit(
+        self,
+        event: &nostr::Event,
+    ) -> Result<(buzz_core::StoredEvent, bool)> {
+        let channel_id = self.channel.id;
+        if event.pubkey.to_bytes().as_slice() != self.relay_pubkey.as_slice()
+            || buzz_core::kind::event_kind_i32(event) != self.kind
+            || crate::event::extract_d_tag(event) != Some(channel_id.to_string())
+        {
+            return Err(DbError::InvalidData(
+                "group-state replacement does not match its locked coordinate".into(),
+            ));
+        }
+        let mut tx = self.tx;
+        let (stored, inserted) = crate::replaceable::replace_addressable_event_in_transaction(
+            &mut tx,
+            event,
+            Some(channel_id),
+        )
+        .await?;
+        if inserted {
+            tx.commit().await?;
+        } else {
+            tx.rollback().await?;
+        }
+        Ok((stored, inserted))
+    }
+}
+
+/// Lock a relay-authored kind:39000 or kind:39001 coordinate and read the
+/// channel and active roster on the same transaction.
+///
+/// Lock order: the coordinate's replacement key only, the same first key that
+/// [`crate::Db::replace_addressable_event`] and [`lock_member_snapshot`] take.
+/// The membership key is not needed: the reads take no locks, and channel and
+/// membership writers commit before they publish, so they never hold a row or
+/// membership lock while waiting on this key.
+pub async fn lock_group_state_snapshot(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    kind: i32,
+    relay_pubkey: &[u8],
+) -> Result<LockedGroupStateSnapshot> {
+    if kind != 39000 && kind != 39001 {
+        return Err(DbError::InvalidData(
+            "group-state snapshot lock requires kind 39000 or 39001".into(),
+        ));
+    }
+    let mut tx = crate::begin_community_event_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let replacement_lock = crate::replaceable::event_replacement_lock_key(
+        community_id,
+        kind,
+        relay_pubkey,
+        Some(channel_id.as_bytes()),
+    );
+    crate::replaceable::acquire_event_replacement_lock(&mut tx, replacement_lock).await?;
+    // Each statement below takes its snapshot after the lock is granted.
+    let channel = get_channel_tx(tx.conn(), community_id, channel_id).await?;
+    let members = get_active_members_tx(tx.conn(), community_id, channel_id).await?;
+    let latest: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT created_at FROM events WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND channel_id = $4 AND deleted_at IS NULL ORDER BY created_at DESC, id ASC LIMIT 1",
+    )
+    .bind(community_id.as_uuid())
+    .bind(kind)
+    .bind(relay_pubkey)
+    .bind(channel_id)
+    .fetch_optional(tx.conn())
+    .await?;
+    Ok(LockedGroupStateSnapshot {
+        channel,
+        members,
+        latest_created_at: latest.map(|timestamp| timestamp.timestamp() as u64),
+        kind,
+        relay_pubkey: relay_pubkey.to_vec(),
+        tx,
+    })
+}
+
+/// Read a channel's active members, oldest first, on `conn`.
+async fn get_active_members_tx(
+    conn: &mut PgConnection,
+    community_id: CommunityId,
+    channel_id: Uuid,
+) -> Result<Vec<MemberRecord>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT cm.channel_id, cm.pubkey, cm.role::text AS role, cm.joined_at, cm.invited_by, cm.removed_at
+        FROM channel_members cm
+        JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL
+        WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.removed_at IS NULL
+        ORDER BY cm.joined_at ASC
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    rows.into_iter().map(row_to_member_record).collect()
+}
+
 /// An active member roster captured while holding the channel's membership
 /// serialization lock on one writer connection.
 pub struct LockedMemberSnapshot {
@@ -577,23 +706,7 @@ pub async fn lock_member_snapshot(
     )
     .await?;
     acquire_channel_membership_lock(tx.conn(), community_id, channel_id).await?;
-    let rows = sqlx::query(
-        r#"
-        SELECT cm.channel_id, cm.pubkey, cm.role::text AS role, cm.joined_at, cm.invited_by, cm.removed_at
-        FROM channel_members cm
-        JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL
-        WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.removed_at IS NULL
-        ORDER BY cm.joined_at ASC
-        "#,
-    )
-    .bind(community_id.as_uuid())
-    .bind(channel_id)
-    .fetch_all(tx.conn())
-    .await?;
-    let members = rows
-        .into_iter()
-        .map(row_to_member_record)
-        .collect::<Result<Vec<_>>>()?;
+    let members = get_active_members_tx(tx.conn(), community_id, channel_id).await?;
     let identity = sqlx::query_as::<_, (String, Vec<String>, Vec<u8>)>(
         "SELECT channel_type::text, labels, created_by FROM channels WHERE community_id = $1 AND id = $2",
     )
@@ -2176,6 +2289,23 @@ pub async fn get_member_role(
 }
 
 impl Db {
+    /// Lock a relay-authored kind:39000/39001 coordinate and capture the
+    /// channel and roster it will publish. See [`lock_group_state_snapshot`].
+    #[datastore_span(name = "lock_group_state_snapshot", system = "postgresql")]
+    pub async fn lock_group_state_snapshot(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        kind: i32,
+        relay_pubkey: &[u8],
+    ) -> Result<LockedGroupStateSnapshot> {
+        let mut snapshot =
+            lock_group_state_snapshot(&self.pool, community_id, channel_id, kind, relay_pubkey)
+                .await?;
+        snapshot.tx.set_push_enqueue(self.push_enqueue.clone());
+        Ok(snapshot)
+    }
+
     /// Capture the active roster while holding the membership-writer lock.
     #[datastore_span(name = "lock_member_snapshot", system = "postgresql")]
     pub async fn lock_member_snapshot(
@@ -4688,6 +4818,122 @@ mod postgres_tests {
             .tags(tags)
             .sign_with_keys(keys)
             .expect("sign roster")
+    }
+
+    /// A kind:39000 publisher that read the channel before an `auto_join`
+    /// flip committed cannot leave its stale snapshot as the live head: the
+    /// flip's own publisher waits on the coordinate lock, then reads the
+    /// committed row and the stale head, and replaces it with a newer event.
+    ///
+    /// Mutations: drop the replacement lock from `lock_group_state_snapshot`
+    /// → the second publisher does not wait (RED); read the live head before
+    /// taking the lock → the second publisher misses the stale head's
+    /// timestamp (RED).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn group_state_snapshot_fences_stale_metadata_publication() {
+        use crate::channel::{update_channel, ChannelUpdate};
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let owner = random_pubkey();
+        let channel = create_test_channel(
+            &pool,
+            community_uuid,
+            "group-state-fence",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .expect("create channel");
+        let set_auto_join = |auto_join| {
+            update_channel(
+                &pool,
+                community,
+                channel.id,
+                ChannelUpdate {
+                    auto_join: Some(auto_join),
+                    ..Default::default()
+                },
+            )
+        };
+        set_auto_join(true).await.expect("flag channel");
+        let keys = Keys::generate();
+        let relay = keys.public_key().to_bytes();
+        let sign = |snapshot: &LockedGroupStateSnapshot| {
+            let created_at = snapshot.latest_created_at.map_or(1_000, |ts| ts + 1);
+            let tags = crate::channel::group_metadata_tags(&snapshot.channel, &snapshot.members)
+                .into_iter()
+                .map(|tag| nostr::Tag::parse(tag).expect("metadata tag"));
+            nostr::EventBuilder::new(nostr::Kind::Custom(39000), "")
+                .tags(tags)
+                .custom_created_at(nostr::Timestamp::from(created_at))
+                .sign_with_keys(&keys)
+                .expect("sign metadata")
+        };
+        let has_auto_join = |event: &nostr::Event| {
+            event
+                .tags
+                .iter()
+                .any(|tag| tag.as_slice()[0] == "auto_join")
+        };
+
+        let stale = lock_group_state_snapshot(&pool, community, channel.id, 39000, &relay)
+            .await
+            .expect("lock stale snapshot");
+        assert!(stale.channel.auto_join);
+        set_auto_join(false).await.expect("clear auto_join");
+
+        let fresh = tokio::spawn({
+            let pool = pool.clone();
+            async move { lock_group_state_snapshot(&pool, community, channel.id, 39000, &relay).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            !fresh.is_finished(),
+            "the second publisher waits for the first"
+        );
+
+        let stale_event = sign(&stale);
+        assert!(has_auto_join(&stale_event));
+        assert!(
+            stale
+                .replace_and_commit(&stale_event)
+                .await
+                .expect("replace stale")
+                .1
+        );
+
+        let fresh = fresh.await.expect("join").expect("lock fresh snapshot");
+        assert!(!fresh.channel.auto_join, "reads the committed flip");
+        assert_eq!(
+            fresh.latest_created_at,
+            Some(stale_event.created_at.as_secs()),
+            "reads the head committed while it waited"
+        );
+        let fresh_event = sign(&fresh);
+        assert!(!has_auto_join(&fresh_event));
+        assert!(
+            fresh
+                .replace_and_commit(&fresh_event)
+                .await
+                .expect("replace fresh")
+                .1
+        );
+
+        let live_id: Vec<u8> = sqlx::query_scalar(
+            "SELECT id FROM events WHERE community_id=$1 AND channel_id=$2 \
+             AND kind=39000 AND deleted_at IS NULL",
+        )
+        .bind(community_uuid)
+        .bind(channel.id)
+        .fetch_one(&pool)
+        .await
+        .expect("load live metadata");
+        assert_eq!(live_id, fresh_event.id.as_bytes().to_vec());
     }
 
     #[tokio::test]
