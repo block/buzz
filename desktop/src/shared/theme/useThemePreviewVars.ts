@@ -25,11 +25,17 @@ let themePreviewVarsPromise: Promise<ThemePreviewVarsByTheme> | null = null;
 async function loadThemePreviewVars(name: SyntaxThemeName) {
   const themeData = await loadThemeData(name);
   const info = extractThemeInfo(name, themeData);
-  const { vars } = createThemeVars(info.bg, info.fg, info.comment, {
-    added: info.added,
-    deleted: info.deleted,
-    modified: info.modified,
-  });
+  const { vars } = createThemeVars(
+    info.bg,
+    info.fg,
+    info.comment,
+    {
+      added: info.added,
+      deleted: info.deleted,
+      modified: info.modified,
+    },
+    info.keyword,
+  );
   return [name, vars] as const;
 }
 
