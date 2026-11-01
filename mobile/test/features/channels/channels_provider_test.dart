@@ -2125,13 +2125,15 @@ void main() {
         final notifier = container.read(channelsProvider.notifier);
         bool isLatest(List<NostrFilter> batch) =>
             batch.isNotEmpty &&
-            batch.every(
+            batch.any(
               (filter) =>
                   filter.limit != 1000 &&
                   filter.kinds.contains(EventKind.streamMessageV2),
             );
-        int? lastLatestSince() =>
-            session.queryBatches.lastWhere(isLatest).single.since;
+        int? lastLatestSince() => session.queryBatches
+            .lastWhere(isLatest)
+            .firstWhere((f) => f.kinds.contains(EventKind.streamMessageV2))
+            .since;
         DateTime at(int seconds) =>
             DateTime.fromMillisecondsSinceEpoch(seconds * 1000, isUtc: true);
         DateTime? lastMessageAt() =>
@@ -2181,11 +2183,14 @@ void main() {
       int now() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
       bool isLatest(List<NostrFilter> batch) =>
           batch.isNotEmpty &&
-          batch.every(
+          batch.any(
             (filter) =>
                 filter.limit != 1000 &&
                 filter.kinds.contains(EventKind.streamMessageV2),
           );
+      int? latestSince(List<NostrFilter> batch) => batch
+          .firstWhere((f) => f.kinds.contains(EventKind.streamMessageV2))
+          .since;
 
       Future<void> refreshed(
         _FakeRelaySession session,
@@ -2210,7 +2215,7 @@ void main() {
         addTearDown(container.dispose);
         final notifier = container.read(channelsProvider.notifier);
         int? lastLatestSince() =>
-            session.queryBatches.lastWhere(isLatest).single.since;
+            latestSince(session.queryBatches.lastWhere(isLatest));
 
         final firstFrom = now();
         await container.read(channelsProvider.future);
@@ -2244,6 +2249,49 @@ void main() {
         );
       });
 
+      test('for a channel whose latest message was deleted', () async {
+        final newest = now() - 600;
+        final older = now() - 3600;
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [_meta(id: _channelA, name: 'general')],
+          recentMessages: [message('m1', newest), message('m0', older)],
+        );
+        final container = _buildContainer(session: session);
+        addTearDown(container.dispose);
+        final notifier = container.read(channelsProvider.notifier);
+        DateTime? lastMessageAt() =>
+            container.read(channelsProvider).value!.single.lastMessageAt;
+        DateTime at(int seconds) =>
+            DateTime.fromMillisecondsSinceEpoch(seconds * 1000, isUtc: true);
+        await container.read(channelsProvider.future);
+        await _settle();
+        expect(lastMessageAt(), at(newest));
+
+        // m1 is deleted. The relay leaves it out, and m0 is older than the
+        // window, so only the deletion says the timestamp is stale.
+        session.recentMessages = [
+          message('m0', older),
+          NostrEvent(
+            id: 'm1-deletion',
+            pubkey: 'alice',
+            createdAt: now(),
+            kind: EventKind.nip29DeleteEvent,
+            tags: const [
+              ['h', _channelA],
+              ['e', 'm1'],
+            ],
+            content: '',
+            sig: 'sig',
+          ),
+        ];
+        await refreshed(session, notifier);
+        final latest = session.queryBatches.where(isLatest).toList();
+        expect(latestSince(latest[latest.length - 2]), isNotNull);
+        expect(latestSince(latest.last), isNull);
+        expect(lastMessageAt(), at(older));
+      });
+
       test('for a channel back in the list', () async {
         final session = _FakeRelaySession(
           memberships: [_membership(_channelA, myPk)],
@@ -2265,7 +2313,7 @@ void main() {
 
         session.memberships = [_membership(_channelA, myPk)];
         await refreshed(session, notifier);
-        expect(session.queryBatches.lastWhere(isLatest).single.since, isNull);
+        expect(latestSince(session.queryBatches.lastWhere(isLatest)), isNull);
         expect(
           container.read(channelsProvider).value!.single.lastMessageAt,
           isNotNull,

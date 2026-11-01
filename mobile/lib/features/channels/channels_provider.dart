@@ -584,6 +584,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   /// bridge request. The relay preserves NIP-01 per-filter limits while
   /// executing the filters with bounded concurrency, avoiding an unbounded
   /// burst of websocket REQs on communities with many channels.
+  ///
+  /// A channel asked only for newer messages can't see that its latest one
+  /// was deleted, so the same request asks for deletions in those windows. A
+  /// channel with one is asked again in full and removed from [sinceById],
+  /// so its latest message is recomputed rather than kept.
   Future<List<NostrEvent>?> _fetchLastMessageEvents(
     RelaySessionNotifier session,
     List<ChannelData> channels,
@@ -592,24 +597,69 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   ) async {
     if (channels.isEmpty) return const [];
 
-    final filters = [
+    NostrFilter latest(ChannelData channel, {int? since}) => NostrFilter(
+      kinds: EventKind.channelMessageEventKinds,
+      tags: {
+        '#h': [channel.id],
+      },
+      since: since,
+      limit: channel.channelType == 'dm' ? 1 : 20,
+    );
+    final windowed = [
       for (final channel in channels)
-        NostrFilter(
-          kinds: EventKind.channelMessageEventKinds,
-          tags: {
-            '#h': [channel.id],
-          },
-          since: sinceById[channel.id],
-          limit: channel.channelType == 'dm' ? 1 : 20,
-        ),
+        if (sinceById.containsKey(channel.id)) channel.id,
     ];
-
-    return _fetchChannelHistoryBatch(
+    final events = await _fetchChannelHistoryBatch(
       session,
-      filters,
+      [
+        for (final channel in channels)
+          latest(channel, since: sinceById[channel.id]),
+        for (var i = 0; i < windowed.length; i += kMaxExplicitChannelValues)
+          NostrFilter(
+            kinds: const [EventKind.deletion, EventKind.nip29DeleteEvent],
+            tags: {
+              '#h': windowed.sublist(
+                i,
+                min(i + kMaxExplicitChannelValues, windowed.length),
+              ),
+            },
+            since: windowed.map((id) => sinceById[id]!).reduce(min),
+            limit: 500,
+          ),
+      ],
       operation: 'latest-message query',
       failedChannelIds: failedChannelIds,
     );
+    if (events == null) return null;
+    bool isDeletion(NostrEvent event) =>
+        event.kind == EventKind.deletion ||
+        event.kind == EventKind.nip29DeleteEvent;
+    // The relay matches a deletion without an `h` tag by the channel of the
+    // event it deletes, which this can't tell, so it counts for every window.
+    final deletedIn = {
+      for (final event in events)
+        if (isDeletion(event))
+          ...switch (event.channelId) {
+            final id? => [if (sinceById.containsKey(id)) id],
+            null => windowed,
+          },
+    };
+    final messages = [
+      for (final event in events)
+        if (!isDeletion(event) && !deletedIn.contains(event.channelId)) event,
+    ];
+    if (deletedIn.isEmpty) return messages;
+    sinceById.removeWhere((id, _) => deletedIn.contains(id));
+    final full = await _fetchChannelHistoryBatch(
+      session,
+      [
+        for (final channel in channels)
+          if (deletedIn.contains(channel.id)) latest(channel),
+      ],
+      operation: 'latest-message query',
+      failedChannelIds: failedChannelIds,
+    );
+    return full == null ? null : [...messages, ...full];
   }
 
   /// Where each channel's latest-message query starts.
