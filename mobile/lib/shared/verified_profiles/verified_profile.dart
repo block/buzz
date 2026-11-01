@@ -170,16 +170,30 @@ class VerifiedProfile {
   );
 }
 
-/// Size bounds applied before any buffering or proof work. Far looser than a
-/// valid projection (empty content, at most eight two-element tags of at most
-/// 128 UTF-16 code units), so a small malformed event still takes its address.
-const _maxContent = 1024;
-const _maxTags = 32;
-const _maxTagElements = 4;
-const _maxTagValue = 1024;
+/// The total size, in UTF-16 code units of content and every tag element
+/// (plus one per tag and per element), above which an event is dropped before any buffering or proof work. A valid
+/// projection is at most about 600 (eight two-element tags of at most 128), so
+/// a small malformed event still takes its address, while a full pre-EOSE
+/// buffer stays near 2 MB.
+const _maxEventSize = 4096;
+
+int? _boundedSize(NostrEvent event) {
+  var size = event.content.length;
+  if (size > _maxEventSize) return null;
+  for (final tag in event.tags) {
+    // Each tag and element counts at least one, so empty ones are bounded too.
+    size += 1;
+    for (final value in tag) {
+      size += value.length + 1;
+      if (size > _maxEventSize) return null;
+    }
+    if (size > _maxEventSize) return null;
+  }
+  return size;
+}
 
 /// The subject a kind 30382 event addresses: its first `d` tag, when the
-/// event is by [authority], within the size bounds, and the tag is a
+/// event is by [authority], within [_maxEventSize], and the tag is a
 /// lowercase hex pubkey.
 ///
 /// Projection shape is not checked here: a newer signed event with a
@@ -192,13 +206,7 @@ String? verifiedProfileSubject(
 ) {
   if (event.kind != verifiedProfileKind ||
       event.pubkey != authority.pubkey ||
-      event.content.length > _maxContent ||
-      event.tags.length > _maxTags ||
-      event.tags.any(
-        (tag) =>
-            tag.length > _maxTagElements ||
-            tag.any((value) => value.length > _maxTagValue),
-      )) {
+      _boundedSize(event) == null) {
     return null;
   }
   for (final tag in event.tags) {

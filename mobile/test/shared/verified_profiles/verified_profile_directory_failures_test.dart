@@ -148,6 +148,31 @@ void main() {
     });
   });
 
+  test('an event spread over many small tags is bounded by total size', () {
+    fakeAsync((async) {
+      setUpContainer();
+      // Every part is small; the total is far above the bound.
+      final spread = signedProjection(profileTags(subjectA));
+      session.history = [
+        NostrEvent(
+          id: spread.id,
+          pubkey: spread.pubkey,
+          createdAt: spread.createdAt,
+          kind: spread.kind,
+          tags: [
+            ...spread.tags,
+            for (var i = 0; i < 24; i++) ['x', 'y' * 1000, 'z' * 1000],
+          ],
+          content: spread.content,
+          sig: spread.sig,
+        ),
+      ];
+      expect(start(async), isEmpty);
+      expect(provenEvents, 0);
+      expect(session.unsubscribed, 0);
+    });
+  });
+
   test('live events are coalesced to the newest per subject', () {
     fakeAsync((async) {
       setUpContainer();
