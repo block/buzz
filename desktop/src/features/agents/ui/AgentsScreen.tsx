@@ -72,7 +72,8 @@ export function AgentsScreen() {
         profile: pubkey,
         profilePersona: null,
         profileTab: options?.tab === "info" ? null : (options?.tab ?? null),
-        profileView: null,
+        profileView:
+          options?.view === "summary" ? null : (options?.view ?? null),
       });
     },
     [applyPatch],
