@@ -23,3 +23,9 @@ Desktop chat shell with:
 - `src/shared` - reusable app-wide code (`ui`, `lib`, `styles`)
 - `src/features` - feature modules (vertical slices)
 - `src/app` - top-level app composition
+
+## Agent sandbox
+
+Local agents run inside a bundled [nono](https://nono.sh) sandbox on macOS and
+Linux. See [docs/agent-sandbox.md](../docs/agent-sandbox.md) for what agents can
+reach and how to grant more.
