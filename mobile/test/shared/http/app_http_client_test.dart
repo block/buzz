@@ -29,6 +29,30 @@ void main() {
     expect((await second.get(Uri.parse('https://relay.example/'))).body, 'ok');
   });
 
+  test('cleartext requests use the handle\'s own client', () async {
+    final sessionUrls = <Uri>[];
+    final cleartextUrls = <Uri>[];
+    var cleartextClosed = false;
+    final client = SharedSessionClient(
+      MockClient((request) async {
+        sessionUrls.add(request.url);
+        return http.Response('', 200);
+      }),
+      cleartext: () => _ClosingMock((request) async {
+        cleartextUrls.add(request.url);
+        return http.Response('', 200);
+      }, onClose: () => cleartextClosed = true),
+    );
+
+    await client.get(Uri.parse('https://relay.example/a'));
+    await client.get(Uri.parse('http://icons.example/b'));
+    client.close();
+
+    expect(sessionUrls, [Uri.parse('https://relay.example/a')]);
+    expect(cleartextUrls, [Uri.parse('http://icons.example/b')]);
+    expect(cleartextClosed, isTrue);
+  });
+
   test('URLSession error codes map to user-facing failure kinds', () {
     expect(urlErrorFailure(-1009), TransportFailure.unreachable);
     expect(urlErrorFailure(-1004), TransportFailure.unreachable);
