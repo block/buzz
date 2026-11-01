@@ -8,6 +8,7 @@ import '../../../shared/mentions/agent_identity_provider.dart';
 import '../../../shared/relay/relay.dart';
 import '../../../shared/profile/user_cache_provider.dart';
 import '../../../shared/profile/user_profile.dart';
+import '../../../shared/verified_profiles/verified_profile.dart';
 import '../../../shared/verified_profiles/verified_profile_directory.dart';
 import '../channel.dart';
 import '../channel_management_provider.dart';
@@ -199,6 +200,15 @@ final mentionCandidatesProvider = Provider.family
           if (channel.isMember && !channel.isArchived) channel.id,
       };
 
+      // The directory search matches self-declared names only. A person
+      // outside the channel whose cached verified name matches joins the
+      // results, so the name headers show finds them, not only an impostor
+      // who copied it into kind 0.
+      final verified = ref.watch(verifiedProfilesProvider);
+      final verifiedMatches = directory
+          ? verifiedMentionMatches(verified, args.query, userCache)
+          : const <UserProfile>[];
+
       List<MentionCandidate> build(List<UserProfile> searchResults) => [
         for (final candidate in buildMentionCandidates(
           members: members,
@@ -206,7 +216,7 @@ final mentionCandidatesProvider = Provider.family
           sharedChannelIds: sharedChannelIds,
           userCache: userCache,
           ownerByAgentPubkey: owners,
-          searchResults: searchResults,
+          searchResults: [...searchResults, ...verifiedMatches],
           currentPubkey: currentPubkey,
           ownedAgents: ownedAgents,
           // Desktop offers the owner's agents where they can be added.
@@ -231,7 +241,6 @@ final mentionCandidatesProvider = Provider.family
       }
       // A verified name replaces the self-declared one for matching, ranking
       // and the inserted text, so typing it finds the verified person.
-      final verified = ref.watch(verifiedProfilesProvider);
       candidates = [
         for (final candidate in candidates)
           switch (verified[candidate.pubkey.toLowerCase()]) {
@@ -262,6 +271,30 @@ final mentionCandidatesProvider = Provider.family
         presence: (key) => presence[key] ?? 'unknown',
       );
     });
+
+/// People whose verified name matches a non-empty [query], as directory
+/// search results. Their cached kind 0 profile is kept when known.
+List<UserProfile> verifiedMentionMatches(
+  Map<String, VerifiedProfile> verified,
+  String query,
+  Map<String, UserProfile> userCache,
+) {
+  if (query.trim().isEmpty) return const [];
+  return [
+    for (final MapEntry(:key, :value) in verified.entries)
+      if (rankMentions([
+        MentionChoice(
+          pubkey: key,
+          name: value.displayName,
+          label: value.displayName,
+          aliases: [value.displayName],
+          member: false,
+        ),
+      ], query).isNotEmpty)
+        userCache[key] ??
+            UserProfile(pubkey: key, displayName: value.displayName),
+  ];
+}
 
 /// Picker labels compare every selectable choice, before query ranking
 /// filters them, so a row's label does not change as the query narrows.

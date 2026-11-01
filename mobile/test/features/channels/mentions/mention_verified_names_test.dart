@@ -73,7 +73,7 @@ class _Verified extends VerifiedProfilesNotifier {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  Future<List<String>> pick(String query) async {
+  Future<List<String>> pick(String query, {bool adaIsMember = true}) async {
     final container = ProviderContainer(
       retry: (_, _) => null,
       overrides: [
@@ -82,12 +82,13 @@ void main() {
         channelsProvider.overrideWith(_Channels.new),
         channelMembersProvider(_channelId).overrideWith(
           (ref) async => [
-            ChannelMember(
-              pubkey: _ada,
-              role: 'member',
-              joinedAt: DateTime.utc(2026),
-              displayName: 'ada_l',
-            ),
+            if (adaIsMember)
+              ChannelMember(
+                pubkey: _ada,
+                role: 'member',
+                joinedAt: DateTime.utc(2026),
+                displayName: 'ada_l',
+              ),
             ChannelMember(
               pubkey: _impostor,
               role: 'member',
@@ -128,4 +129,15 @@ void main() {
   test('the self-declared name still finds the verified person', () async {
     expect(await pick('ada_l'), ['ada=Ada Lovelace']);
   });
+
+  test(
+    'a verified person outside the channel is found by verified name',
+    () async {
+      // The directory search only matches kind 0 names, so it returns the
+      // impostor alone; the cached verified record still adds real Ada.
+      final rows = await pick('Ada Lovelace', adaIsMember: false);
+      expect(rows, contains('ada=Ada Lovelace'));
+      expect(rows, contains('impostor=Ada Lovelace'));
+    },
+  );
 }
