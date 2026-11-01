@@ -327,6 +327,22 @@ void main() {
         expect(shownUrl(tester), original);
         expect(find.text('M'), findsNothing);
         expect(MediaImageProvider.debugCooldownUrls, isEmpty);
+
+        // Another host's 404 keeps its cooldown, even at a path shaped like
+        // a relay thumbnail.
+        final elsewhere =
+            'https://elsewhere.example/media/${'56' * 32}.thumb.jpg';
+        respond = (_) async => http.Response('', 404);
+        await show(
+          tester,
+          AvatarImage(
+            imageUrl: elsewhere,
+            radius: 16,
+            fallback: const Text('E'),
+          ),
+        );
+        expect(find.text('E'), findsOneWidget);
+        expect(MediaImageProvider.debugCooldownUrls, [elsewhere]);
       },
     );
 

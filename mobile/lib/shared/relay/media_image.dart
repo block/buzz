@@ -240,7 +240,9 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       }
       rethrow;
     }
-    if (response.statusCode == 404 && _relayThumbnailPath.hasMatch(uri.path)) {
+    if (response.statusCode == 404 &&
+        auth.isRelayMediaUrl(url) &&
+        _relayThumbnailPath.hasMatch(uri.path)) {
       // Older or externally populated media may have no generated thumbnail.
       // Record that here rather than in a widget's error builder: the widget
       // that asked may be gone by the time a slow 404 arrives, and a
