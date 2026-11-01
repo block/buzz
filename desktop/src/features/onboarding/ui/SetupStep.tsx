@@ -1,5 +1,5 @@
 import * as React from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalUrl } from "@/shared/lib/openExternalUrl";
 import { Check, ChevronRight, ExternalLink } from "lucide-react";
 
 import {
@@ -309,7 +309,7 @@ function RuntimeStatus({
       aria-label={`View ${runtime.label} install instructions`}
       className="buzz-onboarding-runtime-setup h-5 rounded-md bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 text-xs font-medium text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
       data-testid={`onboarding-runtime-instructions-${runtime.id}`}
-      onClick={() => void openUrl(runtime.installInstructionsUrl)}
+      onClick={() => void openExternalUrl(runtime.installInstructionsUrl)}
       type="button"
       variant="ghost"
     >
@@ -893,7 +893,7 @@ function RuntimeSetupGuide({
             <Button
               className="ml-auto h-7 shrink-0 rounded-full bg-foreground px-3 text-xs text-background shadow-none hover:bg-foreground/85"
               data-testid="onboarding-harness-open-setup-guide"
-              onClick={() => void openUrl(runtime.installInstructionsUrl)}
+              onClick={() => void openExternalUrl(runtime.installInstructionsUrl)}
               size="xs"
               type="button"
             >

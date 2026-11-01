@@ -18,6 +18,7 @@ mod initial_window;
 mod key_backup;
 mod link_preview_tags;
 mod linux_media;
+mod linux_url_opener;
 #[cfg(target_os = "macos")]
 mod macos_notifications;
 mod managed_agents;
@@ -606,6 +607,7 @@ pub fn run() {
             get_relay_http_url,
             get_media_proxy_port,
             fetch_link_preview_metadata,
+            linux_url_opener::open_external_url,
             cancel_link_preview_metadata,
             release_link_preview_metadata,
             discover_acp_auth_methods,
