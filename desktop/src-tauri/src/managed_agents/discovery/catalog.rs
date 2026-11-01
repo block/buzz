@@ -93,11 +93,19 @@ pub(crate) const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         underlying_cli: Some("codex"),
         cli_install_commands: &["curl -fsSL https://chatgpt.com/codex/install.sh | sh"],
         cli_install_commands_windows: &[windows_install_command!("codex", "https://chatgpt.com/codex/install.ps1")],
-        adapter_install_commands: &["npm install -g @agentclientprotocol/codex-acp"],
+        // Pinned to the 2.x line. The adapter's ACP contract changed in 2.0
+        // (`initialize` gained `info`/`capabilities`, `session/new` MCP
+        // descriptors gained `type`), and an unbounded `npm install -g` pulls
+        // whatever major is newest — a new major can change the contract again
+        // and silently break every managed codex agent, because the handshake
+        // failure only shows up as a harness log line. The harness speaks both
+        // the v1 and v2 dialects, so 1.x and 2.x both work; crossing a major
+        // boundary has to wait for a Buzz build that has validated it.
+        adapter_install_commands: &["npm install -g @agentclientprotocol/codex-acp@^2"],
         cli_install_instructions_url: "https://developers.openai.com/codex/cli/",
         adapter_install_instructions_url: "https://github.com/agentclientprotocol/codex-acp",
         cli_install_hint: "Buzz talks to Codex through the Codex CLI.",
-        adapter_install_hint: "Buzz talks to the Codex CLI through an ACP adapter. Install it with: npm install -g @agentclientprotocol/codex-acp.",
+        adapter_install_hint: "Buzz talks to the Codex CLI through an ACP adapter. Install it with: npm install -g @agentclientprotocol/codex-acp@^2.",
         skill_dir: Some(".codex/skills"),
         supports_acp_model_switching: false,
         model_env_var: None,
