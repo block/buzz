@@ -278,6 +278,47 @@ test("Welcome ensured marker is scoped to the current identity and community", (
   }
 });
 
+test("Welcome ensured marker canonicalizes relay URL differences", () => {
+  const { restore } = installWindowSessionStorage();
+  try {
+    markWelcomeChannelEnsured("pubkey-a", "wss://community-a.example/");
+
+    // Trailing slash, uppercase scheme, and mixed case must all map
+    // to the same key so a relay URL edit does not orphan the marker.
+    assert.equal(
+      hasEnsuredWelcomeChannel("pubkey-a", "wss://community-a.example"),
+      true,
+    );
+    assert.equal(
+      hasEnsuredWelcomeChannel("pubkey-a", "WSS://Community-A.Example/"),
+      true,
+    );
+    assert.equal(
+      hasEnsuredWelcomeChannel("pubkey-a", "wss://community-a.example//"),
+      true,
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("Welcome ensured marker migrates the legacy raw relay URL key", () => {
+  const { restore } = installWindowSessionStorage();
+  try {
+    const rawRelayUrl = "WSS://Community-A.Example/";
+    const legacyKey = `buzz-welcome-channel-ensured.v2:${encodeURIComponent(rawRelayUrl)}:pubkey-a`;
+    window.localStorage.setItem(legacyKey, "true");
+
+    assert.equal(hasEnsuredWelcomeChannel("pubkey-a", rawRelayUrl), true);
+    assert.equal(
+      hasEnsuredWelcomeChannel("pubkey-a", "wss://community-a.example"),
+      true,
+    );
+  } finally {
+    restore();
+  }
+});
+
 test("ensureStarterChannels reuses existing open starter channels", async () => {
   const general = makeChannel({
     id: "general-channel",
@@ -359,4 +400,29 @@ test("isWelcomeExperienceChannel matches legacy Welcome and starter welcome-ever
     false,
   );
   assert.equal(isWelcomeExperienceChannel(null), false);
+});
+
+test("Welcome relay markers preserve case-sensitive paths and queries", () => {
+  const { restore } = installWindowSessionStorage();
+  try {
+    markWelcomeChannelEnsured("pubkey-a", "WSS://EXAMPLE.COM/Team?key=AbC");
+    assert.equal(
+      hasEnsuredWelcomeChannel("pubkey-a", "wss://example.com/Team?key=AbC"),
+      true,
+    );
+    assert.equal(
+      hasEnsuredWelcomeChannel("pubkey-a", "wss://example.com/team?key=AbC"),
+      false,
+    );
+    assert.equal(
+      hasEnsuredWelcomeChannel("pubkey-a", "wss://example.com/Team?key=abc"),
+      false,
+    );
+    assert.equal(
+      hasEnsuredWelcomeChannel("pubkey-a", "wss://example.com/Team?key=AbC/"),
+      false,
+    );
+  } finally {
+    restore();
+  }
 });
