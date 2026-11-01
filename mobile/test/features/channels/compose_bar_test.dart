@@ -227,7 +227,10 @@ Widget _buildComposeBar({
       if (searchPeople != null)
         mentionUserSearchProvider.overrideWith((ref, query) async {
           await Future<void>.delayed(mentionSearchDebounce);
-          return searchPeople(query.trim());
+          final people = await searchPeople(query.trim());
+          // Like the real search, a finished page is cached by query.
+          ref.read(mentionSearchCacheProvider).put(query.trim(), people);
+          return people;
         }),
       customEmojiListProvider.overrideWithValue(customEmoji),
       mediaUploadServiceProvider.overrideWithValue(uploadService),
@@ -1895,6 +1898,124 @@ void main() {
         await settleSearch(tester);
         expect(popover(), findsOneWidget);
         expect(find.text('Mary Jane'), findsOneWidget);
+      });
+
+      testWidgets('a late directory person does not move the shown rows', (
+        tester,
+      ) async {
+        const saba = UserProfile(
+          pubkey:
+              'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+          displayName: 'Saba Saba',
+        );
+        await pumpMembers(tester, [
+          'Sam',
+        ], searchPeople: (query) async => query == 'S' ? [saba] : const []);
+        await tester.enterText(find.byType(TextField), '@S');
+        await tester.pump();
+        expect(find.text('Saba Saba'), findsNothing);
+        final samTop = tester.getTopLeft(find.text('Sam')).dy;
+        final height = tester.getSize(popover()).height;
+
+        await settleSearch(tester);
+        expect(find.text('Saba Saba'), findsOneWidget);
+        // The late row filled reserved space: nothing shown moved.
+        expect(tester.getTopLeft(find.text('Sam')).dy, samTop);
+        expect(tester.getSize(popover()).height, height);
+      });
+
+      testWidgets('a cached query\'s refresh does not move the shown rows', (
+        tester,
+      ) async {
+        const saba = UserProfile(
+          pubkey:
+              'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+          displayName: 'Saba Saba',
+        );
+        var searches = 0;
+        await pumpMembers(
+          tester,
+          ['Sam'],
+          searchPeople: (query) async =>
+              query == 'S' && searches++ > 0 ? [saba] : const [],
+        );
+        await tester.enterText(find.byType(TextField), '@S');
+        await tester.pump();
+        await settleSearch(tester);
+        expect(find.text('Saba Saba'), findsNothing);
+        await tester.enterText(find.byType(TextField), '');
+        await tester.pump();
+
+        // A new opening shows the cached page at once, then refreshes.
+        await tester.enterText(find.byType(TextField), '@S');
+        await tester.pump();
+        expect(find.text('Saba Saba'), findsNothing);
+        final samTop = tester.getTopLeft(find.text('Sam')).dy;
+        final height = tester.getSize(popover()).height;
+
+        await settleSearch(tester);
+        expect(find.text('Saba Saba'), findsOneWidget);
+        expect(tester.getTopLeft(find.text('Sam')).dy, samTop);
+        expect(tester.getSize(popover()).height, height);
+      });
+
+      testWidgets(
+        'a short landscape view keeps the reserved chooser on screen',
+        (tester) async {
+          tester.view.devicePixelRatio = 1;
+          tester.view.physicalSize = const Size(844, 390);
+          tester.view.viewInsets = const FakeViewPadding(bottom: 170);
+          addTearDown(tester.view.reset);
+          await pumpMembers(tester, ['Sam']);
+          await tester.enterText(find.byType(TextField), '@S');
+          await tester.pump();
+
+          // The search is still running, so the chooser reserves its height,
+          // but no more than fits above the composer.
+          expect(
+            find.byKey(const ValueKey('mention-search-progress')),
+            findsOneWidget,
+          );
+          final sam = tester.getRect(find.widgetWithText(ListTile, 'Sam'));
+          expect(sam.top, greaterThanOrEqualTo(0));
+          expect(tester.getRect(popover()).top, greaterThanOrEqualTo(0));
+          await tester.tap(find.text('Sam'));
+          await tester.pump();
+          expect(find.textContaining('@Sam'), findsWidgets);
+          await settleSearch(tester);
+        },
+      );
+
+      testWidgets('the chooser shows at most three rows, then scrolls', (
+        tester,
+      ) async {
+        final people = [
+          for (final (i, name) in ['Saba', 'Sage', 'Sasha', 'Selma'].indexed)
+            UserProfile(pubkey: '${'a' * 63}$i', displayName: '$name Person'),
+        ];
+        await pumpMembers(tester, [
+          'Sam',
+        ], searchPeople: (query) async => query == 'S' ? people : const []);
+        await tester.enterText(find.byType(TextField), '@S');
+        await tester.pump();
+        await settleSearch(tester);
+        final row = tester.getSize(
+          find.widgetWithText(ListTile, 'Saba Person'),
+        );
+        expect(tester.getSize(popover()).height, row.height * 3 + Grid.xxs * 2);
+      });
+
+      testWidgets('a running search shows a progress bar on the chooser', (
+        tester,
+      ) async {
+        final progress = find.byKey(const ValueKey('mention-search-progress'));
+        await pumpMembers(tester, ['Sam']);
+        await tester.enterText(find.byType(TextField), '@S');
+        await tester.pump();
+        expect(progress, findsOneWidget);
+        expect(tester.getTopLeft(progress).dy, tester.getTopLeft(popover()).dy);
+        await settleSearch(tester);
+        expect(progress, findsNothing);
       });
 
       testWidgets('a DM finds directory people too, marked not in DM', (

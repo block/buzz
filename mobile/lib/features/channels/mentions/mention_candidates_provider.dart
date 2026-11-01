@@ -26,6 +26,7 @@ const mentionSearchDebounce = Duration(milliseconds: 200);
 ///
 /// Debounced: the provider waits [mentionSearchDebounce] before querying;
 /// keystrokes dispose the stale family member so its request never fires.
+/// Each finished search is kept in [mentionSearchCacheProvider].
 final mentionUserSearchProvider = FutureProvider.autoDispose
     .family<List<UserProfile>, String>((ref, query) async {
       // The session notifier is stable across communities, and two
@@ -57,9 +58,12 @@ final mentionUserSearchProvider = FutureProvider.autoDispose
         }
       }
 
-      return [
+      final people = [
         for (final event in latestByPubkey.values) _profileFromEvent(event),
       ];
+      // A search that outlived its query or community is not kept.
+      if (!disposed) ref.read(mentionSearchCacheProvider).put(trimmed, people);
+      return people;
     });
 
 UserProfile _profileFromEvent(NostrEvent event) {
@@ -77,31 +81,49 @@ UserProfile _profileFromEvent(NostrEvent event) {
 /// One chooser opening: an inline `@` token or one open picker.
 typedef MentionChooserArgs = ({String channelId, String query, int opening});
 
-/// The last finished directory search for each chooser opening. A new query
-/// keeps showing its still-matching people while its own search runs.
-/// Nothing here outlives the relay session or the community, and a new
-/// opening starts empty.
-class _SettledSearches {
-  final _pages = <(String, int), List<UserProfile>>{};
+/// Finished directory searches by query, for the current community and
+/// signer. A query searched before shows its people at once while a fresh
+/// search runs, so typing the same query twice shows the same rows. A
+/// query not searched yet starts from the longest searched query it
+/// continues: a name search for `sa` finds no one that `s` did not.
+class MentionSearchCache {
+  static const limit = 64;
+  final _pages = <String, List<UserProfile>>{};
 
-  List<UserProfile>? last(String channelId, int opening) =>
-      _pages[(channelId, opening)];
+  static String _key(String query) => query.trim().toLowerCase();
 
-  /// Keeps [people] as this opening's last search. A search that found no
-  /// one is not kept, so the next opening searches again.
-  void settle(String channelId, int opening, List<UserProfile> people) {
-    if (people.isEmpty) return;
-    final key = (channelId, opening);
+  /// The finished search for exactly [query], or null.
+  List<UserProfile>? exact(String query) => _pages[_key(query)];
+
+  /// The finished search for [query], else the one for the longest
+  /// searched query that [query] continues, else null.
+  List<UserProfile>? seed(String query) {
+    final key = _key(query);
+    if (key.isEmpty) return null;
+    for (var end = key.length; end > 0; end--) {
+      final page = _pages[key.substring(0, end)];
+      if (page != null) return page;
+    }
+    return null;
+  }
+
+  /// Keeps [people] as the latest search for [query], newest last.
+  void put(String query, List<UserProfile> people) {
+    final key = _key(query);
+    if (key.isEmpty) return;
     _pages.remove(key);
     _pages[key] = people;
-    if (_pages.length > 20) _pages.remove(_pages.keys.first);
+    while (_pages.length > limit) {
+      _pages.remove(_pages.keys.first);
+    }
   }
 }
 
-final _settledSearchesProvider = Provider<_SettledSearches>((ref) {
-  ref.watch(relaySessionProvider.select((s) => s.status));
+/// Nothing in the search cache outlives the community or the signer.
+final mentionSearchCacheProvider = Provider<MentionSearchCache>((ref) {
   ref.watch(relayConfigProvider);
-  return _SettledSearches();
+  ref.watch(currentPubkeyProvider);
+  return MentionSearchCache();
 });
 
 /// Explicit mention choices per channel, newest highest. Memory only,
@@ -169,7 +191,7 @@ final mentionCandidatesProvider = Provider.family
       // Archived channels take no mentions.
       if (channel?.isArchived == true) return const [];
       final directory = channel?.mentionsOutsidePeople ?? false;
-      final settled = ref.watch(_settledSearchesProvider);
+      final searches = ref.watch(mentionSearchCacheProvider);
 
       final sharedChannelIds = {
         for (final channel in channels)
@@ -198,17 +220,13 @@ final mentionCandidatesProvider = Provider.family
       // again with the people it finds (portable mention rules, section 2).
       var candidates = build(
         directory
-            ? settled.last(args.channelId, args.opening) ??
-                  const <UserProfile>[]
+            ? searches.seed(args.query) ?? const <UserProfile>[]
             : const <UserProfile>[],
       );
       if (directory) {
         final search = ref.watch(mentionUserSearchProvider(args.query));
         final page = search.asData?.value;
-        if (page != null) {
-          settled.settle(args.channelId, args.opening, page);
-          candidates = build(page);
-        }
+        if (page != null) candidates = build(page);
       }
       if (!matchesMentionQuery(args.query, [
         for (final candidate in candidates)
@@ -273,4 +291,19 @@ final mentionSearchFailedProvider = Provider.family
       }
       final search = ref.watch(mentionUserSearchProvider(args.query));
       return search.hasError && !search.isLoading;
+    });
+
+/// Whether this chooser's directory search is still running, so people may
+/// still join its rows. A cached query counts too: its refresh can add people
+/// or the retry row below the cached page.
+final mentionSearchPendingProvider = Provider.family
+    .autoDispose<bool, MentionChooserArgs>((ref, args) {
+      final channel = ref.watch(channelByIdProvider(args.channelId));
+      if (channel == null ||
+          channel.isArchived ||
+          !channel.mentionsOutsidePeople ||
+          args.query.trim().isEmpty) {
+        return false;
+      }
+      return ref.watch(mentionUserSearchProvider(args.query)).isLoading;
     });
