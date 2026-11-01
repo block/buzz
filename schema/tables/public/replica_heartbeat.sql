@@ -7,7 +7,7 @@
 -- coverage. Deployment-global by design: describes replication topology,
 -- never tenant data.
 
-CREATE TABLE replica_heartbeat (
+CREATE TABLE IF NOT EXISTS replica_heartbeat (
     id    smallint PRIMARY KEY CHECK (id = 1),
     epoch uuid     NOT NULL DEFAULT gen_random_uuid(),
     token bigint   NOT NULL DEFAULT 0
