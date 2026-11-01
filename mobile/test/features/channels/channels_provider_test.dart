@@ -2223,6 +2223,46 @@ void main() {
       },
     );
 
+    test('a channel whose fallback failed catches up over its whole window '
+        'again', () async {
+      int now() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final session =
+          _FakeRelaySession(
+              memberships: [_membership(_channelA, myPk)],
+              metadata: [_meta(id: _channelA, name: 'general')],
+              recentMessages: [message('old', now() - 3600, mention: true)],
+            )
+            // The batch fails and so does its websocket fallback, without a
+            // deadline: the catch-up completes with no events for the channel.
+            ..messageBatchError = Exception('batch unavailable')
+            ..messageHistoryError = Exception('CLOSED: socket error');
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      final notifier = container.read(channelsProvider.notifier);
+      await container.read(channelsProvider.future);
+      await _waitUntil(() => session.queryBatches.any(isUnread));
+      await _settle();
+      expect(notifier.observedUnreadEventsByChannel[_channelA], isNull);
+
+      session
+        ..messageBatchError = null
+        ..messageHistoryError = null;
+      final before = session.queryBatches.where(isUnread).length;
+      await notifier.refresh();
+      await _waitUntil(
+        () => session.queryBatches.where(isUnread).length > before,
+      );
+      await _settle();
+      expect(
+        [
+          for (final filter in session.queryBatches.lastWhere(isUnread))
+            filter.since,
+        ],
+        [0, 0],
+      );
+      expect(notifier.observedUnreadEventsByChannel[_channelA]?.keys, ['old']);
+    });
+
     test('a rebuilt channel list catches up over the whole window', () async {
       final session = _FakeRelaySession(
         memberships: [_membership(_channelA, myPk)],
@@ -3505,6 +3545,12 @@ class _FakeRelaySession extends RelaySessionNotifier {
     for (final filter in filters) {
       final matches = messageSnapshot.where((event) {
         if (!filter.kinds.contains(event.kind)) return false;
+        if (filter.since case final since? when event.createdAt < since) {
+          return false;
+        }
+        if (filter.until case final until? when event.createdAt > until) {
+          return false;
+        }
         for (final entry in filter.tags.entries) {
           final tagName = entry.key.startsWith('#')
               ? entry.key.substring(1)

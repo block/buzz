@@ -58,10 +58,12 @@ extension _UnreadCatchUp on ChannelsNotifier {
             ),
       ];
 
+      final failedChannelIds = <String>{};
       final events = await _fetchChannelHistoryBatch(
         session,
         filters,
         operation: 'unread catch-up',
+        failedChannelIds: failedChannelIds,
       );
       // Unavailable: keep the unread state already observed.
       if (events == null) return;
@@ -73,7 +75,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
         return;
       }
 
-      _recordUnreadCaughtUp(readAtByChannel, requestedAt);
+      _recordUnreadCaughtUp(readAtByChannel, requestedAt, failedChannelIds);
 
       // Keep this response's deletion evidence independently of the bounded
       // cross-request tombstones: a large batch can evict its own early IDs.
@@ -207,11 +209,17 @@ extension _UnreadCatchUp on ChannelsNotifier {
     return max(afterRead, caughtUp.sentAt - relayLiveWindowSkewSeconds);
   }
 
-  /// Remembers when a catch-up that covered every channel in
-  /// [readAtByChannel] was sent, and the read timestamps it used.
-  void _recordUnreadCaughtUp(Map<String, int?> readAtByChannel, int sentAt) {
+  /// Remembers when a catch-up over [readAtByChannel] was sent, and the read
+  /// timestamps it used, for every channel except [failedChannelIds]: their
+  /// filters failed, so the next catch-up still needs their earlier window.
+  void _recordUnreadCaughtUp(
+    Map<String, int?> readAtByChannel,
+    int sentAt,
+    Set<String> failedChannelIds,
+  ) {
     for (final MapEntry(key: channelId, value: readAt)
         in readAtByChannel.entries) {
+      if (failedChannelIds.contains(channelId)) continue;
       _unreadCaughtUpByChannel[channelId] = (sentAt: sentAt, readAt: readAt);
     }
   }

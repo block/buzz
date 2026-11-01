@@ -5,10 +5,14 @@ void _unreadDeletionCases() {
     test(
       'deleted mentions stop unread (kind ${format.$1}, h ${format.$2})',
       () async {
+        // Timestamps below are offsets from a recent base: a repeated
+        // catch-up starts within the relay's drift window, and the relay
+        // stores nothing older than that since then.
+        final base = DateTime.now().millisecondsSinceEpoch ~/ 1000 - 100;
         NostrEvent message(String id, int at) => NostrEvent(
           id: id,
           pubkey: 'alice',
-          createdAt: at,
+          createdAt: base + at,
           kind: 9,
           tags: const [
             ['h', _channelA],
@@ -20,7 +24,7 @@ void _unreadDeletionCases() {
         NostrEvent deletion(String id, String target, int at) => NostrEvent(
           id: id,
           pubkey: 'alice',
-          createdAt: at,
+          createdAt: base + at,
           kind: format.$1,
           tags: [
             if (format.$2) ['h', _channelA],
@@ -108,7 +112,7 @@ void _unreadDeletionCases() {
         NostrEvent unreact(String id, int at) => NostrEvent(
           id: id,
           pubkey: 'alice',
-          createdAt: at,
+          createdAt: base + at,
           kind: EventKind.deletion,
           tags: [
             ['e', 'reaction-$id'],
