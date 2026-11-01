@@ -147,10 +147,14 @@ impl RefPattern {
             {
                 // Partial globs (e.g., "v*") are not allowed.
                 return Err(PatternError::InvalidSegment(part.to_string()));
-            } else if !part
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
-            {
+            } else if !part.chars().all(|c| {
+                c.is_ascii_alphanumeric()
+                    || c == '.'
+                    || c == '_'
+                    || c == '-'
+                    || c == '+'
+                    || c == '@'
+            }) {
                 return Err(PatternError::InvalidSegment(part.to_string()));
             } else {
                 segments.push(PatternSegment::Literal(part.to_string()));
@@ -701,6 +705,31 @@ mod tests {
         let p = RefPattern::parse("refs/heads/**").unwrap();
         // Must match at least one segment after prefix
         assert!(!p.matches("refs/heads"));
+    }
+
+    #[test]
+    fn pattern_literal_accepts_plus_and_at() {
+        // `+` and `@` are now legal inside `is_safe_refname` (#4194). A literal
+        // protection rule must be able to name refs containing them, or those
+        // refs become pushable-but-unnameable — the protection layer can't
+        // enforce anything on them.
+        let p = RefPattern::parse("refs/heads/test/842+841-devnet").unwrap();
+        assert!(p.matches("refs/heads/test/842+841-devnet"));
+        assert!(!p.matches("refs/heads/test/other"));
+
+        let p = RefPattern::parse("refs/tags/release@v1").unwrap();
+        assert!(p.matches("refs/tags/release@v1"));
+
+        // Single-segment wildcard still matches across the widened alphabet
+        // (one segment only — `refs/heads/test/842+841-devnet` has two
+        // segments under `heads/` and so does NOT match `refs/heads/*`).
+        let p = RefPattern::parse("refs/heads/*").unwrap();
+        assert!(p.matches("refs/heads/test"));
+        assert!(!p.matches("refs/heads/test/842+841-devnet"));
+
+        // Recursive wildcard matches refs with `+`/`@` in any component.
+        let p = RefPattern::parse("refs/heads/**").unwrap();
+        assert!(p.matches("refs/heads/test/842+841-devnet"));
     }
 
     #[test]
