@@ -750,14 +750,20 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     .as_ref()
                     .map(crate::nip_fi_core::NipFiSession::from_assertion),
             );
-            match admitted_owner(&state, conn.tenant.community(), pubkey, nip_oa_owner).await {
-                Ok(Some(owner)) => state.conn_manager.set_admitted_owner(conn_id, owner),
-                Ok(None) => {}
-                Err(denial) => {
-                    deny_admission(&conn, &event_id_hex, denial);
-                    return;
-                }
-            }
+            // An admitted owner (NIP-OA, a NIP-FI agent token, or a stored
+            // `agent_owner_pubkey`) makes this socket an agent's.
+            let admitted_agent =
+                match admitted_owner(&state, conn.tenant.community(), pubkey, nip_oa_owner).await {
+                    Ok(Some(owner)) => {
+                        state.conn_manager.set_admitted_owner(conn_id, owner);
+                        true
+                    }
+                    Ok(None) => false,
+                    Err(denial) => {
+                        deny_admission(&conn, &event_id_hex, denial);
+                        return;
+                    }
+                };
             let denial = match final_admission_denial(
                 &state,
                 conn.tenant.community(),
@@ -830,6 +836,21 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 &conn.tenant,
                 conn.nip_fi_assertion.as_ref(),
             );
+            // A community without a membership roster has no roster insert to
+            // join default channels at, so a person is joined on admission to
+            // the ones they have never been in. Agents are not.
+            if !state.config.require_relay_membership && !admitted_agent {
+                let state = Arc::clone(&state);
+                let tenant = conn.tenant.clone();
+                tokio::spawn(async move {
+                    crate::handlers::side_effects::auto_join_never_joined_channels(
+                        &tenant,
+                        &state,
+                        &pubkey.to_bytes(),
+                    )
+                    .await;
+                });
+            }
             // _auth_permit drops here — expiry's write guard may proceed.
         }
         Err(e) => {
@@ -2344,6 +2365,122 @@ mod tests {
                 "the stored-link agent closes"
             );
             assert!(!conns[2].cancel.is_cancelled(), "the bystander stays");
+        }
+
+        /// On a community without a membership roster, a person's admission
+        /// joins them to the default channels they have never been in. An
+        /// agent's (NIP-OA) admission does not, and a person who left is not
+        /// joined back when they are admitted again. The joins run after the
+        /// AUTH reply, so each negative check waits for a later person's
+        /// join first.
+        ///
+        /// Mutations: delete the `auto_join_never_joined_channels` spawn →
+        /// nobody is joined (RED); drop `!admitted_agent` → the agent is
+        /// joined (RED).
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn root_auth_joins_people_to_default_channels_without_a_roster() {
+            use buzz_db::channel::{ChannelType, ChannelUpdate, ChannelVisibility};
+            use std::sync::Arc;
+            let state = auth_test_state_real_db_expect().await;
+            let community = seeded_community(&state).await;
+            let (owner, agent, person, later) = (
+                Keys::generate(),
+                Keys::generate(),
+                Keys::generate(),
+                Keys::generate(),
+            );
+            state
+                .db
+                .ensure_user_for_authorization(community, owner.public_key().as_bytes())
+                .await
+                .expect("seed owner");
+            let channel = state
+                .db
+                .create_channel(
+                    community,
+                    "general",
+                    ChannelType::Stream,
+                    ChannelVisibility::Open,
+                    None,
+                    &owner.public_key().to_bytes(),
+                    None,
+                )
+                .await
+                .expect("create channel")
+                .id;
+            state
+                .db
+                .update_channel(
+                    community,
+                    channel,
+                    ChannelUpdate {
+                        auto_join: Some(true),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("flag channel");
+            let role = |keys: &Keys| {
+                let state = Arc::clone(&state);
+                let pubkey = keys.public_key().to_bytes();
+                async move {
+                    state
+                        .db
+                        .get_member_role(community, channel, &pubkey)
+                        .await
+                        .expect("member role")
+                }
+            };
+            let admit = |keys: &Keys, challenge: &'static str, tag: Option<Vec<String>>| {
+                let state = Arc::clone(&state);
+                let event = signed_auth(keys, challenge, tag);
+                async move {
+                    let (conn, _ctrl) = registered_pending_conn(&state, community, challenge);
+                    handle_auth(event, Arc::clone(&conn), state).await;
+                    assert!(
+                        matches!(conn.auth_state_snapshot(), AuthState::Authenticated(_)),
+                        "{challenge} is admitted"
+                    );
+                }
+            };
+            let wait_joined = |keys: &Keys| {
+                let state = Arc::clone(&state);
+                let pubkey = keys.public_key().to_bytes();
+                async move {
+                    for _ in 0..250 {
+                        if let Some(role) = state
+                            .db
+                            .get_member_role(community, channel, &pubkey)
+                            .await
+                            .expect("member role")
+                        {
+                            return role;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    }
+                    panic!("not joined within 5s");
+                }
+            };
+            let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+                .expect("sign NIP-OA credential");
+            let auth_tag: Vec<String> = serde_json::from_str(&auth_tag).expect("tag JSON");
+
+            admit(&agent, "auto-join-agent", Some(auth_tag)).await;
+            admit(&person, "auto-join-person", None).await;
+            assert_eq!(wait_joined(&person).await, "member");
+            assert_eq!(role(&agent).await, None, "an agent is not joined");
+
+            let person_key = person.public_key().to_bytes();
+            state
+                .db
+                .remove_member(community, channel, &person_key, &person_key)
+                .await
+                .expect("leave");
+            admit(&person, "auto-join-person-again", None).await;
+            admit(&later, "auto-join-later", None).await;
+            assert_eq!(wait_joined(&later).await, "member");
+            assert_eq!(role(&person).await, None, "a leave stands");
         }
 
         /// AUTH with NIP-OA records a previously ownerless agent's owner. That

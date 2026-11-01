@@ -226,8 +226,9 @@ body of kind:9021, so the channel's `join_role` applies and the channel gets
 its `member_joined` kind:40099, kind:39002 and kind:44100. There is no cap on
 how many channels that is: whatever carries the kind:39000 tag is joined, and
 the work a new member costs grows with the number of channels an owner or
-admin flags. The relay does this once, at that moment, and never again on
-login or reconnect, so a later kind:9022 leave stands. A kind:9030 add is
+admin flags. On a community that requires relay membership, the relay does
+this once, at that moment, and never again on login or reconnect, so a later
+kind:9022 leave stands. A kind:9030 add is
 made by someone else, so the new member's `channel_add_policy` applies first,
 as it would to that actor's kind:9000: if it refuses them, no default channel
 is joined. The claim response waits for the joins, and a claimer who
@@ -238,10 +239,20 @@ record a client reconciles against. That includes a channel archived or made
 private while the join runs: the membership write decides both again under
 the channel's locks, so the member is not added and nothing is announced.
 `buzz-admin add-member` writes the roster row only and
-does not join default channels. Auto-join fires only at those roster-insert
-sites, so a community that does not require relay membership advertises the
-kind:39000 tag but auto-joins nobody; a client that wants the same result
-there self-joins (kind:9021) on the tag.
+does not join default channels.
+
+A community that does not require relay membership has no roster insert to
+join people at, so there the relay joins a person when it admits their
+WebSocket AUTH, after the OK, to every effective default channel they have
+never been a member of. "Never a member" is the channel's own membership
+history: a kind:9022 leave or a kind:9001 removal keeps the row, so the
+person is not joined back, and a new device or another relay pod finds the
+row and does nothing. The check runs again under the channel's membership
+lock, so two admissions of the same person join them once. A channel flagged
+later is joined on each person's next admission. Agents are skipped: an AUTH
+with a NIP-OA owner, a NIP-FI agent token, or a stored agent owner joins
+nothing. A membership write that fails leaves no row, so the next admission
+tries that channel again.
 
 ### Group Discovery
 

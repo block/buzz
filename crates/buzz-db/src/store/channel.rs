@@ -657,6 +657,44 @@ pub async fn list_auto_join_channels(
     rows.into_iter().map(row_to_channel_record).collect()
 }
 
+/// The effective `auto_join` channels (see [`list_auto_join_channels`]) where
+/// `pubkey` has never had a membership row, active or removed; oldest first.
+///
+/// A kind:9022 leave or a kind:9001 removal keeps the row with `removed_at`
+/// set, so a channel the person left is not listed. Read without the
+/// membership lock: [`crate::channel_members::put_first_member`] decides
+/// again under it.
+pub async fn list_never_joined_auto_join_channels(
+    pool: &PgPool,
+    community_id: CommunityId,
+    pubkey: &[u8],
+) -> Result<Vec<Uuid>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    let ids = sqlx::query_scalar(
+        r#"
+        SELECT c.id
+        FROM channels c
+        WHERE c.community_id = $1 AND c.auto_join AND c.channel_type = 'stream'
+          AND c.visibility = 'open' AND c.archived_at IS NULL AND c.deleted_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM channel_members m
+              WHERE m.community_id = c.community_id AND m.channel_id = c.id
+                AND m.pubkey = $2
+          )
+        ORDER BY c.created_at ASC
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(pubkey)
+    .fetch_all(&mut *connection)
+    .await?;
+    Ok(ids)
+}
+
 /// A channel archived by the ephemeral-channel reaper.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReapedEphemeralChannel {
@@ -1817,6 +1855,18 @@ impl Db {
         community_id: CommunityId,
     ) -> Result<Vec<ChannelRecord>> {
         list_auto_join_channels(&self.pool, community_id).await
+    }
+
+    /// Lists the effective `auto_join` channels `pubkey` has never been a
+    /// member of, active or removed (see
+    /// [`list_never_joined_auto_join_channels`]).
+    #[datastore_span(name = "list_never_joined_auto_join_channels", system = "postgresql")]
+    pub async fn list_never_joined_auto_join_channels(
+        &self,
+        community_id: CommunityId,
+        pubkey: &[u8],
+    ) -> Result<Vec<Uuid>> {
+        list_never_joined_auto_join_channels(&self.pool, community_id, pubkey).await
     }
 
     /// Lists channels during startup reconciliation.

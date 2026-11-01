@@ -735,6 +735,62 @@ pub async fn put_members(
     Ok(results)
 }
 
+/// Self-join `pubkey` to `channel_id` as [`put_member`] with no actor and no
+/// requested role (so the channel's `join_role` applies), but only if
+/// `pubkey` has never had a membership row in the channel, active or removed.
+/// Returns `None`, writing nothing, when such a row exists.
+///
+/// The row is checked under the [`put_member`] locks, so a leave, a join or
+/// another first join of the same person commits wholly before or after this
+/// write: two sign-ins racing each other write once, and a leave that commits
+/// first keeps the person out. A refusal (an archived or private channel) is
+/// the [`put_member`] error.
+pub async fn put_first_member(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+) -> Result<Option<MemberRecord>> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    lock_channel_for_member_put(&mut tx, channel_id).await?;
+    let seen: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM channel_members \
+         WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3)",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(pubkey)
+    .fetch_one(tx.conn())
+    .await?;
+    if seen {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    let target = MemberPut {
+        pubkey,
+        requested: None,
+    };
+    let put = put_members_on(&mut tx, channel_id, &[target], None)
+        .await?
+        .pop()
+        .ok_or_else(|| DbError::InvalidData("membership put returned no result".to_string()))?;
+    match put {
+        Ok(put) => {
+            tx.commit().await?;
+            Ok(Some(put.member))
+        }
+        Err(refused) => {
+            tx.rollback().await?;
+            Err(refused)
+        }
+    }
+}
+
 /// The result of [`Db::put_members_with_event`].
 pub enum MemberPutEventWrite {
     /// The event was stored and at least one person was written. One result
@@ -2174,6 +2230,18 @@ impl Db {
         .await
     }
 
+    /// Self-joins `pubkey` with the channel's `join_role` only if they have
+    /// never been a member of the channel (see [`put_first_member`]).
+    #[datastore_span(name = "put_first_member", system = "postgresql")]
+    pub async fn put_first_member(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+    ) -> Result<Option<MemberRecord>> {
+        put_first_member(&self.pool, community_id, channel_id, pubkey).await
+    }
+
     /// Stores a kind:9000 `event` and applies its [`put_members`] writes,
     /// with the event's author as the actor, in one transaction (see
     /// [`put_members_with_event`]).
@@ -2550,6 +2618,96 @@ mod postgres_tests {
         .expect("insert owner membership");
 
         crate::channel::get_channel(pool, CommunityId::from_uuid(community_id), id).await
+    }
+
+    /// A person who has never been in a flagged channel is listed for it and
+    /// joined once, with the channel's `join_role`; a second put finds the
+    /// row; after a leave the channel is neither listed nor joined again. An
+    /// unflagged channel is never listed.
+    ///
+    /// Mutations: drop the row check from `put_first_member` → the leave is
+    /// undone (RED); drop the `NOT EXISTS` from
+    /// `list_never_joined_auto_join_channels` → the left channel is still
+    /// listed (RED).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn first_member_put_joins_once_and_never_undoes_a_leave() {
+        use crate::channel::{list_never_joined_auto_join_channels, update_channel, ChannelUpdate};
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let (owner, person) = (random_pubkey(), random_pubkey());
+        let mut channels = Vec::new();
+        for name in ["general", "announcements", "random"] {
+            let channel = create_test_channel(
+                &pool,
+                *community.as_uuid(),
+                name,
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                &owner,
+                None,
+            )
+            .await
+            .expect("create channel");
+            channels.push(channel.id);
+        }
+        let (general, announcements, unflagged) = (channels[0], channels[1], channels[2]);
+        for (channel, join_role) in [(general, None), (announcements, Some("guest"))] {
+            update_channel(
+                &pool,
+                community,
+                channel,
+                ChannelUpdate {
+                    auto_join: Some(true),
+                    join_role: join_role.map(str::to_string),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("flag channel");
+        }
+
+        let never_joined = || list_never_joined_auto_join_channels(&pool, community, &person);
+        assert_eq!(
+            never_joined().await.expect("list"),
+            [general, announcements]
+        );
+
+        let put_first = |channel| put_first_member(&pool, community, channel, &person);
+        assert_eq!(
+            put_first(general).await.expect("first put").map(|m| m.role),
+            Some("member".to_string())
+        );
+        assert_eq!(
+            put_first(announcements)
+                .await
+                .expect("first put")
+                .map(|m| m.role),
+            Some("guest".to_string()),
+            "the channel's join_role applies"
+        );
+        assert!(put_first(general).await.expect("second put").is_none());
+        assert!(never_joined().await.expect("list").is_empty());
+
+        remove_member(&pool, community, general, &person, &person)
+            .await
+            .expect("leave");
+        assert!(never_joined().await.expect("list").is_empty());
+        assert!(put_first(general).await.expect("put after leave").is_none());
+        assert_eq!(
+            get_member_role(&pool, community, general, &person)
+                .await
+                .expect("role"),
+            None,
+            "a leave stands"
+        );
+        assert_eq!(
+            get_member_role(&pool, community, unflagged, &person)
+                .await
+                .expect("role"),
+            None
+        );
     }
 
     #[tokio::test]

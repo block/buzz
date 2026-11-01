@@ -2763,6 +2763,19 @@ pub(crate) async fn join_channel_as_self(
         .db
         .put_member(tenant.community(), channel_id, pubkey, None, None)
         .await?;
+    announce_self_join(tenant, state, channel_id, pubkey).await?;
+    Ok(SelfJoinOutcome::Joined)
+}
+
+/// The side effects of a committed self-join: the membership cache, the
+/// `member_joined` kind:40099, kind:39000/39002 and kind:44100. Only the
+/// system message is fatal, as for kind:9021.
+async fn announce_self_join(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    pubkey: &[u8],
+) -> anyhow::Result<()> {
     state.invalidate_membership(tenant, channel_id, pubkey);
 
     let actor_hex = hex::encode(pubkey);
@@ -2796,12 +2809,14 @@ pub(crate) async fn join_channel_as_self(
         warn!("membership notification for join failed: {e}");
     }
 
-    Ok(SelfJoinOutcome::Joined)
+    Ok(())
 }
 
 /// Join a new community member to every effective `auto_join` channel, as
-/// kind:9021 self-joins. Runs inline at the membership write sites (invite
-/// claim, kind:9030) and nowhere else, so a later kind:9022 leave stands.
+/// kind:9021 self-joins. Runs inline at the roster write sites (invite
+/// claim, kind:9030) and nowhere else, so a later kind:9022 leave stands. A
+/// community without a roster joins on admission instead
+/// ([`auto_join_never_joined_channels`]).
 ///
 /// Best effort: the relay membership has already committed, so a channel
 /// that fails is logged and counted, never retried, and never fails the
@@ -2867,6 +2882,60 @@ pub(crate) async fn auto_join_default_channels(
             Err(e) => {
                 metrics::counter!("buzz_auto_join_failures_total").increment(1);
                 warn!(channel = %channel.id, member = %pubkey_hex, error = %e, "auto-join of default channel failed");
+            }
+        }
+    }
+}
+
+/// Join a person admitted to a community that keeps no membership roster
+/// (`require_relay_membership = false`) to every effective `auto_join`
+/// channel they have never been a member of, as kind:9021 self-joins.
+///
+/// Runs on every human WebSocket admission there, because such a community
+/// has no roster insert to run [`auto_join_default_channels`] at. "Never a
+/// member" is the channel's own membership history: a kind:9022 leave or a
+/// kind:9001 removal keeps a removed row, so the person is not joined back,
+/// and a channel flagged later is joined on their next admission.
+///
+/// A membership write that fails leaves no row, so the next admission tries
+/// that channel again. Failures are logged and counted
+/// (`buzz_auto_join_failures_total`).
+pub(crate) async fn auto_join_never_joined_channels(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    pubkey: &[u8],
+) {
+    let member = hex::encode(pubkey);
+    let channels = match state
+        .db
+        .list_never_joined_auto_join_channels(tenant.community(), pubkey)
+        .await
+    {
+        Ok(channels) => channels,
+        Err(e) => {
+            warn!(%member, error = %e, "auto-join skipped: listing default channels failed");
+            metrics::counter!("buzz_auto_join_failures_total").increment(1);
+            return;
+        }
+    };
+    for channel_id in channels {
+        let joined = match state
+            .db
+            .put_first_member(tenant.community(), channel_id, pubkey)
+            .await
+        {
+            Ok(None) => continue,
+            Ok(Some(_)) => announce_self_join(tenant, state, channel_id, pubkey).await,
+            Err(e) => Err(e.into()),
+        };
+        match joined {
+            Ok(()) => {
+                metrics::counter!("buzz_auto_join_channels_total").increment(1);
+                info!(channel = %channel_id, %member, "auto-joined default channel on admission");
+            }
+            Err(e) => {
+                metrics::counter!("buzz_auto_join_failures_total").increment(1);
+                warn!(channel = %channel_id, %member, error = %e, "auto-join of default channel on admission failed");
             }
         }
     }
