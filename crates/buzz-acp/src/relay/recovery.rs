@@ -117,8 +117,8 @@ fn next_channel(state: &BgState) -> Option<Option<Uuid>> {
         .chain(
             (state.membership_sub_active
                 && state.membership_dropped_since.is_some()
-                && !state.membership_resub_needed)
-                .then_some(None),
+                && state.membership_resub_at.is_none())
+            .then_some(None),
         )
         .min_by_key(|ch| {
             let sub = ch.map_or_else(|| MEMBERSHIP_NOTIF_SUB_ID.to_owned(), channel_sub_id);

@@ -28,7 +28,6 @@ async fn dispatch(
             state,
             &Keys::generate(),
             "ws://127.0.0.1:1",
-            "synthetic-agent",
             None,
         )
         .await
