@@ -47,6 +47,8 @@ pub struct ClaimedDelivery {
     pub event_id: Vec<u8>,
     /// Mentioning event kind.
     pub event_kind: i32,
+    /// Present only for a delivery authorized by an explicit thread watch.
+    pub thread_root_event_id: Option<Vec<u8>>,
     /// Author-controlled event timestamp.
     pub event_created_at: DateTime<Utc>,
     /// Attempt number, starting at one.
@@ -101,7 +103,7 @@ pub(crate) async fn enqueue_mentions_in_transaction(
     }
     let targets = event_targets(event);
     if targets.is_empty() {
-        return Ok(0);
+        return super::operator_listener_threads::enqueue_thread_replies(tx, event).await;
     }
     let event_created_at = DateTime::from_timestamp(event.created_at.as_secs() as i64, 0).ok_or(
         crate::error::DbError::InvalidTimestamp(event.created_at.as_secs() as i64),
@@ -127,7 +129,9 @@ pub(crate) async fn enqueue_mentions_in_transaction(
     }
     separated.push_unseparated(") ON CONFLICT DO NOTHING");
 
-    Ok(query.build().execute(tx.conn()).await?.rows_affected())
+    let mentions = query.build().execute(tx.conn()).await?.rows_affected();
+    let replies = super::operator_listener_threads::enqueue_thread_replies(tx, event).await?;
+    Ok(mentions + replies)
 }
 
 /// Register target pubkeys for one deployment-global listener.
@@ -229,7 +233,7 @@ pub async fn claim_deliveries(
          JOIN communities community ON community.id = c.community_id \
          WHERE o.id = c.id \
          RETURNING o.id, o.claim_id, o.listener_pubkey, o.target_pubkey, o.community_id, \
-                   community.host, o.event_id, o.event_kind, o.event_created_at, o.attempts",
+                   community.host, o.event_id, o.event_kind, o.thread_root_event_id, o.event_created_at, o.attempts",
     )
     .bind(claim_id)
     .bind(MAX_DELIVERY_ATTEMPTS)
@@ -250,6 +254,7 @@ pub async fn claim_deliveries(
                 community_host: row.try_get("host")?,
                 event_id: row.try_get("event_id")?,
                 event_kind: row.try_get("event_kind")?,
+                thread_root_event_id: row.try_get("thread_root_event_id")?,
                 event_created_at: row.try_get("event_created_at")?,
                 attempt: row.try_get("attempts")?,
             })
@@ -298,6 +303,22 @@ pub async fn load_deliverable_event(
          JOIN events e ON e.community_id = $3 AND e.created_at = $4 AND e.id = $5 \
          WHERE r.listener_pubkey = $1 AND r.target_pubkey = $2 \
            AND e.deleted_at IS NULL \
+           AND ($9::bytea IS NULL OR EXISTS ( \
+               SELECT 1 FROM operator_listener_threads w \
+               JOIN channels wc ON wc.community_id = w.community_id AND wc.id = w.channel_id \
+                   AND wc.deleted_at IS NULL AND wc.archived_at IS NULL \
+               JOIN users wu ON wu.community_id = w.community_id AND wu.pubkey = w.target_pubkey AND wu.deactivated_at IS NULL \
+               JOIN channel_members wm ON wm.community_id = w.community_id AND wm.channel_id = w.channel_id \
+                   AND wm.pubkey = w.target_pubkey AND wm.removed_at IS NULL \
+               JOIN events root ON root.community_id = w.community_id AND root.channel_id = w.channel_id \
+                   AND root.id = w.root_event_id AND root.deleted_at IS NULL \
+               JOIN thread_metadata tm ON tm.community_id = w.community_id AND tm.channel_id = w.channel_id \
+                   AND tm.event_id = e.id AND tm.event_created_at = e.created_at \
+                   AND tm.parent_event_id IS NOT NULL \
+                   AND COALESCE(tm.root_event_id, tm.parent_event_id) = w.root_event_id \
+               WHERE w.community_id = $3 AND w.listener_pubkey = $1 AND w.target_pubkey = $2 \
+                   AND w.root_event_id = $9 AND w.channel_id = e.channel_id AND w.expires_at > now() \
+                   AND r.created_at >= now() - interval '30 days')) \
            AND (NOT $8 OR EXISTS ( \
                SELECT 1 FROM pubkey_allowlist a \
                WHERE a.community_id = $3 AND a.pubkey = $2)) \
@@ -327,6 +348,7 @@ pub async fn load_deliverable_event(
     .bind(admission.require_membership)
     .bind(admission.allow_owner_membership)
     .bind(admission.require_allowlist)
+    .bind(&delivery.thread_root_event_id)
     .fetch_optional(&mut *connection)
     .await?;
     match row {
@@ -1237,6 +1259,7 @@ mod postgres_tests {
                     community_host: String::new(),
                     event_id: event.id.as_bytes().to_vec(),
                     event_kind: 9,
+                    thread_root_event_id: None,
                     event_created_at: DateTime::from_timestamp(
                         event.created_at.as_secs() as i64,
                         0,

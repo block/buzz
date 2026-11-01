@@ -67,10 +67,10 @@ pub(crate) use runtime::{
 pub use store::{
     admin_moderation, allowlist, api_token, archived_identities, artifact, artifact_sync, channel,
     channel_members, community, deletion, dm, entity_deletion, event, feed, git_repo, moderation,
-    nip_fi_binding, operator_listener, partition, personal_read, product_feedback, push, reaction,
-    read_state, relay_admin_actions, relay_invite, relay_members, relay_operators, reminder,
-    replaceable, storage_accounting, thread, thread_window, usage, user, user_deletion,
-    user_deletion_fences, workflow,
+    nip_fi_binding, operator_listener, operator_listener_threads, partition, personal_read,
+    product_feedback, push, reaction, read_state, relay_admin_actions, relay_invite, relay_members,
+    relay_operators, reminder, replaceable, storage_accounting, thread, thread_window, usage, user,
+    user_deletion, user_deletion_fences, workflow,
 };
 
 pub use allowlist::AllowlistEntry;
