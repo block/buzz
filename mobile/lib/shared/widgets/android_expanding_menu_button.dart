@@ -276,6 +276,8 @@ class _CreateMenuRoute extends PopupRoute<int> {
                                                             .desktop_windows_outlined,
                                                       'square.and.pencil' =>
                                                         BuzzIcons.edit,
+                                                      'workspace' =>
+                                                        BuzzIcons.workspace,
                                                       'folder.badge.plus' =>
                                                         BuzzIcons.folderPlus,
                                                       'bubble.left' =>

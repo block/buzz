@@ -204,7 +204,7 @@ class HomePage extends HookConsumerWidget {
                       ),
                       (
                         label: 'New workspace',
-                        symbol: 'folder.badge.plus',
+                        symbol: 'workspace',
                         onPressed: newWorkspace.value,
                       ),
                       (
