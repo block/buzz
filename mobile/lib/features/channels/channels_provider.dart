@@ -772,18 +772,18 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       };
       final filters = [
         for (final channel in activeChannels)
-          NostrFilter(
-            kinds: [
-              ...EventKind.channelMessageEventKinds,
-              EventKind.deletion,
-              EventKind.nip29DeleteEvent,
-            ],
-            tags: {
-              '#h': [channel.id],
-            },
-            since: (readAtByChannel[channel.id] ?? -1) + 1,
-            limit: _unreadCatchUpLimit,
-          ),
+          for (final kinds in [
+            EventKind.channelMessageEventKinds,
+            [EventKind.deletion, EventKind.nip29DeleteEvent],
+          ])
+            NostrFilter(
+              kinds: kinds,
+              tags: {
+                '#h': [channel.id],
+              },
+              since: (readAtByChannel[channel.id] ?? -1) + 1,
+              limit: _unreadCatchUpLimit,
+            ),
       ];
 
       final events = await _fetchChannelHistoryBatch(
@@ -800,16 +800,27 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         return;
       }
 
+      // Keep this response's deletion evidence independently of the bounded
+      // cross-request tombstones: a large batch can evict its own early IDs.
+      final batchDeletedIds = <String>{};
       var appliedDeletion = false;
       for (final event in events) {
         final channelId = event.channelId;
         if (channelById.containsKey(channelId) ||
             (channelId == null && event.kind == EventKind.deletion)) {
-          appliedDeletion = _applyUnreadDeletion(event) || appliedDeletion;
+          if (_applyUnreadDeletion(event)) {
+            appliedDeletion = true;
+            batchDeletedIds.addAll(
+              event.tags
+                  .where((tag) => tag.length >= 2 && tag[0] == 'e')
+                  .map((tag) => tag[1]),
+            );
+          }
         }
       }
 
       for (final event in events) {
+        if (batchDeletedIds.contains(event.id)) continue;
         if (EventKind.channelMessageEventKinds.contains(event.kind) &&
             event.pubkey.toLowerCase() == myPk.toLowerCase()) {
           _recordSelfThreadInterest(event, myPk);
@@ -818,6 +829,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
       final recordedAtByChannel = <String, int>{};
       for (final event in events) {
+        if (batchDeletedIds.contains(event.id)) continue;
         final channelId = event.channelId;
         if (channelId == null) continue;
         final channel = channelById[channelId];

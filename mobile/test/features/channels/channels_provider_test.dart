@@ -1931,8 +1931,8 @@ void main() {
 
     // Every HTTP chunk failed, so each batch also ran the websocket fallback.
     expect(session.peakInFlight, {'latest': 4, 'unread': 4, 'huddle': 4});
-    // The fallback covered every channel of both batches.
-    expect(session.messageHistoryCount, 2 * ids.length);
+    // The fallback covered latest messages, unread messages, and deletions.
+    expect(session.messageHistoryCount, 3 * ids.length);
   });
 
   group('deadline-unavailable channel batches', () {
@@ -2114,7 +2114,18 @@ void main() {
             .toSet(),
         {_channelA, _channelB},
       );
-      expect(session.queryBatches.last, hasLength(2));
+      expect(session.queryBatches.last, hasLength(4));
+      for (final channelId in [_channelA, _channelB]) {
+        expect(
+          session.queryBatches.last
+              .where((filter) => filter.tags['#h']!.single == channelId)
+              .map((filter) => filter.kinds),
+          [
+            EventKind.channelMessageEventKinds,
+            [EventKind.deletion, EventKind.nip29DeleteEvent],
+          ],
+        );
+      }
       expect(
         session.queryBatches.last.every(
           (filter) => filter.limit == 1000 && filter.since == 0,
@@ -2764,6 +2775,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     this.huddleStarts = const [],
     this.recentMessages = const [],
     this.deletionChannels = const {},
+    this.enforceHistoryLimits = false,
     this.membershipFailures = 0,
   });
 
@@ -2780,6 +2792,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
   final List<NostrEvent> huddleStarts;
   List<NostrEvent> recentMessages;
   final Map<String, String> deletionChannels;
+  final bool enforceHistoryLimits;
   int membershipFailures;
   int directoryFailures = 0;
   bool failClaimedMemberMetadataQuery = false;
@@ -3185,8 +3198,9 @@ class _FakeRelaySession extends RelaySessionNotifier {
         }
       }
     }
-    return messageSnapshot.where((event) {
-      return filters.any((filter) {
+    final matched = <String, NostrEvent>{};
+    for (final filter in filters) {
+      final matches = messageSnapshot.where((event) {
         if (!filter.kinds.contains(event.kind)) return false;
         for (final entry in filter.tags.entries) {
           final tagName = entry.key.startsWith('#')
@@ -3209,8 +3223,16 @@ class _FakeRelaySession extends RelaySessionNotifier {
           }
         }
         return true;
-      });
-    }).toList();
+      }).toList();
+      if (enforceHistoryLimits) {
+        matches.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      }
+      for (final event
+          in enforceHistoryLimits ? matches.take(filter.limit) : matches) {
+        matched[event.id] = event;
+      }
+    }
+    return matched.values.toList();
   }
 
   @override

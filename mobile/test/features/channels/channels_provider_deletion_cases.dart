@@ -30,9 +30,20 @@ void _unreadDeletionCases() {
           sig: 'sig',
         );
         final session = _FakeRelaySession(
-          memberships: [_membership(_channelA, 'me')],
-          metadata: [_meta(id: _channelA, name: 'general')],
-          deletionChannels: const {'missed-deletion': _channelA},
+          memberships: [
+            _membership(_channelA, 'me'),
+            _membership(_channelB, 'me'),
+          ],
+          metadata: [
+            _meta(id: _channelA, name: 'general'),
+            _meta(id: _channelB, name: 'other'),
+          ],
+          enforceHistoryLimits: true,
+          deletionChannels: {
+            'missed-deletion': _channelA,
+            for (var i = 0; i < 600; i++) 'unreact-a-$i': _channelA,
+            for (var i = 0; i < 1000; i++) 'unreact-b-$i': _channelB,
+          },
         );
         final container = _buildContainer(session: session);
         addTearDown(container.dispose);
@@ -91,6 +102,48 @@ void _unreadDeletionCases() {
           isEmpty,
         );
         expect(notifier.latestObservedByChannel, isNot(contains(_channelA)));
+
+        // Reaction removals must neither consume the message window nor evict
+        // deletion evidence needed by this same multi-channel catch-up batch.
+        NostrEvent unreact(String id, int at) => NostrEvent(
+          id: id,
+          pubkey: 'alice',
+          createdAt: at,
+          kind: EventKind.deletion,
+          tags: [
+            ['e', 'reaction-$id'],
+          ],
+          content: '',
+          sig: 'sig',
+        );
+        session.recentMessages = [
+          missed,
+          deletion('missed-deletion', missed.id, 90),
+          for (var i = 0; i < 1000; i++) unreact('unreact-b-$i', 2000 + i),
+        ];
+        await notifier.refresh();
+        await notifier.waitForUnreadCatchUp();
+        expect(
+          notifier.observedUnreadEventsByChannel[_channelA] ?? {},
+          isEmpty,
+          reason: 'this batch must retain all of its own deletion evidence',
+        );
+
+        session.recentMessages = [
+          missed,
+          deletion('missed-deletion', missed.id, 90),
+          for (var i = 0; i < 600; i++) message('kept-$i', 100 + i),
+          for (var i = 0; i < 600; i++) unreact('unreact-a-$i', 1000 + i),
+          for (var i = 0; i < 1000; i++) unreact('unreact-b-$i', 2000 + i),
+        ];
+        await notifier.refresh();
+        await notifier.waitForUnreadCatchUp();
+        expect(
+          notifier.observedUnreadEventsByChannel[_channelA]?.keys,
+          unorderedEquals([for (var i = 0; i < 600; i++) 'kept-$i']),
+          reason:
+              'all surviving mentions remain unread, but deleted ones do not',
+        );
       },
     );
   }
