@@ -122,6 +122,72 @@ pub(crate) fn run_exact_test_child(test_name: &str, child_env: &str) {
     );
 }
 
+/// Loopback TCP proxy that can pause the upstream database. While paused,
+/// every session holds the bytes it receives with both sockets open; on
+/// resume the held bytes are delivered in order and the sessions carry on.
+/// A trimmed copy of buzz-db's test-only `PausingProxy`, which is private to
+/// that crate's unit tests.
+#[cfg(test)]
+pub(crate) struct PausingProxy {
+    pub(crate) port: u16,
+    paused: tokio::sync::watch::Sender<bool>,
+}
+
+#[cfg(test)]
+impl PausingProxy {
+    pub(crate) async fn spawn(upstream_host: String, upstream_port: u16) -> Self {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn pump(
+            mut from: tokio::net::tcp::OwnedReadHalf,
+            mut to: tokio::net::tcp::OwnedWriteHalf,
+            mut paused: tokio::sync::watch::Receiver<bool>,
+        ) {
+            let mut buf = [0u8; 8192];
+            loop {
+                let Ok(n) = from.read(&mut buf).await else {
+                    return;
+                };
+                if n == 0 {
+                    return;
+                }
+                if paused.wait_for(|paused| !paused).await.is_err() {
+                    return;
+                }
+                if to.write_all(&buf[..n]).await.is_err() {
+                    return;
+                }
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind proxy");
+        let port = listener.local_addr().expect("proxy addr").port();
+        let (paused, accept_paused) = tokio::sync::watch::channel(false);
+        tokio::spawn(async move {
+            while let Ok((client, _)) = listener.accept().await {
+                let Ok(server) =
+                    tokio::net::TcpStream::connect((upstream_host.as_str(), upstream_port)).await
+                else {
+                    continue;
+                };
+                let (client_read, client_write) = client.into_split();
+                let (server_read, server_write) = server.into_split();
+                tokio::spawn(pump(client_read, server_write, accept_paused.clone()));
+                tokio::spawn(pump(server_read, client_write, accept_paused.clone()));
+            }
+        });
+        Self { port, paused }
+    }
+
+    /// Hold or release every session's bytes. A pause applies to all bytes
+    /// the proxy reads after this call returns, on any runtime thread.
+    pub(crate) fn set_paused(&self, paused: bool) {
+        self.paused.send_replace(paused);
+    }
+}
+
 /// A database handle on which only restriction-state reads fail: its
 /// `search_path` puts a schema first whose `community_bans` is a view that
 /// errors when read, so every other table resolves to `public` as normal.

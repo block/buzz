@@ -1276,14 +1276,12 @@ fn blossom_strictness_from_state(state: &AppState) -> BlossomStrictness {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     use axum::{
-        body::{to_bytes, Body},
-        http::{header, Request, StatusCode},
+        body::to_bytes,
+        http::{header, StatusCode},
     };
-    use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag, Timestamp};
-    use tower::ServiceExt;
+    use nostr::{JsonUtil, Timestamp};
     use uuid::Uuid;
 
     const VALID_HASH: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
@@ -1702,216 +1700,6 @@ mod tests {
         assert!(should_stream_as_video(bytes));
     }
 
-    async fn test_state() -> Arc<AppState> {
-        let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
-        config.require_relay_membership = false;
-        config.redis_url = "redis://127.0.0.1:1".to_string();
-        config.media_uploads_per_minute = 1;
-        config.media_max_concurrent_uploads = 2;
-        config.media_max_concurrent_uploads_per_pubkey = 1;
-
-        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
-        let db = buzz_db::Db::from_pool(pool.clone());
-        db.ensure_configured_community("relay.example")
-            .await
-            .expect("seed relay.example community for host-bound media tests");
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
-        let pubsub = Arc::new(
-            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
-                .await
-                .expect("pubsub manager"),
-        );
-        let audit = buzz_audit::AuditService::new(pool.clone());
-        let auth = buzz_auth::AuthService::new(config.auth.clone());
-        let search = buzz_search::SearchService::new(pool.clone());
-        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
-            db.clone(),
-            buzz_workflow::WorkflowConfig::default(),
-        ));
-        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
-        let (state, _audit_shutdown) = AppState::new(
-            config,
-            db,
-            redis_pool,
-            audit,
-            pubsub,
-            auth,
-            search,
-            workflow_engine,
-            nostr::Keys::generate(),
-            media_storage,
-        );
-        Arc::new(state)
-    }
-
-    async fn media_get_auth_router() -> axum::Router {
-        let state = test_state().await;
-        axum::Router::new()
-            .route(
-                "/media/{sha256_ext}",
-                axum::routing::get(get_blob).head(head_blob),
-            )
-            .with_state(state)
-    }
-
-    fn media_get_auth_header(keys: &Keys, tags: Vec<Tag>) -> String {
-        let event = EventBuilder::new(Kind::from(24242), "Get media")
-            .tags(tags)
-            .sign_with_keys(keys)
-            .expect("sign get auth");
-        format!(
-            "Nostr {}",
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(event.as_json().as_bytes())
-        )
-    }
-
-    fn media_get_tags_for(host: &str, sha256: Option<&str>) -> Vec<Tag> {
-        let now = Timestamp::now().as_secs();
-        let expiration = (now + 55).to_string();
-        let mut tags = vec![
-            Tag::parse(["t", "get"]).expect("t tag"),
-            Tag::parse(["expiration", &expiration]).expect("expiration tag"),
-            Tag::parse(["server", host]).expect("server tag"),
-        ];
-        if let Some(sha256) = sha256 {
-            tags.push(Tag::parse(["x", sha256]).expect("x tag"));
-        }
-        tags
-    }
-
-    fn media_request(method: &str, auth: Option<String>) -> Request<Body> {
-        let mut builder = Request::builder()
-            .method(method)
-            .uri(format!("/media/{VALID_HASH}.jpg"))
-            .header(header::HOST, "relay.example");
-        if let Some(auth) = auth {
-            builder = builder.header(header::AUTHORIZATION, auth);
-        }
-        builder.body(Body::empty()).expect("request")
-    }
-
-    #[tokio::test]
-    async fn media_reads_reject_unauthenticated_get_and_head_before_sidecar_gate() {
-        for method in ["GET", "HEAD"] {
-            let response = media_get_auth_router()
-                .await
-                .oneshot(media_request(method, None))
-                .await
-                .expect("response");
-
-            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{method}");
-        }
-    }
-
-    #[tokio::test]
-    async fn media_read_with_valid_server_scoped_token_reaches_sidecar_gate() {
-        let keys = Keys::generate();
-        let auth = media_get_auth_header(&keys, media_get_tags_for("relay.example", None));
-        let response = media_get_auth_router()
-            .await
-            .oneshot(media_request("GET", Some(auth)))
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn media_read_rejects_upload_verb_wrong_server_and_wrong_x() {
-        let keys = Keys::generate();
-        let now = Timestamp::now().as_secs();
-        let expiration = (now + 55).to_string();
-        let cases = [
-            vec![
-                Tag::parse(["t", "upload"]).expect("t tag"),
-                Tag::parse(["expiration", &expiration]).expect("expiration tag"),
-                Tag::parse(["server", "relay.example"]).expect("server tag"),
-            ],
-            vec![
-                Tag::parse(["t", "get"]).expect("t tag"),
-                Tag::parse(["expiration", &expiration]).expect("expiration tag"),
-                Tag::parse(["server", "evil.example"]).expect("server tag"),
-            ],
-            vec![
-                Tag::parse(["t", "get"]).expect("t tag"),
-                Tag::parse(["expiration", &expiration]).expect("expiration tag"),
-                Tag::parse(["x", &"f".repeat(64)]).expect("x tag"),
-            ],
-        ];
-
-        for tags in cases {
-            let auth = media_get_auth_header(&keys, tags);
-            let response = media_get_auth_router()
-                .await
-                .oneshot(media_request("GET", Some(auth)))
-                .await
-                .expect("response");
-
-            assert_ne!(response.status(), StatusCode::NOT_FOUND);
-            assert!(
-                response.status() == StatusCode::UNAUTHORIZED
-                    || response.status() == StatusCode::FORBIDDEN,
-                "unexpected status {}",
-                response.status()
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn media_read_accepts_range_header_only_after_auth() {
-        let keys = Keys::generate();
-        let auth = media_get_auth_header(&keys, media_get_tags_for("relay.example", None));
-        let mut request = media_request("GET", Some(auth));
-        request
-            .headers_mut()
-            .insert(header::RANGE, "bytes=0-0".parse().expect("range header"));
-
-        let response = media_get_auth_router()
-            .await
-            .oneshot(request)
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn upload_rate_limiter_is_scoped_by_community() {
-        let state = test_state().await;
-        let pubkey = nostr::Keys::generate().public_key();
-        let community_a = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
-        let community_b = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xBBBB));
-
-        assert!(!upload_rate_limited(&state, community_a, &pubkey));
-        assert!(upload_rate_limited(&state, community_a, &pubkey));
-        assert!(
-            !upload_rate_limited(&state, community_b, &pubkey),
-            "A's exhausted upload budget must not rate-limit the same key in B"
-        );
-    }
-
-    #[tokio::test]
-    async fn upload_concurrency_limit_is_scoped_by_community() {
-        let state = test_state().await;
-        let pubkey = nostr::Keys::generate().public_key();
-        let community_a = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
-        let community_b = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xBBBB));
-
-        let permit_a =
-            acquire_upload_permit(&state, community_a, &pubkey).expect("first A upload allowed");
-        assert!(matches!(
-            acquire_upload_permit(&state, community_a, &pubkey),
-            Err(MediaError::UploadConcurrencyLimitReached)
-        ));
-        let permit_b = acquire_upload_permit(&state, community_b, &pubkey)
-            .expect("A's in-flight upload must not block B");
-
-        drop(permit_b);
-        drop(permit_a);
-    }
-
     #[test]
     fn test_validate_media_path_bare_hash() {
         assert!(validate_media_path(VALID_HASH).is_ok());
@@ -2114,7 +1902,7 @@ mod tests {
     // ── NIP-FI media regression tests ────────────────────────────────────────
     //
     // These postgres-backed tests prove the NIP-FI admission gate is wired into
-    // the media upload and read routes at the router level. They all require a
+    // the media upload and read routes at the router level. They require a
     // live Postgres + Redis and are tagged #[ignore = "requires Postgres"].
     //
     // Verified contract rows (NIP-FI.md rejection table):
@@ -2166,11 +1954,7 @@ mod tests {
         const TEST_ISSUER: &str = "https://issuer.example";
         const TEST_AUDIENCE: &str = "https://relay.example";
         const TEST_KID: &str = "test-key-1";
-        const TEST_EC_PKCS8_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
-            MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n\
-            WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n\
-            zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n\
-            -----END PRIVATE KEY-----\n";
+        const TEST_EC_PKCS8_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\nWZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\nzhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n-----END PRIVATE KEY-----\n"; // sadscan:disable np.pem.1 kingfisher.privkey.2 -- public ES256 test fixture
 
         /// Build an AppState with NIP-FI Enforce and a real injected P-256 verifier.
         async fn media_enforce_test_state() -> Option<Arc<AppState>> {
@@ -4414,6 +4198,229 @@ mod tests {
                         .execute(&admin),
                 );
             }
+        }
+
+        // ── Host-bound media reads and per-community upload limits ─────────────
+        //
+        // `test_state` seeds the relay.example community, so these need Postgres
+        // too. Its Redis URL is unreachable on purpose: none of them use Redis.
+
+        async fn test_state() -> Arc<AppState> {
+            let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
+            config.database_url = crate::test_support::database_url();
+            config.require_relay_membership = false;
+            config.redis_url = "redis://127.0.0.1:1".to_string();
+            config.media_uploads_per_minute = 1;
+            config.media_max_concurrent_uploads = 2;
+            config.media_max_concurrent_uploads_per_pubkey = 1;
+
+            let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
+            let db = buzz_db::Db::from_pool(pool.clone());
+            db.ensure_configured_community("relay.example")
+                .await
+                .expect("seed relay.example community for host-bound media tests");
+            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .expect("redis pool");
+            let pubsub = Arc::new(
+                buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                    .await
+                    .expect("pubsub manager"),
+            );
+            let audit = buzz_audit::AuditService::new(pool.clone());
+            let auth = buzz_auth::AuthService::new(config.auth.clone());
+            let search = buzz_search::SearchService::new(pool.clone());
+            let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+                db.clone(),
+                buzz_workflow::WorkflowConfig::default(),
+            ));
+            let media_storage =
+                buzz_media::MediaStorage::new(&config.media).expect("media storage");
+            let (state, _audit_shutdown) = AppState::new(
+                config,
+                db,
+                redis_pool,
+                audit,
+                pubsub,
+                auth,
+                search,
+                workflow_engine,
+                nostr::Keys::generate(),
+                media_storage,
+            );
+            Arc::new(state)
+        }
+
+        async fn media_get_auth_router() -> axum::Router {
+            let state = test_state().await;
+            axum::Router::new()
+                .route(
+                    "/media/{sha256_ext}",
+                    axum::routing::get(get_blob).head(head_blob),
+                )
+                .with_state(state)
+        }
+
+        fn media_get_auth_header(keys: &Keys, tags: Vec<Tag>) -> String {
+            let event = EventBuilder::new(Kind::from(24242), "Get media")
+                .tags(tags)
+                .sign_with_keys(keys)
+                .expect("sign get auth");
+            format!(
+                "Nostr {}",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(event.as_json().as_bytes())
+            )
+        }
+
+        fn media_get_tags_for(host: &str, sha256: Option<&str>) -> Vec<Tag> {
+            let now = Timestamp::now().as_secs();
+            let expiration = (now + 55).to_string();
+            let mut tags = vec![
+                Tag::parse(["t", "get"]).expect("t tag"),
+                Tag::parse(["expiration", &expiration]).expect("expiration tag"),
+                Tag::parse(["server", host]).expect("server tag"),
+            ];
+            if let Some(sha256) = sha256 {
+                tags.push(Tag::parse(["x", sha256]).expect("x tag"));
+            }
+            tags
+        }
+
+        fn media_request(method: &str, auth: Option<String>) -> Request<Body> {
+            let mut builder = Request::builder()
+                .method(method)
+                .uri(format!("/media/{VALID_HASH}.jpg"))
+                .header(header::HOST, "relay.example");
+            if let Some(auth) = auth {
+                builder = builder.header(header::AUTHORIZATION, auth);
+            }
+            builder.body(Body::empty()).expect("request")
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn media_reads_reject_unauthenticated_get_and_head_before_sidecar_gate() {
+            for method in ["GET", "HEAD"] {
+                let response = media_get_auth_router()
+                    .await
+                    .oneshot(media_request(method, None))
+                    .await
+                    .expect("response");
+
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{method}");
+            }
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn media_read_with_valid_server_scoped_token_reaches_sidecar_gate() {
+            let keys = Keys::generate();
+            let auth = media_get_auth_header(&keys, media_get_tags_for("relay.example", None));
+            let response = media_get_auth_router()
+                .await
+                .oneshot(media_request("GET", Some(auth)))
+                .await
+                .expect("response");
+
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn media_read_rejects_upload_verb_wrong_server_and_wrong_x() {
+            let keys = Keys::generate();
+            let now = Timestamp::now().as_secs();
+            let expiration = (now + 55).to_string();
+            let cases = [
+                vec![
+                    Tag::parse(["t", "upload"]).expect("t tag"),
+                    Tag::parse(["expiration", &expiration]).expect("expiration tag"),
+                    Tag::parse(["server", "relay.example"]).expect("server tag"),
+                ],
+                vec![
+                    Tag::parse(["t", "get"]).expect("t tag"),
+                    Tag::parse(["expiration", &expiration]).expect("expiration tag"),
+                    Tag::parse(["server", "evil.example"]).expect("server tag"),
+                ],
+                vec![
+                    Tag::parse(["t", "get"]).expect("t tag"),
+                    Tag::parse(["expiration", &expiration]).expect("expiration tag"),
+                    Tag::parse(["x", &"f".repeat(64)]).expect("x tag"),
+                ],
+            ];
+
+            for tags in cases {
+                let auth = media_get_auth_header(&keys, tags);
+                let response = media_get_auth_router()
+                    .await
+                    .oneshot(media_request("GET", Some(auth)))
+                    .await
+                    .expect("response");
+
+                assert_ne!(response.status(), StatusCode::NOT_FOUND);
+                assert!(
+                    response.status() == StatusCode::UNAUTHORIZED
+                        || response.status() == StatusCode::FORBIDDEN,
+                    "unexpected status {}",
+                    response.status()
+                );
+            }
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn media_read_accepts_range_header_only_after_auth() {
+            let keys = Keys::generate();
+            let auth = media_get_auth_header(&keys, media_get_tags_for("relay.example", None));
+            let mut request = media_request("GET", Some(auth));
+            request
+                .headers_mut()
+                .insert(header::RANGE, "bytes=0-0".parse().expect("range header"));
+
+            let response = media_get_auth_router()
+                .await
+                .oneshot(request)
+                .await
+                .expect("response");
+
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn upload_rate_limiter_is_scoped_by_community() {
+            let state = test_state().await;
+            let pubkey = nostr::Keys::generate().public_key();
+            let community_a = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
+            let community_b = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xBBBB));
+
+            assert!(!upload_rate_limited(&state, community_a, &pubkey));
+            assert!(upload_rate_limited(&state, community_a, &pubkey));
+            assert!(
+                !upload_rate_limited(&state, community_b, &pubkey),
+                "A's exhausted upload budget must not rate-limit the same key in B"
+            );
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn upload_concurrency_limit_is_scoped_by_community() {
+            let state = test_state().await;
+            let pubkey = nostr::Keys::generate().public_key();
+            let community_a = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
+            let community_b = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xBBBB));
+
+            let permit_a = acquire_upload_permit(&state, community_a, &pubkey)
+                .expect("first A upload allowed");
+            assert!(matches!(
+                acquire_upload_permit(&state, community_a, &pubkey),
+                Err(MediaError::UploadConcurrencyLimitReached)
+            ));
+            let permit_b = acquire_upload_permit(&state, community_b, &pubkey)
+                .expect("A's in-flight upload must not block B");
+
+            drop(permit_b);
+            drop(permit_a);
         }
     }
 }
