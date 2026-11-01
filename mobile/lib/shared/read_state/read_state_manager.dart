@@ -84,6 +84,7 @@ class ReadStateManager {
   // When the last successful history fetch was sent. A later fetch and the
   // live subscription ask only for blobs stored since then.
   int? _lastFetchSentAt;
+  final int Function() _now;
   final Map<String, int> _contextSourceCreatedAt = {};
   final Set<String> _pendingSyncedAdvances = {};
 
@@ -96,7 +97,9 @@ class ReadStateManager {
     required SignedEventRelay? signedEventRelay,
     required bool remoteEnabled,
     required VoidCallback onChanged,
-  }) : _crypto = crypto,
+    @visibleForTesting int Function() now = currentUnixSeconds,
+  }) : _now = now,
+       _crypto = crypto,
        _storage = ReadStateStorage(prefs),
        _relaySession = relaySession,
        _signedEventRelay = signedEventRelay,
@@ -277,7 +280,7 @@ class ReadStateManager {
   }
 
   Future<bool> _fetchAndMerge() async {
-    final sentAt = currentUnixSeconds();
+    final sentAt = _now();
     try {
       final events = await _relaySession!.fetchHistory(
         NostrFilter(
@@ -379,7 +382,10 @@ class ReadStateManager {
   /// [relayLiveWindowSkewSeconds] adds 60s of client clock skew.
   int? get _storedSinceLastFetch {
     final sentAt = _lastFetchSentAt;
-    return sentAt == null ? null : sentAt - relayLiveWindowSkewSeconds;
+    // A clock set back since then can't place blobs relative to it, so the
+    // next fetch covers the whole horizon again.
+    if (sentAt == null || sentAt > _now()) return null;
+    return sentAt - relayLiveWindowSkewSeconds;
   }
 
   Future<bool> _startLiveSubscription() async {
