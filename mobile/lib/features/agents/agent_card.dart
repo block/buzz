@@ -59,6 +59,7 @@ class AgentCard extends StatelessWidget {
           )
         : AvatarImageContent(
             imageUrl: poster,
+            preferThumbnail: true,
             fallback: fallback,
             fit: portraitFit,
           );
@@ -89,6 +90,7 @@ class AgentCard extends StatelessWidget {
                             scale: 1.8,
                             child: AvatarImageContent(
                               imageUrl: poster,
+                              preferThumbnail: true,
                               fallback: const SizedBox.shrink(),
                             ),
                           ),

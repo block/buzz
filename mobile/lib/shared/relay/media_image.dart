@@ -240,6 +240,14 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       }
       rethrow;
     }
+    if (response.statusCode == 404 && _relayThumbnailPath.hasMatch(uri.path)) {
+      // Older or externally populated media may have no generated thumbnail.
+      // Record that here rather than in a widget's error builder: the widget
+      // that asked may be gone by the time a slow 404 arrives, and a
+      // cooldown would then keep every later build off the original.
+      MediaImage._rememberMissingThumbnail(url);
+      throw NetworkImageLoadException(statusCode: 404, uri: uri);
+    }
     if (response.statusCode != 200) {
       _cooldownUntil[url] = debugNow().add(_cooldownFor(response));
       throw NetworkImageLoadException(
@@ -383,6 +391,7 @@ class MediaImageCooldownException implements Exception {
 }
 
 final _relayBlobPath = RegExp(r'^/media/([0-9a-f]{64})(?:\.[a-z0-9]{1,8})?$');
+final _relayThumbnailPath = RegExp(r'^/media/[0-9a-f]{64}\.thumb\.jpg$');
 
 /// The relay's generated thumbnail for a relay-hosted image, or null when
 /// [url] is not one. Every image uploaded to a relay gets a JPEG thumbnail at
@@ -503,10 +512,8 @@ class MediaImage extends ConsumerWidget {
                 error.statusCode != 404) {
               return errorBuilder!(context, error, stackTrace);
             }
-            // Older or externally populated media may have no generated
-            // thumbnail. Remember that, so later builds go straight to the
-            // original instead of hitting the thumbnail's failure cooldown.
-            _rememberMissingThumbnail(thumbnail);
+            // The fetch already recorded the missing thumbnail, so later
+            // builds go straight to the original.
             return _image(providerFor(url), cacheWidth);
           },
         );
@@ -520,11 +527,10 @@ class MediaImage extends ConsumerWidget {
   static final Set<String> _missingThumbnails = <String>{};
   static const _maxMissingThumbnails = 256;
 
+  /// Called by the fetch that got the 404, which puts no failure cooldown on
+  /// the thumbnail: this set stands in for it, and an entry evicted here then
+  /// costs one more 404 rather than showing the fallback.
   static void _rememberMissingThumbnail(String url) {
-    // This set now stands in for the 404's failure cooldown. Drop that, or
-    // nothing would fetch the URL again to clear it, and an entry evicted
-    // here during its cooldown would show the fallback, not the original.
-    MediaImageProvider._cooldownUntil.remove(url);
     _missingThumbnails
       ..remove(url)
       ..add(url);

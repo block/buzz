@@ -80,6 +80,7 @@ class ProgressiveAnimatedAvatar extends HookWidget {
           AvatarImageContent(
             key: const ValueKey('progressive-animated-avatar-poster'),
             imageUrl: descriptor.posterUrl,
+            preferThumbnail: true,
             fallback: fallback,
             fit: fit,
           ),

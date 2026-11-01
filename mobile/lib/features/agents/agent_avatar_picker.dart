@@ -3,7 +3,9 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+
 import '../../shared/widgets/ios_native_segmented_control.dart';
+
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -311,6 +313,7 @@ class AgentAvatarPicker extends HookConsumerWidget {
                     ),
                     child: AvatarImageContent(
                       imageUrl: agentAvatarCatalog[i].url,
+                      preferThumbnail: true,
                       fallback: const Icon(Icons.smart_toy_outlined),
                     ),
                   ),
