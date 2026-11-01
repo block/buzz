@@ -24,3 +24,6 @@ Before changing anything in this directory, read
   migration fails closed if its backfill has not run, and its release notes
   name the writer release that upgrades must not skip.
 - Bound every lock (`SET LOCAL lock_timeout`).
+- Build a missing index inline under the lock and statement budgets, as
+  `0049` does. Never refuse a table only because it has rows: that breaks
+  every auto-migrating deployment with data, however small.

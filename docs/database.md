@@ -415,6 +415,12 @@ parity assertion on the table for that window.
   online schema change tool to build it for them. CONCURRENTLY cannot run
   inside the migration transaction, so follow the prebuild-then-verify
   procedure in [thread-window-deployment.md](thread-window-deployment.md).
+  When the index is missing, the migration builds it inline under its lock
+  and statement budgets, so a small populated database still upgrades by
+  auto-migration and a large one fails closed until an operator prebuilds it.
+  A migration MUST NOT refuse a table only because it has rows. Migrations
+  0076 and 0078 did, so the startup runner builds their indexes under the
+  same budgets before running them.
   Partitioned parents need per-partition concurrent builds attached to an
   `ON ONLY` parent index.
 - The declarative schema source declares indexes with plain `CREATE INDEX`.
