@@ -204,12 +204,13 @@ fn should_retry_legacy_upload(status: reqwest::StatusCode) -> bool {
     )
 }
 
-/// Returns `true` for moderation command kinds (9040–9044).
+/// Returns `true` for relay-admin member commands (9030–9032) and moderation
+/// command kinds (9040–9044).
 ///
 /// These events execute immediately at the relay without dedup, so they must
 /// not be blindly retried on ambiguous outcomes.
-fn is_moderation_kind(kind: u16) -> bool {
-    matches!(kind, 9040..=9044)
+fn is_once_only_command_kind(kind: u16) -> bool {
+    matches!(kind, 9030..=9032 | 9040..=9044)
 }
 
 /// Returns `true` for HTTP status codes that indicate a successful response
@@ -958,7 +959,7 @@ impl BuzzClient {
 
     /// Submit a signed Nostr event via POST /events.
     ///
-    /// For non-idempotent moderation command kinds (9040–9044), an ambiguous
+    /// For non-idempotent command kinds (9030–9032, 9040–9044), an ambiguous
     /// outcome (mid-request error, body loss, non-ingest 429, or 502/503/504)
     /// surfaces as `CliError::DeliveryUnknown` instead of being retried.  These
     /// events execute at the relay *before* any dedup check, so a blind re-send
@@ -969,14 +970,14 @@ impl BuzzClient {
     /// All other event kinds retain the standard retry policy.
     pub async fn submit_event(&self, event: nostr::Event) -> Result<String, CliError> {
         let kind = event.kind.as_u16();
-        if is_moderation_kind(kind) {
+        if is_once_only_command_kind(kind) {
             self.submit_moderation_event(event).await
         } else {
             self.submit_stored_event(event).await
         }
     }
 
-    /// Submit a moderation command (kinds 9040–9044) with non-idempotent retry policy.
+    /// Submit a once-only command (kinds 9030–9032, 9040–9044) with non-idempotent retry policy.
     async fn submit_moderation_event(&self, event: nostr::Event) -> Result<String, CliError> {
         let url = format!("{}/events", self.relay_url);
         let body = bytes::Bytes::from(
@@ -1022,7 +1023,7 @@ impl BuzzClient {
                         {
                             // Ambiguous: the relay may have executed this command.
                             return Err(CliError::DeliveryUnknown(format!(
-                                "moderation command (kind {}) outcome unknown: {}",
+                                "command (kind {}) outcome unknown: {}",
                                 event.kind.as_u16(),
                                 net_err
                             )));
@@ -1063,7 +1064,7 @@ impl BuzzClient {
                         }
                         // Non-canonical 429 (proxy-level or unrecognised body): outcome unknown.
                         return Err(CliError::DeliveryUnknown(format!(
-                            "moderation command (kind {}) outcome unknown: HTTP 429",
+                            "command (kind {}) outcome unknown: HTTP 429",
                             event.kind.as_u16()
                         )));
                     }
@@ -1071,7 +1072,7 @@ impl BuzzClient {
                         // Proxy-level error: the relay may have received and executed
                         // the command before the proxy failed.
                         return Err(CliError::DeliveryUnknown(format!(
-                            "moderation command (kind {}) outcome unknown: HTTP {status}",
+                            "command (kind {}) outcome unknown: HTTP {status}",
                             event.kind.as_u16()
                         )));
                     }
@@ -1080,7 +1081,7 @@ impl BuzzClient {
                         // Body loss after relay confirmed receipt is ambiguous for
                         // non-idempotent commands.
                         CliError::DeliveryUnknown(format!(
-                            "moderation command (kind {}) outcome unknown: response body lost: {e}",
+                            "command (kind {}) outcome unknown: response body lost: {e}",
                             event.kind.as_u16()
                         ))
                     })?;
@@ -1554,7 +1555,7 @@ mod retry_tests {
     use std::time::Duration;
 
     use super::{
-        env_duration_secs, is_moderation_kind, jitter_delay, parse_retry_hint_text,
+        env_duration_secs, is_once_only_command_kind, jitter_delay, parse_retry_hint_text,
         parse_retry_in_secs, RETRY_BASE_SECS, RETRY_IN_MAX_SECS, RETRY_MAX_ATTEMPTS,
     };
 
@@ -1624,20 +1625,23 @@ mod retry_tests {
         assert_eq!(parse_retry_hint_text(""), None);
     }
 
-    // ---- is_moderation_kind ----
+    // ---- is_once_only_command_kind ----
 
     #[test]
     fn moderation_kind_covers_9040_through_9044() {
-        for kind in 9040u16..=9044 {
-            assert!(is_moderation_kind(kind), "kind {kind} should be moderation");
+        for kind in (9030u16..=9032).chain(9040..=9044) {
+            assert!(
+                is_once_only_command_kind(kind),
+                "kind {kind} should be moderation"
+            );
         }
     }
 
     #[test]
     fn non_moderation_kinds_are_not_moderation() {
-        for kind in [1u16, 9039, 9045, 39000, 20000, 30023] {
+        for kind in [1u16, 9029, 9033, 9039, 9045, 39000, 20000, 30023] {
             assert!(
-                !is_moderation_kind(kind),
+                !is_once_only_command_kind(kind),
                 "kind {kind} should not be moderation"
             );
         }
@@ -1896,6 +1900,19 @@ mod retry_policy_tests {
             1,
             "must not retry 502 for moderation kind"
         );
+    }
+
+    /// A relay-admin member command (kind 9031) that gets HTTP 502 is never re-sent:
+    /// a retried remove would report "member not found" for a removal that landed.
+    #[tokio::test]
+    async fn relay_admin_kind_502_is_not_retried() {
+        let (url, attempts) =
+            test_server(|_n| (StatusCode::BAD_GATEWAY, "bad gateway".to_string())).await;
+        let client = test_client(&url);
+        let event = make_moderation_event(client.keys(), 9031);
+        let err = client.submit_event(event).await.unwrap_err();
+        assert!(matches!(err, CliError::DeliveryUnknown(_)), "{err:?}");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 
     /// When all retry attempts are connect-failures (the relay definitively never saw
