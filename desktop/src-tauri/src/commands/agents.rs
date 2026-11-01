@@ -709,6 +709,7 @@ async fn create_managed_agent_in<R: tauri::Runtime>(
                 input.start_on_app_launch
             },
             auto_restart_on_config_change: true,
+            self_update_fields: Vec::new(),
             runtime_pid: None,
             backend: input.backend.clone(),
             backend_agent_id: None,
