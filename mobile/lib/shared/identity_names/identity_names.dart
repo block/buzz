@@ -13,6 +13,9 @@ final RegExp _hexPubkey = RegExp(r'^[0-9a-f]{64}$');
 @immutable
 class IdentityNameSources {
   final Map<String, UserProfile> profiles;
+
+  /// NIP-FI verified display names. They outrank every self-declared name.
+  final Map<String, String> verifiedNames;
   final Set<String> agentPubkeys;
   final Map<String, String> agentDisplayNames;
   final Map<String, String> agentOwners;
@@ -20,6 +23,7 @@ class IdentityNameSources {
 
   const IdentityNameSources({
     this.profiles = const {},
+    this.verifiedNames = const {},
     this.agentPubkeys = const {},
     this.agentDisplayNames = const {},
     this.agentOwners = const {},
@@ -47,6 +51,7 @@ class IdentityNameSources {
     return NamingIdentity(
       pubkey: key,
       name:
+          _nonBlank(verifiedNames[key]) ??
           _nonBlank(profile?.displayName) ??
           _nonBlank(agentDisplayNames[key]) ??
           _nonBlank(fallbackName) ??
@@ -58,7 +63,9 @@ class IdentityNameSources {
 
   /// Owner lookup fact: only a real, non-blank owner profile name.
   NamingIdentity? _ownerFact(String owner) {
-    final name = _nonBlank(profiles[owner]?.displayName);
+    final name =
+        _nonBlank(verifiedNames[owner]) ??
+        _nonBlank(profiles[owner]?.displayName);
     return name == null ? null : NamingIdentity(pubkey: owner, name: name);
   }
 
@@ -168,6 +175,7 @@ class IdentityNames {
       resolve(pubkey)?.name ?? _plainName(pubkey.toLowerCase());
 
   String _plainName(String key) =>
+      _nonBlank(_sources.verifiedNames[key])?.trim() ??
       _nonBlank(_sources.profiles[key]?.displayName)?.trim() ??
       _nonBlank(_sources.agentDisplayNames[key])?.trim() ??
       _nonBlank(_fallbackNames[key])?.trim() ??

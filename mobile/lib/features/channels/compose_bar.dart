@@ -29,6 +29,7 @@ import '../../shared/huddle/huddle_session.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/verified_mark.dart';
 import '../../shared/widgets/anchored_popover_menu.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/concentric_sheet_surface.dart';

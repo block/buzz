@@ -3,6 +3,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../mentions/agent_identity_provider.dart';
 import '../profile/user_cache_provider.dart';
 import '../relay/relay.dart';
+import '../verified_profiles/verified_profile_directory.dart';
 import 'identity_names.dart';
 
 /// Client-wide naming facts. Views choose their own comparison context with
@@ -10,6 +11,11 @@ import 'identity_names.dart';
 final identityNameSourcesProvider = Provider<IdentityNameSources>((ref) {
   return IdentityNameSources(
     profiles: ref.watch(userCacheProvider),
+    verifiedNames: {
+      for (final MapEntry(:key, :value)
+          in ref.watch(verifiedProfilesProvider).entries)
+        key: value.displayName,
+    },
     agentPubkeys: ref.watch(knownAgentPubkeysProvider),
     agentDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
     agentOwners: ref.watch(agentOwnersProvider).asData?.value ?? const {},

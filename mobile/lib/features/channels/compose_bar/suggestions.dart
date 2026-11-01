@@ -129,7 +129,18 @@ class _MentionSuggestions extends StatelessWidget {
               ),
               isAgent: candidate.isAgent,
             ),
-            title: Text(name, style: context.textTheme.titleSmall),
+            title: Row(
+              children: [
+                Flexible(
+                  child: Text(
+                    name,
+                    style: context.textTheme.titleSmall,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                VerifiedMark(pubkey: candidate.pubkey),
+              ],
+            ),
             subtitle: _MentionSuggestionInfo.build(
               context,
               candidate: candidate,
