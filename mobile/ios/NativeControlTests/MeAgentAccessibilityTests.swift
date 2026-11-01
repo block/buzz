@@ -25,6 +25,9 @@ struct MeAgentAccessibilityTests {
         precondition(controller.navigationItem.leftBarButtonItem?.image != nil)
         let cell = controller.tableView(controller.tableView, cellForRowAt: IndexPath(row: 0, section: 1))
         let controls = cell.contentView.subviews.compactMap { $0 as? UIStackView }.first!
+        precondition(cell.backgroundColor == .clear)
+        precondition(!cell.clipsToBounds)
+        precondition(controls.spacing >= 16 && controls.arrangedSubviews.count == 2)
         let agent = controls.arrangedSubviews[0] as! UIButton
         let project = controls.arrangedSubviews[1] as! UIButton
         precondition(agent.accessibilityLabel == "Agent")

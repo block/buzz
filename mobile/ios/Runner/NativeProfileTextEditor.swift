@@ -386,6 +386,7 @@ private final class NativeProfileTextEditorViewController:
       action: #selector(cancelTapped)
     )
     if isChatEditor && !isProjectEditor {
+      tableView.separatorStyle = .none
       navigationItem.leftBarButtonItem = UIBarButtonItem(
         image: UIImage(systemName: "chevron.backward"), style: .plain,
         target: self, action: #selector(cancelTapped)
@@ -601,6 +602,18 @@ private final class NativeProfileTextEditorViewController:
     return (isChannelEditor ? indexPath.section == 1 : multiline) ? 132 : 52
   }
 
+  private func chatControlConfiguration() -> UIButton.Configuration {
+    var configuration: UIButton.Configuration
+    if #available(iOS 26.0, *) {
+      configuration = .glass()
+    } else {
+      configuration = .gray()
+      configuration.baseBackgroundColor = containerBackgroundColor
+    }
+    configuration.cornerStyle = .capsule
+    return configuration
+  }
+
   override func tableView(
     _ tableView: UITableView,
     cellForRowAt indexPath: IndexPath
@@ -612,18 +625,23 @@ private final class NativeProfileTextEditorViewController:
     cell.layer.cornerCurve = .continuous
     cell.clipsToBounds = true
     if isChatEditor && indexPath.section == 1 {
+      // Each control owns its material; the row must not join their surfaces.
+      cell.backgroundConfiguration = .clear()
+      cell.backgroundColor = .clear
+      cell.clipsToBounds = false
       let saved = chatOptions?["savedAssistant"] as? [String: String]
       let fallback = fieldsLocked ? selectedAssistant.map {
         saved.flatMap { $0["id"] == selectedAssistant ? $0 : nil } ?? ["id": $0, "name": $0]
       } : nil
       let selected = assistants.first { $0["id"] == selectedAssistant } ?? fallback
       let agent = UIButton(type: .system)
-      var agentStyle = UIButton.Configuration.plain()
+      var agentStyle = chatControlConfiguration()
       agentStyle.baseForegroundColor = .label
       agentStyle.image = selected.map { selectedAssistantAvatar ?? MeAssistantListController.avatarImage($0, photo: nil) } ?? UIImage(systemName: "person.crop.square")
       agentStyle.title = selected?["name"] ?? "Choose an agent"
       agentStyle.imagePlacement = .top
       agentStyle.imagePadding = 8
+      agent.tintColor = .label
       agent.configuration = agentStyle
       agent.titleLabel?.numberOfLines = 0
       agent.titleLabel?.adjustsFontForContentSizeCategory = true
@@ -634,12 +652,13 @@ private final class NativeProfileTextEditorViewController:
       agent.addTarget(self, action: #selector(chooseAssistant), for: .touchUpInside)
 
       let workspace = UIButton(type: .system)
-      var workspaceStyle = UIButton.Configuration.plain()
+      var workspaceStyle = chatControlConfiguration()
       workspaceStyle.baseForegroundColor = .label
       workspaceStyle.image = UIImage(systemName: "folder")
       workspaceStyle.title = projects.first { $0["id"] == selectedProject }?["name"] ?? (selectedProject == nil ? "Chats" : "Unavailable workspace")
       workspaceStyle.imagePlacement = .top
       workspaceStyle.imagePadding = 8
+      workspace.tintColor = .label
       workspace.configuration = workspaceStyle
       workspace.titleLabel?.numberOfLines = 0
       workspace.titleLabel?.adjustsFontForContentSizeCategory = true
