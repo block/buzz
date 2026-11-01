@@ -64,15 +64,15 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   String? _subscriptionRelayBaseUrl;
   Timer? _backstopTimer;
   final Map<String, int> _latestObservedByChannel = {};
-  // Per channel, when this session's last successful latest-message query was
-  // sent. A later query asks only for messages stored since then.
-  final Map<String, int> _latestMessageSentAtById = {};
   final Map<String, Map<String, ObservedUnreadEvent>>
   _observedUnreadEventsByChannel = {};
   final Map<String, Set<String>> _unreadDeletedIdsByChannel = {};
   final Set<String> _unscopedUnreadDeletedIds = {};
   Set<String> _participatedRootIds = {};
   Set<String> _authoredRootIds = {};
+  // Per channel, when this session's last successful latest-message query was
+  // sent. A later query asks only for messages stored since then.
+  final Map<String, int> _latestMessageSentAtById = {};
   String? _threadInterestPubkey;
   bool _hasLoaded = false;
   bool _hasCachedSnapshot = false;
