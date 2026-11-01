@@ -206,7 +206,9 @@ void main() {
                 ],
               ),
             );
-            await tester.tap(find.text('$stem.$extension'));
+            await tester.tapOnText(
+              find.textRange.ofSubstring('$stem.$extension'),
+            );
             await tester.pump();
             expect(opened, url);
             expect(filename, '$stem.$extension');
