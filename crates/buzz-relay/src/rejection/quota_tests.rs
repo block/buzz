@@ -955,6 +955,32 @@ async fn ephemeral_and_http_admission_still_fail_closed_when_redis_is_unavailabl
     assert_metric(&recorder, "http", "unavailable", "api_calls", 1);
 }
 
+/// Each NIP-OA link outcome on `POST /events` maps to the owner to charge:
+/// the proven owner once linked, the token or stored owner on a conflict,
+/// and a refusal when the link is unavailable.
+#[test]
+fn http_owner_link_outcomes_map_to_the_owner_to_charge() {
+    use crate::api::bridge::linked_agent_owner;
+    use crate::api::relay_members::OwnerLink;
+    let (proven, token) = (Keys::generate().public_key(), Keys::generate().public_key());
+    for (token_owner, link, expected) in [
+        (None, None, Ok(None)),
+        (Some(token), None, Ok(Some(token))),
+        (None, Some(OwnerLink::Linked), Ok(Some(proven))),
+        (None, Some(OwnerLink::Conflict), Ok(None)),
+        (Some(token), Some(OwnerLink::Conflict), Ok(Some(token))),
+        (None, Some(OwnerLink::Unavailable), Err(())),
+        (Some(token), Some(OwnerLink::Unavailable), Err(())),
+    ] {
+        let nip_oa_link = link.map(|link| (proven, link));
+        assert_eq!(
+            linked_agent_owner(token_owner, nip_oa_link),
+            expected,
+            "{token_owner:?} {link:?}"
+        );
+    }
+}
+
 /// An HTTP agent event is refused, never let through uncounted, when the
 /// shared counter, the proven owner's link, or the stored owner is
 /// unavailable.
@@ -990,7 +1016,11 @@ async fn http_agent_event_admission_fails_closed_when_its_owner_or_counter_is_un
     // The owner is known but its counter is not reachable.
     refuse(Arc::clone(&state), Ok(Some(owner))).await;
     // The request proved an owner whose link could not be read or written.
-    refuse(Arc::clone(&state), Err(())).await;
+    let unavailable = crate::api::bridge::linked_agent_owner(
+        None,
+        Some((owner, crate::api::relay_members::OwnerLink::Unavailable)),
+    );
+    refuse(Arc::clone(&state), unavailable).await;
     // No owner was proven and the stored owner cannot be read.
     let no_database = crate::state::tests::test_state_with_unreachable_database_url(
         "postgres://127.0.0.1:1/none",

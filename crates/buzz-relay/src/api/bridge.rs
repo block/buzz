@@ -158,6 +158,24 @@ pub(crate) async fn enforce_http_agent_event_admission(
     http_admission_result(result, bucket)
 }
 
+/// The owner a `POST /events` request proved, in the form
+/// [`enforce_http_agent_event_admission`] takes. A token owner reached here
+/// linked: membership refuses one that is not. A NIP-OA owner counts once it
+/// is the agent's stored owner. On a conflict the first stored owner stays
+/// the one charged; when the link cannot be read or written, the owner to
+/// charge is unknown.
+pub(crate) fn linked_agent_owner(
+    token_owner: Option<nostr::PublicKey>,
+    nip_oa_link: Option<(nostr::PublicKey, super::relay_members::OwnerLink)>,
+) -> Result<Option<nostr::PublicKey>, ()> {
+    use super::relay_members::OwnerLink;
+    match nip_oa_link {
+        None | Some((_, OwnerLink::Conflict)) => Ok(token_owner),
+        Some((owner, OwnerLink::Linked)) => Ok(Some(owner)),
+        Some((_, OwnerLink::Unavailable)) => Err(()),
+    }
+}
+
 /// The stored owner of `pubkey` in `tenant`'s community, through
 /// [`AppState::agent_owner_cache`]. Only a found owner is cached: it is
 /// first-write-wins, so it cannot change, while "no owner" can end on any
@@ -1345,21 +1363,14 @@ async fn submit_event_authed(
             };
         }
     };
-    // A token owner reached here linked: membership refuses one that is not.
-    // A NIP-OA owner is charged once it is the agent's stored owner. On a
-    // conflict the first stored owner stays the one charged; when the link
-    // cannot be read or written, the owner to charge is unknown.
-    let linked_owner = match nip_oa_owner {
-        None => Ok(token_owner),
-        Some(owner) => {
-            use super::relay_members::OwnerLink;
-            match super::relay_members::link_agent_owner(state, tenant, &pubkey, &owner).await {
-                OwnerLink::Linked => Ok(Some(owner)),
-                OwnerLink::Conflict => Ok(token_owner),
-                OwnerLink::Unavailable => Err(()),
-            }
-        }
+    let nip_oa_link = match nip_oa_owner {
+        Some(owner) => Some((
+            owner,
+            super::relay_members::link_agent_owner(state, tenant, &pubkey, &owner).await,
+        )),
+        None => None,
     };
+    let linked_owner = linked_agent_owner(token_owner, nip_oa_link);
     if let Err(e) =
         enforce_http_agent_event_admission(state, tenant, &pubkey, linked_owner, &event).await
     {
