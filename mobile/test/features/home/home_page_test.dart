@@ -226,6 +226,18 @@ void main() {
       await tester.tap(find.byTooltip('New'));
       await tester.pumpAndSettle();
       expect(find.text('New workspace'), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.text('Solo').last).dy,
+        lessThan(tester.getTopLeft(find.text('New chat')).dy),
+      );
+      expect(
+        tester.getTopLeft(find.text('Team').last).dy,
+        greaterThan(tester.getBottomLeft(find.text('New workspace')).dy),
+      );
+      expect(
+        tester.getTopLeft(find.text('Team').last).dy,
+        lessThan(tester.getTopLeft(find.text('New DM')).dy),
+      );
       expect(find.text('New DM'), findsOneWidget);
       expect(find.text('New channel'), findsOneWidget);
       await tester.tap(find.text('New chat'));

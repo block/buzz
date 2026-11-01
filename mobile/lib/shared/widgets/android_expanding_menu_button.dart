@@ -19,6 +19,7 @@ class AndroidExpandingMenuButton extends HookWidget {
     this.width = 112,
     this.height = 56,
     this.dividerBefore = const {},
+    this.sectionTitles = const {},
     super.key,
   });
 
@@ -26,6 +27,7 @@ class AndroidExpandingMenuButton extends HookWidget {
   final Widget? trigger;
   final double width, height;
   final Set<int> dividerBefore;
+  final Map<int, String> sectionTitles;
 
   final List<({String label, String symbol, VoidCallback? onPressed})> actions;
 
@@ -63,6 +65,7 @@ class AndroidExpandingMenuButton extends HookWidget {
                     label: label,
                     trigger: trigger ?? const _NewLabel(),
                     dividerBefore: dividerBefore,
+                    sectionTitles: sectionTitles,
                     actions: captured,
                     reducedMotion: MediaQuery.disableAnimationsOf(context),
                     dismissLabel: MaterialLocalizations.of(
@@ -114,6 +117,7 @@ class _CreateMenuRoute extends PopupRoute<int> {
     required this.label,
     required this.trigger,
     required this.dividerBefore,
+    required this.sectionTitles,
     required this.actions,
     required this.reducedMotion,
     required this.dismissLabel,
@@ -122,6 +126,7 @@ class _CreateMenuRoute extends PopupRoute<int> {
   final String label;
   final Widget trigger;
   final Set<int> dividerBefore;
+  final Map<int, String> sectionTitles;
   final List<({String label, String symbol, VoidCallback? onPressed})> actions;
   final bool reducedMotion;
   final String dismissLabel;
@@ -150,8 +155,12 @@ class _CreateMenuRoute extends PopupRoute<int> {
       media.size.width - media.padding.horizontal - Grid.lg,
     );
     final rowHeight = math.max(48.0, media.textScaler.scale(20) + Grid.sm);
+    final sectionHeight = media.textScaler.scale(12) + Grid.sm;
     final height = math.min(
-      actions.length * rowHeight + Grid.xs + dividerBefore.length,
+      actions.length * rowHeight +
+          Grid.xs +
+          dividerBefore.length +
+          sectionTitles.length * sectionHeight,
       media.size.height - media.padding.vertical - Grid.lg,
     );
     final expandDown = anchor.center.dy < media.size.height / 2;
@@ -246,6 +255,33 @@ class _CreateMenuRoute extends PopupRoute<int> {
                                         ) ...[
                                           if (dividerBefore.contains(i))
                                             const Divider(height: 1),
+                                          if (sectionTitles[i]
+                                              case final title?)
+                                            SizedBox(
+                                              height: sectionHeight,
+                                              child: Padding(
+                                                padding:
+                                                    const EdgeInsets.symmetric(
+                                                      horizontal: Grid.gutter,
+                                                    ),
+                                                child: Align(
+                                                  alignment:
+                                                      Alignment.centerLeft,
+                                                  child: Semantics(
+                                                    header: true,
+                                                    child: Text(
+                                                      title,
+                                                      style: TextStyle(
+                                                        fontSize: 12,
+                                                        color: context
+                                                            .colors
+                                                            .onSurfaceVariant,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
                                           SizedBox(
                                             height: rowHeight,
                                             child: InkWell(

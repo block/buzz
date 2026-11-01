@@ -45,6 +45,8 @@ class MessagesNavigationBar extends StatelessWidget {
       if (defaultTargetPlatform == TargetPlatform.iOS)
         IosMessageCreateButton(
           actions: creationActions,
+          dividerBefore: const {2},
+          sectionTitles: const {0: 'Solo', 2: 'Team'},
           label: 'New',
           showIconWithLabel: true,
           accessibilityLabel: 'New',
@@ -53,7 +55,11 @@ class MessagesNavigationBar extends StatelessWidget {
           plain: false,
         )
       else
-        AndroidExpandingMenuButton(actions: creationActions),
+        AndroidExpandingMenuButton(
+          actions: creationActions,
+          dividerBefore: const {2},
+          sectionTitles: const {0: 'Solo', 2: 'Team'},
+        ),
       const SizedBox(width: Grid.xs),
       agent,
     ],

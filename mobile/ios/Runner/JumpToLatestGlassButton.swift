@@ -433,9 +433,15 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     }
     if let menu = arguments?["menu"] as? [[String: Any]] {
       var groups: [[UIMenuElement]] = [[]]
+      var groupTitles = [""]
       for item in menu {
-        if item["dividerBefore"] as? Bool == true, !groups[groups.count - 1].isEmpty {
+        if item["dividerBefore"] as? Bool == true || item["sectionTitle"] is String,
+           !groups[groups.count - 1].isEmpty {
           groups.append([])
+          groupTitles.append("")
+        }
+        if let title = item["sectionTitle"] as? String {
+          groupTitles[groupTitles.count - 1] = title
         }
         let symbol = (item["symbol"] as? String).flatMap {
           // A transparent image keeps the native menu's icon column aligned.
@@ -459,7 +465,9 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
         }
         groups[groups.count - 1].append(action)
       }
-      button.menu = UIMenu(children: groups.map { UIMenu(options: .displayInline, children: $0) })
+      button.menu = UIMenu(children: groups.enumerated().map { index, children in
+        UIMenu(title: groupTitles[index], options: .displayInline, children: children)
+      })
       button.showsMenuAsPrimaryAction = !menu.isEmpty
     }
     switch icon {
