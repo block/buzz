@@ -258,3 +258,26 @@ fn held_push_to_talk_never_silence_flushes() {
     // Manually open mic with the shortcut up: normal VAD behavior.
     assert!(vad_flush_allowed(true, true, false));
 }
+
+#[test]
+fn punctuation_only_transcripts_are_dropped() {
+    // Capacity exceeds total sends so the pre-fix code fails on the assertion
+    // below (hallucinations received) instead of deadlocking blocking_send.
+    let (text_tx, mut text_rx) = tokio::sync::mpsc::channel::<String>(16);
+
+    // Parakeet hallucinations on non-speech audio: no alphanumeric content.
+    for hallucinated in [".", "?", "!", ",", "...", ". .", "—"] {
+        super::send_transcript(hallucinated.to_string(), &text_tx);
+    }
+    // Real speech survives, including single-word and non-ASCII replies.
+    for speech in ["yes", "ok.", "привет", "第九"] {
+        super::send_transcript(speech.to_string(), &text_tx);
+    }
+    drop(text_tx);
+
+    let mut received = Vec::new();
+    while let Ok(text) = text_rx.try_recv() {
+        received.push(text);
+    }
+    assert_eq!(received, ["yes", "ok.", "привет", "第九"]);
+}
