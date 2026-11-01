@@ -42,13 +42,23 @@ void soloDraftTests() {
   testWidgets(
     'Solo draft freezes editing during first send and restores on failure',
     (tester) async {
-      final delivery = Completer<void>();
+      var delivery = Completer<void>();
+      final keys = nostr.Keys.generate();
       var busy = false;
       await tester.pumpWidget(
         _buildComposeBar(
-          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          uploadService: _testUploadService(keys.nsec),
+          relayConfig: () => _SwitchableRelayConfigNotifier(
+            RelayConfig(baseUrl: 'https://relay.example', nsec: keys.nsec),
+          ),
           draftMembers: const [],
-          onSendingChanged: (value) => busy = value,
+          onSendingChanged: (value) {
+            expect(
+              SchedulerBinding.instance.schedulerPhase,
+              isNot(SchedulerPhase.persistentCallbacks),
+            );
+            busy = value;
+          },
           onSend: (content, mentions, {mediaTags = const <List<String>>[]}) =>
               delivery.future,
         ),
@@ -68,6 +78,39 @@ void soloDraftTests() {
         isFalse,
       );
       expect(find.text('First message'), findsOneWidget);
+      ScaffoldMessenger.of(
+        tester.element(find.byType(ComposeBar)),
+      ).clearSnackBars();
+      await tester.pumpAndSettle();
+      // A second attempt fails before a build observes sending=true.
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pumpAndSettle();
+      expect(busy, isFalse);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).readOnly,
+        isFalse,
+      );
+      ScaffoldMessenger.of(
+        tester.element(find.byType(ComposeBar)),
+      ).clearSnackBars();
+      await tester.pumpAndSettle();
+      // Same-origin URL changes reset the mounted composer during build.
+      delivery = Completer<void>();
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pump();
+      expect(busy, isTrue);
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
+      );
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: 'https://relay.example/alternate', nsec: keys.nsec);
+      await tester.pump();
+      expect(busy, isFalse);
+      delivery.complete();
+      await tester.pump();
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
     },
   );
 }

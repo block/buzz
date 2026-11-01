@@ -78,31 +78,6 @@ class _MeChatRow extends ConsumerWidget {
   }
 }
 
-Future<void> _offerMeRecovery(BuildContext context, MeSync sync) async {
-  final pending = sync.prefs?.getString(sync.pendingKey);
-  if (pending == null) return;
-  final discard = await showDialog<bool>(
-    context: context,
-    builder: (context) => AlertDialog(
-      title: const Text('Conflicting Solo changes'),
-      content: const Text(
-        'Desktop and this phone changed the same project or chat. Keep the pending phone change to retry later, or discard it and use the current desktop organization. Your chat messages will be kept.',
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context, false),
-          child: const Text('Keep pending'),
-        ),
-        TextButton(
-          onPressed: () => Navigator.pop(context, true),
-          child: const Text('Discard phone change'),
-        ),
-      ],
-    ),
-  );
-  if (discard == true) await sync.discardPending(pending);
-}
-
 // Reconnects replace the transport service while an editor may still be open.
 // Retain the reviewed account/community boundary but use its current connection.
 MeSync _currentMeSync(WidgetRef ref, MeSync reviewed) {

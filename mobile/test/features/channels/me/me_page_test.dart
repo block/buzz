@@ -22,6 +22,19 @@ import 'package:buzz/shared/me/me_groups.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/theme/theme.dart';
 
+class _UnavailableRelay extends RelaySessionNotifier {
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => throw StateError('Agent unavailable');
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => [];
+}
+
 class FakeChannels extends ChannelsNotifier {
   @override
   Future<List<Channel>> build() async => [
@@ -217,7 +230,7 @@ void main() {
       final bestie = StreamController<String?>();
       addTearDown(bestie.close);
       final sync = MeSync(
-        RelaySessionNotifier(),
+        _UnavailableRelay(),
         RelayConfig(
           baseUrl: 'https://relay.test',
           nsec: nostr.Keys.generate().nsec,
@@ -268,6 +281,22 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(ComposeBar), findsOneWidget);
       expect(find.byType(BottomSheet), findsNothing);
+      // Missing agent fails before the next frame and must unlock the header.
+      await tester.tap(find.text('Message Choose an agent'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'Hello');
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp).hitTestable().last);
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<IconButton>(find.byKey(const ValueKey('new-chat-agent')))
+            .onPressed,
+        isNotNull,
+      );
+      ScaffoldMessenger.of(
+        tester.element(find.byType(ComposeBar)),
+      ).clearSnackBars();
+      await tester.pumpAndSettle();
       bestie.add('bestie');
       await tester.pumpAndSettle();
       expect(find.byTooltip('Change agent: My Bestie'), findsOneWidget);
@@ -303,7 +332,7 @@ void main() {
       bestie.add(null);
       await tester.pumpAndSettle();
       expect(find.byTooltip('Change agent: Other agent'), findsOneWidget);
-      await tester.tap(find.text('Message Other agent'));
+      await tester.tap(find.text('Hello').last);
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'Plan our launch');
       await tester.pageBack();
@@ -312,6 +341,25 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Plan our launch'), findsOneWidget);
       expect(MeChatCreation.pending(sync), isNull);
+      await tester.tap(find.byTooltip('Choose an agent'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Other agent'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Plan our launch').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp).hitTestable().last);
+      await tester.pumpAndSettle();
+      expect(MeChatCreation.pending(sync), isNotNull);
+      expect(find.text('Retry'), findsOneWidget);
+      ScaffoldMessenger.of(tester.element(find.text('Retry'))).clearSnackBars();
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Retry'));
+      await tester.pumpAndSettle();
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      expect(find.text('Retry'), findsNothing);
+      expect(find.byType(ComposeBar), findsNothing);
+
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pumpAndSettle();
     },

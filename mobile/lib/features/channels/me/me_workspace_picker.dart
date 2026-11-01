@@ -3,6 +3,8 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../../shared/me/me_sync.dart';
+import '../../../shared/me/me_recovery.dart';
+import 'me_recovery_dialog.dart';
 import '../../../shared/theme/buzz_icons.dart';
 import '../../../shared/widgets/feedback_snackbar.dart';
 import '../../../shared/widgets/frosted_app_bar.dart';
@@ -52,7 +54,9 @@ import '../../../shared/widgets/frosted_app_bar.dart';
         );
       }
     } catch (error) {
-      if (context.mounted) {
+      if (context.mounted && error is MeRecoveryConflict) {
+        await offerMeRecovery(context, sync);
+      } else if (context.mounted) {
         ScaffoldMessenger.of(context).showFeedbackSnackBar(
           SnackBar(
             content: Text(error.toString().replaceFirst('Bad state: ', '')),

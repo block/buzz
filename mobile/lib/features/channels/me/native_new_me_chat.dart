@@ -173,7 +173,7 @@ Future<(Channel, String)?> _showNewMeChat(
         return (created, assistant);
       } catch (failure) {
         if (failure is MeRecoveryConflict && context.mounted) {
-          await _offerMeRecovery(context, sync);
+          await offerMeRecovery(context, sync);
         }
         error =
             '${failure.toString().replaceFirst('Bad state: ', '')}\nRetry continues this same chat.';

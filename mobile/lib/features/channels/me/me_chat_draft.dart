@@ -116,6 +116,7 @@ class _MeChatDraft extends HookConsumerWidget {
         }
       } catch (failure) {
         if (context.mounted) {
+          composerBusy.value = false;
           pending.value = MeChatCreation.pending(sync);
           error.value = failure.toString().replaceFirst('Bad state: ', '');
         }
@@ -241,7 +242,9 @@ class _MeChatDraft extends HookConsumerWidget {
                         displayName: name,
                       ),
                   ],
-                  onSendingChanged: (value) => composerBusy.value = value,
+                  onSendingChanged: (value) {
+                    if (context.mounted) composerBusy.value = value;
+                  },
                   onSend: send,
                 ),
             ],

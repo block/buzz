@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'package:buzz/shared/crypto/nip44.dart';
+import 'package:buzz/features/channels/me/me_workspace_picker.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/me/me_page.dart';
@@ -64,7 +67,14 @@ class _WorkspaceHeader extends HookConsumerWidget {
   const _WorkspaceHeader();
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final workspace = useMeWorkspace(
+      context,
+      ref,
+      enabled: true,
+      channelId: '10000000-0000-4000-8000-000000000001',
+    );
     return Scaffold(
+      appBar: AppBar(actions: [workspace.action]),
       body: TextButton(
         onPressed: () async {
           try {
@@ -150,6 +160,62 @@ void main() {
             .assignments['10000000-0000-4000-8000-000000000001'],
         saved.id,
       );
+
+      // A conflicting, unconfirmed phone move remains recoverable in-place.
+      const chat = '10000000-0000-4000-8000-000000000001';
+      MeGroups organization(String group) => MeGroups(
+        groups: [
+          for (final id in ['original', 'phone', 'desktop'])
+            {'id': id, 'name': id, 'defaultTemplateId': ''},
+        ],
+        assignments: {chat: group},
+        channels: const [chat],
+      );
+      NostrEvent signed(String group, int timestamp) => NostrEvent.fromJson(
+        nostr.Event.from(
+          kind: 30078,
+          content: nip44Encrypt(
+            sync.key,
+            organization(group).encode(sync.community),
+          ),
+          secretKey: sync.privateHex,
+          createdAt: timestamp,
+          tags: [
+            ['d', MeGroups.coordinate(sync.community)],
+            ['t', MeGroups.tag],
+          ],
+          verify: false,
+        ).toMap(),
+      );
+      final pending = jsonEncode({
+        'base': signed('original', 1).toJson(),
+        'event': signed('phone', 2).toJson(),
+      });
+      await prefs.setString(sync.pendingKey, pending);
+      relay.events = [signed('desktop', 3)];
+      Future<void> move() async {
+        await tester.tap(find.byKey(const ValueKey('me-workspace-button')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('No Workspace'));
+        await tester.pumpAndSettle();
+      }
+
+      await move();
+      expect(find.text('Conflicting Solo changes'), findsOneWidget);
+      await tester.tap(find.text('Keep pending'));
+      await tester.pumpAndSettle();
+      expect(prefs.getString(sync.pendingKey), pending);
+      await move();
+      await tester.tap(find.text('Discard phone change'));
+      await tester.pumpAndSettle();
+      expect(prefs.getString(sync.pendingKey), isNull);
+      expect(sync.decode(relay.events.single).assignments[chat], 'desktop');
+      await move();
+      expect(
+        sync.decode(relay.events.single).assignments.containsKey(chat),
+        isFalse,
+      );
+      expect(find.text('Conflicting Solo changes'), findsNothing);
     },
     variant: TargetPlatformVariant.only(TargetPlatform.android),
   );

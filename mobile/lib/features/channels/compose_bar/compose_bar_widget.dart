@@ -93,23 +93,18 @@ class ComposeBar extends HookConsumerWidget {
         draftMembers != null &&
         (isSending.value || uploadingCount.value > 0 || lockedNow.value);
     Future<T> prepare<T>(Future<T> Function() action) =>
-        _prepareComposerAttachment(
-          context,
-          preparingAttachments,
-          draftMembers == null ? null : onSendingChanged,
-          action,
-        );
+        _prepareComposerAttachment(context, preparingAttachments, action);
     final sending =
         isSending.value ||
         uploadingCount.value > 0 ||
         (draftMembers != null && preparingAttachments.value > 0);
-    useEffect(() {
-      var active = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (active) onSendingChanged?.call(sending);
-      });
-      return () => active = false;
-    }, [sending]);
+    _useComposerBusy(
+      isSending: isSending,
+      uploadingCount: uploadingCount,
+      preparingAttachments: preparingAttachments,
+      isDraft: draftMembers != null,
+      onChanged: onSendingChanged,
+    );
     final uploadGeneration = useRef(0);
     final activeUploadCancellation = useRef<UploadCancellationToken?>(null);
     final voiceNote = _useComposerVoiceNote(
@@ -682,7 +677,6 @@ class ComposeBar extends HookConsumerWidget {
       );
 
       isSending.value = true;
-      onSendingChanged?.call(true);
       try {
         if (queuedAttachments.isEmpty) {
           if (!context.mounted) return;

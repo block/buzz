@@ -817,11 +817,9 @@ class _MemoryAttachmentImage extends HookConsumerWidget {
 Future<T> _prepareComposerAttachment<T>(
   BuildContext context,
   ValueNotifier<int> pending,
-  ValueChanged<bool>? onBusy,
   Future<T> Function() action,
 ) async {
   pending.value++;
-  onBusy?.call(true);
   try {
     return await action();
   } finally {

@@ -39,6 +39,7 @@ import '../compose_bar.dart';
 import 'me_assistant_picker_sheet.dart';
 import 'new_me_project.dart';
 import 'me_workspace_picker.dart';
+import 'me_recovery_dialog.dart';
 import '../channel_detail_page.dart';
 import '../channel_management_provider.dart';
 import '../channels_provider.dart';
@@ -104,7 +105,7 @@ class MePage extends HookConsumerWidget {
         await action();
       } catch (error) {
         if (error is MeRecoveryConflict && context.mounted) {
-          await _offerMeRecovery(context, ref.read(meSyncProvider));
+          await offerMeRecovery(context, ref.read(meSyncProvider));
         }
         if (context.mounted) {
           ScaffoldMessenger.of(context).showFeedbackSnackBar(

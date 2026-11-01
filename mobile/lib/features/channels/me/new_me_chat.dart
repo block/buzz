@@ -200,7 +200,7 @@ class _NewMeChat extends HookConsumerWidget {
                       }
                     } catch (e) {
                       if (e is MeRecoveryConflict && context.mounted) {
-                        await _offerMeRecovery(context, sync);
+                        await offerMeRecovery(context, sync);
                       }
                       if (context.mounted) {
                         error.value =
