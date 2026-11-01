@@ -37,6 +37,7 @@ export function scoreUserCandidate({
 
   const labels = [
     label,
+    user.name?.trim() ?? "",
     user.nip05Handle?.trim() ?? "",
     user.isAgent ? "agent" : "",
   ];
