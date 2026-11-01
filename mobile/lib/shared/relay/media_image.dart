@@ -589,13 +589,24 @@ class _AbandonWhenGone extends HookWidget {
   @override
   Widget build(BuildContext context) {
     final config = createLocalImageConfiguration(context);
-    useEffect(() {
-      final stream = image.resolve(config);
-      // After this frame, so the child has stopped listening and a widget
-      // showing the same image elsewhere has started.
-      return () =>
-          scheduleMicrotask(() => abandonPendingImage(stream, image, config));
-    }, [image]);
+    // Resolve only once the child is gone, and only a still-pending load:
+    // resolving earlier would start the download ahead of the child's
+    // [ScrollAwareImageProvider], defeating its deferral during a fast fling.
+    // The microtask runs after this frame, so the child has stopped
+    // listening and a widget showing the same image elsewhere has started.
+    useEffect(
+      () =>
+          () => scheduleMicrotask(() {
+            final cache = PaintingBinding.instance.imageCache;
+            unawaited(
+              image.obtainKey(config).then((key) {
+                if (!cache.statusForKey(key).pending) return;
+                abandonPendingImage(image.resolve(config), image, config);
+              }),
+            );
+          }),
+      [image],
+    );
     return child;
   }
 }

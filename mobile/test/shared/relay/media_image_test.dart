@@ -569,7 +569,9 @@ void main() {
   testWidgets('an image that leaves before it loads stops downloading, '
       'unless another widget still shows it', (tester) async {
     var aborted = false;
+    var requests = 0;
     final client = _StreamingClient((request) async {
+      requests += 1;
       // A slow link: the body has started but does not finish in this test.
       final body = StreamController<List<int>>()..add(const [0]);
       (request as http.AbortableRequest).abortTrigger!.then((_) {
@@ -582,6 +584,9 @@ void main() {
     });
     final shown = ValueNotifier(2);
     addTearDown(shown.dispose);
+    // A fast fling: the scrollable asks images to defer loading.
+    final flinging = ValueNotifier(true);
+    addTearDown(flinging.dispose);
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -589,16 +594,19 @@ void main() {
           mediaHttpClientProvider.overrideWithValue(client),
         ],
         child: MaterialApp(
-          home: ValueListenableBuilder<int>(
-            valueListenable: shown,
-            builder: (_, count, _) => Column(
-              children: [
-                for (var i = 0; i < count; i++)
-                  const SizedBox.square(
-                    dimension: 40,
-                    child: MediaImage(url: _mediaUrl),
-                  ),
-              ],
+          home: ListenableBuilder(
+            listenable: Listenable.merge([shown, flinging]),
+            builder: (_, _) => SingleChildScrollView(
+              physics: flinging.value ? const _DeferringPhysics() : null,
+              child: Column(
+                children: [
+                  for (var i = 0; i < shown.value; i++)
+                    const SizedBox.square(
+                      dimension: 40,
+                      child: MediaImage(url: _mediaUrl),
+                    ),
+                ],
+              ),
             ),
           ),
         ),
@@ -614,6 +622,14 @@ void main() {
     }
 
     await settle();
+    // Nothing downloads while the fling defers loading.
+    expect(requests, 0);
+
+    flinging.value = false;
+    await settle();
+    // Both copies share one download.
+    expect(requests, 1);
+
     // One copy scrolls away; the other still shows the image.
     shown.value = 1;
     await settle();
@@ -661,4 +677,20 @@ class _StreamingClient extends http.BaseClient {
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) =>
       respond(request);
+}
+
+/// Physics that always recommend deferring image loads, as during a fling.
+class _DeferringPhysics extends ScrollPhysics {
+  const _DeferringPhysics({super.parent});
+
+  @override
+  _DeferringPhysics applyTo(ScrollPhysics? ancestor) =>
+      _DeferringPhysics(parent: buildParent(ancestor));
+
+  @override
+  bool recommendDeferredLoading(
+    double velocity,
+    ScrollMetrics metrics,
+    BuildContext context,
+  ) => true;
 }
