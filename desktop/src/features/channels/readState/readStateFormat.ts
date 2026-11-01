@@ -37,6 +37,24 @@ export const THREAD_PREFIX = "thread:";
 
 const EVENT_ID_PATTERN = /^[0-9a-f]{64}$/;
 
+/**
+ * Recency of the READ ACTION behind a marker — when this read fact entered the
+ * client — falling back to the marker value when unknown (contexts seeded
+ * before this signal was recorded).
+ *
+ * Eviction must rank by this, never by the marker timestamp. The marker value
+ * is the age of the *message* that was read, so ranking by it discards a marker
+ * the user just created on an older message while keeping long-stale markers
+ * that happen to point at recent messages.
+ */
+export function readActionRecency(
+  contextId: string,
+  markerTimestamp: number,
+  contextSourceCreatedAt?: ReadonlyMap<string, number>,
+): number {
+  return contextSourceCreatedAt?.get(contextId) ?? markerTimestamp;
+}
+
 export function maxReadAt(...markers: Array<number | null>): number | null {
   return markers.reduce<number | null>((latest, marker) => {
     if (marker === null) return latest;
