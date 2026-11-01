@@ -168,7 +168,9 @@ pub async fn add_relay_member(
     .execute(tx.conn())
     .await?;
     let added = result.rows_affected() > 0;
-    commit_membership_write(tx, added, added, relay_keypair).await
+    // Re-adds also repair missing or legacy stale signed rosters. The list
+    // remains in this same membership transaction, including on retries.
+    commit_membership_write(tx, added, true, relay_keypair).await
 }
 
 /// Commit a membership transaction, first writing the NIP-43 snapshot when
@@ -2336,8 +2338,23 @@ mod postgres_tests {
             .await
             .expect("re-add member");
         assert!(!write.outcome);
-        assert!(write.snapshot.is_none(), "no change writes no list");
-        assert_eq!(live_list_id(&pool, community, &keys).await, live);
+        assert_membership_list_matches(&pool, community, &keys, write.snapshot.as_ref()).await;
+        assert_ne!(live_list_id(&pool, community, &keys).await, live);
+
+        // A legacy writer may have committed a membership row without its list.
+        sqlx::query("DELETE FROM events WHERE community_id = $1 AND kind = 13534")
+            .bind(community.as_uuid())
+            .execute(&pool)
+            .await
+            .expect("simulate missing legacy roster");
+        let write = add_relay_member(&pool, community, &member, "admin", Some(&owner), &keys)
+            .await
+            .expect("retry repairs missing roster");
+        assert!(
+            !write.outcome,
+            "retry preserves existing membership and role"
+        );
+        assert_membership_list_matches(&pool, community, &keys, write.snapshot.as_ref()).await;
 
         let write = claim_relay_membership(&pool, community, &joiner, "member", None, &keys)
             .await
