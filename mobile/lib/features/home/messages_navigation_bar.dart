@@ -27,7 +27,7 @@ class MessagesNavigationBar extends HookWidget {
   @override
   Widget build(BuildContext context) {
     final menuOpen = useState(false);
-    final nudge = menuOpen.value ? 4.0 : 0.0;
+    final nudge = menuOpen.value ? Grid.xs / 2 : 0.0;
     return Builder(
       builder: (controlsContext) => Row(
         mainAxisSize: MainAxisSize.min,

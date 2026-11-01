@@ -294,10 +294,10 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 90));
       final midwayX = tester.getCenter(search).dx;
-      expect(midwayX, greaterThan(initialX + 2));
-      expect(midwayX, lessThan(initialX + 4));
+      expect(midwayX, greaterThan(initialX + 4));
+      expect(midwayX, lessThan(initialX + 8));
       await tester.pumpAndSettle();
-      expect(tester.getCenter(search).dx, closeTo(initialX + 4, .01));
+      expect(tester.getCenter(search).dx, closeTo(initialX + 8, .01));
       creationMenu.onMenuVisibilityChanged!(false);
       await tester.pumpAndSettle();
       expect(tester.getCenter(search).dx, closeTo(initialX, .01));
