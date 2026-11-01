@@ -71,6 +71,33 @@ void main() {
     });
   });
 
+  group('relayThumbnailUrl', () {
+    final hash = 'ab' * 32;
+    final auth = _auth();
+
+    test('maps relay blobs of any format to the thumbnail', () {
+      for (final ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif', '']) {
+        expect(
+          relayThumbnailUrl('$_relayBase/media/$hash$ext', auth),
+          '$_relayBase/media/$hash.thumb.jpg',
+        );
+      }
+    });
+
+    test('leaves everything else alone', () {
+      for (final url in [
+        'https://elsewhere.example/media/$hash.jpg',
+        '$_relayBase/media/$hash.thumb.jpg',
+        '$_relayBase/media/$hash.jpg?v=2',
+        '$_relayBase/media/not-a-hash.jpg',
+        '$_relayBase/avatars/$hash.jpg',
+        '$_relayBase/media/$hash.JPG',
+      ]) {
+        expect(relayThumbnailUrl(url, auth), isNull, reason: url);
+      }
+    });
+  });
+
   group('MediaImageProvider cache identity', () {
     test('equal url + same auth service => equal keys', () {
       final auth = _auth(nsec: nostr.Keys.generate().nsec);
@@ -183,6 +210,29 @@ void main() {
         final completer = provider.resolve(ImageConfiguration.empty);
         await _wait(completer);
       }
+      expect(fetches, 1);
+    });
+
+    test('one URL shown at two decode sizes downloads once', () async {
+      var fetches = 0;
+      final response = Completer<void>();
+      final client = http_testing.MockClient((request) async {
+        fetches += 1;
+        await response.future;
+        return http.Response.bytes(_pngBytes, 200);
+      });
+      final auth = _auth(nsec: nostr.Keys.generate().nsec);
+      ImageStream resolveAt(int width) => ResizeImage(
+        MediaImageProvider(url: _mediaUrl, auth: auth, client: client),
+        width: width,
+      ).resolve(ImageConfiguration.empty);
+
+      final small = _wait(resolveAt(40));
+      final large = _wait(resolveAt(120));
+      await pumpEventQueue();
+      response.complete();
+      await Future.wait([small, large]);
+
       expect(fetches, 1);
     });
 

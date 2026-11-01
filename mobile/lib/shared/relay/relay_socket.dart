@@ -40,6 +40,9 @@ class RelaySocket {
   @visibleForTesting
   static Duration debugPingInterval = pingInterval;
 
+  @visibleForTesting
+  static Duration debugConnectTimeout = relayWebSocketConnectTimeout;
+
   final String _wsUrl;
   final String? _nsec;
   final void Function(List<dynamic> message) _onMessage;
@@ -86,6 +89,7 @@ class RelaySocket {
           Uri.parse(_wsUrl),
           headers: headers,
           pingInterval: debugPingInterval,
+          connectTimeout: debugConnectTimeout,
         ),
       );
       await _channel!.ready;

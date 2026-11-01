@@ -1,3 +1,4 @@
+import '../../helpers/controllable_pairing_socket.dart';
 import 'package:buzz/shared/widgets/buzz_toast.dart';
 import 'package:buzz/features/onboarding/hosted_reconnect_banner.dart';
 import 'package:buzz/shared/hosted/hosted_community_creation.dart';
@@ -9,6 +10,7 @@ import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
 import 'dart:async';
 import 'dart:convert';
+import 'package:nostr/nostr.dart' as nostr;
 
 import 'package:buzz/features/profile/profile_setup_page.dart';
 import 'package:buzz/features/profile/profile_setup_avatar_editor.dart';
@@ -16,6 +18,7 @@ import 'package:buzz/features/profile/profile_avatar_draft.dart';
 import 'package:buzz/shared/emoji/emoji_avatar.dart';
 import 'package:buzz/shared/widgets/playing_avatar_image.dart';
 import 'package:buzz/features/pairing/pairing_page.dart';
+import 'package:buzz/hosted_app_gate.dart';
 import 'package:buzz/onboarding_app_entry.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
@@ -25,6 +28,7 @@ import 'package:buzz/shared/relay/relay_session.dart';
 import 'package:buzz/shared/relay/relay_provider.dart';
 import 'package:buzz/shared/relay/media_image.dart';
 import 'package:buzz/shared/utils/string_utils.dart';
+import 'package:buzz/shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -34,6 +38,16 @@ import 'package:http/http.dart' as http;
 import '../../helpers/hosted_journey_fixture.dart';
 
 void main() {
+  // Bottom banners over Home must stay above its floating tab bar, which the
+  // fixture's stand-in home does not draw.
+  void expectAboveTabBar(WidgetTester tester, String label) {
+    final screen = tester.getSize(find.byType(HostedAppGate)).height;
+    expect(
+      tester.getRect(find.text(label)).bottom,
+      lessThanOrEqualTo(screen - mobileTabBarHeight - mobileTabBarBottomGap),
+    );
+  }
+
   void journey(
     String name,
     Future<void> Function(WidgetTester, HostedJourneyFixture) run, {
@@ -130,6 +144,40 @@ void main() {
       },
     );
   }
+
+  journey('welcome cancels browser sign-in and can retry', (tester, f) async {
+    await f.initialize(localIdentity: false, signedIn: false);
+    f.bound = null;
+    f.offerProfile = false;
+    await f.mount(tester, addingCommunity: false);
+    Future<void> cancelled() async {
+      for (var i = 0; i < 100 && f.flow.stage != HostedFlowStage.idle; i++) {
+        await Future<void>.delayed(Duration.zero);
+        await tester.pump();
+      }
+      expect(f.flow.stage, HostedFlowStage.idle);
+      await f.settle(tester);
+      expect(find.text('or sign in with email').hitTestable(), findsOneWidget);
+    }
+
+    final abandonedBrowser = Completer<void>();
+    f.beforeBrowserReturn = () => abandonedBrowser.future;
+    await f.tap(tester, 'or sign in with email');
+    expect(find.text('Cancel sign-in').hitTestable(), findsOneWidget);
+    await f.tap(tester, 'Cancel sign-in');
+    abandonedBrowser.complete();
+    await cancelled();
+    expect(f.flow.account.account, isNull);
+    f.beforeBrowserReturn = () async {
+      throw PlatformException(code: 'cancelled');
+    };
+    await f.tap(tester, 'or sign in with email');
+    await cancelled();
+    f.beforeBrowserReturn = null;
+    await f.tap(tester, 'or sign in with email');
+    await f.settle(tester);
+    expect(find.text('Create my Buzz identity').hitTestable(), findsOneWidget);
+  });
 
   for (final importing in [false, true]) {
     journey(
@@ -361,9 +409,86 @@ void main() {
   }
 
   journey(
-    'QR credentials enter without an account when domain is not required',
+    'QR credentials preserve an existing hosted identity or enter an opt-out community',
     (tester, f) async {
-      if (HostedEnvironment.requiresAuth('paired.communities.buzz.xyz')) return;
+      if (HostedEnvironment.requiresAuth('paired.communities.buzz.xyz')) {
+        await f.initialize();
+        final original = Community.create(
+          name: 'One',
+          relayUrl: 'https://one.communities.buzz.xyz',
+          pubkey: f.keys.public,
+          nsec: f.keys.nsec,
+        );
+        await f.storage.save(original);
+        await f.storage.saveActiveId(original.id);
+        late ControllablePairingSocket socket;
+        await f.mount(
+          tester,
+          pairingSocketFactory:
+              ({
+                required wsUrl,
+                required ephemeralPrivkey,
+                required onMessage,
+                required onDisconnected,
+              }) {
+                return socket = ControllablePairingSocket(
+                  ephemeralPrivkey: ephemeralPrivkey,
+                  onMessage: onMessage,
+                  onDisconnected: onDisconnected,
+                );
+              },
+        );
+        final transferred = nostr.Keys('2'.padLeft(64, '0'));
+        const sessionSecret =
+            'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';
+        final notifier = f.container.read(pairingProvider.notifier);
+        await notifier.pair(
+          'nostrpair://${transferred.public}?secret=$sessionSecret&relay=wss%3A%2F%2Fpairing.buzz.xyz&v=1',
+        );
+        notifier.setProtectSensitiveActions(false);
+        notifier.confirmSas();
+        socket.sendSourceMessage(
+          sourceSecret: transferred.secret,
+          sessionSecretHex: sessionSecret,
+          message: {'type': 'sas-confirm'},
+          includeTranscriptHash: true,
+        );
+        await f.settle(tester);
+        socket.sendSourceMessage(
+          sourceSecret: transferred.secret,
+          sessionSecretHex: sessionSecret,
+          message: {
+            'type': 'payload',
+            'payload_type': 'credentials',
+            'payload': jsonEncode({
+              'relayUrl': 'https://paired.communities.buzz.xyz',
+              'nsec': transferred.nsec,
+              'pubkey': transferred.public,
+            }),
+          },
+        );
+        await f.settle(tester);
+        const message =
+            'This device uses a different identity. Your saved identity has been kept.';
+        expect(find.text(message).hitTestable(), findsOneWidget);
+        expect(find.text('Scan a QR code').hitTestable(), findsOneWidget);
+        final announcement = find.ancestor(
+          of: find.text(message),
+          matching: find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics && widget.properties.liveRegion == true,
+          ),
+        );
+        expect(announcement, findsOneWidget);
+        final saved = (await f.storage.loadAll()).single;
+        expect(saved.pubkey, f.keys.public);
+        expect(saved.nsec, f.keys.nsec);
+        expect((await f.store.read())?.pubkey, f.keys.public);
+        await tester.tap(find.byTooltip('Back').hitTestable());
+        await f.settle(tester);
+        expect(find.text('Community home').hitTestable(), findsOneWidget);
+        return;
+      }
       // Seed a previous account session: an opt-out build must not restore it.
       await f.initialize(localIdentity: false);
       f.requests.clear();
@@ -410,6 +535,93 @@ void main() {
       expect(f.sent('/current'), isEmpty);
       expect(f.sent('/nsec-backups/status'), isEmpty);
       expect(find.text('Reconnect to Builderlab'), findsNothing);
+    },
+    requiresBuilderlab: false,
+  );
+
+  journey(
+    'a refused organization account changes to another without the hosted one',
+    (tester, f) async {
+      f.relayAuthEnabled = true;
+      f.organizationEnabled = true;
+      await f.initialize();
+      // Signed in to the organization as an account bound to another key.
+      f.organizationSubject = 'other-member';
+      f.organizationBound = f.secondKeys.public;
+      await f.signInOrganization();
+      final community = Community.create(
+        name: 'Block',
+        relayUrl: 'wss://${HostedJourneyFixture.organizationRelayHost}',
+        pubkey: f.keys.public,
+        nsec: f.keys.nsec,
+      );
+      await f.storage.save(community);
+      await f.storage.saveActiveId(community.id);
+      await f.mount(tester, openEntry: false);
+      final sessionSubscription = f.container.listen(
+        relaySessionProvider,
+        (_, _) {},
+      );
+      addTearDown(sessionSubscription.close);
+      await f.settle(tester);
+      const refused =
+          'Your organization account cannot use this community with this key.';
+      expect(find.text(refused), findsOneWidget);
+      expectAboveTabBar(tester, 'Use a different account');
+      expect(f.sent('/identity/assertions'), isEmpty);
+
+      // Retry keeps the refused account and fails the same way.
+      await f.tap(tester, 'Retry');
+      expect(find.text(refused), findsOneWidget);
+      expect(f.organizationBrowserStarts, 0);
+
+      f.organizationSubject = 'journey-owner';
+      f.organizationBound = f.keys.public;
+      final hosted = f.container.read(builderlabAccountProvider);
+      final hostedCredential = await const FlutterSecureStorage().read(
+        key:
+            'buzz_hosted_session_'
+            '${hosted.accountOrigin.host.replaceAll('.', '_')}_v1',
+      );
+      expect(hostedCredential, isNotNull);
+      final connects = f.socketHeaders.length;
+      await f.tap(tester, 'Use a different account');
+      await f.settle(tester);
+      expect(f.organizationBrowserStarts, 1);
+      expect(
+        f.container.read(organizationAccountProvider)!.account!.subject,
+        'journey-owner',
+      );
+      expect(find.text(refused), findsNothing);
+      expect(find.text('Use a different account'), findsNothing);
+      // The real relay session reconnects with the new account's assertion.
+      expect(f.socketHeaders.length, greaterThan(connects));
+      expect(
+        f.socketHeaders.last['Nostr-Federated-Identity'],
+        'Bearer organization-assertion',
+      );
+      expect(
+        f.container.read(relaySessionProvider).status,
+        SessionStatus.connected,
+      );
+      // Only the organization session changed.
+      expect(
+        await const FlutterSecureStorage().read(
+          key:
+              'buzz_hosted_session_'
+              '${hosted.accountOrigin.host.replaceAll('.', '_')}_v1',
+        ),
+        hostedCredential,
+      );
+      expect(
+        f.requests.where(
+          (r) =>
+              r.url.origin != HostedJourneyFixture.organizationOrigin.origin &&
+              r.url.path.endsWith('/identity/assertions'),
+        ),
+        isEmpty,
+      );
+      expect((await f.storage.loadAll()).single.nsec, community.nsec);
     },
     requiresBuilderlab: false,
   );
@@ -688,6 +900,20 @@ void main() {
       await f.link(tester, 'one');
       expect((await f.store.read())!.backup, isNotNull);
       f.beforeUploadReturn = null;
+      // Production legal documents exceed the ordinary 64 KiB account limit.
+      f.policyResponses.add(
+        http.Response(
+          jsonEncode({
+            'policy': {
+              'version': 'one.communities.buzz.xyz',
+              'age_attestation_required': true,
+              'terms_markdown': 'Be kind to this community.',
+              'privacy_markdown': 'Public privacy notice. ' * 5000,
+            },
+          }),
+          200,
+        ),
+      );
       await f.link(tester, 'one');
       expect((await f.store.read())!.pubkey, retainedKey);
       expect(f.browserStarts, 1);
@@ -858,7 +1084,7 @@ void main() {
         findsOneWidget,
       );
       final firstSaved = (await f.storage.loadAll()).firstWhere(
-        (c) => c.name == 'one.communities.buzz.xyz',
+        (c) => c.relayUrl == 'wss://one.communities.buzz.xyz',
       );
       Navigator.of(
         tester.element(find.byType(ProfileSetupPage, skipOffstage: false)),
@@ -882,16 +1108,18 @@ void main() {
         isTrue,
       );
       expect(
-        saved.singleWhere((c) => c.name == 'one.communities.buzz.xyz').id,
+        saved
+            .singleWhere((c) => c.relayUrl == 'wss://one.communities.buzz.xyz')
+            .id,
         firstSaved.id,
       );
       expect(await f.storage.loadActiveId(), firstSaved.id);
       expect(
-        f.probes.where((c) => c.name == 'one.communities.buzz.xyz'),
+        f.probes.where((c) => c.relayUrl == 'wss://one.communities.buzz.xyz'),
         hasLength(1),
       );
       expect(
-        f.probes.where((c) => c.name == 'two.communities.buzz.xyz'),
+        f.probes.where((c) => c.relayUrl == 'wss://two.communities.buzz.xyz'),
         hasLength(2),
       );
       expect(find.byType(OnboardingAppEntry), findsNothing);
@@ -947,11 +1175,14 @@ void main() {
         final communities = await f.storage.loadAll();
         expect(communities, hasLength(2));
         expect(
-          communities.map((c) => c.name),
-          containsAll(['one.communities.buzz.xyz', 'two.communities.buzz.xyz']),
+          communities.map((c) => c.relayUrl),
+          containsAll([
+            'wss://one.communities.buzz.xyz',
+            'wss://two.communities.buzz.xyz',
+          ]),
         );
         final saved = communities.singleWhere(
-          (c) => c.name == 'two.communities.buzz.xyz',
+          (c) => c.relayUrl == 'wss://two.communities.buzz.xyz',
         );
         expect(saved.nsec, f.keys.nsec);
         expect(saved.pubkey, f.keys.public);

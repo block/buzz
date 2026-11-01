@@ -79,6 +79,7 @@ import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/huddle/huddle.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/avatar_shape.dart';
 import 'package:buzz/shared/widgets/app_list_card.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
@@ -2145,7 +2146,7 @@ void main() {
       },
     );
 
-    testWidgets('uses known media shapes in the reconnect shimmer', (
+    testWidgets('keeps the loaded timeline visible during reconnect', (
       tester,
     ) async {
       final relaySession = _ReconnectingRelaySession();
@@ -2174,21 +2175,21 @@ void main() {
       await tester.pump(const Duration(seconds: 3));
       expect(
         tester.widget<SkeletonReveal>(find.byType(SkeletonReveal)).loading,
-        isTrue,
+        isFalse,
       );
       expect(
         tester
             .widget<Opacity>(find.byKey(const Key('skeleton-reveal-content')))
             .opacity,
-        0,
+        1,
       );
       expect(
-        find.byKey(
-          const ValueKey(
-            'message-skeleton-image:https://example.com/loading.jpg',
-          ),
-        ),
-        findsOneWidget,
+        tester
+            .widget<Opacity>(
+              find.byKey(const Key('skeleton-reveal-placeholder')),
+            )
+            .opacity,
+        0,
       );
       relaySession.connect();
       await tester.pumpAndSettle();
@@ -2236,6 +2237,65 @@ void main() {
         'Reconnecting',
       );
     });
+
+    testWidgets(
+      'shows the title refresh bar while a loaded timeline reconnects',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        final relaySession = _ReconnectingRelaySession(
+          initialStatus: SessionStatus.connected,
+        );
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _textMsg(
+                id: 'msg1',
+                pubkey: 'alice',
+                content: 'Existing message',
+              ),
+            ],
+            relaySessionNotifier: relaySession,
+          ),
+        );
+        await tester.pumpAndSettle();
+        final navigationBar = find.byWidgetPredicate(
+          (w) => w is UiKitView && w.viewType == 'buzz/ios_navigation_bar',
+        );
+        final view = tester.widget<UiKitView>(navigationBar);
+        Map<Object?, Object?> payload = view.creationParams! as Map;
+        expect(payload['titleRefreshing'], isFalse);
+        const channel = MethodChannel('buzz/ios_navigation_bar/198');
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          channel,
+          (call) async {
+            if (call.method == 'configure') payload = call.arguments as Map;
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            channel,
+            null,
+          ),
+        );
+        view.onPlatformViewCreated!(198);
+        await tester.pump();
+
+        relaySession.setReconnecting();
+        await tester.pump();
+        expect(payload['titleRefreshing'], isTrue);
+        expect(
+          payload['titleRefreshColor'],
+          ChatColors.of(tester.element(navigationBar)).outgoing.toARGB32(),
+        );
+
+        relaySession.connect();
+        await tester.pumpAndSettle();
+        expect(payload['titleRefreshing'], isFalse);
+        debugDefaultTargetPlatformOverride = null;
+      },
+    );
 
     testWidgets('keeps loaded forum content visible during reconnect', (
       tester,
@@ -7902,8 +7962,8 @@ void main() {
           find.byKey(const ValueKey('huddle-speaking-halo-desktop')),
         );
         final speakingHaloDecoration =
-            speakingHalo.decoration! as BoxDecoration;
-        expect(speakingHaloDecoration.border, isNull);
+            speakingHalo.decoration! as ShapeDecoration;
+        expect(speakingHaloDecoration.shape, const CircleBorder());
         expect(speakingHaloDecoration.color?.a, closeTo(0.07, 0.001));
         await tester.pump(const Duration(milliseconds: 70));
         final mediumScaleMidTransition = tester
@@ -11321,7 +11381,11 @@ void main() {
               )
               .first,
         );
-        expect((frame.decoration! as BoxDecoration).shape, BoxShape.rectangle);
+        final shape = (frame.decoration! as ShapeDecoration).shape;
+        expect(
+          shape,
+          avatarShape(isAgent: true, side: (shape as OutlinedBorder).side),
+        );
       }
       // As on desktop, the reply branch waits for a reply.
       expect(connector, findsNothing);

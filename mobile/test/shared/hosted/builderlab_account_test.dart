@@ -186,6 +186,31 @@ void main() {
     expect(jsonDecode((await stored())!)['credential'], 'new');
   });
 
+  test('concurrent restores share one adopted account', () async {
+    FlutterSecureStorage.setMockInitialValues({
+      storageKey: record('account-1', 'old'),
+    });
+    var verifications = 0;
+    final client = BuilderlabAccountClient(
+      httpClient: MockClient((request) async {
+        verifications++;
+        return http.Response(
+          jsonEncode({'subject': 'account-1', 'expires_at': expiry}),
+          200,
+        );
+      }),
+    );
+    final first = client.restore();
+    final second = client.restore();
+    final adopted = await first;
+    expect(await second, same(adopted));
+    expect(client.account, same(adopted));
+    expect(verifications, 1);
+    // A later restore still re-verifies, so expiry is detected on retry.
+    await client.restore();
+    expect(verifications, 2);
+  });
+
   test('login for another account keeps the existing session', () async {
     FlutterSecureStorage.setMockInitialValues({
       storageKey: record('account-1', 'old'),
