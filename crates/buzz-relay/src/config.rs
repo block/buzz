@@ -478,18 +478,14 @@ fn rate_limit_config_from_env() -> Result<buzz_auth::RateLimitConfig, ConfigErro
         // Without the new variable, the variable this budget replaced, which
         // set one agent key's allowance; for one agent in one channel the
         // meaning is unchanged. It is not read when the new variable is set.
-        agent_channel_events_per_min: match std::env::var_os(
-            "BUZZ_RATE_LIMIT_AGENT_CHANNEL_EVENTS_PER_MIN",
-        ) {
-            Some(_) => positive_u64_from_env(
-                "BUZZ_RATE_LIMIT_AGENT_CHANNEL_EVENTS_PER_MIN",
-                defaults.agent_channel_events_per_min,
-            )?,
-            None => positive_u64_from_env(
-                "BUZZ_RATE_LIMIT_AGENT_STANDARD_MESSAGES_PER_MIN",
-                defaults.agent_channel_events_per_min,
-            )?,
-        },
+        agent_channel_events_per_min: positive_u64_from_env(
+            if std::env::var_os("BUZZ_RATE_LIMIT_AGENT_CHANNEL_EVENTS_PER_MIN").is_some() {
+                "BUZZ_RATE_LIMIT_AGENT_CHANNEL_EVENTS_PER_MIN"
+            } else {
+                "BUZZ_RATE_LIMIT_AGENT_STANDARD_MESSAGES_PER_MIN"
+            },
+            defaults.agent_channel_events_per_min,
+        )?,
         agent_owner_events_per_min: positive_u64_from_env(
             "BUZZ_RATE_LIMIT_AGENT_OWNER_EVENTS_PER_MIN",
             defaults.agent_owner_events_per_min,
