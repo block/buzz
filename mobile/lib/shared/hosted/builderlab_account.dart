@@ -52,17 +52,22 @@ class BuilderlabAccount {
 /// subject is refused until the caller clears the session and every fact it
 /// holds for the previous subject.
 class BuilderlabAccountClient {
+  /// [accountOrigin] defaults to the hosted account environment. An
+  /// organization client uses its own trusted origin and session record.
   BuilderlabAccountClient({
     http.Client? httpClient,
     FlutterSecureStorage? storage,
+    Uri? accountOrigin,
   }) : _http = httpClient ?? http.Client(),
-       _storage = storage ?? defaultStorage;
+       _storage = storage ?? defaultStorage,
+       accountOrigin = accountOrigin ?? origin;
 
   /// Device-only: the session never syncs or restores onto another device.
   @visibleForTesting
   static const defaultStorage = accountSecureStorage;
 
   static final origin = HostedEnvironment.origin;
+  final Uri accountOrigin;
   static const _prefix = '/api/goose';
 
   /// Remote-agent registry routes, shared with desktop.
@@ -79,8 +84,8 @@ class BuilderlabAccountClient {
   };
 
   /// Sessions are scoped per origin so staging never reads production state.
-  static final _storageKey =
-      'buzz_hosted_session_${origin.host.replaceAll('.', '_')}_v1';
+  late final _storageKey =
+      'buzz_hosted_session_${accountOrigin.host.replaceAll('.', '_')}_v1';
   final http.Client _http;
   final FlutterSecureStorage _storage;
   String? _credential;
@@ -104,7 +109,12 @@ class BuilderlabAccountClient {
     return result;
   }
 
-  Future<BuilderlabAccount?> restore() => _serial(() async {
+  /// Concurrent callers share one restore, so a second one cannot replace the
+  /// account the first adopted while its callers still hold that session.
+  Future<BuilderlabAccount?> restore() =>
+      _restoring ??= _restore().whenComplete(() => _restoring = null);
+  Future<BuilderlabAccount?>? _restoring;
+  Future<BuilderlabAccount?> _restore() => _serial(() async {
     final record = await _readRecord();
     if (record == null) return null;
     try {
@@ -124,9 +134,12 @@ class BuilderlabAccountClient {
 
   /// Receives a one-use code only from a validated browser callback. PKCE is
   /// verified by Builderlab; state and callback origin are checked by the caller.
+  /// [isCurrent] is checked just before the session is saved, so a caller can
+  /// abandon an exchange without it later replacing a newer session.
   Future<BuilderlabAccount> exchange({
     required String code,
     required String verifier,
+    bool Function()? isCurrent,
   }) => _serial(() async {
     if (code.isEmpty ||
         !RegExp(r'^[A-Za-z0-9._~-]{43,128}$').hasMatch(verifier)) {
@@ -153,9 +166,11 @@ class BuilderlabAccountClient {
     if (stored != null && stored.subject != verified.subject) {
       throw AccountFailure.differentAccount;
     }
-    if (_disposed) throw AccountFailure.unavailable;
+    if (_disposed || (isCurrent != null && !isCurrent())) {
+      throw AccountFailure.unavailable;
+    }
     final record = jsonEncode({
-      'origin': origin.toString(),
+      'origin': accountOrigin.toString(),
       'credential': credential,
       'subject': verified.subject,
       'expires_at': verified.expiresAt.toIso8601String(),
@@ -184,7 +199,7 @@ class BuilderlabAccountClient {
     try {
       final value = jsonDecode(saved);
       if (value is Map<String, dynamic> &&
-          value['origin'] == origin.toString() &&
+          value['origin'] == accountOrigin.toString() &&
           value['credential'] is String &&
           value['subject'] is String) {
         return (
@@ -201,8 +216,10 @@ class BuilderlabAccountClient {
   BuilderlabAccount _adopt(String credential, BuilderlabAccount verified) {
     if (_disposed) throw AccountFailure.unavailable;
     _credential = credential;
+    // Assigned before notifying, so subject listeners see the new account.
+    _account = verified;
     _subject.value = verified.subject;
-    return _account = verified;
+    return verified;
   }
 
   Future<BuilderlabAccount> _verify(String credential) async {
@@ -337,7 +354,7 @@ class BuilderlabAccountClient {
       final request =
           http.Request(
               body == null ? 'GET' : 'POST',
-              origin.replace(path: '$_prefix$path'),
+              accountOrigin.replace(path: '$_prefix$path'),
             )
             ..followRedirects = false
             ..headers['Accept'] = 'application/json';
@@ -346,7 +363,7 @@ class BuilderlabAccountClient {
       }
       if (body != null) {
         request.headers['Content-Type'] = 'application/json';
-        request.headers['Origin'] = origin.toString();
+        request.headers['Origin'] = accountOrigin.toString();
         request.body = jsonEncode(body);
         if (signingKey != null) {
           request.headers['Authorization'] = buildNip98AuthHeader(
@@ -360,7 +377,7 @@ class BuilderlabAccountClient {
       final response = await boundedHttpResponse(_http, request);
       if (kDebugMode && response.statusCode >= 400) {
         debugPrint(
-          'Builderlab ${origin.host} ${request.method} $path: HTTP ${response.statusCode} contentType=${response.headers['content-type']?.split(';').first}',
+          'Builderlab ${accountOrigin.host} ${request.method} $path: HTTP ${response.statusCode} contentType=${response.headers['content-type']?.split(';').first}',
         );
       }
       if (response.statusCode == 401) throw AccountFailure.signedOut;

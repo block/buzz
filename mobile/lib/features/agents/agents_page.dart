@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/agents/owned_agent_directory.dart';
 import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../../shared/agents/remote_agents.dart';
 import '../../shared/community/community_provider.dart';
@@ -23,7 +24,6 @@ import '../profile/user_profile_sheet.dart';
 import 'create_agent_page.dart';
 import 'agent_card.dart';
 import 'remote_agent_model_control.dart';
-import 'owned_agent_directory.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/theme/buzz_icons.dart';
@@ -153,13 +153,14 @@ class AgentsPage extends HookConsumerWidget {
     }, [flow.stage]);
     final community = ref.watch(activeCommunityProvider).asData?.value;
     final bestie = ref.watch(defaultAgentProvider).asData?.value;
-    final directory = ref.watch(agentDirectoryProvider);
     final ownedDirectory = ref.watch(ownedAgentDirectoryProvider);
+    // The account's remote agents with a verified owner profile here are
+    // listed too, so one stays listed while a deletion that already removed
+    // its registration is retried. Every other agent comes from its listed
+    // registration.
     final candidates = {
       if (controller.owner == community?.pubkey)
         for (final agent in controller.agents) agent['agent_pubkey'] as String,
-      for (final entry in directory.asData?.value ?? <AgentDirectoryEntry>[])
-        entry.pubkey,
     };
     final candidateKey = (candidates.toList()..sort()).join(',');
     final attempt = useState(0);
@@ -203,7 +204,6 @@ class AgentsPage extends HookConsumerWidget {
     final profiles = ref.watch(userCacheProvider);
     final creating = useState(false);
     final failed =
-        directory.hasError ||
         registered.hasError ||
         ownedDirectory.hasError ||
         // Remote listing failures matter only where remote agents are shown.
@@ -211,7 +211,6 @@ class AgentsPage extends HookConsumerWidget {
     final loading =
         !creating.value &&
         (controller.busy ||
-            directory.isLoading ||
             ownedDirectory.isLoading ||
             registered.connectionState != ConnectionState.done);
 
@@ -219,7 +218,6 @@ class AgentsPage extends HookConsumerWidget {
       await controller.run(controller.refresh);
       if (context.mounted) {
         attempt.value++;
-        ref.invalidate(agentDirectoryProvider);
         ref.invalidate(ownedAgentDirectoryProvider);
       }
     }
@@ -239,7 +237,10 @@ class AgentsPage extends HookConsumerWidget {
                   builder: (_) => CreateAgentPage(
                     controller: controller,
                     community: community,
-                    onCreated: () => ref.invalidate(agentDirectoryProvider),
+                    onCreated: () {
+                      ref.invalidate(agentDirectoryProvider);
+                      ref.invalidate(ownedAgentDirectoryProvider);
+                    },
                   ),
                 ),
               );
@@ -353,10 +354,6 @@ class AgentsPage extends HookConsumerWidget {
                       imageUrl:
                           profiles[key]?.avatarUrl ??
                           ownedDirectory.asData?.value
-                              .where((entry) => entry.pubkey == key)
-                              .firstOrNull
-                              ?.avatarUrl ??
-                          directory.asData?.value
                               .where((entry) => entry.pubkey == key)
                               .firstOrNull
                               ?.avatarUrl,

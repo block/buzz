@@ -6,7 +6,7 @@ import 'package:buzz/shared/relay/relay_author_provider.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import 'package:buzz/features/agents/agents_page.dart';
-import 'package:buzz/features/agents/owned_agent_directory.dart';
+import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/agents/remote_agents.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
@@ -27,6 +27,10 @@ import '../../helpers/remote_agents_fixture.dart';
 final existingDesktopKeys = nostr.Keys('0' * 63 + '3');
 final otherAgentKeys = nostr.Keys('0' * 63 + '4');
 final otherOwnerKeys = nostr.Keys('0' * 63 + '5');
+
+/// The owner's agent that only an earlier Buzz runs: its registration has no
+/// `runtime`, so the Agents page leaves it out as desktop does.
+final oldAppAgentKeys = nostr.Keys('0' * 63 + '6');
 
 /// Fakes the relay boundary: owner-attested profiles for registry agents.
 class _Relay extends FakeRelay {
@@ -55,9 +59,33 @@ class _Relay extends FakeRelay {
     if ((filter.authors?.contains(fakeAgent) ?? false) && harness.relayDown) {
       throw TimeoutException('relay unavailable');
     }
+    if (filter.kinds.contains(30177)) {
+      return [
+        for (final pubkey in harness.registered)
+          NostrEvent.fromJson(
+            nostr.Event.from(
+              kind: 30177,
+              content: '{"name":"Agent"}',
+              secretKey: fakeOwner.secret,
+              createdAt: 1,
+              tags: [
+                ['d', pubkey],
+                if (pubkey != oldAppAgentKeys.public)
+                  ['runtime', 'block.claude-code/claude-code'],
+              ],
+            ).toMap(),
+          ),
+      ];
+    }
     return filter.kinds.contains(30078)
         ? events
         : [
+            if (filter.authors?.contains(oldAppAgentKeys.public) ?? false)
+              signedAgentProfile(
+                oldAppAgentKeys,
+                fakeOwner,
+                content: '{"name":"Old app agent"}',
+              ),
             if (filter.authors?.contains(existingDesktopKeys.public) ?? false)
               signedAgentProfile(
                 existingDesktopKeys,
@@ -133,6 +161,9 @@ class AgentsHarness {
   bool relayDown = false;
   bool authorityDown = false;
 
+  /// Agents the owner registered in this community (kind:30177).
+  List<String> registered = const [];
+
   /// [relayUrl] defaults to a hosted community that supports remote agents.
   static Future<AgentsHarness> create({String? relayUrl}) async {
     FlutterSecureStorage.setMockInitialValues({});
@@ -159,13 +190,16 @@ class AgentsHarness {
     );
   }
 
-  /// Opens the Agents sheet over a host page.
+  /// Opens the Agents sheet over a host page. [directory] agents are both
+  /// registered by the owner and listed in the relay agent directory; the
+  /// owner's old-app agent is always registered too.
   Future<void> open(
     WidgetTester tester, {
     required List<String> directory,
     List<String> botDirectory = const [],
     Widget? home,
   }) async {
+    registered = [...directory, oldAppAgentKeys.public];
     final prefs = await SharedPreferences.getInstance();
     final sync = MeSync(
       relay,
@@ -178,7 +212,10 @@ class AgentsHarness {
           communityBotProfilesProvider.overrideWith(
             (ref) async => botDirectory,
           ),
-          ownedAgentDirectoryProvider.overrideWith((ref) async => []),
+          ownedAgentDirectoryProvider.overrideWith(
+            (ref) =>
+                loadOwnedAgentDirectory(fakeOwner.public, relay.fetchHistory),
+          ),
           builderlabAccountProvider.overrideWithValue(registry),
           remoteAgentControllerProvider.overrideWithValue(controller),
           relaySessionProvider.overrideWith(() => relay),

@@ -132,6 +132,7 @@ class _AvatarImageContentState extends ConsumerState<AvatarImageContent> {
       _NetworkAvatarSource(:final url) => MediaImage(
         url: url,
         fit: widget.fit,
+        preferThumbnail: true,
         errorBuilder: (_, _, _) => centeredFallback,
       ),
       null => centeredFallback,
