@@ -863,7 +863,7 @@ mod postgres_tests {
         );
         assert!(
             snapshot
-                .replace_member_event(&fresh_b)
+                .replace_group_state_event(&fresh_b)
                 .await
                 .expect("new writer publishes B")
                 .1
