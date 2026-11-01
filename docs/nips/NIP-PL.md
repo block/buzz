@@ -138,7 +138,7 @@ Each subscription `filter` is a NIP-01 filter object under these restrictions �
 
 ### Suppression
 
-A subscription MAY carry `ignore` (≤ `max_ignore` NIP-01 filters) and `suppress` (`p_tags_max` ≥ 1). Suppression evaluates after a positive match: if the matched event matches any `ignore` filter or carries more than `p_tags_max` `p` tags (the hellthread gate), the wake is dropped. `ignore` filters obey the grammar above *except* the narrowing-selector rule — they only subtract from an already-narrowed stream and cannot amplify. Suppression is safe to skip: a minimal executor MAY ignore it and remain correct, since extra wakes are harmless. Consequently a client MUST NOT infer from any observed behavior that suppression was enforced; it is best-effort noise reduction, not policy.
+A subscription MAY carry `ignore` (≤ `max_ignore` NIP-01 filters) and `suppress` (`p_tags_max` ≥ 1). Suppression evaluates after a positive match: if the matched event matches any `ignore` filter or carries more than `p_tags_max` `p` tags (the hellthread gate), the wake is dropped. The gate counts all `p` tags that carry the same group marker ([NIP-UG](NIP-UG.md)) as one tag. `ignore` filters obey the grammar above *except* the narrowing-selector rule — they only subtract from an already-narrowed stream and cannot amplify. Suppression is safe to skip: a minimal executor MAY ignore it and remain correct, since extra wakes are harmless. Consequently a client MUST NOT infer from any observed behavior that suppression was enforced; it is best-effort noise reduction, not policy.
 
 ### Priority Classes
 

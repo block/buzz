@@ -32,9 +32,9 @@ use buzz_core::kind::{
     KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
     KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
     KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
-    KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
-    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
-    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_GROUP, KIND_USER_STATUS, KIND_WORKFLOW_DEF,
+    KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
+    RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -155,6 +155,109 @@ fn validate_custom_emoji_tags(event: &Event) -> Result<(), IngestError> {
             .map_err(|err| IngestError::Rejected(format!("invalid: {err}")))?;
     }
     Ok(())
+}
+
+fn user_group_rejection(err: buzz_core::user_group::UserGroupError) -> IngestError {
+    IngestError::Rejected(format!("invalid: {err}"))
+}
+
+async fn load_user_group_heads(
+    tenant: &TenantContext,
+    state: &AppState,
+    handle: &str,
+) -> Result<Vec<Event>, IngestError> {
+    let stored = state
+        .db
+        .query_events_for_event_write(&buzz_db::event::EventQuery {
+            kinds: Some(vec![KIND_USER_GROUP as i32]),
+            d_tag: Some(handle.to_string()),
+            limit: Some(50),
+            ..buzz_db::event::EventQuery::for_community(tenant.community())
+        })
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
+    Ok(stored.into_iter().map(|s| s.event).collect())
+}
+
+/// Authorize a kind:30182 write against the community-wide head of its handle
+/// (see `docs/nips/NIP-UG.md`). Returns the authors of other live heads, which
+/// the caller removes once the new head is stored.
+async fn authorize_user_group_write(
+    tenant: &TenantContext,
+    state: &AppState,
+    event: &Event,
+) -> Result<Vec<Vec<u8>>, IngestError> {
+    use buzz_core::user_group::{authorize_write, parse_user_group, resolve_head, Writer};
+
+    let incoming = parse_user_group(event).map_err(user_group_rejection)?;
+    let others: Vec<Event> = load_user_group_heads(tenant, state, &incoming.handle)
+        .await?
+        .into_iter()
+        .filter(|head| head.id != event.id)
+        .collect();
+    let writer_hex = event.pubkey.to_hex();
+    let role = state
+        .db
+        .get_relay_member(tenant.community(), &writer_hex)
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+        .map(|member| member.role);
+    let writer = Writer {
+        pubkey: writer_hex,
+        community_admin: matches!(role.as_deref(), Some("owner" | "admin")),
+    };
+    let head = resolve_head(&incoming.handle, &others);
+    authorize_write(head.as_ref().map(|(_, group)| group), &incoming, &writer)
+        .map_err(user_group_rejection)?;
+    if let Some((head_event, _)) = &head {
+        if head_event.pubkey != event.pubkey && event.created_at <= head_event.created_at {
+            return Err(IngestError::Rejected(
+                "invalid: an edit by another author must be newer than the current group head"
+                    .into(),
+            ));
+        }
+    }
+    let mut superseded: Vec<Vec<u8>> = Vec::new();
+    for head in &others {
+        let author = head.pubkey.to_bytes().to_vec();
+        if head.pubkey != event.pubkey && !superseded.contains(&author) {
+            superseded.push(author);
+        }
+    }
+    Ok(superseded)
+}
+
+/// Reject a message whose group-marked `p` tags do not match the current members
+/// of an active group (see `docs/nips/NIP-UG.md`).
+async fn validate_group_mention_tags(
+    tenant: &TenantContext,
+    state: &AppState,
+    event: &Event,
+) -> Result<(), IngestError> {
+    use buzz_core::user_group::{
+        group_marked_p_tags, resolve_head, validate_group_mentions, UserGroup,
+        MAX_GROUP_MENTIONS_PER_EVENT,
+    };
+
+    let handles: Vec<String> = group_marked_p_tags(event).into_keys().collect();
+    let mut groups: std::collections::HashMap<String, UserGroup> = std::collections::HashMap::new();
+    if handles.len() <= MAX_GROUP_MENTIONS_PER_EVENT {
+        for handle in &handles {
+            let heads = load_user_group_heads(tenant, state, handle).await?;
+            if let Some((_, group)) = resolve_head(handle, &heads) {
+                groups.insert(handle.clone(), group);
+            }
+        }
+    }
+    validate_group_mentions(event, |handle| groups.get(handle).cloned())
+        .map_err(user_group_rejection)
+}
+
+fn has_group_mention_tag(event: &Event) -> bool {
+    event
+        .tags
+        .iter()
+        .any(|tag| buzz_core::user_group::group_mention_handle(tag.as_slice()).is_some())
 }
 
 fn validate_reaction_emoji(event: &Event, emoji: &str) -> Result<(), IngestError> {
@@ -548,7 +651,8 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         KIND_TEXT_NOTE | KIND_LONG_FORM | buzz_core::kind::KIND_ARTIFACT => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
         | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT
-        | KIND_PRIVATE_MANAGED_AGENT | KIND_TEAM_CATALOG | super::push_lease::KIND_PUSH_LEASE => {
+        | KIND_PRIVATE_MANAGED_AGENT | KIND_TEAM_CATALOG | KIND_USER_GROUP
+        | super::push_lease::KIND_PUSH_LEASE => {
             Ok(Scope::UsersWrite)
         }
         // NIP-AM: agent turn metrics are agent-authored global events (encrypted to owner).
@@ -762,6 +866,8 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // keyed by (pubkey, kind[, d_tag]). A stray `h` tag must not channel-scope them.
             | KIND_EMOJI_SET
             | KIND_EMOJI_LIST
+            // NIP-UG user groups are community-wide; never channel-scoped.
+            | KIND_USER_GROUP
             // NIP-AE agent engrams are addressed by (pubkey_a, kind, d_tag); never channel-scoped.
             | KIND_AGENT_ENGRAM
             // NIP-ER event reminders are addressed by (pubkey, kind, d_tag); never channel-scoped.
@@ -3410,6 +3516,13 @@ async fn ingest_event_inner(
         validate_custom_emoji_tags(&event)?;
     }
 
+    let mut superseded_group_authors: Vec<Vec<u8>> = Vec::new();
+    if kind_u32 == KIND_USER_GROUP {
+        superseded_group_authors = authorize_user_group_write(tenant, state, &event).await?;
+    } else if has_group_mention_tag(&event) {
+        validate_group_mention_tags(tenant, state, &event).await?;
+    }
+
     // Resolve the target reference, then use one DB transaction to upsert the
     // reaction row (dedup via ON CONFLICT) with reaction_event_id already set and
     // store the kind:7 event. This replaces the post-storage side-effect handler.
@@ -3708,6 +3821,23 @@ async fn ingest_event_inner(
             }
         }
     };
+
+    if kind_u32 == KIND_USER_GROUP && stored_event.event.id == event.id {
+        let d_tag = buzz_db::event::extract_d_tag(&event).unwrap_or_default();
+        for author in &superseded_group_authors {
+            state
+                .db
+                .soft_delete_by_coordinate(
+                    tenant.community(),
+                    KIND_USER_GROUP as i32,
+                    author,
+                    &d_tag,
+                    event.created_at.as_secs() as i64,
+                )
+                .await
+                .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
+        }
+    }
 
     if !was_inserted {
         return Ok(IngestResult {
@@ -7969,5 +8099,254 @@ mod postgres_tests {
         let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
             .execute(&admin)
             .await;
+    }
+
+    fn group_tags(creator: &str, members: &[&str], extra: &[&[&str]]) -> Vec<Vec<String>> {
+        let mut tags: Vec<Vec<String>> = vec![
+            vec!["d".into(), "ios-team".into()],
+            vec!["name".into(), "iOS Team".into()],
+            vec!["creator".into(), creator.into()],
+        ];
+        tags.extend(
+            members
+                .iter()
+                .map(|m| vec!["p".to_string(), (*m).to_string()]),
+        );
+        tags.extend(
+            extra
+                .iter()
+                .map(|t| t.iter().map(|v| (*v).to_string()).collect()),
+        );
+        tags
+    }
+
+    fn signed_group(keys: &nostr::Keys, tags: Vec<Vec<String>>, created_at: u64) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(KIND_USER_GROUP as u16), "")
+            .tags(tags.into_iter().map(|t| nostr::Tag::parse(t).expect("tag")))
+            .custom_created_at(nostr::Timestamp::from(created_at))
+            .allow_self_tagging()
+            .sign_with_keys(keys)
+            .expect("sign group")
+    }
+
+    #[test]
+    fn user_group_is_a_global_users_write_kind() {
+        assert!(is_global_only_kind(KIND_USER_GROUP));
+        assert!(!requires_h_channel_scope(KIND_USER_GROUP));
+        let event = signed_group(&nostr::Keys::generate(), vec![], 1);
+        assert_eq!(
+            required_scope_for_kind(KIND_USER_GROUP, &event).ok(),
+            Some(Scope::UsersWrite)
+        );
+    }
+
+    #[test]
+    fn group_mention_tag_detection_needs_the_marker() {
+        let keys = nostr::Keys::generate();
+        let pk = "11".repeat(32);
+        let build = |tag: &[&str]| {
+            EventBuilder::new(Kind::Custom(9), "hi")
+                .tag(nostr::Tag::parse(tag.iter().copied()).unwrap())
+                .sign_with_keys(&keys)
+                .unwrap()
+        };
+        assert!(has_group_mention_tag(&build(&[
+            "p",
+            &pk,
+            "",
+            "group:ios-team"
+        ])));
+        assert!(!has_group_mention_tag(&build(&["p", &pk])));
+        assert!(!has_group_mention_tag(&build(&["p", &pk, "", "owner"])));
+    }
+
+    /// Production-path regression for kind:30182 and group mentions: authorization
+    /// by creator, group admin, community admin, and the open policy; one live head
+    /// after a cross-author edit; and mention validation against the head.
+    /// Mutations: drop `authorize_user_group_write`, the cross-author cleanup, or
+    /// `validate_group_mention_tags` → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn user_group_ingest_authorizes_edits_and_validates_mentions() {
+        let state = ingest_state().await;
+        let creator = nostr::Keys::generate();
+        let stranger = nostr::Keys::generate();
+        let admin = nostr::Keys::generate();
+        let member = nostr::Keys::generate();
+        let host = format!("user-groups-{}.test", Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("community")
+            .id;
+        for k in [&creator, &stranger, &admin, &member] {
+            state
+                .db
+                .ensure_user(community, k.public_key().as_bytes())
+                .await
+                .expect("ensure user");
+        }
+        state
+            .db
+            .add_relay_member(
+                community,
+                &admin.public_key().to_hex(),
+                "admin",
+                None,
+                &nostr::Keys::generate(),
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("add admin");
+        let tenant = TenantContext::resolved(community, &host);
+        let now = chrono::Utc::now().timestamp() as u64;
+        let (creator_hex, member_hex) =
+            (creator.public_key().to_hex(), member.public_key().to_hex());
+        let auth = |keys: &nostr::Keys, scope: Scope| IngestAuth::Http {
+            pubkey: keys.public_key(),
+            scopes: vec![scope],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+        let send = |keys: &nostr::Keys, event: nostr::Event, scope: Scope| {
+            let state = state.clone();
+            let tenant = tenant.clone();
+            let auth = auth(keys, scope);
+            async move { ingest_event(&state, &tenant, event, auth).await }
+        };
+        let rejected = |result: Result<IngestResult, IngestError>, needle: &str| match result {
+            Err(IngestError::Rejected(msg)) => assert!(
+                msg.starts_with("invalid: ") && msg.contains(needle),
+                "unexpected rejection {msg:?}"
+            ),
+            Err(other) => panic!("expected Rejected containing {needle:?}, got {other:?}"),
+            Ok(_) => panic!("expected rejection containing {needle:?}"),
+        };
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect test Postgres");
+        let live_heads = || {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, Vec<u8>>(
+                    "SELECT pubkey FROM events WHERE community_id = $1 AND kind = $2 \
+                     AND d_tag = 'ios-team' AND deleted_at IS NULL",
+                )
+                .bind(community.as_uuid())
+                .bind(KIND_USER_GROUP as i32)
+                .fetch_all(&pool)
+                .await
+                .expect("heads")
+            }
+        };
+
+        let created = send(
+            &creator,
+            signed_group(
+                &creator,
+                group_tags(&creator_hex, &[&member_hex], &[]),
+                now - 100,
+            ),
+            Scope::UsersWrite,
+        )
+        .await
+        .expect("create");
+        assert!(created.accepted, "{}", created.message);
+
+        rejected(
+            send(
+                &stranger,
+                signed_group(
+                    &stranger,
+                    group_tags(&stranger.public_key().to_hex(), &[], &[]),
+                    now - 90,
+                ),
+                Scope::UsersWrite,
+            )
+            .await,
+            "creator",
+        );
+        rejected(
+            send(
+                &stranger,
+                signed_group(&stranger, group_tags(&creator_hex, &[], &[]), now - 90),
+                Scope::UsersWrite,
+            )
+            .await,
+            "only the group creator",
+        );
+        assert_eq!(live_heads().await.len(), 1, "refused writes store nothing");
+
+        let by_admin = send(
+            &admin,
+            signed_group(
+                &admin,
+                group_tags(
+                    &creator_hex,
+                    &[&member_hex, &admin.public_key().to_hex()],
+                    &[],
+                ),
+                now - 80,
+            ),
+            Scope::UsersWrite,
+        )
+        .await
+        .expect("community admin edit");
+        assert!(by_admin.accepted, "{}", by_admin.message);
+        let heads = live_heads().await;
+        assert_eq!(heads, vec![admin.public_key().to_bytes().to_vec()]);
+
+        rejected(
+            send(
+                &creator,
+                signed_group(&creator, group_tags(&creator_hex, &[], &[]), now - 85),
+                Scope::UsersWrite,
+            )
+            .await,
+            "newer",
+        );
+
+        let message = |tags: Vec<nostr::Tag>| {
+            EventBuilder::new(Kind::Custom(KIND_TEXT_NOTE as u16), "@ios-team ship it")
+                .tags(tags)
+                .sign_with_keys(&creator)
+                .expect("sign note")
+        };
+        let marked = |pk: &str| nostr::Tag::parse(["p", pk, "", "group:ios-team"]).unwrap();
+        let ok = send(
+            &creator,
+            message(vec![
+                marked(&member_hex),
+                marked(&admin.public_key().to_hex()),
+            ]),
+            Scope::MessagesWrite,
+        )
+        .await
+        .expect("group mention");
+        assert!(ok.accepted, "{}", ok.message);
+        rejected(
+            send(
+                &creator,
+                message(vec![marked(&stranger.public_key().to_hex())]),
+                Scope::MessagesWrite,
+            )
+            .await,
+            "not a member",
+        );
+        rejected(
+            send(
+                &creator,
+                message(vec![nostr::Tag::parse([
+                    "p",
+                    &member_hex,
+                    "",
+                    "group:ghost",
+                ])
+                .unwrap()]),
+                Scope::MessagesWrite,
+            )
+            .await,
+            "no active user group",
+        );
     }
 }
