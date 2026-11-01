@@ -41,6 +41,7 @@ import { parseSnapshotClipboardHtml } from "./agentSnapshotClipboard";
 import { buildPreviewUpdate } from "./linkPreviewContent";
 import { createLinkInteractionExtension } from "./linkInteractionExtension";
 import { LinkPasteTrailingSpace } from "./linkPasteTrailingSpace";
+import { CaretRepaintOnResize } from "./caretRepaintOnResize";
 import {
   CodeBlockAfterHardBreak,
   handleCodeFenceEnter,
@@ -361,6 +362,7 @@ export function useRichTextEditor({
           },
         }),
         LinkPasteTrailingSpace,
+        CaretRepaintOnResize,
         createLinkInteractionExtension({
           getEditLinkHandler: () => onEditLinkRef.current,
           getSelectionChangeHandler: () => onLinkSelectionChangeRef.current,
