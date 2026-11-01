@@ -1,4 +1,4 @@
-import '../../shared/widgets/expanding_menu_button.dart';
+import '../../shared/widgets/android_expanding_menu_button.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -137,7 +137,7 @@ class HomePage extends HookConsumerWidget {
                     height: 44,
                     plain: false,
                   )
-                : ExpandingMenuButton(
+                : AndroidExpandingMenuButton(
                     label: 'Community menu',
                     actions: moreActions,
                     dividerBefore: const {1},
@@ -189,40 +189,38 @@ class HomePage extends HookConsumerWidget {
         padding: EdgeInsets.only(bottom: bottom),
         child: SizedBox(
           height: mobileTabBarHeight,
-          child: Visibility(
-            visible:
-                defaultTargetPlatform != TargetPlatform.iOS ||
-                nativeControlsVisible,
-            maintainState: true,
-            child: Center(
-              child: MessagesNavigationBar(
-                onSearch: openSearch,
-                agent: defaultAgentBuilder(context),
-                creationActions: [
-                  (
-                    label: 'New chat',
-                    symbol: 'square.and.pencil',
-                    onPressed: newChat.value,
+          child:
+              defaultTargetPlatform != TargetPlatform.iOS ||
+                  nativeControlsVisible
+              ? Center(
+                  child: MessagesNavigationBar(
+                    onSearch: openSearch,
+                    agent: defaultAgentBuilder(context),
+                    creationActions: [
+                      (
+                        label: 'New chat',
+                        symbol: 'square.and.pencil',
+                        onPressed: newChat.value,
+                      ),
+                      (
+                        label: 'New workspace',
+                        symbol: 'workspace',
+                        onPressed: newWorkspace.value,
+                      ),
+                      (
+                        label: 'New DM',
+                        symbol: 'bubble.left',
+                        onPressed: newDm.value,
+                      ),
+                      (
+                        label: 'New channel',
+                        symbol: 'number',
+                        onPressed: newChannel.value,
+                      ),
+                    ],
                   ),
-                  (
-                    label: 'New workspace',
-                    symbol: 'workspace',
-                    onPressed: newWorkspace.value,
-                  ),
-                  (
-                    label: 'New DM',
-                    symbol: 'bubble.left',
-                    onPressed: newDm.value,
-                  ),
-                  (
-                    label: 'New channel',
-                    symbol: 'number',
-                    onPressed: newChannel.value,
-                  ),
-                ],
-              ),
-            ),
-          ),
+                )
+              : null,
         ),
       ),
       body: Stack(
