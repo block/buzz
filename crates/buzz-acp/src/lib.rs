@@ -562,6 +562,19 @@ mod inbound_author_gate {
         }
     }
 
+    /// Whether `event` carries the failure-notice marker tag written by
+    /// [`pool::build_failure_notice_event`] (`["failure-notice", "1"]`).
+    ///
+    /// A failure notice is addressed to the human owner, never to another
+    /// agent. See [`evaluate_with_channel_trust`] for where this is enforced.
+    fn is_failure_notice(event: &nostr::Event) -> bool {
+        event.tags.iter().any(|tag| {
+            let s = tag.as_slice();
+            s.first().map(|k| k.as_str()) == Some(pool::FAILURE_NOTICE_TAG)
+                && s.get(1).map(|v| v.as_str()) == Some("1")
+        })
+    }
+
     /// Apply the configured raw-author policy after trusted workflow attribution.
     ///
     /// This stays private to the gate module so neither listener can bypass
@@ -702,15 +715,31 @@ mod inbound_author_gate {
         ) -> InboundAuthorGateDecision {
             let effective_author =
                 effective_prompt_author(event, self.relay_self.as_deref(), &self.agent_pubkey_hex);
-            let allowed = author_allowed(
-                respond_to,
-                allowlist,
-                &effective_author,
-                is_dm,
-                owner_cache,
-                rest_client,
-            )
-            .await;
+            let allowed = if is_failure_notice(event)
+                && owner_cache.get() != Some(effective_author.as_str())
+            {
+                // A failure notice is addressed to the human owner, not to
+                // other agents. Drop it here — before the respond-to policy
+                // and before any sibling lookup — so two broken agents
+                // retrying each other's dead-letter notices cannot wake one
+                // another forever (#7778). The owner themself is exempt so a
+                // human re-sending or quoting the notice is unaffected.
+                tracing::debug!(
+                    effective_author = %effective_author,
+                    "inbound author gate — dropping non-owner failure notice"
+                );
+                false
+            } else {
+                author_allowed(
+                    respond_to,
+                    allowlist,
+                    &effective_author,
+                    is_dm,
+                    owner_cache,
+                    rest_client,
+                )
+                .await
+            };
             InboundAuthorGateDecision {
                 effective_author,
                 allowed,
@@ -8328,6 +8357,118 @@ mod author_gate_tests {
         assert!(
             !decision.allowed,
             "an attacker-signed workflow event must not borrow trusted owner authority"
+        );
+    }
+
+    /// A failure notice carrying the `["failure-notice", "1"]` marker tag
+    /// (see `pool::build_failure_notice_event`) must never wake another
+    /// agent when it comes from a sibling, even under `OwnerOnly` where a
+    /// sibling would otherwise be admitted — otherwise two broken agents can
+    /// retry each other's dead-letter notices forever (#7778).
+    #[tokio::test]
+    async fn test_failure_notice_from_sibling_does_not_wake_owner_only() {
+        let relay = nostr::Keys::generate();
+        let owner = nostr::Keys::generate();
+        let sibling = nostr::Keys::generate();
+        let agent = nostr::Keys::generate().public_key().to_hex();
+        let event = nostr::EventBuilder::new(
+            nostr::Kind::Custom(KIND_STREAM_MESSAGE as u16),
+            "dead-lettered",
+        )
+        .tags([nostr::Tag::parse(["failure-notice", "1"]).expect("failure notice marker")])
+        .sign_with_keys(&sibling)
+        .expect("signed failure notice");
+        let cache = OwnerCache::new(Some(owner.public_key().to_hex()));
+        cache.cache_sibling(sibling.public_key().to_hex(), true);
+
+        let (gate, rest_client, server) =
+            connected_gate(&relay.public_key().to_hex(), &agent).await;
+        let decision = gate
+            .evaluate_for_test(
+                &event,
+                &RespondTo::OwnerOnly,
+                &HashSet::new(),
+                false,
+                &cache,
+                &rest_client,
+            )
+            .await;
+        server.abort();
+        assert_eq!(decision.effective_author, sibling.public_key().to_hex());
+        assert!(
+            !decision.allowed,
+            "a failure notice from a sibling must never wake another agent (#7778)"
+        );
+    }
+
+    /// Regression guard for the above: an ordinary sibling message with no
+    /// failure-notice tag must keep waking the agent under `OwnerOnly`, so
+    /// the new gate check only targets tagged failure notices.
+    #[tokio::test]
+    async fn test_normal_sibling_message_still_wakes_owner_only() {
+        let relay = nostr::Keys::generate();
+        let owner = nostr::Keys::generate();
+        let sibling = nostr::Keys::generate();
+        let agent = nostr::Keys::generate().public_key().to_hex();
+        let event =
+            nostr::EventBuilder::new(nostr::Kind::Custom(KIND_STREAM_MESSAGE as u16), "hello")
+                .sign_with_keys(&sibling)
+                .expect("signed sibling message");
+        let cache = OwnerCache::new(Some(owner.public_key().to_hex()));
+        cache.cache_sibling(sibling.public_key().to_hex(), true);
+
+        let (gate, rest_client, server) =
+            connected_gate(&relay.public_key().to_hex(), &agent).await;
+        let decision = gate
+            .evaluate_for_test(
+                &event,
+                &RespondTo::OwnerOnly,
+                &HashSet::new(),
+                false,
+                &cache,
+                &rest_client,
+            )
+            .await;
+        server.abort();
+        assert!(
+            decision.allowed,
+            "an ordinary sibling message (no failure-notice tag) must still wake under OwnerOnly"
+        );
+    }
+
+    /// The human owner is exempt from the failure-notice gate: if they
+    /// resend or quote a notice themselves, it must still be able to wake
+    /// the agent.
+    #[tokio::test]
+    async fn test_failure_notice_from_owner_still_wakes() {
+        let relay = nostr::Keys::generate();
+        let owner = nostr::Keys::generate();
+        let agent = nostr::Keys::generate().public_key().to_hex();
+        let event = nostr::EventBuilder::new(
+            nostr::Kind::Custom(KIND_STREAM_MESSAGE as u16),
+            "dead-lettered",
+        )
+        .tags([nostr::Tag::parse(["failure-notice", "1"]).expect("failure notice marker")])
+        .sign_with_keys(&owner)
+        .expect("signed failure notice");
+        let cache = OwnerCache::new(Some(owner.public_key().to_hex()));
+
+        let (gate, rest_client, server) =
+            connected_gate(&relay.public_key().to_hex(), &agent).await;
+        let decision = gate
+            .evaluate_for_test(
+                &event,
+                &RespondTo::OwnerOnly,
+                &HashSet::new(),
+                false,
+                &cache,
+                &rest_client,
+            )
+            .await;
+        server.abort();
+        assert!(
+            decision.allowed,
+            "the human owner resending/quoting a failure notice must still wake the agent"
         );
     }
 
