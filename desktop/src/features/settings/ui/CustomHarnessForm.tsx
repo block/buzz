@@ -265,6 +265,10 @@ export function CustomHarnessForm({
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    // This form can be rendered in a dialog portal opened from the agent
+    // definition form. React events still bubble through the component tree
+    // across portals, so keep this save from submitting the outer form too.
+    e.stopPropagation();
     setError(null);
     // Mirror the backend comma-in-args rejection so the user gets an inline
     // error naming the offending argument before the round-trip.
