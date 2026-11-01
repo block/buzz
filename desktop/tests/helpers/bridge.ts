@@ -481,6 +481,8 @@ type MockBridgeOptions = {
    * Drives the LocalArchiveSettingsCard subscription list view in screenshot
    * and UI tests without a real SQLite backend.
    */
+  /** `get_agent_usage_series` response (camelCase `AgentUsageSeries`). */
+  agentUsageSeries?: unknown;
   saveSubscriptions?: Array<{
     scope_type: string;
     scope_value: string;
