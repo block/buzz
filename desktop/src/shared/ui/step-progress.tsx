@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { cn } from "@/shared/lib/cn";
 
 type StepProgressProps = {
@@ -22,7 +24,10 @@ export function StepProgress({
 
   return (
     <div
-      aria-label={`Step ${safeCurrentStep} of ${safeTotalSteps}`}
+      aria-label={uiT("Step {0} of {1}", {
+        p0: safeCurrentStep,
+        p1: safeTotalSteps,
+      })}
       aria-valuemax={safeTotalSteps}
       aria-valuemin={1}
       aria-valuenow={safeCurrentStep}

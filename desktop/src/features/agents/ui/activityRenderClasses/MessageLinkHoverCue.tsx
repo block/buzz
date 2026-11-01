@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { ArrowUpRight } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
@@ -17,7 +19,7 @@ export function MessageLinkHoverCue({ className }: { className?: string }) {
         className,
       )}
     >
-      Open in chat
+      {uiT("Open in chat")}
       <ArrowUpRight className="h-3 w-3" />
     </span>
   );

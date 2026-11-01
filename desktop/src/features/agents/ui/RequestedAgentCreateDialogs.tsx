@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import {
@@ -10,6 +12,8 @@ import { usePersonaActions } from "./usePersonaActions";
 
 /** App-level create flow so contextual entry points do not navigate away. */
 export function RequestedAgentCreateDialogs() {
+  useUiLanguage();
+
   const personas = usePersonaActions();
   const [targetChannel, setTargetChannel] = React.useState<{
     id: string;

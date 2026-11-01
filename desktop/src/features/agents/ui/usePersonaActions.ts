@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { isRelayRemovedError } from "@/features/agents/managedAgentRelayCleanup";
 import { useQueryClient } from "@tanstack/react-query";
@@ -212,7 +214,7 @@ export function usePersonaActions() {
         );
         if (!runtime) {
           setPersonaErrorMessage(
-            "Choose an available provider for this agent.",
+            uiT("Choose an available provider for this agent."),
           );
           return false;
         }
@@ -254,19 +256,31 @@ export function usePersonaActions() {
           );
           if (created.spawnError && !isRelayRemovedError(created.spawnError)) {
             setPersonaErrorMessage(
-              `${persona.displayName} was created, but it did not start: ${created.spawnError}`,
+              uiT("{0} was created, but it did not start: {1}", {
+                p0: persona.displayName,
+                p1: created.spawnError,
+              }),
             );
           }
           if (created.profileSyncError) {
             setPersonaErrorMessage(
-              `${created.agent.name} was created, but profile sync failed: ${created.profileSyncError}`,
+              uiT("{0} was created, but profile sync failed: {1}", {
+                p0: created.agent.name,
+                p1: created.profileSyncError,
+              }),
             );
           }
         } catch (error) {
           setPersonaErrorMessage(
             error instanceof Error
-              ? `${persona.displayName} was created, but the agent instance could not be created: ${error.message}`
-              : `${persona.displayName} was created, but the agent instance could not be created.`,
+              ? uiT(
+                  "{0} was created, but the agent instance could not be created: {1}",
+                  { p0: persona.displayName, p1: error.message },
+                )
+              : uiT(
+                  "{0} was created, but the agent instance could not be created.",
+                  { p0: persona.displayName },
+                ),
           );
         }
       }
@@ -274,7 +288,7 @@ export function usePersonaActions() {
       return true;
     } catch (error) {
       setPersonaErrorMessage(
-        error instanceof Error ? error.message : "Failed to save agent.",
+        error instanceof Error ? error.message : uiT("Failed to save agent."),
       );
       return false;
     } finally {
@@ -290,7 +304,7 @@ export function usePersonaActions() {
       setPersonaToDelete(null);
     } catch (error) {
       setPersonaErrorMessage(
-        error instanceof Error ? error.message : "Failed to delete agent.",
+        error instanceof Error ? error.message : uiT("Failed to delete agent."),
       );
     }
   }
@@ -362,8 +376,8 @@ export function usePersonaActions() {
         error instanceof Error
           ? error.message
           : active
-            ? "Failed to select agent for My Agents."
-            : "Failed to deselect agent from My Agents.",
+            ? uiT("Failed to select agent for My Agents.")
+            : uiT("Failed to deselect agent from My Agents."),
       );
       return null;
     }
@@ -386,7 +400,7 @@ export function usePersonaActions() {
       setPersonaErrorMessage(
         err instanceof Error
           ? err.message
-          : "Failed to read agent snapshot file.",
+          : uiT("Failed to read agent snapshot file."),
       );
     }
   }
@@ -409,14 +423,20 @@ export function usePersonaActions() {
       });
       if (result.memoryErrors.length > 0) {
         setPersonaErrorMessage(
-          `${result.displayName} imported, but ${result.memoryErrors.length} memory entr${result.memoryErrors.length === 1 ? "y" : "ies"} failed to restore.`,
+          uiT("{0} imported, but {1} memory entr{2} failed to restore.", {
+            p0: result.displayName,
+            p1: result.memoryErrors.length,
+            p2: result.memoryErrors.length === 1 ? "y" : "ies",
+          }),
         );
       } else {
         setPersonaNoticeMessage(`Imported ${result.displayName}.`);
       }
     } catch (err) {
       setSnapshotImportConfirmError(
-        err instanceof Error ? err.message : "Failed to import agent snapshot.",
+        err instanceof Error
+          ? err.message
+          : uiT("Failed to import agent snapshot."),
       );
     }
   }
@@ -489,7 +509,7 @@ export function usePersonaActions() {
           setPersonaErrorMessage(
             error instanceof Error
               ? error.message
-              : "Failed to export agent snapshot.",
+              : uiT("Failed to export agent snapshot."),
           );
         },
       },
@@ -548,7 +568,7 @@ export function usePersonaActions() {
       setPersonaErrorMessage(
         error instanceof Error
           ? error.message
-          : "Failed to update catalog sharing.",
+          : uiT("Failed to update catalog sharing."),
       );
     }
   }

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { MessageCircle } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
@@ -12,7 +14,7 @@ export function ProjectsOverviewChatToggle({
   onToggle: () => void;
   sectionTitle: string;
 }) {
-  const label = `Chat with an agent about ${sectionTitle}`;
+  const label = uiT("Chat with an agent about {0}", { p0: sectionTitle });
 
   return (
     <Button

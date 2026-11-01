@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { useSearch } from "@tanstack/react-router";
 import { Maximize2, Plus } from "lucide-react";
 import * as React from "react";
@@ -66,7 +68,11 @@ function ProjectHomeHeaderToggle({
     <Tooltip disableHoverableContent>
       <TooltipTrigger asChild>
         <Button
-          aria-label={open ? `Hide ${label}` : `Show ${label}`}
+          aria-label={
+            open
+              ? uiT("Hide {0}", { p0: label })
+              : uiT("Show {0}", { p0: label })
+          }
           aria-pressed={open}
           className="h-7 w-7 text-sidebar-foreground hover:bg-sidebar-accent"
           data-testid={testId}
@@ -99,6 +105,8 @@ export function ProjectChannelHome({
   targetMessageEvents?: RelayEvent[];
   targetMessageId?: string | null;
 }) {
+  useUiLanguage();
+
   const { goChannel, goProject, goProjects } = useAppNavigation();
   const sidebar = useOptionalSidebar();
   const identityQuery = useIdentityQuery();
@@ -227,8 +235,10 @@ export function ProjectChannelHome({
     workspaceSheetTab,
   ]);
   const expandLabel = workspaceSheetTab
-    ? `Open ${projectHomeWorkspaceSheetTitle(workspaceSheetTab)} in repository`
-    : "Open in repository";
+    ? uiT("Open {0} in repository", {
+        p0: projectHomeWorkspaceSheetTitle(workspaceSheetTab),
+      })
+    : uiT("Open in repository");
   const workspaceSheet =
     workspaceSheetOpen && workspaceSheetTab && workspaceRepository ? (
       <ProjectHomeWorkspaceSheet
@@ -272,7 +282,7 @@ export function ProjectChannelHome({
           <ProjectDetailChrome
             actions={
               <ProjectHomeHeaderToggle
-                label="Overview"
+                label={uiT("Overview")}
                 onClick={() => {
                   if (workspaceSheetOpen) {
                     closeWorkspaceSheet();
@@ -388,7 +398,7 @@ export function ProjectChannelHome({
           ) : (
             <div className="flex min-h-0 flex-1 items-center justify-center px-6 py-8">
               <p className="text-sm text-muted-foreground">
-                This project's channel could not be found.
+                {uiT("This project's channel could not be found.")}
               </p>
             </div>
           )}

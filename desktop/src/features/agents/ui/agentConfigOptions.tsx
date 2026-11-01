@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type {
   AcpRuntimeCatalogEntry,
   GlobalAgentConfig,
@@ -106,17 +108,23 @@ const PROVIDER_CREDENTIAL_CONFIG: Partial<
   anthropic: {
     requiredEnvKeys: ["ANTHROPIC_API_KEY"],
     secretEnvVar: "ANTHROPIC_API_KEY",
-    apiKeyLabel: "Anthropic API Key",
+    get apiKeyLabel() {
+      return uiT("Anthropic API Key");
+    },
   },
   openai: {
     requiredEnvKeys: ["OPENAI_COMPAT_API_KEY"],
     secretEnvVar: "OPENAI_COMPAT_API_KEY",
-    apiKeyLabel: "OpenAI Runtime API Key",
+    get apiKeyLabel() {
+      return uiT("OpenAI Runtime API Key");
+    },
   },
   "openai-compat": {
     requiredEnvKeys: ["OPENAI_COMPAT_API_KEY"],
     secretEnvVar: "OPENAI_COMPAT_API_KEY",
-    apiKeyLabel: "OpenAI-compatible Runtime API Key",
+    get apiKeyLabel() {
+      return uiT("OpenAI-compatible Runtime API Key");
+    },
   },
   databricks: {
     // DATABRICKS_TOKEN is NOT required — OAuth PKCE is the normal path.
@@ -135,21 +143,35 @@ const PROVIDER_CREDENTIAL_CONFIG: Partial<
   openrouter: {
     requiredEnvKeys: ["OPENROUTER_API_KEY"],
     secretEnvVar: "OPENROUTER_API_KEY",
-    apiKeyLabel: "OpenRouter API Key",
+    get apiKeyLabel() {
+      return uiT("OpenRouter API Key");
+    },
   },
 };
 
 const DEFAULT_MODEL_OPTION: PersonaModelOption = {
   id: "",
-  label: "Default model",
+  get label() {
+    return uiT("Default model");
+  },
 };
 
 export const PERSONA_LLM_PROVIDER_OPTIONS: readonly PersonaModelOption[] = [
   { id: "anthropic", label: "Anthropic" },
   { id: "openai", label: "OpenAI" },
-  { id: "openai-compat", label: "OpenAI-compatible" },
+  {
+    id: "openai-compat",
+    get label() {
+      return uiT("OpenAI-compatible");
+    },
+  },
   { id: "openrouter", label: "OpenRouter" },
-  { id: "relay-mesh", label: "Buzz shared compute" },
+  {
+    id: "relay-mesh",
+    get label() {
+      return uiT("Buzz shared compute");
+    },
+  },
   { id: "databricks", label: "Databricks" },
   { id: "databricks_v2", label: "Databricks v2" },
 ];
@@ -414,7 +436,10 @@ export function getPersonaProviderOptions(
 
   return [
     ...options,
-    { id: trimmedProvider, label: `${trimmedProvider} (current)` },
+    {
+      id: trimmedProvider,
+      label: uiT("{0} (current)", { p0: trimmedProvider }),
+    },
   ];
 }
 
@@ -502,10 +527,10 @@ export function buildPersonaRuntimeDropdownOptions({
   runtimeDropdownOptions: PersonaDropdownOption[];
 } {
   const blankRuntimeOptionLabel = runtimesLoading
-    ? "Loading harnesses..."
+    ? uiT("Loading harnesses...")
     : isCreateMode
-      ? "Choose a harness"
-      : "No preference (use app default)";
+      ? uiT("Choose a harness")
+      : uiT("No preference (use app default)");
   const runtimeDropdownOptions: PersonaDropdownOption[] = [
     ...(!isCreateMode
       ? [
@@ -532,7 +557,7 @@ export function buildPersonaRuntimeDropdownOptions({
     !runtimeDropdownOptions.some((option) => option.value === currentRuntime)
   ) {
     runtimeDropdownOptions.push({
-      label: `${currentRuntime} (current)`,
+      label: uiT("{0} (current)", { p0: currentRuntime }),
       value: currentRuntime,
     });
   }

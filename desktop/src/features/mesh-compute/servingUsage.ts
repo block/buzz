@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type { MeshServingUsage } from "@/shared/api/tauriMesh";
 
 /**
@@ -61,8 +63,11 @@ export function deriveServingIndicator(
   if (hasRemoteConsumers) {
     const remote = usage.remoteAttempts + usage.endpointAttempts;
     const label = active
-      ? `In use now by another member · ${usage.inflight} live`
-      : `Used by another member · ${remote} ${plural(remote, "request")}`;
+      ? uiT("In use now by another member · {0} live", { p0: usage.inflight })
+      : uiT("Used by another member · {0} {1}", {
+          p0: remote,
+          p1: plural(remote, "request"),
+        });
     const detail =
       usage.peers > 0
         ? `${usage.peers} ${plural(usage.peers, "peer")} on the mesh · ${Math.round(usage.tokensPerSecond)} tok/s`
@@ -76,7 +81,7 @@ export function deriveServingIndicator(
       show: true,
       active: true,
       hasRemoteConsumers: false,
-      label: `Serving your agent · ${usage.inflight} live`,
+      label: uiT("Serving your agent · {0} live", { p0: usage.inflight }),
       detail: `${Math.round(usage.tokensPerSecond)} tok/s`,
     };
   }
@@ -85,7 +90,9 @@ export function deriveServingIndicator(
       show: true,
       active: false,
       hasRemoteConsumers: false,
-      label: "Idle · no one using it right now",
+      get label() {
+        return uiT("Idle · no one using it right now");
+      },
       detail: `${usage.requestsServed} ${plural(usage.requestsServed, "request")} served this session`,
     };
   }
@@ -95,7 +102,9 @@ export function deriveServingIndicator(
     show: true,
     active: false,
     hasRemoteConsumers: false,
-    label: "Idle · no one using it yet",
+    get label() {
+      return uiT("Idle · no one using it yet");
+    },
     detail: null,
   };
 }

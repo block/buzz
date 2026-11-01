@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { createFileRoute } from "@tanstack/react-router";
 
@@ -14,6 +16,8 @@ export const Route = createFileRoute("/projects")({
 });
 
 function ProjectsRouteComponent() {
+  useUiLanguage();
+
   usePreviewFeatureWarning("projects");
   return (
     <React.Suspense fallback={<ViewLoadingFallback kind="projects" />}>

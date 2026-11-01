@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type {
   AgentPersona,
   CreatePersonaInput,
@@ -39,9 +41,15 @@ export function parsePersonaNamePoolText(text: string): string[] {
 
 export function createPersonaDialogState(): PersonaDialogState {
   return {
-    title: "Create agent",
-    description: "Create an agent and start it immediately.",
-    submitLabel: "Create agent",
+    get title() {
+      return uiT("Create agent");
+    },
+    get description() {
+      return uiT("Create an agent and start it immediately.");
+    },
+    get submitLabel() {
+      return uiT("Create agent");
+    },
     initialValues: {
       displayName: "",
       avatarUrl: "",
@@ -57,10 +65,15 @@ export function duplicatePersonaDialogState(
   persona: AgentPersona,
 ): PersonaDialogState {
   return {
-    title: `Duplicate ${persona.displayName}`,
-    description:
-      "Create a new agent by copying this profile and adjusting it as needed.",
-    submitLabel: "Create agent",
+    title: uiT("Duplicate {0}", { p0: persona.displayName }),
+    get description() {
+      return uiT(
+        "Create a new agent by copying this profile and adjusting it as needed.",
+      );
+    },
+    get submitLabel() {
+      return uiT("Create agent");
+    },
     initialValues: {
       displayName: `${persona.displayName} copy`,
       avatarUrl: persona.avatarUrl ?? "",
@@ -122,9 +135,13 @@ export function editPersonaDialogState(
       }
     : persona;
   return {
-    title: "Edit agent",
+    get title() {
+      return uiT("Edit agent");
+    },
     description: "",
-    submitLabel: "Save changes",
+    get submitLabel() {
+      return uiT("Save changes");
+    },
     initialValues: {
       id: persona.id,
       displayName: persona.displayName,

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type {
   ProjectsSort,
   ProjectsViewMode,
@@ -19,15 +21,15 @@ export function ProjectsSortSelect({
 }) {
   return (
     <label className="flex items-center gap-2 text-xs text-muted-foreground">
-      <span className="sr-only">Sort projects</span>
+      <span className="sr-only">{uiT("Sort projects")}</span>
       <select
         className="h-8 rounded-md bg-transparent px-2 text-xs text-foreground outline-hidden hover:bg-muted/50 focus:ring-1 focus:ring-ring"
         onChange={(event) => onChange(event.target.value as ProjectsSort)}
         value={sort}
       >
-        <option value="updated">Recent activity</option>
-        <option value="created">Created date</option>
-        <option value="name">Name</option>
+        <option value="updated">{uiT("Recent activity")}</option>
+        <option value="created">{uiT("Created date")}</option>
+        <option value="name">{uiT("Name")}</option>
       </select>
     </label>
   );

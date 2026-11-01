@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { TerminalSquare } from "lucide-react";
 
@@ -50,6 +52,8 @@ export function RuntimeIcon({
   className?: string;
   runtime: AcpRuntimeCatalogEntry;
 }) {
+  useUiLanguage();
+
   const [imageFailed, setImageFailed] = React.useState(false);
   // Only use bundled logo maps — never render user-supplied avatar URLs for
   // custom/preset entries (tracking pixel / spoofing vector, security line).

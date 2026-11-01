@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { toast } from "sonner";
 import { isThreadReply } from "@/features/messages/lib/threading";
@@ -76,7 +78,7 @@ export function useRoutedMessageEdit({
         current.isThreadReply !== isThreadReply(message.tags ?? [])
       ) {
         pendingMainEditRef.current = null;
-        toast.info("Finish or cancel your edit first.");
+        toast.info(uiT("Finish or cancel your edit first."));
         return false;
       }
       if (current?.id === message.id) {

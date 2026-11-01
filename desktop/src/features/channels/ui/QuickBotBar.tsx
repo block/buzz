@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { Spinner } from "@/shared/ui/spinner";
 
@@ -16,6 +18,8 @@ type QuickBotBarProps = {
 };
 
 export function QuickBotBar({ personas, pending, onAdd }: QuickBotBarProps) {
+  useUiLanguage();
+
   const [pendingId, setPendingId] = React.useState<string | null>(null);
 
   // Clear pending state when the mutation finishes
@@ -31,7 +35,7 @@ export function QuickBotBar({ personas, pending, onAdd }: QuickBotBarProps) {
     <div
       className="flex items-center"
       role="toolbar"
-      aria-label="Quick add bots"
+      aria-label={uiT("Quick add bots")}
     >
       <div
         className={cn(
@@ -52,7 +56,7 @@ export function QuickBotBar({ personas, pending, onAdd }: QuickBotBarProps) {
             <Tooltip key={persona.id}>
               <TooltipTrigger asChild>
                 <button
-                  aria-label={`Add ${persona.displayName}`}
+                  aria-label={uiT("Add {0}", { p0: persona.displayName })}
                   className={cn(
                     "relative flex h-7 w-7 shrink-0 items-center justify-center rounded-lg",
                     "border border-border/50 shadow-xs",
@@ -87,7 +91,10 @@ export function QuickBotBar({ personas, pending, onAdd }: QuickBotBarProps) {
                 </button>
               </TooltipTrigger>
               <TooltipContent side="bottom" className="text-xs">
-                Add {instanceName} ({persona.displayName})
+                {uiT("Add {0} ({1})", {
+                  p0: instanceName,
+                  p1: persona.displayName,
+                })}
               </TooltipContent>
             </Tooltip>
           );

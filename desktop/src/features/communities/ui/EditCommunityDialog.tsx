@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { CommunityIconSettingsCard } from "@/features/communities/ui/CommunityIconSettingsCard";
@@ -38,6 +40,8 @@ export function EditCommunityDialog({
   onSave,
   showIconEditor = false,
 }: EditCommunityDialogProps) {
+  useUiLanguage();
+
   const [name, setName] = React.useState("");
   const [relayUrl, setRelayUrl] = React.useState("");
   const [token, setToken] = React.useState("");
@@ -126,9 +130,9 @@ export function EditCommunityDialog({
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>Edit Community</DialogTitle>
+          <DialogTitle>{uiT("Edit Community")}</DialogTitle>
           <DialogDescription>
-            Update this community's name or relay URL.
+            {uiT("Update this community's name or relay URL.")}
           </DialogDescription>
         </DialogHeader>
         <form
@@ -138,9 +142,9 @@ export function EditCommunityDialog({
           {canEditIcon ? (
             <div className="flex items-center justify-between gap-4 rounded-xl border border-border/70 bg-muted/20 p-3">
               <div className="min-w-0">
-                <p className="text-sm font-medium">Community icon</p>
+                <p className="text-sm font-medium">{uiT("Community icon")}</p>
                 <p className="text-xs text-muted-foreground">
-                  Shown in the community rail and switcher.
+                  {uiT("Shown in the community rail and switcher.")}
                 </p>
               </div>
               <CommunityIconSettingsCard compact />
@@ -151,13 +155,13 @@ export function EditCommunityDialog({
               className="text-sm font-medium text-foreground"
               htmlFor="edit-ws-name"
             >
-              Name
+              {uiT("Name")}
             </label>
             <Input
               autoFocus
               id="edit-ws-name"
               onChange={(e) => setName(e.target.value)}
-              placeholder="My Community"
+              placeholder={uiT("My Community")}
               type="text"
               value={name}
             />
@@ -167,7 +171,7 @@ export function EditCommunityDialog({
               className="text-sm font-medium text-foreground"
               htmlFor="edit-ws-relay-url"
             >
-              Relay URL
+              {uiT("Relay URL")}
             </label>
             <Input
               id="edit-ws-relay-url"
@@ -182,9 +186,9 @@ export function EditCommunityDialog({
               className="text-sm font-medium text-foreground"
               htmlFor="edit-ws-token"
             >
-              API Token
+              {uiT("API Token")}
               <span className="ml-1 text-xs font-normal text-muted-foreground">
-                (optional)
+                {uiT("(optional)")}
               </span>
             </label>
             <Input
@@ -200,9 +204,9 @@ export function EditCommunityDialog({
               className="text-sm font-medium text-foreground"
               htmlFor="edit-ws-repos-dir"
             >
-              Repos Directory
+              {uiT("Repos Directory")}
               <span className="ml-1 text-xs font-normal text-muted-foreground">
-                (optional)
+                {uiT("(optional)")}
               </span>
             </label>
             <Input
@@ -219,17 +223,19 @@ export function EditCommunityDialog({
               <p className="text-xs text-destructive">{reposDirError}</p>
             ) : null}
             <p className="text-xs text-muted-foreground">
-              Point the agent's <code>REPOS</code> directory at an existing
-              folder so agents work in your local checkouts. Leave blank to use
-              the default location.
+              {uiT("Point the agent's ")}
+              <code>REPOS</code>{" "}
+              {uiT(
+                " directory at an existing folder so agents work in your local checkouts. Leave blank to use the default location.",
+              )}
             </p>
           </div>
           <div className="flex justify-end gap-2 pt-2">
             <Button onClick={handleClose} type="button" variant="outline">
-              Cancel
+              {uiT("Cancel")}
             </Button>
             <Button disabled={!name.trim() || !relayUrl.trim()} type="submit">
-              Save Changes
+              {uiT("Save Changes")}
             </Button>
           </div>
         </form>

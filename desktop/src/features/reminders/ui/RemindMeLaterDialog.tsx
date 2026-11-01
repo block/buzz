@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { CalendarClock, Clock, Loader2 } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
@@ -31,6 +33,8 @@ export function RemindMeLaterDialog({
   onOpenChange: (open: boolean) => void;
   target: ReminderTarget | null;
 }) {
+  useUiLanguage();
+
   const pubkey = useIdentityQuery().data?.pubkey ?? "";
   const { create } = useReminderMutations(pubkey);
   const [note, setNote] = React.useState("");
@@ -44,11 +48,11 @@ export function RemindMeLaterDialog({
       { target, notBefore, note: note || undefined },
       {
         onSuccess: () => {
-          toast.success("Reminder set");
+          toast.success(uiT("Reminder set"));
           onOpenChange(false);
           setNote("");
         },
-        onError: () => toast.error("Failed to create reminder"),
+        onError: () => toast.error(uiT("Failed to create reminder")),
       },
     );
   };
@@ -59,10 +63,10 @@ export function RemindMeLaterDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Clock className="h-4 w-4" />
-            Remind me later
+            {uiT("Remind me later")}
           </DialogTitle>
           <DialogDescription>
-            Choose when you want to be reminded about this message.
+            {uiT("Choose when you want to be reminded about this message.")}
           </DialogDescription>
         </DialogHeader>
 
@@ -83,11 +87,11 @@ export function RemindMeLaterDialog({
         <div className="space-y-3 border-t pt-3">
           <p className="flex items-center gap-2 text-sm font-medium">
             <CalendarClock className="h-4 w-4" />
-            Custom date & time
+            {uiT("Custom date & time")}
           </p>
           <div className="flex gap-2">
             <Input
-              aria-label="Reminder date"
+              aria-label={uiT("Reminder date")}
               className="flex-1"
               min={todayDateString()}
               onChange={(e) => setCustomDate(e.target.value)}
@@ -95,7 +99,7 @@ export function RemindMeLaterDialog({
               value={customDate}
             />
             <Input
-              aria-label="Reminder time"
+              aria-label={uiT("Reminder time")}
               className="w-[120px]"
               onChange={(e) => setCustomTime(e.target.value)}
               type="time"
@@ -109,11 +113,11 @@ export function RemindMeLaterDialog({
             htmlFor="reminder-note"
             className="text-sm font-medium text-muted-foreground"
           >
-            Note (optional)
+            {uiT("Note (optional)")}
           </label>
           <Textarea
             id="reminder-note"
-            placeholder="Add a note..."
+            placeholder={uiT("Add a note...")}
             value={note}
             onChange={(e) => setNote(e.target.value)}
             rows={2}
@@ -127,7 +131,7 @@ export function RemindMeLaterDialog({
             onClick={() => onOpenChange(false)}
             disabled={create.isPending}
           >
-            Cancel
+            {uiT("Cancel")}
           </Button>
           <Button
             className="relative"
@@ -141,7 +145,7 @@ export function RemindMeLaterDialog({
             {/* The hidden label keeps the button width stable while the
                 spinner overlays it. */}
             <span className={create.isPending ? "invisible" : undefined}>
-              Set reminder
+              {uiT("Set reminder")}
             </span>
             {create.isPending ? (
               <span className="absolute inset-0 flex items-center justify-center">

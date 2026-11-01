@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiMessage, uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { AlertTriangle, ChevronDown, Search, X } from "lucide-react";
 import {
@@ -74,9 +76,24 @@ function formatSearchUserSecondary(user: UserSearchResult) {
 }
 
 const RESPOND_TO_OPTIONS: PersonaDropdownOption[] = [
-  { label: "Only me (default)", value: "owner-only" },
-  { label: "Anyone", value: "anyone" },
-  { label: "Selected people", value: "allowlist" },
+  {
+    get label() {
+      return uiT("Only me (default)");
+    },
+    value: "owner-only",
+  },
+  {
+    get label() {
+      return uiT("Anyone");
+    },
+    value: "anyone",
+  },
+  {
+    get label() {
+      return uiT("Selected people");
+    },
+    value: "allowlist",
+  },
 ];
 
 export const OWNER_ONLY_ACCESS_DISABLED_REASON =
@@ -115,6 +132,8 @@ export function CreateAgentRespondToField({
    */
   runLocation?: AgentRunLocation | null;
 }) {
+  useUiLanguage();
+
   const [query, setQuery] = React.useState("");
   const [isDirectEntryOpen, setIsDirectEntryOpen] = React.useState(false);
   const [pasteText, setPasteText] = React.useState("");
@@ -205,7 +224,7 @@ export function CreateAgentRespondToField({
         }
         htmlFor="agent-respond-to"
       >
-        Who can send instructions
+        {uiT("Who can send instructions")}
       </label>
       {isPersonaVariant ? (
         <PersonaDropdownField
@@ -213,7 +232,7 @@ export function CreateAgentRespondToField({
           id="agent-respond-to"
           onValueChange={(value) => onModeChange(value as RespondToMode)}
           options={RESPOND_TO_OPTIONS}
-          placeholder="Only me (default)"
+          placeholder={uiT("Only me (default)")}
           value={mode}
         />
       ) : (
@@ -243,7 +262,7 @@ export function CreateAgentRespondToField({
       {mode === "anyone" ? accessWarning : null}
       {mode === "owner-only" ? (
         <p className="text-xs text-muted-foreground">
-          Only you and your agents can send instructions.
+          {uiT("Only you and your agents can send instructions.")}
         </p>
       ) : null}
       {mode === "allowlist" ? (
@@ -342,21 +361,22 @@ function AllowlistPicker({
     >
       {!isPersona ? (
         <div className="flex items-center justify-between gap-2">
-          <span className="text-sm font-medium">Selected people</span>
+          <span className="text-sm font-medium">{uiT("Selected people")}</span>
           <span className="rounded-full bg-background px-2 py-1 text-2xs font-medium leading-none text-muted-foreground">
-            {allowlist.length} selected
+            {uiT("{0} selected", { p0: allowlist.length })}
           </span>
         </div>
       ) : null}
       {!isPersona && ownerPubkey ? (
         <p className="text-xs text-muted-foreground">
-          You (
-          <PubKey pubkey={ownerPubkey} />) can always use this agent. You
-          don&apos;t need to add yourself.
+          {uiMessage(
+            "You ({0}) can always use this agent. You don't need to add yourself.",
+            { p0: <PubKey pubkey={ownerPubkey} /> },
+          )}
         </p>
       ) : !isPersona ? (
         <p className="text-xs text-muted-foreground">
-          You can always use this agent.
+          {uiT("You can always use this agent.")}
         </p>
       ) : null}
       <div className="rounded-lg border border-border/80 bg-background">
@@ -368,7 +388,9 @@ function AllowlistPicker({
             disabled={disabled}
             onChange={(event) => onQueryChange(event.target.value)}
             placeholder={
-              isPersona ? "Search people" : "Search by name or NIP-05."
+              isPersona
+                ? uiT("Search people")
+                : uiT("Search by name or NIP-05.")
             }
             value={query}
           />
@@ -388,7 +410,7 @@ function AllowlistPicker({
                 />
                 <PubKey pubkey={pubkey} />
                 <button
-                  aria-label={`Remove ${truncateNpub(pubkey)}`}
+                  aria-label={uiT("Remove {0}", { p0: truncateNpub(pubkey) })}
                   className="text-muted-foreground transition-colors hover:text-foreground"
                   disabled={disabled}
                   onClick={() => onRemove(pubkey)}
@@ -404,7 +426,7 @@ function AllowlistPicker({
           <div className="border-t border-border/70 px-2 py-2">
             {searchIsLoading ? (
               <p className="px-2 py-1 text-sm text-muted-foreground">
-                Searching…
+                {uiT("Searching…")}
               </p>
             ) : searchResults.length > 0 ? (
               <div className="max-h-44 space-y-1 overflow-y-auto">
@@ -432,7 +454,9 @@ function AllowlistPicker({
                         </p>
                       </div>
                     </div>
-                    <span className="text-xs text-muted-foreground">Add</span>
+                    <span className="text-xs text-muted-foreground">
+                      {uiT("Add")}
+                    </span>
                   </button>
                 ))}
               </div>
@@ -454,15 +478,17 @@ function AllowlistPicker({
                       {truncateNpub(queryPubkey)}
                     </p>
                     <p className="truncate text-xs text-muted-foreground">
-                      Add pubkey directly
+                      {uiT("Add pubkey directly")}
                     </p>
                   </div>
                 </div>
-                <span className="text-xs text-muted-foreground">Add</span>
+                <span className="text-xs text-muted-foreground">
+                  {uiT("Add")}
+                </span>
               </button>
             ) : (
               <p className="px-2 py-1 text-sm text-muted-foreground">
-                No matching users.
+                {uiT("No matching users.")}
               </p>
             )}
           </div>
@@ -487,7 +513,7 @@ function AllowlistPicker({
                 isDirectEntryOpen && "rotate-180",
               )}
             />
-            <span>Paste pubkeys</span>
+            <span>{uiT("Paste pubkeys")}</span>
           </button>
           {isDirectEntryOpen ? (
             <div
@@ -495,8 +521,9 @@ function AllowlistPicker({
               id="agent-respond-to-direct-panel"
             >
               <p className="text-xs text-muted-foreground">
-                One per line, or comma/space-separated. Each entry is an npub
-                (npub1…) or a 64-char hex public key.
+                {uiT(
+                  "One per line, or comma/space-separated. Each entry is an npub (npub1…) or a 64-char hex public key.",
+                )}
               </p>
               <Textarea
                 className="min-h-20 font-mono text-xs"
@@ -508,16 +535,23 @@ function AllowlistPicker({
               />
               {pasteInvalid.length > 0 ? (
                 <p className="text-xs text-destructive">
-                  {pasteInvalid.length} entr
-                  {pasteInvalid.length === 1 ? "y is" : "ies are"} not a valid
-                  npub or 64-char hex public key and will be ignored.
+                  {uiT(
+                    "{0} entr {1} not a valid npub or 64-char hex public key and will be ignored.",
+                    {
+                      p0: pasteInvalid.length,
+                      p1: pasteInvalid.length === 1 ? "y is" : "ies are",
+                    },
+                  )}
                 </p>
               ) : null}
               <div className="flex items-center justify-between gap-2">
                 <span className="text-xs text-muted-foreground">
                   {pasteValidCount > 0
-                    ? `${pasteValidCount} valid pubkey${pasteValidCount === 1 ? "" : "s"} ready.`
-                    : "No valid pubkeys yet."}
+                    ? uiT("{0} valid pubkey{1} ready.", {
+                        p0: pasteValidCount,
+                        p1: pasteValidCount === 1 ? "" : "s",
+                      })
+                    : uiT("No valid pubkeys yet.")}
                 </span>
                 <button
                   className="rounded-md border border-border/80 bg-background px-2.5 py-1 text-xs font-medium transition-colors hover:bg-accent hover:text-accent-foreground disabled:cursor-not-allowed disabled:opacity-50"
@@ -526,7 +560,7 @@ function AllowlistPicker({
                   onClick={onAddFromPaste}
                   type="button"
                 >
-                  Add people
+                  {uiT("Add people")}
                 </button>
               </div>
             </div>

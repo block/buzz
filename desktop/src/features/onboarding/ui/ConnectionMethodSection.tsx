@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type * as React from "react";
 import { ChevronRight, CreditCard, KeyRound } from "lucide-react";
 
@@ -7,12 +9,16 @@ import type { HarnessConnectionMethod } from "./harnessConnectionOptions";
 const CONNECTION_METHOD_CHOICES = [
   {
     icon: CreditCard,
-    label: "Log in with a subscription",
+    get label() {
+      return uiT("Log in with a subscription");
+    },
     method: "subscription",
   },
   {
     icon: KeyRound,
-    label: "Use an API key",
+    get label() {
+      return uiT("Use an API key");
+    },
     method: "api",
   },
 ] as const satisfies ReadonlyArray<{
@@ -33,10 +39,12 @@ export function ConnectionMethodSection({
     >
       <div className="shrink-0">
         <h1 className="text-title font-normal text-foreground">
-          Connect your AI provider
+          {uiT("Connect your AI provider")}
         </h1>
         <p className="mt-2 text-base leading-6 text-foreground/80">
-          Choose how your agents will access AI. You can change this later.
+          {uiT(
+            "Choose how your agents will access AI. You can change this later.",
+          )}
         </p>
       </div>
 

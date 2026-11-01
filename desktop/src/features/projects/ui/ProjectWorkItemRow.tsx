@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import type * as React from "react";
 
 import type { ProjectSelectionItem } from "@/features/projects/lib/projectSelection";
@@ -33,6 +35,8 @@ export function ProjectWorkItemRow({
   title: string;
   trailing?: React.ReactNode;
 }) {
+  useUiLanguage();
+
   const projectSelection = useProjectSelection();
   const selected = Boolean(
     selection && projectSelection?.isSelected(selection.item.id),
@@ -73,7 +77,7 @@ export function ProjectWorkItemRow({
           >
             <ProjectEntitySelectControl
               checked={selected}
-              label={`Select ${selection.item.title}`}
+              label={uiT("Select {0}", { p0: selection.item.title })}
               onToggle={({ shiftKey }) =>
                 projectSelection.toggle(selection.item, {
                   rangeItems: selection.rangeItems,

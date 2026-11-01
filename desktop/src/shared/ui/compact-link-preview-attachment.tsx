@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { ImageOff } from "lucide-react";
 import { useRef, useState } from "react";
 
@@ -61,6 +63,8 @@ export function CompactLinkPreviewAttachment({
   preview: ResolvedLinkPreview;
   showControls?: boolean;
 }) {
+  useUiLanguage();
+
   const reserveImage = preview.imageState !== "none";
   const imageSrc =
     preview.imageState === "image" ? (preview.imageDataUrl ?? null) : null;
@@ -104,7 +108,7 @@ export function CompactLinkPreviewAttachment({
           >
             {showImage ? (
               <img
-                alt={`Preview from ${preview.imageDomain}`}
+                alt={uiT("Preview from {0}", { p0: preview.imageDomain })}
                 className="h-full w-full object-cover"
                 onError={() => setFailedImageSrc(imageSrc)}
                 src={imageSrc ?? undefined}
@@ -165,12 +169,20 @@ export function CompactLinkPreviewAttachment({
         </AttachmentContent>
         {onOpen ? (
           <AttachmentTrigger
-            aria-label={`Open ${preview.provider} ${preview.typeLabel}: ${preview.title}`}
+            aria-label={uiT("Open {0} {1}: {2}", {
+              p0: preview.provider,
+              p1: uiT(preview.typeLabel),
+              p2: preview.title,
+            })}
             className={reserveImage ? undefined : "rounded-none"}
             onClick={onOpen}
           >
             <span className="sr-only">
-              Open {preview.provider} {preview.typeLabel}: {preview.title}
+              {uiT("Open {0} {1}: {2}", {
+                p0: preview.provider,
+                p1: uiT(preview.typeLabel),
+                p2: preview.title,
+              })}
             </span>
           </AttachmentTrigger>
         ) : (
@@ -179,13 +191,21 @@ export function CompactLinkPreviewAttachment({
             className={reserveImage ? undefined : "rounded-none"}
           >
             <a
-              aria-label={`Open ${preview.provider} ${preview.typeLabel}: ${preview.title}`}
+              aria-label={uiT("Open {0} {1}: {2}", {
+                p0: preview.provider,
+                p1: uiT(preview.typeLabel),
+                p2: preview.title,
+              })}
               href={preview.href}
               rel="noreferrer"
               target="_blank"
             >
               <span className="sr-only">
-                Open {preview.provider} {preview.typeLabel}: {preview.title}
+                {uiT("Open {0} {1}: {2}", {
+                  p0: preview.provider,
+                  p1: uiT(preview.typeLabel),
+                  p2: preview.title,
+                })}
               </span>
             </a>
           </AttachmentTrigger>

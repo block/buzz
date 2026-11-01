@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { useUserStatusQuery } from "@/features/user-status/hooks";
@@ -20,6 +22,8 @@ export function UserStatusLookupProvider({
 }: {
   children: React.ReactNode;
 }) {
+  useUiLanguage();
+
   const [registrations, setRegistrations] = React.useState<
     ReadonlyMap<string, number>
   >(new Map());

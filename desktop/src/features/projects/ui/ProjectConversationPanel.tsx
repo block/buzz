@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { useQuery } from "@tanstack/react-query";
 import * as React from "react";
 
@@ -51,6 +53,8 @@ export function ProjectConversationPanel({
   sharedHeaderBackdrop?: boolean;
   widthPx: number;
 }) {
+  useUiLanguage();
+
   const { goChannel } = useAppNavigation();
   const channelsQuery = useChannelsQuery();
   const activeChannel =
@@ -195,7 +199,7 @@ export function ProjectConversationPanel({
   const layoutProps = {
     canResetWidth,
     enterMotion: !canShowThread,
-    headerTitle: channelLabel ? `#${channelLabel}` : "Thread",
+    headerTitle: channelLabel ? `#${channelLabel}` : uiT("Thread"),
     headerTitleAriaLabel: channelLabel ? `Open #${channelLabel}` : undefined,
     isFocusMode: false,
     isSinglePanelView: !isOverlay,
@@ -317,10 +321,10 @@ export function ProjectConversationPanel({
   return wrapProjectConversationPane(
     <div className="flex h-full flex-col items-center justify-center gap-3 bg-background p-6 text-center">
       <p className="text-sm text-muted-foreground">
-        This conversation could not be loaded.
+        {uiT("This conversation could not be loaded.")}
       </p>
       <Button onClick={onClose} size="sm" variant="outline">
-        Close
+        {uiT("Close")}
       </Button>
     </div>,
     {

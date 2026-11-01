@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { CustomHarnessForm } from "@/features/settings/ui/CustomHarnessForm";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
@@ -24,13 +26,15 @@ export function AddCustomHarnessDialog({
         contentClassName="flex min-h-0 flex-1 p-0"
         data-testid="add-custom-harness-dialog"
         scrollAreaClassName="flex min-h-0 overflow-hidden px-0"
-        title="Add custom harness"
+        title={uiT("Add custom harness")}
       >
         <CustomHarnessForm
           chromeless
           header={
             <p className="text-sm text-muted-foreground">
-              Register any ACP-speaking agent tool as a selectable harness.
+              {uiT(
+                "Register any ACP-speaking agent tool as a selectable harness.",
+              )}
             </p>
           }
           onCancel={() => onOpenChange(false)}

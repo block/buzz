@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type * as React from "react";
 import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
 import type { AgentAiConfigurationMode } from "./agentAiConfigurationPolicy";
@@ -18,13 +20,13 @@ export function HarnessModelDefaultNotice({
       className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 text-sm"
       data-testid="agent-harness-defaults-notice"
     >
-      <dt className="text-muted-foreground">Harness</dt>
+      <dt className="text-muted-foreground">{uiT("Harness")}</dt>
       <dd className="truncate text-foreground">
-        {harness || "Not configured"}
+        {harness || uiT("Not configured")}
       </dd>
-      <dt className="text-muted-foreground">Model</dt>
+      <dt className="text-muted-foreground">{uiT("Model")}</dt>
       <dd className="truncate text-foreground">
-        {model?.trim() || "Harness default"}
+        {model?.trim() || uiT("Harness default")}
       </dd>
     </dl>
   );
@@ -76,7 +78,9 @@ export function AgentAiConfigurationModeField({
 }) {
   return (
     <div className="space-y-1.5">
-      <p className="text-sm font-medium text-foreground">AI configuration</p>
+      <p className="text-sm font-medium text-foreground">
+        {uiT("AI configuration")}
+      </p>
       <Tabs
         onValueChange={(value) =>
           onModeChange(value as AgentAiConfigurationMode)
@@ -97,14 +101,14 @@ export function AgentAiConfigurationModeField({
             value="defaults"
           >
             {needsProviderSelection
-              ? "Use agent defaults"
-              : "Use harness defaults"}
+              ? uiT("Use agent defaults")
+              : uiT("Use harness defaults")}
           </TabsTrigger>
           <TabsTrigger
             className="relative z-10 h-full rounded-md bg-transparent text-xs font-medium shadow-none transition-colors data-[state=active]:bg-transparent data-[state=active]:shadow-none"
             value="custom"
           >
-            Customize for this agent
+            {uiT("Customize for this agent")}
           </TabsTrigger>
         </TabsList>
       </Tabs>

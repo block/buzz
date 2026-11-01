@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import type { Project } from "@/features/projects/hooks";
@@ -33,6 +35,8 @@ export function AddProjectRepositoryDialog({
   project?: Project;
   projects?: Project[];
 }) {
+  useUiLanguage();
+
   const projectOptions = React.useMemo(
     () => projects ?? (project ? [project] : []),
     [project, projects],
@@ -79,7 +83,9 @@ export function AddProjectRepositoryDialog({
       onOpenChange(false);
     } catch (error) {
       setErrorMessage(
-        error instanceof Error ? error.message : "Failed to add repository.",
+        error instanceof Error
+          ? error.message
+          : uiT("Failed to add repository."),
       );
     }
   }
@@ -98,8 +104,10 @@ export function AddProjectRepositoryDialog({
         data-testid="add-project-repository-dialog"
         description={
           selectedProject
-            ? `Add another repository to ${selectedProject.name}.`
-            : "Choose a project for this repository."
+            ? uiT("Add another repository to {0}.", {
+                p0: selectedProject.name,
+              })
+            : uiT("Choose a project for this repository.")
         }
         footer={
           <Button
@@ -113,12 +121,12 @@ export function AddProjectRepositoryDialog({
             form="add-project-repository-form"
             type="submit"
           >
-            {isCreating ? "Adding..." : "Add repository"}
+            {isCreating ? uiT("Adding...") : uiT("Add repository")}
           </Button>
         }
         footerClassName="border-t-0 pt-0"
         headerClassName="pb-2"
-        title="Add repository"
+        title={uiT("Add repository")}
       >
         <form
           className="space-y-5"
@@ -131,7 +139,7 @@ export function AddProjectRepositoryDialog({
                 className="text-sm font-medium text-foreground"
                 htmlFor="add-project-repository-project"
               >
-                Project
+                {uiT("Project")}
               </label>
               <div className={FIELD_SHELL_CLASS}>
                 <select
@@ -161,7 +169,7 @@ export function AddProjectRepositoryDialog({
               className="text-sm font-medium text-foreground"
               htmlFor="add-project-repository-name"
             >
-              Name
+              {uiT("Name")}
             </label>
             <div className={FIELD_SHELL_CLASS}>
               <Input
@@ -188,7 +196,7 @@ export function AddProjectRepositoryDialog({
               className="text-sm font-medium text-foreground"
               htmlFor="add-project-repository-channel"
             >
-              Access channel
+              {uiT("Access channel")}
             </label>
             <div className={FIELD_SHELL_CLASS}>
               <select
@@ -203,7 +211,7 @@ export function AddProjectRepositoryDialog({
                 required
                 value={selectedChannelId}
               >
-                <option value="">Select a channel</option>
+                <option value="">{uiT("Select a channel")}</option>
                 {channels.map((channel) => (
                   <option key={channel.id} value={channel.id}>
                     {channel.name}
@@ -212,7 +220,7 @@ export function AddProjectRepositoryDialog({
               </select>
             </div>
             <p className="text-xs text-muted-foreground">
-              Members of this channel can access the repository.
+              {uiT("Members of this channel can access the repository.")}
             </p>
           </div>
           <div className="space-y-1.5">
@@ -220,9 +228,9 @@ export function AddProjectRepositoryDialog({
               className="text-sm font-medium text-foreground"
               htmlFor="add-project-repository-clone-url"
             >
-              Clone URL
+              {uiT("Clone URL")}
               <span className="ml-1 text-xs font-normal text-muted-foreground/50">
-                Optional
+                {uiT("Optional")}
               </span>
             </label>
             <div className={FIELD_SHELL_CLASS}>

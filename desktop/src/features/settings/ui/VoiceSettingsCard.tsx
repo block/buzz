@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiMessage, uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { ChevronDown, Play, Trash2, Upload, Volume2 } from "lucide-react";
 
@@ -47,6 +49,8 @@ type TtsVoiceMutation = {
 };
 
 export function VoiceSettingsCard() {
+  useUiLanguage();
+
   const [settings, setSettings] = React.useState<TtsSettings | null>(null);
   const [registry, setRegistry] = React.useState<VoiceRegistryEntry[]>([]);
   const [busy, setBusy] = React.useState(false);
@@ -72,7 +76,7 @@ export function VoiceSettingsCard() {
           setError(
             loadError instanceof Error
               ? loadError.message
-              : "Voice settings could not be loaded.",
+              : uiT("Voice settings could not be loaded."),
           );
         }
       });
@@ -106,7 +110,7 @@ export function VoiceSettingsCard() {
       setError(
         saveError instanceof Error
           ? saveError.message
-          : "Voice settings could not be saved.",
+          : uiT("Voice settings could not be saved."),
       );
     } finally {
       setBusy(false);
@@ -125,7 +129,7 @@ export function VoiceSettingsCard() {
       setError(
         saveError instanceof Error
           ? saveError.message
-          : "Voice settings could not be saved.",
+          : uiT("Voice settings could not be saved."),
       );
     } finally {
       setBusy(false);
@@ -147,7 +151,7 @@ export function VoiceSettingsCard() {
       setError(
         importError instanceof Error
           ? importError.message
-          : "Voice could not be imported.",
+          : uiT("Voice could not be imported."),
       );
     } finally {
       setBusy(false);
@@ -169,7 +173,7 @@ export function VoiceSettingsCard() {
       setError(
         deleteError instanceof Error
           ? deleteError.message
-          : "Voice could not be deleted.",
+          : uiT("Voice could not be deleted."),
       );
     } finally {
       setBusy(false);
@@ -187,25 +191,27 @@ export function VoiceSettingsCard() {
   return (
     <section className="min-w-0" data-testid="settings-voice">
       <SettingsSectionHeader
-        title="Voice"
-        description="Choose whether Buzz reads new agent responses aloud during an active huddle."
+        title={uiT("Voice")}
+        description={uiT(
+          "Choose whether Buzz reads new agent responses aloud during an active huddle.",
+        )}
       />
 
       <SettingsOptionGroupList>
-        <SettingsOptionGroup title="Playback">
+        <SettingsOptionGroup title={uiT("Playback")}>
           <SettingsOptionRow>
             <div className="min-w-0">
               <label
                 className="text-sm font-medium"
                 htmlFor="agent-text-to-speech-switch"
               >
-                Agent text to speech
+                {uiT("Agent text to speech")}
               </label>
               <p
                 className="text-sm text-muted-foreground/70"
                 data-settings-subcopy
               >
-                Read new agent messages aloud in the order they arrive.
+                {uiT("Read new agent messages aloud in the order they arrive.")}
               </p>
             </div>
             <Switch
@@ -228,15 +234,15 @@ export function VoiceSettingsCard() {
           )}
           data-testid="pocket-voice-controls"
         >
-          <SettingsOptionGroup title="Voice">
+          <SettingsOptionGroup title={uiT("Voice")}>
             <SettingsOptionRow>
               <div className="min-w-0">
-                <p className="text-sm font-medium">Pocket TTS voice</p>
+                <p className="text-sm font-medium">{uiT("Pocket TTS voice")}</p>
                 <p
                   className="text-sm text-muted-foreground/70"
                   data-settings-subcopy
                 >
-                  Voice files stay private on this device.
+                  {uiT("Voice files stay private on this device.")}
                 </p>
               </div>
 
@@ -244,7 +250,9 @@ export function VoiceSettingsCard() {
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <Button
-                      aria-label={`Pocket TTS voice: ${selectedVoice?.displayName ?? "Mary"}`}
+                      aria-label={uiT("Pocket TTS voice: {0}", {
+                        p0: selectedVoice?.displayName ?? "Mary",
+                      })}
                       className="min-w-32 justify-between"
                       data-testid="pocket-voice-selector"
                       disabled={controlsDisabled}
@@ -278,7 +286,9 @@ export function VoiceSettingsCard() {
                   </DropdownMenuContent>
                 </DropdownMenu>
                 <Button
-                  aria-label={`Preview ${selectedVoice?.displayName ?? "Mary"}`}
+                  aria-label={uiT("Preview {0}", {
+                    p0: selectedVoice?.displayName ?? "Mary",
+                  })}
                   data-testid="pocket-voice-preview"
                   disabled={controlsDisabled || previewing || !selectedVoice}
                   onClick={() => {
@@ -292,7 +302,7 @@ export function VoiceSettingsCard() {
                         setError(
                           previewError instanceof Error
                             ? previewError.message
-                            : "Voice preview could not be played.",
+                            : uiT("Voice preview could not be played."),
                         );
                       })
                       .finally(() => setPreviewing(false));
@@ -300,12 +310,13 @@ export function VoiceSettingsCard() {
                   size="sm"
                   variant="outline"
                 >
-                  {previewing ? (
-                    <Volume2 className="h-4 w-4 animate-pulse" />
-                  ) : (
-                    <Play className="h-4 w-4" />
-                  )}
-                  Preview
+                  {uiMessage("{0} Preview", {
+                    p0: previewing ? (
+                      <Volume2 className="h-4 w-4 animate-pulse" />
+                    ) : (
+                      <Play className="h-4 w-4" />
+                    ),
+                  })}
                 </Button>
                 <Button
                   data-testid="pocket-voice-import"
@@ -315,11 +326,13 @@ export function VoiceSettingsCard() {
                   variant="outline"
                 >
                   <Upload className="h-4 w-4" />
-                  Add voice
+                  {uiT("Add voice")}
                 </Button>
                 {selectedVoice?.key.startsWith("pocket:imported:") && (
                   <Button
-                    aria-label={`Delete ${selectedVoice.displayName}`}
+                    aria-label={uiT("Delete {0}", {
+                      p0: selectedVoice.displayName,
+                    })}
                     data-testid="pocket-voice-delete"
                     disabled={controlsDisabled}
                     onClick={() => setDeleteCandidate(selectedVoice)}
@@ -351,17 +364,23 @@ export function VoiceSettingsCard() {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete imported voice?</AlertDialogTitle>
+            <AlertDialogTitle>{uiT("Delete imported voice?")}</AlertDialogTitle>
             <AlertDialogDescription>
               {deleteCandidate
-                ? `${deleteCandidate.displayName} and its local audio file will be removed.`
-                : "This imported voice and its local audio file will be removed."}
+                ? uiT("{0} and its local audio file will be removed.", {
+                    p0: deleteCandidate.displayName,
+                  })
+                : uiT(
+                    "This imported voice and its local audio file will be removed.",
+                  )}
               {selectedVoice?.key === deleteCandidate?.key &&
-                " Mary will be selected instead."}
+                uiT(" Mary will be selected instead.")}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
+            <AlertDialogCancel disabled={busy}>
+              {uiT("Cancel")}
+            </AlertDialogCancel>
             <AlertDialogAction
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               data-testid="confirm-pocket-voice-delete"
@@ -373,7 +392,7 @@ export function VoiceSettingsCard() {
                 }
               }}
             >
-              Delete voice
+              {uiT("Delete voice")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

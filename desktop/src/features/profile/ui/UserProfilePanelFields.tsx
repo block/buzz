@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import type { LucideIcon } from "lucide-react";
 import {
   Activity,
@@ -37,6 +39,8 @@ function runtimeLabel(command: string): string {
 }
 
 export type ProfileField = {
+  /** Stable discriminator; never translate or derive it from the label. */
+  id: string;
   copyValue?: string;
   displayValue: string;
   displayNode?: React.ReactNode;
@@ -47,35 +51,31 @@ export type ProfileField = {
   trailingNode?: React.ReactNode;
 };
 
-const AGENT_INFO_LABELS = new Set([
-  "Public key",
-  "Managed by",
-  "NIP-05",
-  "Agent type",
-  "Capabilities",
-  "Backend",
+const AGENT_INFO_IDS = new Set([
+  "public-key",
+  "managed-by",
+  "nip05",
+  "agent-type",
+  "capabilities",
+  "backend",
 ]);
-const AGENT_SETTINGS_LABELS = new Set([
-  "Runtime",
-  "Agent profile",
-  "Who can send instructions",
-  "ACP command",
-  "MCP command",
-  "Start on launch",
+const AGENT_SETTINGS_IDS = new Set([
+  "runtime",
+  "agent-profile",
+  "respond-to",
+  "acp-command",
+  "mcp-command",
+  "start-on-launch",
 ]);
-const DIAGNOSTICS_LABELS = new Set(["Status", "Last error"]);
+const DIAGNOSTICS_IDS = new Set(["status", "last-error"]);
 
 export function bucketProfileFields(fields: ProfileField[]) {
   return {
-    agentInfoFields: fields.filter((field) =>
-      AGENT_INFO_LABELS.has(field.label),
-    ),
+    agentInfoFields: fields.filter((field) => AGENT_INFO_IDS.has(field.id)),
     agentSettingsFields: fields.filter((field) =>
-      AGENT_SETTINGS_LABELS.has(field.label),
+      AGENT_SETTINGS_IDS.has(field.id),
     ),
-    diagnosticsFields: fields.filter((field) =>
-      DIAGNOSTICS_LABELS.has(field.label),
-    ),
+    diagnosticsFields: fields.filter((field) => DIAGNOSTICS_IDS.has(field.id)),
   };
 }
 
@@ -110,6 +110,8 @@ export function useProfileFieldBuckets({
   pubkey: string | null;
   relayAgent: RelayAgent | undefined;
 }) {
+  const language = useUiLanguage();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Display values depend on the active UI language.
   return React.useMemo(() => {
     const metadataFields = [
       ...buildPublicFields({ pubkey, profile, relayAgent, isBot, persona }),
@@ -131,6 +133,7 @@ export function useProfileFieldBuckets({
     ];
     return bucketProfileFields(metadataFields);
   }, [
+    language,
     isBot,
     isOwner,
     managedAgent,
@@ -178,7 +181,10 @@ export function buildPublicFields({
         />
       ),
       icon: Fingerprint,
-      label: "Public key",
+      id: "public-key",
+      get label() {
+        return uiT("Public key");
+      },
       testId: "user-profile-public-key",
     });
   }
@@ -188,6 +194,7 @@ export function buildPublicFields({
       copyValue: profile.nip05Handle,
       displayValue: profile.nip05Handle,
       icon: UserRound,
+      id: "nip05",
       label: "NIP-05",
       testId: "user-profile-nip05",
     });
@@ -198,16 +205,22 @@ export function buildPublicFields({
       copyValue: relayAgent.agentType,
       displayValue: runtimeLabel(relayAgent.agentType),
       icon: Cpu,
-      label: "Agent type",
+      id: "agent-type",
+      get label() {
+        return uiT("Agent type");
+      },
       testId: "user-profile-agent-type",
     });
   }
 
   if (!pubkey && persona) {
     fields.push({
-      displayValue: "Not deployed",
+      displayValue: uiT("Not deployed"),
       icon: Activity,
-      label: "Status",
+      id: "status",
+      get label() {
+        return uiT("Status");
+      },
       testId: "user-profile-agent-status",
     });
   }
@@ -217,7 +230,10 @@ export function buildPublicFields({
       copyValue: relayAgent.capabilities.join(", "),
       displayValue: relayAgent.capabilities.join(", "),
       icon: Server,
-      label: "Capabilities",
+      id: "capabilities",
+      get label() {
+        return uiT("Capabilities");
+      },
       testId: "user-profile-capabilities",
     });
   }
@@ -255,11 +271,11 @@ export function buildOwnerFields({
   const respondToDisplayValue = respondTo
     ? respondTo === "owner-only"
       ? ownerDisplayName
-        ? `Only ${ownerDisplayName} (owner)`
-        : "Only the owner"
+        ? uiT("Only {0} (owner)", { p0: ownerDisplayName })
+        : uiT("Only the owner")
       : respondTo === "allowlist"
-        ? "Selected people"
-        : "Anyone"
+        ? uiT("Selected people")
+        : uiT("Anyone")
     : null;
 
   const ownerClickable = Boolean(onOpenProfile && ownerProfilePubkey);
@@ -278,7 +294,10 @@ export function buildOwnerFields({
       displayValue: ownerDisplayName,
       displayNode: <span className="truncate">{ownerDisplayName}</span>,
       icon: UserRound,
-      label: "Managed by",
+      id: "managed-by",
+      get label() {
+        return uiT("Managed by");
+      },
       onClick:
         ownerClickable && ownerProfilePubkey
           ? () => onOpenProfile?.(ownerProfilePubkey)
@@ -296,7 +315,10 @@ export function buildOwnerFields({
       copyValue: managedAgent.agentCommand,
       displayValue: runtimeLabel(managedAgent.agentCommand),
       icon: Terminal,
-      label: "Runtime",
+      id: "runtime",
+      get label() {
+        return uiT("Runtime");
+      },
       testId: "user-profile-runtime",
     });
   } else if (relayAgent?.agentType) {
@@ -304,7 +326,10 @@ export function buildOwnerFields({
       copyValue: relayAgent.agentType,
       displayValue: runtimeLabel(relayAgent.agentType),
       icon: Terminal,
-      label: "Runtime",
+      id: "runtime",
+      get label() {
+        return uiT("Runtime");
+      },
       testId: "user-profile-runtime",
     });
   } else if (persona?.runtime) {
@@ -312,15 +337,21 @@ export function buildOwnerFields({
       copyValue: persona.runtime,
       displayValue: runtimeLabel(persona.runtime),
       icon: Terminal,
-      label: "Runtime",
+      id: "runtime",
+      get label() {
+        return uiT("Runtime");
+      },
       testId: "user-profile-runtime",
     });
   } else if (ownerPubkey) {
     fields.push({
       copyValue: canonicalNpub(ownerPubkey) ?? undefined,
-      displayValue: "Declared owner verified",
+      displayValue: uiT("Declared owner verified"),
       icon: UserRound,
-      label: "Agent profile",
+      id: "agent-profile",
+      get label() {
+        return uiT("Agent profile");
+      },
       testId: "user-profile-agent-profile",
     });
   }
@@ -340,7 +371,10 @@ export function buildOwnerFields({
         />
       ),
       icon: Activity,
-      label: "Status",
+      id: "status",
+      get label() {
+        return uiT("Status");
+      },
       testId: "user-profile-agent-status",
     });
   }
@@ -350,7 +384,10 @@ export function buildOwnerFields({
       copyValue: managedAgent.acpCommand,
       displayValue: managedAgent.acpCommand,
       icon: Terminal,
-      label: "ACP command",
+      id: "acp-command",
+      get label() {
+        return uiT("ACP command");
+      },
       testId: "user-profile-acp",
     });
   }
@@ -360,7 +397,10 @@ export function buildOwnerFields({
       copyValue: managedAgent.mcpCommand,
       displayValue: managedAgent.mcpCommand,
       icon: Terminal,
-      label: "MCP command",
+      id: "mcp-command",
+      get label() {
+        return uiT("MCP command");
+      },
       testId: "user-profile-mcp",
     });
   }
@@ -371,16 +411,22 @@ export function buildOwnerFields({
       copyValue: backendLabel,
       displayValue: backendLabel,
       icon: Server,
-      label: "Backend",
+      id: "backend",
+      get label() {
+        return uiT("Backend");
+      },
       testId: "user-profile-backend",
     });
   }
 
   if (managedAgent) {
     fields.push({
-      displayValue: managedAgent.startOnAppLaunch ? "Yes" : "No",
+      displayValue: managedAgent.startOnAppLaunch ? uiT("Yes") : uiT("No"),
       icon: Server,
-      label: "Start on launch",
+      id: "start-on-launch",
+      get label() {
+        return uiT("Start on launch");
+      },
       testId: "user-profile-start-on-launch",
     });
   }
@@ -389,7 +435,10 @@ export function buildOwnerFields({
     fields.push({
       displayValue: respondToDisplayValue,
       icon: Ear,
-      label: "Who can send instructions",
+      id: "respond-to",
+      get label() {
+        return uiT("Who can send instructions");
+      },
       testId: "user-profile-respond-to",
     });
   }
@@ -399,7 +448,10 @@ export function buildOwnerFields({
       copyValue: managedAgent.lastError,
       displayValue: managedAgent.lastError,
       icon: Activity,
-      label: "Last error",
+      id: "last-error",
+      get label() {
+        return uiT("Last error");
+      },
       testId: "user-profile-last-error",
     });
   }
@@ -408,28 +460,24 @@ export function buildOwnerFields({
 }
 
 function orderProfileFields(fields: ProfileField[]) {
-  const visibilityLabel = "Visibility";
-  const publicKeyLabel = "Public key";
-  const managedByLabel = "Managed by";
-  const statusLabel = "Status";
   return [
-    ...fields.filter((field) => field.label === visibilityLabel),
-    ...fields.filter((field) => field.label === publicKeyLabel),
-    ...fields.filter((field) => field.label === managedByLabel),
+    ...fields.filter((field) => field.id === "visibility"),
+    ...fields.filter((field) => field.id === "public-key"),
+    ...fields.filter((field) => field.id === "managed-by"),
     ...fields.filter(
       (field) =>
-        field.label !== visibilityLabel &&
-        field.label !== publicKeyLabel &&
-        field.label !== managedByLabel &&
+        field.id !== "visibility" &&
+        field.id !== "public-key" &&
+        field.id !== "managed-by" &&
         field.copyValue,
     ),
-    ...fields.filter((field) => field.label === statusLabel),
+    ...fields.filter((field) => field.id === "status"),
     ...fields.filter((field) => {
       if (
-        field.label === visibilityLabel ||
-        field.label === publicKeyLabel ||
-        field.label === managedByLabel ||
-        field.label === statusLabel
+        field.id === "visibility" ||
+        field.id === "public-key" ||
+        field.id === "managed-by" ||
+        field.id === "status"
       ) {
         return false;
       }
@@ -448,11 +496,7 @@ export function ProfileFieldRows({
   return (
     <>
       {orderProfileFields(fields).map((field) => (
-        <ProfileFieldRow
-          field={field}
-          key={field.testId ?? field.label}
-          variant={variant}
-        />
+        <ProfileFieldRow field={field} key={field.id} variant={variant} />
       ))}
     </>
   );
@@ -501,11 +545,13 @@ function ProfileFieldRow({
   field: ProfileField;
   variant: "default" | "runtime";
 }) {
+  useUiLanguage();
+
   const Icon = field.icon;
   const isCopyable = Boolean(field.copyValue);
   const isActionable = Boolean(field.onClick);
   const isTrailingDisplay =
-    variant === "runtime" && field.label === "Status" && field.displayNode;
+    variant === "runtime" && field.id === "status" && field.displayNode;
   const { copied, copy } = useCopyFeedback({
     label: field.label,
     value: field.copyValue ?? "",
@@ -553,11 +599,11 @@ function ProfileFieldRow({
   if (isActionable) {
     return (
       <button
-        aria-label={`Open ${field.label}`}
+        aria-label={uiT("Open {0}", { p0: field.label })}
         className="group flex min-h-16 w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
         data-testid={field.testId}
         onClick={field.onClick}
-        title={`Open ${field.label}`}
+        title={uiT("Open {0}", { p0: field.label })}
         type="button"
       >
         {content}
@@ -568,11 +614,11 @@ function ProfileFieldRow({
   if (isCopyable && field.copyValue) {
     return (
       <button
-        aria-label={`Copy ${field.label}`}
+        aria-label={uiT("Copy {0}", { p0: field.label })}
         className="group flex min-h-16 w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
         data-testid={field.testId}
         onClick={() => void copy()}
-        title={`Copy ${field.label}`}
+        title={uiT("Copy {0}", { p0: field.label })}
         type="button"
       >
         {content}

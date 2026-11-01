@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import type * as React from "react";
 import * as BuzzTheme from "@/app/BuzzThemeSurfaces";
 import { HuddleRoomHeader, HuddleStartingView } from "@/features/huddle";
@@ -23,6 +25,8 @@ export function AppShellChannelSurface({
   mainInsetRef,
   terminal,
 }: AppShellChannelSurfaceProps) {
+  useUiLanguage();
+
   const { isMobile, openMobile, state: sidebarState } = useSidebar();
   const hasCollapsedSidebarGutter =
     !isHuddleRoom &&

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type { Repository } from "@/features/projects/hooks";
 import {
   type ProjectRepoHost,
@@ -30,7 +32,7 @@ export function useProjectRepoPresentation(
     controls: {
       externalUrl: host.kind === "external" ? webUrl : null,
       remoteKind: host.kind === "unresolved" ? undefined : host.kind,
-      remoteLabel: host.kind === "external" ? host.host : "Remote",
+      remoteLabel: host.kind === "external" ? host.host : uiT("Remote"),
     },
   };
 }

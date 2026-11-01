@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import type * as React from "react";
 import { BellOff, ChevronDown, CircleDot, X } from "lucide-react";
 
@@ -75,8 +77,7 @@ function UnreadCountBadge({
     >
       {formatUnreadCount(count)}
       <span className="sr-only">
-        {" "}
-        unread notification{count === 1 ? "" : "s"}
+        {uiT("unread notification{0}", { p0: count === 1 ? "" : "s" })}
       </span>
     </span>
   );
@@ -94,7 +95,7 @@ function UnreadDotBadge({
       className={cn("h-2 w-2 shrink-0 rounded-full bg-primary", className)}
       data-testid={`channel-unread-dot-${channelName}`}
     >
-      <span className="sr-only">unread</span>
+      <span className="sr-only">{uiT("unread")}</span>
     </span>
   );
 }
@@ -129,6 +130,8 @@ function ChannelWorkingBadge({
   isActive: boolean;
   summary: ActiveChannelTurnSummary;
 }) {
+  useUiLanguage();
+
   const now = useNow(1000);
   const elapsed = formatElapsed(now - summary.anchorAt);
   const label =
@@ -264,6 +267,8 @@ export function ChannelMenuButton({
   presenceStatus?: PresenceStatus;
   onSelectChannel: (channelId: string) => void;
 }) {
+  useUiLanguage();
+
   const resolvedLabel = label ?? channel.name;
   const ephemeralDisplay = getEphemeralChannelDisplay(channel);
   const { hasSidebarUnreadProjections, unreadThreadChannelIds } = useAppShell();
@@ -504,7 +509,7 @@ export function SidebarSection({
                     ) : null}
                     {channel.channelType === "dm" && onHideDm ? (
                       <button
-                        aria-label="Close direct message"
+                        aria-label={uiT("Close direct message")}
                         className={cn(
                           "absolute right-1 top-1/2 z-10 -translate-y-1/2 after:absolute after:-inset-2 after:md:hidden group-data-[collapsible=icon]:hidden",
                           SIDEBAR_ROW_ICON_ACTION_CLASS,

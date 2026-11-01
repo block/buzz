@@ -1,3 +1,5 @@
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
 import * as React from "react";
 
 import { getPresenceLabel } from "@/features/presence/lib/presence";
@@ -61,6 +63,8 @@ export function SidebarProfileCard({
   selfUserStatus,
   communities,
 }: SidebarProfileCardProps) {
+  useUiLanguage();
+
   const selfProfileCache = useSelfProfileCache();
   const myMembershipQuery = useMyRelayMembershipLookupQuery();
   const activeRole = myMembershipQuery.data?.membership?.role;
@@ -85,7 +89,7 @@ export function SidebarProfileCard({
     [toggleProfilePopover],
   );
   const hasStatus = Boolean(selfUserStatus?.text || selfUserStatus?.emoji);
-  const communityLabel = activeCommunity?.name ?? "No community";
+  const communityLabel = activeCommunity?.name ?? uiT("No community");
   const readonlyCommunityLabel = (
     <span
       className="flex min-w-0 cursor-pointer items-center gap-1 text-xs leading-snug text-sidebar-foreground/70"
@@ -111,7 +115,9 @@ export function SidebarProfileCard({
     >
       <div className="flex min-w-0 items-center gap-3">
         <button
-          aria-label={`Open profile menu for ${resolvedDisplayName}`}
+          aria-label={uiT("Open profile menu for {0}", {
+            p0: resolvedDisplayName,
+          })}
           className="relative shrink-0 rounded-xl outline-hidden focus:outline-none focus-visible:outline-none"
           data-testid="sidebar-profile-avatar-button"
           onClick={(event) => {
@@ -209,7 +215,9 @@ export function SidebarProfileCard({
           {hasStatus ? (
             <div className="relative mt-0.5">
               <button
-                aria-label={`Open profile menu for ${resolvedDisplayName}`}
+                aria-label={uiT("Open profile menu for {0}", {
+                  p0: resolvedDisplayName,
+                })}
                 className={cn(
                   "flex w-full min-w-0 items-center truncate rounded-sm text-left text-xs leading-snug text-sidebar-foreground/70 outline-hidden transition-opacity duration-150 focus:outline-none focus-visible:outline-none group-hover/profile-card:opacity-0",
                   profilePopoverOpen && "opacity-100",

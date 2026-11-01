@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { ChevronDown, ChevronUp, ImageOff } from "lucide-react";
 import type { ComponentType, ReactNode } from "react";
 import { useState } from "react";
@@ -62,6 +64,8 @@ function LinkPreviewImage({
   ImageLightbox: LinkPreviewImageLightboxComponent;
   preview: ResolvedLinkPreview;
 }) {
+  useUiLanguage();
+
   const imageSrc =
     preview.imageState === "image" ? preview.imageDataUrl : undefined;
   const [failedImageSrc, setFailedImageSrc] = useState<string | null>(null);
@@ -164,6 +168,8 @@ function TweetPreview({
   showControls: boolean;
   showExpandControl: boolean;
 }) {
+  useUiLanguage();
+
   const [contentExpanded, setContentExpanded] = useState(true);
   const reserveImage = preview.imageState !== "none";
   const hasExpandableContent = Boolean(preview.description) || reserveImage;
@@ -222,7 +228,7 @@ function TweetPreview({
           ) : (
             <ChevronDown aria-hidden="true" className="size-3" />
           )}
-          {contentExpanded ? "Show less" : "Show more"}
+          {contentExpanded ? uiT("Show less") : uiT("Show more")}
         </button>
       ) : null}
       {showControls ? (
@@ -249,6 +255,8 @@ export function RichLinkPreviewAttachment({
   showControls?: boolean;
   showExpandControl?: boolean;
 }) {
+  useUiLanguage();
+
   const [contentExpanded, setContentExpanded] = useState(true);
 
   if (isTweetPreview(preview)) {
@@ -301,7 +309,11 @@ export function RichLinkPreviewAttachment({
           <span className="truncate">{hostname}</span>
         </a>
         <a
-          aria-label={`Open ${preview.provider} ${preview.typeLabel}: ${preview.title}`}
+          aria-label={uiT("Open {0} {1}: {2}", {
+            p0: preview.provider,
+            p1: uiT(preview.typeLabel),
+            p2: preview.title,
+          })}
           className="mt-0.5 block text-sm font-semibold leading-5 text-foreground hover:underline"
           href={preview.href}
           onClick={
@@ -344,7 +356,7 @@ export function RichLinkPreviewAttachment({
           ) : (
             <ChevronDown aria-hidden="true" className="size-3" />
           )}
-          {contentExpanded ? "Show less" : "Show more"}
+          {contentExpanded ? uiT("Show less") : uiT("Show more")}
         </button>
       ) : null}
       {showControls ? (

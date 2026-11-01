@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { motion, useReducedMotion } from "motion/react";
 import type { ComponentProps } from "react";
 
@@ -10,6 +12,8 @@ export function TerminalPanelIcon({
 }: ComponentProps<"svg"> & {
   open: boolean;
 }) {
+  useUiLanguage();
+
   const prefersReducedMotion = useReducedMotion();
 
   return (

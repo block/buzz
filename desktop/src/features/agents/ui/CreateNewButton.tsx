@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { Plus } from "lucide-react";
 
 import { Button } from "@/shared/ui/button";
@@ -13,7 +15,7 @@ type CreateNewButtonProps = {
 export function CreateNewButton({
   ariaLabel,
   disabled = false,
-  label = "New",
+  label = uiT("New"),
   onClick,
   variant = "default",
 }: CreateNewButtonProps) {

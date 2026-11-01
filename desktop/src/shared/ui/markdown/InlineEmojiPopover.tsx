@@ -1,3 +1,5 @@
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
 import * as React from "react";
 
 import {
@@ -14,10 +16,12 @@ export function InlineEmojiPopover({
   alt: string | undefined;
   resolvedSrc: string;
 }) {
+  useUiLanguage();
+
   const [open, setOpen] = React.useState(false);
   const openTimeout = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const closeTimeout = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-  const label = alt?.trim() || "Custom emoji";
+  const label = alt?.trim() || uiT("Custom emoji");
 
   const clearTimers = React.useCallback(() => {
     if (openTimeout.current) {

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type { ManagedAgentBackend } from "@/shared/api/types";
 import { PERSONA_LABEL_OPTIONAL_CLASS } from "./agentConfigOptions";
 import {
@@ -59,8 +61,8 @@ export function EffortPickerField({
         className="text-sm font-medium text-foreground"
         htmlFor="edit-agent-effort"
       >
-        Thinking effort
-        <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
+        {uiT("Thinking effort")}
+        <span className={PERSONA_LABEL_OPTIONAL_CLASS}>{uiT("Optional")}</span>
       </label>
       <PersonaDropdownField
         disabled={disabled}
@@ -69,16 +71,16 @@ export function EffortPickerField({
           onChange(effortSelectionToPersistedValue(next))
         }
         options={options}
-        placeholder="Adapter default"
+        placeholder={uiT("Adapter default")}
         value={selectValue}
       />
       <p className="text-xs text-muted-foreground">
         {note === "unknownModel"
-          ? `Support for ${selectValue} isn't known yet. `
+          ? uiT("Support for {0} isn't known yet. ", { p0: selectValue })
           : note === "unlisted"
-            ? `This model may not support ${selectValue}. `
+            ? uiT("This model may not support {0}. ", { p0: selectValue })
             : null}
-        Applied at the next session start.
+        {uiT("Applied at the next session start.")}
       </p>
     </div>
   );

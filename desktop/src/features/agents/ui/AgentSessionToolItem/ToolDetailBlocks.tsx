@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { cn } from "@/shared/lib/cn";
 import type { FileEditDiff } from "../agentSessionFileEditDiff";
 import type { FileReadContent } from "../agentSessionFileRead";
@@ -54,7 +56,7 @@ export function ToolDetailBlocks({
         <ShellCommandBlock command={shellCommand} result={result} />
       ) : showParameters ? (
         <ToolCodeBlock
-          label="Parameters"
+          label={uiT("Parameters")}
           tone="muted"
           value={JSON.stringify(args, null, 2)}
         />
@@ -71,7 +73,7 @@ export function ToolDetailBlocks({
           />
         ) : (
           <ToolCodeBlock
-            label={isError ? "Error" : "Result"}
+            label={isError ? uiT("Error") : uiT("Result")}
             tone={isError ? "error" : "muted"}
             value={result}
           />
@@ -79,7 +81,7 @@ export function ToolDetailBlocks({
       ) : null}
       {!showShellCommand && !showParameters && !hasResult ? (
         <p className="text-sm text-muted-foreground/80">
-          Waiting for tool details.
+          {uiT("Waiting for tool details.")}
         </p>
       ) : null}
     </div>

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
@@ -18,6 +20,8 @@ export const OnboardingInput = React.forwardRef<
   HTMLInputElement,
   OnboardingInputProps
 >(({ className, onBlur, onFocus, smooth = true, ...props }, forwardedRef) => {
+  useUiLanguage();
+
   const inputRef = React.useRef<HTMLInputElement | null>(null);
   const [isFocused, setIsFocused] = React.useState(false);
   useSmoothCorners(inputRef, { enabled: smooth });

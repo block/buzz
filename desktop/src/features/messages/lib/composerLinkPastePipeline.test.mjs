@@ -68,16 +68,21 @@ after(() => dom.window.close());
 /**
  * Mounts the production composer editor and returns its Tiptap instance.
  */
-async function mountComposerEditor() {
+async function mountComposerEditor(options = {}) {
   const React = await import("react");
   const { act, render, waitFor } = await import("@testing-library/react");
   const { EditorContent } = await import("@tiptap/react");
   const { useRichTextEditor } = await import("./useRichTextEditor.ts");
+  const { useUiLanguage } = await import(
+    "../../../shared/i18n/uiTranslation.ts"
+  );
 
   let editor = null;
   function Harness() {
+    useUiLanguage();
     const instance = useRichTextEditor({
       messageLinkChannels: MESSAGE_LINK_CHANNELS,
+      ...options,
     }).editor;
     editor = instance;
     return instance
@@ -240,5 +245,78 @@ test("fully markable selection keeps its label for linkify-only URL shapes", asy
 
     assert.equal(editor.state.doc.textContent, "read this");
     assert.deepEqual(linkHrefs(editor), [expectedHref]);
+  }
+});
+
+test("composing Korean text survives a language switch and Enter does not submit", async () => {
+  const { act } = await import("@testing-library/react");
+  const { setAppLanguage } = await import("../../../i18n.ts");
+  let sent = 0;
+  const editor = await mountComposerEditor({
+    onSubmit: () => {
+      sent += 1;
+    },
+  });
+  try {
+    seedDocument(editor, paragraph(text("한글 조합 파일.txt {{p0}}")));
+    const before = editor.getJSON();
+    editor.view.dom.dispatchEvent(
+      new dom.window.CompositionEvent("compositionstart", {
+        bubbles: true,
+        data: "한",
+      }),
+    );
+    assert.equal(editor.view.composing, true);
+    editor.view.dom.dispatchEvent(
+      new dom.window.KeyboardEvent("keydown", {
+        key: "Enter",
+        code: "Enter",
+        keyCode: 229,
+        isComposing: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    assert.equal(sent, 0);
+    await act(async () => {
+      await setAppLanguage("ko");
+    });
+    assert.equal(editor.isDestroyed, false);
+    assert.deepEqual(editor.getJSON(), before);
+    assert.equal(editor.view.composing, true);
+    editor.view.dom.dispatchEvent(
+      new dom.window.KeyboardEvent("keydown", {
+        key: "Enter",
+        code: "Enter",
+        keyCode: 229,
+        isComposing: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    assert.equal(sent, 0);
+    editor.view.dom.dispatchEvent(
+      new dom.window.CompositionEvent("compositionend", {
+        bubbles: true,
+        data: "한",
+      }),
+    );
+    assert.deepEqual(editor.getJSON(), before);
+    // The real input pipeline must still accept a later, ordinary Enter.
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    editor.view.dom.dispatchEvent(
+      new dom.window.KeyboardEvent("keydown", {
+        key: "Enter",
+        code: "Enter",
+        keyCode: 13,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    assert.equal(sent, 1);
+  } finally {
+    await act(async () => {
+      await setAppLanguage("en");
+    });
   }
 });

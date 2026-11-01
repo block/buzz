@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { MessageSquare } from "lucide-react";
 import { useMemo } from "react";
 
@@ -38,6 +40,8 @@ export function ForumPostCard({
   onClick,
   onDelete,
 }: ForumPostCardProps) {
+  useUiLanguage();
+
   const authorLabel = resolveUserLabel({
     pubkey: post.pubkey,
     currentPubkey,
@@ -118,7 +122,7 @@ export function ForumPostCard({
             role="presentation"
           >
             <DeleteActionMenu
-              label="post"
+              label={uiT("post")}
               onConfirm={() => onDelete(post.eventId)}
             />
           </div>
@@ -143,12 +147,16 @@ export function ForumPostCard({
           <MessageSquare className="h-4 w-4" />
           <span>
             {summary.replyCount}{" "}
-            {summary.replyCount === 1 ? "reply" : "replies"}
+            {summary.replyCount === 1 ? uiT("reply") : uiT("replies")}
           </span>
           {summary.lastReplyAt ? (
             <>
               <span className="text-muted-foreground/50">·</span>
-              <span>last {formatRelativeTime(summary.lastReplyAt)}</span>
+              <span>
+                {uiT("last {0}", {
+                  p0: formatRelativeTime(summary.lastReplyAt),
+                })}
+              </span>
             </>
           ) : null}
         </div>

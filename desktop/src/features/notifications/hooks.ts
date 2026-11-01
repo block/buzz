@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { useHomeFeedQuery } from "@/features/home/hooks";
@@ -270,8 +272,10 @@ export function useNotificationSettings(pubkey?: string) {
         }));
         setErrorMessage(
           nextPermission === "denied"
-            ? "Desktop notifications are blocked for Buzz. Enable them in system settings to turn alerts on."
-            : "Desktop notifications are unavailable in this environment.",
+            ? uiT(
+                "Desktop notifications are blocked for Buzz. Enable them in system settings to turn alerts on.",
+              )
+            : uiT("Desktop notifications are unavailable in this environment."),
         );
         return false;
       }
@@ -289,7 +293,7 @@ export function useNotificationSettings(pubkey?: string) {
       setErrorMessage(
         error instanceof Error
           ? error.message
-          : "Failed to enable desktop notifications.",
+          : uiT("Failed to enable desktop notifications."),
       );
       return false;
     } finally {

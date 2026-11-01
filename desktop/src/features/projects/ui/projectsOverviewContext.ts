@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type {
   Project,
   ProjectActivitySummary,
@@ -112,7 +114,9 @@ function resolvedReviewActivity(
 function createProjectAction(): OverviewContextAction {
   return {
     kind: "project",
-    label: "Create project",
+    get label() {
+      return uiT("Create project");
+    },
     testId: "projects-overview-create-project",
   };
 }
@@ -240,32 +244,44 @@ export function projectsOverviewContext(
     return {
       action: {
         kind: "repository",
-        label: "Add repository",
+        get label() {
+          return uiT("Add repository");
+        },
         testId: "projects-overview-add-repository",
       },
-      detailsTitle: "Repository activity",
+      get detailsTitle() {
+        return uiT("Repository activity");
+      },
       people,
       stats: [
         {
           count: repositories,
           icon: "repositories",
-          label: "Repositories",
+          get label() {
+            return uiT("Repositories");
+          },
           section: "repositories",
         },
         {
           count: tasks.active,
           icon: "tasks",
-          label: "Active tasks",
+          get label() {
+            return uiT("Active tasks");
+          },
           section: "issues",
         },
         {
           count: reviews.open,
           icon: "reviews",
-          label: "Open reviews",
+          get label() {
+            return uiT("Open reviews");
+          },
           section: "prs",
         },
       ],
-      title: "Repositories",
+      get title() {
+        return uiT("Repositories");
+      },
     };
   }
 
@@ -273,32 +289,44 @@ export function projectsOverviewContext(
     return {
       action: {
         kind: "channel",
-        label: "Add channel",
+        get label() {
+          return uiT("Add channel");
+        },
         testId: "projects-overview-add-channel",
       },
-      detailsTitle: "Details",
+      get detailsTitle() {
+        return uiT("Details");
+      },
       people,
       stats: [
         {
           count: channelCount,
           icon: "channels",
-          label: "Channels",
+          get label() {
+            return uiT("Channels");
+          },
           section: "channels",
         },
         {
           count: projects.length,
           icon: "projects",
-          label: "Projects",
+          get label() {
+            return uiT("Projects");
+          },
           section: "projects",
         },
         {
           count: repositories,
           icon: "repositories",
-          label: "Repositories",
+          get label() {
+            return uiT("Repositories");
+          },
           section: "repositories",
         },
       ],
-      title: "Channels",
+      get title() {
+        return uiT("Channels");
+      },
     };
   }
 
@@ -306,32 +334,44 @@ export function projectsOverviewContext(
     return {
       action: {
         kind: "issue",
-        label: "Create task",
+        get label() {
+          return uiT("Create task");
+        },
         testId: "projects-overview-create-issue",
       },
-      detailsTitle: "Details",
+      get detailsTitle() {
+        return uiT("Details");
+      },
       people,
       stats: [
         {
           count: tasks.total,
           icon: "tasks",
-          label: "Tasks",
+          get label() {
+            return uiT("Tasks");
+          },
           section: "issues",
         },
         {
           count: tasks.active,
           icon: "tasks",
-          label: "Active",
+          get label() {
+            return uiT("Active");
+          },
           section: "issues",
         },
         {
           count: tasks.completed,
           icon: "completed",
-          label: "Completed",
+          get label() {
+            return uiT("Completed");
+          },
           section: "issues",
         },
       ],
-      title: "Tasks",
+      get title() {
+        return uiT("Tasks");
+      },
     };
   }
 
@@ -339,97 +379,131 @@ export function projectsOverviewContext(
     return {
       action: {
         kind: "pullRequest",
-        label: "Create review",
+        get label() {
+          return uiT("Create review");
+        },
         testId: "projects-overview-create-pull-request",
       },
-      detailsTitle: "Review activity",
+      get detailsTitle() {
+        return uiT("Review activity");
+      },
       people,
       stats: [
         {
           count: reviews.total,
           icon: "reviews",
-          label: "Reviews",
+          get label() {
+            return uiT("Reviews");
+          },
           section: "prs",
         },
         {
           count: reviews.open,
           icon: "reviews",
-          label: "Open",
+          get label() {
+            return uiT("Open");
+          },
           section: "prs",
         },
         {
           count: reviews.merged,
           icon: "merged",
-          label: "Merged",
+          get label() {
+            return uiT("Merged");
+          },
           section: "prs",
         },
       ],
-      title: "Reviews",
+      get title() {
+        return uiT("Reviews");
+      },
     };
   }
 
   if (filter === "all") {
     return {
       action: null,
-      detailsTitle: "Details",
+      get detailsTitle() {
+        return uiT("Details");
+      },
       people,
       stats: [
         {
           count: projects.length,
           icon: "projects",
-          label: "Projects",
+          get label() {
+            return uiT("Projects");
+          },
           section: "projects",
         },
         {
           count: repositories,
           icon: "repositories",
-          label: "Repositories",
+          get label() {
+            return uiT("Repositories");
+          },
           section: "repositories",
         },
         {
           count: channelCount,
           icon: "channels",
-          label: "Channels",
+          get label() {
+            return uiT("Channels");
+          },
           section: "channels",
         },
         {
           count: tasks.total,
           icon: "tasks",
-          label: "Tasks",
+          get label() {
+            return uiT("Tasks");
+          },
           section: "issues",
         },
         {
           count: reviews.total,
           icon: "reviews",
-          label: "Reviews",
+          get label() {
+            return uiT("Reviews");
+          },
           section: "prs",
         },
       ],
-      title: "Activity",
+      get title() {
+        return uiT("Activity");
+      },
     };
   }
 
   return {
     action: createProjectAction(),
-    detailsTitle: "Details",
+    get detailsTitle() {
+      return uiT("Details");
+    },
     people,
     stats: [
       {
         count: projects.length,
         icon: "projects",
-        label: "Projects",
+        get label() {
+          return uiT("Projects");
+        },
         section: "projects",
       },
       {
         count: repositories,
         icon: "repositories",
-        label: "Repositories",
+        get label() {
+          return uiT("Repositories");
+        },
         section: "repositories",
       },
       {
         count: channelCount,
         icon: "channels",
-        label: "Channels",
+        get label() {
+          return uiT("Channels");
+        },
         section: "channels",
       },
     ],

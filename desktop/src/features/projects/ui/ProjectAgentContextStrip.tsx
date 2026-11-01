@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { X } from "lucide-react";
 
 import type { ProjectDetailAgentContext } from "@/features/projects/lib/projectDetailAgentContext";
@@ -41,11 +43,11 @@ export function ProjectAgentContextStrip({
       </p>
       {onClose ? (
         <Button
-          aria-label="Close agent chat"
+          aria-label={uiT("Close agent chat")}
           className="h-7 w-7 shrink-0"
           onClick={onClose}
           size="icon"
-          title="Close agent chat"
+          title={uiT("Close agent chat")}
           type="button"
           variant="ghost"
         >

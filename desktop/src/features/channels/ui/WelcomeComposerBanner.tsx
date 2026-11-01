@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Bot, Check, X } from "lucide-react";
@@ -160,6 +162,8 @@ function getWelcomePersonaEnterTotalSeconds(characterCount: number) {
 }
 
 function WelcomeComposerPersonaMention() {
+  useUiLanguage();
+
   const shouldReduceMotion = useReducedMotion();
   const [personaIndex, setPersonaIndex] = React.useState(0);
   const activePersonaName = WELCOME_PERSONA_NAMES[personaIndex];
@@ -388,7 +392,7 @@ export function WelcomeComposerBanner({
                 key="complete-copy"
                 variants={welcomeComposerBannerSuccessCopyVariants}
               >
-                Nice work.
+                {uiT("Nice work.")}
               </motion.span>
             ) : settingUp ? (
               <motion.span
@@ -400,7 +404,7 @@ export function WelcomeComposerBanner({
                 key="setting-up-copy"
                 variants={welcomeComposerBannerContentVariants}
               >
-                Setting up your welcome team…
+                {uiT("Setting up your welcome team…")}
               </motion.span>
             ) : (
               <motion.span
@@ -411,14 +415,15 @@ export function WelcomeComposerBanner({
                 key="prompt-copy"
                 variants={welcomeComposerBannerContentVariants}
               >
-                Mention <WelcomeComposerPersonaMention /> or another teammate
-                whenever you want their help.
+                {uiT("Mention ")}
+                <WelcomeComposerPersonaMention />{" "}
+                {uiT(" or another teammate whenever you want their help.")}
               </motion.span>
             )}
           </AnimatePresence>
           {state === "prompt" && onDismiss && !settingUp ? (
             <button
-              aria-label="Dismiss hint"
+              aria-label={uiT("Dismiss hint")}
               className="ml-auto flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-muted-foreground/60 transition-colors hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               data-testid="welcome-composer-dismiss-button"
               onClick={onDismiss}

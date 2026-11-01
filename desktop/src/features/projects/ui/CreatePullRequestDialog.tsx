@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -37,6 +39,8 @@ export function CreatePullRequestDialog({
   projects: Project[];
   reposDir?: string | null;
 }) {
+  useUiLanguage();
+
   const repositoryOptions = React.useMemo(
     () =>
       projects.flatMap((project) =>
@@ -142,7 +146,7 @@ export function CreatePullRequestDialog({
   const description =
     repository && sourceBranch && targetBranch
       ? `${repository.name}: ${sourceBranch} → ${targetBranch}${sourceCommit ? ` at ${sourceCommit.slice(0, 7)}` : ""}`
-      : "Choose a repository and branches to compare.";
+      : uiT("Choose a repository and branches to compare.");
 
   async function handleCreate(input: CreatePullRequestDialogInput) {
     if (!project || !repository || !sourceCommit || selectionError) {
@@ -156,13 +160,13 @@ export function CreatePullRequestDialog({
       mergeBase: sourceSyncQuery.data?.mergeBase ?? null,
       reviewers: [],
     });
-    toast.success("Review created.");
+    toast.success(uiT("Review created."));
     await onCreated(project, repository, pullRequestId);
   }
 
   return (
     <CreateProjectWorkItemDialog
-      bodyPlaceholder="Add context for reviewers"
+      bodyPlaceholder={uiT("Add context for reviewers")}
       description={description}
       isCreating={createMutation.isPending}
       itemName="pull-request"
@@ -173,12 +177,12 @@ export function CreatePullRequestDialog({
       }}
       open={open}
       submitDisabled={Boolean(selectionError)}
-      title="Open a review"
-      titlePlaceholder="Describe the change"
+      title={uiT("Open a review")}
+      titlePlaceholder={uiT("Describe the change")}
     >
       <div className="grid gap-3 rounded-xl border border-border/60 bg-muted/25 p-3 sm:grid-cols-2">
         <label className="space-y-1.5 text-sm font-medium sm:col-span-2">
-          <span>Repository</span>
+          <span>{uiT("Repository")}</span>
           <select
             className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm font-normal outline-hidden focus:ring-1 focus:ring-ring"
             data-testid="create-pull-request-repository"
@@ -199,7 +203,7 @@ export function CreatePullRequestDialog({
           </select>
         </label>
         <label className="space-y-1.5 text-sm font-medium">
-          <span>Base</span>
+          <span>{uiT("Base")}</span>
           <select
             className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm font-normal outline-hidden focus:ring-1 focus:ring-ring"
             data-testid="create-pull-request-base-branch"
@@ -215,7 +219,7 @@ export function CreatePullRequestDialog({
           </select>
         </label>
         <label className="space-y-1.5 text-sm font-medium">
-          <span>Compare</span>
+          <span>{uiT("Compare")}</span>
           <select
             className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm font-normal outline-hidden focus:ring-1 focus:ring-ring"
             data-testid="create-pull-request-compare-branch"
@@ -224,7 +228,7 @@ export function CreatePullRequestDialog({
             value={sourceBranch}
           >
             <option disabled value="">
-              Select branch
+              {uiT("Select branch")}
             </option>
             {branchOptions.map((branch) => (
               <option key={branch} value={branch}>

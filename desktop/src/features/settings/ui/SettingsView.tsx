@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { AlertCircle, ArrowLeft, LoaderCircle, RefreshCw } from "lucide-react";
@@ -53,7 +55,9 @@ export const settingsNavGroups: Array<{
   sections: SettingsSection[];
 }> = [
   {
-    label: "Personal",
+    get label() {
+      return uiT("Personal");
+    },
     sections: [
       "profile",
       "appearance",
@@ -66,11 +70,15 @@ export const settingsNavGroups: Array<{
     ],
   },
   {
-    label: "Communities",
+    get label() {
+      return uiT("Communities");
+    },
     sections: ["hosted-communities", "community-members", "relay-admin"],
   },
   {
-    label: "App",
+    get label() {
+      return uiT("App");
+    },
     sections: ["agents", "compute", "experimental", "mobile", "updates"],
   },
 ];
@@ -127,6 +135,8 @@ export function SettingsView({
   onSetSoundForSlot,
   section,
 }: SettingsViewProps) {
+  const __buzzLanguage = useUiLanguage();
+
   const { isMobile, open: sidebarOpen, setOpen: setSidebarOpen } = useSidebar();
   const myMembershipQuery = useMyRelayMembershipLookupQuery();
   const featureState = useFeatureSnapshot();
@@ -200,6 +210,7 @@ export function SettingsView({
     () => new Map(visibleSections.map((entry) => [entry.value, entry])),
     [visibleSections],
   );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: This UI projection reads locale-dependent labels.
   const visibleNavGroups = React.useMemo(
     () =>
       settingsNavGroups
@@ -212,7 +223,7 @@ export function SettingsView({
             ),
         }))
         .filter((group) => group.sections.length > 0),
-    [visibleSectionByValue],
+    [visibleSectionByValue, __buzzLanguage],
   );
 
   return (
@@ -241,11 +252,11 @@ export function SettingsView({
               <SidebarMenuButton
                 data-testid="settings-back-to-app"
                 onClick={onClose}
-                tooltip="Back to app"
+                tooltip={uiT("Back to app")}
                 type="button"
               >
                 <ArrowLeft className="h-4 w-4" />
-                <span>Back to app</span>
+                <span>{uiT("Back to app")}</span>
               </SidebarMenuButton>
             </SidebarMenuItem>
           </SidebarMenu>
@@ -258,7 +269,7 @@ export function SettingsView({
               data-testid="community-access-loading"
             >
               <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
-              Checking invite permissions…
+              {uiT("Checking invite permissions…")}
             </div>
           ) : null}
           {myMembershipQuery.isError ? (
@@ -268,7 +279,7 @@ export function SettingsView({
             >
               <div className="flex items-center gap-2">
                 <AlertCircle className="h-3.5 w-3.5 text-destructive" />
-                Invite settings could not be checked.
+                {uiT("Invite settings could not be checked.")}
               </div>
               <button
                 className="flex items-center gap-1.5 font-medium text-sidebar-foreground underline-offset-2 hover:underline"
@@ -276,7 +287,7 @@ export function SettingsView({
                 type="button"
               >
                 <RefreshCw className="h-3.5 w-3.5" />
-                Try again
+                {uiT("Try again")}
               </button>
             </div>
           ) : null}
@@ -286,15 +297,18 @@ export function SettingsView({
               data-testid="community-access-snapshot-missing"
             >
               <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
-              Invite settings are unavailable. Relay recovery may still be in
-              progress.
+              {uiT(
+                "Invite settings are unavailable. Relay recovery may still be in progress.",
+              )}
             </div>
           ) : null}
           {visibleNavGroups.map((group) => (
             <SidebarGroup key={group.label}>
               <SidebarGroupLabel>{group.label}</SidebarGroupLabel>
               <SidebarGroupContent>
-                <SidebarMenu aria-label={`${group.label} settings sections`}>
+                <SidebarMenu
+                  aria-label={uiT("{0} settings sections", { p0: group.label })}
+                >
                   {group.sections.map((entry) => (
                     <SettingsSectionButton
                       active={entry.value === section}

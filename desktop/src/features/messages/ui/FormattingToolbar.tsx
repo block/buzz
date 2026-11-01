@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { TextSelection } from "@tiptap/pm/state";
 import type { Editor } from "@tiptap/react";
@@ -129,6 +131,8 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
   disabled = false,
   onLinkButton,
 }: FormattingToolbarProps) {
+  useUiLanguage();
+
   const pendingSelectionRef = React.useRef<FormattingSelectionRange | null>(
     null,
   );
@@ -320,66 +324,86 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
   const items = [
     {
       icon: Bold,
-      label: "Bold",
+      get label() {
+        return uiT("Bold");
+      },
       shortcut: "⌘B",
       action: toggleBold,
       active: activeStates.bold,
     },
     {
       icon: Italic,
-      label: "Italic",
+      get label() {
+        return uiT("Italic");
+      },
       shortcut: "⌘I",
       action: toggleItalic,
       active: activeStates.italic,
     },
     {
       icon: Strikethrough,
-      label: "Strikethrough",
+      get label() {
+        return uiT("Strikethrough");
+      },
       shortcut: "⌘⇧X",
       action: toggleStrike,
       active: activeStates.strike,
     },
     {
       icon: Code,
-      label: "Code",
+      get label() {
+        return uiT("Code");
+      },
       shortcut: "⌘E",
       action: toggleCode,
       active: activeStates.code,
     },
     {
       icon: SquareCode,
-      label: "Code block",
+      get label() {
+        return uiT("Code block");
+      },
       action: toggleCodeBlock,
       active: activeStates.codeBlock,
     },
     {
       icon: Link,
-      label: "Link",
+      get label() {
+        return uiT("Link");
+      },
       shortcut: "⌘K",
       action: toggleLink,
       active: activeStates.link,
     },
     {
       icon: List,
-      label: "Bullet list",
+      get label() {
+        return uiT("Bullet list");
+      },
       action: toggleBulletList,
       active: activeStates.bulletList,
     },
     {
       icon: ListOrdered,
-      label: "Ordered list",
+      get label() {
+        return uiT("Ordered list");
+      },
       action: toggleOrderedList,
       active: activeStates.orderedList,
     },
     {
       icon: Quote,
-      label: "Quote",
+      get label() {
+        return uiT("Quote");
+      },
       action: toggleBlockquote,
       active: activeStates.blockquote,
     },
     {
       icon: HatGlasses,
-      label: "Spoiler",
+      get label() {
+        return uiT("Spoiler");
+      },
       action: toggleSpoiler,
       active: activeStates.spoiler,
     },

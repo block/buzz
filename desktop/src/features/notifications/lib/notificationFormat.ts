@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 const NOTIFICATION_BODY_MAX_LENGTH = 140;
 
 /**
@@ -44,7 +46,7 @@ export function formatNotificationTitle(opts: {
   channelLabel: string | null;
 }): string {
   return opts.channelLabel
-    ? `${opts.prefix} in ${opts.channelLabel}`
+    ? uiT("{0} in {1}", { p0: opts.prefix, p1: opts.channelLabel })
     : opts.prefix;
 }
 
@@ -56,11 +58,21 @@ export type MessageNotificationSource =
   | "thread_reply";
 
 const MESSAGE_BODY_FALLBACKS: Record<MessageNotificationSource, string> = {
-  mention: "Something in Buzz needs your attention.",
-  approval: "A workflow is waiting for your approval.",
-  needs_action: "Something in Buzz needs your attention.",
-  dm: "New message",
-  thread_reply: "New reply",
+  get mention() {
+    return uiT("Something in Buzz needs your attention.");
+  },
+  get approval() {
+    return uiT("A workflow is waiting for your approval.");
+  },
+  get needs_action() {
+    return uiT("Something in Buzz needs your attention.");
+  },
+  get dm() {
+    return uiT("New message");
+  },
+  get thread_reply() {
+    return uiT("New reply");
+  },
 };
 
 /**
@@ -89,24 +101,24 @@ export function formatMessageNotification(opts: {
   );
 
   if (source === "dm") {
-    return { title: senderName ?? channelName ?? "Direct message", body };
+    return { title: senderName ?? channelName ?? uiT("Direct message"), body };
   }
 
   const channelLabel = channelName ? `#${channelName}` : null;
   const prefix =
     source === "mention"
       ? senderName
-        ? `${senderName} mentioned you`
-        : "@Mention"
+        ? uiT("{0} mentioned you", { p0: senderName })
+        : uiT("@Mention")
       : source === "approval"
         ? senderName
-          ? `${senderName} requested approval`
-          : "Approval Requested"
+          ? uiT("{0} requested approval", { p0: senderName })
+          : uiT("Approval Requested")
         : source === "thread_reply"
           ? senderName
-            ? `${senderName} replied`
-            : "Reply"
-          : (senderName ?? "Needs Action");
+            ? uiT("{0} replied", { p0: senderName })
+            : uiT("Reply")
+          : (senderName ?? uiT("Needs Action"));
 
   return { title: formatNotificationTitle({ prefix, channelLabel }), body };
 }

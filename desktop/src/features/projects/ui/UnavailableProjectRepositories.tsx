@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { FolderGit2 } from "lucide-react";
 
 import type { Project } from "@/features/projects/hooks";
@@ -16,7 +18,7 @@ export function UnavailableProjectRepositories({
       <span className="max-w-80 truncate">
         {address.slice(address.indexOf(":", 6) + 1)}
       </span>
-      <span>Unavailable</span>
+      <span>{uiT("Unavailable")}</span>
     </div>
   ));
 }

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { ChevronDown, ClockFading, Hash } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
@@ -25,20 +27,77 @@ import { EditableInfoFieldRow } from "./ChannelManagementSheetRows";
 import { ChannelTypePicker } from "./ChannelTypePicker";
 
 const CHANNEL_TYPE_OPTIONS = [
-  { value: "temporary", label: "Temporary", Icon: ClockFading },
-  { value: "ongoing", label: "Ongoing", Icon: Hash },
+  {
+    value: "temporary",
+    get label() {
+      return uiT("Temporary");
+    },
+    Icon: ClockFading,
+  },
+  {
+    value: "ongoing",
+    get label() {
+      return uiT("Ongoing");
+    },
+    Icon: Hash,
+  },
 ] as const;
 
 const EPHEMERAL_TIMEOUT_OPTIONS = [
-  { label: "30 minutes", seconds: 30 * 60 },
-  { label: "1 hour", seconds: 60 * 60 },
-  { label: "6 hours", seconds: 6 * 60 * 60 },
-  { label: "12 hours", seconds: 12 * 60 * 60 },
-  { label: "1 day", seconds: 24 * 60 * 60 },
-  { label: "3 days", seconds: 3 * 24 * 60 * 60 },
-  { label: "7 days", seconds: DEFAULT_EPHEMERAL_TTL_SECONDS },
-  { label: "14 days", seconds: 14 * 24 * 60 * 60 },
-  { label: "30 days", seconds: 30 * 24 * 60 * 60 },
+  {
+    get label() {
+      return uiT("30 minutes");
+    },
+    seconds: 30 * 60,
+  },
+  {
+    get label() {
+      return uiT("1 hour");
+    },
+    seconds: 60 * 60,
+  },
+  {
+    get label() {
+      return uiT("6 hours");
+    },
+    seconds: 6 * 60 * 60,
+  },
+  {
+    get label() {
+      return uiT("12 hours");
+    },
+    seconds: 12 * 60 * 60,
+  },
+  {
+    get label() {
+      return uiT("1 day");
+    },
+    seconds: 24 * 60 * 60,
+  },
+  {
+    get label() {
+      return uiT("3 days");
+    },
+    seconds: 3 * 24 * 60 * 60,
+  },
+  {
+    get label() {
+      return uiT("7 days");
+    },
+    seconds: DEFAULT_EPHEMERAL_TTL_SECONDS,
+  },
+  {
+    get label() {
+      return uiT("14 days");
+    },
+    seconds: 14 * 24 * 60 * 60,
+  },
+  {
+    get label() {
+      return uiT("30 days");
+    },
+    seconds: 30 * 24 * 60 * 60,
+  },
 ] as const;
 
 const CHANNEL_TYPE_RESIZE_TRANSITION = {
@@ -55,6 +114,8 @@ export function ChannelTypeDetailRow({
   channel: Channel;
   onEdit?: () => void;
 }) {
+  useUiLanguage();
+
   const projectHome = useIsProjectHomeChannel(channel.id);
   const lifecycle = channelLifecycle({
     projectHome,
@@ -64,7 +125,7 @@ export function ChannelTypeDetailRow({
   return (
     <EditableInfoFieldRow
       editTestId="channel-management-edit-channel-type"
-      label="Channel type"
+      label={uiT("Channel type")}
       onEdit={canEdit ? onEdit : undefined}
       testId="channel-management-type"
       value={channelLifecycleLabel(lifecycle, channel.ttlSeconds)}
@@ -75,7 +136,7 @@ export function ChannelTypeDetailRow({
 export function ChannelTypeSettings({
   channelId,
   disabled,
-  label = "Channel type",
+  label = uiT("Channel type"),
   onOpenChange,
   onTemporaryChange,
   onTtlSecondsChange,
@@ -97,6 +158,8 @@ export function ChannelTypeSettings({
   ttlSeconds: number;
   variant?: "dropdown" | "segmented";
 }) {
+  useUiLanguage();
+
   const projectHome = useIsProjectHomeChannel(channelId);
   const lifecycle = channelLifecycle({ projectHome, temporary });
   const shouldReduceMotion = useReducedMotion();
@@ -110,7 +173,7 @@ export function ChannelTypeSettings({
     ? EPHEMERAL_TIMEOUT_OPTIONS
     : [
         {
-          label: `Current (${formatTtlDuration(ttlSeconds)})`,
+          label: uiT("Current ({0})", { p0: formatTtlDuration(ttlSeconds) }),
           seconds: ttlSeconds,
         },
         ...EPHEMERAL_TIMEOUT_OPTIONS,
@@ -136,7 +199,7 @@ export function ChannelTypeSettings({
         {variant === "segmented" ? (
           <SegmentedControl
             disabled={disabled}
-            legend="Channel type"
+            legend={uiT("Channel type")}
             onValueChange={(value) => onTemporaryChange(value === "temporary")}
             optionTestIdPrefix={`${testIdPrefix}-channel-type-option`}
             options={CHANNEL_TYPE_OPTIONS}
@@ -180,12 +243,12 @@ export function ChannelTypeSettings({
                 )}
                 htmlFor={`${testIdPrefix}-ttl`}
               >
-                Expires after
+                {uiT("Expires after")}
               </label>
               <DropdownMenu modal={false}>
                 <DropdownMenuTrigger asChild>
                   <Button
-                    aria-label="Expires after"
+                    aria-label={uiT("Expires after")}
                     className="-mr-2.5 ml-auto h-9 w-fit justify-end px-2.5 text-right text-sm font-medium text-foreground hover:bg-muted/50"
                     data-testid={`${testIdPrefix}-ttl`}
                     disabled={disabled}
@@ -195,7 +258,9 @@ export function ChannelTypeSettings({
                   >
                     <span className="text-right">
                       {selectedTimeoutOption?.label ??
-                        `Current (${formatTtlDuration(ttlSeconds)})`}
+                        uiT("Current ({0})", {
+                          p0: formatTtlDuration(ttlSeconds),
+                        })}
                     </span>
                     <ChevronDown className="size-4 shrink-0 text-muted-foreground/70" />
                   </Button>

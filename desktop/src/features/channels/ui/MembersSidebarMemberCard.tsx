@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { agentPresenceStartBlockReason } from "@/features/agents/lib/useAgentAvailability";
 import {
   Activity,
@@ -87,9 +89,24 @@ export type MemberModerationState = {
 
 /** Timeout durations offered in the member menu, in seconds. */
 const TIMEOUT_PRESETS: { label: string; seconds: number }[] = [
-  { label: "1 hour", seconds: 60 * 60 },
-  { label: "24 hours", seconds: 24 * 60 * 60 },
-  { label: "7 days", seconds: 7 * 24 * 60 * 60 },
+  {
+    get label() {
+      return uiT("1 hour");
+    },
+    seconds: 60 * 60,
+  },
+  {
+    get label() {
+      return uiT("24 hours");
+    },
+    seconds: 24 * 60 * 60,
+  },
+  {
+    get label() {
+      return uiT("7 days");
+    },
+    seconds: 7 * 24 * 60 * 60,
+  },
 ];
 
 const MEMBER_ROW_INSET_DIVIDER_CLASS =
@@ -233,10 +250,10 @@ export function MembersSidebarMemberCard({
               }
             >
               {managedAgentRuntime
-                ? agentCommunityAvailability(managedAgentRuntime)
+                ? uiT(agentCommunityAvailability(managedAgentRuntime))
                 : managedAgent && isManagedAgentActive(managedAgent)
-                  ? "Running"
-                  : "Stopped"}
+                  ? uiT("Running")
+                  : uiT("Stopped")}
             </Badge>
             {managedAgent ? (
               <Badge
@@ -263,7 +280,7 @@ export function MembersSidebarMemberCard({
     >
       {onOpenProfile ? (
         <button
-          aria-label={`Open profile for ${memberLabel}`}
+          aria-label={uiT("Open profile for {0}", { p0: memberLabel })}
           className="absolute inset-0 z-0 cursor-pointer focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
           data-testid={`sidebar-member-open-profile-${member.pubkey}`}
           onClick={() => onOpenProfile(member.pubkey)}
@@ -379,7 +396,7 @@ function MemberActionsMenu({
             onClick={() => onViewActivity?.(member.pubkey)}
           >
             <Activity className="h-4 w-4" />
-            View activity
+            {uiT("View activity")}
           </DropdownMenuItem>
         ) : null}
         {memberIsBot && managedAgent ? (
@@ -407,7 +424,7 @@ function MemberActionsMenu({
                 onClick={() => onEditRespondTo(managedAgent)}
               >
                 <Pencil className="h-4 w-4" />
-                Manage agent access...
+                {uiT("Manage agent access...")}
               </DropdownMenuItem>
             ) : null}
             {canRemoveMember || showChangeRole ? (
@@ -422,7 +439,7 @@ function MemberActionsMenu({
               disabled={disabled}
             >
               <Shield className="h-4 w-4" />
-              Change role
+              {uiT("Change role")}
             </DropdownMenuSubTrigger>
             <DropdownMenuSubContent>
               {PEOPLE_ROLES.map((role) => (
@@ -434,7 +451,7 @@ function MemberActionsMenu({
                 >
                   {role[0]?.toUpperCase()}
                   {role.slice(1)}
-                  {member.role === role ? " (current)" : ""}
+                  {member.role === role ? uiT("(current)") : ""}
                 </DropdownMenuItem>
               ))}
             </DropdownMenuSubContent>
@@ -450,7 +467,7 @@ function MemberActionsMenu({
               onClick={() => onRemoveMember(member)}
             >
               <Trash2 className="h-4 w-4" />
-              Remove from channel
+              {uiT("Remove from channel")}
             </DropdownMenuItem>
           </>
         ) : null}
@@ -466,7 +483,7 @@ function MemberActionsMenu({
                 onClick={() => onUntimeout(member)}
               >
                 <ShieldCheck className="h-4 w-4" />
-                Lift timeout
+                {uiT("Lift timeout")}
               </DropdownMenuItem>
             ) : (
               <DropdownMenuSub>
@@ -475,7 +492,7 @@ function MemberActionsMenu({
                   disabled={disabled}
                 >
                   <Clock className="h-4 w-4" />
-                  Time out
+                  {uiT("Time out")}
                 </DropdownMenuSubTrigger>
                 <DropdownMenuSubContent>
                   {TIMEOUT_PRESETS.map((preset) => (
@@ -503,7 +520,7 @@ function MemberActionsMenu({
                 onClick={() => onUnban(member)}
               >
                 <CircleSlash className="h-4 w-4" />
-                Lift ban
+                {uiT("Lift ban")}
               </DropdownMenuItem>
             ) : (
               <DropdownMenuItem
@@ -513,7 +530,7 @@ function MemberActionsMenu({
                 onClick={() => onBan(member)}
               >
                 <Ban className="h-4 w-4" />
-                Ban from community
+                {uiT("Ban from community")}
               </DropdownMenuItem>
             )}
           </>

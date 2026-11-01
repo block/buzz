@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 /**
  * The member picker's shared parts: one result row, its label, and the
  * candidate list built from a pluggable search source plus a pasted
@@ -73,7 +75,7 @@ export function MemberSearchResult({
       </span>
       {isDirectPubkey || showKey ? (
         <span className="shrink-0 text-xs text-muted-foreground">
-          {isDirectPubkey ? "public key" : truncateNpub(user.pubkey)}
+          {isDirectPubkey ? uiT("public key") : truncateNpub(user.pubkey)}
         </span>
       ) : null}
     </button>

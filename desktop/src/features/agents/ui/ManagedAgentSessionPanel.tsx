@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import {
   CircleAlert,
@@ -64,7 +66,9 @@ export function ManagedAgentSessionPanel({
   autoTail = false,
   channelId = null,
   className,
-  emptyDescription = "Mention this agent in a channel to watch the next turn.",
+  emptyDescription = uiT(
+    "Mention this agent in a channel to watch the next turn.",
+  ),
   emptyState = "idle",
   panelPadding = true,
   rawLayout = "responsive",
@@ -76,6 +80,8 @@ export function ManagedAgentSessionPanel({
   rawEventsOverride,
   transcriptOverride,
 }: ManagedAgentSessionPanelProps) {
+  useUiLanguage();
+
   const hasObserver = agent.status === "running" || agent.status === "deployed";
   // Always read from the store — archived frames are ingested regardless of
   // live status and must be renderable for idle agents with channel history.
@@ -186,20 +192,23 @@ function SessionHeader({
       <div className="min-w-0">
         <div className="flex items-center gap-2">
           <h3 className="text-sm font-semibold tracking-tight">
-            Live ACP session
+            {uiT("Live ACP session")}
           </h3>
           <ObserverStatusBadge state={connectionState} />
         </div>
         <p className="mt-1 text-sm text-muted-foreground">
           {hasObserver
             ? latestSessionId
-              ? `Session ${shorten(latestSessionId)}`
-              : "Waiting for the next agent turn."
-            : "Restart this local agent to attach the observer feed."}
+              ? uiT("Session {0}", { p0: shorten(latestSessionId) })
+              : uiT("Waiting for the next agent turn.")
+            : uiT("Restart this local agent to attach the observer feed.")}
         </p>
       </div>
       <Badge className="w-fit font-mono" variant="outline">
-        {eventCount} event{eventCount === 1 ? "" : "s"}
+        {uiT("{0} event{1}", {
+          p0: eventCount,
+          p1: eventCount === 1 ? "" : "s",
+        })}
       </Badge>
     </div>
   );
@@ -339,18 +348,43 @@ function SessionLoadingSkeleton() {
 function ObserverStatusBadge({ state }: { state: ConnectionState }) {
   const display =
     state === "open"
-      ? { label: "Live", Icon: CircleDot, variant: "default" as const }
+      ? {
+          get label() {
+            return uiT("Live");
+          },
+          Icon: CircleDot,
+          variant: "default" as const,
+        }
       : state === "connecting"
-        ? { label: "Connecting", variant: "secondary" as const }
+        ? {
+            get label() {
+              return uiT("Connecting");
+            },
+            variant: "secondary" as const,
+          }
         : state === "error"
           ? {
-              label: "Unavailable",
+              get label() {
+                return uiT("Unavailable");
+              },
               Icon: XCircle,
               variant: "destructive" as const,
             }
           : state === "closed"
-            ? { label: "Closed", Icon: Clock3, variant: "secondary" as const }
-            : { label: "Idle", Icon: Clock3, variant: "secondary" as const };
+            ? {
+                get label() {
+                  return uiT("Closed");
+                },
+                Icon: Clock3,
+                variant: "secondary" as const,
+              }
+            : {
+                get label() {
+                  return uiT("Idle");
+                },
+                Icon: Clock3,
+                variant: "secondary" as const,
+              };
   const StatusIcon = display.Icon;
 
   return (
@@ -369,9 +403,11 @@ function EmptyObserverState() {
   return (
     <div className="mt-4 flex min-h-48 flex-col items-center justify-center px-6 py-8 text-center">
       <TerminalSquare className="mx-auto h-4 w-4 text-muted-foreground" />
-      <p className="mt-3 text-sm font-medium">Observer not attached</p>
+      <p className="mt-3 text-sm font-medium">{uiT("Observer not attached")}</p>
       <p className="mt-1 text-sm text-muted-foreground">
-        The live feed is available for local agents started after this update.
+        {uiT(
+          "The live feed is available for local agents started after this update.",
+        )}
       </p>
     </div>
   );

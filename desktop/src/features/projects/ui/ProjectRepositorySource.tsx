@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiMessage, uiT } from "@/shared/i18n/uiTranslation";
 import {
   ChevronDown,
   Cloud,
@@ -99,7 +101,7 @@ export function RepositoryBranchDropdown({
           }}
           value={selectedValue}
         >
-          <DropdownMenuLabel>Branches</DropdownMenuLabel>
+          <DropdownMenuLabel>{uiT("Branches")}</DropdownMenuLabel>
           {selectableBranches.map((option) => (
             <DropdownMenuRadioItem key={option} value={`branch:${option}`}>
               <GitBranch className="mr-1.5 h-3.5 w-3.5 text-muted-foreground" />
@@ -109,7 +111,7 @@ export function RepositoryBranchDropdown({
           {tagOptions.length > 0 ? (
             <>
               <DropdownMenuSeparator />
-              <DropdownMenuLabel>Tags</DropdownMenuLabel>
+              <DropdownMenuLabel>{uiT("Tags")}</DropdownMenuLabel>
               {tagOptions.map((option) => (
                 <DropdownMenuRadioItem
                   key={option.name}
@@ -137,7 +139,7 @@ export function RepositoryBranchDropdown({
                   title={createBranchTitle}
                 >
                   <Plus className="h-4 w-4" />
-                  Create branch…
+                  {uiT("Create branch…")}
                 </DropdownMenuItem>
                 {createBranchDisabled && createBranchTitle ? (
                   <p className="max-w-56 px-2 py-1 text-xs text-muted-foreground">
@@ -155,7 +157,7 @@ export function RepositoryBranchDropdown({
                 title={deleteBranchTitle}
               >
                 <Trash2 className="h-4 w-4" />
-                Delete {branch}
+                {uiT("Delete {0}", { p0: branch })}
               </DropdownMenuItem>
             ) : null}
           </>
@@ -302,7 +304,7 @@ export function RepoSourceDropdown({
             )}
             <span className="text-muted-foreground">{controls.localLabel}</span>
             <span className="ml-auto rounded-md border border-input/60 bg-background px-2 py-0.5 text-xs font-medium text-foreground shadow-xs group-focus:border-input">
-              {controls.clonePending ? "Cloning…" : "Clone"}
+              {controls.clonePending ? uiT("Cloning…") : uiT("Clone")}
             </span>
           </DropdownMenuItem>
         ) : null}
@@ -328,12 +330,12 @@ export function RepoSyncActionButton({
         asChild
         className={PROJECT_PANEL_ACTION_BUTTON_CLASS}
         size="sm"
-        title={`Open repository on ${controls.remoteLabel}`}
+        title={uiT("Open repository on {0}", { p0: controls.remoteLabel })}
         variant="ghost"
       >
         <a href={externalOpenUrl} rel="noreferrer" target="_blank">
           <ExternalLink className="h-4 w-4" />
-          Open
+          {uiT("Open")}
         </a>
       </Button>
     ) : null;
@@ -350,15 +352,17 @@ export function RepoSyncActionButton({
         disabled={controls.pullDisabled}
         onClick={controls.onPull}
         size="sm"
-        title={controls.pullTitle ?? "Pull remote commits"}
+        title={controls.pullTitle ?? uiT("Pull remote commits")}
         variant="ghost"
       >
-        {controls.pullPending ? (
-          <Loader2 className="h-4 w-4 animate-spin" />
-        ) : (
-          <DownloadCloud className="h-4 w-4" />
-        )}
-        Pull{count > 0 ? ` ${count}` : ""}
+        {uiMessage("{0} Pull{1}", {
+          p0: controls.pullPending ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <DownloadCloud className="h-4 w-4" />
+          ),
+          p1: count > 0 ? ` ${count}` : "",
+        })}
       </Button>
     );
   }
@@ -370,15 +374,16 @@ export function RepoSyncActionButton({
         disabled={controls.pushDisabled}
         onClick={controls.onPush}
         size="sm"
-        title={controls.pushTitle ?? "Push local commits"}
+        title={controls.pushTitle ?? uiT("Push local commits")}
         variant="ghost"
       >
-        {controls.pushPending ? (
-          <Loader2 className="h-4 w-4 animate-spin" />
-        ) : (
-          <UploadCloud className="h-4 w-4" />
-        )}
-        Push
+        {uiMessage("{0} Push", {
+          p0: controls.pushPending ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <UploadCloud className="h-4 w-4" />
+          ),
+        })}
       </Button>
     );
   }
@@ -390,15 +395,16 @@ export function RepoSyncActionButton({
       disabled={controls.fetchPending}
       onClick={controls.onFetch}
       size="sm"
-      title={controls.fetchTitle ?? "Check for remote changes"}
+      title={controls.fetchTitle ?? uiT("Check for remote changes")}
       variant="ghost"
     >
-      {controls.fetchPending ? (
-        <Loader2 className="h-4 w-4 animate-spin" />
-      ) : (
-        <RefreshCw className="h-4 w-4" />
-      )}
-      Fetch
+      {uiMessage("{0} Fetch", {
+        p0: controls.fetchPending ? (
+          <Loader2 className="h-4 w-4 animate-spin" />
+        ) : (
+          <RefreshCw className="h-4 w-4" />
+        ),
+      })}
     </Button>
   );
 }

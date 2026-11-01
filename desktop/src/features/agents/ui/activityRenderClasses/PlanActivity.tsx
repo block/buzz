@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { Markdown } from "@/shared/ui/markdown";
 import {
   ActivityRow,
@@ -50,7 +52,7 @@ export function PlanActivity(props: ActivityRenderClassItemProps) {
 function PlanUpdateLabelObject({ text }: { text: string }) {
   return (
     <>
-      plan
+      {uiT("plan")}
       {text ? (
         <>
           {" · "}

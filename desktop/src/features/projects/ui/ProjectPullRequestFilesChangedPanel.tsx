@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import {
   Braces,
   CodeXml,
@@ -453,6 +455,8 @@ function DiffPreview({
   focusedAnchor?: ProjectPullRequestCommentAnchor | null;
   inlineComments?: InlineCommentControls;
 }) {
+  useUiLanguage();
+
   const rows = diffRows(file);
   const focusedRowRef = React.useRef<HTMLDivElement | null>(null);
   const [highlightedAnchor, setHighlightedAnchor] =
@@ -493,7 +497,7 @@ function DiffPreview({
   if (rows.length === 0) {
     return (
       <div className="bg-muted/20 px-4 py-4 text-sm text-muted-foreground">
-        No textual diff is available for this file.
+        {uiT("No textual diff is available for this file.")}
       </div>
     );
   }
@@ -502,8 +506,10 @@ function DiffPreview({
     <div className="overflow-x-auto bg-background/70 font-mono text-xs leading-5">
       {file.truncated ? (
         <div className="border-border/40 border-b bg-amber-500/10 px-4 py-2 text-amber-600 dark:text-amber-400">
-          Large diff truncated — showing the first {rows.length} lines. Use a
-          local checkout to review the full change.
+          {uiT(
+            "Large diff truncated — showing the first {0} lines. Use a local checkout to review the full change.",
+            { p0: rows.length },
+          )}
         </div>
       ) : null}
       {rows.map((row) => {
@@ -550,14 +556,18 @@ function DiffPreview({
               <span className="flex select-none items-center justify-center">
                 {anchor && inlineComments ? (
                   <button
-                    aria-label={`Comment on ${anchor.path} ${anchor.side} line ${anchor.line}`}
+                    aria-label={uiT("Comment on {0} {1} line {2}", {
+                      p0: anchor.path,
+                      p1: anchor.side,
+                      p2: anchor.line,
+                    })}
                     className={cn(
                       "flex h-5 w-5 items-center justify-center rounded text-muted-foreground opacity-0 hover:bg-primary hover:text-primary-foreground focus-visible:opacity-100 focus-visible:outline-hidden group-hover:opacity-100",
                       (comments.length > 0 || isActive) && "opacity-100",
                     )}
                     data-testid="project-diff-add-comment"
                     onClick={() => inlineComments.onStart(anchor)}
-                    title="Add line comment"
+                    title={uiT("Add line comment")}
                     type="button"
                   >
                     <MessageSquarePlus className="h-3.5 w-3.5" />
@@ -670,6 +680,8 @@ export function ProjectPullRequestFilesChangedPanel({
   project: Project;
   pullRequest: ProjectPullRequest | null;
 }) {
+  useUiLanguage();
+
   const identityQuery = useIdentityQuery();
   const [activeAnchor, setActiveAnchor] =
     React.useState<ProjectPullRequestCommentAnchor | null>(null);
@@ -704,14 +716,14 @@ export function ProjectPullRequestFilesChangedPanel({
         setActiveAnchor(null);
         toast.success(
           decision === "request-changes"
-            ? "Changes requested."
-            : "Line comment posted.",
+            ? uiT("Changes requested.")
+            : uiT("Line comment posted."),
         );
       } catch (error) {
         toast.error(
           error instanceof Error
             ? error.message
-            : "Failed to post line comment.",
+            : uiT("Failed to post line comment."),
         );
         throw error;
       }
@@ -749,7 +761,7 @@ export function ProjectPullRequestFilesChangedPanel({
           : undefined
       }
       isLoading={isLoading}
-      subjectLabel="review"
+      subjectLabel={uiT("review")}
     />
   );
 }
@@ -780,6 +792,8 @@ export function ProjectDiffFilesPanel({
   inlineComments?: InlineCommentControls;
   subjectLabel: string;
 }) {
+  useUiLanguage();
+
   const outerBorderClass = embedded ? "" : PROJECT_DETAIL_PANEL_CLASS;
   const [query, setQuery] = React.useState("");
   const [selectedPath, setSelectedPath] = React.useState<string | null>(null);
@@ -821,7 +835,7 @@ export function ProjectDiffFilesPanel({
   }, [filteredFiles, selectedPath]);
 
   if (isLoading && !diff) {
-    return <BuzzLoadingState label="Loading changed files" />;
+    return <BuzzLoadingState label={uiT("Loading changed files")} />;
   }
 
   if (error && !diff) {
@@ -834,7 +848,11 @@ export function ProjectDiffFilesPanel({
         )}
         data-project-detail-panel={embedded ? undefined : true}
       >
-        <p>Could not load changed files for this {subjectLabel}.</p>
+        <p>
+          {uiT("Could not load changed files for this {0}.", {
+            p0: subjectLabel,
+          })}
+        </p>
         {message ? (
           <p className="font-mono text-xs text-muted-foreground/80">
             {message}
@@ -853,7 +871,9 @@ export function ProjectDiffFilesPanel({
         )}
         data-project-detail-panel={embedded ? undefined : true}
       >
-        No changed files are available for this {subjectLabel} yet.
+        {uiT("No changed files are available for this {0} yet.", {
+          p0: subjectLabel,
+        })}
       </div>
     );
   }
@@ -871,14 +891,14 @@ export function ProjectDiffFilesPanel({
         <div className="space-y-3 p-3">
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <Files className="h-3.5 w-3.5" />
-            <span>{files.length} changed files</span>
+            <span>{uiT("{0} changed files", { p0: files.length })}</span>
           </div>
           <label className="flex h-8 items-center gap-2 border border-border/60 bg-background/70 px-2 text-xs text-muted-foreground">
             <Search className="h-3.5 w-3.5" />
             <input
               className="min-w-0 flex-1 bg-transparent text-foreground outline-hidden placeholder:text-muted-foreground"
               onChange={(event) => setQuery(event.currentTarget.value)}
-              placeholder="Filter files…"
+              placeholder={uiT("Filter files…")}
               value={query}
             />
           </label>
@@ -904,7 +924,7 @@ export function ProjectDiffFilesPanel({
             <span className="truncate">{headerLabel}</span>
           </div>
           <div className="flex items-center gap-3">
-            <span>{files.length} files changed</span>
+            <span>{uiT("{0} files changed", { p0: files.length })}</span>
             <span className="text-green-500">+{stats.additions}</span>
             <span className="text-destructive">-{stats.deletions}</span>
           </div>
@@ -946,7 +966,7 @@ export function ProjectDiffFilesPanel({
             </article>
           ) : (
             <div className="border border-border/60 bg-background/45 p-4 text-sm text-muted-foreground">
-              No files match this filter.
+              {uiT("No files match this filter.")}
             </div>
           )}
         </div>

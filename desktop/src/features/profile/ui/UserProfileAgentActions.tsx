@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import {
   Archive,
@@ -40,6 +42,8 @@ export function UserProfileAgentSettingsMenu({
   onToggleAutoStart?: () => void;
   personaActionKey?: string;
 }) {
+  useUiLanguage();
+
   const [archiveConfirmOpen, setArchiveConfirmOpen] = React.useState(false);
   const actionKey = managedAgent?.pubkey ?? "persona-draft";
   const personaKey = personaActionKey ?? actionKey;
@@ -59,15 +63,17 @@ export function UserProfileAgentSettingsMenu({
     return null;
   }
 
-  const archiveLabel = isBot ? "Archive agent" : "Archive identity";
-  const unarchiveLabel = isBot ? "Unarchive agent" : "Unarchive identity";
+  const archiveLabel = isBot ? uiT("Archive agent") : uiT("Archive identity");
+  const unarchiveLabel = isBot
+    ? uiT("Unarchive agent")
+    : uiT("Unarchive identity");
 
   return (
     <>
       <DropdownMenu modal={false}>
         <DropdownMenuTrigger asChild>
           <Button
-            aria-label="Open profile settings"
+            aria-label={uiT("Open profile settings")}
             data-testid="user-profile-settings-menu-trigger"
             size="icon"
             type="button"
@@ -92,10 +98,10 @@ export function UserProfileAgentSettingsMenu({
             >
               <Power className="h-4 w-4 text-muted-foreground" />
               <span className="min-w-0 flex-1 text-sm font-medium">
-                Auto-start
+                {uiT("Auto-start")}
               </span>
               <Switch
-                aria-label="Auto-start"
+                aria-label={uiT("Auto-start")}
                 checked={managedAgent.startOnAppLaunch}
                 data-testid={autoStartSwitchId}
                 disabled={isPending}
@@ -112,7 +118,7 @@ export function UserProfileAgentSettingsMenu({
               onClick={onDuplicatePersona}
             >
               <CopyPlus className="h-4 w-4" />
-              Duplicate
+              {uiT("Duplicate")}
             </DropdownMenuItem>
           ) : null}
           {onExportPersona ? (
@@ -122,7 +128,7 @@ export function UserProfileAgentSettingsMenu({
               onClick={onExportPersona}
             >
               <Download className="h-4 w-4" />
-              Export
+              {uiT("Export")}
             </DropdownMenuItem>
           ) : null}
           {hasArchiveAction && (canToggleAutoStart || hasPrimaryActions) ? (
@@ -136,7 +142,9 @@ export function UserProfileAgentSettingsMenu({
                 onClick={archiveActions.unarchive}
               >
                 <ArchiveRestore className="h-4 w-4" />
-                {archiveActions.isPending ? "Unarchiving…" : unarchiveLabel}
+                {archiveActions.isPending
+                  ? uiT("Unarchiving…")
+                  : unarchiveLabel}
               </DropdownMenuItem>
             ) : (
               <DropdownMenuItem
@@ -145,7 +153,7 @@ export function UserProfileAgentSettingsMenu({
                 onSelect={() => setArchiveConfirmOpen(true)}
               >
                 <Archive className="h-4 w-4" />
-                {archiveActions.isPending ? "Archiving…" : archiveLabel}
+                {archiveActions.isPending ? uiT("Archiving…") : archiveLabel}
               </DropdownMenuItem>
             )
           ) : null}

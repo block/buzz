@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { ChevronRight } from "lucide-react";
 
@@ -29,9 +31,9 @@ function ProfileInstanceRow({
       </span>
       <span className="text-xs capitalize text-muted-foreground">
         {archived
-          ? "Archived"
+          ? uiT("Archived")
           : isCurrent
-            ? "Current"
+            ? uiT("Current")
             : instance.status.replace("_", " ")}
       </span>
       <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -58,15 +60,20 @@ export function ProfileInstancesSection({
   instances: ManagedAgent[];
   onOpenInstance: (pubkey: string) => void;
 }) {
+  useUiLanguage();
+
   const [expanded, setExpanded] = React.useState(false);
   const totalCount = instances.length + archivedInstances.length;
   if (totalCount === 0) return null;
-  const instanceCountLabel = `${totalCount} instance${totalCount === 1 ? "" : "s"}`;
+  const instanceCountLabel = uiT("{0} instance{1}", {
+    p0: totalCount,
+    p1: totalCount === 1 ? "" : "s",
+  });
 
   return (
     <ProfileSectionGroup
       testId="user-profile-instances-section"
-      title="Instances"
+      title={uiT("Instances")}
     >
       <button
         aria-expanded={expanded}
@@ -101,7 +108,7 @@ export function ProfileInstancesSection({
                 className="px-4 pb-1 pt-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground"
                 data-testid="user-profile-instances-archived-header"
               >
-                Archived
+                {uiT("Archived")}
               </p>
               {archivedInstances.map((instance) => (
                 <ProfileInstanceRow

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { isTauri } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { QueryClientProvider } from "@tanstack/react-query";
@@ -189,6 +191,8 @@ function AppLoadingGate() {
 // Quiet gate for switching between already-set-up communities: visually empty
 // unless the switch takes long, so fast switches don't flash the boot splash.
 function CommunitySwitchGate() {
+  useUiLanguage();
+
   const [showSpinner, setShowSpinner] = useState(false);
 
   useEffect(() => {
@@ -203,10 +207,10 @@ function CommunitySwitchGate() {
       role="status"
     >
       <StartupWindowDragRegion />
-      <span className="sr-only">Switching community…</span>
+      <span className="sr-only">{uiT("Switching community…")}</span>
       {showSpinner ? (
         <BeeLoader
-          ariaLabel="Switching community…"
+          ariaLabel={uiT("Switching community…")}
           className="h-auto w-20"
           tintClassName="text-muted-foreground"
         />
@@ -224,6 +228,8 @@ function CommunityQueryProvider({
   pubkey: string | null;
   relayUrl: string | null;
 }) {
+  useUiLanguage();
+
   // Seeding persisted channel heads is part of constructing the client, not a
   // gate in front of the app: the splash, AppReady, and relay preconnect mount
   // immediately, and only the channel query waits on the cache load (see
@@ -308,6 +314,8 @@ function AppReady({
   isSharedIdentity: boolean;
   isCommunitySwitch: boolean;
 }) {
+  useUiLanguage();
+
   const onboarding = useAppOnboardingState(isSharedIdentity);
 
   if (onboarding.stage === "reset-failed") {
@@ -370,6 +378,8 @@ function CommunityApp({
   onBackToMachineConfig: () => void;
   sharedIdentity: boolean;
 }) {
+  useUiLanguage();
+
   const {
     activeCommunity,
     communities,
@@ -696,6 +706,8 @@ function CommunityApp({
 }
 
 function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
+  useUiLanguage();
+
   const { activeCommunity } = useCommunities();
   const communityOnboarding = useCommunityOnboarding();
   const machine = useMachineOnboardingState({
@@ -792,6 +804,8 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
 }
 
 export function App() {
+  useUiLanguage();
+
   useReloadShortcut();
   useCloseWindowShortcut();
   useInitialRenderReady();

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import {
@@ -33,6 +35,8 @@ export function ToolItem({
   item: Extract<TranscriptItem, { type: "tool" }>;
   profiles?: UserProfileLookup;
 }) {
+  useUiLanguage();
+
   const [isExpanded, setIsExpanded] = React.useState(false);
   const hasArgs = Object.keys(item.args).length > 0;
   const hasResult = item.result.trim().length > 0;

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import type { Workflow } from "@/shared/api/types";
@@ -30,6 +32,8 @@ export function WorkflowEditorOverlayProvider({
   onOpenNewWorkflow: (channelId?: string) => void;
   onOpenWorkflow: (workflowId: string, workflow?: Workflow) => void;
 }) {
+  useUiLanguage();
+
   const value = React.useMemo(
     () => ({
       openNewWorkflow: onOpenNewWorkflow,

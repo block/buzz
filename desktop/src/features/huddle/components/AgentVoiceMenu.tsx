@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { ChevronDown, MoreVertical } from "lucide-react";
 import * as React from "react";
 
@@ -50,6 +52,8 @@ export function AgentVoiceMenu({
   onSettingsChange,
   trigger,
 }: AgentVoiceMenuProps) {
+  useUiLanguage();
+
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const voices = voicesForBackend(registry, "pocket");
@@ -73,7 +77,7 @@ export function AgentVoiceMenu({
         setError(
           updateError instanceof Error
             ? updateError.message
-            : "Agent voice could not be updated.",
+            : uiT("Agent voice could not be updated."),
         );
       } finally {
         setBusy(false);
@@ -87,7 +91,7 @@ export function AgentVoiceMenu({
       <PopoverTrigger asChild>
         {trigger ?? (
           <Button
-            aria-label={`Voice settings for ${displayName}`}
+            aria-label={uiT("Voice settings for {0}", { p0: displayName })}
             className="absolute right-1.5 top-1.5 z-20 h-7 w-7 rounded-md bg-transparent text-muted-foreground shadow-none hover:bg-muted/70 hover:text-foreground"
             data-testid="huddle-agent-voice-menu-trigger"
             size="icon"
@@ -110,7 +114,7 @@ export function AgentVoiceMenu({
             className="text-sm font-medium"
             htmlFor={`agent-tts-${agentPubkey}`}
           >
-            Agent text-to-speech
+            {uiT("Agent text-to-speech")}
           </label>
           <Switch
             checked={settings?.enabled ?? true}
@@ -125,11 +129,11 @@ export function AgentVoiceMenu({
 
         {settings?.enabled ? (
           <div className="flex items-center justify-between gap-4">
-            <span className="text-sm font-medium">Agent voice</span>
+            <span className="text-sm font-medium">{uiT("Agent voice")}</span>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
-                  aria-label="Choose agent voice"
+                  aria-label={uiT("Choose agent voice")}
                   className="h-8 shrink-0 gap-1.5 px-2 text-sm text-muted-foreground"
                   data-testid="huddle-agent-voice-selector"
                   disabled={busy || voices.length === 0}
@@ -139,7 +143,7 @@ export function AgentVoiceMenu({
                 >
                   {selectedVoice
                     ? voiceOptionLabel(selectedVoice, voices)
-                    : "Unavailable"}
+                    : uiT("Unavailable")}
                   <ChevronDown aria-hidden="true" className="h-3.5 w-3.5" />
                 </Button>
               </DropdownMenuTrigger>
@@ -168,13 +172,13 @@ export function AgentVoiceMenu({
           <>
             <Separator />
             <Button
-              aria-label={`Remove ${displayName} from huddle`}
+              aria-label={uiT("Remove {0} from huddle", { p0: displayName })}
               className="w-full justify-start text-destructive hover:bg-destructive/10 hover:text-destructive"
               onClick={onRemoveAgent}
               type="button"
               variant="ghost"
             >
-              Remove from huddle
+              {uiT("Remove from huddle")}
             </Button>
           </>
         ) : null}

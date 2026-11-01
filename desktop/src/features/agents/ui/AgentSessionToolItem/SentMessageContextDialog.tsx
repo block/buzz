@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { CheckCheck, ChevronDown } from "lucide-react";
 
@@ -51,7 +53,7 @@ export function SentMessageContextDialog({
       <DialogContent className="max-w-xl overflow-hidden p-0">
         <div className="flex max-h-[85vh] flex-col">
           <DialogHeader className="px-6 pb-3 pt-5 pr-14">
-            <DialogTitle>Sent message context</DialogTitle>
+            <DialogTitle>{uiT("Sent message context")}</DialogTitle>
             <DialogDescription className="flex items-center gap-1.5">
               <CheckCheck className="h-3.5 w-3.5 shrink-0" />
               <span>{label}</span>
@@ -91,26 +93,40 @@ function buildSentMessageContextSections({
 }): SentMessageContextSection[] {
   const sections: SentMessageContextSection[] = [];
   if (preview) {
-    sections.push({ title: "Message", body: preview });
+    sections.push({
+      get title() {
+        return uiT("Message");
+      },
+      body: preview,
+    });
   }
   if (description) {
-    sections.push({ title: "Tool", body: description });
+    sections.push({
+      get title() {
+        return uiT("Tool");
+      },
+      body: description,
+    });
   }
   if (hasArgs) {
     sections.push({
-      title: "Parameters",
+      get title() {
+        return uiT("Parameters");
+      },
       body: JSON.stringify(args, null, 2),
     });
   }
   if (hasResult) {
     sections.push({
-      title: isError ? "Error" : "Result",
+      title: isError ? uiT("Error") : uiT("Result"),
       body: formatCodeValue(result),
     });
   }
   if (sections.length === 0) {
     sections.push({
-      title: "Status",
+      get title() {
+        return uiT("Status");
+      },
       body: "Waiting for tool details.",
     });
   }
@@ -139,6 +155,8 @@ function SentMessageContextSectionAccordion({
 }: {
   section: SentMessageContextSection;
 }) {
+  useUiLanguage();
+
   const [open, setOpen] = React.useState(false);
   const body = section.body.trim();
 
@@ -169,7 +187,9 @@ function SentMessageContextSectionAccordion({
               {body.length > 0 ? (
                 body
               ) : (
-                <span className="italic text-foreground/50">No metadata.</span>
+                <span className="italic text-foreground/50">
+                  {uiT("No metadata.")}
+                </span>
               )}
             </div>
           </div>

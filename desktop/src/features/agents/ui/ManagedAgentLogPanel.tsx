@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { CircleAlert } from "lucide-react";
 
 import type { ManagedAgent } from "@/shared/api/types";
@@ -44,10 +46,10 @@ export function ManagedAgentLogPanel({
         <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h3 className="text-sm font-semibold tracking-tight">
-              Harness Log
+              {uiT("Harness Log")}
             </h3>
             <p className="text-sm text-muted-foreground">
-              Select a local agent to inspect recent output.
+              {uiT("Select a local agent to inspect recent output.")}
             </p>
           </div>
         </div>
@@ -61,10 +63,10 @@ export function ManagedAgentLogPanel({
           )}
         >
           <p className="text-sm font-semibold tracking-tight">
-            No local agent selected
+            {uiT("No local agent selected")}
           </p>
           <p className="mt-2 text-sm text-muted-foreground">
-            Pick a managed agent to view the latest ACP log output.
+            {uiT("Pick a managed agent to view the latest ACP log output.")}
           </p>
         </div>
       ) : isLoading ? (
@@ -162,7 +164,7 @@ function HarnessLogHeader({
     <div className="flex min-h-12 items-center justify-between gap-3 border-b border-white/10 px-3 py-2">
       <div className="flex min-w-0 flex-col gap-0.5">
         <span className="min-w-0 truncate text-2xs font-semibold uppercase tracking-wide text-zinc-300">
-          Harness Log
+          {uiT("Harness Log")}
         </span>
         <span
           className="min-w-0 truncate font-mono text-2xs text-zinc-500"
@@ -173,7 +175,7 @@ function HarnessLogHeader({
       </div>
       <CopyButton
         className="h-6 rounded-md bg-black/40 px-2 text-zinc-300 hover:bg-black/70 hover:text-white"
-        label="Copy log"
+        label={uiT("Copy log")}
         size="xs"
         value={logContent}
         variant="ghost"

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { FolderKanban, Hash, LockKeyhole } from "lucide-react";
 import * as React from "react";
 
@@ -31,6 +33,8 @@ export function ProjectsChannelsList({
   projects: Project[];
   searchQuery?: string;
 }) {
+  const __buzzLanguage = useUiLanguage();
+
   const { goChannel } = useAppNavigation();
   const channelsQuery = useChannelsQuery({ enabled: projects.length > 0 });
   const channelsById = React.useMemo(() => {
@@ -38,6 +42,7 @@ export function ProjectsChannelsList({
       (channelsQuery.data ?? []).map((channel) => [channel.id, channel]),
     );
   }, [channelsQuery.data]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: UI label getters depend on the active language.
   const rows = React.useMemo(() => {
     const collected = collapseProjectRelatedChannelRows(
       collectProjectRelatedChannelRows(projects),
@@ -71,7 +76,7 @@ export function ProjectsChannelsList({
           left.channelId.localeCompare(right.channelId)
         );
       });
-  }, [channelsById, projects, searchQuery]);
+  }, [channelsById, projects, searchQuery, __buzzLanguage]);
   const participantPubkeys = React.useMemo(
     () => [
       ...new Set(
@@ -130,7 +135,7 @@ export function ProjectsChannelsList({
   }, [rows]);
 
   if (channelsQuery.isLoading && rows.length === 0) {
-    return <BuzzLoadingState label="Loading project channels" />;
+    return <BuzzLoadingState label={uiT("Loading project channels")} />;
   }
   if (rows.length === 0) {
     const searching = Boolean(searchQuery.trim());
@@ -138,11 +143,17 @@ export function ProjectsChannelsList({
       <ProjectPanelState
         description={
           searching
-            ? "Try a different search."
-            : "Link a discussion channel to a project or repository and it will appear here."
+            ? uiT("Try a different search.")
+            : uiT(
+                "Link a discussion channel to a project or repository and it will appear here.",
+              )
         }
         panel={false}
-        title={searching ? "No matching channels" : "No project channels yet"}
+        title={
+          searching
+            ? uiT("No matching channels")
+            : uiT("No project channels yet")
+        }
       />
     );
   }
@@ -177,10 +188,12 @@ export function ProjectsChannelsList({
               );
               const repositoryLabel =
                 row.repositoryNames.length === 0
-                  ? "Project channel"
+                  ? uiT("Project channel")
                   : row.repositoryNames.length === 1
                     ? row.repositoryNames[0]
-                    : `${row.repositoryNames.length} repositories`;
+                    : uiT("{0} repositories", {
+                        p0: row.repositoryNames.length,
+                      });
               const people =
                 channel?.participantPubkeys ?? channel?.participants ?? [];
               const selectionItem = selectionItemsByRowKey.get(rowKey);
@@ -207,7 +220,7 @@ export function ProjectsChannelsList({
                     description={
                       channel
                         ? listRowDescription(channel.description, name)
-                        : "Channel details are unavailable"
+                        : uiT("Channel details are unavailable")
                     }
                     icon={
                       channel ? (

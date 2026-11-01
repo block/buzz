@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { Calendar, GitCommitHorizontal, Hash, UserRound } from "lucide-react";
 
 import type { Repository } from "@/features/projects/hooks";
@@ -61,13 +63,13 @@ export function ProjectCommitDetailPanel({
             {commit?.subject ?? shortHash}{" "}
             <ShareLinkButton
               className="ml-0.5 inline-flex h-auto w-auto align-middle hover:bg-transparent"
-              label="Copy commit link"
+              label={uiT("Copy commit link")}
               link={commitShareLink(project, commit?.hash ?? commitHash)}
               testId="project-commit-copy-link"
             />
           </h3>
           <p className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-muted-foreground">
-            <span>Committed</span>
+            <span>{uiT("Committed")}</span>
             {commit ? (
               <span
                 className="shrink-0 whitespace-nowrap"
@@ -83,7 +85,7 @@ export function ProjectCommitDetailPanel({
           </p>
         </header>
         <ProjectDetailMetaList>
-          <ProjectDetailMetaRow icon={Hash} label="Commit">
+          <ProjectDetailMetaRow icon={Hash} label={uiT("Commit")}>
             <span className="inline-flex min-w-0 items-center gap-1 font-mono text-xs">
               {shortHash}
               <CopyCommitHashButton
@@ -93,7 +95,7 @@ export function ProjectCommitDetailPanel({
             </span>
           </ProjectDetailMetaRow>
           {commit?.authorName ? (
-            <ProjectDetailMetaRow icon={UserRound} label="Author">
+            <ProjectDetailMetaRow icon={UserRound} label={uiT("Author")}>
               <span
                 className="min-w-0 truncate text-muted-foreground"
                 title={commit.authorEmail}
@@ -103,14 +105,17 @@ export function ProjectCommitDetailPanel({
             </ProjectDetailMetaRow>
           ) : null}
           {commit ? (
-            <ProjectDetailMetaRow icon={Calendar} label="Date">
+            <ProjectDetailMetaRow icon={Calendar} label={uiT("Date")}>
               <span className="text-muted-foreground">
                 {commitDateLabel(commit.timestamp)}
               </span>
             </ProjectDetailMetaRow>
           ) : null}
           {diff ? (
-            <ProjectDetailMetaRow icon={GitCommitHorizontal} label="Changes">
+            <ProjectDetailMetaRow
+              icon={GitCommitHorizontal}
+              label={uiT("Changes")}
+            >
               <span className="flex items-center gap-1.5">
                 <span className="text-green-500">+{diff.additions}</span>
                 <span className="text-destructive">-{diff.deletions}</span>
@@ -119,7 +124,7 @@ export function ProjectCommitDetailPanel({
           ) : null}
         </ProjectDetailMetaList>
         {diff?.commitBody ? (
-          <ProjectDetailSection defaultOpen title="Description">
+          <ProjectDetailSection defaultOpen title={uiT("Description")}>
             <ProjectRichContent
               content={diff.commitBody}
               hardLineBreaks={false}
@@ -128,7 +133,7 @@ export function ProjectCommitDetailPanel({
         ) : null}
         <DiscussedInChannels
           className="mx-6 mb-4"
-          entityLabel="this commit"
+          entityLabel={uiT("this commit")}
           query={commitDiscussionQuery({
             hash: commit?.hash ?? commitHash,
             shortHash: commit?.shortHash,
@@ -141,7 +146,7 @@ export function ProjectCommitDetailPanel({
         contentClassName="flex min-h-0 flex-1 flex-col"
         defaultOpen
         headerClassName="mx-auto max-w-3xl"
-        title="Files changed"
+        title={uiT("Files changed")}
       >
         {/* Full-bleed: cancel the section's inner padding so the file
             tree + diff grid spans the whole content column, and let it
@@ -155,7 +160,7 @@ export function ProjectCommitDetailPanel({
             error={diffError}
             headerLabel={`${commit?.subject ?? "Commit"} · ${shortHash}`}
             isLoading={diffLoading}
-            subjectLabel="commit"
+            subjectLabel={uiT("commit")}
           />
         </div>
       </ProjectDetailSection>

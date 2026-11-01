@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { Link2 } from "lucide-react";
 
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
@@ -9,7 +11,7 @@ import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
  * offer a link that would fail to parse for the recipient.
  */
 export function CopyShareLinkMenuItem({
-  label = "Copy link",
+  label = uiT("Copy link"),
   link,
   successMessage = "Link copied to clipboard",
   testId,

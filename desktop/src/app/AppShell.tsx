@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { ProtectedGlobalOverlay } from "@protected-feature-components";
 import { useQueryClient } from "@tanstack/react-query";
@@ -108,6 +110,8 @@ import { AppWorkflowEditorOverlayProvider } from "@/app/AppWorkflowEditorOverlay
 import { LazySettingsScreen } from "@/app/LazySettingsScreen";
 const EMPTY_CHANNELS: Channel[] = [];
 export function AppShell() {
+  useUiLanguage();
+
   useWebviewZoomShortcuts();
   useTauriWindowDrag();
   useWebviewScrollBoundaryLock();

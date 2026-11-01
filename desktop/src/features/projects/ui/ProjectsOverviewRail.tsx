@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import {
@@ -88,6 +90,8 @@ export function ProjectsOverviewPeople({
   people: string[];
   profiles?: UserProfileLookup;
 }) {
+  useUiLanguage();
+
   const containerRef = React.useRef<HTMLDivElement>(null);
   const [layout, setLayout] = React.useState({
     columns: Math.min(people.length, 48) || 1,
@@ -173,7 +177,7 @@ export function ProjectsOverviewPeople({
                 <TooltipContent>
                   {remainingLabels.length === 1
                     ? remainingLabels[0]
-                    : `${remaining} more`}
+                    : uiT("{0} more", { p0: remaining })}
                 </TooltipContent>
               </Tooltip>
             ) : null}

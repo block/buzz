@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 function commandLooksLikePath(command: string) {
   const trimmed = command.trim();
   return (
@@ -12,17 +14,17 @@ export function describeResolvedCommand(command: string, resolvedPath: string) {
   const normalized = resolvedPath.replace(/\\/g, "/");
 
   if (normalized.includes("/target/release/")) {
-    return "workspace release build";
+    return uiT("workspace release build");
   }
   if (normalized.includes("/target/debug/")) {
-    return "workspace debug build";
+    return uiT("workspace debug build");
   }
 
   if (commandLooksLikePath(command)) {
-    return "custom command";
+    return uiT("custom command");
   }
 
-  return "installed on PATH";
+  return uiT("installed on PATH");
 }
 
 export function describeLogFile(path: string) {
@@ -30,7 +32,7 @@ export function describeLogFile(path: string) {
   const basename = normalized.split("/").pop() ?? path;
 
   if (!basename.endsWith(".log")) {
-    return "local harness log";
+    return uiT("local harness log");
   }
 
   const stem = basename.slice(0, -4);

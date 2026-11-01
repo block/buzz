@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
 
 export type MentionCandidateForRanking = {
@@ -118,7 +120,7 @@ export function rankMentionCandidates<T extends MentionCandidateForRanking>(
         : "";
       const label =
         candidate.displayName ??
-        (candidate.pubkey ? truncateNpub(candidate.pubkey) : "agent");
+        (candidate.pubkey ? truncateNpub(candidate.pubkey) : uiT("agent"));
       const groupRank = getMentionCandidateGroupRank(
         candidate,
         activePersonaIds,

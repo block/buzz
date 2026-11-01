@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { Check, Copy } from "lucide-react";
 import * as React from "react";
 
@@ -39,6 +41,8 @@ type PubKeyProps = {
 };
 
 function CopyRow({ label, value }: { label: string; value: string }) {
+  useUiLanguage();
+
   const [copied, setCopied] = React.useState(false);
   const resetTimer = React.useRef<number | undefined>(undefined);
   React.useEffect(() => () => window.clearTimeout(resetTimer.current), []);
@@ -52,7 +56,7 @@ function CopyRow({ label, value }: { label: string; value: string }) {
         <div className="break-all font-mono text-xs">{value}</div>
       </div>
       <Button
-        aria-label={`Copy ${label}`}
+        aria-label={uiT("Copy {0}", { p0: label })}
         onClick={() => {
           copyTextToClipboard(value, `${label} copied`);
           setCopied(true);
@@ -88,6 +92,8 @@ export function PubKey({
   className,
   testId,
 }: PubKeyProps) {
+  useUiLanguage();
+
   const [open, setOpen] = React.useState(false);
   const hoverTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
     null,
@@ -138,7 +144,7 @@ export function PubKey({
           <Popover>
             <PopoverTrigger asChild>
               <Button
-                aria-label="Copy public key"
+                aria-label={uiT("Copy public key")}
                 size="icon-xs"
                 type="button"
                 variant="ghost"
@@ -177,7 +183,7 @@ export function PubKey({
     <Popover onOpenChange={setOpen} open={open}>
       <PopoverTrigger asChild>
         <button
-          aria-label="Show full public key"
+          aria-label={uiT("Show full public key")}
           className={cn(
             "cursor-pointer rounded font-mono hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring",
             className,

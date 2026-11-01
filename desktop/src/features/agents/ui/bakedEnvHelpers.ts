@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 /**
  * Pure helper functions for displaying baked build env values in the global
  * agent config card. Extracted into their own module so unit tests can import
@@ -18,7 +20,7 @@ export function getBakedProviderInheritLabel(
 ): string {
   const match = options.find((o) => o.id === bakedProviderId);
   const friendlyName = match ? match.label : bakedProviderId;
-  return `${friendlyName} (inherited from build)`;
+  return uiT("{0} (inherited from build)", { p0: friendlyName });
 }
 
 export type InheritedDefaultSource = "build" | "global" | null;
@@ -55,7 +57,7 @@ export function resolveInheritedDefault(
 }
 
 export function getBakedModelInheritLabel(bakedModelId: string): string {
-  return `Inherit build default (${bakedModelId})`;
+  return uiT("Inherit build default ({0})", { p0: bakedModelId });
 }
 
 function providerModelEnvKey(provider: string): string | null {
@@ -120,20 +122,26 @@ export function getAdvancedInheritedSummary(
 
   const globalEnvLabel =
     globalEnvCount > 0
-      ? `${globalEnvCount} global env var${globalEnvCount > 1 ? "s" : ""}`
+      ? uiT("{0} global env var{1}", {
+          p0: globalEnvCount,
+          p1: globalEnvCount > 1 ? "s" : "",
+        })
       : "";
   if (effort.source === "build" && globalEnvCount === 0) {
-    return `Using build defaults: effort ${effort.value}`;
+    return uiT("Using build defaults: effort {0}", { p0: effort.value });
   }
   if (effort.source === "build") {
-    return `Using inherited defaults: build effort ${effort.value} · ${globalEnvLabel}`;
+    return uiT("Using inherited defaults: build effort {0} · {1}", {
+      p0: effort.value,
+      p1: globalEnvLabel,
+    });
   }
 
   const parts = [
     ...(effort.value ? [`effort ${effort.value}`] : []),
     ...(globalEnvLabel ? [globalEnvLabel] : []),
   ];
-  return `Using agent defaults: ${parts.join(" · ")}`;
+  return uiT("Using agent defaults: {0}", { p0: parts.join(" · ") });
 }
 
 export function getInheritedAgentDefaults(

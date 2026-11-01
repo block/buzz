@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { createPortal } from "react-dom";
 
 import type {
@@ -14,10 +16,6 @@ const MODE_TAB_LABELS: Record<AvatarMode, string> = {
   emoji: "Emoji",
   image: "Image",
 };
-const MODE_SEGMENT_OPTIONS = MODE_TAB_ORDER.map((value) => ({
-  label: MODE_TAB_LABELS[value],
-  value,
-}));
 
 type ProfileAvatarModeTabsProps = {
   disabled: boolean;
@@ -34,6 +32,11 @@ export function ProfileAvatarModeTabs({
   presentation,
   portalContainer,
 }: ProfileAvatarModeTabsProps) {
+  useUiLanguage();
+  const modeOptions = MODE_TAB_ORDER.map((value) => ({
+    label: uiT(MODE_TAB_LABELS[value]),
+    value,
+  }));
   const isOnboardingModal = presentation === "onboarding-modal";
   const isOnboardingInline = presentation === "onboarding-inline";
   const tabs = isOnboardingInline ? (
@@ -41,10 +44,10 @@ export function ProfileAvatarModeTabs({
       className="w-full bg-muted"
       disabled={disabled}
       indicatorTestId="onboarding-avatar-mode-indicator"
-      legend="Avatar type"
+      legend={uiT("Avatar type")}
       onValueChange={onModeChange}
       optionTestIdPrefix="onboarding-avatar-mode"
-      options={MODE_SEGMENT_OPTIONS}
+      options={modeOptions}
       testId="onboarding-avatar-mode-control"
       value={mode}
     />
@@ -57,7 +60,7 @@ export function ProfileAvatarModeTabs({
       value={mode}
     >
       <TabsList
-        aria-label="Avatar type"
+        aria-label={uiT("Avatar type")}
         className={cn(
           isOnboardingModal
             ? "relative isolate grid h-10 w-full max-w-[320px] grid-cols-3 overflow-hidden rounded-full bg-[color:rgb(var(--buzz-onboarding-avatar-control-fg)_/_0.12)] p-1 text-muted-foreground"
@@ -89,7 +92,7 @@ export function ProfileAvatarModeTabs({
             key={tabMode}
             value={tabMode}
           >
-            {MODE_TAB_LABELS[tabMode]}
+            {uiT(MODE_TAB_LABELS[tabMode])}
           </TabsTrigger>
         ))}
       </TabsList>

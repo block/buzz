@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { Info } from "lucide-react";
 import * as React from "react";
 
@@ -22,6 +24,8 @@ export function AgentContextPayloadPreview({
   payload: string;
   triggerLabel: string;
 }) {
+  useUiLanguage();
+
   const [open, setOpen] = React.useState(false);
   const trimmed = payload.trim();
   if (!trimmed) return null;
@@ -39,7 +43,7 @@ export function AgentContextPayloadPreview({
         data-testid="agent-context-preview-trigger"
         onClick={() => setOpen((value) => !value)}
         size="sm"
-        title="Preview the exact context appended to your message"
+        title={uiT("Preview the exact context appended to your message")}
         type="button"
         variant="ghost"
       >
@@ -52,9 +56,9 @@ export function AgentContextPayloadPreview({
           data-testid="agent-context-preview"
         >
           <p className="mb-2 text-xs text-muted-foreground">
-            This exact text is appended to your message before it is signed and
-            sent. Quoted values are untrusted workspace metadata — Buzz does not
-            verify or rewrite them.
+            {uiT(
+              "This exact text is appended to your message before it is signed and sent. Quoted values are untrusted workspace metadata — Buzz does not verify or rewrite them.",
+            )}
           </p>
           <pre
             className="max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-xs text-foreground"

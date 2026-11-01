@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { Columns2, PanelRightOpen } from "lucide-react";
 
 import {
@@ -28,13 +30,17 @@ const THREAD_VIEW_MODE_TOGGLE = {
   focus: {
     // Viewing the drawer → offer the pane.
     icon: Columns2,
-    label: "Show thread beside channel",
+    get label() {
+      return uiT("Show thread beside channel");
+    },
     target: "split",
   },
   split: {
     // Viewing the pane → offer the drawer.
     icon: PanelRightOpen,
-    label: "Expand thread",
+    get label() {
+      return uiT("Expand thread");
+    },
     target: "focus",
   },
 } as const;
@@ -57,6 +63,8 @@ export function ThreadViewModeToggle({
 }: {
   onChange: (mode: ThreadViewMode, restoreFocus: boolean) => void;
 }) {
+  useUiLanguage();
+
   const viewMode = useThreadViewMode();
   const { icon: Icon, label, target } = THREAD_VIEW_MODE_TOGGLE[viewMode];
 

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type { ComponentType } from "react";
 import { useRef, useState } from "react";
 
@@ -80,7 +82,7 @@ export function createLinkPreviewImageLightbox(
     return (
       <>
         <button
-          aria-label={`Zoom image: ${alt}`}
+          aria-label={uiT("Zoom image: {0}", { p0: alt })}
           className={cn(
             "cursor-zoom-in border-0 p-0 text-left focus:outline-hidden focus-visible:ring-2 focus-visible:ring-ring/50",
             lightboxState && "opacity-0",

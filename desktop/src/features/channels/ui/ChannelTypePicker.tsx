@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { ChevronDown, ClockFading, Hash } from "lucide-react";
 import * as React from "react";
 
@@ -34,7 +36,7 @@ export function ChannelTypePicker({
   onLifecycleChange,
   onOpenChange,
   open,
-  temporaryOptionAriaLabel = "Temporary channel",
+  temporaryOptionAriaLabel = uiT("Temporary channel"),
   testId,
 }: {
   align?: React.ComponentProps<typeof DropdownMenuContent>["align"];
@@ -49,10 +51,12 @@ export function ChannelTypePicker({
   temporaryOptionAriaLabel?: string;
   testId?: string;
 }) {
+  useUiLanguage();
+
   const [internalOpen, setInternalOpen] = React.useState(false);
   const pickerOpen = open ?? internalOpen;
   const setPickerOpen = onOpenChange ?? setInternalOpen;
-  const label = LIFECYCLE_LABEL[lifecycle];
+  const label = uiT(LIFECYCLE_LABEL[lifecycle]);
   const Icon = lifecycle === "project" ? null : LIFECYCLE_ICON[lifecycle];
   const projectLocked = lifecycle === "project";
 
@@ -71,7 +75,7 @@ export function ChannelTypePicker({
     <DropdownMenu modal={false} onOpenChange={setPickerOpen} open={pickerOpen}>
       <DropdownMenuTrigger asChild>
         <Button
-          aria-label={ariaLabel ?? `Channel type: ${label}`}
+          aria-label={ariaLabel ?? uiT("Channel type: {0}", { p0: label })}
           className={cn(
             "h-9 w-fit px-2.5 text-sm font-medium text-foreground hover:bg-muted/50",
             className,
@@ -99,23 +103,26 @@ export function ChannelTypePicker({
       >
         <DropdownMenuRadioGroup onValueChange={selectType} value={lifecycle}>
           {allowProject ? (
-            <DropdownMenuRadioItem aria-label="Project channel" value="project">
-              Project
+            <DropdownMenuRadioItem
+              aria-label={uiT("Project channel")}
+              value="project"
+            >
+              {uiT("Project")}
             </DropdownMenuRadioItem>
           ) : null}
           <DropdownMenuRadioItem
-            aria-label="Ongoing channel"
+            aria-label={uiT("Ongoing channel")}
             disabled={projectLocked}
             value="ongoing"
           >
-            Ongoing
+            {uiT("Ongoing")}
           </DropdownMenuRadioItem>
           <DropdownMenuRadioItem
             aria-label={temporaryOptionAriaLabel}
             disabled={projectLocked}
             value="temporary"
           >
-            Temporary
+            {uiT("Temporary")}
           </DropdownMenuRadioItem>
         </DropdownMenuRadioGroup>
       </DropdownMenuContent>

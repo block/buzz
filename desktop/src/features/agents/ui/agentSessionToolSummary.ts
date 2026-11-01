@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type {
   AgentActivityAction,
   ToolStatus,
@@ -102,12 +104,12 @@ function labelForStatus(
 ) {
   const label = descriptor.label;
   if (descriptor.groupKey === "file-edit:str_replace") {
-    if (failed) return "Edit failed";
-    if (running) return "Editing file";
-    return "Edited file";
+    if (failed) return uiT("Edit failed");
+    if (running) return uiT("Editing file");
+    return uiT("Edited file");
   }
   if (failed) {
-    return label.endsWith("failed") ? label : `${label} failed`;
+    return label.endsWith("failed") ? label : uiT("{0} failed", { p0: label });
   }
   if (running) return label;
   if (status === "completed") return label;

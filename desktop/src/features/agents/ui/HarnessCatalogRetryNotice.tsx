@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { AlertCircle } from "lucide-react";
 
 import { useRetryBootWarm } from "@/features/agents/hooks";
@@ -11,13 +13,15 @@ import { Button } from "@/shared/ui/button";
  * picker and Agent defaults surfaces both render this instead of a dead end.
  */
 export function HarnessCatalogRetryNotice() {
+  useUiLanguage();
+
   const retryBootWarm = useRetryBootWarm();
   return (
     <div className="flex flex-wrap items-center gap-2 text-sm text-destructive">
       <AlertCircle className="size-4 shrink-0" />
-      <span>Couldn't detect agent harnesses.</span>
+      <span>{uiT("Couldn't detect agent harnesses.")}</span>
       <Button onClick={retryBootWarm} size="sm" variant="outline">
-        Try again
+        {uiT("Try again")}
       </Button>
     </div>
   );

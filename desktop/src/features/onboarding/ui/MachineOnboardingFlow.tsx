@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import type { QueryClient } from "@tanstack/react-query";
 import { motion, useReducedMotion } from "motion/react";
@@ -72,6 +74,8 @@ export function MachineOnboardingFlow({
   initialPage?: MachineOnboardingPage;
   queryClient: QueryClient;
 }) {
+  useUiLanguage();
+
   const [page, setPage] = React.useState<MachineOnboardingPage>(
     identityLost ? "key-import" : (initialPage ?? "identity"),
   );
@@ -158,7 +162,7 @@ export function MachineOnboardingFlow({
       setPage("backup");
     } catch (cause) {
       setError(
-        cause instanceof Error ? cause.message : "Failed to load identity",
+        cause instanceof Error ? cause.message : uiT("Failed to load identity"),
       );
     } finally {
       setIsPending(false);
@@ -179,7 +183,7 @@ export function MachineOnboardingFlow({
       setPage("setup");
     } catch (cause) {
       setError(
-        cause instanceof Error ? cause.message : "Failed to load identity",
+        cause instanceof Error ? cause.message : uiT("Failed to load identity"),
       );
     } finally {
       setIsPending(false);
@@ -206,7 +210,7 @@ export function MachineOnboardingFlow({
       setPage("backup");
     } catch (cause) {
       setError(
-        cause instanceof Error ? cause.message : "Failed to save identity",
+        cause instanceof Error ? cause.message : uiT("Failed to save identity"),
       );
     } finally {
       setIsPending(false);
@@ -305,7 +309,9 @@ export function MachineOnboardingFlow({
           ? { disabled: isKeyImporting, onClick: backFromKeyImport }
           : page === "backup" && backupSubview !== "created"
             ? {
-                label: "Return to onboarding",
+                get label() {
+                  return uiT("Return to onboarding");
+                },
                 onClick: returnToCreatedKey,
                 testId: "backup-return-to-onboarding",
               }
@@ -346,8 +352,9 @@ export function MachineOnboardingFlow({
                 src="/landing/buzz-wordmark.png"
               />
               <p className="mt-2 max-w-[560px] text-center text-2xl font-normal leading-none text-foreground">
-                Your people, your agents, your projects —<br />
-                all in one place.
+                {uiT("Your people, your agents, your projects —")}
+                <br />
+                {uiT("all in one place.")}
               </p>
               {error ? (
                 <p className="mt-4 text-sm text-destructive">{error}</p>
@@ -367,10 +374,10 @@ export function MachineOnboardingFlow({
                   type="button"
                 >
                   {isPending
-                    ? "Loading identity…"
+                    ? uiT("Loading identity…")
                     : selectedPubkey
-                      ? "Continue setup"
-                      : "Create a new identity key"}
+                      ? uiT("Continue setup")
+                      : uiT("Create a new identity key")}
                 </Button>
                 <Button
                   className={`${ONBOARDING_SECONDARY_CTA_CLASS} px-5`}
@@ -385,8 +392,8 @@ export function MachineOnboardingFlow({
                   variant="ghost"
                 >
                   {selectedPubkey
-                    ? "Use a different key instead"
-                    : "Use an existing key"}
+                    ? uiT("Use a different key instead")
+                    : uiT("Use an existing key")}
                 </Button>
               </div>
               <IdentityKeyHelpDialog
@@ -440,10 +447,10 @@ export function MachineOnboardingFlow({
           {keyImportDialog === "backup" ? (
             <div className="w-full" data-testid="backup-recovery-dialog">
               <h1 className="text-title font-normal text-foreground">
-                Restore from a backup file
+                {uiT("Restore from a backup file")}
               </h1>
               <p className="mt-2 w-full text-base leading-6 text-foreground/80">
-                Choose the encrypted backup file you saved from Buzz.
+                {uiT("Choose the encrypted backup file you saved from Buzz.")}
               </p>
               <NostrKeyImportForm
                 key={keyImportFormKey}
@@ -463,12 +470,16 @@ export function MachineOnboardingFlow({
               data-testid="phone-recovery-dialog"
             >
               <h1 className="text-title font-normal text-foreground">
-                {identityLost ? "Recover from your phone" : "Scan to sign in"}
+                {identityLost
+                  ? uiT("Recover from your phone")
+                  : uiT("Scan to sign in")}
               </h1>
               <p className="mt-2 w-full text-base leading-6 text-foreground/80">
                 {phoneRecoveryStep === "loading" || phoneRecoveryStep === "qr"
-                  ? "Scan this code with a device where you’re currently signed in to Buzz."
-                  : "Confirm the code before sharing your identity."}
+                  ? uiT(
+                      "Scan this code with a device where you’re currently signed in to Buzz.",
+                    )
+                  : uiT("Confirm the code before sharing your identity.")}
               </p>
               <div
                 className="flex min-h-0 flex-1 items-center justify-center"
@@ -494,16 +505,17 @@ export function MachineOnboardingFlow({
               >
                 <h1 className="text-title font-normal text-foreground">
                   {keyImportStage === "backup-password"
-                    ? "Unlock your account"
-                    : "Enter your private key"}
+                    ? uiT("Unlock your account")
+                    : uiT("Enter your private key")}
                 </h1>
                 <div className="mt-2 w-full text-base leading-6 text-foreground/80">
                   {keyImportStage === "backup-password" ? (
-                    "Enter your backup password to restore your identity."
+                    uiT("Enter your backup password to restore your identity.")
                   ) : (
                     <p>
-                      Paste your private key to sign in to Buzz. You can also
-                      use a{" "}
+                      {uiT(
+                        "Paste your private key to sign in to Buzz. You can also use a",
+                      )}{" "}
                       <button
                         className="rounded-sm font-medium underline decoration-foreground/40 underline-offset-4 transition-colors hover:decoration-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-60"
                         data-testid="nostr-import-file-button"
@@ -514,9 +526,9 @@ export function MachineOnboardingFlow({
                         }}
                         type="button"
                       >
-                        backup file
+                        {uiT("backup file")}
                       </button>
-                      , or{" "}
+                      {uiT(", or")}{" "}
                       <button
                         className="rounded-sm font-medium underline decoration-foreground/40 underline-offset-4 transition-colors hover:decoration-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-60"
                         data-testid="nostr-import-phone-link"
@@ -527,7 +539,7 @@ export function MachineOnboardingFlow({
                         }}
                         type="button"
                       >
-                        recover from your phone
+                        {uiT("recover from your phone")}
                       </button>
                       .
                     </p>
@@ -554,7 +566,7 @@ export function MachineOnboardingFlow({
                       type="button"
                       variant="ghost"
                     >
-                      Start new identity
+                      {uiT("Start new identity")}
                     </Button>
                   ) : null}
                 </div>

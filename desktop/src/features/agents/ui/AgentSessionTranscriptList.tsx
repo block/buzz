@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { motion, useReducedMotion } from "motion/react";
 import { CheckCheck, Clock, Radio } from "lucide-react";
@@ -135,6 +137,8 @@ export function AgentSessionTranscriptList({
   scrollScopeKey?: string | null;
   variant?: AgentSessionTranscriptVariant;
 }) {
+  useUiLanguage();
+
   const activeTurns = useActiveAgentTurns(agentPubkey);
   const isTurnLive = React.useMemo(
     () => isAgentTurnLive(activeTurns, channelId),
@@ -209,7 +213,7 @@ export function AgentSessionTranscriptList({
         <div className="flex h-full min-h-40 flex-col items-center justify-center px-6 py-10 text-center">
           {isLoading ? (
             <FuzzyLogo
-              ariaLabel="Waiting for ACP activity"
+              ariaLabel={uiT("Waiting for ACP activity")}
               className="mx-auto text-muted-foreground"
               fuzz={false}
               loop
@@ -217,7 +221,9 @@ export function AgentSessionTranscriptList({
           ) : (
             <>
               <Radio className="mx-auto h-4 w-4 text-muted-foreground" />
-              <p className="mt-3 text-sm font-medium">No ACP activity yet</p>
+              <p className="mt-3 text-sm font-medium">
+                {uiT("No ACP activity yet")}
+              </p>
               <p className="mt-1 text-sm text-muted-foreground">
                 {emptyDescription}
               </p>
@@ -236,7 +242,7 @@ export function AgentSessionTranscriptList({
       ref={autoTail ? scrollContainerRef : undefined}
     >
       <div
-        aria-label="Live ACP transcript"
+        aria-label={uiT("Live ACP transcript")}
         aria-live="polite"
         className={cn(
           "flex w-full flex-col",
@@ -342,7 +348,7 @@ function TranscriptAcpSourceBadge({ source }: { source: string }) {
     <span
       className="mb-1 inline-flex max-w-full rounded border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 font-mono text-xs leading-none text-amber-800 dark:text-amber-200"
       data-testid="transcript-acp-source"
-      title={`ACP wire source: ${source}`}
+      title={uiT("ACP wire source: {0}", { p0: source })}
     >
       {source}
     </span>
@@ -359,6 +365,8 @@ function TranscriptDisplayBlockView({
   block: TranscriptDisplayBlock;
   profiles?: UserProfileLookup;
 }) {
+  useUiLanguage();
+
   const variant = useAgentSessionTranscriptVariant();
   const isCompactPreview = variant === "compactPreview";
   const animationPreferenceEnabled = useTranscriptAnimationEnabled();
@@ -495,6 +503,8 @@ function SameKindSummaryItem({
   profiles?: UserProfileLookup;
   summary: Extract<TranscriptTurnSegment, { kind: "summary" }>["summary"];
 }) {
+  useUiLanguage();
+
   const groupedFileEditDiffs = React.useMemo(
     () =>
       summary.renderClass === "file-edit" || summary.variant === "mixed"
@@ -618,6 +628,8 @@ function ToolRunSummaryLabel({
   label: string;
   stats?: ActivityRowStats | null;
 }) {
+  useUiLanguage();
+
   const animationPreferenceEnabled = useTranscriptAnimationEnabled();
   const parts = splitActivityRowLabel(label);
 
@@ -694,6 +706,8 @@ function PromptUserMessage({
   profiles?: UserProfileLookup;
   setup?: Extract<TranscriptItem, { type: "lifecycle" }>[];
 }) {
+  useUiLanguage();
+
   const [contextOpen, setContextOpen] = React.useState(false);
   const contextSections = React.useMemo(
     () => [...(context?.sections ?? [])],
@@ -749,7 +763,7 @@ function PromptContextDialog({
       <DialogContent className="max-w-xl overflow-hidden p-0">
         <div className="flex min-w-0 max-h-[85vh] flex-col">
           <DialogHeader className="px-6 pb-3 pt-5 pr-14">
-            <DialogTitle>Prompt context</DialogTitle>
+            <DialogTitle>{uiT("Prompt context")}</DialogTitle>
             {setupText ? (
               <div className="flex items-center gap-1.5">
                 <CheckCheck className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -810,13 +824,15 @@ function TurnSetupFooter({
     >
       {showContext ? (
         <Toggle
-          aria-label={`${contextOpen ? "Hide" : "Show"} prompt context`}
+          aria-label={uiT("{0} prompt context", {
+            p0: contextOpen ? "Hide" : "Show",
+          })}
           className="data-[state=on]:bg-primary/10 data-[state=on]:text-primary dark:data-[state=on]:bg-primary/15"
           data-testid="transcript-prompt-context-toggle"
           onPressedChange={onContextOpenChange}
           pressed={contextOpen}
           size="xs"
-          title={tooltipText || "Show prompt context"}
+          title={tooltipText || uiT("Show prompt context")}
           variant="ghost"
         >
           <CheckCheck aria-hidden="true" />
@@ -854,6 +870,8 @@ function TranscriptItemRow({
   item: TranscriptItem;
   profiles?: UserProfileLookup;
 }) {
+  useUiLanguage();
+
   const variant = useAgentSessionTranscriptVariant();
   const timestampsEnabled = useTranscriptTimestampsEnabled();
   const showTimestamp = shouldShowTranscriptRowTimestamp(item, {
@@ -948,10 +966,10 @@ function SessionBoundaryDivider({
 }) {
   const label =
     labelState === "current"
-      ? "Latest live-observed session"
+      ? uiT("Latest live-observed session")
       : labelState === "most-recent"
-        ? "Most recent observed session"
-        : "Earlier observed session";
+        ? uiT("Most recent observed session")
+        : uiT("Earlier observed session");
   const formattedDate = new Date(sessionStartTimestamp).toLocaleString();
   return (
     <div
@@ -984,6 +1002,8 @@ const TranscriptItemView = React.memo(function TranscriptItemView({
   item: TranscriptItem;
   profiles?: UserProfileLookup;
 }) {
+  useUiLanguage();
+
   return (
     <TranscriptActivityItem
       agentAvatarUrl={agentAvatarUrl}

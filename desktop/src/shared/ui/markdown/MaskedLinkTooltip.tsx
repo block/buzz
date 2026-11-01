@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { isMaskedLink } from "@/shared/lib/maskedLink";
@@ -21,6 +23,8 @@ export function MaskedLinkTooltip({
   disabled?: boolean;
   children: React.ReactElement;
 }) {
+  useUiLanguage();
+
   // A masked link inside an unrevealed spoiler must not expose its URL via a
   // hover/focus tooltip — that would leak the spoiler's content early.
   const hiddenInSpoiler = React.useContext(SpoilerHiddenContext);

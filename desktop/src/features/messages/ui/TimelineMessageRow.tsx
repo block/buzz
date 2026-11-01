@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
@@ -36,6 +38,8 @@ export function SystemRow({
   profiles,
   ownerProfiles,
 }: SystemRowProps) {
+  useUiLanguage();
+
   const systemEntries = entries ?? (entry ? [entry] : []);
   const firstEntry = systemEntries[0];
   const groupedMessages = React.useMemo(
