@@ -1964,11 +1964,32 @@ pub fn build_presence_update(status: &str) -> Result<EventBuilder, SdkError> {
 /// status — kind 30315 is parameterized-replaceable, so an event carrying
 /// neither is what clients read as "no status".
 pub fn build_user_status(text: &str, emoji: Option<&str>) -> Result<EventBuilder, SdkError> {
+    build_user_status_expiring(text, emoji, None)
+}
+
+/// Like [`build_user_status`], with an optional NIP-40 `["expiration", unix_secs]`
+/// tag after the emoji tag. Clients read the status as cleared once that time
+/// passes. An expiry on a status with neither text nor emoji is rejected,
+/// because that shape is the clear.
+pub fn build_user_status_expiring(
+    text: &str,
+    emoji: Option<&str>,
+    expires_at: Option<u64>,
+) -> Result<EventBuilder, SdkError> {
     let text = text.trim();
     check_content(text, 64 * 1024)?;
+    let emoji = emoji.map(str::trim).filter(|e| !e.is_empty());
+    if expires_at.is_some() && text.is_empty() && emoji.is_none() {
+        return Err(SdkError::InvalidInput(
+            "an expiring status needs text or an emoji".into(),
+        ));
+    }
     let mut tags = vec![tag(&["d", "general"])?];
-    if let Some(emoji) = emoji.map(str::trim).filter(|e| !e.is_empty()) {
+    if let Some(emoji) = emoji {
         tags.push(tag(&["emoji", emoji])?);
+    }
+    if let Some(expires_at) = expires_at {
+        tags.push(tag(&["expiration", &expires_at.to_string()])?);
     }
     Ok(EventBuilder::new(Kind::Custom(KIND_USER_STATUS as u16), text).tags(tags))
 }
@@ -4955,6 +4976,31 @@ mod tests {
         assert_eq!(ev.content, "");
         assert_eq!(tag_values(&ev, "d"), vec!["general"]);
         assert_eq!(ev.tags.len(), 1);
+    }
+
+    #[test]
+    fn expiring_user_status_adds_expiration_after_emoji() {
+        let ev =
+            sign(build_user_status_expiring("lunch", Some("🥪"), Some(1_900_000_000)).unwrap());
+        assert_eq!(ev.content, "lunch");
+        assert_eq!(tag_values(&ev, "expiration"), vec!["1900000000"]);
+        let names: Vec<&str> = ev.tags.iter().map(|t| t.as_slice()[0].as_str()).collect();
+        assert_eq!(names, vec!["d", "emoji", "expiration"]);
+    }
+
+    #[test]
+    fn expiring_user_status_without_expiry_matches_build_user_status() {
+        let plain = sign(build_user_status("same", Some("🚀")).unwrap());
+        let none = sign(build_user_status_expiring("same", Some("🚀"), None).unwrap());
+        assert_eq!(plain.tags, none.tags);
+        assert!(tag_values(&plain, "expiration").is_empty());
+    }
+
+    #[test]
+    fn expiring_user_status_requires_text_or_emoji() {
+        let err = build_user_status_expiring("  ", Some(" "), Some(1_900_000_000)).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+        assert!(build_user_status_expiring("", Some("🎶"), Some(1_900_000_000)).is_ok());
     }
 
     #[test]
