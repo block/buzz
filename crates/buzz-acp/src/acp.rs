@@ -64,11 +64,14 @@ struct StdoutLines {
 /// A line and its share of the byte budget, returned when the line is taken.
 type QueuedLine = (
     Result<String, LinesCodecError>,
-    Option<tokio::sync::OwnedSemaphorePermit>,
+    tokio::sync::OwnedSemaphorePermit,
 );
 
 /// Most bytes of agent stdout queued and not yet taken by a reader.
 const STDOUT_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+/// What each queued entry costs on top of its text, so short lines and
+/// errors cannot fill memory for free.
+const STDOUT_ENTRY_OVERHEAD_BYTES: usize = 128;
 
 impl StdoutLines {
     fn spawn(stdout: ChildStdout, background: Arc<Mutex<background::BackgroundWork>>) -> Self {
@@ -81,21 +84,25 @@ impl StdoutLines {
             let codec = || LinesCodec::new_with_max_length(MAX_LINE_SIZE);
             let mut framed = FramedRead::new(stdout, codec());
             while let Some(read) = framed.next().await {
-                let permit = match &read {
+                let cost = match &read {
                     Ok(line) => {
+                        // Every reader skips blank lines; do not queue them.
+                        if line.trim().is_empty() {
+                            continue;
+                        }
                         if let Some(update) = background::parse_sdk_message(line) {
                             if let Ok(mut work) = background.lock() {
                                 work.apply(update);
                             }
                             continue;
                         }
-                        let bytes = line.len().min(STDOUT_BUFFER_BYTES) as u32;
-                        match Arc::clone(&budget).acquire_many_owned(bytes).await {
-                            Ok(permit) => Some(permit),
-                            Err(_) => break,
-                        }
+                        line.len() + STDOUT_ENTRY_OVERHEAD_BYTES
                     }
-                    Err(_) => None,
+                    Err(_) => STDOUT_ENTRY_OVERHEAD_BYTES,
+                };
+                let cost = cost.min(STDOUT_BUFFER_BYTES) as u32;
+                let Ok(permit) = Arc::clone(&budget).acquire_many_owned(cost).await else {
+                    break;
                 };
                 let overlong = matches!(read, Err(LinesCodecError::MaxLineLengthExceeded));
                 let io_error = matches!(read, Err(LinesCodecError::Io(_)));
@@ -3694,6 +3701,72 @@ mod tests {
         assert!(client.pending_background_work().is_empty());
     }
 
+    /// An overlong line is reported once, and the lines after it still
+    /// arrive: the agent is alive.
+    #[tokio::test]
+    async fn an_overlong_line_does_not_end_the_reader() {
+        let mut client = spawn_script(&format!(
+            "head -c {} /dev/zero | tr '\\0' x; echo; echo after; sleep 10",
+            MAX_LINE_SIZE + 1
+        ))
+        .await;
+        let mut saw_error = false;
+        let deadline = std::time::Duration::from_secs(20);
+        loop {
+            let read = tokio::time::timeout(deadline, client.reader.next())
+                .await
+                .expect("line within 20s")
+                .expect("reader ended");
+            match read {
+                Err(LinesCodecError::MaxLineLengthExceeded) => saw_error = true,
+                Ok(line) if line == "after" => break,
+                Ok(_) => {}
+                Err(e) => panic!("unexpected error {e:?}"),
+            }
+        }
+        assert!(saw_error, "the overlong line was not reported");
+        assert!(client.pending_background_work().is_empty());
+        assert!(!client.background.lock().unwrap().exited());
+    }
+
+    /// Past the byte budget the reader stops taking lines, so the agent waits
+    /// on its pipe; nothing is dropped once a consumer drains the queue.
+    #[tokio::test]
+    async fn queued_stdout_is_bounded_and_nothing_is_lost() {
+        const LINES: usize = 100_000;
+        let mut client = spawn_script(&format!(
+            "for i in $(seq {LINES}); do printf '%0100d\\n' $i; done; sleep 10"
+        ))
+        .await;
+        // Let the reader fill the queue as far as the budget allows.
+        let mut queued = 0;
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let now = client.reader.lines.len();
+            if now == queued && now > 0 {
+                break;
+            }
+            queued = now;
+        }
+        let per_line = 100 + STDOUT_ENTRY_OVERHEAD_BYTES;
+        assert!(
+            client.reader.lines.len() * per_line <= STDOUT_BUFFER_BYTES,
+            "{} lines queued past the budget",
+            client.reader.lines.len()
+        );
+        assert!(client.reader.lines.len() < LINES, "budget never applied");
+        let mut received = 0;
+        while received < LINES {
+            let read =
+                tokio::time::timeout(std::time::Duration::from_secs(20), client.reader.next())
+                    .await
+                    .expect("line within 20s")
+                    .expect("reader ended");
+            assert!(read.is_ok());
+            received += 1;
+        }
+    }
+
     /// `service_idle` reports an exited agent instead of waiting.
     #[tokio::test]
     async fn service_idle_reports_an_exited_agent() {
@@ -4302,6 +4375,16 @@ mod tests {
     /// actually received.
     #[cfg(unix)]
     async fn claude_session_meta_with_cli(cli_body: &str) -> serde_json::Value {
+        claude_session_meta_with_env(cli_body, &[]).await
+    }
+
+    /// Like [`claude_session_meta_with_cli`], with more variables in the
+    /// adapter's launch environment.
+    #[cfg(unix)]
+    async fn claude_session_meta_with_env(
+        cli_body: &str,
+        launch_env: &[(String, String)],
+    ) -> serde_json::Value {
         use std::os::unix::fs::PermissionsExt;
 
         let dir =
@@ -4328,10 +4411,14 @@ sleep 1"#,
             &[],
             &[],
             false,
-            &[(
-                "CLAUDE_CODE_EXECUTABLE".into(),
-                cli.to_str().expect("utf8 path").into(),
-            )],
+            &[
+                &[(
+                    "CLAUDE_CODE_EXECUTABLE".to_owned(),
+                    cli.to_str().expect("utf8 path").to_owned(),
+                )][..],
+                launch_env,
+            ]
+            .concat(),
         )
         .await
         .expect("spawn fake claude adapter");
@@ -4376,6 +4463,27 @@ sleep 1"#,
             );
             assert_eq!(meta["sessionTitle"], "Fizz", "{case}");
         }
+    }
+
+    /// The agent's `CLAUDE_MODEL_CONFIG` reaches `session/new` inside the
+    /// settings that carry the Stop hook.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_session_settings_carry_the_model_config() {
+        if std::env::var_os(launch::PREFIX_ENV).is_some() {
+            return;
+        }
+        let meta = claude_session_meta_with_env(
+            "echo '2.1.284 (Claude Code)'",
+            &[(
+                "CLAUDE_MODEL_CONFIG".to_owned(),
+                r#"{"modelOverrides":{"opus":"bedrock-opus"}}"#.to_owned(),
+            )],
+        )
+        .await;
+        let settings = &meta["claudeCode"]["options"]["settings"];
+        assert_eq!(settings["modelOverrides"]["opus"], "bedrock-opus", "{meta}");
+        assert!(settings["hooks"]["Stop"].is_array(), "{meta}");
     }
 
     /// A Claude session asks for the SDK messages that report background

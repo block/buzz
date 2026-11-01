@@ -111,14 +111,26 @@ pub(crate) fn parse_sdk_message(line: &str) -> Option<SdkUpdate> {
     Some(SdkUpdate { session_id, change })
 }
 
+/// Most sessions [`BackgroundWork`] tracks per agent process. One process
+/// serves a handful of sessions; ids beyond this are ignored.
+const MAX_TRACKED_SESSIONS: usize = 64;
+/// Most background tasks kept per session.
+const MAX_TASKS_PER_SESSION: usize = 32;
+
 impl BackgroundWork {
     /// Apply one parsed `_claude/sdkMessage` notification.
     pub(crate) fn apply(&mut self, update: SdkUpdate) {
         if update.session_id.is_empty() {
             return;
         }
+        if !self.sessions.contains_key(&update.session_id)
+            && self.sessions.len() >= MAX_TRACKED_SESSIONS
+        {
+            return;
+        }
         match update.change {
-            Change::Tasks(tasks) => {
+            Change::Tasks(mut tasks) => {
+                tasks.truncate(MAX_TASKS_PER_SESSION);
                 self.sessions.entry(update.session_id).or_default().tasks = tasks;
             }
             Change::Running(running) => {
@@ -172,7 +184,17 @@ impl BackgroundWork {
 /// A task's kind, such as `local_bash`. The description is model-written
 /// text that can quote anything, so it is not kept.
 fn describe_task(task: &Value) -> String {
-    task["task_type"].as_str().unwrap_or("task").to_owned()
+    task["task_type"]
+        .as_str()
+        .filter(|kind| {
+            !kind.is_empty()
+                && kind.len() <= 32
+                && kind
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        })
+        .unwrap_or("task")
+        .to_owned()
 }
 
 /// Per-process directory the Stop hook writes session crons into. Removed on
@@ -241,18 +263,21 @@ impl StopHookDir {
 
     /// The scheduled wakeups of every session, one line per cron. A session
     /// whose last Stop hook listed no crons contributes nothing.
+    ///
+    /// The agent can write to this directory, so only regular files up to
+    /// [`MAX_RECORD_BYTES`] count, and at most [`MAX_RECORDS`] of them.
     pub(crate) fn crons(&self) -> Vec<String> {
         let Ok(entries) = std::fs::read_dir(&self.path) else {
             return Vec::new();
         };
         let mut crons = Vec::new();
-        for entry in entries.flatten() {
+        for entry in entries.flatten().take(MAX_RECORDS) {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 remove_if_abandoned(&path);
                 continue;
             }
-            let Ok(text) = std::fs::read_to_string(&path) else {
+            let Some(text) = read_record(&path) else {
                 continue;
             };
             let Ok(record) = serde_json::from_str::<Value>(&text) else {
@@ -266,6 +291,27 @@ impl StopHookDir {
     }
 }
 
+/// Most entries of the Stop hook directory [`StopHookDir::crons`] looks at.
+const MAX_RECORDS: usize = 256;
+/// Largest record [`StopHookDir::crons`] reads.
+const MAX_RECORD_BYTES: u64 = 64 * 1024;
+
+/// The text of `path` if it is a regular file (not a link, FIFO or device) of
+/// at most [`MAX_RECORD_BYTES`].
+fn read_record(path: &Path) -> Option<String> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.file_type().is_file() || meta.len() > MAX_RECORD_BYTES {
+        return None;
+    }
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(MAX_RECORD_BYTES)
+        .read_to_string(&mut text)
+        .ok()?;
+    Some(text)
+}
+
 /// Remove `path` if it is a `.json.tmp` the hook stopped writing a minute
 /// ago or more: a hook that died between write and rename.
 fn remove_if_abandoned(path: &Path) {
@@ -273,7 +319,7 @@ fn remove_if_abandoned(path: &Path) {
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.ends_with(".json.tmp"));
-    let abandoned = std::fs::metadata(path)
+    let abandoned = std::fs::symlink_metadata(path)
         .and_then(|meta| meta.modified())
         .ok()
         .and_then(|modified| modified.elapsed().ok())
@@ -292,7 +338,16 @@ impl Drop for StopHookDir {
 /// A cron's kind and schedule. The prompt is the agent's own words, so it is
 /// not kept.
 fn describe_cron(cron: &Value) -> String {
-    let schedule = cron["schedule"].as_str().unwrap_or("?");
+    let schedule = cron["schedule"]
+        .as_str()
+        .filter(|schedule| {
+            !schedule.is_empty()
+                && schedule.len() <= 64
+                && schedule
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || " */,-?".contains(c))
+        })
+        .unwrap_or("?");
     if cron["recurring"].as_bool() == Some(true) {
         format!("recurring wakeup `{schedule}`")
     } else {
@@ -319,22 +374,47 @@ pub(crate) fn run_stop_hook() -> i32 {
     else {
         return 0;
     };
-    let mut input = String::new();
-    if std::io::stdin().read_to_string(&mut input).is_err() {
+    let Some(input) = read_stdin_bounded() else {
         return 0;
-    }
+    };
     if let Err(error) = record_stop_hook_input(Path::new(dir), &input) {
-        // stdout and stderr must stay silent; leave a trace next to the records.
+        // stdout and stderr must stay silent; leave a trace next to the
+        // records, up to a size.
         use std::io::Write;
-        if let Ok(mut log) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(Path::new(dir).join("stop-hook-errors.log"))
-        {
-            let _ = writeln!(log, "{error}");
+        let log = Path::new(dir).join("stop-hook-errors.log");
+        let small = std::fs::metadata(&log).map_or(true, |meta| meta.len() < MAX_RECORD_BYTES);
+        if small {
+            if let Ok(mut log) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log)
+            {
+                let _ = writeln!(log, "{error}");
+            }
         }
     }
     0
+}
+
+/// Largest Stop hook input read. A Stop input carries the last assistant
+/// message, so it can be large; anything past this is not a usable record.
+const MAX_STOP_HOOK_INPUT_BYTES: u64 = 1024 * 1024;
+/// How long the hook waits for its input before it gives up.
+const STOP_HOOK_INPUT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Stdin up to [`MAX_STOP_HOOK_INPUT_BYTES`], or `None` when it is larger,
+/// unreadable, or does not end within [`STOP_HOOK_INPUT_TIMEOUT`].
+fn read_stdin_bounded() -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut input = String::new();
+        let read = std::io::stdin()
+            .take(MAX_STOP_HOOK_INPUT_BYTES + 1)
+            .read_to_string(&mut input);
+        let _ = tx.send(read.ok().map(|_| input));
+    });
+    let input = rx.recv_timeout(STOP_HOOK_INPUT_TIMEOUT).ok()??;
+    (input.len() as u64 <= MAX_STOP_HOOK_INPUT_BYTES).then_some(input)
 }
 
 fn record_stop_hook_input(dir: &Path, input: &str) -> std::io::Result<()> {
@@ -348,6 +428,18 @@ fn record_stop_hook_input(dir: &Path, input: &str) -> std::io::Result<()> {
     let Some(crons) = hook.get("session_crons").filter(|crons| crons.is_array()) else {
         return Ok(());
     };
+    // Keep only what `crons()` reads. The prompt is the agent's own words.
+    let crons: Vec<Value> = crons
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|cron| {
+            serde_json::json!({
+                "schedule": cron.get("schedule").cloned().unwrap_or(Value::Null),
+                "recurring": cron.get("recurring").cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect();
     let record = serde_json::json!({ "session_crons": crons });
     // Write then rename, so a reader never sees half a file.
     let tmp = dir.join(format!("{session_id}.json.tmp"));
@@ -482,6 +574,84 @@ mod tests {
         let config = r#"{"hooks":{"Stop":[{"hooks":[]}]}}"#;
         let settings = dir.settings(Path::new("/bin/buzz-acp"), Some(config));
         assert_eq!(settings["hooks"]["Stop"].as_array().map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn the_record_keeps_schedule_and_recurrence_only() {
+        let dir = StopHookDir::create().unwrap();
+        let input = serde_json::json!({
+            "session_id": "s-1",
+            "session_crons": [{ "id": "c1", "schedule": "0 9 * * *", "recurring": false, "prompt": "token=SECRET" }],
+        });
+        record_stop_hook_input(dir.path(), &input.to_string()).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("s-1.json")).unwrap();
+        assert!(!text.contains("SECRET") && !text.contains("c1"), "{text}");
+        assert_eq!(dir.crons(), vec!["wakeup `0 9 * * *`".to_owned()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn crons_skip_links_and_oversized_records() {
+        let dir = StopHookDir::create().unwrap();
+        std::os::unix::fs::symlink("/dev/zero", dir.path().join("zero.json")).unwrap();
+        let big = format!(
+            r#"{{"session_crons":[{{"schedule":"0 9 * * *"}}],"pad":"{}"}}"#,
+            "x".repeat(MAX_RECORD_BYTES as usize)
+        );
+        std::fs::write(dir.path().join("big.json"), big).unwrap();
+        assert!(dir.crons().is_empty());
+    }
+
+    #[test]
+    fn agent_written_kinds_and_schedules_are_validated() {
+        let task = serde_json::json!({ "task_type": "local_bash\nforged log line" });
+        assert_eq!(describe_task(&task), "task");
+        let task = serde_json::json!({ "task_type": "x".repeat(33) });
+        assert_eq!(describe_task(&task), "task");
+        let cron = serde_json::json!({ "schedule": "0 9 * * *\nforged" });
+        assert_eq!(describe_cron(&cron), "wakeup `?`");
+    }
+
+    #[test]
+    fn tracked_sessions_are_capped() {
+        let mut work = BackgroundWork::default();
+        for i in 0..MAX_TRACKED_SESSIONS + 10 {
+            work.observe_line(&sdk_message(
+                &format!("s{i}"),
+                serde_json::json!({ "type": "system", "subtype": "session_state_changed", "state": "running" }),
+            ));
+        }
+        assert_eq!(work.pending().len(), MAX_TRACKED_SESSIONS);
+    }
+
+    #[test]
+    fn an_abandoned_tmp_file_is_removed_and_a_fresh_one_kept() {
+        let dir = StopHookDir::create().unwrap();
+        let fresh = dir.path().join("a.json.tmp");
+        let old = dir.path().join("b.json.tmp");
+        std::fs::write(&fresh, "{}").unwrap();
+        std::fs::write(&old, "{}").unwrap();
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(hour_ago)
+            .unwrap();
+        dir.crons();
+        assert!(fresh.exists());
+        assert!(!old.exists());
+    }
+
+    #[test]
+    fn the_raw_message_filter_names_the_two_subtypes() {
+        assert_eq!(
+            emit_raw_filter(),
+            serde_json::json!([
+                { "type": "system", "subtype": "background_tasks_changed" },
+                { "type": "system", "subtype": "session_state_changed" },
+            ])
+        );
     }
 
     #[test]
