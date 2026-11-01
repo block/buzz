@@ -24,8 +24,13 @@ use crate::kind::{KIND_MANAGED_AGENT, KIND_PERSONA, KIND_PRIVATE_MANAGED_AGENT};
 pub const FORMAT: &str = "buzz-private-managed-agent";
 /// Current decrypted payload schema version.
 pub const VERSION: u32 = 1;
-/// NIP-44 v2 plaintext limit.
+/// NIP-44 v2 plaintext limit per spec. Retained as the documented spec value;
+/// the gates that reject oversized payloads use `NIP44_ENCRYPT_MAX` below.
 pub const MAX_PLAINTEXT_BYTES: usize = 65_535;
+/// Effective NIP-44 v2 encrypt limit (bytes). `nostr`'s `nip44::encrypt` refuses
+/// larger plaintext, so this — not the spec cap above — is the real gate.
+// nostr 0.44.7 nip44/v2.rs:35 MAX_SUPPORTED_PLAINTEXT_SIZE = 65_536 - 128 (비공개 상수라 하드코딩)
+pub const NIP44_ENCRYPT_MAX: usize = 65_408;
 /// Maximum plausible NIP-44 v2 ciphertext length.
 pub const MAX_CIPHERTEXT_BYTES: usize = 87_472;
 /// Largest integer represented exactly by interoperable JSON implementations.
@@ -346,10 +351,11 @@ pub fn build_event(owner_keys: &Keys, payload: &Payload, created_at: u64) -> Res
         ));
     }
     let plaintext = serde_json::to_vec(payload).map_err(|_| Error::Encrypt)?;
-    if plaintext.len() > MAX_PLAINTEXT_BYTES {
-        return Err(Error::InvalidPayload(
-            "plaintext exceeds NIP-44 limit".into(),
-        ));
+    if plaintext.len() > NIP44_ENCRYPT_MAX {
+        return Err(Error::InvalidPayload(format!(
+            "plaintext exceeds {NIP44_ENCRYPT_MAX}-byte NIP-44 limit ({} bytes)",
+            plaintext.len()
+        )));
     }
     let plaintext = std::str::from_utf8(&plaintext).map_err(|_| Error::Encrypt)?;
     let ciphertext = nip44::encrypt(
@@ -386,7 +392,7 @@ pub fn validate_and_decrypt(
         &event.content,
     )
     .map_err(|_| Error::Decrypt)?;
-    if plaintext.len() > MAX_PLAINTEXT_BYTES {
+    if plaintext.len() > NIP44_ENCRYPT_MAX {
         return Err(Error::Decrypt);
     }
     let value = parse_strict_json(plaintext.as_bytes())?;
