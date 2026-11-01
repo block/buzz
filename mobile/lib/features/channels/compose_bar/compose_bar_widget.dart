@@ -980,6 +980,39 @@ class ComposeBar extends HookConsumerWidget {
       expand: expandComposer,
     );
 
+    // Hardware keyboards only: the software return key sends no key event, so
+    // it keeps inserting a newline. Tab accepts the top mention, Enter sends,
+    // and Shift+Enter falls through to the field's own newline.
+    KeyEventResult handleHardwareKey(FocusNode _, KeyEvent event) {
+      if (event is KeyUpEvent) return KeyEventResult.ignored;
+      final keyboard = HardwareKeyboard.instance;
+      final key = event.logicalKey;
+      if (key == LogicalKeyboardKey.tab && !keyboard.isShiftPressed) {
+        final top = suggestions
+            .where((s) => !mentionRows.unavailable.contains(s.pubkey))
+            .firstOrNull;
+        if (mentionQuery.value == null || top == null) {
+          return KeyEventResult.ignored;
+        }
+        if (event is KeyDownEvent) insertMention(top);
+        return KeyEventResult.handled;
+      }
+      final isEnter =
+          key == LogicalKeyboardKey.enter ||
+          key == LogicalKeyboardKey.numpadEnter;
+      // A composing IME owns Enter: it commits the candidate text.
+      if (!isEnter ||
+          keyboard.isShiftPressed ||
+          keyboard.isControlPressed ||
+          keyboard.isAltPressed ||
+          keyboard.isMetaPressed ||
+          !controller.value.composing.isCollapsed) {
+        return KeyEventResult.ignored;
+      }
+      if (event is KeyDownEvent) unawaited(send());
+      return KeyEventResult.handled;
+    }
+
     final suggestionPanel = _composerSuggestionPanel(
       channelSuggestions: channelSuggestions,
       mentionSuggestions: suggestions,
@@ -1075,6 +1108,7 @@ class ComposeBar extends HookConsumerWidget {
               contextMenuBuilder: buildContextMenu,
               onContentInserted: uploadPastedImage,
               onSend: () => unawaited(send()),
+              onKeyEvent: handleHardwareKey,
               resolvedHint: resolvedHint,
               attachmentSurface: attachmentSurface.value,
               onAttachmentTap: handleAttachmentTap,
