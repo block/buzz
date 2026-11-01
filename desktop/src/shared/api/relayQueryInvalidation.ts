@@ -26,6 +26,7 @@ const RELAY_QUERY_ROOTS = new Set<string>([
   "run-approvals",
   "search-messages",
   "thread-replies",
+  "thread-titles",
   "user-profile",
   "user-search",
   "user-status",

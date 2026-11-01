@@ -5,6 +5,10 @@ import {
   THREAD_PANEL_COMPOSER_GUTTER_CLASS,
   THREAD_PANEL_MESSAGE_GUTTER_CLASS,
 } from "@/features/messages/lib/messageThreadPanelLayout";
+import {
+  ThreadTitleEditor,
+  type ThreadTitleTarget,
+} from "@/features/threads/ui/ThreadTitleEditor";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { cn } from "@/shared/lib/cn";
@@ -27,6 +31,7 @@ export function MessageThreadPanelHeader({
   onClose,
   onHeaderTitleClick,
   showBackButton,
+  threadTitleTarget,
 }: {
   headerLeading?: React.ReactNode;
   headerTitle?: string;
@@ -36,8 +41,10 @@ export function MessageThreadPanelHeader({
   onClose: () => void;
   onHeaderTitleClick?: () => void;
   showBackButton?: boolean;
+  /** When set, the title shows and edits this thread's shared title. */
+  threadTitleTarget?: ThreadTitleTarget | null;
 }) {
-  const title = onHeaderTitleClick ? (
+  const panelTitle = onHeaderTitleClick ? (
     <button
       aria-label={headerTitleAriaLabel ?? `Open ${headerTitle}`}
       className="min-w-0 max-w-full truncate text-left hover:underline"
@@ -50,6 +57,15 @@ export function MessageThreadPanelHeader({
     </button>
   ) : (
     headerTitle
+  );
+  const title = threadTitleTarget ? (
+    <ThreadTitleEditor
+      fallback={panelTitle}
+      keepFallback={Boolean(onHeaderTitleClick)}
+      target={threadTitleTarget}
+    />
+  ) : (
+    panelTitle
   );
 
   return (

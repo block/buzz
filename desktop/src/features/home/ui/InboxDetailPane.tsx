@@ -14,6 +14,7 @@ import type {
   InboxItem,
   InboxReply,
 } from "@/features/home/lib/inbox";
+import { useThreadTitleForRoot } from "@/features/threads/hooks";
 import { getProjectInboxReference } from "@/features/home/lib/projectInbox";
 import { ProjectInboxDetail } from "@/features/home/ui/ProjectInboxDetail";
 import { ChannelMembersBar } from "@/features/channels/ui/ChannelMembersBar";
@@ -434,6 +435,9 @@ function InboxMessageDetailPane({
     settleAtBottomAfterLayout,
   );
 
+  // Looked up before the empty-state return; only used for thread contexts.
+  const sharedThreadTitle = useThreadTitleForRoot(item?.conversationId ?? null);
+
   if (!item) {
     return (
       <section
@@ -503,11 +507,15 @@ function InboxMessageDetailPane({
         ?.tags ?? [])
     : [];
   const contextLabel = isThreadContext
-    ? isDirectMessage
-      ? `Thread with ${item.senderLabel}`
-      : channelContextName
-        ? `Thread in #${channelContextName}`
-        : "Thread"
+    ? sharedThreadTitle
+      ? isDirectMessage || !channelContextName
+        ? sharedThreadTitle
+        : `${sharedThreadTitle} · #${channelContextName}`
+      : isDirectMessage
+        ? `Thread with ${item.senderLabel}`
+        : channelContextName
+          ? `Thread in #${channelContextName}`
+          : "Thread"
     : isDirectMessage
       ? `DM with ${item.senderLabel}`
       : channelContextName
