@@ -1,10 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
-import '../../shared/crypto/nip_oa.dart';
-import '../../shared/mentions/agent_identity_provider.dart';
-import '../../shared/relay/relay.dart';
+import '../crypto/nip_oa.dart';
+import '../mentions/agent_identity_provider.dart';
+import '../relay/relay.dart';
 
 /// Public model information accompanying a verified owned agent profile.
 class OwnedAgentDirectoryEntry extends AgentDirectoryEntry {
@@ -17,15 +18,22 @@ class OwnedAgentDirectoryEntry extends AgentDirectoryEntry {
   final String? model;
 }
 
-/// Discovers owned identities even when their runtime has no kind:10100 entry.
-/// Owner registrations nominate candidates; signed profiles prove ownership.
+/// The owner's agents in the active community, as desktop's Agents tab lists
+/// them: each agent's newest kind:30177 registration must name it and carry
+/// the `runtime` tag of its agent type. Registrations an earlier Buzz wrote
+/// have no `runtime` until the agent is imported, so they are not listed.
+/// Signed profiles prove ownership.
 final ownedAgentDirectoryProvider =
     FutureProvider<List<OwnedAgentDirectoryEntry>>((ref) async {
       ref.watch(relayConfigProvider);
       final owner = ref.watch(myPubkeyProvider);
       final session = ref.watch(relaySessionProvider);
-      if (owner == null || session.status != SessionStatus.connected) {
-        return const [];
+      if (owner == null) return const [];
+      // Stay loading until connected: an empty list would read as "no
+      // listed agents" and hide the owner's agents from mentions. The
+      // provider rebuilds when the session status changes.
+      if (session.status != SessionStatus.connected) {
+        return Completer<List<OwnedAgentDirectoryEntry>>().future;
       }
       final relay = ref.read(relaySessionProvider.notifier);
       return loadOwnedAgentDirectory(
@@ -39,7 +47,6 @@ Future<List<OwnedAgentDirectoryEntry>> loadOwnedAgentDirectory(
   String owner,
   Future<List<NostrEvent>> Function(NostrFilter) query,
 ) async {
-  final keys = <String>{};
   final registrations = <String, NostrEvent>{};
   final seen = <String>{};
   for (var page = 1; ; page++) {
@@ -54,23 +61,22 @@ Future<List<OwnedAgentDirectoryEntry>> loadOwnedAgentDirectory(
     final fresh = events.where((event) => seen.add(event.id)).toList();
     for (final event in fresh) {
       if (event.kind != 30177 || event.pubkey != owner) continue;
-      for (final tag in event.tags) {
-        if (tag.length >= 2 &&
-            tag.first == 'd' &&
-            RegExp(r'^[0-9a-f]{64}$').hasMatch(tag[1])) {
-          keys.add(tag[1]);
-          final previous = registrations[tag[1]];
-          if (previous == null ||
-              event.createdAt > previous.createdAt ||
-              (event.createdAt == previous.createdAt &&
-                  event.id.compareTo(previous.id) < 0)) {
-            registrations[tag[1]] = event;
-          }
-        }
+      final key = _tagValue(event, 'd');
+      if (key == null || !RegExp(r'^[0-9a-f]{64}$').hasMatch(key)) continue;
+      final previous = registrations[key];
+      if (previous == null ||
+          event.createdAt > previous.createdAt ||
+          (event.createdAt == previous.createdAt &&
+              event.id.compareTo(previous.id) < 0)) {
+        registrations[key] = event;
       }
     }
     if (events.length < 100 || fresh.isEmpty) break;
   }
+  final keys = {
+    for (final MapEntry(:key, :value) in registrations.entries)
+      if (isListedAgentRegistration(value)) key,
+  };
   final results = <OwnedAgentDirectoryEntry>[];
   final ordered = keys.toList();
   for (var offset = 0; offset < ordered.length; offset += 50) {
@@ -114,4 +120,31 @@ Future<List<OwnedAgentDirectoryEntry>> loadOwnedAgentDirectory(
     }
   }
   return results;
+}
+
+/// An agent type key, `pluginId/typeId`, as desktop's `RUNTIME` pattern
+/// (buzz-app `src/features/agents/service.ts`) accepts it.
+final _runtimePattern = RegExp(r'^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$');
+
+/// Whether desktop lists this kind:30177 registration as one of the owner's
+/// agents: it names the agent and carries a valid `runtime` tag.
+bool isListedAgentRegistration(NostrEvent event) {
+  if (!_runtimePattern.hasMatch(_tagValue(event, 'runtime') ?? '')) {
+    return false;
+  }
+  try {
+    final content = jsonDecode(event.content);
+    return content is Map &&
+        content['name'] is String &&
+        (content['name'] as String).trim().isNotEmpty;
+  } on FormatException {
+    return false;
+  }
+}
+
+String? _tagValue(NostrEvent event, String name) {
+  for (final tag in event.tags) {
+    if (tag.length >= 2 && tag.first == name) return tag[1];
+  }
+  return null;
 }

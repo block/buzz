@@ -19,6 +19,7 @@ import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import 'thread_follows/thread_follows_provider.dart';
 import 'unread_badge/is_high_priority_event.dart';
+import '../../shared/agents/is_quiet_agent_message.dart';
 import 'unread_badge/observed_unread_event.dart';
 import 'unread_badge/should_notify_for_event.dart';
 
@@ -79,6 +80,9 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   String? _memberSnapshotPubkey;
   Map<String, List<ChannelMember>> _memberSnapshotsByChannelId = const {};
   List<NostrEvent> _directoryMetas = const [];
+  // The scope [_directoryMetas] came from. A community switch drops them, so
+  // the directory status alone cannot say this scope's directory is cached.
+  String? _directoryMetasScope;
   Set<String> _hiddenDmIds = const {};
 
   /// Fences directory responses to the relay and identity that requested them.
@@ -176,6 +180,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _memberSnapshotPubkey = pubkey;
       _memberSnapshotsByChannelId = const {};
       _directoryMetas = const [];
+      _directoryMetasScope = null;
       _hiddenDmIds = const {};
       // Retire any in-flight directory request: its response describes the
       // previous relay or identity and must not reach this scope's state.
@@ -345,7 +350,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // ever regresses. The composite cursor preserves tied-timestamp rows.
     if (fetchDirectory) {
       final metas = await _refreshCoordinator.loadDirectory(session, fence);
-      if (metas != null) _directoryMetas = metas;
+      if (metas != null) {
+        _directoryMetas = metas;
+        _directoryMetasScope = fence.scope;
+      }
     }
 
     // Merge and dedupe by `d` tag. Kind:39000 is parameterized-replaceable,
@@ -828,12 +836,20 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       }
 
       final recordedAtByChannel = <String, int>{};
+      final windowSizeByChannel = <String, int>{};
+      final oldestQuietByChannel = <String, NostrEvent>{};
       for (final event in events) {
-        if (batchDeletedIds.contains(event.id)) continue;
+        if (!EventKind.channelMessageEventKinds.contains(event.kind)) continue;
         final channelId = event.channelId;
         if (channelId == null) continue;
         final channel = channelById[channelId];
         if (channel == null) continue;
+        windowSizeByChannel.update(channelId, (n) => n + 1, ifAbsent: () => 1);
+        if (batchDeletedIds.contains(event.id) ||
+            _unscopedUnreadDeletedIds.contains(event.id) ||
+            _unreadDeletedIdsByChannel[channelId]?.contains(event.id) == true) {
+          continue;
+        }
         final readAt = readAtByChannel[channelId];
         if (event.pubkey.toLowerCase() == myPk.toLowerCase()) continue;
         if (readAt != null && event.createdAt <= readAt) continue;
@@ -848,11 +864,36 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         )) {
           continue;
         }
+        if (isQuietAgentMessage(event.tags)) {
+          final oldest = oldestQuietByChannel[channelId];
+          if (oldest == null || event.createdAt < oldest.createdAt) {
+            oldestQuietByChannel[channelId] = event;
+          }
+          continue;
+        }
         if (!_recordUnreadEvent(channel, event, myPk)) continue;
         recordedAtByChannel[channelId] = max(
           recordedAtByChannel[channelId] ?? 0,
           event.createdAt,
         );
+      }
+      // A full window of quiet agent messages can hide an older unread event,
+      // and every refresh asks for the same window. Count its oldest quiet
+      // message instead, so the channel stays unread until it is opened.
+      for (final MapEntry(key: channelId, value: quiet)
+          in oldestQuietByChannel.entries) {
+        if (recordedAtByChannel.containsKey(channelId)) continue;
+        if ((windowSizeByChannel[channelId] ?? 0) < _unreadCatchUpLimit) {
+          continue;
+        }
+        if (_recordUnreadEvent(
+          channelById[channelId]!,
+          quiet,
+          myPk,
+          countQuiet: true,
+        )) {
+          recordedAtByChannel[channelId] = quiet.createdAt;
+        }
       }
       // Republish only when this catch-up actually changed unread state. A
       // batch that recorded nothing has nothing to show, and a failed or
@@ -1097,16 +1138,23 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     return _channelFromMeta(latest, data, isMember: false);
   }
 
-  /// Loads the directory when Browse channels opens after startup or an error.
-  Future<void> ensureDirectoryLoaded() async {
+  /// Loads the directory unless it is loading, or loaded within [maxAge]
+  /// (any age when null), for the current relay and identity.
+  Future<void> ensureDirectoryLoaded({Duration? maxAge}) async {
     final directoryState = ref.read(channelDirectoryLoadStatusProvider);
     final scope = channelDirectoryScope(
       ref.read(relayConfigProvider).baseUrl,
       ref.read(myPubkeyProvider),
     );
+    final loadedAt = directoryState.loadedAt;
+    final fresh =
+        directoryState.status == ChannelDirectoryLoadStatus.loaded &&
+        _directoryMetasScope == scope &&
+        (maxAge == null ||
+            (loadedAt != null && DateTime.now().difference(loadedAt) < maxAge));
     if (directoryState.scope == scope &&
         (directoryState.status == ChannelDirectoryLoadStatus.loading ||
-            directoryState.status == ChannelDirectoryLoadStatus.loaded)) {
+            fresh)) {
       return;
     }
     await retryDirectory();
@@ -1114,7 +1162,6 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
   /// Retries channel discovery while retaining the current channel list.
   Future<void> retryDirectory() async {
-    final previousChannels = state.value;
     final directoryStatus = ref.read(
       channelDirectoryLoadStatusProvider.notifier,
     );
@@ -1131,6 +1178,20 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       directoryStatus.markError(scope);
       return;
     }
+    // This attempt replaces the last failure before anything can retire it,
+    // so a displaced attempt never reports the old error (beginRefresh clears
+    // it too, for other entry points, but only after a yield).
+    if (directoryStatus.hasFailed(scope)) directoryStatus.markIdle(scope);
+    // Let a pending first load finish, as fetchFresh does. This request
+    // would retire it, and its late failure would replace the list.
+    final generation = _buildGeneration;
+    try {
+      await future;
+    } catch (_) {
+      // A failed first load must not prevent the directory request.
+    }
+    if (!ref.mounted || generation != _buildGeneration) return;
+    final previousChannels = state.value;
     try {
       state = AsyncData(
         await _fetch(subscribeLive: true, fetchDirectory: true),

@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
@@ -63,6 +64,105 @@ void main() {
       expect(session.directoryQueryFilters, isNotEmpty);
     },
   );
+
+  test('ensureDirectoryLoaded reads again once older than maxAge', () async {
+    final session = _FakeRelaySession(
+      memberships: const [],
+      metadata: [_meta(id: _channelA, name: 'general')],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+    await container.read(channelsProvider.future);
+    final channels = container.read(channelsProvider.notifier);
+
+    await channels.ensureDirectoryLoaded();
+    final reads = session.directoryQueryFilters.length;
+    expect(reads, isPositive);
+    // A loaded directory serves later calls until it is older than maxAge.
+    await channels.ensureDirectoryLoaded();
+    await channels.ensureDirectoryLoaded(maxAge: const Duration(hours: 1));
+    expect(session.directoryQueryFilters, hasLength(reads));
+    await channels.ensureDirectoryLoaded(maxAge: Duration.zero);
+    expect(session.directoryQueryFilters, hasLength(reads * 2));
+  });
+
+  test(
+    'ensureDirectoryLoaded reads again after the community switches away and back',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: const [],
+        metadata: [_meta(id: _channelA, name: 'general')],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      final config = container.read(relayConfigProvider.notifier);
+      final communityA = container.read(relayConfigProvider).baseUrl;
+      const maxAge = Duration(hours: 1);
+
+      await container
+          .read(channelsProvider.notifier)
+          .ensureDirectoryLoaded(maxAge: maxAge);
+      expect(container.read(channelsProvider).requireValue.map((c) => c.id), [
+        _channelA,
+      ]);
+
+      // Switch to B without loading its directory, then back to A. The switch
+      // drops A's cached directory, so A's earlier load no longer serves it.
+      config.update(baseUrl: 'https://community-b.example');
+      await container.read(channelsProvider.future);
+      config.update(baseUrl: communityA);
+      await container.read(channelsProvider.future);
+      final reads = session.directoryQueryFilters.length;
+
+      await container
+          .read(channelsProvider.notifier)
+          .ensureDirectoryLoaded(maxAge: maxAge);
+      expect(session.directoryQueryFilters.length, greaterThan(reads));
+      expect(container.read(channelsProvider).requireValue.map((c) => c.id), [
+        _channelA,
+      ]);
+    },
+  );
+
+  test('a directory load during the first channel load waits for it', () async {
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk)],
+      metadata: [
+        _meta(id: _channelA, name: 'general'),
+        _meta(id: _channelB, name: 'discoverable'),
+      ],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+    final sub = container.listen(channelsProvider, (_, _) {});
+    addTearDown(sub.close);
+
+    // Search starts while the first load's member metadata is held.
+    session.pauseNextMemberMetadataQuery();
+    container.read(channelsProvider);
+    await session.nextMemberMetadataQueryStarted;
+    final directory = container
+        .read(channelsProvider.notifier)
+        .ensureDirectoryLoaded(maxAge: const Duration(seconds: 30));
+    await _settle();
+
+    // The first load's reply arrives last. It must not replace the list.
+    session.resumePausedMemberMetadataQuery();
+    await directory;
+    await _settle();
+
+    final state = container.read(channelsProvider);
+    expect(state.hasError, isFalse);
+    expect(
+      state.requireValue.map((c) => c.id),
+      unorderedEquals([_channelA, _channelB]),
+    );
+    expect(
+      container.read(channelDirectoryLoadStatusProvider).status,
+      ChannelDirectoryLoadStatus.loaded,
+    );
+  });
 
   test('paginates channel discovery with a composite cursor', () async {
     final firstPage = List.generate(
@@ -303,6 +403,38 @@ void main() {
     );
   });
 
+  test(
+    'a directory retry clears an earlier failure before it yields',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      session.membershipFailures = 1;
+      await container.read(channelsProvider.notifier).retryDirectory();
+      expect(
+        container.read(channelDirectoryLoadStatusProvider).status,
+        ChannelDirectoryLoadStatus.error,
+      );
+
+      // A refresh that retires this attempt in the same microtask drain must
+      // not leave the old error to be read as its result.
+      final retry = container.read(channelsProvider.notifier).retryDirectory();
+      expect(
+        container.read(channelDirectoryLoadStatusProvider).status,
+        ChannelDirectoryLoadStatus.idle,
+      );
+      await retry;
+      expect(
+        container.read(channelDirectoryLoadStatusProvider).status,
+        ChannelDirectoryLoadStatus.loaded,
+      );
+    },
+  );
+
   for (final rebuild in [false, true]) {
     test(
       '${rebuild ? 'Same-scope rebuild' : 'Ordinary refresh'} settles a superseded directory load for retry',
@@ -348,7 +480,7 @@ void main() {
 
         expect(
           container.read(channelDirectoryLoadStatusProvider).status,
-          ChannelDirectoryLoadStatus.error,
+          ChannelDirectoryLoadStatus.idle,
         );
         expect(
           container
@@ -1939,19 +2071,24 @@ void main() {
     Object deadline() => RelayException(503, '{"error":"query timed out"}');
     bool isUnread(List<NostrFilter> batch) =>
         batch.isNotEmpty && batch.every((filter) => filter.since != null);
-    NostrEvent message(String id, int createdAt, {bool mention = false}) =>
-        NostrEvent(
-          id: id,
-          pubkey: 'alice',
-          createdAt: createdAt,
-          kind: EventKind.streamMessageV2,
-          tags: [
-            const ['h', _channelA],
-            if (mention) const ['p', myPk],
-          ],
-          content: 'hi',
-          sig: 'sig',
-        );
+    NostrEvent message(
+      String id,
+      int createdAt, {
+      bool mention = false,
+      bool quiet = false,
+    }) => NostrEvent(
+      id: id,
+      pubkey: 'alice',
+      createdAt: createdAt,
+      kind: EventKind.streamMessageV2,
+      tags: [
+        const ['h', _channelA],
+        if (mention) const ['p', myPk],
+        if (quiet) const ['audience', 'agents'],
+      ],
+      content: 'hi',
+      sig: 'sig',
+    );
 
     test('a latest-message deadline keeps known timestamps', () async {
       final session = _FakeRelaySession(
@@ -2024,6 +2161,84 @@ void main() {
         DateTime.fromMillisecondsSinceEpoch(60 * 1000, isUtc: true),
       );
     });
+
+    test('quiet agent messages never count as unread', () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+        recentMessages: [
+          message('quiet-mention', 30, mention: true, quiet: true),
+          message('mention', 20, mention: true),
+        ],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      await _waitUntil(() => session.queryBatches.any(isUnread));
+      await _settle();
+      session.emit(message('quiet-live', 60, quiet: true));
+      session.emit(message('live', 50));
+      await _settle();
+      final notifier = container.read(channelsProvider.notifier);
+      expect(
+        notifier.observedUnreadEventsByChannel[_channelA]?.keys,
+        unorderedEquals(['mention', 'live']),
+      );
+      expect(notifier.latestObservedByChannel[_channelA], 50);
+    });
+
+    // Quiet messages that fill the bounded catch-up window can hide an older
+    // unread event, so the full window still counts its oldest one, as plain
+    // backlog even when it mentions the reader.
+    for (final (count, deleted, expected) in [
+      (999, false, <String>[]),
+      (1000, false, ['quiet-0']),
+      (999, true, <String>[]),
+      (1000, true, ['quiet-1']),
+    ]) {
+      test(
+        '$count quiet messages, deletion $deleted, record $expected',
+        () async {
+          final session = _FakeRelaySession(
+            memberships: [_membership(_channelA, myPk)],
+            metadata: [_meta(id: _channelA, name: 'general')],
+            recentMessages: [
+              for (var i = count - 1; i >= 0; i--)
+                message('quiet-$i', 100 + i, mention: true, quiet: true),
+              if (deleted)
+                const NostrEvent(
+                  id: 'quiet-deletion',
+                  pubkey: 'alice',
+                  createdAt: 2000,
+                  kind: EventKind.deletion,
+                  tags: [
+                    ['h', _channelA],
+                    ['e', 'quiet-0'],
+                  ],
+                  content: '',
+                  sig: 'sig',
+                ),
+            ],
+          );
+          final container = _buildContainer(session: session);
+          addTearDown(container.dispose);
+          await container.read(channelsProvider.future);
+          await _waitUntil(() => session.queryBatches.any(isUnread));
+          await _settle();
+          final notifier = container.read(channelsProvider.notifier);
+          expect(
+            notifier.observedUnreadEventsByChannel[_channelA]?.keys ?? const [],
+            expected,
+          );
+          for (final event
+              in notifier.observedUnreadEventsByChannel[_channelA]?.values ??
+                  const <ObservedUnreadEvent>[]) {
+            expect(event.highPriority, isFalse);
+            expect(event.channelCatchUp, isTrue);
+          }
+        },
+      );
+    }
 
     // HTTP fails ordinarily, then a per-filter websocket fallback times out:
     // the batch is unavailable and no later chunk is sent.

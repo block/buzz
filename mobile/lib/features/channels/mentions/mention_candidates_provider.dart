@@ -1,5 +1,6 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../../shared/agents/owned_agent_directory.dart';
 import '../../../shared/crypto/nip_oa.dart';
 import '../../../shared/identity_names/identity_names.dart';
 import '../../../shared/identity_names/identity_names_provider.dart';
@@ -159,6 +160,8 @@ final mentionCandidatesProvider = Provider.family
           ref.watch(agentDirectoryProvider).asData?.value ??
           const <AgentDirectoryEntry>[];
       final owners = ref.watch(agentOwnersProvider).asData?.value ?? const {};
+      // Null while loading or failed: nothing is known to be unlisted.
+      final ownedAgents = ref.watch(ownedAgentDirectoryProvider).asData?.value;
       final channels = channelsAsync.asData?.value ?? const <Channel>[];
       final userCache = ref.watch(userCacheProvider);
       final currentPubkey = ref.watch(currentPubkeyProvider);
@@ -182,6 +185,10 @@ final mentionCandidatesProvider = Provider.family
           ownerByAgentPubkey: owners,
           searchResults: searchResults,
           currentPubkey: currentPubkey,
+          ownedAgents: ownedAgents,
+          // Desktop offers the owner's agents where they can be added.
+          offerOwnedAgents:
+              channel != null && (channel.isStream || channel.isForum),
         ))
           if (isMentionKey(candidate.pubkey)) candidate,
       ];
