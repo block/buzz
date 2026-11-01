@@ -43,14 +43,23 @@ impl Fixture {
         }
     }
 
-    /// An open channel the reader and `other` have both joined.
+    /// A stream the reader and `other` have both joined.
     async fn channel(&self, visibility: ChannelVisibility) -> Uuid {
+        self.typed_channel(ChannelType::Stream, visibility).await
+    }
+
+    /// A channel of `channel_type` the reader and `other` have both joined.
+    async fn typed_channel(
+        &self,
+        channel_type: ChannelType,
+        visibility: ChannelVisibility,
+    ) -> Uuid {
         let channel = self
             .db
             .create_channel(
                 self.community,
                 "c",
-                ChannelType::Stream,
+                channel_type,
                 visibility,
                 None,
                 &self.owner.public_key().to_bytes(),
@@ -239,4 +248,21 @@ async fn more_than_the_cap_overflows() {
         MembershipChanges::Changes { changes, .. } => assert_eq!(changes.len(), MAX_ROWS),
         MembershipChanges::Overflow => panic!("exactly the cap must not overflow"),
     }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn system_channels_are_not_reported() {
+    let f = Fixture::new().await;
+    let removed = f
+        .typed_channel(ChannelType::System, ChannelVisibility::Private)
+        .await;
+    let deleted = f
+        .typed_channel(ChannelType::System, ChannelVisibility::Private)
+        .await;
+    f.remove(removed, &f.reader).await;
+    f.db.soft_delete_channel(f.community, deleted)
+        .await
+        .expect("delete channel");
+    assert_eq!(f.pairs(hour_ago()).await, vec![]);
 }

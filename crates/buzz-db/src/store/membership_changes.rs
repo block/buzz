@@ -84,6 +84,7 @@ impl Db {
             .bind(reader)
             .bind(since)
             .bind((MAX_ROWS + 1) as i64)
+            .bind(buzz_core::channel::LEGACY_CHANNEL_TYPES.to_vec())
             .fetch_all(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -111,17 +112,22 @@ impl Db {
 
 // Uses channel_members_sync (community_id, pubkey, sync_modified_at, channel_id)
 // for removals and the reader's active memberships to reach deleted channels.
+// Like the kind:39002 `#p` read this replaces, it names no channel, so NIP-CL
+// limits both halves to the legacy channel types ($5).
 const CHANGES: &str = r#"
 SELECT true AS removed, m.channel_id, m.sync_modified_at AS at
 FROM channel_members m
+JOIN channels c ON c.community_id=m.community_id AND c.id=m.channel_id
 WHERE m.community_id=$1 AND m.pubkey=$2
   AND m.removed_at IS NOT NULL AND m.sync_modified_at >= $3
+  AND c.channel_type::text=ANY($5)
 UNION ALL
 SELECT false, c.id, c.deleted_at
 FROM channel_members m
 JOIN channels c ON c.community_id=m.community_id AND c.id=m.channel_id
 WHERE m.community_id=$1 AND m.pubkey=$2 AND m.removed_at IS NULL
   AND c.deleted_at IS NOT NULL AND c.deleted_at >= $3
+  AND c.channel_type::text=ANY($5)
 ORDER BY at, channel_id
 LIMIT $4
 "#;

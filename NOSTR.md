@@ -379,6 +379,9 @@ The body is exactly one filter with exactly these two keys:
   channel's visibility now. A rejoined channel is not reported.
 - `reason: "deleted"`: the channel was deleted at or after `since` while the
   reader's membership was still active.
+- Like the kind:39002 `#p` read, this names no channel, so it reports only
+  the legacy channel types (`stream`, `forum`, `dm`, `workflow`), never a
+  system channel ([NIP-CL](docs/nips/NIP-CL.md)).
 - `asOf` is the relay's clock (unix seconds) when the read ran. Start the next
   read from `asOf` minus an overlap (artifact sync uses 120s), since a change
   can commit after its timestamp.
