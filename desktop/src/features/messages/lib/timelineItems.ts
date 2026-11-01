@@ -84,6 +84,13 @@ function parseMembershipChangePayload(
       return target ? { mode: "departure", target } : null;
     }
     if (
+      payload.type === "member_removed" &&
+      typeof payload.target === "string"
+    ) {
+      const target = payload.target.trim().toLowerCase();
+      return target ? { mode: "departure", target } : null;
+    }
+    if (
       payload.type !== "member_joined" ||
       typeof payload.actor !== "string" ||
       typeof payload.target !== "string"
@@ -106,10 +113,14 @@ function membershipChangesCanGroup(
   first: MembershipChangePayload,
   second: MembershipChangePayload,
 ): boolean {
-  if (second.mode === "departure") {
-    return first.mode === "self-arrival" && first.target === second.target;
-  }
-  return first.mode !== "departure";
+  return (
+    (first.mode === "self-arrival" ||
+      first.mode === "addition" ||
+      first.mode === "departure") &&
+    (second.mode === "self-arrival" ||
+      second.mode === "addition" ||
+      second.mode === "departure")
+  );
 }
 
 /**
@@ -118,13 +129,14 @@ function membershipChangesCanGroup(
  * likewise the newest entry's key: extending the oldest visible group changes
  * its contents, but not its identity or the virtual list's existing key suffix.
  *
- * Compatible membership activities stay together while they are contiguous.
- * Arrival cohorts are actor-neutral even when self-joins and additions mix, but
- * one or more equivalent self-joins followed by that member leaving remain a
- * single lifecycle summary — every contiguous self-arrival of the departing
- * member is absorbed, since the relay re-emits `member_joined` on each
- * PUT_USER. `buildGroupedMembershipPayload` must describe every group this
- * emits; `membershipGroupPayload.test.mjs` pins that with a matrix invariant.
+ * Membership activities stay together while they are contiguous, regardless of
+ * whether they are arrivals, removals, or self-departures. Arrival cohorts are
+ * actor-neutral even when self-joins and additions mix, but one or more
+ * equivalent self-joins followed by that member leaving remain a single
+ * lifecycle summary — every contiguous self-arrival of the departing member is
+ * absorbed, since the relay re-emits `member_joined` on each PUT_USER.
+ * `buildGroupedMembershipPayload` must describe every group this emits;
+ * `membershipGroupPayload.test.mjs` pins that with a matrix invariant.
  * Each adjacent event must fall within the one-hour activity window, so
  * uninterrupted activity can extend beyond an hour overall.
  */
