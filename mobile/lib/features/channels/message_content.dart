@@ -38,6 +38,7 @@ import 'message_content/link_normalizer.dart';
 import 'message_content/preview_text.dart';
 import 'message_media.dart';
 import 'message_content/bubble_segments.dart';
+import 'message_content/edited_marker.dart';
 import 'message_content/buzz_link_label.dart';
 import 'message_content/channel_token_pattern.dart';
 import 'message_mention_pill.dart';
@@ -165,6 +166,10 @@ class MessageContent extends HookConsumerWidget {
   /// it contains.
   final bool scaleEmojiOnly;
 
+  /// Marks the body as replaced by an edit, after its last line: inline after
+  /// prose, else on its own line after a closing block or trailing media.
+  final bool edited;
+
   /// Allows a multi-image carousel to reclaim leading space reserved by the
   /// surrounding message layout, while keeping its image count aligned with
   /// the message body.
@@ -196,6 +201,7 @@ class MessageContent extends HookConsumerWidget {
     this.textAlign,
     this.maxLines,
     this.scaleEmojiOnly = false,
+    this.edited = false,
     this.mediaCarouselLeadingOverflow = 0,
     this.mediaCarouselTrailingOverflow = 0,
   });
@@ -309,7 +315,10 @@ class MessageContent extends HookConsumerWidget {
       // so the gpt_markdown combined regex can match multi-word names
       // even when caseSensitive is not preserved.
       // Skip content inside backticks to avoid altering inline code.
-      final mentionParts = markdownContent.split('`');
+      // Only the renderer places the edited slot.
+      final mentionParts = markdownContent
+          .replaceAll(editedSlot, '')
+          .split('`');
       final mentionBuf = StringBuffer();
       for (var i = 0; i < mentionParts.length; i++) {
         if (i.isOdd) {
@@ -354,6 +363,11 @@ class MessageContent extends HookConsumerWidget {
       hasMediaMore: onMediaMore != null,
       onMentionTap: onMentionTap,
       onChannelTap: resolvedChannelTap,
+    );
+    final editedStyle = editedMarkerStyle(context, own: bubble && ownMessage);
+    final components = useMemoized(
+      () => [EditedMarkerMd(editedStyle), ...inlineComponents],
+      [inlineComponents, editedStyle],
     );
 
     Widget renderMarkdown(String text) => KeyedSubtree(
@@ -404,12 +418,34 @@ class MessageContent extends HookConsumerWidget {
         ),
         textAlign: textAlign,
         maxLines: maxLines,
-        inlineComponents: inlineComponents,
+        inlineComponents: components,
       ),
     );
     final segments = bubble
         ? messageBubbleSegments(finalContent, imetaByUrl)
         : const <({String text, bool attachment})>[];
+    // Media that closes the body takes the marker after it instead.
+    final editedInBody =
+        edited &&
+        trailingGallery == null &&
+        (bubble
+            ? segments.isNotEmpty && !segments.last.attachment
+            : finalContent.trim().isNotEmpty);
+    // The last text gets the marker: joined to prose, else on its own line.
+    Widget renderBody(String text, {required bool last}) {
+      if (!editedInBody || !last) return renderMarkdown(text);
+      final slotted = withEditedSlot(text);
+      if (slotted != null) return renderMarkdown(slotted);
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          renderMarkdown(text),
+          Text(editedMarkerText, style: editedStyle),
+        ],
+      );
+    }
+
     final markdown = bubble
         ? Column(
             crossAxisAlignment: ownMessage
@@ -508,7 +544,10 @@ class MessageContent extends HookConsumerWidget {
                                     : context.colors.onSurface,
                               ),
                             ),
-                            child: renderMarkdown(segment.text),
+                            child: renderBody(
+                              segment.text,
+                              last: index == segments.length - 1,
+                            ),
                           ),
                         ),
                       ),
@@ -516,31 +555,50 @@ class MessageContent extends HookConsumerWidget {
                   ),
             ],
           )
-        : renderMarkdown(finalContent);
-    if (trailingGallery == null) return markdown;
-
+        : renderBody(finalContent, last: true);
+    final body = trailingGallery == null
+        ? markdown
+        : Column(
+            crossAxisAlignment: ownMessage
+                ? CrossAxisAlignment.end
+                : CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (trailingGallery.content.trim().isNotEmpty) markdown,
+              MessageAttachmentCorners(
+                borderRadius: _attachmentCorners(
+                  start: bubbleStart && trailingGallery.content.trim().isEmpty,
+                  end: bubbleEnd,
+                ),
+                child: _MessageImageCarousel(
+                  key: ValueKey(
+                    trailingGallery.items
+                        .map((item) => item.url)
+                        .join('\u0000'),
+                  ),
+                  items: trailingGallery.items,
+                  mirrored: ownMessage,
+                  leadingOverflow: mediaCarouselLeadingOverflow,
+                  trailingOverflow: mediaCarouselTrailingOverflow,
+                  onReply: onMediaReply,
+                  onMore: onMediaMore,
+                ),
+              ),
+            ],
+          );
+    if (!edited || editedInBody) return body;
     return Column(
       crossAxisAlignment: ownMessage
           ? CrossAxisAlignment.end
           : CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (trailingGallery.content.trim().isNotEmpty) markdown,
-        MessageAttachmentCorners(
-          borderRadius: _attachmentCorners(
-            start: bubbleStart && trailingGallery.content.trim().isEmpty,
-            end: bubbleEnd,
-          ),
-          child: _MessageImageCarousel(
-            key: ValueKey(
-              trailingGallery.items.map((item) => item.url).join('\u0000'),
-            ),
-            items: trailingGallery.items,
-            mirrored: ownMessage,
-            leadingOverflow: mediaCarouselLeadingOverflow,
-            trailingOverflow: mediaCarouselTrailingOverflow,
-            onReply: onMediaReply,
-            onMore: onMediaMore,
+        body,
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
+          child: Text(
+            editedMarkerText,
+            style: editedMarkerStyle(context, own: false),
           ),
         ),
       ],

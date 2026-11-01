@@ -25,6 +25,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/message_content.dart';
+import 'package:buzz/features/channels/message_content/edited_marker.dart';
 import 'package:buzz/features/channels/media_viewer_page.dart';
 import 'package:buzz/features/channels/voice_note_attachment.dart';
 import 'package:buzz/features/channels/voice_note_waveform.dart';
@@ -422,6 +423,7 @@ class _TestChannelsNotifier extends ChannelsNotifier {
 void main() {
   carouselPreviewTests();
   bubbleContentTests();
+  editedMarkerTests();
   test('wide voice-note waveforms distribute bars across their full width', () {
     const width = 320.0;
     const sampleCount = 48;

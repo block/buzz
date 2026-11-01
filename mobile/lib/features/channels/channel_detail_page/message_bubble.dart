@@ -321,21 +321,6 @@ class _MessageBubble extends HookConsumerWidget {
                                               ),
                                             ),
                                           ),
-                                          if (message.edited) ...[
-                                            const SizedBox(width: Grid.half),
-                                            Text(
-                                              '(edited)',
-                                              style: context
-                                                  .textTheme
-                                                  .labelSmall
-                                                  ?.copyWith(
-                                                    color: context
-                                                        .colors
-                                                        .onSurfaceVariant,
-                                                    fontStyle: FontStyle.italic,
-                                                  ),
-                                            ),
-                                          ],
                                         ],
                                       ),
                                     ),
@@ -347,6 +332,7 @@ class _MessageBubble extends HookConsumerWidget {
                                     child: MessageContent(
                                       key: swipeContentKey,
                                       content: message.content,
+                                      edited: message.edited,
                                       bubble: true,
                                       hasReactions:
                                           message.reactions.isNotEmpty,
