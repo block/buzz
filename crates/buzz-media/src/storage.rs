@@ -1102,6 +1102,10 @@ pub struct BlobMeta {
     pub blurhash: String,
     /// Full URL to thumbnail.
     pub thumb_url: String,
+    /// Thumbnail format: `image/png` keeps transparency; empty means JPEG,
+    /// as in every sidecar written before transparent thumbnails.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub thumb_mime: String,
     /// File extension (e.g. "jpg").
     pub ext: String,
     /// MIME type (e.g. "image/jpeg").
@@ -1114,4 +1118,17 @@ pub struct BlobMeta {
     /// Video duration in seconds. `None` for non-video blobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_secs: Option<f64>,
+}
+
+impl BlobMeta {
+    /// Storage key and Content-Type of this blob's thumbnail. Its public path
+    /// stays `{sha256}.thumb.jpg` whatever the format, so clients that build
+    /// that path keep working.
+    pub fn thumb_object(&self, sha256: &str) -> (String, &'static str) {
+        if self.thumb_mime == "image/png" {
+            (format!("{sha256}.thumb.png"), "image/png")
+        } else {
+            (format!("{sha256}.thumb.jpg"), "image/jpeg")
+        }
+    }
 }

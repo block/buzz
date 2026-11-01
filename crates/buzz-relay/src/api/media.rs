@@ -868,14 +868,9 @@ pub(crate) async fn serve_blob_for_tenant(
     let cache_control = blob_cache_control();
 
     // Sidecar gate FIRST — reject before any blob I/O. Storage is not authoritative.
-    let content_type = if sha256_ext.ends_with(".thumb.jpg") {
-        let parent_hash = sha256_ext.strip_suffix(".thumb.jpg").unwrap_or(sha256_ext);
-        let _ = state
-            .media_storage
-            .read_sidecar_mime(tenant, parent_hash)
-            .await
-            .ok_or(MediaError::NotFound)?;
-        "image/jpeg".to_string()
+    let thumb = thumb_object(&state.media_storage, tenant, sha256_ext).await?;
+    let content_type = if let Some((_, mime)) = &thumb {
+        mime.to_string()
     } else {
         // For explicit paths (hash.ext), verify the requested extension matches
         // the sidecar's canonical extension — sidecar is authoritative.
@@ -908,7 +903,10 @@ pub(crate) async fn serve_blob_for_tenant(
         "attachment"
     };
 
-    let key = resolve_s3_key(&state.media_storage, tenant, sha256_ext).await?;
+    let key = match thumb {
+        Some((key, _)) => key,
+        None => resolve_s3_key(&state.media_storage, tenant, sha256_ext).await?,
+    };
 
     // Parse optional Range header.
     let range_header = req_headers
@@ -1156,14 +1154,9 @@ pub(crate) async fn head_blob(
     let cache_control = blob_cache_control();
 
     // Sidecar gate FIRST — reject before any blob I/O.
-    let content_type = if sha256_ext.ends_with(".thumb.jpg") {
-        let parent_hash = sha256_ext.strip_suffix(".thumb.jpg").unwrap_or(&sha256_ext);
-        let _ = state
-            .media_storage
-            .read_sidecar_mime(&tenant, parent_hash)
-            .await
-            .ok_or(MediaError::NotFound)?;
-        "image/jpeg".to_string()
+    let thumb = thumb_object(&state.media_storage, &tenant, &sha256_ext).await?;
+    let content_type = if let Some((_, mime)) = &thumb {
+        mime.to_string()
     } else {
         let sidecar_mime = state
             .media_storage
@@ -1184,7 +1177,10 @@ pub(crate) async fn head_blob(
         sidecar_mime
     };
 
-    let key = resolve_s3_key(&state.media_storage, &tenant, &sha256_ext).await?;
+    let key = match thumb {
+        Some((key, _)) => key,
+        None => resolve_s3_key(&state.media_storage, &tenant, &sha256_ext).await?,
+    };
     match state.media_storage.head_with_metadata(&key).await? {
         Some(meta) => {
             let size_str = meta.size.to_string();
@@ -1201,6 +1197,23 @@ pub(crate) async fn head_blob(
         }
         None => Ok(StatusCode::NOT_FOUND.into_response()),
     }
+}
+
+/// For a `{sha256}.thumb.jpg` path, the storage key and Content-Type of the
+/// thumbnail its sidecar records; `None` for any other path.
+async fn thumb_object(
+    storage: &buzz_media::MediaStorage,
+    tenant: &TenantContext,
+    sha256_ext: &str,
+) -> Result<Option<(String, &'static str)>, MediaError> {
+    let Some(sha256) = sha256_ext.strip_suffix(".thumb.jpg") else {
+        return Ok(None);
+    };
+    let sidecar = storage
+        .get_sidecar(tenant, sha256)
+        .await
+        .map_err(|_| MediaError::NotFound)?;
+    Ok(Some(sidecar.thumb_object(sha256)))
 }
 
 /// Resolve the S3 key from a URL path segment.

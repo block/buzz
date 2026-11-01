@@ -277,7 +277,7 @@ pub async fn verify_imeta_blobs(
 
         // 4. If thumb is claimed, HEAD the thumbnail object too.
         if !thumb_value.is_empty() {
-            let thumb_key = format!("{x_value}.thumb.jpg");
+            let (thumb_key, _) = sidecar.thumb_object(&x_value);
             let thumb_exists = storage
                 .head(&thumb_key)
                 .await

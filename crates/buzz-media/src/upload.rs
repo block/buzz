@@ -266,6 +266,7 @@ pub async fn process_file_upload(
                 dim: String::new(),
                 blurhash: String::new(),
                 thumb_url: String::new(),
+                thumb_mime: String::new(),
                 size: input.body.len() as u64,
                 ext: input.ext,
                 mime_type: input.mime,
@@ -472,6 +473,7 @@ pub async fn process_video_upload(
         dim: format!("{}x{}", video_meta.width, video_meta.height),
         blurhash: String::new(),
         thumb_url: String::new(),
+        thumb_mime: String::new(),
         ext: ext.to_string(),
         mime_type: mime.clone(),
         size: file_size,
@@ -530,8 +532,8 @@ async fn prepare_image_metadata(
     meta.uploaded_at = input.uploaded_at;
 
     if let Some(ref tb) = thumb_bytes {
-        let thumb_key = format!("{}.thumb.jpg", input.sha256);
-        storage.put(&thumb_key, tb, "image/jpeg").await?;
+        let (thumb_key, thumb_mime) = meta.thumb_object(&input.sha256);
+        storage.put(&thumb_key, tb, thumb_mime).await?;
     }
 
     Ok(meta)
@@ -583,6 +585,74 @@ mod tests {
         }
     }
 
+    /// A 640x640 PNG, so its thumbnail is 320x320, whose left half has the
+    /// given alpha and right half is opaque red.
+    fn png_with_alpha(alpha: u8) -> Vec<u8> {
+        let img = image::RgbaImage::from_fn(640, 640, |x, _| {
+            image::Rgba([255, 0, 0, if x < 320 { alpha } else { 255 }])
+        });
+        let mut bytes = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn transparent_image_thumbnail_keeps_alpha() {
+        let (meta, thumb) = generate_image_metadata_sync(
+            &test_config(),
+            &"a".repeat(64),
+            &png_with_alpha(0),
+            "image/png",
+            "png",
+        )
+        .unwrap();
+        let thumb = thumb.unwrap();
+        assert_eq!(
+            image::guess_format(&thumb).unwrap(),
+            image::ImageFormat::Png
+        );
+        let decoded = image::load_from_memory(&thumb).unwrap().to_rgba8();
+        assert_eq!(
+            decoded.get_pixel(0, 0)[3],
+            0,
+            "transparent pixel stays transparent"
+        );
+        assert_eq!(
+            decoded.get_pixel(319, 0)[3],
+            255,
+            "opaque pixel stays opaque"
+        );
+        assert_eq!(
+            meta.thumb_object("s"),
+            ("s.thumb.png".to_string(), "image/png")
+        );
+    }
+
+    #[test]
+    fn opaque_image_thumbnail_stays_jpeg() {
+        let (meta, thumb) = generate_image_metadata_sync(
+            &test_config(),
+            &"a".repeat(64),
+            &png_with_alpha(255),
+            "image/png",
+            "png",
+        )
+        .unwrap();
+        let thumb = thumb.unwrap();
+        assert_eq!(
+            image::guess_format(&thumb).unwrap(),
+            image::ImageFormat::Jpeg
+        );
+        assert_eq!(
+            meta.thumb_object("s"),
+            ("s.thumb.jpg".to_string(), "image/jpeg")
+        );
+    }
+
     #[test]
     fn test_build_descriptor_video_omits_empty_thumb_and_blurhash() {
         // Video uploads produce a BlobMeta with empty thumb_url and blurhash.
@@ -592,6 +662,7 @@ mod tests {
             dim: "320x240".to_string(),
             blurhash: String::new(),  // empty — video has no blurhash
             thumb_url: String::new(), // empty — video has no thumbnail
+            thumb_mime: String::new(),
             ext: "mp4".to_string(),
             mime_type: "video/mp4".to_string(),
             size: 5_000_000,
@@ -650,6 +721,7 @@ mod tests {
             dim: "800x600".to_string(),
             blurhash: "LEHV6nWB2yk8pyo0adR*.7kCMdnj".to_string(),
             thumb_url: format!("https://media.example.com/{hash}.thumb.jpg"),
+            thumb_mime: String::new(),
             ext: "jpg".to_string(),
             mime_type: "image/jpeg".to_string(),
             size: 100_000,

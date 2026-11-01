@@ -10,7 +10,8 @@ use crate::storage::BlobMeta;
 
 /// Generate thumbnail and blurhash from image bytes (CPU-bound, sync).
 ///
-/// Returns `(metadata, optional thumbnail JPEG bytes)`.
+/// Returns `(metadata, optional thumbnail bytes)`: PNG when the image has
+/// transparent pixels, so they don't turn black, otherwise JPEG.
 /// Caller handles S3 writes after `spawn_blocking` returns.
 pub fn generate_image_metadata_sync(
     config: &MediaConfig,
@@ -28,11 +29,18 @@ pub fn generate_image_metadata_sync(
 
     // Thumbnail: 320px max dimension, preserve aspect ratio
     let thumb = img.thumbnail(320, 320);
+    let rgba = thumb.to_rgba8();
+    // Only images with an alpha channel pay for the pixel scan.
+    let transparent = thumb.color().has_alpha() && rgba.pixels().any(|p| p[3] < u8::MAX);
+    let (format, thumb_mime) = if transparent {
+        (ImageFormat::Png, "image/png")
+    } else {
+        (ImageFormat::Jpeg, "")
+    };
     let mut thumb_bytes = Vec::new();
-    thumb.write_to(&mut Cursor::new(&mut thumb_bytes), ImageFormat::Jpeg)?;
+    thumb.write_to(&mut Cursor::new(&mut thumb_bytes), format)?;
 
     // Blurhash from thumbnail (faster than full image)
-    let rgba = thumb.to_rgba8();
     let bh =
         blurhash::encode(4, 3, thumb.width(), thumb.height(), rgba.as_raw()).unwrap_or_default();
 
@@ -41,6 +49,7 @@ pub fn generate_image_metadata_sync(
             dim: format!("{w}x{h}"),
             blurhash: bh,
             thumb_url: format!("{}/{sha256}.thumb.jpg", config.public_base_url),
+            thumb_mime: thumb_mime.to_string(),
             ext: ext.to_string(),
             mime_type: mime.to_string(),
             size: bytes.len() as u64,
