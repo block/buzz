@@ -836,6 +836,7 @@ class RunnerTests: XCTestCase {
     let messenger = NavigationTestMessenger()
     let parent = UIViewController()
     let window = UIWindow(frame: UIScreen.main.bounds)
+    window.windowScene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
     window.rootViewController = parent
     window.makeKeyAndVisible()
     defer { window.isHidden = true }
@@ -857,7 +858,7 @@ class RunnerTests: XCTestCase {
       XCTAssertFalse(scroll.topEdgeEffect.isHidden)
       XCTAssertEqual(scroll.topEdgeEffect.style, .soft)
       XCTAssertFalse(scroll.isUserInteractionEnabled)
-      XCTAssertTrue(material.isHidden)
+      XCTAssertFalse(material.isHidden)
       XCTAssertFalse(bar.view().clipsToBounds)
     }
     let expandedHeight = navigation.navigationBar.frame.height
@@ -866,6 +867,41 @@ class RunnerTests: XCTestCase {
     let measuredExpandedHeight = try XCTUnwrap(metrics["expandedHeight"] as? Double)
     XCTAssertEqual(expandedHeight, measuredExpandedHeight, accuracy: 0.5)
     XCTAssertGreaterThan(expandedHeight, compactHeight)
+    // Compare actual raster output with and without the material while UIKit's
+    // large-title edge is inactive. Requested edge flags alone missed this bug.
+    parent.view.backgroundColor = .systemRed
+    let originalHeight = bar.view().frame.height
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = 1
+    let renderer = UIGraphicsImageRenderer(size: CGSize(width: 24, height: 24), format: format)
+    func statusPixels() throws -> Data {
+      let image = renderer.image { context in
+        context.cgContext.translateBy(x: -8, y: -8)
+        window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+      }
+      let cgImage = try XCTUnwrap(image.cgImage)
+      return try XCTUnwrap(cgImage.dataProvider?.data) as Data
+    }
+    for offset in [30.0, 80.0, 30.0] {
+      messenger.scroll(to: offset)
+      bar.view().frame.size.height = originalHeight - min(offset, measuredExpandedHeight - compactHeight)
+      bar.view().setNeedsLayout()
+      bar.view().layoutIfNeeded()
+      let protectedPixels = try statusPixels()
+      let wasHidden = material.isHidden
+      material.isHidden = true
+      let unprotectedPixels = try statusPixels()
+      material.isHidden = wasHidden
+      XCTAssertNotEqual(protectedPixels, unprotectedPixels,
+                        "Rendered status area must retain material at offset \(offset)")
+      let attachment = XCTAttachment(image: UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+        window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+      })
+      attachment.name = "large-title-offset-\(offset)"
+      attachment.lifetime = .keepAlways
+      add(attachment)
+    }
+    bar.view().frame.size.height = originalHeight
     for _ in 0..<3 {
       messenger.scroll(to: measuredExpandedHeight - compactHeight)
       bar.view().setNeedsLayout()

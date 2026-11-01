@@ -118,6 +118,7 @@ class ProfileAvatarCropPage extends HookWidget {
           leading: Padding(
             padding: const EdgeInsets.only(left: Grid.gutter),
             child: Align(
+              widthFactor: 1,
               alignment: Alignment.centerLeft,
               child: _CropHeaderButton(
                 label: 'Back',

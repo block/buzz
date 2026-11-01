@@ -388,10 +388,12 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       content.scrollView.topEdgeEffect.style = .soft
       content.scrollView.topEdgeEffect.isHidden = !usesSystemScrollEdge
     }
-    // Every header uses the same native soft edge on iOS 27, including
-    // custom Flutter controls and large titles. Older embedded views retain
-    // the material fallback because their edge cannot sample Flutter content.
-    material.isHidden = usesSystemScrollEdge
+    // Older embedded views retain material because their native edge cannot
+    // sample Flutter content. On iOS 27, UIKit also suppresses its native
+    // edge while the large-title inset is collapsing.
+    // Keep the graduated material throughout that transition so partial
+    // scrolling never leaves the title and status area unprotected.
+    material.isHidden = usesSystemScrollEdge && !largeTitle
     // Let the native fade extend past the bar without enlarging its hit area.
     // The mirrored content is transparent and the bottom edge is hidden.
     container.clipsToBounds = !usesSystemScrollEdge
