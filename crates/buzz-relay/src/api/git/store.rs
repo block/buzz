@@ -594,9 +594,17 @@ impl GitStore {
         let mut transport_drops = 0usize;
 
         // -- Phase 1: sequential --------------------------------------------------
+        // Phase 1 writes through the same immutable create-only path as real packs
+        // (`put_immutable`), but under the `probe/` namespace rather than `packs/`
+        // so the probe litter is collectable by a `probe/`-scoped retention rule.
+        // Going through `put_pack` instead hardcoded these probe bodies to `packs/`,
+        // where they could not be told apart from real (content-addressed) pack
+        // data and could not be cleaned without risking real packs (#5241).
         for round in 0..cfg.race_rounds {
             let body = format!("probe-sequential-{nonce}-{round}").into_bytes();
-            let key = self.put_pack(&body).await?;
+            let key = self
+                .put_immutable("probe/pack", &body, "application/x-git-pack")
+                .await?;
             let got = self
                 .get_verified(&key, &Self::digest_hex(&body))
                 .await
