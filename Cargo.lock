@@ -1402,6 +1402,7 @@ dependencies = [
  "nostr 0.44.7",
  "openssl",
  "p256",
+ "percent-encoding",
  "proptest",
  "rand 0.10.1",
  "reqwest 0.13.4",
