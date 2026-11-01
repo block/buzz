@@ -3,6 +3,7 @@ import 'dart:math';
 
 import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:http/http.dart' as http;
+import 'package:buzz/shared/http/app_http_client.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../crypto/nip44.dart';
@@ -243,7 +244,7 @@ Future<BuzzPushLeaseDescriptor> fetchBuzzPushLeaseDescriptor(
     throw FormatException('Invalid relay HTTP URL: $relayBaseUrl');
   }
   final requestUri = uri.resolve('/');
-  final ownedClient = client ?? http.Client();
+  final ownedClient = client ?? newAppHttpClient();
   try {
     final response = await ownedClient
         .get(requestUri, headers: const {'Accept': 'application/nostr+json'})

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
+import 'package:buzz/shared/http/app_http_client.dart';
 
 import '../relay/relay_provider.dart';
 import 'builderlab_account.dart';
@@ -67,11 +68,13 @@ final hostedRelayAuthProvider = Provider<HostedRelayAuth>((ref) {
 });
 
 /// Each transport owns its client lifetime; configuration and auth are shared.
-final hostedHttpClientFactoryProvider = Provider<http.Client Function()>((ref) {
-  final auth = ref.watch(hostedRelayAuthProvider);
-  final config = ref.watch(relayConfigProvider);
-  return () => HostedRelayHttpClient(auth, config);
-});
+final hostedHttpClientFactoryProvider =
+    Provider<http.Client Function({HttpTraffic traffic})>((ref) {
+      final auth = ref.watch(hostedRelayAuthProvider);
+      final config = ref.watch(relayConfigProvider);
+      return ({HttpTraffic traffic = HttpTraffic.api}) =>
+          HostedRelayHttpClient(auth, config, inner: newAppHttpClient(traffic));
+    });
 
 /// The build's one Builderlab session, with a short-lived assertion for the
 /// current relay/key. A public build's hosted communities use [account] when
@@ -500,7 +503,7 @@ class HostedRelayHttpClient extends http.BaseClient {
     this.config, {
     http.Client? inner,
     this.canSend,
-  }) : _inner = inner ?? http.Client();
+  }) : _inner = inner ?? newAppHttpClient();
   final HostedRelayAuth auth;
   final RelayConfig config;
   final http.Client _inner;
