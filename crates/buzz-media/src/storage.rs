@@ -204,6 +204,24 @@ fn parse_object_versions_page(xml: &[u8]) -> Result<ObjectVersionsPage, MediaErr
 /// S3-compatible object storage client.
 pub struct MediaStorage {
     bucket: Box<Bucket>,
+    /// Same bucket without a request deadline, for whole-blob streams.
+    stream_bucket: Box<Bucket>,
+}
+
+/// Retry a failed idempotent write once after a second when the failure looks
+/// transient. rust-s3 0.37 did this for every request; 0.38 only retries reads.
+async fn retry_transient_write<T, F, Fut>(mut write: F) -> Result<T, s3::error::S3Error>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, s3::error::S3Error>>,
+{
+    match write().await {
+        Err(s3::error::S3Error::HttpFailWithBody(408 | 429 | 500 | 502 | 503 | 504, _)) => {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            write().await
+        }
+        result => result,
+    }
 }
 
 impl MediaStorage {
@@ -252,7 +270,15 @@ impl MediaStorage {
             S3AddressingStyle::Path => bucket.with_path_style(),
             S3AddressingStyle::Virtual => bucket,
         };
-        Ok(Self { bucket })
+        // rust-s3 0.38 enforces the bucket's 60 s default on every request, body
+        // included. Blob streams are paced by the client or the file size and
+        // can run longer, so they keep the unbounded behaviour from before 0.38.
+        let mut stream_bucket = bucket.clone();
+        stream_bucket.set_request_timeout(None);
+        Ok(Self {
+            bucket,
+            stream_bucket,
+        })
     }
 
     /// Store an object from a byte slice.
@@ -260,9 +286,11 @@ impl MediaStorage {
     /// Used for images, sidecars, and thumbnails. For large video files use
     /// [`put_file`] to avoid loading the entire blob into RAM.
     pub async fn put(&self, key: &str, bytes: &[u8], content_type: &str) -> Result<(), MediaError> {
-        self.bucket
-            .put_object_with_content_type(key, bytes, content_type)
-            .await?;
+        retry_transient_write(|| {
+            self.bucket
+                .put_object_with_content_type(key, bytes, content_type)
+        })
+        .await?;
         Ok(())
     }
 
@@ -284,7 +312,7 @@ impl MediaStorage {
             .map_err(|e| MediaError::Io(e.to_string()))?;
         let mut reader = tokio::io::BufReader::with_capacity(BUF, file);
 
-        self.bucket
+        self.stream_bucket
             .put_object_stream_with_content_type(&mut reader, key, content_type)
             .await?;
         Ok(())
@@ -319,7 +347,7 @@ impl MediaStorage {
     /// blobs (video) directly into HTTP responses via `Body::from_stream()`.
     pub async fn get_stream(&self, key: &str) -> Result<ByteStream, MediaError> {
         let response = self
-            .bucket
+            .stream_bucket
             .get_object_stream(key)
             .await
             .map_err(|e| MediaError::StorageError(e.to_string()))?;
@@ -345,8 +373,7 @@ impl MediaStorage {
 
     /// Delete an object. Returns an error on failure — callers decide whether to propagate.
     pub async fn delete(&self, key: &str) -> Result<(), MediaError> {
-        self.bucket
-            .delete_object(key)
+        retry_transient_write(|| self.bucket.delete_object(key))
             .await
             .map_err(|e| MediaError::StorageError(e.to_string()))?;
         Ok(())
@@ -970,6 +997,97 @@ mod tests {
         }
     }
 
+    /// Cloudflare R2 rejects a ranged GET whose signature covers
+    /// `content-length`/`content-type` (403 SignatureDoesNotMatch, surfaced as a
+    /// 500 from `/media`). MinIO accepts those headers, so only inspecting the
+    /// request on the wire catches a client that sends them.
+    #[tokio::test]
+    async fn get_range_does_not_send_or_sign_body_headers() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // The S3 client honours proxy variables, which would route this request
+        // away from the local listener.
+        if ["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"]
+            .iter()
+            .any(|name| std::env::var_os(name).is_some())
+        {
+            eprintln!("skipping: a proxy environment variable is set");
+            return;
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let (requests, mut received) = tokio::sync::mpsc::unbounded_channel();
+        // Answer every connection: the client may retry or open a second one.
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.expect("accept request");
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match stream.read(&mut chunk).await {
+                        Ok(read) if read > 0 => request.extend_from_slice(&chunk[..read]),
+                        _ => break,
+                    }
+                }
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/10\r\n\
+                          Content-Length: 4\r\nConnection: close\r\n\r\nbuzz",
+                    )
+                    .await;
+                let _ = requests.send(String::from_utf8_lossy(&request).into_owned());
+            }
+        });
+
+        let mut config = storage_config("buzz_dev", "buzz_dev_secret");
+        config.s3_endpoint = format!("http://{addr}");
+        let storage = MediaStorage::new(&config).expect("static client");
+        let bytes = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            storage.get_range("blob", 0, 3),
+        )
+        .await
+        .expect("ranged read completes")
+        .expect("ranged read succeeds");
+        assert_eq!(bytes, b"buzz");
+
+        // Every attempt must be clean, so check all recorded requests.
+        let mut recorded = vec![received.recv().await.expect("request recorded")];
+        server.abort();
+        while let Ok(request) = received.try_recv() {
+            recorded.push(request);
+        }
+        for request in recorded {
+            assert_range_request_has_no_body_headers(&request);
+        }
+    }
+
+    fn assert_range_request_has_no_body_headers(request: &str) {
+        let headers: HashMap<String, String> = request
+            .lines()
+            .skip(1)
+            .filter_map(|line| line.split_once(':'))
+            .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_string()))
+            .collect();
+        assert_eq!(headers.get("range").map(String::as_str), Some("bytes=0-3"));
+        assert!(!headers.contains_key("content-length"), "{request}");
+        assert!(!headers.contains_key("content-type"), "{request}");
+
+        let authorization = headers.get("authorization").expect("signed request");
+        let signed: Vec<&str> = authorization
+            .split_once("SignedHeaders=")
+            .and_then(|(_, rest)| rest.split(',').next())
+            .expect("SignedHeaders in Authorization")
+            .split(';')
+            .collect();
+        assert!(signed.contains(&"range"), "{authorization}");
+        assert!(!signed.contains(&"content-length"), "{authorization}");
+        assert!(!signed.contains(&"content-type"), "{authorization}");
+    }
+
     /// Static keys present: builds a client without touching the AWS
     /// credential chain (no env/metadata access), and the signing region
     /// comes from config rather than a hardcoded "us-east-1".
@@ -981,6 +1099,58 @@ mod tests {
             Region::Custom { ref region, .. } => assert_eq!(region, "us-west-2"),
             other => panic!("expected Custom region, got {other:?}"),
         }
+    }
+
+    /// A full-body `/media` download is paced by the client and may outlast any
+    /// fixed deadline; rust-s3 would otherwise cut it off after 60 seconds.
+    #[test]
+    fn client_constructor_leaves_only_streams_unbounded() {
+        for style in [S3AddressingStyle::Path, S3AddressingStyle::Virtual] {
+            let mut config = storage_config("buzz_dev", "buzz_dev_secret");
+            config.s3_addressing_style = style;
+            let storage = MediaStorage::new(&config).expect("static client");
+            assert_eq!(storage.stream_bucket.request_timeout(), None);
+            assert_eq!(storage.stream_bucket.url(), storage.bucket.url());
+            // Metadata and small-object calls must not hang on a stalled endpoint.
+            assert!(storage.bucket.request_timeout().is_some());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn transient_write_failure_is_retried_once() {
+        use s3::error::S3Error;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let fail = |code| S3Error::HttpFailWithBody(code, String::new());
+
+        let calls = AtomicUsize::new(0);
+        let recovered = retry_transient_write(|| async {
+            match calls.fetch_add(1, Ordering::SeqCst) {
+                0 => Err(fail(503)),
+                _ => Ok(()),
+            }
+        })
+        .await;
+        assert!(recovered.is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        let calls = AtomicUsize::new(0);
+        let persistent = retry_transient_write(|| async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err::<(), _>(fail(503))
+        })
+        .await;
+        assert!(matches!(persistent, Err(S3Error::HttpFailWithBody(503, _))));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        let calls = AtomicUsize::new(0);
+        let permanent = retry_transient_write(|| async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err::<(), _>(fail(403))
+        })
+        .await;
+        assert!(matches!(permanent, Err(S3Error::HttpFailWithBody(403, _))));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
