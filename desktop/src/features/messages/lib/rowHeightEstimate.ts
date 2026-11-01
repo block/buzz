@@ -1,9 +1,11 @@
 import type * as React from "react";
 
 import { dimensionsFromDim } from "@/shared/ui/markdown/utils";
+import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
+import { KIND_JOB_RESULT } from "@/shared/constants/kinds";
 import type { TimelineItem } from "./timelineItems";
 import type { TimelineMessage } from "../types";
-import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
+import { getJobResultRequestId, parseJobResultContent } from "./jobResult";
 
 /**
  * Estimate a timeline row's rendered height so its `content-visibility`
@@ -30,6 +32,10 @@ const CONTINUATION_ROW_CHROME = 8; // uniform py-1 padding; header/avatar are hi
 const MEDIA_BLOCK_MARGIN_TOP = 4; // image/video blocks use mt-1 in markdown
 const REACTION_ROW = 24;
 const PREVIEW_CARD = 70;
+const JOB_RESULT_CARD_BASE = 164;
+const JOB_RESULT_ARTIFACT_ROW = 70;
+const JOB_RESULT_VERIFICATION_ROW = 56;
+const JOB_RESULT_EMPTY_SECTION = 38;
 const MESSAGE_ITEM_BOTTOM_PADDING = 10; // TimelineMessageList pb-2.5
 const MIN_ESTIMATE = 60; // never reserve less than the old flat floor
 const CONTINUATION_MIN_ESTIMATE = 28;
@@ -112,6 +118,41 @@ export function estimateRowHeight(
   message: TimelineMessage,
   { isContinuation = false }: { isContinuation?: boolean } = {},
 ): number {
+  if (message.kind === KIND_JOB_RESULT) {
+    const result = parseJobResultContent(
+      message.body,
+      getJobResultRequestId(message.tags ?? []),
+    );
+    if (result) {
+      const chrome = isContinuation ? CONTINUATION_ROW_CHROME : ROW_CHROME;
+      const narrative = [
+        result.requestedOutcome,
+        result.outcome,
+        result.lastProgress,
+        result.blocker,
+      ]
+        .filter((value): value is string => Boolean(value))
+        .join("\n");
+      const artifactHeight =
+        result.artifacts.length > 0
+          ? result.artifacts.length * JOB_RESULT_ARTIFACT_ROW
+          : JOB_RESULT_EMPTY_SECTION;
+      const verificationHeight =
+        result.verification.length > 0
+          ? result.verification.length * JOB_RESULT_VERIFICATION_ROW
+          : JOB_RESULT_EMPTY_SECTION;
+
+      return Math.max(
+        isContinuation ? CONTINUATION_MIN_ESTIMATE : MIN_ESTIMATE,
+        chrome +
+          JOB_RESULT_CARD_BASE +
+          wrappedLineCount(narrative) * TEXT_LINE_HEIGHT +
+          artifactHeight +
+          verificationHeight,
+      );
+    }
+  }
+
   const body = message.body ?? "";
   const { prose, codeLines } = splitFencedCode(body);
   const proseForLineCount = stripMediaOnlyLines(prose);
