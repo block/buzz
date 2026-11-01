@@ -1,7 +1,3 @@
-CREATE TRIGGER trg_events_guard_channel_roster_snapshot
-    BEFORE INSERT ON events
-    FOR EACH ROW EXECUTE FUNCTION guard_channel_roster_snapshot();
-
 -- INSERT OR UPDATE OF: an UPDATE can move a previously exempt row into the
 -- guarded set (channel_id NULL -> NOT NULL) or move a channel row's
 -- created_at below the fence, so both mutation paths re-run the guard on the
