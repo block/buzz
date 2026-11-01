@@ -3212,8 +3212,9 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    // A kind:9007 with an `h` tag creates its channel when it is stored, in the
-    // same transaction (see the storage dispatch below).
+    // A kind:9007 must carry the new channel's id in its `h` tag. It creates
+    // its channel when it is stored, in the same transaction (see the storage
+    // dispatch below).
     let mut channel_create: Option<ChannelCreateRequest> = None;
 
     if kind_u32 == KIND_NIP29_CREATE_GROUP {
@@ -3290,6 +3291,12 @@ async fn ingest_event_inner(
                 unlisted,
                 members,
             });
+        } else {
+            // The channel is created in the same commit as its event, so a
+            // refused create (a taken name, for example) reaches the client.
+            return Err(IngestError::Rejected(
+                "invalid: create-group must include an h tag with the new channel id".into(),
+            ));
         }
     }
 
@@ -3558,8 +3565,12 @@ async fn ingest_event_inner(
             .db
             .create_channel_with_event(tenant.community(), create.channel_id, channel, &event)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
-        {
+            .map_err(|e| match e {
+                buzz_db::DbError::ChannelNameTaken(_) => {
+                    IngestError::Rejected(format!("invalid: {e}"))
+                }
+                _ => IngestError::Internal(format!("error: {e}")),
+            })? {
             buzz_db::channel::ChannelCreate::Created(stored) => {
                 metrics::counter!(
                     "buzz_channels_created_total",
@@ -3623,6 +3634,9 @@ async fn ingest_event_inner(
             .map_err(|e| match e.downcast_ref::<buzz_db::DbError>() {
                 Some(buzz_db::DbError::AccessDenied(reason)) => {
                     IngestError::Rejected(format!("invalid: {reason}"))
+                }
+                Some(taken @ buzz_db::DbError::ChannelNameTaken(_)) => {
+                    IngestError::Rejected(format!("invalid: {taken}"))
                 }
                 _ => IngestError::Internal(format!("error: channel update failed: {e}")),
             })?

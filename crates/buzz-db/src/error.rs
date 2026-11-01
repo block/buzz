@@ -25,6 +25,11 @@ pub enum DbError {
     #[error("channel not found: {0}")]
     ChannelNotFound(uuid::Uuid),
 
+    /// Another listed open channel in the community already has this name
+    /// (see `channel::ensure_listed_channel_name_unique`).
+    #[error("an open channel named \"{0}\" already exists")]
+    ChannelNameTaken(String),
+
     /// The requested member is not in the channel.
     #[error("member not found in channel {0}")]
     MemberNotFound(uuid::Uuid),
