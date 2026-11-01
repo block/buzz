@@ -12,6 +12,7 @@ class NavigationButtonSurface extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (NavigationGlassGroup.maybeOf(context)) return child;
     if (defaultTargetPlatform != TargetPlatform.iOS) {
       return Material(
         color: context.controlSurface,
@@ -30,4 +31,16 @@ class NavigationButtonSurface extends StatelessWidget {
       child: child,
     );
   }
+}
+
+/// Uses the shared native navigation glass instead of a separate surface.
+class NavigationGlassGroup extends InheritedWidget {
+  const NavigationGlassGroup({super.key, required super.child});
+
+  static bool maybeOf(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<NavigationGlassGroup>() !=
+      null;
+
+  @override
+  bool updateShouldNotify(NavigationGlassGroup oldWidget) => false;
 }

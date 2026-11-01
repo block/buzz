@@ -27,33 +27,14 @@ class MessagesNavigationBar extends HookWidget {
   @override
   Widget build(BuildContext context) {
     final menuOpen = useState(false);
-    final nudge = menuOpen.value ? Grid.xs : 0.0;
-    return Builder(
-      builder: (controlsContext) => Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _MenuNudge(
-            offset: nudge,
-            menuOpen: menuOpen.value,
-            alignment: Alignment.centerRight,
-            child: NavigationButtonSurface(
-              child: SizedBox.square(
-                dimension: 56,
-                child: IconButton(
-                  tooltip: 'Search',
-                  onPressed: () {
-                    unawaited(HapticFeedback.lightImpact());
-                    onSearch();
-                  },
-                  color: context.colors.onSurface,
-                  icon: const Icon(BuzzIcons.search300, size: 24),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(width: Grid.xs),
-          if (defaultTargetPlatform == TargetPlatform.iOS)
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      return SizedBox(
+        width: 256,
+        height: 56,
+        child: Stack(
+          children: [
             IosMessageCreateButton(
+              mergingNavigation: true,
               onMenuVisibilityChanged: (visible) => menuOpen.value = visible,
               actions: creationActions,
               dividerBefore: const {2},
@@ -61,28 +42,79 @@ class MessagesNavigationBar extends HookWidget {
               label: 'New',
               showIconWithLabel: true,
               accessibilityLabel: 'New',
-              width: 112,
+              width: 256,
               height: 56,
               plain: false,
-            )
-          else
-            AndroidExpandingMenuButton(
-              expansionBoundsContext: controlsContext,
-              actions: creationActions,
-              dividerBefore: const {2},
-              sectionTitles: const {0: 'Solo', 2: 'Team'},
             ),
+            Positioned(
+              left: 0,
+              width: 72,
+              top: 0,
+              bottom: 0,
+              child: ClipRect(
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: _MenuNudge(
+                    offset: menuOpen.value ? 100 : 0,
+                    menuOpen: menuOpen.value,
+                    alignment: Alignment.center,
+                    child: _search(context),
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              right: 0,
+              width: 72,
+              top: 0,
+              bottom: 0,
+              child: ClipRect(
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: _MenuNudge(
+                    offset: menuOpen.value ? -100 : 0,
+                    menuOpen: menuOpen.value,
+                    alignment: Alignment.center,
+                    child: NavigationGlassGroup(child: agent),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+    return Builder(
+      builder: (controlsContext) => Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          NavigationButtonSurface(child: _search(context)),
           const SizedBox(width: Grid.xs),
-          _MenuNudge(
-            offset: -nudge,
-            menuOpen: menuOpen.value,
-            alignment: Alignment.centerLeft,
-            child: agent,
+          AndroidExpandingMenuButton(
+            expansionBoundsContext: controlsContext,
+            actions: creationActions,
+            dividerBefore: const {2},
+            sectionTitles: const {0: 'Solo', 2: 'Team'},
           ),
+          const SizedBox(width: Grid.xs),
+          agent,
         ],
       ),
     );
   }
+
+  Widget _search(BuildContext context) => SizedBox.square(
+    dimension: 56,
+    child: IconButton(
+      tooltip: 'Search',
+      onPressed: () {
+        unawaited(HapticFeedback.lightImpact());
+        onSearch();
+      },
+      color: context.colors.onSurface,
+      icon: const Icon(BuzzIcons.search300, size: 24),
+    ),
+  );
 }
 
 class _MenuNudge extends StatelessWidget {

@@ -44,6 +44,8 @@ final class NavigationGlassButton: UIButton {
   var hitTargetInsets = UIEdgeInsets.zero
   var pendingMenuAction: (() -> Void)?
   var menuVisibilityChanged: ((Bool) -> Void)?
+  var animateMenu: ((Bool, UIContextMenuInteractionAnimating?) -> Void)?
+  weak var glassPreview: UIView?
 
   override func contextMenuInteraction(
     _ interaction: UIContextMenuInteraction,
@@ -51,6 +53,7 @@ final class NavigationGlassButton: UIButton {
     animator: UIContextMenuInteractionAnimating?
   ) {
     super.contextMenuInteraction(interaction, willDisplayMenuFor: configuration, animator: animator)
+    animateMenu?(true, animator)
     menuVisibilityChanged?(true)
     UIImpactFeedbackGenerator(style: .light).impactOccurred()
   }
@@ -61,6 +64,7 @@ final class NavigationGlassButton: UIButton {
     animator: UIContextMenuInteractionAnimating?
   ) {
     super.contextMenuInteraction(interaction, willEndFor: configuration, animator: animator)
+    animateMenu?(false, animator)
     menuVisibilityChanged?(false)
     let action = pendingMenuAction
     pendingMenuAction = nil
@@ -71,6 +75,16 @@ final class NavigationGlassButton: UIButton {
     } else {
       action?()
     }
+  }
+
+  override func contextMenuInteraction(
+    _ interaction: UIContextMenuInteraction,
+    previewForHighlightingMenuWithConfiguration configuration: UIContextMenuConfiguration
+  ) -> UITargetedPreview? {
+    guard let glassPreview else {
+      return super.contextMenuInteraction(interaction, previewForHighlightingMenuWithConfiguration: configuration)
+    }
+    return UITargetedPreview(view: glassPreview)
   }
 
   override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
@@ -198,6 +212,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
   private let containerView: UIView
   private let channel: FlutterMethodChannel
   private let button = NavigationGlassButton(type: .system)
+  private var navigationGlass: MergingNavigationGlass?
   private let activityIndicator = UIActivityIndicatorView(style: .medium)
   private let swatchView = UIView()
   private var labelForegroundColor: UIColor?
@@ -248,7 +263,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       configuration = .gray()
       configuration.baseBackgroundColor = UIColor.secondarySystemBackground
     }
-    if arguments?["plain"] as? Bool == true { configuration = .plain() }
+    if arguments?["plain"] as? Bool == true || arguments?["mergingNavigation"] as? Bool == true { configuration = .plain() }
     configuration.cornerStyle = .capsule
     button.configuration = configuration
     applyContent(from: arguments)
@@ -309,6 +324,24 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       result(nil)
     }
 
+    if arguments?["mergingNavigation"] as? Bool == true {
+      let glass = MergingNavigationGlass(frame: containerView.bounds)
+      glass.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+      containerView.addSubview(glass)
+      navigationGlass = glass
+      glass.centerSurface.contentView.addSubview(button)
+      button.glassPreview = glass.centerSurface
+      button.animateMenu = { [weak glass] visible, animator in
+        glass?.setMenuOpen(visible, animator: animator)
+      }
+      NSLayoutConstraint.activate([
+        button.leadingAnchor.constraint(equalTo: glass.centerSurface.contentView.leadingAnchor),
+        button.trailingAnchor.constraint(equalTo: glass.centerSurface.contentView.trailingAnchor),
+        button.topAnchor.constraint(equalTo: glass.centerSurface.contentView.topAnchor),
+        button.bottomAnchor.constraint(equalTo: glass.centerSurface.contentView.bottomAnchor),
+      ])
+      return
+    }
     containerView.addSubview(button)
     NSLayoutConstraint.activate([
       button.centerYAnchor.constraint(equalTo: containerView.centerYAnchor),
@@ -702,5 +735,76 @@ final class NativeSegmentedControlPlatformView: NSObject, FlutterPlatformView {
 
   deinit {
     channel.setMethodCallHandler(nil)
+  }
+}
+
+/// Three native glass elements share a compositor so their surfaces merge.
+final class MergingNavigationGlass: UIView {
+  let leftSurface: UIVisualEffectView
+  let centerSurface: UIVisualEffectView
+  let rightSurface: UIVisualEffectView
+  private let group: UIVisualEffectView
+
+  override init(frame: CGRect) {
+    if #available(iOS 26.0, *) {
+      let container = UIGlassContainerEffect()
+      container.spacing = 12
+      group = UIVisualEffectView(effect: container)
+      leftSurface = UIVisualEffectView(effect: UIGlassEffect(style: .regular))
+      centerSurface = UIVisualEffectView(effect: UIGlassEffect(style: .regular))
+      rightSurface = UIVisualEffectView(effect: UIGlassEffect(style: .regular))
+    } else {
+      group = UIVisualEffectView(effect: nil)
+      leftSurface = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
+      centerSurface = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
+      rightSurface = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
+    }
+    super.init(frame: frame)
+    group.frame = bounds
+    group.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    addSubview(group)
+    for surface in [leftSurface, rightSurface, centerSurface] {
+      if #available(iOS 26.0, *) {
+        surface.cornerConfiguration = .capsule()
+      } else {
+        surface.layer.cornerRadius = 28
+        surface.clipsToBounds = true
+      }
+      group.contentView.addSubview(surface)
+    }
+    leftSurface.isUserInteractionEnabled = false
+    rightSurface.isUserInteractionEnabled = false
+  }
+
+  required init?(coder: NSCoder) { nil }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    // Use bounds/center rather than frame: side views may be transformed.
+    leftSurface.bounds = CGRect(x: 0, y: 0, width: 56, height: 56)
+    rightSurface.bounds = leftSurface.bounds
+    centerSurface.bounds = CGRect(x: 0, y: 0, width: 112, height: 56)
+    leftSurface.center = CGPoint(x: 28, y: bounds.midY)
+    rightSurface.center = CGPoint(x: bounds.width - 28, y: bounds.midY)
+    centerSurface.center = CGPoint(x: bounds.midX, y: bounds.midY)
+  }
+
+  func setMenuOpen(_ open: Bool, animator: UIContextMenuInteractionAnimating?) {
+    layoutIfNeeded()
+    let movement = bounds.midX - 28
+    let changes = { [weak self] in
+      guard let self else { return }
+      self.leftSurface.transform = open
+        ? CGAffineTransform(translationX: movement, y: 0).scaledBy(x: 0.9, y: 0.9) : .identity
+      self.rightSurface.transform = open
+        ? CGAffineTransform(translationX: -movement, y: 0).scaledBy(x: 0.9, y: 0.9) : .identity
+    }
+    if UIAccessibility.isReduceMotionEnabled {
+      UIView.performWithoutAnimation(changes)
+    } else if let animator {
+      animator.addAnimations(changes)
+    } else {
+      UIView.animate(withDuration: 0.18, delay: 0, options: [.curveEaseOut, .beginFromCurrentState], animations: changes)
+    }
   }
 }

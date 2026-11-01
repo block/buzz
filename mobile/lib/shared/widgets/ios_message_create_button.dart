@@ -32,6 +32,7 @@ class IosMessageCreateButton extends HookWidget {
     this.deferMenuActions = true,
     this.showIconWithLabel = false,
     this.onMenuVisibilityChanged,
+    this.mergingNavigation = false,
   });
 
   final Set<int> dividerBefore;
@@ -58,6 +59,9 @@ class IosMessageCreateButton extends HookWidget {
   final bool deferMenuActions;
   final bool showIconWithLabel;
   final ValueChanged<bool>? onMenuVisibilityChanged;
+
+  /// Hosts the Search/New/Bestie glass surfaces in one native container.
+  final bool mergingNavigation;
 
   final List<({String label, String symbol, VoidCallback? onPressed})> actions;
 
@@ -188,7 +192,8 @@ class IosMessageCreateButton extends HookWidget {
           'plain': plain,
           'fillWidth': fillWidth,
           'buttonCenterX': width / 2,
-          'controlWidth': width,
+          'controlWidth': mergingNavigation ? 112.0 : width,
+          'mergingNavigation': mergingNavigation,
           'controlSize': height,
           'hitTargetWidth': width,
           'hitTargetHeight': height,

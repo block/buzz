@@ -23,6 +23,19 @@ private final class SettingMenuMessenger: NSObject, FlutterBinaryMessenger {
 @main
 struct SettingMenuSelectionTests {
   @MainActor static func main() {
+    let merging = MergingNavigationGlass(frame: CGRect(x: 0, y: 0, width: 256, height: 56))
+    merging.layoutIfNeeded()
+    UIView.setAnimationsEnabled(false)
+    merging.setMenuOpen(true, animator: nil)
+    precondition(merging.leftSurface.transform.tx == 100)
+    precondition(merging.rightSurface.transform.tx == -100)
+    precondition(merging.leftSurface.transform.a == 0.9)
+    precondition(merging.leftSurface.alpha == 1)
+    merging.setMenuOpen(false, animator: nil)
+    precondition(merging.leftSurface.transform == .identity)
+    precondition(merging.rightSurface.transform == .identity)
+    UIView.setAnimationsEnabled(true)
+
     for deferred in [false, true] {
       let messenger = SettingMenuMessenger()
       let view = NavigationGlassButtonPlatformView(
