@@ -1,12 +1,16 @@
+import 'dart:async';
+import 'dart:ui' as ui;
+
 import 'package:buzz/shared/widgets/sheet_action_section.dart';
 import 'package:buzz/shared/widgets/app_list_card.dart';
-import 'dart:ui' as ui;
 import 'package:flutter/services.dart';
 
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/message_actions.dart';
+import 'package:buzz/features/channels/read_aloud/read_aloud_controller.dart';
+import 'package:buzz/features/channels/read_aloud/read_aloud_engine.dart';
 import 'package:buzz/features/channels/message_long_press_region.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/thread_follows/thread_follows_provider.dart';
@@ -24,6 +28,28 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../helpers/thread_ids.dart';
 
 const _channelId = 'chan-1';
+
+class _SheetReadAloudEngine implements ReadAloudEngine {
+  final spoken = <String>[];
+  var stops = 0;
+  final _pending = <Completer<void>>[];
+
+  @override
+  Future<void> speak(String text) {
+    spoken.add(text);
+    final done = Completer<void>();
+    _pending.add(done);
+    return done.future;
+  }
+
+  @override
+  Future<void> stop() async {
+    stops++;
+    for (final done in _pending) {
+      if (!done.isCompleted) done.complete();
+    }
+  }
+}
 
 TimelineMessage _message({
   String id = 'msg-1',
@@ -157,11 +183,14 @@ Future<void> _pumpSheet(
   bool nativePresentation = false,
   String? currentPubkey = 'self',
   bool listChannel = false,
+  ReadAloudEngine? readAloudEngine,
 }) async {
   Future<void>? presentation;
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
+        if (readAloudEngine != null)
+          readAloudEngineProvider.overrideWithValue(readAloudEngine),
         savedPrefsProvider.overrideWithValue(prefs),
         myPubkeyProvider.overrideWithValue('self'),
         readStateProvider.overrideWith(
@@ -734,6 +763,7 @@ void main() {
         for (final label in [
           'Mark unread',
           'Follow thread',
+          'Read aloud',
           'Copy text',
           'Edit message',
           'Delete message',
@@ -776,6 +806,7 @@ void main() {
       final prefs = await _mockPrefs();
       await _pumpSheet(tester, message: _message(), prefs: prefs);
 
+      expect(find.text('Read aloud'), findsOneWidget);
       expect(find.text('Copy text'), findsOneWidget);
       expect(find.text('Copy link'), findsOneWidget);
       expect(find.text('Mark unread'), findsOneWidget);
@@ -802,6 +833,36 @@ void main() {
         tester.getSize(find.byKey(const ValueKey('quick-reaction-\u{1F44D}'))),
         const Size.square(52),
       );
+    });
+
+    testWidgets('read aloud speaks the held message and a second tap stops', (
+      tester,
+    ) async {
+      final engine = _SheetReadAloudEngine();
+      final prefs = await _mockPrefs();
+      await _pumpSheet(
+        tester,
+        message: _message(),
+        prefs: prefs,
+        readAloudEngine: engine,
+      );
+
+      await tester.tap(find.text('Read aloud'));
+      await tester.pumpAndSettle();
+      expect(engine.spoken, ['hello world']);
+      expect(find.text('Read aloud'), findsNothing);
+
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      expect(find.text('Stop reading'), findsOneWidget);
+      final stopsBefore = engine.stops;
+      await tester.tap(find.text('Stop reading'));
+      await tester.pumpAndSettle();
+      expect(engine.stops, stopsBefore + 1);
+
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      expect(find.text('Read aloud'), findsOneWidget);
     });
 
     testWidgets(
@@ -885,6 +946,7 @@ void main() {
       final prefs = await _mockPrefs();
       await _pumpSheet(tester, message: _message(isSystem: true), prefs: prefs);
 
+      expect(find.text('Read aloud'), findsNothing);
       expect(find.text('Copy text'), findsNothing);
       expect(find.text('Copy link'), findsNothing);
       expect(find.text('Mark unread'), findsNothing);
