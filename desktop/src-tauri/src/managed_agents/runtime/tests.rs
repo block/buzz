@@ -601,7 +601,8 @@ fn custom_acp_command_keeps_relay_git_credentials() {
     super::apply_custom_acp_git_credentials(
         &mut custom,
         "custom-acp",
-        "nsec-test",
+        "buzz-desktop-test",
+        "agent-test-account",
         "wss://relay.example",
         Some(helper),
     );
@@ -609,8 +610,10 @@ fn custom_acp_command_keeps_relay_git_credentials() {
         .get_envs()
         .filter_map(|(key, value)| Some((key.to_str()?, value?.to_str()?)))
         .collect();
-    assert_eq!(env.get("NOSTR_PRIVATE_KEY"), Some(&"nsec-test"));
-    assert_eq!(env.get("GIT_CONFIG_COUNT"), Some(&"2"));
+    // Only nonsecret daz-secrets coordinates reach the child; no key bytes.
+    assert!(!env.contains_key("NOSTR_PRIVATE_KEY"));
+    assert!(!env.contains_key("BUZZ_PRIVATE_KEY"));
+    assert_eq!(env.get("GIT_CONFIG_COUNT"), Some(&"4"));
     assert_eq!(
         env.get("GIT_CONFIG_KEY_0"),
         Some(&"credential.https://relay.example/git.helper")
@@ -620,12 +623,17 @@ fn custom_acp_command_keeps_relay_git_credentials() {
         Some(&"/opt/buzz/git-credential-nostr")
     );
     assert_eq!(env.get("GIT_CONFIG_VALUE_1"), Some(&"true"));
+    assert_eq!(env.get("GIT_CONFIG_KEY_2"), Some(&"nostr.secretService"));
+    assert_eq!(env.get("GIT_CONFIG_VALUE_2"), Some(&"buzz-desktop-test"));
+    assert_eq!(env.get("GIT_CONFIG_KEY_3"), Some(&"nostr.secretAccount"));
+    assert_eq!(env.get("GIT_CONFIG_VALUE_3"), Some(&"agent-test-account"));
 
     let mut standard = std::process::Command::new("buzz-acp");
     super::apply_custom_acp_git_credentials(
         &mut standard,
         super::super::DEFAULT_ACP_COMMAND,
-        "nsec-test",
+        "buzz-desktop-test",
+        "agent-test-account",
         "wss://relay.example",
         Some(helper),
     );

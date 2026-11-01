@@ -80,8 +80,9 @@ const PASSTHROUGH_ENV: &[&str] = &[
     // was configured correctly and the child could not see it.
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
-    // Git config/keyfile paths arrive explicitly in session/new mcpServers[].env.
-    "BUZZ_PRIVATE_KEY",
+    // Buzz transport metadata. Identity bytes are never inherited; Git config
+    // (including non-secret daz-secrets coordinates) arrives explicitly in
+    // session/new mcpServers[].env.
     "BUZZ_RELAY_URL",
     "BUZZ_AUTH_TAG",
     // Harness-chosen `buzz` CLI read format (token-lean event reads).

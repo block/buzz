@@ -42,10 +42,9 @@
 //!   may optimize this away). The `SecretKey` type in the nostr crate wraps
 //!   `secp256k1::SecretKey` which also lacks `Zeroize`, so some residual copies
 //!   may persist until the process exits (short-lived by design).
-//! - **Environment variables:** Private keys in env vars are inherently risky
-//!   (visible in `/proc`, shell history, crash dumps). Prefer keyfile storage.
-//!   Env vars are removed from the process environment immediately after reading
-//!   to minimize the exposure window.
+//! - **Secret storage:** Private keys are loaded on demand from the configured
+//!   `daz-secrets` provider. They are never accepted through environment
+//!   variables, command-line arguments, or files.
 //! - **Unsafe code:** This crate uses minimal `unsafe` for Unix fd operations
 //!   (`from_raw_fd`, `fcntl`) where no safe Rust API exists. Each block is
 //!   documented with safety invariants. This is an accepted exception to the
@@ -84,7 +83,7 @@ use chrono::DateTime;
 use nostr::hashes::sha256::Hash as Sha256Hash;
 use nostr::hashes::{Hash, HashEngine};
 use nostr::secp256k1::schnorr::Signature;
-use nostr::secp256k1::{Keypair, Message};
+use nostr::secp256k1::{Keypair, Message, XOnlyPublicKey};
 use nostr::{FromBech32, PublicKey, SecretKey, SECP256K1};
 use zeroize::Zeroize;
 
@@ -389,64 +388,32 @@ macro_rules! status_or_fail {
     };
 }
 
-/// Load the private key from env vars or git config keyfile.
-///
-/// Priority: NOSTR_PRIVATE_KEY > BUZZ_PRIVATE_KEY > git config nostr.keyfile
+/// Load the private key from the configured daz-secrets provider.
 ///
 /// Returns a zeroize-on-drop string containing the raw key material.
 fn load_key() -> Result<zeroize::Zeroizing<String>, Error> {
-    // 1. NOSTR_PRIVATE_KEY
-    if let Ok(mut val) = std::env::var("NOSTR_PRIVATE_KEY") {
-        // Cap at 128 bytes: nsec1 bech32 is ~63 chars, hex is 64 chars.
-        // 128 bytes is generous headroom; anything larger is malformed input.
-        if val.len() > 128 {
-            val.zeroize();
-            std::env::remove_var("NOSTR_PRIVATE_KEY");
-            return Err(Error::Fatal(
-                "NOSTR_PRIVATE_KEY exceeds 128-byte size limit".to_string(),
-            ));
-        }
-        let trimmed = val.trim().to_string();
-        val.zeroize();
-        // Remove from process environment to minimize exposure window
-        std::env::remove_var("NOSTR_PRIVATE_KEY");
-        if !trimmed.is_empty() {
-            return Ok(zeroize::Zeroizing::new(trimmed));
-        }
+    let service = git_config("nostr.secretService").unwrap_or_else(|| "buzz-desktop".into());
+    let account = git_config("nostr.secretAccount").unwrap_or_else(|| "identity".into());
+    let client = daz_secrets::BlockingClient::from_default_config()
+        .map_err(|_| Error::Fatal("secret provider is unavailable".into()))?;
+    let secret = client
+        .get(&service, &account)
+        .map_err(|_| Error::Fatal("signing identity is unavailable".into()))?;
+    if secret.value.len() > 128 {
+        return Err(Error::Fatal(
+            "signing identity exceeds 128-byte size limit".into(),
+        ));
     }
-
-    // 2. BUZZ_PRIVATE_KEY
-    if let Ok(mut val) = std::env::var("BUZZ_PRIVATE_KEY") {
-        // Cap at 128 bytes: nsec1 bech32 is ~63 chars, hex is 64 chars.
-        // 128 bytes is generous headroom; anything larger is malformed input.
-        if val.len() > 128 {
-            val.zeroize();
-            std::env::remove_var("BUZZ_PRIVATE_KEY");
-            return Err(Error::Fatal(
-                "BUZZ_PRIVATE_KEY exceeds 128-byte size limit".to_string(),
-            ));
-        }
-        let trimmed = val.trim().to_string();
-        val.zeroize();
-        // Remove from process environment to minimize exposure window
-        std::env::remove_var("BUZZ_PRIVATE_KEY");
-        if !trimmed.is_empty() {
-            return Ok(zeroize::Zeroizing::new(trimmed));
-        }
+    let mut value = zeroize::Zeroizing::new(
+        String::from_utf8(secret.value)
+            .map_err(|_| Error::Fatal("signing identity is not valid UTF-8".into()))?,
+    );
+    let trimmed = zeroize::Zeroizing::new(value.trim().to_string());
+    value.zeroize();
+    if trimmed.is_empty() {
+        return Err(Error::Fatal("signing identity is empty".into()));
     }
-
-    // 3. nostr.keyfile git config
-    let path = git_config("nostr.keyfile").ok_or_else(|| {
-        Error::Fatal(
-            "no key available: set NOSTR_PRIVATE_KEY, BUZZ_PRIVATE_KEY, \
-             or git config nostr.keyfile"
-                .to_string(),
-        )
-    })?;
-
-    // Delegate to read_keyfile_secure which handles permission checks,
-    // size limits, and Zeroizing wrapping in one place.
-    read_keyfile_secure(&path)
+    Ok(trimmed)
 }
 
 /// Load the NIP-OA auth tag from env or git config.
@@ -764,123 +731,6 @@ fn git_config_strict(key: &str) -> Result<Option<String>, String> {
     } else {
         Ok(Some(trimmed.to_string()))
     }
-}
-
-/// Open a keyfile with symlink rejection and permission checks.
-///
-/// Uses `O_NOFOLLOW` to reject symlinks atomically at the kernel level (no
-/// TOCTOU between stat and open). Uses `O_NONBLOCK` to prevent blocking on
-/// FIFOs — cleared after confirming the path is a regular file. Then fstats
-/// the opened handle to verify permissions. Returns the opened file handle.
-#[cfg(unix)]
-fn open_keyfile(path: &str) -> Result<fs::File, Error> {
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-    use std::os::unix::io::AsRawFd;
-
-    // O_NOFOLLOW: fail with ELOOP if path is a symlink.
-    // O_NONBLOCK: prevent blocking if path is a FIFO (cleared below once we
-    //             confirm it's a regular file).
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|e| {
-            if e.raw_os_error() == Some(libc::ELOOP) {
-                Error::Fatal(format!("keyfile {path} is a symlink (not allowed)"))
-            } else {
-                Error::Fatal(format!("cannot open keyfile {path}: {e}"))
-            }
-        })?;
-
-    // fstat the opened handle — no TOCTOU since we already have the fd
-    let meta = file
-        .metadata()
-        .map_err(|e| Error::Fatal(format!("cannot stat keyfile {path}: {e}")))?;
-
-    if !meta.file_type().is_file() {
-        return Err(Error::Fatal(format!(
-            "keyfile {path} is not a regular file"
-        )));
-    }
-
-    // Clear O_NONBLOCK now that we know it's a regular file — reads on regular
-    // files are always non-blocking anyway, but clearing it is cleaner.
-    let fd = file.as_raw_fd();
-    // SAFETY EXCEPTION: Required for Unix fd operations; no safe Rust API exists
-    // for fcntl F_GETFL/F_SETFL. The fd comes from a File we just opened and
-    // fstat'd — it is valid for the duration of this block. We only modify the
-    // O_NONBLOCK flag; no memory is read or written through the fd here.
-    unsafe {
-        let flags = libc::fcntl(fd, libc::F_GETFL);
-        if flags >= 0 {
-            libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK);
-        }
-    }
-
-    let mode = meta.permissions().mode() & 0o777;
-    if mode & 0o177 != 0 {
-        return Err(Error::Fatal(format!(
-            "keyfile {path} has insecure permissions {mode:04o} (expected 0600 or 0400)"
-        )));
-    }
-
-    // Verify the keyfile is owned by the current user. A 0600 file owned by
-    // another UID could still be readable via ACLs or privileged execution.
-    // SAFETY EXCEPTION: getuid(2) has no preconditions and no side effects.
-    let current_uid = unsafe { libc::getuid() };
-    if meta.uid() != current_uid {
-        return Err(Error::Fatal(format!(
-            "keyfile {path} is owned by uid {} but current uid is {current_uid}",
-            meta.uid()
-        )));
-    }
-
-    Ok(file)
-}
-
-#[cfg(not(unix))]
-fn check_keyfile_permissions(_path: &str) -> Result<(), Error> {
-    // No permission checking on non-unix platforms.
-    Ok(())
-}
-
-/// Read a keyfile securely, returning its trimmed contents as a `Zeroizing<String>`.
-///
-/// Performs platform-appropriate permission/symlink checks, enforces the 1 KB
-/// size limit, and wraps the buffer in `Zeroizing` from the moment it is
-/// allocated so the secret material is erased on drop regardless of the return
-/// path.
-fn read_keyfile_secure(path: &str) -> Result<zeroize::Zeroizing<String>, Error> {
-    // Max keyfile size: nsec1 bech32 is ~63 chars, hex is 64 chars.
-    // 1 KB allows generous headroom for whitespace/newlines.
-    const MAX_KEYFILE: u64 = 1024;
-
-    #[cfg(unix)]
-    let file = open_keyfile(path)?;
-
-    #[cfg(not(unix))]
-    let file = {
-        check_keyfile_permissions(path)?;
-        fs::File::open(path)
-            .map_err(|e| Error::Fatal(format!("cannot open keyfile {path}: {e}")))?
-    };
-
-    // Allocate inside Zeroizing immediately so the buffer is erased on any
-    // early-return error path, not just on the success path.
-    let mut buf = zeroize::Zeroizing::new(String::new());
-    file.take(MAX_KEYFILE + 1)
-        .read_to_string(&mut buf)
-        .map_err(|e| Error::Fatal(format!("cannot read keyfile {path}: {e}")))?;
-    if buf.len() as u64 > MAX_KEYFILE {
-        return Err(Error::Fatal(format!(
-            "keyfile {path} exceeds {MAX_KEYFILE} byte limit"
-        )));
-    }
-
-    // Trim in-place: build a new Zeroizing<String> from the trimmed slice,
-    // then let the original (with leading/trailing whitespace) be zeroized.
-    let trimmed = zeroize::Zeroizing::new(buf.trim().to_string());
-    Ok(trimmed)
 }
 
 /// Compute the NIP-GS signing hash.
@@ -1373,6 +1223,7 @@ fn parse_envelope(json_str: &str) -> Result<Envelope, String> {
         .as_str()
         .ok_or("pk must be a string")?;
     validate_hex_field(pk, 64, "pk")?;
+    validate_xonly_public_key(pk).map_err(|e| format!("pk is not a valid BIP-340 key: {e}"))?;
 
     // sig (required, 128-char lowercase hex)
     let sig = obj
@@ -1420,7 +1271,7 @@ fn parse_envelope(json_str: &str) -> Result<Envelope, String> {
         }
 
         // Validate oa[0] is a valid BIP-340 x-only public key (not just hex)
-        PublicKey::from_hex(owner)
+        validate_xonly_public_key(owner)
             .map_err(|e| format!("oa[0] is not a valid BIP-340 public key: {e}"))?;
 
         // Self-attestation is meaningless — owner must differ from signer
@@ -1459,6 +1310,13 @@ fn validate_hex_field(val: &str, expected_len: usize, name: &str) -> Result<(), 
         return Err(format!("{name} must be lowercase hex"));
     }
     Ok(())
+}
+
+fn validate_xonly_public_key(value: &str) -> Result<(), String> {
+    let bytes = hex::decode(value).map_err(|error| error.to_string())?;
+    XOnlyPublicKey::from_slice(&bytes)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 fn parse_armor(content: &str) -> Result<&str, String> {
@@ -2116,8 +1974,10 @@ Initial commit"
 
     #[test]
     fn test_parse_envelope_rejects_invalid_oa_pubkey() {
-        // oa[0] is valid hex but not a valid BIP-340 point (all zeros)
-        let zero_pk = "0".repeat(64);
+        // oa[0] is valid hex but exceeds the secp256k1 field modulus, so it
+        // cannot encode an x-coordinate. x=0 is not a sound negative fixture:
+        // current secp256k1 accepts it because a curve point exists at x=0.
+        let invalid_pk = "f".repeat(64);
         let fake_sig = "b".repeat(128);
         let sig_field = "a".repeat(128);
         let json = [
@@ -2126,7 +1986,7 @@ Initial commit"
             r#"","sig":""#,
             &sig_field,
             r#"","t":1700000000,"oa":[""#,
-            &zero_pk,
+            &invalid_pk,
             r#"","",""#,
             &fake_sig,
             r#""]}"#,

@@ -38,6 +38,8 @@ sqlx = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 clap = { version = "4", features = ["derive"] }
+daz-secrets = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

@@ -10,14 +10,16 @@ cargo install --path crates/buzz-cli
 
 ## Authentication
 
-| Env Var | Mode | Use Case |
-|---------|------|----------|
-| `BUZZ_PRIVATE_KEY` | NIP-98 Schnorr signature | Agents with a keypair |
+Buzz loads the Nostr identity directly from daz-secrets. The default item is
+`buzz-desktop/identity`; managed agents receive their own nonsecret provider
+coordinates through process-local git config.
 
 ```bash
-# Private key identity (NIP-98 signed requests)
-export BUZZ_PRIVATE_KEY="nsec1..."
+daz-secrets set buzz-desktop identity
 buzz channels list
+
+# Or select another provider item without putting secret bytes in argv.
+buzz --secret-service my-app --secret-account relay-identity channels list
 ```
 
 ## Usage

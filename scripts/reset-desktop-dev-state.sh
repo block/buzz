@@ -14,6 +14,22 @@ remove_path() {
   fi
 }
 
+delete_secret_namespace() {
+  local service="$1"
+  local cli
+  cli="$(command -v daz-secrets || true)"
+  if [[ -z "$cli" ]]; then
+    log "daz-secrets is required to remove the development secret namespace"
+    exit 1
+  fi
+  python3 -c 'import json, subprocess, sys
+cli, service = sys.argv[1:]
+items = json.loads(subprocess.check_output([cli, "list"], text=True))
+for item in items:
+    if item["service"] == service:
+        subprocess.run([cli, "delete", service, item["account"]], check=True)' "$cli" "$service"
+}
+
 remove_bundle_state() {
   local base="$1"
   local suffix="${2:-}"
@@ -41,12 +57,8 @@ case "$(uname -s)" in
     remove_bundle_state "$HOME/Library/Saved Application State" ".savedState"
     remove_bundle_state "$HOME/Library/Preferences" ".plist"
 
-    # SecretStore keeps all dev identity and agent keys in this dev-only item.
-    # Delete every matching item in case an older build used multiple accounts.
-    if command -v security >/dev/null 2>&1; then
-      while security delete-generic-password -s buzz-desktop-dev >/dev/null 2>&1; do :; done
-      while security delete-generic-password -s sprout-desktop-dev >/dev/null 2>&1; do :; done
-    fi
+    delete_secret_namespace buzz-desktop-dev
+    delete_secret_namespace sprout-desktop-dev
     ;;
   Linux)
     remove_bundle_state "${XDG_DATA_HOME:-$HOME/.local/share}"

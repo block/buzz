@@ -184,6 +184,8 @@ jobs:
         with:
           path: ~/.cache/tauri-debs
           key: ${{ steps.tauri-debs.outputs.key }}
+      - name: Set up isolated test secrets
+        uses: ./.github/actions/setup-test-secrets
       - name: Desktop Tauri ${{ matrix.lane }}
         run: ${{ matrix.run }}
         env:
