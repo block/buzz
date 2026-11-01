@@ -4,8 +4,9 @@ import 'dart:typed_data';
 
 import 'package:buzz/shared/relay/media_auth.dart';
 import 'package:buzz/shared/relay/media_image.dart';
-import 'package:flutter/painting.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
 import 'package:nostr/nostr.dart' as nostr;
@@ -513,6 +514,117 @@ void main() {
         expect(fetches, 2);
       },
     );
+  });
+
+  group('stalls', () {
+    // Each row stalls at a different point; both must abort at the stall
+    // timeout, well before the fetch cap, and put the URL on cooldown.
+    final rows =
+        <
+          String,
+          Future<http.StreamedResponse> Function(
+            http.BaseRequest request,
+            Future<void> aborted,
+          )
+        >{
+          'headers never arrive': (request, aborted) async {
+            await aborted;
+            throw http.RequestAbortedException(request.url);
+          },
+          'the body stops partway': (request, aborted) async {
+            Stream<List<int>> body() async* {
+              yield _pngBytes.sublist(0, 8);
+              await aborted;
+              throw http.RequestAbortedException(request.url);
+            }
+
+            return http.StreamedResponse(body(), 200);
+          },
+        };
+    for (final MapEntry(key: name, value: respond) in rows.entries) {
+      test('a silent connection is aborted when $name', () async {
+        final client = _StreamingClient(
+          (request) => respond(
+            request,
+            (request as http.AbortableRequest).abortTrigger!,
+          ),
+        );
+        final stopwatch = Stopwatch()..start();
+        final error = await _waitError(
+          MediaImageProvider(
+            url: _mediaUrl,
+            auth: _auth(),
+            client: client,
+            stallTimeout: const Duration(milliseconds: 150),
+            maxFetchDuration: const Duration(seconds: 30),
+          ).resolve(ImageConfiguration.empty),
+        ).timeout(const Duration(seconds: 5));
+        expect(error, isA<http.RequestAbortedException>());
+        expect(stopwatch.elapsed, lessThan(const Duration(seconds: 5)));
+        expect(MediaImageProvider.debugCooldownUrls, [_mediaUrl]);
+      });
+    }
+  });
+
+  testWidgets('an image that leaves before it loads stops downloading, '
+      'unless another widget still shows it', (tester) async {
+    var aborted = false;
+    final client = _StreamingClient((request) async {
+      // A slow link: the body has started but does not finish in this test.
+      final body = StreamController<List<int>>()..add(const [0]);
+      (request as http.AbortableRequest).abortTrigger!.then((_) {
+        aborted = true;
+        body
+          ..addError(http.RequestAbortedException(request.url))
+          ..close();
+      });
+      return http.StreamedResponse(body.stream, 200);
+    });
+    final shown = ValueNotifier(2);
+    addTearDown(shown.dispose);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          mediaGetAuthServiceProvider.overrideWithValue(_auth()),
+          mediaHttpClientProvider.overrideWithValue(client),
+        ],
+        child: MaterialApp(
+          home: ValueListenableBuilder<int>(
+            valueListenable: shown,
+            builder: (_, count, _) => Column(
+              children: [
+                for (var i = 0; i < count; i++)
+                  const SizedBox.square(
+                    dimension: 40,
+                    child: MediaImage(url: _mediaUrl),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    Future<void> settle() async {
+      for (var i = 0; i < 3; i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 50)),
+        );
+        await tester.pump();
+      }
+    }
+
+    await settle();
+    // One copy scrolls away; the other still shows the image.
+    shown.value = 1;
+    await settle();
+    expect(aborted, isFalse);
+
+    // The last one leaves: the download stops, and the URL itself did not
+    // fail, so it is not put on cooldown.
+    shown.value = 0;
+    await settle();
+    expect(aborted, isTrue);
+    expect(MediaImageProvider.debugCooldownUrls, isEmpty);
   });
 }
 
