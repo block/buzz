@@ -1,6 +1,7 @@
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/me/me_page.dart';
+import 'package:buzz/features/channels/me/me_workspace_picker.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
 import 'package:buzz/shared/me/me_groups.dart';
 import 'package:buzz/shared/me/me_project_creation.dart';
@@ -59,6 +60,20 @@ class _Relay extends RelaySessionNotifier {
   }
 }
 
+class _WorkspaceHeader extends HookConsumerWidget {
+  const _WorkspaceHeader();
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final workspace = useMeWorkspace(
+      context,
+      ref,
+      enabled: true,
+      channelId: '10000000-0000-4000-8000-000000000001',
+    );
+    return Scaffold(body: workspace.action);
+  }
+}
+
 void main() {
   final config = RelayConfig(
     baseUrl: 'https://relay.test',
@@ -66,6 +81,66 @@ void main() {
       prefix: nostr.Nip19Prefix.nsec,
       data: '0' * 63 + '1',
     ),
+  );
+  testWidgets(
+    'workspace creation assigns the chat and resumes a lost acknowledgement',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final relay = _Relay()..failAfterPublish = true;
+      final sync = MeSync(relay, config, prefs: prefs);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            meSyncProvider.overrideWithValue(sync),
+            meGroupsProvider.overrideWith(
+              (ref) => Stream.value(const MeGroups()),
+            ),
+          ],
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: const _WorkspaceHeader(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      Future<void> open() async {
+        await tester.tap(find.byTooltip('Choose workspace'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Create workspace'));
+        await tester.pumpAndSettle();
+      }
+
+      await open();
+      await tester.enterText(find.byType(TextField), 'Launch');
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Create workspace'));
+      await tester.pumpAndSettle();
+      final saved = MeProjectCreation.pending(sync)!;
+      expect(saved.channelId, '10000000-0000-4000-8000-000000000001');
+      expect(
+        sync
+            .decode(relay.events.single)
+            .assignments['10000000-0000-4000-8000-000000000001'],
+        saved.id,
+      );
+      expect(sync.decode(relay.events.single).groups.single['name'], 'Launch');
+      relay.failAfterPublish = false;
+      for (var attempt = 0; attempt < 2; attempt++) {
+        await open();
+        await tester.tap(find.text('Resume'));
+        await tester.pumpAndSettle();
+      }
+      expect(MeProjectCreation.pending(sync), isNull);
+      expect(relay.writes, 1);
+      expect(
+        sync
+            .decode(relay.events.single)
+            .assignments['10000000-0000-4000-8000-000000000001'],
+        saved.id,
+      );
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.android),
   );
   for (final throws in [false, true]) {
     testWidgets(
@@ -275,7 +350,11 @@ void main() {
       final prefs = await SharedPreferences.getInstance();
       final relay = _Relay()..failAfterPublish = true;
       final sync = MeSync(relay, config, prefs: prefs);
-      const intent = MeProjectCreation('project', 'Name');
+      const intent = MeProjectCreation(
+        'project',
+        'Name',
+        channelId: '10000000-0000-4000-8000-000000000001',
+      );
       await expectLater(intent.complete(sync), throwsStateError);
       final restarted = MeSync(relay, config, prefs: prefs);
       relay.failAfterPublish = false;
@@ -287,6 +366,12 @@ void main() {
       expect(MeProjectCreation.pending(restarted), isNull);
       expect(relay.writes, 1);
       expect(restarted.decode(relay.events.single).groups, hasLength(1));
+      expect(
+        restarted
+            .decode(relay.events.single)
+            .assignments['10000000-0000-4000-8000-000000000001'],
+        'project',
+      );
     },
   );
 }

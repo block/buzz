@@ -6,6 +6,16 @@ class ComposeBar extends HookConsumerWidget {
   final String? hintText;
   final ComposeBarOnSend onSend;
 
+  /// Temporarily freezes composition while its destination is being changed.
+  final bool interactionLocked;
+
+  /// Intended recipients before a new Solo channel exists. Suppresses typing
+  /// and membership writes; other mentions are references until creation.
+  final List<ChannelMember>? draftMembers;
+
+  /// Reports whether a send or upload is in flight.
+  final ValueChanged<bool>? onSendingChanged;
+
   /// Lets a parent prepare its layout before the editor requests focus.
   final VoidCallback? onFocusRequested;
 
@@ -21,8 +31,11 @@ class ComposeBar extends HookConsumerWidget {
   const ComposeBar({
     super.key,
     required this.channelId,
+    this.interactionLocked = false,
     this.channelName = '',
     this.hintText,
+    this.draftMembers,
+    this.onSendingChanged,
     this.threadHeadId,
     this.rootId,
     this.focusNode,
@@ -73,6 +86,30 @@ class ComposeBar extends HookConsumerWidget {
     final uploadError = useState<String?>(null);
     final uploadingCount = useState(0);
     final uploadProgress = useState(0.0);
+    final preparingAttachments = useState(0);
+    final lockedNow = useRef(interactionLocked);
+    lockedNow.value = interactionLocked;
+    bool rejectsAttachment() =>
+        draftMembers != null &&
+        (isSending.value || uploadingCount.value > 0 || lockedNow.value);
+    Future<T> prepare<T>(Future<T> Function() action) =>
+        _prepareComposerAttachment(
+          context,
+          preparingAttachments,
+          draftMembers == null ? null : onSendingChanged,
+          action,
+        );
+    final sending =
+        isSending.value ||
+        uploadingCount.value > 0 ||
+        (draftMembers != null && preparingAttachments.value > 0);
+    useEffect(() {
+      var active = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (active) onSendingChanged?.call(sending);
+      });
+      return () => active = false;
+    }, [sending]);
     final uploadGeneration = useRef(0);
     final activeUploadCancellation = useRef<UploadCancellationToken?>(null);
     final voiceNote = _useComposerVoiceNote(
@@ -236,7 +273,9 @@ class ComposeBar extends HookConsumerWidget {
     final channelsAsync = ref.watch(channelsProvider);
     _useComposerChannelNames(controller, channelsAsync);
 
-    final membersAsync = ref.watch(channelMembersProvider(channelId));
+    final membersAsync = draftMembers == null
+        ? ref.watch(channelMembersProvider(channelId))
+        : AsyncData(draftMembers!);
     final sessionStatus = ref.watch(relaySessionProvider).status;
     final cachedMembers = channelsAsync.asData == null
         ? const <ChannelMember>[]
@@ -336,7 +375,7 @@ class ComposeBar extends HookConsumerWidget {
         final textChanged = text != previousValue.text;
 
         // Broadcast typing indicator (throttled).
-        if (textChanged && text.isNotEmpty) {
+        if (draftMembers == null && textChanged && text.isNotEmpty) {
           final now = DateTime.now().millisecondsSinceEpoch;
           if (now - lastTypingSentMs.value > _typingThrottleMs) {
             lastTypingSentMs.value = now;
@@ -505,7 +544,9 @@ class ComposeBar extends HookConsumerWidget {
     // Send the message.
     Future<void> send() async {
       final text = controller.text.trim();
-      if ((text.isEmpty && !hasAttachments) ||
+      if ((draftMembers != null && preparingAttachments.value > 0) ||
+          interactionLocked ||
+          (text.isEmpty && !hasAttachments) ||
           isSending.value ||
           uploadingCount.value > 0) {
         return;
@@ -574,12 +615,25 @@ class ComposeBar extends HookConsumerWidget {
       final channelActions = ref.read(channelActionsProvider);
       final _NonMemberMentionScan scan;
       try {
-        scan = await _scanNonMemberMentions(
-          ref,
-          channelId: channelId,
-          selectedMentions: selectedMentions,
-          currentPubkey: currentPubkey,
-        );
+        scan = draftMembers != null
+            ? _NonMemberMentionScan(
+                channelId: channelId,
+                outside: selectedMentions
+                    .where(
+                      (candidate) => !draftMembers!.any(
+                        (member) => member.pubkey == candidate.pubkey,
+                      ),
+                    )
+                    .toList(),
+                canAddMembers: false,
+                isDm: true,
+              )
+            : await _scanNonMemberMentions(
+                ref,
+                channelId: channelId,
+                selectedMentions: selectedMentions,
+                currentPubkey: currentPubkey,
+              );
       } catch (_) {
         // Nothing was sent and the draft is untouched, so Retry sends it again.
         if (context.mounted) {
@@ -623,6 +677,7 @@ class ComposeBar extends HookConsumerWidget {
       );
 
       isSending.value = true;
+      onSendingChanged?.call(true);
       try {
         if (queuedAttachments.isEmpty) {
           if (!context.mounted) return;
@@ -729,12 +784,16 @@ class ComposeBar extends HookConsumerWidget {
       }
     }
 
-    final queueAttachment = useCallback(
-      (
-        XFile file,
-        _PendingAttachmentKind kind, {
-        bool deleteAfterUse = false,
-      }) => _queueComposerAttachment(
+    final queueAttachment = useCallback((
+      XFile file,
+      _PendingAttachmentKind kind, {
+      bool deleteAfterUse = false,
+    }) {
+      if (rejectsAttachment()) {
+        if (deleteAfterUse) unawaited(_deleteXFile(file));
+        return;
+      }
+      _queueComposerAttachment(
         file,
         kind,
         voiceNoteRef,
@@ -742,9 +801,8 @@ class ComposeBar extends HookConsumerWidget {
         uploadError,
         draftRevision,
         deleteAfterUse: deleteAfterUse,
-      ),
-      [voiceNoteRef, draftRevision, uploadError, attachments],
-    );
+      );
+    }, [voiceNoteRef, draftRevision, uploadError, attachments]);
     Future<void> pickThenQueue({
       required Future<XFile?> Function() pick,
       required _PendingAttachmentKind kind,
@@ -762,6 +820,7 @@ class ComposeBar extends HookConsumerWidget {
     }
 
     bool queueImages(List<XFile> images, {bool deleteAfterUse = false}) =>
+        !rejectsAttachment() &&
         _queueComposerImages(
           images,
           voiceNote,
@@ -772,24 +831,26 @@ class ComposeBar extends HookConsumerWidget {
         );
 
     Future<void> retainAndQueueImages(List<XFile> images) =>
-        _retainAndQueueImages(context, images, queueImages);
+        prepare(() => _retainAndQueueImages(context, images, queueImages));
 
     final pasteClipboardImage = useCallback(() {
       ContextMenuController.removeAny();
-      unawaited(() async {
-        try {
-          final image = await ref
-              .read(mediaUploadServiceProvider)
-              .readClipboardImage();
-          if (image != null && context.mounted) {
-            queueAttachment(image, _PendingAttachmentKind.image);
-          } else if (context.mounted) {
-            uploadError.value = 'Unable to read pasted image';
+      unawaited(
+        prepare(() async {
+          try {
+            final image = await ref
+                .read(mediaUploadServiceProvider)
+                .readClipboardImage();
+            if (image != null && context.mounted) {
+              queueAttachment(image, _PendingAttachmentKind.image);
+            } else if (context.mounted) {
+              uploadError.value = 'Unable to read pasted image';
+            }
+          } catch (error) {
+            if (context.mounted) uploadError.value = _formatUploadError(error);
           }
-        } catch (error) {
-          if (context.mounted) uploadError.value = _formatUploadError(error);
-        }
-      }());
+        }),
+      );
     }, [context, ref, queueAttachment, uploadError]);
 
     final buildContextMenu = useCallback<EditableTextContextMenuBuilder>((
@@ -882,7 +943,7 @@ class ComposeBar extends HookConsumerWidget {
             context,
             attachmentSurface,
             uploadError,
-            choose,
+            () => prepare(choose),
             errorMessage: errorMessage,
           );
 
@@ -997,6 +1058,7 @@ class ComposeBar extends HookConsumerWidget {
     );
     Widget buildOverlayPanel(_AttachmentSurface surface) {
       return _composerAttachmentPanel(
+        preparePhotos: prepare,
         surface: surface,
         suggestionPanel: suggestionPanel,
         onBack: () => attachmentSurface.value = _AttachmentSurface.menu,
@@ -1024,7 +1086,8 @@ class ComposeBar extends HookConsumerWidget {
           attachmentSurface.value = _AttachmentSurface.closed;
           await retainAndQueueImages([image]);
         },
-        onPickAllPhotos: ref.read(mediaUploadServiceProvider).pickGalleryImages,
+        onPickAllPhotos: () =>
+            prepare(ref.read(mediaUploadServiceProvider).pickGalleryImages),
         onChoosePhotos: (photos) async {
           attachmentSurface.value = _AttachmentSurface.closed;
           await retainAndQueueImages(photos);
@@ -1063,52 +1126,57 @@ class ComposeBar extends HookConsumerWidget {
             onDismissAttachmentSurface: () {
               attachmentSurface.value = _AttachmentSurface.closed;
             },
-            child: _ComposeBarLayout(
-              surfaceKey: sendSurfaceKey,
-              voiceNoteRecorder: voiceNote.recorder,
-              attachments: attachments.value,
-              onRemoveAttachment: removeAttachment,
-              uploadError: uploadError.value,
-              isExpanded: isComposerExpanded.value,
-              controller: controller,
-              focusNode: focusNode,
-              contextMenuBuilder: buildContextMenu,
-              onContentInserted: uploadPastedImage,
-              onSend: () => unawaited(send()),
-              resolvedHint: resolvedHint,
-              attachmentSurface: attachmentSurface.value,
-              onAttachmentTap: handleAttachmentTap,
-              onExpand: expandComposer,
-              expansionAnimation: composerExpansionController,
-              formattingOpen: showFormatting.value,
-              onCloseFormatting: () => showFormatting.value = false,
-              motionDuration: motionDuration,
-              resizeDuration: resizeDuration,
-              onFormat: applyFormat,
-              onMention: () {
-                attachmentSurface.value = _AttachmentSurface.closed;
-                triggerMention();
-              },
-              onChannel: () {
-                attachmentSurface.value = _AttachmentSurface.closed;
-                triggerChannel();
-              },
-              onEmoji: () {
-                attachmentSurface.value = _AttachmentSurface.closed;
-                isEmojiPickerOpen.value = true;
-                _showComposerEmojiPicker(context, insertEmoji, () {
-                  if (!context.mounted) return;
-                  isEmojiPickerOpen.value = false;
-                  focusNode.requestFocus();
-                });
-              },
-              onOpenFormatting: () {
-                attachmentSurface.value = _AttachmentSurface.closed;
-                showFormatting.value = true;
-              },
-              hasPendingUploads: hasPendingUploads,
-              canSend: composerText.trim().isNotEmpty || hasAttachments,
-              isSending: isSending.value,
+            child: AbsorbPointer(
+              absorbing: interactionLocked || (draftMembers != null && sending),
+              child: _ComposeBarLayout(
+                surfaceKey: sendSurfaceKey,
+                voiceNoteRecorder: voiceNote.recorder,
+                attachments: attachments.value,
+                onRemoveAttachment: removeAttachment,
+                uploadError: uploadError.value,
+                isExpanded: isComposerExpanded.value,
+                controller: controller,
+                focusNode: focusNode,
+                contextMenuBuilder: buildContextMenu,
+                onContentInserted: uploadPastedImage,
+                onSend: () => unawaited(send()),
+                resolvedHint: resolvedHint,
+                attachmentSurface: attachmentSurface.value,
+                onAttachmentTap: handleAttachmentTap,
+                onExpand: expandComposer,
+                expansionAnimation: composerExpansionController,
+                formattingOpen: showFormatting.value,
+                onCloseFormatting: () => showFormatting.value = false,
+                motionDuration: motionDuration,
+                resizeDuration: resizeDuration,
+                onFormat: applyFormat,
+                onMention: () {
+                  attachmentSurface.value = _AttachmentSurface.closed;
+                  triggerMention();
+                },
+                onChannel: () {
+                  attachmentSurface.value = _AttachmentSurface.closed;
+                  triggerChannel();
+                },
+                onEmoji: () {
+                  attachmentSurface.value = _AttachmentSurface.closed;
+                  isEmojiPickerOpen.value = true;
+                  _showComposerEmojiPicker(context, insertEmoji, () {
+                    if (!context.mounted) return;
+                    isEmojiPickerOpen.value = false;
+                    focusNode.requestFocus();
+                  });
+                },
+                onOpenFormatting: () {
+                  attachmentSurface.value = _AttachmentSurface.closed;
+                  showFormatting.value = true;
+                },
+                hasPendingUploads: hasPendingUploads,
+                canSend: composerText.trim().isNotEmpty || hasAttachments,
+                isSending: isSending.value || (draftMembers != null && sending),
+                readOnly:
+                    interactionLocked || (draftMembers != null && sending),
+              ),
             ),
           ),
         ],

@@ -37,6 +37,13 @@ Future<(Channel, String)?> _showNewMeChat(
     }
   }
   if (!context.mounted) return null;
+  final pendingDraft = MeChatCreation.pending(ref.read(meSyncProvider));
+  if (pendingDraft == null || pendingDraft.initialMessage != null) {
+    await Navigator.of(
+      context,
+    ).push<void>(MaterialPageRoute(builder: (_) => const _MeChatDraft()));
+    return null;
+  }
   if (defaultTargetPlatform == TargetPlatform.iOS) {
     final sync = ref.read(meSyncProvider);
     final pending = MeChatCreation.pending(sync);
@@ -191,6 +198,7 @@ Future<Channel> _createMeChat(
   String assistant,
   String? project, {
   String? initialContent,
+  List<List<String>> initialMediaTags = const [],
 }) async {
   sync = _currentMeSync(ref, sync);
   final pending = MeChatCreation.pending(sync);
@@ -204,6 +212,7 @@ Future<Channel> _createMeChat(
                 tags: [
                   ['h', channelId],
                   ['p', assistant],
+                  ...initialMediaTags,
                 ],
                 secretKey: sync.privateHex,
               ).toMap(),

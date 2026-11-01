@@ -24,7 +24,6 @@ import '../../../shared/me/default_agent.dart';
 import '../../../shared/me/me_chat_title.dart';
 import '../../../shared/crypto/event_signing.dart';
 import '../../../shared/me/me_chat_creation.dart';
-import '../../../shared/me/me_project_creation.dart';
 import '../../../shared/me/me_sync.dart';
 import '../../../shared/relay/relay.dart';
 import '../../../shared/me/me_recovery.dart';
@@ -36,6 +35,10 @@ import '../../../shared/widgets/frosted_scaffold.dart';
 import '../../../shared/widgets/buzz_loading_indicator.dart';
 import '../../../shared/widgets/modal_presentation.dart';
 import '../channel.dart';
+import '../compose_bar.dart';
+import 'me_assistant_picker_sheet.dart';
+import 'new_me_project.dart';
+import 'me_workspace_picker.dart';
 import '../channel_detail_page.dart';
 import '../channel_management_provider.dart';
 import '../channels_provider.dart';
@@ -43,8 +46,8 @@ import '../channels_provider.dart';
 part 'me_page_helpers.dart';
 part 'me_empty_state.dart';
 part 'new_me_chat.dart';
+part 'me_chat_draft.dart';
 part 'native_new_me_chat.dart';
-part 'new_me_project.dart';
 
 /// Personal chats and projects shared with the desktop Me workspace.
 class MePage extends HookConsumerWidget {
@@ -119,7 +122,7 @@ class MePage extends HookConsumerWidget {
     final VoidCallback? newProject = busy.value || !groups.hasValue
         ? null
         : () => perform(() async {
-            await _createMeProject(context, ref);
+            await createMeProject(context, ref);
           });
     final VoidCallback? newChat = busy.value || !groups.hasValue
         ? null

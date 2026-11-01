@@ -203,6 +203,7 @@ Widget _composerAttachmentPanel({
   required Future<List<XFile>> Function() onPickAllPhotos,
   required Future<void> Function(List<XFile> photos) onChoosePhotos,
   required Future<void> Function(List<XFile> photos) onChooseAllPhotos,
+  required Future<void> Function(Future<void> Function()) preparePhotos,
 }) => _AttachmentSurfacePanel(
   key: ValueKey(
     surface == _AttachmentSurface.closed
@@ -221,6 +222,7 @@ Widget _composerAttachmentPanel({
   onPickAllPhotos: onPickAllPhotos,
   onChoosePhotos: onChoosePhotos,
   onChooseAllPhotos: onChooseAllPhotos,
+  preparePhotos: preparePhotos,
 );
 
 const _pastedImageMimeTypes = <String>[

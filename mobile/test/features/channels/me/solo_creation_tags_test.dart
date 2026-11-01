@@ -1,3 +1,6 @@
+import 'package:buzz/features/channels/compose_bar.dart';
+import 'package:buzz/shared/me/default_agent.dart';
+import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -67,6 +70,17 @@ void main() {
           ? 'interrupted Solo recovery uses fresh membership before creating'
           : 'New Solo chat submits its discovery label through the production action',
       (tester) async {
+        const mediaChannel = MethodChannel('buzz/media_upload');
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          mediaChannel,
+          (call) async => call.method == 'clipboardHasImage' ? false : null,
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            mediaChannel,
+            null,
+          ),
+        );
         final flutterSheet = defaultTargetPlatform == TargetPlatform.android;
         SharedPreferences.setMockInitialValues({});
         final prefs = await SharedPreferences.getInstance();
@@ -159,7 +173,16 @@ void main() {
           }
         });
         final directory = Completer<List<AgentDirectoryEntry>>();
-        if (flutterSheet) directory.complete([]);
+        if (!recoverExisting) {
+          directory.complete([
+            AgentDirectoryEntry(
+              pubkey: agent.public,
+              displayName: 'Owned agent',
+            ),
+          ]);
+        } else if (flutterSheet) {
+          directory.complete([]);
+        }
         final draft = Completer<Map<String, String>>();
         String? presentationId;
         Map<Object?, Object?>? agentUpdate;
@@ -187,6 +210,13 @@ void main() {
         await tester.pumpWidget(
           ProviderScope(
             overrides: [
+              savedPrefsProvider.overrideWithValue(prefs),
+              defaultAgentProvider.overrideWith(
+                (ref) => Stream.value(agent.public),
+              ),
+              agentDirectoryProvider.overrideWith((ref) async => []),
+              agentOwnersProvider.overrideWith((ref) async => {}),
+              customEmojiListProvider.overrideWithValue([]),
               meSyncProvider.overrideWithValue(sync),
               relaySessionProvider.overrideWith(() => relay),
               meGroupsProvider.overrideWith(
@@ -224,26 +254,13 @@ void main() {
           await tester.tap(find.text('Resume'));
           await tester.pumpAndSettle();
         }
-        if (flutterSheet) {
+        if (!recoverExisting) {
+          final composer = tester.widget<ComposeBar>(find.byType(ComposeBar));
+          unawaited(
+            composer.onSend('Mobile Solo', const []).catchError((_) {}),
+          );
+        } else if (flutterSheet) {
           final row = find.byKey(const ValueKey('new-session-assistant'));
-          if (!recoverExisting) {
-            expect(find.text('Choose an agent'), findsOneWidget);
-            await tester.enterText(
-              find.byKey(const ValueKey('new-session-name')),
-              'Mobile Solo',
-            );
-            await tester.tap(find.text('Send'));
-            await tester.pumpAndSettle();
-            expect(
-              find.text('Enter a message and choose an agent.'),
-              findsOneWidget,
-            );
-            expect(relay.submitted, isEmpty);
-            expect(MeChatCreation.pending(sync), isNull);
-            await tester.pumpWidget(const SizedBox.shrink());
-            await tester.pumpAndSettle();
-            return;
-          }
           final semantics = tester.ensureSemantics();
           await tester.pump();
           expect(find.text('Choose an agent'), findsNothing);

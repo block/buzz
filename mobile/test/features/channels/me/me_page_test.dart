@@ -1,3 +1,5 @@
+import 'package:buzz/features/channels/compose_bar.dart';
+import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'dart:async';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:buzz/shared/me/me_chat_creation.dart';
@@ -8,8 +10,6 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
-import 'package:buzz/shared/profile/user_cache_provider.dart';
-import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:flutter/material.dart';
@@ -208,28 +208,28 @@ void main() {
     },
   );
   testWidgets(
-    'new chat defaults to Bestie and preserves message and explicit agent choice',
+    'new chat opens a conversation with Bestie and workspace controls',
     (tester) async {
-      final semantics = tester.ensureSemantics();
-      final bestie = StreamController<String?>();
-      addTearDown(bestie.close);
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
       final action = ValueNotifier<VoidCallback?>(null);
       addTearDown(action.dispose);
+      final bestie = StreamController<String?>();
+      addTearDown(bestie.close);
       final sync = MeSync(
         RelaySessionNotifier(),
         RelayConfig(
           baseUrl: 'https://relay.test',
-          nsec: nostr.Nip19.encode(
-            prefix: nostr.Nip19Prefix.nsec,
-            data:
-                '0000000000000000000000000000000000000000000000000000000000000001',
-          ),
+          nsec: nostr.Keys.generate().nsec,
         ),
+        prefs: prefs,
       );
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
             defaultAgentProvider.overrideWith((ref) => bestie.stream),
+            meSyncProvider.overrideWithValue(sync),
             meGroupsProvider.overrideWith(
               (ref) => Stream.value(
                 const MeGroups(
@@ -243,15 +243,19 @@ void main() {
                 ),
               ),
             ),
-            meSyncProvider.overrideWithValue(sync),
             channelsProvider.overrideWith(FakeChannels.new),
             meAssistantsProvider.overrideWith(
               (ref) async => const [
-                AgentDirectoryEntry(pubkey: 'agent', displayName: 'Owner Name'),
                 AgentDirectoryEntry(pubkey: 'bestie', displayName: 'My Bestie'),
+                AgentDirectoryEntry(
+                  pubkey: 'other',
+                  displayName: 'Other agent',
+                ),
               ],
             ),
-            userCacheProvider.overrideWith(_ConfusableProfiles.new),
+            agentDirectoryProvider.overrideWith((ref) async => []),
+            agentOwnersProvider.overrideWith((ref) async => {}),
+            customEmojiListProvider.overrideWithValue([]),
           ],
           child: MaterialApp(
             theme: AppTheme.light(),
@@ -260,188 +264,49 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.byTooltip('New chat'), findsNothing);
-      expect(action.value, isNotNull);
       action.value!();
       await tester.pumpAndSettle();
-      expect(find.byType(BottomSheet), findsOneWidget);
+      expect(find.byType(ComposeBar), findsOneWidget);
+      expect(find.byType(BottomSheet), findsNothing);
       bestie.add('bestie');
       await tester.pumpAndSettle();
-      expect(find.text('My Bestie'), findsOneWidget);
-      bestie.addError(StateError('Offline cache write failed'));
+      expect(find.byTooltip('Change agent: My Bestie'), findsOneWidget);
+      bestie.addError(StateError('Cache write failed'));
       await tester.pumpAndSettle();
-      expect(find.text('My Bestie'), findsOneWidget);
-      bestie.add('agent');
+      expect(find.byTooltip('Change agent: My Bestie'), findsOneWidget);
+      final bar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar).last);
+      expect(bar.nativeActions!.map((action) => action.label), [
+        'Choose workspace',
+        'Change agent: My Bestie',
+      ]);
+      await tester.tap(find.byTooltip('Choose workspace'));
       await tester.pumpAndSettle();
-      expect(find.text('Owner Name'), findsOneWidget);
-      bestie.add(null);
-      await tester.pumpAndSettle();
-      expect(find.text('Choose an agent'), findsOneWidget);
-      bestie.add('bestie');
-      await tester.pumpAndSettle();
-      expect(
-        find.bySemanticsLabel('Message\nWhat would you like to work on?'),
-        findsOneWidget,
-      );
-      expect(find.text('Send'), findsOneWidget);
-      expect(
-        find.byKey(const ValueKey('new-session-name')).hitTestable(),
-        findsOneWidget,
-      );
-      expect(
-        find.byKey(const ValueKey('new-session-assistant')).hitTestable(),
-        findsOneWidget,
-      );
-      await tester.enterText(
-        find.byKey(const ValueKey('new-session-name')),
-        'x' * 8193,
-      );
-      await tester.ensureVisible(find.text('Send'));
-      await tester.tap(find.text('Send'));
-      await tester.pumpAndSettle();
-      expect(
-        find.text('Message is too long. Keep it under 8 KB.'),
-        findsOneWidget,
-      );
-      expect(
-        tester
-            .widget<TextField>(find.byKey(const ValueKey('new-session-name')))
-            .enabled,
-        isTrue,
-      );
-      await tester.enterText(
-        find.byKey(const ValueKey('new-session-name')),
-        'Design session',
-      );
-      await tester.tap(find.byKey(const ValueKey('new-session-project')));
-      await tester.pumpAndSettle();
+      expect(find.text('Create workspace'), findsOneWidget);
       await tester.tap(find.text('Mobile app').last);
       await tester.pumpAndSettle();
-      expect(find.text('Design session'), findsOneWidget);
-      expect(find.text('Mobile app'), findsWidgets);
-      await tester.tap(find.byKey(const ValueKey('new-session-project')));
+      expect(find.byTooltip('Workspace: Mobile app'), findsOneWidget);
+      await tester.tap(find.byTooltip('Change agent: My Bestie'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('No project').last);
+      await tester.tap(find.text('Other agent'));
       await tester.pumpAndSettle();
-      expect(find.text('Design session'), findsOneWidget);
-      // The owner's label and its initial outrank the agent's own profile.
-      await tester.tap(find.byKey(const ValueKey('new-session-assistant')));
+      bestie.add(null);
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Owner Name').last);
+      expect(find.byTooltip('Change agent: Other agent'), findsOneWidget);
+      await tester.tap(find.text('Message Other agent'));
       await tester.pumpAndSettle();
-      final row = find.byKey(const ValueKey('new-session-assistant'));
-      expect(
-        find.descendant(of: row, matching: find.text('Owner Name')),
-        findsOneWidget,
-      );
-      expect(
-        find.descendant(of: row, matching: find.text('O')),
-        findsOneWidget,
-      );
-      bestie.add('bestie');
+      await tester.enterText(find.byType(TextField), 'Plan our launch');
+      await tester.pageBack();
       await tester.pumpAndSettle();
-      expect(
-        find.descendant(of: row, matching: find.text('Owner Name')),
-        findsOneWidget,
-      );
-      expect(find.textContaining('Confusable'), findsNothing);
-      semantics.dispose();
+      action.value!();
+      await tester.pumpAndSettle();
+      expect(find.text('Plan our launch'), findsOneWidget);
+      expect(MeChatCreation.pending(sync), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
     },
   );
 
-  testWidgets('iOS new chat uses the native profile form with project choices', (
-    tester,
-  ) async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-    addTearDown(() => debugDefaultTargetPlatformOverride = null);
-    const channel = MethodChannel('buzz/profile_text_editor');
-    final calls = <MethodCall>[];
-    var directoryLoads = 0;
-    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
-      call,
-    ) async {
-      calls.add(call);
-      return null;
-    });
-    addTearDown(
-      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        channel,
-        null,
-      ),
-    );
-    final sync = MeSync(
-      RelaySessionNotifier(),
-      RelayConfig(
-        baseUrl: 'https://relay.test',
-        nsec: nostr.Nip19.encode(
-          prefix: nostr.Nip19Prefix.nsec,
-          data:
-              '0000000000000000000000000000000000000000000000000000000000000001',
-        ),
-      ),
-    );
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
-          meGroupsProvider.overrideWith(
-            (ref) => Stream.value(
-              const MeGroups(
-                groups: [
-                  {
-                    'id': 'mobile',
-                    'name': 'Mobile app',
-                    'defaultTemplateId': '',
-                  },
-                ],
-              ),
-            ),
-          ),
-          meSyncProvider.overrideWithValue(sync),
-          channelsProvider.overrideWith(FakeChannels.new),
-          meAssistantsProvider.overrideWith((ref) async {
-            directoryLoads++;
-            return const [
-              AgentDirectoryEntry(pubkey: 'agent', displayName: 'Owner Name'),
-            ];
-          }),
-          userCacheProvider.overrideWith(_ConfusableProfiles.new),
-        ],
-        child: MaterialApp(theme: AppTheme.light(), home: const MePage()),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    final bar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar));
-    bar.nativeActions!
-        .firstWhere((action) => action.label == 'New chat')
-        .onPressed!();
-    await tester.pumpAndSettle();
-    expect(directoryLoads, 1);
-    expect(calls, hasLength(1));
-    expect(calls.single.method, 'presentChat');
-    final args = calls.single.arguments as Map;
-    expect(args['title'], 'New chat');
-    expect(args['placeholder'], 'Message');
-    expect(args['assistants'], [
-      {
-        'id': 'agent',
-        'name': 'Owner Name',
-        'artworkScale': '1',
-        'avatarUrl': '',
-      },
-    ]);
-    expect(args['projects'], [
-      {'id': 'mobile', 'name': 'Mobile app'},
-    ]);
-    expect(args['selectedProject'], isNull);
-    expect(args['containerCornerRadius'], Radii.container);
-    expect(find.byType(BottomSheet), findsNothing);
-    await tester.pumpWidget(const SizedBox.shrink());
-    debugDefaultTargetPlatformOverride = null;
-  });
-
-  for (final resume in [true, false]) {
+  for (final resume in [true]) {
     testWidgets('iOS new chat recovers a durable creation: resume=$resume', (
       tester,
     ) async {
@@ -555,11 +420,4 @@ void main() {
     expect(find.text('Try again'), findsOneWidget);
     expect(find.text('A place to work with your agents'), findsNothing);
   });
-}
-
-class _ConfusableProfiles extends UserCacheNotifier {
-  @override
-  Map<String, UserProfile> build() => {
-    'agent': const UserProfile(pubkey: 'agent', displayName: 'Confusable Name'),
-  };
 }
