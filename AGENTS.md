@@ -194,7 +194,7 @@ lane subprocesses resolve the pinned flutter/dart/lefthook even when an
 unactivated shell has Homebrew first. Activating Hermit remains recommended for
 non-hook commands.
 
-**Commit with `git commit -s`.** The required **DCO Check** fails any PR with a commit missing a `Signed-off-by` trailer, and `just hooks` installs a `commit-msg` hook that adds it to commits you create locally (`git rebase` and `git cherry-pick` still need `--signoff`) — if you build commit commands programmatically, include `-s` every time. To repair a branch that already has unsigned commits: `git rebase --signoff main`, then force-push.
+**Commit with `git commit -s`.** The required **DCO Check** fails any PR with a commit missing a `Signed-off-by` trailer, and `just hooks` installs a `commit-msg` hook that adds it to commits you create locally (`git rebase` and `git cherry-pick` still need `--signoff`) — if you build commit commands programmatically, include `-s` every time. If git already sets `core.hooksPath` outside this repo (global or system config, or a file either includes), `just hooks` and `just setup` skip the install, and unless that hooks manager chains to lefthook neither the `commit-msg` hook nor the pre-push lanes run — see [CONTRIBUTING.md § First-Time Setup](CONTRIBUTING.md#first-time-setup). To repair a branch that already has unsigned commits: `git rebase --signoff main`, then force-push.
 
 Additional rules:
 - No `unsafe` code

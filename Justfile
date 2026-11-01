@@ -58,6 +58,30 @@ hooks:
     # works with no pre-installed lefthook and guarantees the pinned version
     # rather than whatever happens to be on PATH.
     export PATH="{{justfile_directory()}}/bin:$PATH"
+    # A repo-local core.hooksPath overrides one from any other scope (system,
+    # global, a file either includes, or `git -c`), so leave a developer's own
+    # hooks manager in charge unless they opt in. --get-all lists every value in
+    # precedence order, so a local value can't hide the one it overrides. Exit
+    # status 1 only means none is set; any other failure stops the recipe (via
+    # `[ ]`, because macOS bash 3.2's errexit ignores a failing `[[ ]]`).
+    SCOPED_HOOKS_PATHS="$(git config --show-scope --get-all core.hooksPath)" || [ $? -eq 1 ]
+    OUTER_SCOPE="" OUTER_HOOKS_PATH="" LOCAL_HOOKS_PATH=""
+    while IFS=$'\t' read -r scope path; do
+        case "$scope" in
+            "" | worktree) ;;
+            local) LOCAL_HOOKS_PATH="$path" ;;
+            *) OUTER_SCOPE="$scope" OUTER_HOOKS_PATH="$path" ;;
+        esac
+    done <<< "$SCOPED_HOOKS_PATHS"
+    if [[ -n "$OUTER_HOOKS_PATH" && "${BUZZ_LOCAL_HOOKS:-}" != "1" ]]; then
+        echo "Skipping git hooks: installing them would override the core.hooksPath in your $OUTER_SCOPE git config ($OUTER_HOOKS_PATH) in this repo."
+        if [[ -n "$LOCAL_HOOKS_PATH" ]]; then
+            echo "This repo's local config already sets core.hooksPath ($LOCAL_HOOKS_PATH), probably from an earlier just hooks or just setup, so your $OUTER_SCOPE hooks don't run here."
+            echo "To use them here again, run: git config --local --unset core.hooksPath"
+        fi
+        echo "To install the repo's hooks anyway, run: BUZZ_LOCAL_HOOKS=1 just hooks"
+        exit 0
+    fi
     # --path-format=absolute guarantees an absolute path from every invocation context:
     # without it, --git-common-dir returns ".git" from the main checkout and a
     # relative hooksPath would break linked-worktree dispatch just like .hooks did.

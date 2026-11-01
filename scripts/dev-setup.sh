@@ -168,15 +168,10 @@ fi
 
 # ---- Install git hooks ------------------------------------------------------
 
-log "Installing git hooks..."
-# Install into the shared .git/hooks directory using --path-format=absolute so the
-# stored hooksPath is always an absolute path. Without it, --git-common-dir returns
-# ".git" from the main checkout; a relative hooksPath would silently break
-# linked-worktree dispatch (same failure mode as the old worktree-relative .hooks).
-HOOKS_DIR="$(git -C "${REPO_ROOT}" rev-parse --path-format=absolute --git-common-dir)/hooks"
-git -C "${REPO_ROOT}" config --local core.hooksPath "$HOOKS_DIR"
-lefthook install --force
-success "Git hooks installed"
+# `just hooks` owns the install, including the check that leaves a hooks manager
+# configured outside this repo in charge unless BUZZ_LOCAL_HOOKS=1.
+log "Setting up git hooks..."
+"${REPO_ROOT}/bin/just" hooks
 
 # ---- Print connection info --------------------------------------------------
 
