@@ -475,15 +475,21 @@ fn rate_limit_config_from_env() -> Result<buzz_auth::RateLimitConfig, ConfigErro
             "BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC",
             defaults.human_ws_events_per_sec,
         )?,
-        agent_channel_events_per_min: positive_u64_from_env(
+        // Without the new variable, the variable this budget replaced, which
+        // set one agent key's allowance; for one agent in one channel the
+        // meaning is unchanged. It is not read when the new variable is set.
+        agent_channel_events_per_min: match std::env::var_os(
             "BUZZ_RATE_LIMIT_AGENT_CHANNEL_EVENTS_PER_MIN",
-            // The variable this budget replaced, which set one agent key's
-            // allowance; for one agent in one channel the meaning is unchanged.
-            positive_u64_from_env(
+        ) {
+            Some(_) => positive_u64_from_env(
+                "BUZZ_RATE_LIMIT_AGENT_CHANNEL_EVENTS_PER_MIN",
+                defaults.agent_channel_events_per_min,
+            )?,
+            None => positive_u64_from_env(
                 "BUZZ_RATE_LIMIT_AGENT_STANDARD_MESSAGES_PER_MIN",
                 defaults.agent_channel_events_per_min,
             )?,
-        )?,
+        },
         agent_owner_events_per_min: positive_u64_from_env(
             "BUZZ_RATE_LIMIT_AGENT_OWNER_EVENTS_PER_MIN",
             defaults.agent_owner_events_per_min,
@@ -2660,6 +2666,12 @@ mod tests {
             ),
             (45, 300),
             "the new variable wins over the legacy one"
+        );
+        std::env::set_var(LEGACY, "not-a-number");
+        assert_eq!(
+            limits().agent_channel_events_per_min,
+            45,
+            "the legacy variable is not read once the new one is set"
         );
 
         std::env::set_var(OWNER, "0");

@@ -1398,11 +1398,10 @@ pub struct AppState {
     pub author_type_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), bool>>,
     /// Stored agent owner (`users.agent_owner_pubkey`) that HTTP-published
     /// agent events are budgeted to. Key: (community, agent pubkey). Value:
-    /// the owner, or `None` for a key with no owner. An owner, once stored,
-    /// never changes; the 60s TTL bounds how long a key linked on another pod
-    /// keeps a cached `None`. Lookup errors are not cached.
+    /// the owner. An owner, once stored, never changes. A key with no owner is
+    /// not cached, because any relay instance can link it at any time.
     #[allow(clippy::type_complexity)]
-    pub agent_owner_cache: Arc<moka::sync::Cache<(CommunityId, [u8; 32]), Option<[u8; 32]>>>,
+    pub agent_owner_cache: Arc<moka::sync::Cache<(CommunityId, [u8; 32]), [u8; 32]>>,
     /// Ephemeral-path cache of `is_serving_active` (community not archived or
     /// deleted). Key: community. TTL only (10s). Persistent ingest keeps the
     /// uncached read as its durable write fence; on the ephemeral path archive

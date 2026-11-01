@@ -116,32 +116,36 @@ pub(crate) async fn enforce_http_admission(
 /// budgets, the same ones its WebSocket events spend, so the choice of
 /// transport adds no capacity. A key with no owner is not charged here.
 ///
-/// `linked_owner` is an owner this request proved and recorded for `pubkey`.
-/// Otherwise the stored owner is used, so a key without its auth tag still
-/// spends its owner's budgets, and a key cannot move to a second owner by
-/// presenting that owner's attestation: the first stored owner is permanent.
+/// `linked_owner` is `Ok(Some(owner))` for an owner this request proved and
+/// recorded for `pubkey`. With `Ok(None)` the stored owner is used, so a key
+/// without its auth tag still spends its owner's budgets, and a key cannot
+/// move to a second owner by presenting that owner's attestation: the first
+/// stored owner is permanent. `Err(())` means the request proved an owner
+/// whose link could not be read or written; the owner to charge is unknown,
+/// so the event is refused.
 pub(crate) async fn enforce_http_agent_event_admission(
     state: &AppState,
     tenant: &TenantContext,
     pubkey: &nostr::PublicKey,
-    linked_owner: Option<nostr::PublicKey>,
+    linked_owner: Result<Option<nostr::PublicKey>, ()>,
     event: &nostr::Event,
 ) -> Result<(), (StatusCode, Json<Value>)> {
     if buzz_core::kind::is_ephemeral(buzz_core::kind::event_kind_u32(event)) {
         return Ok(());
     }
     let owner = match linked_owner {
-        Some(owner) => owner,
-        None => match stored_agent_owner(state, tenant, pubkey).await {
-            Ok(Some(owner)) => owner,
-            Ok(None) => return Ok(()),
-            Err(()) => {
-                return http_admission_result(
-                    Err(crate::admission::AdmissionError::Unavailable),
-                    "agent_events",
-                )
-            }
-        },
+        Ok(None) => stored_agent_owner(state, tenant, pubkey).await,
+        proven => proven,
+    };
+    let owner = match owner {
+        Ok(Some(owner)) => owner,
+        Ok(None) => return Ok(()),
+        Err(()) => {
+            return http_admission_result(
+                Err(crate::admission::AdmissionError::Unavailable),
+                "agent_events",
+            )
+        }
     };
     let (result, bucket) = crate::admission::check_agent_event(
         state.admission_rate_limiter.as_ref(),
@@ -155,7 +159,9 @@ pub(crate) async fn enforce_http_agent_event_admission(
 }
 
 /// The stored owner of `pubkey` in `tenant`'s community, through
-/// [`AppState::agent_owner_cache`]. A failed read is `Err` and is not cached.
+/// [`AppState::agent_owner_cache`]. Only a found owner is cached: it is
+/// first-write-wins, so it cannot change, while "no owner" can end on any
+/// relay instance at any time. A failed read is `Err`.
 async fn stored_agent_owner(
     state: &AppState,
     tenant: &TenantContext,
@@ -163,7 +169,7 @@ async fn stored_agent_owner(
 ) -> Result<Option<nostr::PublicKey>, ()> {
     let key = (tenant.community(), pubkey.to_bytes());
     let owner = match state.agent_owner_cache.get(&key) {
-        Some(owner) => owner,
+        Some(owner) => Some(owner),
         None => {
             let row = state
                 .db
@@ -175,7 +181,9 @@ async fn stored_agent_owner(
             let owner = row
                 .and_then(|(_, owner)| owner)
                 .and_then(|owner| <[u8; 32]>::try_from(owner).ok());
-            state.agent_owner_cache.insert(key, owner);
+            if let Some(owner) = owner {
+                state.agent_owner_cache.insert(key, owner);
+            }
             owner
         }
     };
@@ -1338,12 +1346,20 @@ async fn submit_event_authed(
         }
     };
     // A token owner reached here linked: membership refuses one that is not.
-    let mut linked_owner = token_owner;
-    if let Some(owner) = nip_oa_owner {
-        if super::relay_members::materialize_nip_oa_owner(state, tenant, &pubkey, &owner).await {
-            linked_owner = Some(owner);
+    // A NIP-OA owner is charged once it is the agent's stored owner. On a
+    // conflict the first stored owner stays the one charged; when the link
+    // cannot be read or written, the owner to charge is unknown.
+    let linked_owner = match nip_oa_owner {
+        None => Ok(token_owner),
+        Some(owner) => {
+            use super::relay_members::OwnerLink;
+            match super::relay_members::link_agent_owner(state, tenant, &pubkey, &owner).await {
+                OwnerLink::Linked => Ok(Some(owner)),
+                OwnerLink::Conflict => Ok(token_owner),
+                OwnerLink::Unavailable => Err(()),
+            }
         }
-    }
+    };
     if let Err(e) =
         enforce_http_agent_event_admission(state, tenant, &pubkey, linked_owner, &event).await
     {

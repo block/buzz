@@ -44,7 +44,8 @@ the owner's other channels.
 
 The previous per-agent-key budget variable,
 `BUZZ_RATE_LIMIT_AGENT_STANDARD_MESSAGES_PER_MIN`, still sets the per-channel
-budget when the new variable is not set.
+budget when the new variable is not set. When the new variable is set, the old
+one is ignored, even if its value is not valid.
 
 ### Which owner
 
@@ -53,9 +54,14 @@ budget when the new variable is not set.
   `users.agent_owner_pubkey`. An agent that authenticates without its auth tag
   is still charged to its owner.
 - **HTTP (`POST /events`):** the owner that the request proved and recorded.
-  Otherwise it is the stored owner, read through a cache with a 60 s TTL. The
-  stored owner is first-write-wins. A key cannot move its charges to a second
-  owner by presenting that owner's attestation.
+  Otherwise it is the stored owner. The stored owner is first-write-wins, so
+  a found owner is cached for 60 s. "No owner" is never cached: another relay
+  instance can link the key at any time, and its next event is charged. A key
+  cannot move its charges to a second owner by presenting that owner's
+  attestation.
+- If the relay cannot read the stored owner, or cannot record an owner that
+  the request proved, it refuses the non-ephemeral event with
+  `rate-limited: shared admission unavailable`.
 
 A key with no owner is a human key. Human budgets are not changed. Over HTTP,
 human events spend only the HTTP API call budget.

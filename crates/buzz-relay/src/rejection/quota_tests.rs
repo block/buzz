@@ -142,6 +142,16 @@ async fn get(state: &AppState, key: String) -> Option<u64> {
         .unwrap()
 }
 
+/// Seconds until `key` expires.
+async fn ttl(state: &AppState, key: &str) -> i64 {
+    let mut redis = state.redis_pool.get().await.unwrap();
+    redis::cmd("TTL")
+        .arg(key)
+        .query_async(&mut *redis)
+        .await
+        .unwrap()
+}
+
 async fn counter(state: &AppState, conn: &ConnectionState, bucket: LimitType) -> Option<u64> {
     get(
         state,
@@ -418,6 +428,8 @@ async fn channel_budgets_are_independent_under_one_owner_budget() {
     assert!(admit(&channel_event(9, c), &conn, &mut rx, &state).await);
     assert!(!admit(&channel_event(9, c), &conn, &mut rx, &state).await);
     assert!(!admit(&channel_event(9, d), &conn, &mut rx, &state).await);
+    // With both budgets full, the owner budget is the one reported.
+    assert!(!admit(&channel_event(9, a), &conn, &mut rx, &state).await);
 
     assert_eq!(channel_spent(&state, &conn, &owner, a).await, Some(3));
     assert_eq!(channel_spent(&state, &conn, &owner, b).await, Some(3));
@@ -428,7 +440,7 @@ async fn channel_budgets_are_independent_under_one_owner_budget() {
         &recorder,
         &[
             ("websocket", "quota", "agent_channel_events", 1),
-            ("websocket", "quota", "agent_owner_events", 2),
+            ("websocket", "quota", "agent_owner_events", 3),
         ],
     );
 
@@ -515,6 +527,13 @@ async fn agent_budgets_are_isolated_by_community() {
     assert!(admit(&channel_event(9, channel), &there, &mut there_rx, &state).await);
     assert_eq!(owner_spent(&state, &here, &owner).await, Some(1));
     assert_eq!(owner_spent(&state, &there, &owner).await, Some(1));
+    // Both budgets are one-minute windows.
+    for key in [
+        buzz_auth::agent_channel_budget_key(&there.tenant, &owner, channel),
+        buzz_auth::agent_owner_budget_key(&there.tenant, &owner),
+    ] {
+        assert!((1..=60).contains(&ttl(&state, &key).await), "{key}");
+    }
 }
 
 /// Two relay instances with their own connection pools admit concurrently
@@ -671,18 +690,54 @@ async fn post_event(
     publisher: &nostr::PublicKey,
     msg: &ClientMessage,
 ) -> (axum::http::StatusCode, serde_json::Value) {
+    send_event(state, host, msg, |request| {
+        request.header("x-pubkey", publisher.to_hex())
+    })
+    .await
+}
+
+/// `POST /events` signed with NIP-98 by `agent`, presenting `owner`'s NIP-OA
+/// attestation for it in `x-auth-tag`.
+async fn post_attested_event(
+    state: &Arc<AppState>,
+    tenant: &buzz_core::TenantContext,
+    agent: &Keys,
+    owner: &Keys,
+    msg: &ClientMessage,
+) -> (axum::http::StatusCode, serde_json::Value) {
+    let ClientMessage::Event(event) = msg else {
+        unreachable!()
+    };
+    let url = crate::api::bridge::nip98_expected_url(&state.config.relay_url, tenant, "/events");
+    let authorization =
+        crate::nip98::nip98_header(agent, &url, &serde_json::to_vec(event).unwrap()).unwrap();
+    let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(owner, &agent.public_key(), "").unwrap();
+    send_event(state, tenant.host(), msg, |request| {
+        request
+            .header(axum::http::header::AUTHORIZATION, authorization)
+            .header("x-auth-tag", auth_tag)
+    })
+    .await
+}
+
+async fn send_event(
+    state: &Arc<AppState>,
+    host: &str,
+    msg: &ClientMessage,
+    authenticate: impl FnOnce(axum::http::request::Builder) -> axum::http::request::Builder,
+) -> (axum::http::StatusCode, serde_json::Value) {
     use axum::http::{header, Request};
     use tower::ServiceExt;
     let ClientMessage::Event(event) = msg else {
         unreachable!()
     };
+    let request = Request::builder()
+        .method("POST")
+        .uri("/events")
+        .header(header::HOST, host);
     let response = crate::router::build_router(Arc::clone(state))
         .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/events")
-                .header(header::HOST, host)
-                .header("x-pubkey", publisher.to_hex())
+            authenticate(request)
                 .body(axum::body::Body::from(serde_json::to_vec(event).unwrap()))
                 .unwrap(),
         )
@@ -724,13 +779,16 @@ async fn http_agent_events_share_owner_budgets_with_websocket() {
     let tenant = buzz_core::TenantContext::resolved(community, &host);
     let owner = Keys::generate().public_key();
     let http_agent = Keys::generate().public_key();
-    assert_eq!(
-        crate::api::relay_members::link_agent_owner(&state, &tenant, &http_agent, &owner).await,
-        crate::api::relay_members::OwnerLink::Linked
-    );
-    state.agent_owner_cache.invalidate_all();
     let (ws, mut ws_rx) = agent_socket(&state, community, Keys::generate().public_key(), owner);
     let channel = Some(Uuid::new_v4());
+
+    // Before it has an owner, the key is not charged to any agent budget.
+    let (status, _) = post_event(&state, &host, &http_agent, &channel_event(9, channel)).await;
+    assert_ne!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(owner_spent(&state, &ws, &owner).await, None);
+    // Another relay instance records the owner. This instance learns of it
+    // on the next event, with no cache invalidation.
+    link_in_database(&state, community, &http_agent, &owner).await;
 
     assert!(admit(&channel_event(9, channel), &ws, &mut ws_rx, &state).await);
     // Admitted by the budget; ingest then refuses the unknown channel.
@@ -776,6 +834,94 @@ async fn http_agent_events_share_owner_budgets_with_websocket() {
     assert_eq!(get(&state, human_key(LimitType::ApiCalls)).await, Some(2));
 }
 
+/// Records `owner` for `agent` directly in the database, as another relay
+/// instance does, without touching this instance's caches.
+async fn link_in_database(
+    state: &AppState,
+    community: CommunityId,
+    agent: &nostr::PublicKey,
+    owner: &nostr::PublicKey,
+) {
+    for key in [agent, owner] {
+        state
+            .db
+            .ensure_user_for_authorization(community, key.as_bytes())
+            .await
+            .unwrap();
+    }
+    assert!(state
+        .db
+        .set_agent_owner_for_authorization(community, agent.as_bytes(), owner.as_bytes())
+        .await
+        .unwrap());
+}
+
+/// An HTTP agent proving its owner with a NIP-OA tag is charged to that owner
+/// once the link is recorded. A key that already has a stored owner stays
+/// charged to it when it presents another owner's tag.
+#[tokio::test]
+#[ignore = "requires Postgres and explicit isolated BUZZ_TEST_REDIS_URL"]
+async fn http_nip_oa_agents_are_charged_to_their_stored_owner() {
+    let state = crate::api::bridge::postgres_tests::bridge_handler_test_state()
+        .await
+        .expect("local Postgres and Redis");
+    let state = Arc::new(with_limits(
+        (*state).clone(),
+        Limits {
+            agent_channel: 100,
+            agent_owner: 100,
+            ..Limits::default()
+        },
+    ));
+    let host = format!("agent-budget-{}.local", Uuid::new_v4().simple());
+    let community = state
+        .db
+        .ensure_configured_community(&host)
+        .await
+        .expect("ensure community")
+        .id;
+    let tenant = buzz_core::TenantContext::resolved(community, &host);
+    let (owner, other_owner) = (Keys::generate(), Keys::generate());
+    let (ws, _ws_rx) = agent_socket(
+        &state,
+        community,
+        Keys::generate().public_key(),
+        owner.public_key(),
+    );
+
+    // A new agent: its first attested event records the owner and is charged.
+    let agent = Keys::generate();
+    let (status, _) =
+        post_attested_event(&state, &tenant, &agent, &owner, &channel_event(9, None)).await;
+    assert_ne!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+    assert!(state
+        .db
+        .is_agent_owner(
+            community,
+            agent.public_key().as_bytes(),
+            owner.public_key().as_bytes()
+        )
+        .await
+        .unwrap());
+    assert_eq!(owner_spent(&state, &ws, &owner.public_key()).await, Some(1));
+
+    // The same agent presenting another owner's tag still spends the first.
+    let (status, _) = post_attested_event(
+        &state,
+        &tenant,
+        &agent,
+        &other_owner,
+        &channel_event(9, None),
+    )
+    .await;
+    assert_ne!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(owner_spent(&state, &ws, &owner.public_key()).await, Some(2));
+    assert_eq!(
+        owner_spent(&state, &ws, &other_owner.public_key()).await,
+        None
+    );
+}
+
 #[tokio::test]
 async fn ephemeral_and_http_admission_still_fail_closed_when_redis_is_unavailable() {
     let state = crate::state::tests::test_state().await;
@@ -809,38 +955,83 @@ async fn ephemeral_and_http_admission_still_fail_closed_when_redis_is_unavailabl
     assert_metric(&recorder, "http", "unavailable", "api_calls", 1);
 }
 
-/// An agent event the shared counter cannot admit is refused, never let
-/// through uncounted, on both transports.
+/// An HTTP agent event is refused, never let through uncounted, when the
+/// shared counter, the proven owner's link, or the stored owner is
+/// unavailable.
 #[tokio::test]
-async fn agent_event_admission_fails_closed_when_redis_is_unavailable() {
+async fn http_agent_event_admission_fails_closed_when_its_owner_or_counter_is_unavailable() {
     let state = crate::state::tests::test_state().await;
     let recorder = DebuggingRecorder::new();
     let _guard = metrics::set_default_local_recorder(&recorder);
     let owner = Keys::generate().public_key();
+    let (conn, _) = agent_connection(&state, owner);
+    let ClientMessage::Event(event) = channel_event(9, Some(Uuid::new_v4())) else {
+        unreachable!()
+    };
+    let refuse = |state: Arc<AppState>, linked_owner| {
+        let (tenant, pubkey, event) = (conn.tenant.clone(), pubkey(&conn), event.clone());
+        async move {
+            let (status, body) = crate::api::bridge::enforce_http_agent_event_admission(
+                &state,
+                &tenant,
+                &pubkey,
+                linked_owner,
+                &event,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(
+                body.0["error"],
+                "rate-limited: shared admission unavailable"
+            );
+        }
+    };
+    // The owner is known but its counter is not reachable.
+    refuse(Arc::clone(&state), Ok(Some(owner))).await;
+    // The request proved an owner whose link could not be read or written.
+    refuse(Arc::clone(&state), Err(())).await;
+    // No owner was proven and the stored owner cannot be read.
+    let no_database = crate::state::tests::test_state_with_unreachable_database_url(
+        "postgres://127.0.0.1:1/none",
+    )
+    .await;
+    refuse(no_database, Ok(None)).await;
+    assert_metric(&recorder, "http", "unavailable", "agent_events", 3);
+}
+
+/// A WebSocket agent event is refused when the owner budgets cannot be
+/// checked, even though the per-key flood check admitted it.
+#[tokio::test]
+#[ignore = "requires explicit isolated BUZZ_TEST_REDIS_URL"]
+async fn ws_agent_event_admission_fails_closed_when_the_owner_check_fails() {
+    let state = state_with_limits(Limits::default()).await;
+    let recorder = DebuggingRecorder::new();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    let owner = Keys::generate().public_key();
     let (conn, mut rx) = agent_connection(&state, owner);
-    let msg = channel_event(9, Some(Uuid::new_v4()));
-    // The flood check fails first; call the owner check directly as well.
-    assert!(!enforce_ws_admission(&msg, &conn, &state).await);
+    // A value of the wrong type makes the owner budget script fail.
+    let mut redis = state.redis_pool.get().await.unwrap();
+    let key = buzz_auth::agent_owner_budget_key(&conn.tenant, &owner);
+    let () = redis::cmd("HSET")
+        .arg(&key)
+        .arg("field")
+        .arg("value")
+        .query_async(&mut *redis)
+        .await
+        .unwrap();
+    let () = redis::cmd("EXPIRE")
+        .arg(&key)
+        .arg(60)
+        .query_async(&mut *redis)
+        .await
+        .unwrap();
+
+    assert!(!enforce_ws_admission(&event(9), &conn, &state).await);
     assert_eq!(
         read_frame(&mut rx)[3],
         "rate-limited: shared admission unavailable"
     );
-    let ClientMessage::Event(event) = &msg else {
-        unreachable!()
-    };
-    let (status, body) = crate::api::bridge::enforce_http_agent_event_admission(
-        &state,
-        &conn.tenant,
-        &pubkey(&conn),
-        Some(owner),
-        event,
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(
-        body.0["error"],
-        "rate-limited: shared admission unavailable"
-    );
-    assert_metric(&recorder, "http", "unavailable", "agent_events", 1);
+    assert_eq!(counter(&state, &conn, LimitType::WsEvents).await, Some(1));
+    assert_metric(&recorder, "websocket", "unavailable", "agent_events", 1);
 }
