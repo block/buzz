@@ -51,6 +51,24 @@ const HUDDLE_AUDIO_COMMAND_EVENT = "huddle-audio-command";
 const HUDDLE_AUDIO_STATE_EVENT = "huddle-audio-state";
 const HUDDLE_AUDIO_LEVEL_EVENT = "huddle-audio-level";
 
+/** Trailing debounce so residual `devicechange` storms cannot spam the cpal
+ *  backend with output-device queries. */
+const OUTPUT_DEVICE_REFRESH_DEBOUNCE_MS = 1000;
+
+function outputDevicesAreIdentical(
+  previous: { name: string; is_default: boolean }[],
+  next: { name: string; is_default: boolean }[],
+): boolean {
+  return (
+    previous.length === next.length &&
+    previous.every(
+      (device, index) =>
+        device.name === next[index]?.name &&
+        device.is_default === next[index]?.is_default,
+    )
+  );
+}
+
 function isRedundantHuddlePhaseError(message: string): boolean {
   return /^cannot (?:start|join) huddle: already in phase /i.test(message);
 }
@@ -127,7 +145,14 @@ export function HuddleProvider({
     setSelectedDeviceId: setLocalSelectedDeviceId,
     micGain: localMicGain,
     setMicGain: setLocalMicGain,
+    refreshAudioDevices: localRefreshAudioDevices,
   } = useAudioDevices(workletRef);
+  // Companion windows mirror the audio-owning window's device list; only the
+  // audio-owning provider enumerates.
+  const refreshAudioDevices = React.useCallback(async () => {
+    if (!ownsAudioSession) return;
+    await localRefreshAudioDevices();
+  }, [localRefreshAudioDevices, ownsAudioSession]);
   const audioDevices = ownsAudioSession
     ? localAudioDevices
     : (mirroredAudioState?.audioDevices ?? []);
@@ -189,16 +214,32 @@ export function HuddleProvider({
     });
   }, []);
 
-  // Fetch output devices on mount and when system devices change.
+  // Fetch output devices on mount and when system devices change. The Rust
+  // cpal command cannot feed the WebKitGTK enumerate↔devicechange loop (see
+  // docs/linux-media-device-enumeration-loop.md), but WebKitGTK re-announces
+  // devices on every monitor start, so this handler is debounced and skips
+  // identical lists instead of re-invoking the backend per event.
   React.useEffect(() => {
+    let debounceTimer: number | null = null;
     function refreshOutputDevices() {
       invoke<{ name: string; is_default: boolean }[]>(
         "list_audio_output_devices",
       )
-        .then(setOutputDevices)
+        .then((next) => {
+          setOutputDevices((previous) =>
+            outputDevicesAreIdentical(previous, next) ? previous : next,
+          );
+        })
         .catch(() => {
           /* best-effort */
         });
+    }
+    function scheduleRefreshOutputDevices() {
+      if (debounceTimer !== null) window.clearTimeout(debounceTimer);
+      debounceTimer = window.setTimeout(() => {
+        debounceTimer = null;
+        refreshOutputDevices();
+      }, OUTPUT_DEVICE_REFRESH_DEBOUNCE_MS);
     }
     refreshOutputDevices();
     invoke<string>("get_audio_output_device")
@@ -208,12 +249,13 @@ export function HuddleProvider({
       });
     navigator.mediaDevices.addEventListener(
       "devicechange",
-      refreshOutputDevices,
+      scheduleRefreshOutputDevices,
     );
     return () => {
+      if (debounceTimer !== null) window.clearTimeout(debounceTimer);
       navigator.mediaDevices.removeEventListener(
         "devicechange",
-        refreshOutputDevices,
+        scheduleRefreshOutputDevices,
       );
     };
   }, []);
@@ -580,6 +622,11 @@ export function HuddleProvider({
       });
       const audioTrack = stream.getAudioTracks()[0];
 
+      // Capture permission is granted, so device labels are readable. Refresh
+      // the demand-driven input list once per start/join — never event-driven
+      // (docs/linux-media-device-enumeration-loop.md).
+      void localRefreshAudioDevices();
+
       // Wrap post-getUserMedia steps so the stream is always cleaned up on
       // failure — prevents the mic permission light staying on after errors.
       try {
@@ -619,7 +666,7 @@ export function HuddleProvider({
         throw err;
       }
     },
-    [getVoiceInputMode, selectedDeviceId],
+    [getVoiceInputMode, localRefreshAudioDevices, selectedDeviceId],
   );
 
   const startHuddle = React.useCallback(
@@ -906,6 +953,7 @@ export function HuddleProvider({
       audioDevices,
       selectedDeviceId,
       setSelectedDeviceId,
+      refreshAudioDevices,
       micGain,
       setMicGain,
       outputDevices,
@@ -933,6 +981,7 @@ export function HuddleProvider({
       micGain,
       outputDevices,
       pttActive,
+      refreshAudioDevices,
       selectedDeviceId,
       selectedOutputDevice,
       setMicGain,
