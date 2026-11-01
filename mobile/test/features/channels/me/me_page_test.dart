@@ -1,14 +1,15 @@
+import 'package:buzz/features/channels/compose_bar.dart';
+import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'dart:async';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:buzz/shared/me/me_chat_creation.dart';
+import 'package:buzz/shared/me/default_agent.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
-import 'package:buzz/shared/profile/user_cache_provider.dart';
-import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:flutter/material.dart';
@@ -20,6 +21,19 @@ import 'package:buzz/features/channels/me/me_page.dart';
 import 'package:buzz/shared/me/me_groups.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/theme/theme.dart';
+
+class _UnavailableRelay extends RelaySessionNotifier {
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => throw StateError('Agent unavailable');
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => [];
+}
 
 class FakeChannels extends ChannelsNotifier {
   @override
@@ -74,6 +88,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
           myPubkeyProvider.overrideWithValue('owner'),
           channelsProvider.overrideWith(LabeledChannels.new),
           meGroupsProvider.overrideWith(
@@ -112,6 +127,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
           meGroupsProvider.overrideWith(
             (ref) => Stream.value(const MeGroups()),
           ),
@@ -141,6 +157,7 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
+            defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
             meGroupsProvider.overrideWith((ref) => updates.stream),
             channelsProvider.overrideWith(FakeChannels.new),
           ],
@@ -160,11 +177,11 @@ void main() {
       expect(find.text('Search chats'), findsNothing);
       expect(find.byType(TextField), findsNothing);
       expect(find.byIcon(BuzzIcons.edit), findsOneWidget);
-      expect(find.byIcon(BuzzIcons.folderPlus), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.workspace), findsOneWidget);
       final header = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar));
       expect(header.nativeLargeTitle, isTrue);
       expect(header.nativeActions!.map((action) => action.icon), [
-        BuzzIcons.folderPlus,
+        BuzzIcons.workspace,
         BuzzIcons.edit,
       ]);
       expect(find.text('App work'), findsOneWidget);
@@ -187,12 +204,12 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.text('No chats in this project'), findsOneWidget);
+      expect(find.text('No chats in this workspace yet'), findsOneWidget);
       expect(find.text('Design agent'), findsOneWidget);
       await tester.tap(find.text('Chats'));
       await tester.pumpAndSettle();
       expect(find.text('Design agent'), findsNothing);
-      expect(find.text('No chats in this project'), findsOneWidget);
+      expect(find.text('No chats in this workspace yet'), findsOneWidget);
       await tester.tap(find.text('Chats'));
       await tester.pumpAndSettle();
       expect(find.text('Design agent'), findsOneWidget);
@@ -204,24 +221,28 @@ void main() {
     },
   );
   testWidgets(
-    'footer new chat offers project selection without losing its name',
+    'new chat opens a conversation with Bestie and workspace controls',
     (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
       final action = ValueNotifier<VoidCallback?>(null);
       addTearDown(action.dispose);
+      final bestie = StreamController<String?>();
+      addTearDown(bestie.close);
       final sync = MeSync(
-        RelaySessionNotifier(),
+        _UnavailableRelay(),
         RelayConfig(
           baseUrl: 'https://relay.test',
-          nsec: nostr.Nip19.encode(
-            prefix: nostr.Nip19Prefix.nsec,
-            data:
-                '0000000000000000000000000000000000000000000000000000000000000001',
-          ),
+          nsec: nostr.Keys.generate().nsec,
         ),
+        prefs: prefs,
       );
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            defaultAgentProvider.overrideWith((ref) => bestie.stream),
+            meSyncProvider.overrideWithValue(sync),
             meGroupsProvider.overrideWith(
               (ref) => Stream.value(
                 const MeGroups(
@@ -235,14 +256,19 @@ void main() {
                 ),
               ),
             ),
-            meSyncProvider.overrideWithValue(sync),
             channelsProvider.overrideWith(FakeChannels.new),
             meAssistantsProvider.overrideWith(
               (ref) async => const [
-                AgentDirectoryEntry(pubkey: 'agent', displayName: 'Owner Name'),
+                AgentDirectoryEntry(pubkey: 'bestie', displayName: 'My Bestie'),
+                AgentDirectoryEntry(
+                  pubkey: 'other',
+                  displayName: 'Other agent',
+                ),
               ],
             ),
-            userCacheProvider.overrideWith(_ConfusableProfiles.new),
+            agentDirectoryProvider.overrideWith((ref) async => []),
+            agentOwnersProvider.overrideWith((ref) async => {}),
+            customEmojiListProvider.overrideWithValue([]),
           ],
           child: MaterialApp(
             theme: AppTheme.light(),
@@ -251,147 +277,95 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.byTooltip('New chat'), findsNothing);
-      expect(action.value, isNotNull);
       action.value!();
       await tester.pumpAndSettle();
-      expect(find.byType(BottomSheet), findsOneWidget);
-      expect(
-        find.byKey(const ValueKey('new-session-name')).hitTestable(),
-        findsOneWidget,
-      );
-      expect(
-        find.byKey(const ValueKey('new-session-assistant')).hitTestable(),
-        findsOneWidget,
-      );
-      await tester.enterText(
-        find.byKey(const ValueKey('new-session-name')),
-        'Design session',
-      );
-      await tester.tap(find.byKey(const ValueKey('new-session-project')));
+      expect(find.byType(ComposeBar), findsOneWidget);
+      expect(find.byType(BottomSheet), findsNothing);
+      // Missing agent fails before the next frame and must unlock the header.
+      await tester.tap(find.text('Message Choose an agent'));
       await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'Hello');
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp).hitTestable().last);
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<IconButton>(find.byKey(const ValueKey('new-chat-agent')))
+            .onPressed,
+        isNotNull,
+      );
+      ScaffoldMessenger.of(
+        tester.element(find.byType(ComposeBar)),
+      ).clearSnackBars();
+      await tester.pumpAndSettle();
+      bestie.add('bestie');
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Change agent: My Bestie'), findsOneWidget);
+      bestie.addError(StateError('Cache write failed'));
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Change agent: My Bestie'), findsOneWidget);
+      final bar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar).last);
+      expect(bar.nativeActions!.map((action) => action.label), [
+        'Choose workspace',
+        'Change agent: My Bestie',
+      ]);
+      expect(bar.nativeLeading?.symbol, 'chevron.backward');
+      expect(
+        bar.nativeActions!.every((action) => !action.sharesBackground),
+        isTrue,
+      );
+      await tester.tap(find.byTooltip('Choose workspace'));
+      await tester.pumpAndSettle();
+      expect(find.byType(BottomSheet), findsNothing);
+      expect(
+        find.widgetWithText(CheckedPopupMenuItem<String>, 'No Workspace'),
+        findsOneWidget,
+      );
+      expect(find.text('Create workspace'), findsNothing);
       await tester.tap(find.text('Mobile app').last);
       await tester.pumpAndSettle();
-      expect(find.text('Design session'), findsOneWidget);
-      expect(find.text('Mobile app'), findsWidgets);
-      await tester.tap(find.byKey(const ValueKey('new-session-project')));
+      expect(find.byTooltip('Workspace: Mobile app'), findsOneWidget);
+      await tester.tap(find.byTooltip('Change agent: My Bestie'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('No project').last);
+      expect(tester.getSize(find.byType(ListView).last).height, lessThan(300));
+      await tester.tap(find.text('Other agent'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Create chat'));
+      bestie.add(null);
       await tester.pumpAndSettle();
-      expect(find.text('Enter a name and choose an agent.'), findsOneWidget);
-      expect(find.text('Design session'), findsOneWidget);
-      // The owner's label and its initial outrank the agent's own profile.
-      await tester.tap(find.byKey(const ValueKey('new-session-assistant')));
+      expect(find.byTooltip('Change agent: Other agent'), findsOneWidget);
+      await tester.tap(find.text('Hello').last);
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Owner Name').last);
+      await tester.enterText(find.byType(TextField), 'Plan our launch');
+      await tester.pageBack();
       await tester.pumpAndSettle();
-      final row = find.byKey(const ValueKey('new-session-assistant'));
-      expect(
-        find.descendant(of: row, matching: find.text('Owner Name')),
-        findsOneWidget,
-      );
-      expect(
-        find.descendant(of: row, matching: find.text('O')),
-        findsOneWidget,
-      );
-      expect(find.textContaining('Confusable'), findsNothing);
+      action.value!();
+      await tester.pumpAndSettle();
+      expect(find.text('Plan our launch'), findsOneWidget);
+      expect(MeChatCreation.pending(sync), isNull);
+      await tester.tap(find.byTooltip('Choose an agent'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Other agent'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Plan our launch').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp).hitTestable().last);
+      await tester.pumpAndSettle();
+      expect(MeChatCreation.pending(sync), isNotNull);
+      expect(find.text('Retry'), findsOneWidget);
+      ScaffoldMessenger.of(tester.element(find.text('Retry'))).clearSnackBars();
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Retry'));
+      await tester.pumpAndSettle();
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      expect(find.text('Retry'), findsNothing);
+      expect(find.byType(ComposeBar), findsNothing);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
     },
   );
 
-  testWidgets('iOS new chat uses the native profile form with project choices', (
-    tester,
-  ) async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-    addTearDown(() => debugDefaultTargetPlatformOverride = null);
-    const channel = MethodChannel('buzz/profile_text_editor');
-    final calls = <MethodCall>[];
-    var directoryLoads = 0;
-    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
-      call,
-    ) async {
-      calls.add(call);
-      return null;
-    });
-    addTearDown(
-      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        channel,
-        null,
-      ),
-    );
-    final sync = MeSync(
-      RelaySessionNotifier(),
-      RelayConfig(
-        baseUrl: 'https://relay.test',
-        nsec: nostr.Nip19.encode(
-          prefix: nostr.Nip19Prefix.nsec,
-          data:
-              '0000000000000000000000000000000000000000000000000000000000000001',
-        ),
-      ),
-    );
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          meGroupsProvider.overrideWith(
-            (ref) => Stream.value(
-              const MeGroups(
-                groups: [
-                  {
-                    'id': 'mobile',
-                    'name': 'Mobile app',
-                    'defaultTemplateId': '',
-                  },
-                ],
-              ),
-            ),
-          ),
-          meSyncProvider.overrideWithValue(sync),
-          channelsProvider.overrideWith(FakeChannels.new),
-          meAssistantsProvider.overrideWith((ref) async {
-            directoryLoads++;
-            return const [
-              AgentDirectoryEntry(pubkey: 'agent', displayName: 'Owner Name'),
-            ];
-          }),
-          userCacheProvider.overrideWith(_ConfusableProfiles.new),
-        ],
-        child: MaterialApp(theme: AppTheme.light(), home: const MePage()),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    final bar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar));
-    bar.nativeActions!
-        .firstWhere((action) => action.label == 'New chat')
-        .onPressed!();
-    await tester.pumpAndSettle();
-    expect(directoryLoads, 1);
-    expect(calls, hasLength(1));
-    expect(calls.single.method, 'presentChat');
-    final args = calls.single.arguments as Map;
-    expect(args['title'], 'New chat');
-    expect(args['placeholder'], 'Chat name');
-    expect(args['assistants'], [
-      {
-        'id': 'agent',
-        'name': 'Owner Name',
-        'artworkScale': '1',
-        'avatarUrl': '',
-      },
-    ]);
-    expect(args['projects'], [
-      {'id': 'mobile', 'name': 'Mobile app'},
-    ]);
-    expect(args['selectedProject'], isNull);
-    expect(args['containerCornerRadius'], Radii.container);
-    expect(find.byType(BottomSheet), findsNothing);
-    await tester.pumpWidget(const SizedBox.shrink());
-    debugDefaultTargetPlatformOverride = null;
-  });
-
-  for (final resume in [true, false]) {
+  for (final resume in [true]) {
     testWidgets('iOS new chat recovers a durable creation: resume=$resume', (
       tester,
     ) async {
@@ -440,6 +414,7 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
+            defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
             meGroupsProvider.overrideWith(
               (ref) => Stream.value(const MeGroups()),
             ),
@@ -476,7 +451,7 @@ void main() {
         MeChatCreation.pending(restarted)?.id,
         resume ? 'same-id' : isNull,
       );
-      expect(args['placeholder'], 'Chat name');
+      expect(args['placeholder'], resume ? 'Chat name' : 'Message');
       expect(args['assistants'], isEmpty);
       expect(args['containerCornerRadius'], Radii.container);
       expect(find.byType(BottomSheet), findsNothing);
@@ -491,6 +466,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
           meGroupsProvider.overrideWith(
             (ref) => Stream<MeGroups>.error(StateError('offline')),
           ),
@@ -503,11 +479,4 @@ void main() {
     expect(find.text('Try again'), findsOneWidget);
     expect(find.text('A place to work with your agents'), findsNothing);
   });
-}
-
-class _ConfusableProfiles extends UserCacheNotifier {
-  @override
-  Map<String, UserProfile> build() => {
-    'agent': const UserProfile(pubkey: 'agent', displayName: 'Confusable Name'),
-  };
 }

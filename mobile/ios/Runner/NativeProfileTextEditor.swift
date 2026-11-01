@@ -256,11 +256,13 @@ private final class NativeProfileTextEditorViewController:
   private var hasFocusedEditor = false
   private var selectedAssistantAvatar: UIImage?
   private var selectedAssistant: String?
+  private var assistantChosenManually = false
   private var selectedProject: String?
   private var projects: [[String: String]] {
     chatOptions?["projects"] as? [[String: String]] ?? []
   }
   private var isChatEditor: Bool { chatOptions != nil }
+  private var isMessageEditor: Bool { chatOptions?["messageMode"] as? Bool ?? false }
   private var isProjectEditor: Bool { chatOptions?["projectOnly"] as? Bool ?? false }
   private var assistants: [[String: String]] {
     chatOptions?["assistants"] as? [[String: String]] ?? []
@@ -291,7 +293,7 @@ private final class NativeProfileTextEditorViewController:
     let view = UITextView()
     view.translatesAutoresizingMaskIntoConstraints = false
     view.text = channelDescription ?? initialValue
-    view.isEditable = canEditDetails
+    view.isEditable = canEditDetails && !fieldsLocked
     view.accessibilityLabel = isChannelEditor ? "Description" : placeholder
     view.font = .preferredFont(forTextStyle: .body)
     view.adjustsFontForContentSizeCategory = true
@@ -386,7 +388,7 @@ private final class NativeProfileTextEditorViewController:
       action: #selector(cancelTapped)
     )
     navigationItem.rightBarButtonItem = UIBarButtonItem(
-      title: isChatEditor ? (fieldsLocked ? "Retry" : "Create") : (isChannelEditor ? "Save" : "Set"),
+      title: isChatEditor ? (fieldsLocked ? "Retry" : (isMessageEditor ? "Send" : "Create")) : (isChannelEditor ? "Save" : "Set"),
       style: .done,
       target: self,
       action: #selector(setTapped)
@@ -445,6 +447,11 @@ private final class NativeProfileTextEditorViewController:
     chatOptions?["assistants"] = arguments["assistants"]
     chatOptions?["assistantsLoading"] = false
     chatOptions?["assistantError"] = arguments["assistantError"]
+    if !assistantChosenManually && !fieldsLocked && arguments.keys.contains("defaultAssistant") {
+      let bestie = arguments["defaultAssistant"] as? String
+      selectedAssistant = assistants.contains(where: { $0["id"] == bestie }) ? bestie : nil
+      selectedAssistantAvatar = nil
+    }
     tableView.reloadSections(IndexSet(integer: 2), with: .none)
     updateNavigation()
   }
@@ -461,7 +468,7 @@ private final class NativeProfileTextEditorViewController:
       && (!isChannelEditor || !canonicalChannelName.isEmpty)
       && (!isChatEditor || (
         !currentValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-          && currentValue.count <= 120
+          && (isMessageEditor || currentValue.count <= 120)
           && (isProjectEditor || canSubmitAssistant)
       ))
     navigationController?.isModalInPresentation = hasUnsavedChanges
@@ -503,10 +510,16 @@ private final class NativeProfileTextEditorViewController:
       guard !name.isEmpty, currentValue.count <= 120 else { return }
       onSet(name)
     } else if isChatEditor {
+      if isMessageEditor && currentValue.trimmingCharacters(in: .whitespacesAndNewlines).utf8.count > 8192 {
+        let alert = UIAlertController(title: "Message too long", message: "Keep your first message under 8 KB.", preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
+        return
+      }
       guard let selectedAssistant,
             canSubmitAssistant,
             !currentValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-            currentValue.count <= 120 else { return }
+            (isMessageEditor || currentValue.count <= 120) else { return }
       onSet(["name": currentValue, "assistant": selectedAssistant, "project": selectedProject ?? ""])
     } else if isChannelEditor {
       guard !canonicalChannelName.isEmpty else { return }
@@ -543,6 +556,7 @@ private final class NativeProfileTextEditorViewController:
       view.endEditing(true)
       let picker = MeAssistantListController(assistants: assistants, selected: selectedAssistant, pageColor: pageBackgroundColor, rowColor: containerBackgroundColor, avatars: assistantAvatars) { [weak self] id, avatar in
         self?.selectedAssistantAvatar = avatar
+        self?.assistantChosenManually = true
         self?.selectedAssistant = id
         self?.tableView.reloadSections(IndexSet(integer: 2), with: .none)
         self?.updateNavigation()
@@ -587,7 +601,7 @@ private final class NativeProfileTextEditorViewController:
   ) -> CGFloat {
     if isChatEditor && indexPath.section == 2 && selectedAssistant != nil { return 64 }
     if isChannelEditor && indexPath.section >= 2 { return UITableView.automaticDimension }
-    return (isChannelEditor ? indexPath.section == 1 : multiline) ? 132 : 52
+    return (isChannelEditor ? indexPath.section == 1 : multiline && indexPath.section == 0) ? 132 : 52
   }
 
   override func tableView(

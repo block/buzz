@@ -1,6 +1,10 @@
+import 'dart:convert';
+import 'package:buzz/shared/crypto/nip44.dart';
+import 'package:buzz/features/channels/me/me_workspace_picker.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/me/me_page.dart';
+import 'package:buzz/features/channels/me/new_me_project.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
 import 'package:buzz/shared/me/me_groups.dart';
 import 'package:buzz/shared/me/me_project_creation.dart';
@@ -59,6 +63,40 @@ class _Relay extends RelaySessionNotifier {
   }
 }
 
+class _WorkspaceHeader extends HookConsumerWidget {
+  const _WorkspaceHeader();
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final workspace = useMeWorkspace(
+      context,
+      ref,
+      enabled: true,
+      channelId: '10000000-0000-4000-8000-000000000001',
+    );
+    return Scaffold(
+      appBar: AppBar(actions: [workspace.action]),
+      body: TextButton(
+        onPressed: () async {
+          try {
+            await createMeProject(
+              context,
+              ref,
+              workspace: true,
+              channelId: '10000000-0000-4000-8000-000000000001',
+            );
+          } on StateError catch (error) {
+            expect(
+              error.message,
+              contains('Project setup saved on this phone'),
+            );
+          }
+        },
+        child: const Text('Open workspace creation'),
+      ),
+    );
+  }
+}
+
 void main() {
   final config = RelayConfig(
     baseUrl: 'https://relay.test',
@@ -66,6 +104,120 @@ void main() {
       prefix: nostr.Nip19Prefix.nsec,
       data: '0' * 63 + '1',
     ),
+  );
+  testWidgets(
+    'workspace creation assigns the chat and resumes a lost acknowledgement',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final relay = _Relay()..failAfterPublish = true;
+      final sync = MeSync(relay, config, prefs: prefs);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            meSyncProvider.overrideWithValue(sync),
+            meGroupsProvider.overrideWith(
+              (ref) => Stream.value(const MeGroups()),
+            ),
+          ],
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: const _WorkspaceHeader(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      Future<void> open() async {
+        await tester.tap(find.text('Open workspace creation'));
+        await tester.pumpAndSettle();
+      }
+
+      await open();
+      await tester.enterText(find.byType(TextField), 'Launch');
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Create workspace'));
+      await tester.pumpAndSettle();
+      final saved = MeProjectCreation.pending(sync)!;
+      expect(saved.channelId, '10000000-0000-4000-8000-000000000001');
+      expect(
+        sync
+            .decode(relay.events.single)
+            .assignments['10000000-0000-4000-8000-000000000001'],
+        saved.id,
+      );
+      expect(sync.decode(relay.events.single).groups.single['name'], 'Launch');
+      relay.failAfterPublish = false;
+      for (var attempt = 0; attempt < 2; attempt++) {
+        await open();
+        await tester.tap(find.text('Resume'));
+        await tester.pumpAndSettle();
+      }
+      expect(MeProjectCreation.pending(sync), isNull);
+      expect(relay.writes, 1);
+      expect(
+        sync
+            .decode(relay.events.single)
+            .assignments['10000000-0000-4000-8000-000000000001'],
+        saved.id,
+      );
+
+      // A conflicting, unconfirmed phone move remains recoverable in-place.
+      const chat = '10000000-0000-4000-8000-000000000001';
+      MeGroups organization(String group) => MeGroups(
+        groups: [
+          for (final id in ['original', 'phone', 'desktop'])
+            {'id': id, 'name': id, 'defaultTemplateId': ''},
+        ],
+        assignments: {chat: group},
+        channels: const [chat],
+      );
+      NostrEvent signed(String group, int timestamp) => NostrEvent.fromJson(
+        nostr.Event.from(
+          kind: 30078,
+          content: nip44Encrypt(
+            sync.key,
+            organization(group).encode(sync.community),
+          ),
+          secretKey: sync.privateHex,
+          createdAt: timestamp,
+          tags: [
+            ['d', MeGroups.coordinate(sync.community)],
+            ['t', MeGroups.tag],
+          ],
+          verify: false,
+        ).toMap(),
+      );
+      final pending = jsonEncode({
+        'base': signed('original', 1).toJson(),
+        'event': signed('phone', 2).toJson(),
+      });
+      await prefs.setString(sync.pendingKey, pending);
+      relay.events = [signed('desktop', 3)];
+      Future<void> move() async {
+        await tester.tap(find.byKey(const ValueKey('me-workspace-button')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('No Workspace'));
+        await tester.pumpAndSettle();
+      }
+
+      await move();
+      expect(find.text('Conflicting Solo changes'), findsOneWidget);
+      await tester.tap(find.text('Keep pending'));
+      await tester.pumpAndSettle();
+      expect(prefs.getString(sync.pendingKey), pending);
+      await move();
+      await tester.tap(find.text('Discard phone change'));
+      await tester.pumpAndSettle();
+      expect(prefs.getString(sync.pendingKey), isNull);
+      expect(sync.decode(relay.events.single).assignments[chat], 'desktop');
+      await move();
+      expect(
+        sync.decode(relay.events.single).assignments.containsKey(chat),
+        isFalse,
+      );
+      expect(find.text('Conflicting Solo changes'), findsNothing);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.android),
   );
   for (final throws in [false, true]) {
     testWidgets(
@@ -275,7 +427,11 @@ void main() {
       final prefs = await SharedPreferences.getInstance();
       final relay = _Relay()..failAfterPublish = true;
       final sync = MeSync(relay, config, prefs: prefs);
-      const intent = MeProjectCreation('project', 'Name');
+      const intent = MeProjectCreation(
+        'project',
+        'Name',
+        channelId: '10000000-0000-4000-8000-000000000001',
+      );
       await expectLater(intent.complete(sync), throwsStateError);
       final restarted = MeSync(relay, config, prefs: prefs);
       relay.failAfterPublish = false;
@@ -287,6 +443,12 @@ void main() {
       expect(MeProjectCreation.pending(restarted), isNull);
       expect(relay.writes, 1);
       expect(restarted.decode(relay.events.single).groups, hasLength(1));
+      expect(
+        restarted
+            .decode(relay.events.single)
+            .assignments['10000000-0000-4000-8000-000000000001'],
+        'project',
+      );
     },
   );
 }

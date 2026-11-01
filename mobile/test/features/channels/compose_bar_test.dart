@@ -1,3 +1,4 @@
+import 'package:flutter/scheduler.dart';
 import 'dart:async';
 import 'package:buzz/features/channels/composer_send_origin.dart';
 import 'dart:convert';
@@ -39,6 +40,7 @@ import 'package:buzz/shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 part 'compose_bar_test/exact_mention_tests.dart';
+part 'compose_bar_test/solo_draft_tests.dart';
 part 'compose_bar_test/durable_mention_tests.dart';
 
 final _pngBytes = Uint8List.fromList([
@@ -183,6 +185,8 @@ late SharedPreferences _testPrefs;
 Widget _buildComposeBar({
   required MediaUploadService uploadService,
   required ComposeBarOnSend onSend,
+  List<ChannelMember>? draftMembers,
+  ValueChanged<bool>? onSendingChanged,
   List<ChannelMember> members = const <ChannelMember>[],
   Future<List<ChannelMember>>? membersFuture,
   Future<List<ChannelMember>> Function()? loadMembers,
@@ -288,6 +292,8 @@ Widget _buildComposeBar({
                 final composeBar = ComposeBar(
                   key: ValueKey(composeBarKey),
                   channelId: 'channel-1',
+                  draftMembers: draftMembers,
+                  onSendingChanged: onSendingChanged,
                   threadHeadId: threadHeadId,
                   focusNode: focusNode,
                   onFocusRestorerChanged: onFocusRestorerChanged,
@@ -689,6 +695,7 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
 }
 
 void main() {
+  soloDraftTests();
   exactMentionTests();
   durableMentionTests();
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -3838,19 +3845,25 @@ void main() {
         },
       );
 
+      var busy = false;
+      final delivery = Completer<void>();
       String? sentContent;
       List<List<String>> sentMediaTags = const [];
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: uploadService,
+          draftMembers: const [],
+          onSendingChanged: (value) => busy = value,
           onSend:
               (
                 content,
                 mentionPubkeys, {
                 mediaTags = const <List<String>>[],
               }) async {
+                expect(busy, isTrue);
                 sentContent = content;
                 sentMediaTags = mediaTags;
+                await delivery.future;
               },
         ),
       );
@@ -3884,8 +3897,16 @@ void main() {
       );
 
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
-      await tester.pumpAndSettle();
+      for (var frame = 0; frame < 100 && sentContent == null; frame++) {
+        await tester.pump();
+      }
+      expect(sentContent, isNotNull);
 
+      expect(busy, isTrue);
+      delivery.completeError(Exception('First send failed'));
+      await tester.pumpAndSettle();
+      expect(busy, isFalse);
+      expect(find.byTooltip('Remove attachment'), findsOneWidget);
       expect(uploadedBytes, _pngBytes);
       expect(uploadedMimeType, 'image/png');
       expect(sentContent, '\n![image](https://relay.example/media/pasted.png)');
@@ -4133,6 +4154,7 @@ void main() {
     ) async {
       final previousPlatform = debugDefaultTargetPlatformOverride;
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      var busy = false;
       try {
         final uploadService = MediaUploadService(
           baseUrl: 'https://relay.example',
@@ -4144,6 +4166,8 @@ void main() {
         await tester.pumpWidget(
           _buildComposeBar(
             uploadService: uploadService,
+            draftMembers: const [],
+            onSendingChanged: (value) => busy = value,
             onSend:
                 (
                   content,
@@ -4169,6 +4193,7 @@ void main() {
             .onPressed!();
         await tester.pumpAndSettle();
 
+        expect(busy, isFalse);
         expect(find.text('Unable to read pasted image'), findsOneWidget);
         expect(find.byTooltip('Remove attachment'), findsNothing);
       } finally {

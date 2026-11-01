@@ -25,6 +25,7 @@ import '../../shared/me/me_sync.dart';
 import '../../shared/me/me_search_placement.dart';
 import 'me/me_assistant_picker.dart';
 import 'me/me_chat_assistant.dart';
+import 'me/me_workspace_picker.dart';
 import 'me/me_messages_provider.dart';
 import '../../shared/huddle/huddle.dart';
 import '../../shared/identity_names/identity_names.dart';
@@ -302,6 +303,12 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       personalChat ? meSendMessageProvider : sendMessageProvider,
     );
     final messagesState = ref.watch(messagesProvider);
+    final workspace = useMeWorkspace(
+      context,
+      ref,
+      enabled: personalChat,
+      channelId: channel.id,
+    );
     final assistant = useMeChatAssistant(
       context,
       ref,
@@ -743,6 +750,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                   messagesNotifier.isCatchingUp,
         onNativeTitlePressed: openChannelDetails,
         nativeActions: [
+          if (personalChat) workspace.nativeAction,
           if (personalChat)
             assistant.nativeAction
           else if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)
@@ -763,6 +771,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
           onTap: openChannelDetails,
         ),
         actions: [
+          if (personalChat) workspace.action,
           if (personalChat)
             assistant.action
           else if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)

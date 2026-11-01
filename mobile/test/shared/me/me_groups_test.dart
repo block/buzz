@@ -3,6 +3,25 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/shared/me/me_groups.dart';
 
 void main() {
+  test(
+    'moving to No workspace removes the old assignment and retains the chat',
+    () {
+      const groups = MeGroups(
+        groups: [
+          {'id': 'work', 'name': 'Work', 'defaultTemplateId': ''},
+        ],
+        channels: ['chat', 'other'],
+        assignments: {'chat': 'work', 'other': 'work'},
+      );
+      final unfiled = groups.place('chat', clearGroup: true);
+      expect(unfiled.assignments, {'other': 'work'});
+      expect(unfiled.channels, ['chat', 'other']);
+      expect(
+        unfiled.place('chat', group: 'work').assignments,
+        groups.assignments,
+      );
+    },
+  );
   const origin = 'https://buzz.block.builderlab.xyz';
   const channel = '11111111-1111-4111-8111-111111111111';
   Map<String, dynamic> record() => {

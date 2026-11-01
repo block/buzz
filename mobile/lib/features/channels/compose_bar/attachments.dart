@@ -132,6 +132,7 @@ class _AttachmentSurfacePanel extends HookWidget {
   final Future<List<XFile>> Function() onPickAllPhotos;
   final Future<void> Function(List<XFile> photos) onChoosePhotos;
   final Future<void> Function(List<XFile> photos) onChooseAllPhotos;
+  final Future<void> Function(Future<void> Function()) preparePhotos;
 
   const _AttachmentSurfacePanel({
     super.key,
@@ -147,6 +148,7 @@ class _AttachmentSurfacePanel extends HookWidget {
     required this.onPickAllPhotos,
     required this.onChoosePhotos,
     required this.onChooseAllPhotos,
+    required this.preparePhotos,
   });
 
   @override
@@ -225,6 +227,7 @@ class _AttachmentSurfacePanel extends HookWidget {
           onPickAllPhotos: onPickAllPhotos,
           onChoosePhotos: onChoosePhotos,
           onChooseAllPhotos: onChooseAllPhotos,
+          preparePhotos: preparePhotos,
         ),
       ),
       _AttachmentSurface.closed ||
@@ -807,5 +810,19 @@ class _MemoryAttachmentImage extends HookConsumerWidget {
         child: Icon(BuzzIcons.image, color: context.colors.onSurfaceVariant),
       ),
     );
+  }
+}
+
+// Keep a new-chat draft mounted until a selected attachment has been retained.
+Future<T> _prepareComposerAttachment<T>(
+  BuildContext context,
+  ValueNotifier<int> pending,
+  Future<T> Function() action,
+) async {
+  pending.value++;
+  try {
+    return await action();
+  } finally {
+    if (context.mounted) pending.value--;
   }
 }

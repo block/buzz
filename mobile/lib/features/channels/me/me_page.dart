@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -19,8 +20,10 @@ import 'solo_working_dots.dart';
 import 'me_unread_provider.dart';
 import '../../../shared/widgets/avatar_image.dart';
 import '../../../shared/me/me_groups.dart';
+import '../../../shared/me/default_agent.dart';
+import '../../../shared/me/me_chat_title.dart';
+import '../../../shared/crypto/event_signing.dart';
 import '../../../shared/me/me_chat_creation.dart';
-import '../../../shared/me/me_project_creation.dart';
 import '../../../shared/me/me_sync.dart';
 import '../../../shared/relay/relay.dart';
 import '../../../shared/me/me_recovery.dart';
@@ -32,6 +35,11 @@ import '../../../shared/widgets/frosted_scaffold.dart';
 import '../../../shared/widgets/buzz_loading_indicator.dart';
 import '../../../shared/widgets/modal_presentation.dart';
 import '../channel.dart';
+import '../compose_bar.dart';
+import 'me_assistant_picker_sheet.dart';
+import 'new_me_project.dart';
+import 'me_workspace_picker.dart';
+import 'me_recovery_dialog.dart';
 import '../channel_detail_page.dart';
 import '../channel_management_provider.dart';
 import '../channels_provider.dart';
@@ -39,8 +47,8 @@ import '../channels_provider.dart';
 part 'me_page_helpers.dart';
 part 'me_empty_state.dart';
 part 'new_me_chat.dart';
+part 'me_chat_draft.dart';
 part 'native_new_me_chat.dart';
-part 'new_me_project.dart';
 
 /// Personal chats and projects shared with the desktop Me workspace.
 class MePage extends HookConsumerWidget {
@@ -74,6 +82,7 @@ class MePage extends HookConsumerWidget {
           );
     // Warm the directory while browsing Me, before the creation form opens.
     final assistants = ref.watch(meAssistantsProvider).value;
+    ref.watch(defaultAgentProvider);
     useEffect(() {
       if (assistants != null) {
         ref.read(userCacheProvider.notifier).preload([
@@ -96,7 +105,7 @@ class MePage extends HookConsumerWidget {
         await action();
       } catch (error) {
         if (error is MeRecoveryConflict && context.mounted) {
-          await _offerMeRecovery(context, ref.read(meSyncProvider));
+          await offerMeRecovery(context, ref.read(meSyncProvider));
         }
         if (context.mounted) {
           ScaffoldMessenger.of(context).showFeedbackSnackBar(
@@ -114,7 +123,7 @@ class MePage extends HookConsumerWidget {
     final VoidCallback? newProject = busy.value || !groups.hasValue
         ? null
         : () => perform(() async {
-            await _createMeProject(context, ref);
+            await createMeProject(context, ref);
           });
     final VoidCallback? newChat = busy.value || !groups.hasValue
         ? null
@@ -232,8 +241,8 @@ class MePage extends HookConsumerWidget {
                         if (!visible.any(
                           (c) => organization.assignments[c.id] == group['id'],
                         ))
-                          const ListTile(
-                            title: Text('No chats in this project'),
+                          const _MeSectionEmpty(
+                            'No chats in this workspace yet',
                           ),
                       ],
                     ),
@@ -252,7 +261,7 @@ class MePage extends HookConsumerWidget {
                         if (!visible.any(
                           (c) => !organization.assignments.containsKey(c.id),
                         ))
-                          const ListTile(title: Text('No chats yet')),
+                          const _MeSectionEmpty('No chats yet'),
                       ],
                     ),
                 ],
@@ -315,8 +324,7 @@ class MePage extends HookConsumerWidget {
         nativeActions: [
           IosNavigationAction(
             label: 'New project',
-            symbol: 'folder.badge.plus',
-            icon: BuzzIcons.folderPlus,
+            icon: BuzzIcons.workspace,
             onPressed: newProject,
           ),
           if (newChatAction == null)
@@ -343,7 +351,7 @@ class MePage extends HookConsumerWidget {
                   children: [
                     IconButton(
                       tooltip: 'New project',
-                      icon: const Icon(BuzzIcons.folderPlus, size: 20),
+                      icon: const Icon(BuzzIcons.workspace, size: 20),
                       onPressed: newProject,
                     ),
                     if (newChatAction == null)

@@ -19,6 +19,7 @@ class IosMessageCreateButton extends HookWidget {
     this.avatarUrl,
     this.avatarInitial,
     this.dividerBefore = const {},
+    this.sectionTitles = const {},
     this.icon = 'plus',
     this.accessibilityLabel = 'Create',
     this.width = 64,
@@ -30,9 +31,12 @@ class IosMessageCreateButton extends HookWidget {
     this.eagerGestures = true,
     this.deferMenuActions = true,
     this.showIconWithLabel = false,
+    this.onMenuVisibilityChanged,
+    this.mergingNavigation = false,
   });
 
   final Set<int> dividerBefore;
+  final Map<int, String> sectionTitles;
   final String? label;
   final double? labelFontSize;
   final String? avatarUrl, avatarInitial;
@@ -54,6 +58,10 @@ class IosMessageCreateButton extends HookWidget {
   /// Wait for menu dismissal before actions that navigate to another route.
   final bool deferMenuActions;
   final bool showIconWithLabel;
+  final ValueChanged<bool>? onMenuVisibilityChanged;
+
+  /// Hosts the Search/New/Bestie glass surfaces in one native container.
+  final bool mergingNavigation;
 
   final List<({String label, String symbol, VoidCallback? onPressed})> actions;
 
@@ -89,12 +97,15 @@ class IosMessageCreateButton extends HookWidget {
     final avatar = useFuture(avatarFuture, preserveState: false).data;
     final channel = useState<MethodChannel?>(null);
     final latest = useRef(actions)..value = actions;
+    final latestVisibility = useRef(onMenuVisibilityChanged)
+      ..value = onMenuVisibilityChanged;
     final latestEnabled = useRef(enabled)..value = enabled;
     final menu = [
       for (var i = 0; i < actions.length; i++)
         {
           'id': i,
           'dividerBefore': dividerBefore.contains(i),
+          'sectionTitle': ?sectionTitles[i],
           'label': actions[i].label,
           'symbol': actions[i].symbol,
           'enabled': enabled && actions[i].onPressed != null,
@@ -117,6 +128,10 @@ class IosMessageCreateButton extends HookWidget {
       final current = channel.value;
       if (current == null) return null;
       current.setMethodCallHandler((call) async {
+        if (call.method == 'menuVisibilityChanged') {
+          latestVisibility.value?.call(call.arguments as bool);
+          return;
+        }
         if (call.method != 'menuAction') return;
         final index = call.arguments as int;
         if (index >= 0 && index < latest.value.length) {
@@ -152,6 +167,7 @@ class IosMessageCreateButton extends HookWidget {
         deferMenuActions,
         showIconWithLabel,
         ...dividerBefore,
+        ...sectionTitles.entries.expand((e) => [e.key, e.value]),
         ...actions.expand((a) => [a.label, a.symbol, a.onPressed != null]),
         brightness,
         foreground,
@@ -176,7 +192,8 @@ class IosMessageCreateButton extends HookWidget {
           'plain': plain,
           'fillWidth': fillWidth,
           'buttonCenterX': width / 2,
-          'controlWidth': width,
+          'controlWidth': mergingNavigation ? 112.0 : width,
+          'mergingNavigation': mergingNavigation,
           'controlSize': height,
           'hitTargetWidth': width,
           'hitTargetHeight': height,

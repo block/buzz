@@ -5,12 +5,14 @@ class _PhotoGalleryPicker extends StatelessWidget {
   final Future<List<XFile>> Function() onPickAllPhotos;
   final Future<void> Function(List<XFile> photos) onChoosePhotos;
   final Future<void> Function(List<XFile> photos) onChooseAllPhotos;
+  final Future<void> Function(Future<void> Function()) preparePhotos;
 
   const _PhotoGalleryPicker({
     required this.onBack,
     required this.onPickAllPhotos,
     required this.onChoosePhotos,
     required this.onChooseAllPhotos,
+    required this.preparePhotos,
   });
 
   @override
@@ -20,6 +22,7 @@ class _PhotoGalleryPicker extends StatelessWidget {
       onPickAllPhotos: onPickAllPhotos,
       onChoosePhotos: onChoosePhotos,
       onChooseAllPhotos: onChooseAllPhotos,
+      preparePhotos: preparePhotos,
     );
     if (defaultTargetPlatform != TargetPlatform.iOS) return fallback;
     return _IOSInlinePhotoPicker(
@@ -27,6 +30,7 @@ class _PhotoGalleryPicker extends StatelessWidget {
       onPickAllPhotos: onPickAllPhotos,
       onChoosePhotos: onChoosePhotos,
       onChooseAllPhotos: onChooseAllPhotos,
+      preparePhotos: preparePhotos,
       fallback: fallback,
     );
   }
@@ -37,12 +41,14 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
   final Future<List<XFile>> Function() onPickAllPhotos;
   final Future<void> Function(List<XFile> photos) onChoosePhotos;
   final Future<void> Function(List<XFile> photos) onChooseAllPhotos;
+  final Future<void> Function(Future<void> Function()) preparePhotos;
 
   const _RecentPhotoGalleryPicker({
     required this.onBack,
     required this.onPickAllPhotos,
     required this.onChoosePhotos,
     required this.onChooseAllPhotos,
+    required this.preparePhotos,
   });
 
   @override
@@ -68,7 +74,7 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
             ];
     }
 
-    Future<void> choosePhotos() async {
+    Future<void> choosePhotos() => preparePhotos(() async {
       if (isResolving.value) return;
       isResolving.value = true;
       actionError.value = null;
@@ -92,7 +98,7 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
       } finally {
         if (context.mounted) isResolving.value = false;
       }
-    }
+    });
 
     final selectedCount = selection.value.length;
     final actionLabel = selectedCount == 0

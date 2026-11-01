@@ -223,9 +223,33 @@ void main() {
       await tester.pumpAndSettle();
       chat!.value = () => created++;
       await tester.pumpAndSettle();
+      final controlsBounds = tester.getRect(find.byType(MessagesNavigationBar));
       await tester.tap(find.byTooltip('New'));
       await tester.pumpAndSettle();
       expect(find.text('New workspace'), findsOneWidget);
+      final menuBounds = tester.getRect(
+        find
+            .ancestor(
+              of: find.text('New workspace'),
+              matching: find.byType(Material),
+            )
+            .first,
+      );
+      expect(menuBounds.left, closeTo(controlsBounds.left, .01));
+      expect(menuBounds.right, closeTo(controlsBounds.right, .01));
+      expect(menuBounds.bottom, closeTo(controlsBounds.bottom, .01));
+      expect(
+        tester.getTopLeft(find.text('Solo').last).dy,
+        lessThan(tester.getTopLeft(find.text('New chat')).dy),
+      );
+      expect(
+        tester.getTopLeft(find.text('Team').last).dy,
+        greaterThan(tester.getBottomLeft(find.text('New workspace')).dy),
+      );
+      expect(
+        tester.getTopLeft(find.text('Team').last).dy,
+        lessThan(tester.getTopLeft(find.text('New DM')).dy),
+      );
       expect(find.text('New DM'), findsOneWidget);
       expect(find.text('New channel'), findsOneWidget);
       await tester.tap(find.text('New chat'));
@@ -259,6 +283,36 @@ void main() {
             .map((a) => a.label),
         ['New chat', 'New workspace', 'New DM', 'New channel'],
       );
+      final creationMenu = tester.widget<IosMessageCreateButton>(
+        find.byWidgetPredicate(
+          (w) => w is IosMessageCreateButton && w.label == 'New',
+        ),
+      );
+      final search = find.byTooltip('Search');
+      final initialX = tester.getCenter(search).dx;
+      final initialWidth =
+          (tester.getTopRight(search).dx - tester.getTopLeft(search).dx);
+      creationMenu.onMenuVisibilityChanged!(true);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 90));
+      final midwayX = tester.getCenter(search).dx;
+      expect(midwayX, greaterThan(initialX + 50));
+      expect(midwayX, lessThan(initialX + 100));
+      await tester.pumpAndSettle();
+      expect(tester.getCenter(search).dx, closeTo(initialX + 100, .01));
+      expect(
+        (tester.getTopRight(search).dx - tester.getTopLeft(search).dx),
+        closeTo(initialWidth * .9, .01),
+      );
+      expect(search.hitTestable(), findsNothing);
+      creationMenu.onMenuVisibilityChanged!(false);
+      await tester.pumpAndSettle();
+      expect(tester.getCenter(search).dx, closeTo(initialX, .01));
+      expect(
+        (tester.getTopRight(search).dx - tester.getTopLeft(search).dx),
+        closeTo(initialWidth, .01),
+      );
+      expect(search.hitTestable(), findsOneWidget);
       final communityMenu = tester.widget<IosMessageCreateButton>(
         find.byWidgetPredicate(
           (w) =>
