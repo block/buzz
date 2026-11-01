@@ -4,6 +4,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/hosted/hosted_flow.dart';
+import '../../shared/hosted/hosted_environment.dart';
 import '../../shared/widgets/onboarding_step_page.dart';
 import '../../shared/widgets/bee_loading_mark.dart';
 import '../../shared/widgets/onboarding_loading_page.dart';
@@ -88,6 +89,13 @@ class HostedConnectSheet extends HookConsumerWidget {
         flow.canCreateIdentity
             ? 'Your Buzz identity is how communities recognize you. Create a new one, or import your existing identity if you already use Buzz.'
             : 'Your identity hasn’t been backed up yet. Bring it from your other device to keep using the same Buzz account.',
+      HostedFlowStage.confirmBackup =>
+        'Continuing links this identity to your Builderlab account and uploads '
+            'an encrypted copy of your secret key (nsec) to '
+            '${HostedEnvironment.origin.host}. Builderlab can decrypt this backup. '
+            'Anyone signed in to your Builderlab account can recover this key '
+            'and use your identity, including on self-hosted relays. '
+            'Cancel to stop setup and keep using your self-hosted communities.',
       HostedFlowStage.chooseCommunities => 'Select a community',
       HostedFlowStage.communityConflict =>
         '${flow.addingCommunityName} is already saved with a different identity. '
@@ -141,6 +149,23 @@ class HostedConnectSheet extends HookConsumerWidget {
       ],
       if (!fullScreen) Text(message, style: context.textTheme.bodyLarge),
       const SizedBox(height: Grid.sm),
+      if (stage == HostedFlowStage.confirmBackup) ...[
+        SelectableText(
+          fullNpub(flow.backupPubkey ?? '') ?? '',
+          style: context.textTheme.bodySmall,
+        ),
+        const SizedBox(height: Grid.twelve),
+        FilledButton(
+          style: actionStyle,
+          onPressed: flow.confirmBackup,
+          child: const Text('Back up and continue'),
+        ),
+        TextButton(
+          style: actionStyle,
+          onPressed: () => flow.leave(),
+          child: const Text('Keep key on this device'),
+        ),
+      ],
       for (final choice in flow.identityChoices)
         Padding(
           padding: const EdgeInsets.only(bottom: Grid.sm),
@@ -247,6 +272,7 @@ class HostedConnectSheet extends HookConsumerWidget {
           stage != HostedFlowStage.acceptPolicy &&
           stage != HostedFlowStage.chooseIdentity &&
           stage != HostedFlowStage.setupIdentity &&
+          stage != HostedFlowStage.confirmBackup &&
           stage != HostedFlowStage.chooseCommunities &&
           stage != HostedFlowStage.communityConflict &&
           stage != HostedFlowStage.complete &&
@@ -274,6 +300,7 @@ class HostedConnectSheet extends HookConsumerWidget {
         flow.canCreateIdentity
             ? 'Create or import a Buzz identity'
             : 'Bring your identity with you',
+      HostedFlowStage.confirmBackup => 'Back up your secret key?',
       HostedFlowStage.chooseIdentity => 'Choose your identity',
       HostedFlowStage.working =>
         flow.addingCommunityName == null

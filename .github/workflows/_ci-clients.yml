@@ -151,6 +151,7 @@ jobs:
           test/shared/hosted/relay_auth_isolation_test.dart
           test/features/onboarding/hosted_app_gate_environment_test.dart
           test/features/onboarding/hosted_journeys_test.dart
+          test/features/onboarding/hosted_backup_consent_test.dart
           test/features/onboarding/hosted_communities_test.dart
           test/features/pairing/pairing_hosted_handoff_test.dart
           test/shared/agents/remote_agents_test.dart
