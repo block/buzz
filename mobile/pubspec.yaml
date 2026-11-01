@@ -18,6 +18,9 @@ dependencies:
   hooks_riverpod: ^3.0.3
   flutter_hooks: ^0.21.3
   http: ^1.4.0
+  # iOS HTTP transport (NSURLSession): HTTP/2 and native gzip. See
+  # lib/shared/http/app_http_client.dart.
+  cupertino_http: ^3.1.0
   crypto: ^3.0.7
   flutter_secure_storage: ^10.0.0
   flutter_svg: ^2.2.4

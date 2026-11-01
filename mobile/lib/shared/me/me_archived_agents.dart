@@ -5,12 +5,13 @@ import 'dart:isolate';
 import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
+import 'package:buzz/shared/http/app_http_client.dart';
 
 import '../relay/relay.dart';
 import 'me_sync.dart';
 
 final meRelayInformationClientProvider = Provider<http.Client>((ref) {
-  final client = http.Client();
+  final client = newAppHttpClient();
   ref.onDispose(client.close);
   return client;
 });
