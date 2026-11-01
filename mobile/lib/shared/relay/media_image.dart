@@ -4,6 +4,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 
@@ -47,9 +48,14 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   /// Excluded from equality: transport, not identity.
   final http.Client client;
 
-  /// Deadline for the complete response, including a stalled response body.
-  /// Aborts the request without closing the shared client.
-  final Duration requestTimeout;
+  /// Longest wait for response headers or the next body chunk. A slow link
+  /// that keeps delivering bytes finishes; one that stops is aborted without
+  /// closing the shared client.
+  final Duration stallTimeout;
+
+  /// Longest a fetch may take even while bytes keep arriving, so a server
+  /// that trickles bytes cannot hold a connection indefinitely.
+  final Duration maxFetchDuration;
 
   const MediaImageProvider({
     required this.url,
@@ -57,7 +63,8 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     required this.client,
     this.onBytesLoaded,
     this.scale = 1.0,
-    this.requestTimeout = const Duration(seconds: 30),
+    this.stallTimeout = const Duration(seconds: 20),
+    this.maxFetchDuration = const Duration(minutes: 5),
   });
 
   /// Maximum encoded image body retained before decoding (20 MiB).
@@ -66,8 +73,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   static const _defaultCooldown = Duration(seconds: 30);
   static const _maxRetryAfter = Duration(minutes: 5);
   static final Map<String, DateTime> _cooldownUntil = {};
-  static final Map<(String, MediaGetAuthService), Future<Uint8List>> _inFlight =
-      {};
+  static final Map<(String, MediaGetAuthService), _SharedFetch> _inFlight = {};
 
   /// Injectable clock for cooldown tests.
   @visibleForTesting
@@ -89,33 +95,67 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     MediaImageProvider key,
     ImageDecoderCallback decode,
   ) {
-    return MultiFrameImageStreamCompleter(
-      codec: _loadAsync(key, decode),
+    final abandoned = Completer<void>();
+    // The image cache listens to a pending load, so this fires mid-download
+    // only once a consumer evicts the entry and stops listening (see
+    // [abandonPendingImage]), as [MediaImage] does when it stops showing an
+    // image before its first frame. Abort the download then.
+    return _MediaImageStreamCompleter(
+      codec: _loadAsync(key, decode, abandoned.future),
       scale: key.scale,
       debugLabel: url,
-    );
+    )..addOnLastListenerRemovedCallback(() {
+      if (!abandoned.isCompleted) abandoned.complete();
+    });
   }
 
   Future<ui.Codec> _loadAsync(
     MediaImageProvider key,
     ImageDecoderCallback decode,
+    Future<void> abandoned,
   ) async {
+    var wasAbandoned = false;
     try {
       // Each decode size is its own cache entry (see [ResizeImage]), so one
       // URL shown at two sizes resolves twice. Share the download instead of
       // fetching the same bytes once per size.
       final fetchKey = (url, auth);
-      // whenComplete awaits a returned Future, so the callback must not
-      // return the removed entry (this same future) or it never completes.
-      final bytes = await (_inFlight[fetchKey] ??= _fetchBytes().whenComplete(
-        () {
-          _inFlight.remove(fetchKey);
+      final fetch = _inFlight[fetchKey] ??= _SharedFetch(
+        _fetchBytes,
+        onFinished: (fetch) {
+          if (_inFlight[fetchKey] == fetch) _inFlight.remove(fetchKey);
         },
-      ));
+      );
+      fetch.join();
+      var left = false;
+      void leave() {
+        if (left) return;
+        left = true;
+        fetch.leave();
+      }
+
+      unawaited(
+        abandoned.then((_) {
+          wasAbandoned = true;
+          leave();
+        }),
+      );
+      final Uint8List bytes;
+      try {
+        bytes = await fetch.bytes;
+      } finally {
+        leave();
+      }
+      // Another size kept the download going, but this load's consumer left.
+      if (wasAbandoned) throw StateError('Image load abandoned');
       onBytesLoaded?.call(bytes);
       final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
       return await decode(buffer);
     } catch (_) {
+      // An abandoned load has no listener left to report to, and an error
+      // would surface as an unhandled image error. The consumer already
+      // evicted it; leave the codec unresolved.
+      if (wasAbandoned) return Completer<ui.Codec>().future;
       // Match NetworkImage: make sure an errored key is not retained in the
       // cache. The cooldown map (not the cache) throttles retries.
       scheduleMicrotask(() {
@@ -125,7 +165,9 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     }
   }
 
-  Future<Uint8List> _fetchBytes() async {
+  /// Downloads [url]. Completing [abort] means every load waiting for this
+  /// download was abandoned, so the URL is not put on cooldown.
+  Future<Uint8List> _fetchBytes(Future<void> abort) async {
     final until = _cooldownUntil[url];
     if (until != null) {
       if (debugNow().isBefore(until)) {
@@ -136,20 +178,44 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
 
     final uri = Uri.parse(url);
     final http.Response response;
+    var wasAbandoned = false;
     try {
-      final abort = Completer<void>();
-      final deadline = Timer(requestTimeout, abort.complete);
+      final stop = Completer<void>();
+      Timer? stall;
+      void restartStallTimer() {
+        stall?.cancel();
+        stall = Timer(stallTimeout, () {
+          if (!stop.isCompleted) stop.complete();
+        });
+      }
+
+      restartStallTimer();
+      final deadline = Timer(maxFetchDuration, () {
+        if (!stop.isCompleted) stop.complete();
+      });
+      unawaited(
+        abort.then((_) {
+          if (stop.isCompleted) return;
+          wasAbandoned = true;
+          stop.complete();
+        }),
+      );
       StreamIterator<List<int>>? body;
       try {
         final request = http.AbortableRequest(
           'GET',
           uri,
-          abortTrigger: abort.future,
+          abortTrigger: stop.future,
         )..headers.addAll(auth.headersFor(url));
         final streamed = await client.send(request);
+        restartStallTimer();
         final iterator = body = StreamIterator(streamed.stream);
         final bytes = BytesBuilder(copy: false);
-        while (await iterator.moveNext()) {
+        // An error body is never shown, and reading a slow one could hold
+        // this load for the whole fetch cap before the fallback or
+        // Retry-After applies. Leave it unread; finally cancels the stream.
+        while (streamed.statusCode == 200 && await iterator.moveNext()) {
+          restartStallTimer();
           final chunk = iterator.current;
           if (chunk.length > maxResponseBytes - bytes.length) {
             throw const FormatException('Image response too large');
@@ -162,12 +228,16 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
           headers: streamed.headers,
         );
       } finally {
+        stall?.cancel();
         deadline.cancel();
-        if (!abort.isCompleted) abort.complete();
+        if (!stop.isCompleted) stop.complete();
         unawaited(body?.cancel());
       }
     } catch (_) {
-      _cooldownUntil[url] = debugNow().add(_defaultCooldown);
+      // Nobody wanted the image any more; the URL itself did not fail.
+      if (!wasAbandoned) {
+        _cooldownUntil[url] = debugNow().add(_defaultCooldown);
+      }
       rethrow;
     }
     if (response.statusCode != 200) {
@@ -209,6 +279,95 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   @override
   String toString() =>
       'MediaImageProvider("$url", scale: ${scale.toStringAsFixed(1)})';
+}
+
+/// Stops waiting for [provider]'s image before its first frame arrives.
+///
+/// Call after removing your own listener from [stream]. Until the first frame
+/// the image cache holds its own listener on the load, so removing a caller's
+/// listener alone leaves the download running. When no other consumer is
+/// listening, evicting the pending entry drops that last listener and a
+/// [MediaImageProvider] load aborts its download. When another consumer still
+/// listens, the entry stays so the finished image is still cached.
+void abandonPendingImage(
+  ImageStream stream,
+  ImageProvider<Object> provider,
+  ImageConfiguration config,
+) {
+  final completer = stream.completer;
+  if (completer is _MediaImageStreamCompleter &&
+      completer._listeners.length != 1) {
+    // Someone besides the cache still wants it, or it already finished.
+    return;
+  }
+  unawaited(
+    provider
+        .obtainKey(config)
+        .then(
+          (key) => PaintingBinding.instance.imageCache.evict(
+            key,
+            includeLive: false,
+          ),
+        ),
+  );
+}
+
+/// Tracks its listeners so [abandonPendingImage] can tell whether anyone
+/// besides the image cache is still waiting for the load.
+class _MediaImageStreamCompleter extends MultiFrameImageStreamCompleter {
+  _MediaImageStreamCompleter({
+    required super.codec,
+    required super.scale,
+    super.debugLabel,
+  });
+
+  final _listeners = <ImageStreamListener>[];
+
+  @override
+  void addListener(ImageStreamListener listener) {
+    _listeners.add(listener);
+    super.addListener(listener);
+  }
+
+  @override
+  void removeListener(ImageStreamListener listener) {
+    _listeners.remove(listener);
+    super.removeListener(listener);
+  }
+}
+
+/// One download shared by every load of the same URL and auth scope. It is
+/// aborted once every load waiting for it has been abandoned, and a load that
+/// arrives after that starts a new download.
+class _SharedFetch {
+  _SharedFetch(
+    Future<Uint8List> Function(Future<void> abort) fetch, {
+    required this.onFinished,
+  }) {
+    bytes = fetch(_abort.future).whenComplete(() {
+      _done = true;
+      onFinished(this);
+    });
+    // Waiting loads handle errors; an abandoned download has none left.
+    bytes.ignore();
+  }
+
+  final void Function(_SharedFetch) onFinished;
+  final _abort = Completer<void>();
+  late final Future<Uint8List> bytes;
+  var _waiting = 0;
+  var _done = false;
+
+  void join() => _waiting++;
+
+  /// Called once per joined load, when it is abandoned or has its result.
+  void leave() {
+    _waiting--;
+    if (_waiting == 0 && !_done && !_abort.isCompleted) {
+      _abort.complete();
+      onFinished(this);
+    }
+  }
 }
 
 /// Thrown when a fetch is suppressed because the URL recently failed.
@@ -399,16 +558,55 @@ class MediaImage extends ConsumerWidget {
     int? cacheWidth, {
     ImageErrorWidgetBuilder? errorBuilder,
   }) {
-    return Image(
-      image: ResizeImage.resizeIfNeeded(cacheWidth, null, provider),
-      fit: fit,
-      width: width,
-      height: height,
-      semanticLabel: semanticLabel,
-      errorBuilder: errorBuilder ?? this.errorBuilder,
-      frameBuilder: frameBuilder,
-      filterQuality: filterQuality,
-      gaplessPlayback: true,
+    final image = ResizeImage.resizeIfNeeded(cacheWidth, null, provider);
+    return _AbandonWhenGone(
+      image: image,
+      child: Image(
+        image: image,
+        fit: fit,
+        width: width,
+        height: height,
+        semanticLabel: semanticLabel,
+        errorBuilder: errorBuilder ?? this.errorBuilder,
+        frameBuilder: frameBuilder,
+        filterQuality: filterQuality,
+        gaplessPlayback: true,
+      ),
     );
+  }
+}
+
+/// Abandons [image]'s download if [child] stops showing it before it loads,
+/// for example when a chat image scrolls away. Otherwise the image cache's
+/// own listener would keep the download, and its share of a slow link, going
+/// until the fetch cap. Another widget still showing the image keeps it.
+class _AbandonWhenGone extends HookWidget {
+  const _AbandonWhenGone({required this.image, required this.child});
+
+  final ImageProvider<Object> image;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final config = createLocalImageConfiguration(context);
+    // Resolve only once the child is gone, and only a still-pending load:
+    // resolving earlier would start the download ahead of the child's
+    // [ScrollAwareImageProvider], defeating its deferral during a fast fling.
+    // The microtask runs after this frame, so the child has stopped
+    // listening and a widget showing the same image elsewhere has started.
+    useEffect(
+      () =>
+          () => scheduleMicrotask(() {
+            final cache = PaintingBinding.instance.imageCache;
+            unawaited(
+              image.obtainKey(config).then((key) {
+                if (!cache.statusForKey(key).pending) return;
+                abandonPendingImage(image.resolve(config), image, config);
+              }),
+            );
+          }),
+      [image],
+    );
+    return child;
   }
 }

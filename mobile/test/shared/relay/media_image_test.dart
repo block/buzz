@@ -4,8 +4,9 @@ import 'dart:typed_data';
 
 import 'package:buzz/shared/relay/media_auth.dart';
 import 'package:buzz/shared/relay/media_image.dart';
-import 'package:flutter/painting.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
 import 'package:nostr/nostr.dart' as nostr;
@@ -213,6 +214,80 @@ void main() {
       expect(fetches, 1);
     });
 
+    test(
+      'abandoning a load another consumer still waits for keeps it cached',
+      () async {
+        var fetches = 0;
+        var aborted = false;
+        final response = Completer<void>();
+        final client = _StreamingClient((request) async {
+          fetches += 1;
+          (request as http.AbortableRequest).abortTrigger!.then((_) {
+            if (!response.isCompleted) aborted = true;
+          });
+          await response.future;
+          return http.StreamedResponse(Stream.value(_pngBytes), 200);
+        });
+        final provider = MediaImageProvider(
+          url: _mediaUrl,
+          auth: _auth(),
+          client: client,
+        );
+        const config = ImageConfiguration.empty;
+        final cell = provider.resolve(config);
+        final cellListener = ImageStreamListener((_, _) {});
+        cell.addListener(cellListener);
+        final prefetch = provider.resolve(config);
+        final loaded = Completer<void>();
+        final prefetchListener = ImageStreamListener((image, _) {
+          image.dispose();
+          if (!loaded.isCompleted) loaded.complete();
+        });
+        prefetch.addListener(prefetchListener);
+
+        // The cell scrolls away while the prefetch still wants the image.
+        cell.removeListener(cellListener);
+        abandonPendingImage(cell, provider, config);
+        response.complete();
+        await loaded.future.timeout(const Duration(seconds: 2));
+        prefetch.removeListener(prefetchListener);
+
+        expect(aborted, isFalse);
+        expect(
+          PaintingBinding.instance.imageCache.containsKey(provider),
+          isTrue,
+        );
+        await _wait(provider.resolve(config));
+        expect(fetches, 1);
+      },
+    );
+
+    test('abandoning a load nobody else waits for aborts it', () async {
+      final aborted = Completer<void>();
+      final client = _StreamingClient((request) async {
+        (request as http.AbortableRequest).abortTrigger!.then((_) {
+          if (!aborted.isCompleted) aborted.complete();
+        });
+        await aborted.future;
+        throw http.RequestAbortedException(request.url);
+      });
+      final provider = MediaImageProvider(
+        url: _mediaUrl,
+        auth: _auth(),
+        client: client,
+      );
+      final stream = provider.resolve(ImageConfiguration.empty);
+      final listener = ImageStreamListener((_, _) {});
+      stream.addListener(listener);
+      stream.removeListener(listener);
+      abandonPendingImage(stream, provider, ImageConfiguration.empty);
+      await aborted.future.timeout(const Duration(seconds: 2));
+      expect(
+        PaintingBinding.instance.imageCache.containsKey(provider),
+        isFalse,
+      );
+    });
+
     test('one URL shown at two decode sizes downloads once', () async {
       var fetches = 0;
       final response = Completer<void>();
@@ -236,6 +311,53 @@ void main() {
       expect(fetches, 1);
     });
 
+    test(
+      'a download shared by two sizes outlives one abandoned size',
+      () async {
+        var fetches = 0;
+        var aborts = 0;
+        final response = Completer<void>();
+        final client = _StreamingClient((request) async {
+          fetches += 1;
+          final trigger = (request as http.AbortableRequest).abortTrigger!;
+          unawaited(
+            trigger.then((_) {
+              if (!response.isCompleted) aborts += 1;
+            }),
+          );
+          await Future.any([response.future, trigger]);
+          if (!response.isCompleted) {
+            throw http.RequestAbortedException(request.url);
+          }
+          return http.StreamedResponse(Stream.value(_pngBytes), 200);
+        });
+        final auth = _auth(nsec: nostr.Keys.generate().nsec);
+        final base = MediaImageProvider(
+          url: _mediaUrl,
+          auth: auth,
+          client: client,
+        );
+        const config = ImageConfiguration.empty;
+        final smallProvider = ResizeImage(base, width: 40);
+        final largeProvider = ResizeImage(base, width: 120);
+        final small = smallProvider.resolve(config);
+        final smallListener = ImageStreamListener((_, _) {});
+        small.addListener(smallListener);
+        final largeDone = _wait(largeProvider.resolve(config));
+        await pumpEventQueue();
+
+        small.removeListener(smallListener);
+        abandonPendingImage(small, smallProvider, config);
+        await pumpEventQueue();
+        expect(aborts, 0);
+        response.complete();
+        await largeDone.timeout(const Duration(seconds: 2));
+        expect(fetches, 1);
+        expect(aborts, 0);
+        expect(MediaImageProvider.debugCooldownUrls, isEmpty);
+      },
+    );
+
     test('sends auth headers with the fetch', () async {
       Map<String, String>? seen;
       final client = http_testing.MockClient((request) async {
@@ -250,6 +372,68 @@ void main() {
       );
       await _wait(provider.resolve(ImageConfiguration.empty));
       expect(seen?['Authorization'], startsWith('Nostr '));
+    });
+
+    test(
+      'a slow body that keeps arriving outlives the stall timeout',
+      () async {
+        const gap = Duration(milliseconds: 60);
+        final client = _StreamingClient((request) async {
+          // Honor the abort trigger the way the real IO client does.
+          var aborted = false;
+          (request as http.AbortableRequest).abortTrigger!.then((_) {
+            aborted = true;
+          });
+          Stream<List<int>> trickle() async* {
+            for (var i = 0; i < _pngBytes.length; i += 12) {
+              await Future<void>.delayed(gap);
+              if (aborted) throw http.RequestAbortedException(request.url);
+              yield _pngBytes.sublist(i, (i + 12).clamp(0, _pngBytes.length));
+            }
+          }
+
+          return http.StreamedResponse(trickle(), 200);
+        });
+        final stopwatch = Stopwatch()..start();
+        await _wait(
+          MediaImageProvider(
+            url: _mediaUrl,
+            auth: _auth(),
+            client: client,
+            stallTimeout: gap * 2.5,
+          ).resolve(ImageConfiguration.empty),
+        ).timeout(const Duration(seconds: 5));
+        // The whole body took several stall windows; only gaps are bounded.
+        expect(stopwatch.elapsed, greaterThan(gap * 5));
+      },
+    );
+
+    test('a body that never ends is aborted at the fetch cap', () async {
+      final client = _StreamingClient((request) async {
+        var aborted = false;
+        (request as http.AbortableRequest).abortTrigger!.then((_) {
+          aborted = true;
+        });
+        Stream<List<int>> endless() async* {
+          while (true) {
+            await Future<void>.delayed(const Duration(milliseconds: 20));
+            if (aborted) throw http.RequestAbortedException(request.url);
+            yield const [0];
+          }
+        }
+
+        return http.StreamedResponse(endless(), 200);
+      });
+      final error = await _waitError(
+        MediaImageProvider(
+          url: _mediaUrl,
+          auth: _auth(),
+          client: client,
+          stallTimeout: const Duration(seconds: 5),
+          maxFetchDuration: const Duration(milliseconds: 200),
+        ).resolve(ImageConfiguration.empty),
+      ).timeout(const Duration(seconds: 3));
+      expect(error, isA<http.RequestAbortedException>());
     });
 
     test('failed URL is not refetched until cooldown elapses', () async {
@@ -284,40 +468,179 @@ void main() {
       expect(fetches, 2);
     });
 
-    test('honors Retry-After on 429 (capped)', () async {
-      var fetches = 0;
-      final client = http_testing.MockClient((request) async {
-        fetches += 1;
-        return http.Response(
-          'rate limited',
-          429,
-          headers: {'retry-after': '120'},
+    test(
+      'honors Retry-After on 429 (capped) without reading the body',
+      () async {
+        var fetches = 0;
+        // A body that never ends: the error must not wait for it.
+        Stream<List<int>> endless() async* {
+          while (true) {
+            await Future<void>.delayed(const Duration(milliseconds: 20));
+            yield const [0];
+          }
+        }
+
+        final client = _StreamingClient((request) async {
+          fetches += 1;
+          return http.StreamedResponse(
+            endless(),
+            429,
+            headers: {'retry-after': '120'},
+          );
+        });
+        final auth = _auth(nsec: nostr.Keys.generate().nsec);
+        var current = DateTime.utc(2026, 7, 21, 12);
+        MediaImageProvider.debugNow = () => current;
+
+        Future<Object?> attempt() async {
+          final provider = MediaImageProvider(
+            url: _mediaUrl,
+            auth: auth,
+            client: client,
+          );
+          return _waitError(provider.resolve(ImageConfiguration.empty));
+        }
+
+        final error = await attempt().timeout(const Duration(seconds: 3));
+        expect(error, isA<NetworkImageLoadException>());
+        expect(fetches, 1);
+
+        current = current.add(const Duration(seconds: 60));
+        expect(await attempt(), isA<MediaImageCooldownException>());
+        expect(fetches, 1);
+
+        current = current.add(const Duration(seconds: 61));
+        await attempt();
+        expect(fetches, 2);
+      },
+    );
+  });
+
+  group('stalls', () {
+    // Each row stalls at a different point; both must abort at the stall
+    // timeout, well before the fetch cap, and put the URL on cooldown.
+    final rows =
+        <
+          String,
+          Future<http.StreamedResponse> Function(
+            http.BaseRequest request,
+            Future<void> aborted,
+          )
+        >{
+          'headers never arrive': (request, aborted) async {
+            await aborted;
+            throw http.RequestAbortedException(request.url);
+          },
+          'the body stops partway': (request, aborted) async {
+            Stream<List<int>> body() async* {
+              yield _pngBytes.sublist(0, 8);
+              await aborted;
+              throw http.RequestAbortedException(request.url);
+            }
+
+            return http.StreamedResponse(body(), 200);
+          },
+        };
+    for (final MapEntry(key: name, value: respond) in rows.entries) {
+      test('a silent connection is aborted when $name', () async {
+        final client = _StreamingClient(
+          (request) => respond(
+            request,
+            (request as http.AbortableRequest).abortTrigger!,
+          ),
         );
+        final stopwatch = Stopwatch()..start();
+        final error = await _waitError(
+          MediaImageProvider(
+            url: _mediaUrl,
+            auth: _auth(),
+            client: client,
+            stallTimeout: const Duration(milliseconds: 150),
+            maxFetchDuration: const Duration(seconds: 30),
+          ).resolve(ImageConfiguration.empty),
+        ).timeout(const Duration(seconds: 5));
+        expect(error, isA<http.RequestAbortedException>());
+        expect(stopwatch.elapsed, lessThan(const Duration(seconds: 5)));
+        expect(MediaImageProvider.debugCooldownUrls, [_mediaUrl]);
       });
-      final auth = _auth(nsec: nostr.Keys.generate().nsec);
-      var current = DateTime.utc(2026, 7, 21, 12);
-      MediaImageProvider.debugNow = () => current;
+    }
+  });
 
-      Future<Object?> attempt() async {
-        final provider = MediaImageProvider(
-          url: _mediaUrl,
-          auth: auth,
-          client: client,
-        );
-        return _waitError(provider.resolve(ImageConfiguration.empty));
-      }
-
-      await attempt();
-      expect(fetches, 1);
-
-      current = current.add(const Duration(seconds: 60));
-      expect(await attempt(), isA<MediaImageCooldownException>());
-      expect(fetches, 1);
-
-      current = current.add(const Duration(seconds: 61));
-      await attempt();
-      expect(fetches, 2);
+  testWidgets('an image that leaves before it loads stops downloading, '
+      'unless another widget still shows it', (tester) async {
+    var aborted = false;
+    var requests = 0;
+    final client = _StreamingClient((request) async {
+      requests += 1;
+      // A slow link: the body has started but does not finish in this test.
+      final body = StreamController<List<int>>()..add(const [0]);
+      (request as http.AbortableRequest).abortTrigger!.then((_) {
+        aborted = true;
+        body
+          ..addError(http.RequestAbortedException(request.url))
+          ..close();
+      });
+      return http.StreamedResponse(body.stream, 200);
     });
+    final shown = ValueNotifier(2);
+    addTearDown(shown.dispose);
+    // A fast fling: the scrollable asks images to defer loading.
+    final flinging = ValueNotifier(true);
+    addTearDown(flinging.dispose);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          mediaGetAuthServiceProvider.overrideWithValue(_auth()),
+          mediaHttpClientProvider.overrideWithValue(client),
+        ],
+        child: MaterialApp(
+          home: ListenableBuilder(
+            listenable: Listenable.merge([shown, flinging]),
+            builder: (_, _) => SingleChildScrollView(
+              physics: flinging.value ? const _DeferringPhysics() : null,
+              child: Column(
+                children: [
+                  for (var i = 0; i < shown.value; i++)
+                    const SizedBox.square(
+                      dimension: 40,
+                      child: MediaImage(url: _mediaUrl),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    Future<void> settle() async {
+      for (var i = 0; i < 3; i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 50)),
+        );
+        await tester.pump();
+      }
+    }
+
+    await settle();
+    // Nothing downloads while the fling defers loading.
+    expect(requests, 0);
+
+    flinging.value = false;
+    await settle();
+    // Both copies share one download.
+    expect(requests, 1);
+
+    // One copy scrolls away; the other still shows the image.
+    shown.value = 1;
+    await settle();
+    expect(aborted, isFalse);
+
+    // The last one leaves: the download stops, and the URL itself did not
+    // fail, so it is not put on cooldown.
+    shown.value = 0;
+    await settle();
+    expect(aborted, isTrue);
+    expect(MediaImageProvider.debugCooldownUrls, isEmpty);
   });
 }
 
@@ -354,4 +677,20 @@ class _StreamingClient extends http.BaseClient {
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) =>
       respond(request);
+}
+
+/// Physics that always recommend deferring image loads, as during a fling.
+class _DeferringPhysics extends ScrollPhysics {
+  const _DeferringPhysics({super.parent});
+
+  @override
+  _DeferringPhysics applyTo(ScrollPhysics? ancestor) =>
+      _DeferringPhysics(parent: buildParent(ancestor));
+
+  @override
+  bool recommendDeferredLoading(
+    double velocity,
+    ScrollMetrics metrics,
+    BuildContext context,
+  ) => true;
 }

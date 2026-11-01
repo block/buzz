@@ -7,6 +7,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
+import '../relay/media_image.dart';
+
 /// UIKit's horizontally scrolling photo strip, using the app's image providers.
 /// Authentication and image-cache isolation remain owned by Flutter.
 class IosMediaCarousel extends HookWidget {
@@ -129,9 +131,9 @@ class IosMediaCarousel extends HookWidget {
 }
 
 // Keep native subscriptions and unresolved provider loads bounded together.
-// A cancelled load keeps its slot until its first frame/error. MediaImageProvider
-// aborts stalled HTTP requests at its deadline, allowing queued cells to progress
-// without releasing slots while their transports are still running.
+// A load cancelled or disposed before its first frame evicts its pending cache
+// entry and stops listening; with no listener left, MediaImageProvider aborts its
+// download, so the slot is released at once.
 class _CarouselImages {
   _CarouselImages(this.channel);
   final MethodChannel channel;
@@ -159,10 +161,15 @@ class _CarouselImages {
     image.cancelled = true;
     image.nextFrame?.dispose();
     image.nextFrame = null;
-    if (image.receivedFrame) {
-      image.detach();
-      if (!image.encoding) _finish(image);
-    }
+    image.detach();
+    _releasePending(image);
+    if (!image.encoding) _finish(image);
+  }
+
+  void _releasePending(_CarouselImage image) {
+    final stream = image.stream;
+    if (stream == null || image.receivedFrame) return;
+    abandonPendingImage(stream, image.provider, image.config);
   }
 
   void _drain() {
@@ -254,6 +261,8 @@ class _CarouselImages {
     _queued.clear();
     for (final image in _running.values.toList()) {
       image.cancelled = true;
+      image.detach();
+      _releasePending(image);
       _finish(image);
     }
   }

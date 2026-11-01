@@ -29,12 +29,26 @@ void carouselPreviewTests() {
         }
         return null;
       });
-      final client = MockClient((request) {
+      final aborted = <String>{};
+      final client = MockClient.streaming((request, _) async {
         final url = request.url.toString();
         started.add(url);
         final response = responses[url] = Completer<http.Response>();
-
-        return response.future;
+        if (request case http.Abortable(:final abortTrigger?)) {
+          unawaited(
+            abortTrigger.then((_) {
+              // The provider also fires the trigger after a finished load.
+              if (response.isCompleted) return;
+              aborted.add(url);
+              response.completeError(http.RequestAbortedException(request.url));
+            }),
+          );
+        }
+        final body = await response.future;
+        return http.StreamedResponse(
+          Stream.value(body.bodyBytes),
+          body.statusCode,
+        );
       });
       Future<void> waitForCount(int count) async {
         for (
@@ -98,7 +112,59 @@ void carouselPreviewTests() {
       }
       await tester.pumpAndSettle();
       expect(started.toSet(), urls.take(5).toSet());
-      // No native subscribeImage or page callback was sent by this harness.
+      Future<void> page(int index) async {
+        await messenger.handlePlatformMessage(
+          channels.single.name,
+          channels.single.codec.encodeMethodCall(MethodCall('page', index)),
+          (_) {},
+        );
+        await tester.pump();
+        await tester.pump();
+      }
+
+      // Jumping to the end prefetches around the new page.
+      await page(9);
+      await waitForCount(7);
+      expect(started.skip(5), [urls[9], urls[8]]);
+      Future<void> native(String method, Object argument) async {
+        await tester.runAsync(
+          () => messenger.handlePlatformMessage(
+            channels.single.name,
+            channels.single.codec.encodeMethodCall(
+              MethodCall(method, argument),
+            ),
+            (_) {},
+          ),
+        );
+        await tester.pump();
+      }
+
+      // A native cell that cancels and comes back while the prefetch is still
+      // loading joins that download instead of starting another.
+      await native('subscribeImage', {'id': 'a', 'index': 9});
+      await native('cancelImage', 'a');
+      await native('subscribeImage', {'id': 'b', 'index': 9});
+      for (var attempt = 0; attempt < 10; attempt++) {
+        await tester.pump();
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 10)),
+        );
+      }
+      expect(started, hasLength(7));
+      expect(aborted, isEmpty);
+      await native('cancelImage', 'b');
+      // Leaving before they finish abandons both downloads and frees the
+      // workers for the new window.
+      await page(0);
+      for (var attempt = 0; attempt < 100 && aborted.length < 2; attempt++) {
+        await tester.pump();
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 10)),
+        );
+      }
+      expect(aborted, {urls[9], urls[8]});
+      await waitForCount(9);
+      expect(started.skip(7), [urls[0], urls[1]]);
       await tester.pumpWidget(const SizedBox());
       expect(tester.takeException(), isNull);
     },
