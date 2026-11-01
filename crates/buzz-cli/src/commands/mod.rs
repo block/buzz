@@ -19,6 +19,8 @@ pub mod projects;
 pub mod reactions;
 mod repo_default_branch;
 pub mod repos;
+pub mod sidebar;
+mod sidebar_doc;
 pub mod social;
 pub mod upload;
 pub mod users;

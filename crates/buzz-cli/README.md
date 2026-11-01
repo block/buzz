@@ -90,6 +90,11 @@ buzz messages vote --event <event-id> --direction up
 buzz canvas get --channel <uuid>
 buzz canvas set --channel <uuid> --content "# Welcome"
 
+# Sidebar sections (your own sidebar, synced with Buzz desktop)
+buzz sidebar sections create --name "Engineering" --icon "🛠"
+buzz sidebar sections move --section "Engineering" --channel <uuid> --channel <uuid>
+buzz sidebar sections list
+
 # Agent Memory (NIP-AE)
 buzz mem ls
 buzz mem get <slug>
@@ -105,6 +110,12 @@ buzz repos protect remove --id my-repo --ref refs/heads/main
 # Pipe to jq
 buzz channels list | jq '.[].name'
 ```
+
+`sidebar sections` edits the signing identity's own sidebar. Each command is
+one read and one publish, so a multi-channel `move` lands together. `--section`
+takes a section id or a unique section name. A repeated command prints
+`"message": "unchanged"` and publishes nothing. Concurrent edits from another
+CLI run or another client can overwrite each other, and the last publish wins.
 
 `protect set` replaces every existing rule for the exact ref pattern. Any
 constraint omitted from the command is removed. `protect list` reports malformed
@@ -144,6 +155,13 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `remove-member` | Remove a member |
 | `canvas` | `get` | Get channel canvas |
 | | `set` | Set channel canvas |
+| `sidebar` | `sections list` | List your sections and their channels |
+| | `sections create` | Create a section at the end of your sidebar |
+| | `sections update` | Rename a section or change its icon |
+| | `sections delete` | Delete a section |
+| | `sections reorder` | Put sections in order |
+| | `sections move` | Move one or more channels into a section |
+| | `sections unassign` | Return channels to the default channel list |
 | `reactions` | `add` | React to a message |
 | | `remove` | Remove a reaction |
 | | `get` | List reactions |
