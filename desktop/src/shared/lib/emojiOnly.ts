@@ -136,3 +136,19 @@ export function isEmojiOnlyMessage(
 
   return sawEmoji;
 }
+/** True only when the entire value is one native emoji grapheme cluster. */
+export function isSingleNativeEmoji(value: string): boolean {
+  if (!value) return false;
+  const cluster = readGrapheme(value, 0);
+  if (cluster !== value) return false;
+
+  nativeEmojiSet ??= buildNativeEmojiSet();
+  if (nativeEmojiSet.has(cluster)) return true;
+
+  // Keep future pictographs working without accepting arbitrary text that a
+  // malformed ZWJ sequence caused readGrapheme() to consume (for example,
+  // `👩‍a`). Every ZWJ component must itself be pictographic.
+  return /^\p{Extended_Pictographic}(?:\ufe0f|[\u{1f3fb}-\u{1f3ff}])?(?:\u200d\p{Extended_Pictographic}(?:\ufe0f|[\u{1f3fb}-\u{1f3ff}])?)*$/u.test(
+    cluster,
+  );
+}
