@@ -31,6 +31,10 @@ class _Batch {
   /// next sync replaces the batch with a fresh subscription.
   bool stale = false;
 
+  /// Bumped by each retry, so a job that awaited proof across one doesn't
+  /// promote records the retry left unchecked.
+  int retries = 0;
+
   /// Subjects that were checked when the retry began, checked again at the
   /// replay's EOSE.
   final Set<String> resume = {};
@@ -325,6 +329,7 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
   void _onRetry(_Batch batch) {
     if (!batch.active) return;
     batch.stale = true;
+    batch.retries++;
     if (!batch.ready) return;
     batch.resume.addAll(batch.subjects.where(_checked.contains));
     _checked.removeAll(batch.subjects);
@@ -342,7 +347,9 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
       if (batch.resume.isEmpty) return;
       final resume = Set.of(batch.resume);
       batch.resume.clear();
+      final retries = batch.retries;
       _enqueue(batch, generation, () async {
+        if (batch.retries != retries) return;
         _checked.addAll(resume);
         _publish();
       });
@@ -354,18 +361,27 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
     final early = List.of(batch.early);
     batch.early.clear();
     final candidates = batch.candidates;
+    final retries = batch.retries;
     _enqueue(batch, generation, () async {
       final proven = await _prove(early);
       if (!_live(batch, generation)) return;
       _accept(proven, authority);
+      // A retry while proof ran left these subjects for the replay or the
+      // replacement subscription to reconcile.
+      if (batch.retries != retries) {
+        _publish();
+        return;
+      }
       final seen = {
         for (final event in proven) verifiedProfileSubject(event, authority)!,
       };
       // A full response that omits subjects may be truncated: only a short
-      // response proves absence.
+      // response proves absence. A retried response resumed after the events
+      // already delivered, so it never does.
       final complete =
-          candidates < batch.subjects.length ||
-          seen.length == batch.subjects.length;
+          retries == 0 &&
+          (candidates < batch.subjects.length ||
+              seen.length == batch.subjects.length);
       for (final subject in batch.subjects) {
         if (!complete && !seen.contains(subject)) continue;
         _checked.add(subject);

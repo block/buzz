@@ -170,31 +170,34 @@ class VerifiedProfile {
   );
 }
 
-/// The subject a kind 30382 event addresses: its first `d` tag, when the
-/// event is by [authority] and the tag is a lowercase hex pubkey.
-///
-/// A newer signed event with a malformed profile still replaces the older one
-/// at this address, so a malformed projection clears the earlier verified name
-/// instead of preserving it. Callers must have verified id and signature.
-/// Longer than any valid tag name or value (64 scalar values is at most 128
-/// UTF-16 code units).
-const _maxTagValue = 256;
+/// Size bounds applied before any buffering or proof work. Far looser than a
+/// valid projection (empty content, at most eight two-element tags of at most
+/// 128 UTF-16 code units), so a small malformed event still takes its address.
+const _maxContent = 1024;
+const _maxTags = 32;
+const _maxTagElements = 4;
+const _maxTagValue = 1024;
 
+/// The subject a kind 30382 event addresses: its first `d` tag, when the
+/// event is by [authority], within the size bounds, and the tag is a
+/// lowercase hex pubkey.
+///
+/// Projection shape is not checked here: a newer signed event with a
+/// malformed profile still replaces the older one at this address, so it
+/// clears the earlier verified name instead of preserving it (only the latest
+/// projection counts). Callers must have verified id and signature.
 String? verifiedProfileSubject(
   NostrEvent event,
   VerifiedProfileAuthority authority,
 ) {
   if (event.kind != verifiedProfileKind ||
       event.pubkey != authority.pubkey ||
-      // Bounded before any buffering or proof work: a projection or
-      // retraction has empty content and at most eight short two-element tags.
-      event.content.isNotEmpty ||
-      event.tags.length > 8 ||
+      event.content.length > _maxContent ||
+      event.tags.length > _maxTags ||
       event.tags.any(
         (tag) =>
-            tag.length != 2 ||
-            tag[0].length > _maxTagValue ||
-            tag[1].length > _maxTagValue,
+            tag.length > _maxTagElements ||
+            tag.any((value) => value.length > _maxTagValue),
       )) {
     return null;
   }

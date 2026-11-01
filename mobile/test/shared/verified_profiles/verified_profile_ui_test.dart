@@ -64,14 +64,27 @@ void main() {
       ),
     );
     expect(find.byKey(const ValueKey('verified-mark')), findsOneWidget);
-    expect(find.byTooltip('Verified by Example Corp'), findsOneWidget);
+    expect(find.byTooltip('Name verified by Example Corp'), findsOneWidget);
+    // The mark's Semantics owns its label; the Tooltip adds no second one.
+    expect(
+      find.descendant(
+        of: find.byType(VerifiedMark),
+        matching: find.byWidgetPredicate(
+          (widget) => widget is Semantics && widget.properties.tooltip != null,
+        ),
+      ),
+      findsNothing,
+    );
     expect(find.text('Augusta Ada King'), findsOneWidget);
-    expect(find.text('Verified by Example Corp'), findsOneWidget);
+    expect(find.text('Name verified by Example Corp'), findsOneWidget);
+    expect(find.text(verifiedHistoricalNote), findsOneWidget);
     expect(find.text('Last verified 2 days ago'), findsOneWidget);
 
     directory.replace({ada: record(checked: false)});
     await tester.pump();
     expect(find.text('Last verified 2 days ago (cached)'), findsOneWidget);
+    // A cached record isn't presented as freshly checked: no mark.
+    expect(find.byKey(const ValueKey('verified-mark')), findsNothing);
 
     // Hidden discovery or a retraction removes every trace.
     directory.replace({});

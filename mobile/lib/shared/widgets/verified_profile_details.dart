@@ -4,6 +4,15 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../theme/theme.dart';
 import '../verified_profiles/verified_profile_directory.dart';
 
+/// The mark's label. NIP-FI verification is historical: it covers the name and
+/// key, not current account access or issuer endorsement.
+String verifiedByLabel(String issuerLabel) => 'Name verified by $issuerLabel';
+
+/// What a verification does and doesn't say, shown with its details.
+const verifiedHistoricalNote =
+    'Verifies this name and key as of that time, '
+    'not current account access.';
+
 /// "Last verified" wording for a historical record: never current access.
 String lastVerifiedLabel(int verifiedAt, DateTime now) {
   final seconds = now
@@ -39,9 +48,10 @@ class VerifiedProfileDetails extends ConsumerWidget {
     );
     final lines = [
       if (profile.fullName != null) profile.fullName!,
-      'Verified by ${profile.issuerLabel}',
+      verifiedByLabel(profile.issuerLabel),
       '${lastVerifiedLabel(profile.verifiedAt, now ?? DateTime.now())}'
           '${profile.checked ? '' : ' (cached)'}',
+      verifiedHistoricalNote,
     ];
     return Padding(
       padding: const EdgeInsets.only(top: Grid.xxs),

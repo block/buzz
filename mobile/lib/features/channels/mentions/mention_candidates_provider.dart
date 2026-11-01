@@ -8,6 +8,7 @@ import '../../../shared/mentions/agent_identity_provider.dart';
 import '../../../shared/relay/relay.dart';
 import '../../../shared/profile/user_cache_provider.dart';
 import '../../../shared/profile/user_profile.dart';
+import '../../../shared/verified_profiles/verified_profile_directory.dart';
 import '../channel.dart';
 import '../channel_management_provider.dart';
 import '../channels_provider.dart';
@@ -228,10 +229,18 @@ final mentionCandidatesProvider = Provider.family
         final page = search.asData?.value;
         if (page != null) candidates = build(page);
       }
-      if (!matchesMentionQuery(args.query, [
+      // A verified name replaces the self-declared one for matching, ranking
+      // and the inserted text, so typing it finds the verified person.
+      final verified = ref.watch(verifiedProfilesProvider);
+      candidates = [
         for (final candidate in candidates)
-          if (candidate.displayName?.trim().isNotEmpty == true)
-            candidate.displayName!.trim(),
+          switch (verified[candidate.pubkey.toLowerCase()]) {
+            final profile? => candidate.withVerifiedName(profile.displayName),
+            null => candidate,
+          },
+      ];
+      if (!matchesMentionQuery(args.query, [
+        for (final candidate in candidates) ...candidate.searchNames,
       ])) {
         return const [];
       }
