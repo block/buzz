@@ -706,6 +706,32 @@ pub struct ReapedEphemeralChannel {
     pub channel_id: Uuid,
 }
 
+/// The channel row, deleted or not, on a caller-owned transaction, or `None`
+/// when it is missing.
+pub(crate) async fn channel_in_transaction(
+    tx: &mut crate::AdmittedTx,
+    channel_id: Uuid,
+) -> Result<Option<ChannelRecord>> {
+    let community_id = tx.community();
+    let row = sqlx::query(
+        r#"
+        SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
+               description, canvas,
+               created_by, created_at, updated_at, archived_at, deleted_at,
+               nip29_group_id, topic_required, max_members,
+               topic, topic_set_by, topic_set_at,
+               purpose, purpose_set_by, purpose_set_at,
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
+        FROM channels WHERE community_id = $1 AND id = $2
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_optional(tx.conn())
+    .await?;
+    row.map(row_to_channel_record).transpose()
+}
+
 pub(crate) fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<ChannelRecord> {
     let id: Uuid = row.try_get("id")?;
     let topic_required: bool = row.try_get("topic_required")?;

@@ -760,7 +760,7 @@ async fn assert_entry_points(db: &Db, community: CommunityId, channel: Uuid, key
         .expect("sign member snapshot");
     assert!(
         snapshot
-            .replace_member_event(&roster)
+            .replace_group_state_event(&roster)
             .await
             .expect("replace member snapshot")
             .1
