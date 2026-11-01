@@ -82,7 +82,8 @@ void main() {
           ? 'interrupted Solo recovery uses fresh membership before creating'
           : 'New Solo chat submits its discovery label through the production action',
       (tester) async {
-        final flutterSheet = defaultTargetPlatform == TargetPlatform.android;
+        final flutterSheet =
+            defaultTargetPlatform == TargetPlatform.android && recoverExisting;
         SharedPreferences.setMockInitialValues({});
         final prefs = await SharedPreferences.getInstance();
         final owner = nostr.Keys.generate(), agent = nostr.Keys.generate();
@@ -245,24 +246,6 @@ void main() {
         }
         if (flutterSheet) {
           final row = find.byKey(const ValueKey('new-session-assistant'));
-          if (!recoverExisting) {
-            expect(find.text('Choose an agent'), findsOneWidget);
-            await tester.enterText(
-              find.byKey(const ValueKey('new-session-name')),
-              'Mobile Solo',
-            );
-            await tester.tap(find.text('Create chat'));
-            await tester.pumpAndSettle();
-            expect(
-              find.text('Enter a name and choose an agent.'),
-              findsOneWidget,
-            );
-            expect(relay.submitted, isEmpty);
-            expect(MeChatCreation.pending(sync), isNull);
-            await tester.pumpWidget(const SizedBox.shrink());
-            await tester.pumpAndSettle();
-            return;
-          }
           final semantics = tester.ensureSemantics();
           await tester.pump();
           expect(find.text('Choose an agent'), findsNothing);

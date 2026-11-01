@@ -111,7 +111,13 @@ class _ReadyMeChat extends HookConsumerWidget {
           IconButton(
             key: const ValueKey('new-session-assistant'),
             tooltip: 'Agent: $label',
-            icon: const Icon(BuzzIcons.bot),
+            icon: AvatarImage(
+              imageUrl: ref.watch(userCacheProvider)[agent]?.avatarUrl,
+              radius: 16,
+              isAgent: true,
+              backgroundColor: context.controlSurface,
+              fallback: Text(label.isEmpty ? 'A' : label.characters.first),
+            ),
             onPressed: locked ? null : chooseAgent,
           ),
         ],

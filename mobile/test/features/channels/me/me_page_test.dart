@@ -215,7 +215,7 @@ void main() {
     },
   );
   testWidgets(
-    'footer new chat offers project selection without losing its name',
+    'Android new chat opens the composer with Bestie and optional workspace',
     (tester) async {
       final action = ValueNotifier<VoidCallback?>(null);
       addTearDown(action.dispose);
@@ -268,40 +268,31 @@ void main() {
       expect(action.value, isNotNull);
       action.value!();
       await tester.pumpAndSettle();
-      expect(find.byType(BottomSheet), findsOneWidget);
-      expect(
-        find.byKey(const ValueKey('new-session-name')).hitTestable(),
-        findsOneWidget,
-      );
-      expect(
-        find.byKey(const ValueKey('new-session-assistant')).hitTestable(),
-        findsOneWidget,
-      );
-      await tester.enterText(
-        find.byKey(const ValueKey('new-session-name')),
-        'Design session',
-      );
+      expect(find.byType(BottomSheet), findsNothing);
+      expect(find.byType(ComposeBar), findsOneWidget);
+      expect(find.byKey(const ValueKey('new-session-name')), findsNothing);
+      expect(find.byTooltip('Agent: Owner Name'), findsOneWidget);
       await tester.tap(find.byKey(const ValueKey('new-session-project')));
       await tester.pumpAndSettle();
+      expect(find.text('No Workspace'), findsOneWidget);
       await tester.tap(find.text('Mobile app').last);
       await tester.pumpAndSettle();
-      expect(find.text('Design session'), findsOneWidget);
-      expect(find.text('Mobile app'), findsWidgets);
+      expect(find.byTooltip('Workspace: Mobile app'), findsOneWidget);
       await tester.tap(find.byKey(const ValueKey('new-session-project')));
       await tester.pumpAndSettle();
       await tester.tap(find.text('No Workspace').last);
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Create chat'));
-      await tester.pumpAndSettle();
-      expect(find.text('Enter a name and choose an agent.'), findsOneWidget);
-      expect(find.text('Design session'), findsOneWidget);
-      // The owner's label and its initial outrank the agent's own profile.
+      expect(find.byTooltip('Workspace: No Workspace'), findsOneWidget);
       await tester.tap(find.byKey(const ValueKey('new-session-assistant')));
       await tester.pumpAndSettle();
+      expect(
+        tester.getSize(find.byType(MeAssistantList)).height,
+        lessThan(200),
+      );
       await tester.tap(find.text('Owner Name').last);
       await tester.pumpAndSettle();
+      expect(find.byType(BottomSheet), findsNothing);
       final row = find.byKey(const ValueKey('new-session-assistant'));
-      expect(find.text('Owner Name'), findsOneWidget);
       expect(
         find.descendant(of: row, matching: find.text('O')),
         findsOneWidget,

@@ -37,15 +37,14 @@ Future<(Channel, String)?> _showNewMeChat(
     }
   }
   if (!context.mounted) return null;
+  final sync = ref.read(meSyncProvider);
+  final pending = MeChatCreation.pending(sync);
+  if (pending == null) {
+    return Navigator.of(context).push<(Channel, String)>(
+      MaterialPageRoute(builder: (_) => const _ReadyMeChat()),
+    );
+  }
   if (defaultTargetPlatform == TargetPlatform.iOS) {
-    final sync = ref.read(meSyncProvider);
-    final pending = MeChatCreation.pending(sync);
-    if (pending == null) {
-      return Navigator.of(context).push<(Channel, String)>(
-        MaterialPageRoute(builder: (_) => const _ReadyMeChat()),
-      );
-    }
-
     final id = pending.id;
     String name = pending.name;
     String? assistant = pending.agent;
