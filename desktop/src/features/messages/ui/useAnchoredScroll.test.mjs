@@ -24,18 +24,19 @@ function fakeContainer({ clientHeight, scrollHeight, scrollTop }) {
 }
 
 test("split panel settles only an already-bottomed timeline", () => {
-  assert.equal(
-    shouldSettleForSplitPanel({ isAtBottom: true, splitPanelOpen: true }),
-    true,
-  );
-  assert.equal(
-    shouldSettleForSplitPanel({ isAtBottom: false, splitPanelOpen: true }),
-    false,
-  );
-  assert.equal(
-    shouldSettleForSplitPanel({ isAtBottom: true, splitPanelOpen: false }),
-    false,
-  );
+  for (const [isAtBottom, splitPanelOpen, targetHeld, expected] of [
+    [true, true, false, true],
+    [false, true, false, false],
+    [true, false, false, false],
+    // A held navigation target keeps the viewport even at the floor.
+    [true, true, true, false],
+  ]) {
+    assert.equal(
+      shouldSettleForSplitPanel({ isAtBottom, splitPanelOpen, targetHeld }),
+      expected,
+      JSON.stringify({ isAtBottom, splitPanelOpen, targetHeld }),
+    );
+  }
 });
 
 test("virtualized bottom settle arms for pinned appends and replacements", () => {
