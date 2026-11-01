@@ -15,6 +15,7 @@ class AndroidExpandingMenuButton extends HookWidget {
   const AndroidExpandingMenuButton({
     required this.actions,
     this.label = 'New',
+    this.expansionBoundsContext,
     this.trigger,
     this.width = 112,
     this.height = 56,
@@ -23,6 +24,8 @@ class AndroidExpandingMenuButton extends HookWidget {
     super.key,
   });
 
+  /// Optional control row whose bounds the expanded menu should cover.
+  final BuildContext? expansionBoundsContext;
   final String label;
   final Widget? trigger;
   final double width, height;
@@ -59,9 +62,18 @@ class AndroidExpandingMenuButton extends HookWidget {
                     box.getTransformTo(overlay),
                     Offset.zero & box.size,
                   );
+                  final expansionBox =
+                      expansionBoundsContext?.findRenderObject() as RenderBox?;
+                  final expansionBounds = expansionBox == null
+                      ? null
+                      : MatrixUtils.transformRect(
+                          expansionBox.getTransformTo(overlay),
+                          Offset.zero & expansionBox.size,
+                        );
                   final captured = actions;
                   final route = _CreateMenuRoute(
                     anchor: rect,
+                    expansionBounds: expansionBounds,
                     label: label,
                     trigger: trigger ?? const _NewLabel(),
                     dividerBefore: dividerBefore,
@@ -114,6 +126,7 @@ class _NewLabel extends StatelessWidget {
 class _CreateMenuRoute extends PopupRoute<int> {
   _CreateMenuRoute({
     required this.anchor,
+    required this.expansionBounds,
     required this.label,
     required this.trigger,
     required this.dividerBefore,
@@ -123,6 +136,7 @@ class _CreateMenuRoute extends PopupRoute<int> {
     required this.dismissLabel,
   });
   final Rect anchor;
+  final Rect? expansionBounds;
   final String label;
   final Widget trigger;
   final Set<int> dividerBefore;
@@ -151,7 +165,7 @@ class _CreateMenuRoute extends PopupRoute<int> {
   ) {
     final media = MediaQuery.of(context);
     final width = math.min(
-      240.0,
+      expansionBounds?.width ?? 240.0,
       media.size.width - media.padding.horizontal - Grid.lg,
     );
     final rowHeight = math.max(48.0, media.textScaler.scale(20) + Grid.sm);
@@ -165,13 +179,16 @@ class _CreateMenuRoute extends PopupRoute<int> {
     );
     final expandDown = anchor.center.dy < media.size.height / 2;
     final left =
-        (expandDown ? anchor.right - width : anchor.center.dx - width / 2)
+        (expansionBounds?.left ??
+                (expandDown
+                    ? anchor.right - width
+                    : anchor.center.dx - width / 2))
             .clamp(
               media.padding.left + Grid.xs,
               media.size.width - media.padding.right - Grid.xs - width,
             )
             .toDouble();
-    final bottom = anchor.bottom
+    final bottom = (expansionBounds ?? anchor).bottom
         .clamp(
           media.padding.top + Grid.xs + height,
           media.size.height - media.padding.bottom,

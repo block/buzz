@@ -71,6 +71,7 @@ struct SettingMenuSelectionTests {
       ]], messenger: messenger
     )
     let button = grouped.view().subviews.compactMap { $0 as? NavigationGlassButton }.first!
+    precondition(button.preferredMenuElementOrder == .fixed)
     let groups = button.menu!.children.compactMap { $0 as? UIMenu }
     precondition(groups.map(\.title) == ["Solo", "Team"])
     precondition(groups.map { $0.children.count } == [2, 2])

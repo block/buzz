@@ -223,9 +223,21 @@ void main() {
       await tester.pumpAndSettle();
       chat!.value = () => created++;
       await tester.pumpAndSettle();
+      final controlsBounds = tester.getRect(find.byType(MessagesNavigationBar));
       await tester.tap(find.byTooltip('New'));
       await tester.pumpAndSettle();
       expect(find.text('New workspace'), findsOneWidget);
+      final menuBounds = tester.getRect(
+        find
+            .ancestor(
+              of: find.text('New workspace'),
+              matching: find.byType(Material),
+            )
+            .first,
+      );
+      expect(menuBounds.left, closeTo(controlsBounds.left, .01));
+      expect(menuBounds.right, closeTo(controlsBounds.right, .01));
+      expect(menuBounds.bottom, closeTo(controlsBounds.bottom, .01));
       expect(
         tester.getTopLeft(find.text('Solo').last).dy,
         lessThan(tester.getTopLeft(find.text('New chat')).dy),
