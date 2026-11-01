@@ -53,33 +53,59 @@ fn child_env(cmd: &tokio::process::Command, name: &str) -> Option<String> {
 /// next turn started. The task reads every line as soon as it arrives.
 ///
 /// Lines that only feed [`background::BackgroundWork`] are consumed by the task
-/// and never queued.
+/// and never queued. Queued lines hold up to [`STDOUT_BUFFER_BYTES`]; beyond
+/// that the task stops reading until the consumer catches up, which leaves the
+/// rest in the pipe as before.
 struct StdoutLines {
-    lines: tokio::sync::mpsc::UnboundedReceiver<Result<String, LinesCodecError>>,
+    lines: tokio::sync::mpsc::UnboundedReceiver<QueuedLine>,
     task: tokio::task::JoinHandle<()>,
 }
+
+/// A line and its share of the byte budget, returned when the line is taken.
+type QueuedLine = (
+    Result<String, LinesCodecError>,
+    Option<tokio::sync::OwnedSemaphorePermit>,
+);
+
+/// Most bytes of agent stdout queued and not yet taken by a reader.
+const STDOUT_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
 impl StdoutLines {
     fn spawn(stdout: ChildStdout, background: Arc<Mutex<background::BackgroundWork>>) -> Self {
         let (tx, lines) = tokio::sync::mpsc::unbounded_channel();
+        let budget = Arc::new(tokio::sync::Semaphore::new(STDOUT_BUFFER_BYTES));
         let task = tokio::spawn(async move {
             // LinesCodec::new_with_max_length enforces MAX_LINE_SIZE at the
             // read level — prevents OOM from rogue agents writing infinite
             // non-newline bytes.
-            let mut framed =
-                FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_LINE_SIZE));
+            let codec = || LinesCodec::new_with_max_length(MAX_LINE_SIZE);
+            let mut framed = FramedRead::new(stdout, codec());
             while let Some(read) = framed.next().await {
-                if let Ok(line) = &read {
-                    let consumed = background
-                        .lock()
-                        .map(|mut work| work.observe_line(line))
-                        .unwrap_or(false);
-                    if consumed {
-                        continue;
+                let permit = match &read {
+                    Ok(line) => {
+                        if let Some(update) = background::parse_sdk_message(line) {
+                            if let Ok(mut work) = background.lock() {
+                                work.apply(update);
+                            }
+                            continue;
+                        }
+                        let bytes = line.len().min(STDOUT_BUFFER_BYTES) as u32;
+                        match Arc::clone(&budget).acquire_many_owned(bytes).await {
+                            Ok(permit) => Some(permit),
+                            Err(_) => break,
+                        }
                     }
-                }
-                if tx.send(read).is_err() {
+                    Err(_) => None,
+                };
+                let overlong = matches!(read, Err(LinesCodecError::MaxLineLengthExceeded));
+                let io_error = matches!(read, Err(LinesCodecError::Io(_)));
+                if tx.send((read, permit)).is_err() || io_error {
                     break;
+                }
+                if overlong {
+                    // A codec that failed once yields nothing more. The agent
+                    // still lives, so keep reading its pipe with a fresh one.
+                    framed = FramedRead::new(framed.into_inner(), codec());
                 }
             }
             // Dropping `tx` ends the stream: the next read sees the agent exit.
@@ -92,13 +118,13 @@ impl StdoutLines {
 
     /// The next line, waiting for one. `None` once the agent closed stdout.
     async fn next(&mut self) -> Option<Result<String, LinesCodecError>> {
-        self.lines.recv().await
+        self.lines.recv().await.map(|(read, _permit)| read)
     }
 
     /// The next line if one is buffered, without waiting.
     fn try_next(&mut self) -> Result<Option<Result<String, LinesCodecError>>, AcpError> {
         match self.lines.try_recv() {
-            Ok(read) => Ok(Some(read)),
+            Ok((read, _permit)) => Ok(Some(read)),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => Ok(None),
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => Err(AcpError::AgentExited),
         }
@@ -3561,7 +3587,7 @@ mod tests {
         let reply = std::env::temp_dir().join(format!("buzz-acp-perm-{}", uuid::Uuid::new_v4()));
         let request = r#"{"jsonrpc":"2.0","id":"p1","method":"session/request_permission","params":{"sessionId":"s1","options":[{"optionId":"yes","kind":"allow_once"},{"optionId":"no","kind":"reject_once"}]}}"#;
         let mut client = spawn_script(&format!(
-            "echo '{request}'; IFS= read -r line; printf '%s' \"$line\" > '{}'; sleep 10",
+            "echo '{request}'; IFS= read -r line; printf '%s' \"$line\" > '{0}.tmp'; mv '{0}.tmp' '{0}'; sleep 10",
             reply.display()
         ))
         .await;
@@ -3596,8 +3622,76 @@ mod tests {
         );
         assert_eq!(
             client.pending_background_work(),
-            vec!["local_bash: wait for CI".to_owned()]
+            vec!["local_bash".to_owned()]
         );
+    }
+
+    /// One `service_idle` call handles at most `IDLE_SERVICE_MAX_LINES`; the
+    /// rest waits for the next call.
+    #[tokio::test]
+    async fn service_idle_handles_a_bounded_batch_per_call() {
+        let marker = std::env::temp_dir().join(format!("buzz-acp-batch-{}", uuid::Uuid::new_v4()));
+        let lines = IDLE_SERVICE_MAX_LINES + 44;
+        let mut client = spawn_script(&format!(
+            "for i in $(seq {lines}); do echo noise; done; touch '{}'; sleep 10",
+            marker.display()
+        ))
+        .await;
+        assert!(
+            wait_for_file(&marker).await,
+            "script did not print its lines"
+        );
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while client.reader.lines.len() < lines {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "lines were not queued"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        client.service_idle().await.expect("first batch");
+        let mut rest = 0;
+        while let Some(read) = client.reader.try_next().expect("agent alive") {
+            assert!(matches!(read, Ok(ref line) if line == "noise"));
+            rest += 1;
+        }
+        assert_eq!(rest, lines - IDLE_SERVICE_MAX_LINES);
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    /// Once the agent closes stdout, its last report no longer counts: a
+    /// dead process waits on nothing, whatever it said before or the hook
+    /// recorded.
+    #[tokio::test]
+    async fn an_exited_agent_reports_no_pending_work() {
+        let note = r#"{"jsonrpc":"2.0","method":"_claude/sdkMessage","params":{"sessionId":"s1","message":{"type":"system","subtype":"session_state_changed","state":"running"}}}"#;
+        let mut client = spawn_script(&format!("echo '{note}'; echo ready; read -r _")).await;
+        let ready = tokio::time::timeout(std::time::Duration::from_secs(10), client.reader.next())
+            .await
+            .expect("line within 10s");
+        assert!(
+            matches!(&ready, Some(Ok(line)) if line == "ready"),
+            "got {ready:?}"
+        );
+        assert_eq!(client.pending_background_work().len(), 1);
+
+        let dir = background::StopHookDir::create().unwrap();
+        std::fs::write(
+            dir.path().join("s1.json"),
+            r#"{"session_crons":[{"schedule":"0 9 * * *"}]}"#,
+        )
+        .unwrap();
+        client.stop_hook = Some(dir);
+        assert_eq!(client.pending_background_work().len(), 2);
+
+        // End the script: it waits on stdin, so closing stdin lets it exit.
+        client.stdin = None;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !matches!(client.service_idle().await, Err(AcpError::AgentExited)) {
+            assert!(tokio::time::Instant::now() < deadline, "agent did not exit");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(client.pending_background_work().is_empty());
     }
 
     /// `service_idle` reports an exited agent instead of waiting.
@@ -4294,6 +4388,14 @@ sleep 1"#,
             meta["claudeCode"]["emitRawSDKMessages"],
             background::emit_raw_filter()
         );
+        if std::env::var_os(launch::PREFIX_ENV).is_some() {
+            // A prefixed agent may not run on this host: no hook.
+            assert!(
+                meta["claudeCode"]["options"].get("settings").is_none(),
+                "{meta}"
+            );
+            return;
+        }
         let command = meta["claudeCode"]["options"]["settings"]["hooks"]["Stop"][0]["hooks"][0]
             ["command"]
             .as_str()

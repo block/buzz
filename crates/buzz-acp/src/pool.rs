@@ -7108,6 +7108,74 @@ pub(crate) mod tests {
         }
     }
 
+    async fn script_agent(index: usize, script: &str) -> OwnedAgent {
+        let acp = AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
+            .await
+            .expect("spawn script agent");
+        OwnedAgent {
+            index,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "script-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        }
+    }
+
+    /// The pool asks every idle agent: pending work is reported per agent,
+    /// and a permission request from one agent is answered on that agent only.
+    #[tokio::test]
+    async fn idle_agents_are_serviced_and_report_pending_work_each() {
+        let reply = std::env::temp_dir().join(format!("buzz-acp-pool-perm-{}", Uuid::new_v4()));
+        let note = r#"{"jsonrpc":"2.0","method":"_claude/sdkMessage","params":{"sessionId":"s1","message":{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_type":"local_bash"}]}}}"#;
+        let request = r#"{"jsonrpc":"2.0","id":"p1","method":"session/request_permission","params":{"sessionId":"s2","options":[{"optionId":"yes","kind":"allow_once"}]}}"#;
+        let waiting = script_agent(
+            0,
+            &format!(
+                "echo '{note}'; read -r line; echo \"$line\" > '{0}.wrong'; sleep 30",
+                reply.display()
+            ),
+        )
+        .await;
+        let asking = script_agent(
+            1,
+            &format!(
+                "echo '{request}'; IFS= read -r line; printf '%s' \"$line\" > '{0}.tmp'; mv '{0}.tmp' '{0}'; sleep 30",
+                reply.display()
+            ),
+        )
+        .await;
+        let mut pool = AgentPool::from_slots(vec![Some(waiting), Some(asking)]);
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !reply.exists() || pool.pending_background_work().is_empty() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "no answer or no pending work"
+            );
+            pool.service_idle_agents().await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            pool.pending_background_work(),
+            vec!["agent 0: local_bash".to_owned()]
+        );
+        let answer: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&reply).unwrap()).unwrap();
+        assert_eq!(answer["id"], "p1");
+        assert!(
+            !std::path::Path::new(&format!("{}.wrong", reply.display())).exists(),
+            "the agent that asked nothing got a reply"
+        );
+        let _ = std::fs::remove_file(&reply);
+    }
+
     #[tokio::test]
     async fn run_prompt_task_observes_thread_root_only_for_thread_scope() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

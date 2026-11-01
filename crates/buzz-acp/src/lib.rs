@@ -2459,6 +2459,36 @@ impl BackgroundHold {
     }
 }
 
+/// Whether the exit-after-inactivity reaper fires: the bound has passed with
+/// no turn in flight, and no idle agent still waits on background work (see
+/// [`BackgroundHold`]). `pending` is asked only when the bound has passed.
+#[allow(clippy::too_many_arguments)]
+fn inactivity_exit_due(
+    last_activity: tokio::time::Instant,
+    now: tokio::time::Instant,
+    bound: Duration,
+    turn_in_flight: bool,
+    hold: &mut BackgroundHold,
+    pending: impl FnOnce() -> Vec<String>,
+    hold_cap: Duration,
+) -> bool {
+    inactivity_expired(last_activity, now, bound, turn_in_flight)
+        && !hold.holds(&pending(), last_activity, now, hold_cap)
+}
+
+/// Whether the idle-pool reaper tears the pool down: `sleep_due` (see
+/// [`idle_pool_sleep_due`]) and no idle agent still waits on background work.
+fn idle_pool_teardown_due(
+    sleep_due: bool,
+    last_activity: tokio::time::Instant,
+    now: tokio::time::Instant,
+    hold: &mut BackgroundHold,
+    pending: impl FnOnce() -> Vec<String>,
+    hold_cap: Duration,
+) -> bool {
+    sleep_due && !hold.holds(&pending(), last_activity, now, hold_cap)
+}
+
 fn inactivity_expired(
     last_activity: tokio::time::Instant,
     now: tokio::time::Instant,
@@ -2515,7 +2545,7 @@ mod background_hold_tests {
     #[test]
     fn pending_work_holds_until_the_cap_from_first_sight() {
         let mut hold = BackgroundHold::default();
-        let pending = vec!["agent 0: local_bash: wait for CI".to_owned()];
+        let pending = vec!["agent 0: local_bash".to_owned()];
         let turn = tokio::time::Instant::now();
         let start = turn + Duration::from_secs(60);
         assert!(hold.holds(&pending, turn, start, CAP));
@@ -2531,6 +2561,90 @@ mod background_hold_tests {
         assert!(hold.holds(&pending, turn, turn, CAP));
         assert!(!hold.holds(&[], turn, turn + CAP, CAP));
         assert!(hold.holds(&pending, turn, turn + CAP + Duration::from_secs(1), CAP));
+    }
+
+    const BOUND: Duration = Duration::from_secs(900);
+
+    fn ci_wait() -> Vec<String> {
+        vec!["agent 0: local_bash".to_owned()]
+    }
+
+    #[test]
+    fn pending_work_blocks_the_inactivity_exit_until_the_cap() {
+        let mut hold = BackgroundHold::default();
+        let turn = tokio::time::Instant::now();
+        let quiet = turn + BOUND;
+        assert!(!inactivity_exit_due(
+            turn, quiet, BOUND, false, &mut hold, ci_wait, CAP
+        ));
+        assert!(inactivity_exit_due(
+            turn,
+            quiet + CAP,
+            BOUND,
+            false,
+            &mut hold,
+            ci_wait,
+            CAP
+        ));
+        let mut hold = BackgroundHold::default();
+        assert!(inactivity_exit_due(
+            turn,
+            quiet,
+            BOUND,
+            false,
+            &mut hold,
+            Vec::new,
+            CAP
+        ));
+    }
+
+    #[test]
+    fn pending_work_blocks_the_idle_pool_teardown_until_the_cap() {
+        let mut hold = BackgroundHold::default();
+        let turn = tokio::time::Instant::now();
+        let quiet = turn + BOUND;
+        assert!(!idle_pool_teardown_due(
+            true, turn, quiet, &mut hold, ci_wait, CAP
+        ));
+        assert!(idle_pool_teardown_due(
+            true,
+            turn,
+            quiet + CAP,
+            &mut hold,
+            ci_wait,
+            CAP
+        ));
+        let mut hold = BackgroundHold::default();
+        assert!(idle_pool_teardown_due(
+            true,
+            turn,
+            quiet,
+            &mut hold,
+            Vec::new,
+            CAP
+        ));
+    }
+
+    #[test]
+    fn a_reaper_that_is_not_due_neither_fires_nor_asks() {
+        let mut hold = BackgroundHold::default();
+        let turn = tokio::time::Instant::now();
+        let never = || -> Vec<String> { panic!("pending asked although the reaper is not due") };
+        assert!(!idle_pool_teardown_due(
+            false, turn, turn, &mut hold, never, CAP
+        ));
+        assert!(!inactivity_exit_due(
+            turn, turn, BOUND, false, &mut hold, never, CAP
+        ));
+        assert!(!inactivity_exit_due(
+            turn,
+            turn + BOUND,
+            BOUND,
+            true,
+            &mut hold,
+            never,
+            CAP
+        ));
     }
 
     #[test]
@@ -3448,6 +3562,8 @@ async fn run_harness(
             None
         };
         let maintenance_at = pool_ready.then_some(last_maintenance + maintenance_interval);
+        // Only a woken pool with an idle agent has anything to service.
+        let idle_service_armed = pool_ready && pool.any_idle();
 
         // Borrow result_rx and join_set simultaneously via split-borrow helper.
         pool.retain_held_scopes(|scope| queue.has_pending_scope(scope));
@@ -3917,18 +4033,15 @@ async fn run_harness(
                 } => {
                     let _ = result_rx;
                     let now = tokio::time::Instant::now();
-                    if inactivity_expired(
+                    if inactivity_exit_due(
                         last_activity,
                         now,
                         inactivity_bound,
                         queue.has_in_flight() || heartbeat_in_flight,
-                    ) && !background_hold.holds(
-                        &pool.pending_background_work(),
-                        last_activity,
-                        now,
+                        &mut background_hold,
+                        || pool.pending_background_work(),
                         background_hold_cap,
-                    )
-                    {
+                    ) {
                         tracing::info!(
                             inactivity_seconds = config.exit_after_inactivity_secs,
                             "inactivity bound reached — exiting gracefully"
@@ -3937,11 +4050,15 @@ async fn run_harness(
                     }
                     None
                 }
-                _ = idle_service.tick() => {
-                    let _ = result_rx; // end split borrow before touching pool
-                    if pool_ready {
-                        pool.service_idle_agents().await;
+                _ = async {
+                    if idle_service_armed {
+                        idle_service.tick().await
+                    } else {
+                        std::future::pending().await
                     }
+                } => {
+                    let _ = result_rx; // end split borrow before touching pool
+                    pool.service_idle_agents().await;
                     None
                 }
                 _ = async {
@@ -3959,7 +4076,7 @@ async fn run_harness(
                     // keeps `work_queued` true for a retry-throttled batch too,
                     // so a failed turn awaiting backoff is never stranded — the
                     // next iteration dispatches or re-wakes it.
-                    if idle_pool_sleep_due(
+                    let sleep_due = idle_pool_sleep_due(
                         pool_ready,
                         last_activity,
                         now,
@@ -3969,13 +4086,15 @@ async fn run_harness(
                         queue.has_undispatched_work(),
                         !wake_tasks.is_empty()
                             || any_respawn_in_flight(&crash_history),
-                    ) && !background_hold.holds(
-                        &pool.pending_background_work(),
+                    );
+                    if idle_pool_teardown_due(
+                        sleep_due,
                         last_activity,
                         now,
+                        &mut background_hold,
+                        || pool.pending_background_work(),
                         background_hold_cap,
-                    )
-                    {
+                    ) {
                         tracing::info!(
                             idle_pool_sleep_seconds = config.idle_pool_sleep_secs,
                             "idle pool sleep bound reached — tearing pool back to lazy state"

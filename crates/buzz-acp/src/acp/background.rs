@@ -58,53 +58,88 @@ struct SessionActivity {
     running: bool,
 }
 
+/// One change a `_claude/sdkMessage` notification reports.
+#[derive(Debug)]
+pub(crate) struct SdkUpdate {
+    session_id: String,
+    change: Change,
+}
+
+#[derive(Debug)]
+enum Change {
+    /// The full set of live background tasks, by kind.
+    Tasks(Vec<String>),
+    /// Whether the session is in a model cycle.
+    Running(bool),
+    /// An SDK message buzz-acp did not ask for.
+    None,
+}
+
+/// Parse `line` if it is a `_claude/sdkMessage` notification.
+///
+/// Returns `None` for every other line. Those notifications exist only for
+/// [`BackgroundWork`], so the caller drops them instead of passing them on.
+/// Parsing happens here, outside any lock.
+pub(crate) fn parse_sdk_message(line: &str) -> Option<SdkUpdate> {
+    if !line.contains(SDK_MESSAGE_METHOD) {
+        return None;
+    }
+    let msg = serde_json::from_str::<Value>(line).ok()?;
+    if msg.get("method").and_then(Value::as_str) != Some(SDK_MESSAGE_METHOD) {
+        return None;
+    }
+    let params = &msg["params"];
+    let message = &params["message"];
+    let session_id = params["sessionId"]
+        .as_str()
+        .or_else(|| message["session_id"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    let change = match message["subtype"].as_str() {
+        // REPLACE semantics: the payload is the whole live set.
+        Some("background_tasks_changed") => Change::Tasks(
+            message["tasks"]
+                .as_array()
+                .map(|tasks| tasks.iter().map(describe_task).collect())
+                .unwrap_or_default(),
+        ),
+        Some("session_state_changed") => {
+            Change::Running(message["state"].as_str() == Some("running"))
+        }
+        _ => Change::None,
+    };
+    Some(SdkUpdate { session_id, change })
+}
+
 impl BackgroundWork {
-    /// Record `line` if it is a `_claude/sdkMessage` notification.
-    ///
-    /// Returns `true` when it was one. Those notifications exist only for this
-    /// bookkeeping, so the caller drops them instead of passing them on.
-    pub(crate) fn observe_line(&mut self, line: &str) -> bool {
-        if !line.contains(SDK_MESSAGE_METHOD) {
-            return false;
+    /// Apply one parsed `_claude/sdkMessage` notification.
+    pub(crate) fn apply(&mut self, update: SdkUpdate) {
+        if update.session_id.is_empty() {
+            return;
         }
-        let Ok(msg) = serde_json::from_str::<Value>(line) else {
-            return false;
-        };
-        if msg.get("method").and_then(Value::as_str) != Some(SDK_MESSAGE_METHOD) {
-            return false;
-        }
-        let params = &msg["params"];
-        let message = &params["message"];
-        let Some(session_id) = params["sessionId"]
-            .as_str()
-            .or_else(|| message["session_id"].as_str())
-        else {
-            return true;
-        };
-        match message["subtype"].as_str() {
-            Some("background_tasks_changed") => {
-                // REPLACE semantics: the payload is the whole live set.
-                let tasks = message["tasks"]
-                    .as_array()
-                    .map(|tasks| tasks.iter().map(describe_task).collect())
-                    .unwrap_or_default();
-                self.sessions
-                    .entry(session_id.to_owned())
-                    .or_default()
-                    .tasks = tasks;
+        match update.change {
+            Change::Tasks(tasks) => {
+                self.sessions.entry(update.session_id).or_default().tasks = tasks;
             }
-            Some("session_state_changed") => {
-                let running = message["state"].as_str() == Some("running");
-                self.sessions
-                    .entry(session_id.to_owned())
-                    .or_default()
-                    .running = running;
+            Change::Running(running) => {
+                self.sessions.entry(update.session_id).or_default().running = running;
             }
-            _ => {}
+            Change::None => {}
         }
         self.sessions
             .retain(|_, activity| activity.running || !activity.tasks.is_empty());
-        true
+    }
+
+    /// Parse and apply `line`; `true` when it was a `_claude/sdkMessage`.
+    #[cfg(test)]
+    fn observe_line(&mut self, line: &str) -> bool {
+        match parse_sdk_message(line) {
+            Some(update) => {
+                self.apply(update);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Record that the agent closed stdout. Its last reports describe work
@@ -120,7 +155,8 @@ impl BackgroundWork {
     }
 
     /// What the process is still working on, one line per item. Empty when
-    /// nothing is pending.
+    /// nothing is pending. Items name kinds only, never task descriptions,
+    /// so they are safe to log.
     pub(crate) fn pending(&self) -> Vec<String> {
         let mut pending = Vec::new();
         for activity in self.sessions.values() {
@@ -133,12 +169,10 @@ impl BackgroundWork {
     }
 }
 
+/// A task's kind, such as `local_bash`. The description is model-written
+/// text that can quote anything, so it is not kept.
 fn describe_task(task: &Value) -> String {
-    let kind = task["task_type"].as_str().unwrap_or("task");
-    match task["description"].as_str().filter(|d| !d.is_empty()) {
-        Some(description) => format!("{kind}: {description}"),
-        None => kind.to_owned(),
-    }
+    task["task_type"].as_str().unwrap_or("task").to_owned()
 }
 
 /// Per-process directory the Stop hook writes session crons into. Removed on
@@ -150,7 +184,7 @@ pub(crate) struct StopHookDir {
 
 impl StopHookDir {
     /// Create a fresh directory under the system temp dir, readable only by
-    /// this user: the cron prompts it holds are the agent's own words.
+    /// this user: the cron prompts the hook writes are the agent's own words.
     pub(crate) fn create() -> std::io::Result<Self> {
         let path =
             std::env::temp_dir().join(format!("buzz-acp-stop-hook-{}", uuid::Uuid::new_v4()));
@@ -162,7 +196,7 @@ impl StopHookDir {
     }
 
     #[cfg(test)]
-    fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
@@ -178,16 +212,31 @@ impl StopHookDir {
             shell_quote(&exe.to_string_lossy()),
             shell_quote(&self.path.to_string_lossy()),
         );
-        let mut settings = model_config
-            .and_then(|config| serde_json::from_str::<Value>(config).ok())
-            .filter(Value::is_object)
-            .unwrap_or_else(|| serde_json::json!({}));
         let hook = serde_json::json!({ "hooks": [{ "type": "command", "command": command }] });
-        match settings["hooks"]["Stop"].as_array_mut() {
-            Some(stop) => stop.push(hook),
-            None => settings["hooks"]["Stop"] = Value::Array(vec![hook]),
+        let mut settings = match model_config.map(serde_json::from_str::<Value>) {
+            Some(Ok(Value::Object(config))) => config,
+            Some(_) => {
+                tracing::warn!("CLAUDE_MODEL_CONFIG is not a JSON object — not merged");
+                serde_json::Map::new()
+            }
+            None => serde_json::Map::new(),
+        };
+        let hooks = settings
+            .entry("hooks")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if !hooks.is_object() {
+            tracing::warn!("CLAUDE_MODEL_CONFIG has a non-object `hooks` — replaced");
+            *hooks = Value::Object(serde_json::Map::new());
         }
-        settings
+        if let Some(hooks) = hooks.as_object_mut() {
+            match hooks.get_mut("Stop").and_then(Value::as_array_mut) {
+                Some(stop) => stop.push(hook),
+                None => {
+                    hooks.insert("Stop".to_owned(), Value::Array(vec![hook]));
+                }
+            }
+        }
+        Value::Object(settings)
     }
 
     /// The scheduled wakeups of every session, one line per cron. A session
@@ -200,6 +249,7 @@ impl StopHookDir {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                remove_if_abandoned(&path);
                 continue;
             }
             let Ok(text) = std::fs::read_to_string(&path) else {
@@ -216,32 +266,37 @@ impl StopHookDir {
     }
 }
 
+/// Remove `path` if it is a `.json.tmp` the hook stopped writing a minute
+/// ago or more: a hook that died between write and rename.
+fn remove_if_abandoned(path: &Path) {
+    let is_tmp = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".json.tmp"));
+    let abandoned = std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age >= std::time::Duration::from_secs(60));
+    if is_tmp && abandoned {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 impl Drop for StopHookDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
     }
 }
 
+/// A cron's kind and schedule. The prompt is the agent's own words, so it is
+/// not kept.
 fn describe_cron(cron: &Value) -> String {
     let schedule = cron["schedule"].as_str().unwrap_or("?");
-    let kind = if cron["recurring"].as_bool() == Some(true) {
-        "recurring wakeup"
+    if cron["recurring"].as_bool() == Some(true) {
+        format!("recurring wakeup `{schedule}`")
     } else {
-        "wakeup"
-    };
-    match cron["prompt"].as_str().filter(|p| !p.is_empty()) {
-        Some(prompt) => format!("{kind} `{schedule}`: {}", truncate(prompt, 120)),
-        None => format!("{kind} `{schedule}`"),
-    }
-}
-
-fn truncate(text: &str, max_chars: usize) -> String {
-    let mut chars = text.chars();
-    let head: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        format!("{head}…")
-    } else {
-        head
+        format!("wakeup `{schedule}`")
     }
 }
 
@@ -268,7 +323,17 @@ pub(crate) fn run_stop_hook() -> i32 {
     if std::io::stdin().read_to_string(&mut input).is_err() {
         return 0;
     }
-    let _ = record_stop_hook_input(Path::new(dir), &input);
+    if let Err(error) = record_stop_hook_input(Path::new(dir), &input) {
+        // stdout and stderr must stay silent; leave a trace next to the records.
+        use std::io::Write;
+        if let Ok(mut log) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(Path::new(dir).join("stop-hook-errors.log"))
+        {
+            let _ = writeln!(log, "{error}");
+        }
+    }
     0
 }
 
@@ -278,9 +343,12 @@ fn record_stop_hook_input(dir: &Path, input: &str) -> std::io::Result<()> {
         .as_str()
         .filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
         .ok_or_else(|| std::io::Error::other("stop hook input has no usable session_id"))?;
-    let record = serde_json::json!({
-        "session_crons": hook.get("session_crons").cloned().unwrap_or(Value::Array(Vec::new())),
-    });
+    // No `session_crons` means the hook could not tell, not that there are
+    // none: keep the last record.
+    let Some(crons) = hook.get("session_crons").filter(|crons| crons.is_array()) else {
+        return Ok(());
+    };
+    let record = serde_json::json!({ "session_crons": crons });
     // Write then rename, so a reader never sees half a file.
     let tmp = dir.join(format!("{session_id}.json.tmp"));
     std::fs::write(&tmp, record.to_string())?;
@@ -311,7 +379,7 @@ mod tests {
                 "tasks": [{ "task_id": "b1", "task_type": "local_bash", "description": "wait for CI" }],
             }),
         )));
-        assert_eq!(work.pending(), vec!["local_bash: wait for CI".to_owned()]);
+        assert_eq!(work.pending(), vec!["local_bash".to_owned()]);
 
         assert!(work.observe_line(&sdk_message(
             "s1",
@@ -354,15 +422,66 @@ mod tests {
             "session_crons": [{ "id": "7996a899", "schedule": "43 10 1 11 *", "recurring": false, "prompt": "check CI" }],
         });
         record_stop_hook_input(dir.path(), &input.to_string()).unwrap();
-        assert_eq!(
-            dir.crons(),
-            vec!["wakeup `43 10 1 11 *`: check CI".to_owned()]
-        );
+        assert_eq!(dir.crons(), vec!["wakeup `43 10 1 11 *`".to_owned()]);
 
         // The next Stop hook of the same session replaces the record.
         let input = serde_json::json!({ "session_id": "d9367-4cd1", "session_crons": [] });
         record_stop_hook_input(dir.path(), &input.to_string()).unwrap();
         assert!(dir.crons().is_empty());
+    }
+
+    #[test]
+    fn a_stop_hook_without_crons_keeps_the_last_record() {
+        let dir = StopHookDir::create().unwrap();
+        let with_cron = serde_json::json!({
+            "session_id": "s-1",
+            "session_crons": [{ "schedule": "0 9 * * *", "recurring": true, "prompt": "p" }],
+        });
+        record_stop_hook_input(dir.path(), &with_cron.to_string()).unwrap();
+        let unknown = serde_json::json!({ "session_id": "s-1" });
+        record_stop_hook_input(dir.path(), &unknown.to_string()).unwrap();
+        assert_eq!(dir.crons(), vec!["recurring wakeup `0 9 * * *`".to_owned()]);
+    }
+
+    #[test]
+    fn cron_and_task_lines_carry_no_model_text() {
+        let dir = StopHookDir::create().unwrap();
+        let input = serde_json::json!({
+            "session_id": "s-1",
+            "session_crons": [{ "schedule": "0 9 * * *", "prompt": "token=SECRET" }],
+        });
+        record_stop_hook_input(dir.path(), &input.to_string()).unwrap();
+        assert!(dir.crons().iter().all(|line| !line.contains("SECRET")));
+
+        let mut work = BackgroundWork::default();
+        work.observe_line(&sdk_message(
+            "s1",
+            serde_json::json!({
+                "type": "system",
+                "subtype": "background_tasks_changed",
+                "tasks": [{ "task_type": "local_bash", "description": "curl -H 'Authorization: SECRET'" }],
+            }),
+        ));
+        assert!(work.pending().iter().all(|line| !line.contains("SECRET")));
+    }
+
+    #[test]
+    fn a_non_object_hooks_in_the_model_config_is_replaced_not_a_panic() {
+        let dir = StopHookDir::create().unwrap();
+        for config in [
+            r#"{"hooks":[]}"#,
+            r#"{"hooks":"none"}"#,
+            r#"{"hooks":{"Stop":7}}"#,
+        ] {
+            let settings = dir.settings(Path::new("/bin/buzz-acp"), Some(config));
+            assert!(
+                settings["hooks"]["Stop"][0]["hooks"][0]["command"].is_string(),
+                "{config}: {settings}"
+            );
+        }
+        let config = r#"{"hooks":{"Stop":[{"hooks":[]}]}}"#;
+        let settings = dir.settings(Path::new("/bin/buzz-acp"), Some(config));
+        assert_eq!(settings["hooks"]["Stop"].as_array().map(Vec::len), Some(2));
     }
 
     #[test]
