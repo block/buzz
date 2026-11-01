@@ -1117,6 +1117,36 @@ impl AgentPool {
         self.agents.iter().any(|slot| slot.is_some())
     }
 
+    /// Handle what the idle agents wrote since the last call, such as a
+    /// permission request from a model cycle Claude Code started on its own
+    /// (see [`AcpClient::service_idle`]).
+    pub async fn service_idle_agents(&mut self) {
+        for agent in self.agents.iter_mut().flatten() {
+            match agent.acp.service_idle().await {
+                // A dead idle agent surfaces when it is next claimed.
+                Ok(()) | Err(AcpError::AgentExited) => {}
+                Err(error) => tracing::debug!(agent = agent.index, "idle agent stdout: {error}"),
+            }
+        }
+    }
+
+    /// What the idle agents are still waiting on after their turns ended,
+    /// one line per item, prefixed with the agent index. Empty when nothing
+    /// is pending.
+    pub fn pending_background_work(&self) -> Vec<String> {
+        self.agents
+            .iter()
+            .flatten()
+            .flat_map(|agent| {
+                agent
+                    .acp
+                    .pending_background_work()
+                    .into_iter()
+                    .map(move |item| format!("agent {}: {item}", agent.index))
+            })
+            .collect()
+    }
+
     /// Confirm that pending work for `scope` successfully claimed a worker.
     ///
     /// In particular, an expired busy-owner hold must not be consumed until

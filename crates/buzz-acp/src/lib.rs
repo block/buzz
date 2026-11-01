@@ -2405,6 +2405,60 @@ impl Drop for RespawnGuard {
 // sync entry point — `std::env::set_var` is only safe before tokio spawns
 // worker threads (Rust 2024 edition safety requirement).
 
+/// How often idle agents' stdout is serviced between turns.
+const IDLE_SERVICE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Keeps the idle reapers off while an idle agent still waits on background
+/// work: a background task, a model cycle it started on its own, or a
+/// scheduled wakeup. Each of those resumes the agent later, but only while its
+/// process lives. Tearing the pool down would silently drop that work.
+///
+/// The hold lasts at most `cap` from the moment pending work was first seen,
+/// so a stuck task or a far-off recurring cron cannot keep a pool up forever.
+/// When the cap runs out, the reaper proceeds and logs what was dropped.
+#[derive(Debug, Default)]
+struct BackgroundHold {
+    since: Option<tokio::time::Instant>,
+}
+
+impl BackgroundHold {
+    /// Whether `pending` work keeps the pool alive at `now`. A turn
+    /// dispatched after the hold began (`last_activity`) starts a new one.
+    fn holds(
+        &mut self,
+        pending: &[String],
+        last_activity: tokio::time::Instant,
+        now: tokio::time::Instant,
+        cap: Duration,
+    ) -> bool {
+        if self.since.is_some_and(|since| since < last_activity) {
+            self.since = None;
+        }
+        if pending.is_empty() {
+            if self.since.take().is_some() {
+                tracing::info!("background work finished — idle reapers resume");
+            }
+            return false;
+        }
+        let since = *self.since.get_or_insert_with(|| {
+            tracing::info!(
+                pending = ?pending,
+                "idle agents still wait on background work — holding the pool"
+            );
+            now
+        });
+        if now.duration_since(since) < cap {
+            return true;
+        }
+        tracing::warn!(
+            pending = ?pending,
+            cap_seconds = cap.as_secs(),
+            "background work outlasted the hold — the reaper drops it"
+        );
+        false
+    }
+}
+
 fn inactivity_expired(
     last_activity: tokio::time::Instant,
     now: tokio::time::Instant,
@@ -2439,6 +2493,56 @@ fn idle_pool_sleep_due(
         && !prompt_tasks_in_flight
         && !wake_or_respawn_in_flight
         && inactivity_expired(last_activity, now, bound, turn_in_flight)
+}
+
+#[cfg(test)]
+mod background_hold_tests {
+    use super::*;
+
+    const CAP: Duration = Duration::from_secs(7200);
+
+    #[test]
+    fn nothing_pending_never_holds() {
+        let mut hold = BackgroundHold::default();
+        assert!(!hold.holds(
+            &[],
+            tokio::time::Instant::now(),
+            tokio::time::Instant::now(),
+            CAP
+        ));
+    }
+
+    #[test]
+    fn pending_work_holds_until_the_cap_from_first_sight() {
+        let mut hold = BackgroundHold::default();
+        let pending = vec!["agent 0: local_bash: wait for CI".to_owned()];
+        let turn = tokio::time::Instant::now();
+        let start = turn + Duration::from_secs(60);
+        assert!(hold.holds(&pending, turn, start, CAP));
+        assert!(hold.holds(&pending, turn, start + CAP - Duration::from_secs(1), CAP));
+        assert!(!hold.holds(&pending, turn, start + CAP, CAP));
+    }
+
+    #[test]
+    fn the_cap_restarts_after_pending_work_clears() {
+        let mut hold = BackgroundHold::default();
+        let pending = vec!["agent 0: wakeup `43 10 1 11 *`".to_owned()];
+        let turn = tokio::time::Instant::now();
+        assert!(hold.holds(&pending, turn, turn, CAP));
+        assert!(!hold.holds(&[], turn, turn + CAP, CAP));
+        assert!(hold.holds(&pending, turn, turn + CAP + Duration::from_secs(1), CAP));
+    }
+
+    #[test]
+    fn a_later_turn_restarts_the_cap() {
+        let mut hold = BackgroundHold::default();
+        let pending = vec!["agent 0: recurring wakeup `*/10 * * * *`".to_owned()];
+        let turn = tokio::time::Instant::now();
+        assert!(hold.holds(&pending, turn, turn, CAP));
+        assert!(!hold.holds(&pending, turn, turn + CAP, CAP));
+        let next_turn = turn + CAP + Duration::from_secs(60);
+        assert!(hold.holds(&pending, next_turn, next_turn + Duration::from_secs(1), CAP));
+    }
 }
 
 #[cfg(test)]
@@ -2724,6 +2828,9 @@ pub fn run() -> Result<()> {
         Some("git-credential-nostr") => std::process::exit(git_credential_nostr::run()),
         Some("git-sign-nostr") => std::process::exit(git_sign_nostr::run()),
         _ => {}
+    }
+    if is_subcommand(acp::STOP_HOOK_SUBCOMMAND) {
+        std::process::exit(acp::run_stop_hook());
     }
     config::propagate_legacy_env_vars();
     if is_subcommand("run") {
@@ -3140,6 +3247,17 @@ async fn run_harness(
             interval,
         ))
     };
+
+    // Idle agents keep writing after their turns: Claude Code runs model
+    // cycles on its own when a background task finishes or a cron fires.
+    // Read and answer that output promptly, so a permission request from such
+    // a cycle does not wait for the next turn.
+    let mut idle_service = tokio::time::interval(IDLE_SERVICE_INTERVAL);
+    idle_service.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Background work an idle agent is waiting on keeps the reapers off, for
+    // at most one hard turn length (see `BackgroundHold`).
+    let background_hold_cap = Duration::from_secs(config.max_turn_duration_secs);
+    let mut background_hold = BackgroundHold::default();
 
     // Runs at the TOP of every loop iteration via Instant check — cannot be
     // starved by the biased select. Slot refill spawns background tasks so
@@ -3798,17 +3916,31 @@ async fn run_harness(
                     }
                 } => {
                     let _ = result_rx;
+                    let now = tokio::time::Instant::now();
                     if inactivity_expired(
                         last_activity,
-                        tokio::time::Instant::now(),
+                        now,
                         inactivity_bound,
                         queue.has_in_flight() || heartbeat_in_flight,
-                    ) {
+                    ) && !background_hold.holds(
+                        &pool.pending_background_work(),
+                        last_activity,
+                        now,
+                        background_hold_cap,
+                    )
+                    {
                         tracing::info!(
                             inactivity_seconds = config.exit_after_inactivity_secs,
                             "inactivity bound reached — exiting gracefully"
                         );
                         let _ = shutdown_tx.send(());
+                    }
+                    None
+                }
+                _ = idle_service.tick() => {
+                    let _ = result_rx; // end split borrow before touching pool
+                    if pool_ready {
+                        pool.service_idle_agents().await;
                     }
                     None
                 }
@@ -3819,6 +3951,7 @@ async fn run_harness(
                     }
                 } => {
                     let _ = result_rx; // end split borrow before touching pool
+                    let now = tokio::time::Instant::now();
                     // A wake in flight (pool not yet ready) is covered by the
                     // pool_ready gate; respawn tasks and in-flight prompt tasks
                     // are the remaining "busy" signals. Never sleep mid-work:
@@ -3829,14 +3962,20 @@ async fn run_harness(
                     if idle_pool_sleep_due(
                         pool_ready,
                         last_activity,
-                        tokio::time::Instant::now(),
+                        now,
                         idle_pool_sleep_bound,
                         queue.has_in_flight() || heartbeat_in_flight,
                         !pool.join_set.is_empty(),
                         queue.has_undispatched_work(),
                         !wake_tasks.is_empty()
                             || any_respawn_in_flight(&crash_history),
-                    ) {
+                    ) && !background_hold.holds(
+                        &pool.pending_background_work(),
+                        last_activity,
+                        now,
+                        background_hold_cap,
+                    )
+                    {
                         tracing::info!(
                             idle_pool_sleep_seconds = config.idle_pool_sleep_secs,
                             "idle pool sleep bound reached — tearing pool back to lazy state"
@@ -3851,6 +3990,7 @@ async fn run_harness(
                         pool_ready = false;
                         pool_lifecycle = PoolLifecycle::listening();
                         last_activity = tokio::time::Instant::now();
+                        background_hold = BackgroundHold::default();
                         emit_runtime_lifecycle(
                             observer.as_ref(),
                             &runtime_start_nonce,
