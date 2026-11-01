@@ -10,11 +10,11 @@ use buzz_media::validation::mime_to_ext;
 pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result<(), String> {
     const ALLOWED_IMETA_KEYS: &[&str] = &[
         "url", "m", "x", "size", "dim", "blurhash", "alt", "thumb", "fallback", "duration",
-        "bitrate", "image", "filename",
+        "bitrate", "image", "filename", "waveform",
     ];
     const SINGLETON_KEYS: &[&str] = &[
         "url", "m", "x", "size", "dim", "blurhash", "thumb", "alt", "duration", "bitrate", "image",
-        "filename",
+        "filename", "waveform",
     ];
     // Previewable media MIME types — these get the strict url-extension
     // consistency check below (their ext is derived from the MIME). Generic
@@ -27,6 +27,7 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
         "image/gif",
         "image/webp",
         "video/mp4",
+        "audio/mp4",
     ];
 
     for tag in tags {
@@ -115,6 +116,19 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
                         return Err("imeta duration must be a valid float".into());
                     }
                 }
+                "waveform" => {
+                    // NIP-A0 voice-message amplitudes: up to 100 integers, 0–100.
+                    let mut count = 0usize;
+                    for sample in value.split(' ') {
+                        count += 1;
+                        if count > 100 || !matches!(sample.parse::<u8>(), Ok(0..=100)) {
+                            return Err(
+                                "imeta waveform must be 1–100 space-separated integers from 0 to 100"
+                                    .into(),
+                            );
+                        }
+                    }
+                }
                 "bitrate" if value.parse::<u64>().map_or(true, |b| b == 0) => {
                     return Err("imeta bitrate must be a positive integer".into());
                 }
@@ -162,15 +176,21 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
             return Err("imeta tag must include url, m, x, and size".into());
         }
 
-        // Video-only NIP-71 fields must not appear on image blobs.
+        // Video-only NIP-71 fields must not appear on other blobs. Audio-only
+        // MP4 (and legacy voice notes stored as video/mp4) may carry the
+        // NIP-A0 voice fields `duration` and `waveform`.
         let is_video = m_value == "video/mp4";
-        if !is_video {
-            for key in &["duration", "bitrate", "image"] {
-                if seen_keys.contains(*key) {
-                    return Err(format!(
-                        "imeta {key} is only valid for video/mp4, not {m_value}"
-                    ));
-                }
+        let is_timed = is_video || m_value == "audio/mp4";
+        for (key, allowed, valid_for) in [
+            ("duration", is_timed, "video/mp4 or audio/mp4"),
+            ("waveform", is_timed, "video/mp4 or audio/mp4"),
+            ("bitrate", is_video, "video/mp4"),
+            ("image", is_video, "video/mp4"),
+        ] {
+            if !allowed && seen_keys.contains(key) {
+                return Err(format!(
+                    "imeta {key} is only valid for {valid_for}, not {m_value}"
+                ));
             }
         }
 
@@ -627,6 +647,73 @@ mod tests {
         ];
         let err = validate_imeta_tags(&[tag], BASE).unwrap_err();
         assert!(err.contains("valid MIME"), "{err}");
+    }
+
+    fn voice_note_tag(m: &str, ext: &str, extra: &[&str]) -> Vec<String> {
+        let mut tag = vec![
+            "imeta".into(),
+            format!("url /media/{HASH}.{ext}"),
+            format!("m {m}"),
+            format!("x {HASH}"),
+            "size 4096".into(),
+            "filename voice-note-1.m4a".into(),
+        ];
+        tag.extend(extra.iter().map(|s| s.to_string()));
+        tag
+    }
+
+    #[test]
+    fn test_imeta_audio_mp4_voice_note_passes() {
+        let tag = voice_note_tag("audio/mp4", "m4a", &["duration 2.5", "waveform 0 25 100"]);
+        assert!(validate_imeta_tags(&[tag], BASE).is_ok());
+    }
+
+    #[test]
+    fn test_imeta_legacy_video_voice_note_waveform_passes() {
+        let tag = voice_note_tag("video/mp4", "mp4", &["duration 2.5", "waveform 10 20"]);
+        assert!(validate_imeta_tags(&[tag], BASE).is_ok());
+    }
+
+    #[test]
+    fn test_imeta_audio_mp4_url_extension_must_be_m4a() {
+        let tag = voice_note_tag("audio/mp4", "mp4", &[]);
+        let err = validate_imeta_tags(&[tag], BASE).unwrap_err();
+        assert!(err.contains("extension does not match"), "{err}");
+    }
+
+    #[test]
+    fn test_imeta_audio_mp4_rejects_video_only_fields() {
+        for field in ["bitrate 128000", &format!("image /media/{HASH}.jpg")] {
+            let tag = voice_note_tag("audio/mp4", "m4a", &[field]);
+            let err = validate_imeta_tags(&[tag], BASE).unwrap_err();
+            assert!(err.contains("only valid for video/mp4"), "{field}: {err}");
+        }
+    }
+
+    #[test]
+    fn test_imeta_waveform_rejected_on_non_timed_media() {
+        let tag = voice_note_tag("application/pdf", "pdf", &["waveform 1 2 3"]);
+        let err = validate_imeta_tags(&[tag], BASE).unwrap_err();
+        assert!(err.contains("waveform is only valid"), "{err}");
+    }
+
+    #[test]
+    fn test_imeta_waveform_must_be_bounded_amplitudes() {
+        let too_many = format!("waveform {}", vec!["1"; 101].join(" "));
+        let max = format!("waveform {}", vec!["100"; 100].join(" "));
+        assert!(validate_imeta_tags(&[voice_note_tag("audio/mp4", "m4a", &[&max])], BASE).is_ok());
+        for bad in [
+            "waveform",
+            "waveform 101",
+            "waveform -1",
+            "waveform 1.5",
+            "waveform 1  2",
+            too_many.as_str(),
+        ] {
+            let tag = voice_note_tag("audio/mp4", "m4a", &[bad]);
+            let err = validate_imeta_tags(&[tag], BASE).unwrap_err();
+            assert!(err.contains("waveform must be"), "{bad}: {err}");
+        }
     }
 
     #[test]

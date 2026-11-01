@@ -228,8 +228,11 @@ pub fn validate_file_content(
 /// PDF is intentionally *not* inline yet — inline PDF preview is a planned
 /// fast-follow; until the renderer handles it, force download like any other file.
 pub fn serve_inline(mime: &str) -> bool {
-    mime.starts_with("image/") || mime.starts_with("video/")
+    mime.starts_with("image/") || mime.starts_with("video/") || mime == AUDIO_MP4_MIME
 }
+
+/// Canonical MIME type for an MP4 that carries only one AAC audio track.
+pub const AUDIO_MP4_MIME: &str = "audio/mp4";
 
 /// Metadata extracted from a validated MP4 file.
 #[derive(Debug, Clone)]
@@ -289,18 +292,64 @@ pub fn validate_content(bytes: &[u8], config: &MediaConfig) -> Result<String, Me
     Ok(mime)
 }
 
+/// A canonical MP4 accepted by [`validate_mp4_file`].
+#[derive(Debug, Clone)]
+pub enum ValidatedMp4 {
+    /// One H.264 video track and at most one AAC audio track (`video/mp4`).
+    Video(VideoMeta),
+    /// Exactly one AAC audio track and no video track (`audio/mp4`).
+    Audio {
+        /// Duration in seconds of the audio track.
+        duration_secs: f64,
+    },
+}
+
+impl ValidatedMp4 {
+    /// Canonical MIME type stored for this upload.
+    pub fn mime_type(&self) -> &'static str {
+        match self {
+            Self::Video(_) => "video/mp4",
+            Self::Audio { .. } => AUDIO_MP4_MIME,
+        }
+    }
+
+    /// Duration in seconds of the primary track.
+    pub fn duration_secs(&self) -> f64 {
+        match self {
+            Self::Video(meta) => meta.duration_secs,
+            Self::Audio { duration_secs } => *duration_secs,
+        }
+    }
+}
+
+/// Validate a video MP4 file on disk.
+///
+/// Same checks as [`validate_mp4_file`], but an audio-only MP4 is rejected
+/// with `DisallowedContentType("audio/mp4")`.
+pub fn validate_video_file(path: &Path, config: &MediaConfig) -> Result<VideoMeta, MediaError> {
+    match validate_mp4_file(path, config)? {
+        ValidatedMp4::Video(meta) => Ok(meta),
+        ValidatedMp4::Audio { .. } => Err(MediaError::DisallowedContentType(
+            AUDIO_MP4_MIME.to_string(),
+        )),
+    }
+}
+
 /// Validate an MP4 file on disk.
 ///
 /// Checks:
 /// - Container is MP4 (ftyp brand is not QuickTime `qt  `)
-/// - Exactly one video track using `avc1` (H.264 only — rejects HEVC, VP9, AV1)
+/// - At most one video track, using `avc1` (H.264 only — rejects HEVC, VP9, AV1)
 /// - At most one audio track, using `mp4a` (AAC)
-/// - Duration ≤ 600 seconds (from mvhd timescale, not edit lists)
+/// - At least one of those tracks, and no other track types
+/// - Duration ≤ 600 seconds (from the track timescale, not edit lists)
 /// - Resolution: short edge ≤ 2160 and long edge ≤ 3840 (portrait or landscape)
 /// - moov atom precedes mdat (fast-start / web-optimised)
+/// - No location, metadata, chapter, or telemetry structures
 ///
-/// Returns [`VideoMeta`] on success.
-pub fn validate_video_file(path: &Path, config: &MediaConfig) -> Result<VideoMeta, MediaError> {
+/// A file without a video track is [`ValidatedMp4::Audio`]: the same container,
+/// metadata, and track policy apply to it.
+pub fn validate_mp4_file(path: &Path, config: &MediaConfig) -> Result<ValidatedMp4, MediaError> {
     // --- moov-before-mdat check (raw byte scan) ---
     // We scan the top-level atom sequence before handing off to the mp4 crate,
     // because the mp4 crate parses the whole file regardless of atom order.
@@ -336,7 +385,7 @@ pub fn validate_video_file(path: &Path, config: &MediaConfig) -> Result<VideoMet
 
     // --- Track inspection ---
     let mut video_meta: Option<VideoMeta> = None;
-    let mut has_audio = false;
+    let mut audio_duration_secs: Option<f64> = None;
 
     for track in mp4.tracks().values() {
         match track.track_type().map_err(|_| MediaError::InvalidVideo)? {
@@ -355,22 +404,8 @@ pub fn validate_video_file(path: &Path, config: &MediaConfig) -> Result<VideoMet
                     return Err(MediaError::WrongCodec);
                 }
 
-                // Duration from mvhd timescale (track duration / timescale).
                 // Reject zero/negative (malformed) and >600s (too long).
-                // Must match imeta validation which requires duration > 0.0.
-                // Guard: timescale=0 causes division-by-zero in the mp4 crate's
-                // duration() method. Fail fast before it panics.
-                if track.timescale() == 0 {
-                    return Err(MediaError::InvalidVideo);
-                }
-                let duration_ms = track.duration().as_millis();
-                let duration_secs = duration_ms as f64 / 1000.0;
-                if duration_secs <= 0.0 {
-                    return Err(MediaError::InvalidVideo);
-                }
-                if duration_secs > 600.0 {
-                    return Err(MediaError::DurationTooLong);
-                }
+                let duration_secs = track_duration_secs(track)?;
 
                 // Resolution check. Apply the 2160×3840 envelope independent
                 // of orientation so equivalent portrait and landscape videos
@@ -391,7 +426,7 @@ pub fn validate_video_file(path: &Path, config: &MediaConfig) -> Result<VideoMet
                 });
             }
             mp4::TrackType::Audio => {
-                if has_audio {
+                if audio_duration_secs.is_some() {
                     // Reject alternate audio tracks for the same reason as
                     // alternate video tracks: only the canonical primary stream
                     // produced by the client sanitizer is permitted.
@@ -401,21 +436,39 @@ pub fn validate_video_file(path: &Path, config: &MediaConfig) -> Result<VideoMet
                 if media_type != mp4::MediaType::AAC {
                     return Err(MediaError::WrongCodec);
                 }
-                has_audio = true;
+                audio_duration_secs = Some(track_duration_secs(track)?);
             }
             _ => return Err(MediaError::MetadataForbidden),
         }
     }
 
-    let mut meta = video_meta.ok_or_else(|| {
-        if has_audio {
-            MediaError::DisallowedContentType("audio/mp4".to_string())
-        } else {
-            MediaError::InvalidVideo
+    match (video_meta, audio_duration_secs) {
+        (Some(mut meta), audio) => {
+            meta.has_audio = audio.is_some();
+            Ok(ValidatedMp4::Video(meta))
         }
-    })?;
-    meta.has_audio = has_audio;
-    Ok(meta)
+        (None, Some(duration_secs)) => Ok(ValidatedMp4::Audio { duration_secs }),
+        (None, None) => Err(MediaError::InvalidVideo),
+    }
+}
+
+/// Track duration in seconds, rejecting malformed (zero) and overlong tracks.
+///
+/// Guard: timescale=0 causes division-by-zero in the mp4 crate's `duration()`
+/// method, so fail fast before calling it. A zero duration would also fail the
+/// imeta `duration > 0` rule.
+fn track_duration_secs(track: &mp4::Mp4Track) -> Result<f64, MediaError> {
+    if track.timescale() == 0 {
+        return Err(MediaError::InvalidVideo);
+    }
+    let duration_secs = track.duration().as_millis() as f64 / 1000.0;
+    if duration_secs <= 0.0 {
+        return Err(MediaError::InvalidVideo);
+    }
+    if duration_secs > 600.0 {
+        return Err(MediaError::DurationTooLong);
+    }
+    Ok(duration_secs)
 }
 
 /// Scan the top-level atom sequence to verify moov appears before mdat.
@@ -952,6 +1005,7 @@ pub fn mime_to_ext(mime: &str) -> &'static str {
         "image/gif" => "gif",
         "image/webp" => "webp",
         "video/mp4" => "mp4",
+        AUDIO_MP4_MIME => "m4a",
         _ => "bin",
     }
 }
@@ -2505,6 +2559,126 @@ mod tests {
             Ok(meta) => assert!(meta.has_audio),
             Err(e) => panic!("expected Ok, got {e:?}"),
         }
+    }
+
+    /// Build a fast-start MP4 whose only track is one AAC audio track.
+    fn build_audio_only_mp4(duration_ms: u32) -> Vec<u8> {
+        let video = build_mp4_bytes(true, b"avc1", duration_ms, 320, 240, false);
+        let video_trak = build_video_trak(1, duration_ms, 1_000, b"avc1", 320, 240);
+        let start = video
+            .windows(video_trak.len())
+            .position(|window| window == video_trak.as_slice())
+            .expect("fixture must contain its video trak");
+        let mut bytes = video;
+        bytes.drain(start..start + video_trak.len());
+        const FTYP_SIZE: usize = 20;
+        let moov_size = u32::from_be_bytes(
+            bytes[FTYP_SIZE..FTYP_SIZE + 4]
+                .try_into()
+                .expect("moov size"),
+        );
+        let moov_size = moov_size - video_trak.len() as u32;
+        bytes[FTYP_SIZE..FTYP_SIZE + 4].copy_from_slice(&moov_size.to_be_bytes());
+        append_box_to_moov(bytes, &build_audio_trak(1, duration_ms, 1_000))
+    }
+
+    fn validate_bytes(bytes: &[u8]) -> Result<ValidatedMp4, MediaError> {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), bytes).unwrap();
+        validate_mp4_file(tmp.path(), &test_config())
+    }
+
+    #[test]
+    fn test_validate_mp4_accepts_audio_only_aac() {
+        let bytes = build_audio_only_mp4(2_500);
+        assert!(!bytes.windows(4).any(|window| window == b"avc1"));
+        match validate_bytes(&bytes) {
+            Ok(ValidatedMp4::Audio { duration_secs }) => assert_eq!(duration_secs, 2.5),
+            other => panic!("expected audio-only MP4, got {other:?}"),
+        }
+        let validated = validate_bytes(&bytes).unwrap();
+        assert_eq!(validated.mime_type(), "audio/mp4");
+        assert_eq!(mime_to_ext(validated.mime_type()), "m4a");
+    }
+
+    #[test]
+    fn test_validate_video_file_still_rejects_audio_only() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), build_audio_only_mp4(1_000)).unwrap();
+        assert!(matches!(
+            validate_video_file(tmp.path(), &test_config()),
+            Err(MediaError::DisallowedContentType(mime)) if mime == "audio/mp4"
+        ));
+    }
+
+    #[test]
+    fn test_validate_mp4_classifies_video_with_audio_as_video() {
+        match validate_bytes(&build_mp4_with_audio()) {
+            Ok(ValidatedMp4::Video(meta)) => assert!(meta.has_audio),
+            other => panic!("expected video MP4, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_mp4_audio_only_rejects_alternate_audio_track() {
+        let bytes = append_box_to_moov(
+            build_audio_only_mp4(1_000),
+            &build_audio_trak(2, 1_000, 1_000),
+        );
+        assert!(matches!(
+            validate_bytes(&bytes),
+            Err(MediaError::MetadataForbidden)
+        ));
+    }
+
+    #[test]
+    fn test_validate_mp4_audio_only_rejects_non_aac_codec() {
+        let mut bytes = build_audio_only_mp4(1_000);
+        let codec = bytes
+            .windows(4)
+            .position(|window| window == b"mp4a")
+            .expect("fixture must contain an mp4a sample entry");
+        bytes[codec..codec + 4].copy_from_slice(b"Opus");
+        assert!(matches!(
+            validate_bytes(&bytes),
+            Err(MediaError::WrongCodec)
+        ));
+    }
+
+    #[test]
+    fn test_validate_mp4_audio_only_rejects_overlong_duration() {
+        assert!(matches!(
+            validate_bytes(&build_audio_only_mp4(601_000)),
+            Err(MediaError::DurationTooLong)
+        ));
+    }
+
+    #[test]
+    fn test_validate_mp4_audio_only_rejects_quicktime_location() {
+        let location = box_wrap(b"\xa9xyz", b"+37.7750-122.4183+015.000/");
+        let bytes = append_box_to_moov(build_audio_only_mp4(1_000), &box_wrap(b"udta", &location));
+        assert!(matches!(
+            validate_bytes(&bytes),
+            Err(MediaError::MetadataForbidden)
+        ));
+    }
+
+    #[test]
+    fn test_validate_mp4_audio_only_rejects_mdat_before_moov() {
+        let audio = build_audio_only_mp4(1_000);
+        const FTYP_SIZE: usize = 20;
+        let moov_end = audio.len() - 8;
+        let mut bytes = audio[..FTYP_SIZE].to_vec();
+        bytes.extend_from_slice(&audio[moov_end..]);
+        bytes.extend_from_slice(&audio[FTYP_SIZE..moov_end]);
+        assert!(validate_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_audio_mp4_is_served_inline_but_other_audio_is_not() {
+        assert!(serve_inline("audio/mp4"));
+        assert!(!serve_inline("audio/mpeg"));
+        assert!(!serve_inline("audio/wav"));
     }
 
     #[test]
