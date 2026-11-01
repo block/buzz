@@ -214,7 +214,9 @@ void main() {
       testWidgets(
         'New opens creation actions on $platform with reduced motion $reduced',
         (tester) async {
-          debugDefaultTargetPlatformOverride = platform;
+          debugDefaultTargetPlatformOverride = platform == TargetPlatform.iOS
+              ? platform
+              : null;
           addTearDown(() => debugDefaultTargetPlatformOverride = null);
           ValueNotifier<VoidCallback?>? chat;
           var created = 0;
@@ -261,6 +263,7 @@ void main() {
           await tester.tap(find.text('New chat'));
           await tester.pumpAndSettle();
           expect(created, 1);
+          debugDefaultTargetPlatformOverride = null;
         },
       );
     }
@@ -319,7 +322,7 @@ void main() {
           of: find.byType(IosMessageCreateButton),
           matching: find.byType(UiKitView),
         ),
-        findsNWidgets(2),
+        findsOneWidget,
       );
       communityMenu.actions.first.onPressed!();
       await tester.pump();

@@ -189,38 +189,40 @@ class HomePage extends HookConsumerWidget {
         padding: EdgeInsets.only(bottom: bottom),
         child: SizedBox(
           height: mobileTabBarHeight,
-          child:
-              defaultTargetPlatform != TargetPlatform.iOS ||
-                  nativeControlsVisible
-              ? Center(
-                  child: MessagesNavigationBar(
-                    onSearch: openSearch,
-                    agent: defaultAgentBuilder(context),
-                    creationActions: [
-                      (
-                        label: 'New chat',
-                        symbol: 'square.and.pencil',
-                        onPressed: newChat.value,
-                      ),
-                      (
-                        label: 'New workspace',
-                        symbol: 'workspace',
-                        onPressed: newWorkspace.value,
-                      ),
-                      (
-                        label: 'New DM',
-                        symbol: 'bubble.left',
-                        onPressed: newDm.value,
-                      ),
-                      (
-                        label: 'New channel',
-                        symbol: 'number',
-                        onPressed: newChannel.value,
-                      ),
-                    ],
+          child: Visibility(
+            visible:
+                defaultTargetPlatform != TargetPlatform.iOS ||
+                nativeControlsVisible,
+            maintainState: true,
+            child: Center(
+              child: MessagesNavigationBar(
+                onSearch: openSearch,
+                agent: defaultAgentBuilder(context),
+                creationActions: [
+                  (
+                    label: 'New chat',
+                    symbol: 'square.and.pencil',
+                    onPressed: newChat.value,
                   ),
-                )
-              : null,
+                  (
+                    label: 'New workspace',
+                    symbol: 'workspace',
+                    onPressed: newWorkspace.value,
+                  ),
+                  (
+                    label: 'New DM',
+                    symbol: 'bubble.left',
+                    onPressed: newDm.value,
+                  ),
+                  (
+                    label: 'New channel',
+                    symbol: 'number',
+                    onPressed: newChannel.value,
+                  ),
+                ],
+              ),
+            ),
+          ),
         ),
       ),
       body: Stack(
