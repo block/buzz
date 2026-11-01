@@ -18,6 +18,7 @@ part 'channels_provider_deletion_cases.dart';
 part 'channels_provider_terminal_cases.dart';
 part 'channels_provider_readiness_cases.dart';
 part 'channels_provider_request_path_cases.dart';
+part 'channels_provider_membership_delta_cases.dart';
 
 /// Tests for [ChannelsNotifier] in the pure-Nostr world.
 ///
@@ -35,6 +36,7 @@ void main() {
   _unreadReadinessCases();
   _unreadDeletionCases();
   _requestPathCases();
+  _membershipDeltaCases();
   const myPk = 'me';
 
   test(
@@ -3017,6 +3019,12 @@ class _FakeRelaySession extends RelaySessionNotifier {
 
   final List<NostrFilter> historyFilters = [];
 
+  /// Answers `{"membership":"removed","since":T}` reads, which [queryRelayJson]
+  /// records. By default the relay refuses them, as a relay predating the read
+  /// does: its p-gate answers 403 to a filter without kinds.
+  Object? Function(int since)? membershipRemovals;
+  final List<int> membershipRemovalSinces = [];
+
   /// While set, member metadata reads wait for it to complete.
   Completer<void>? metadataGate;
   final List<List<NostrFilter>> queryBatches = [];
@@ -3313,6 +3321,23 @@ class _FakeRelaySession extends RelaySessionNotifier {
   }
 
   @override
+  Future<Object?> queryRelayJson(
+    List<Object> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    final [filter as Map<String, Object?>] = filters;
+    expect(filter.keys, unorderedEquals(['membership', 'since']));
+    expect(filter['membership'], 'removed');
+    final since = filter['since']! as int;
+    membershipRemovalSinces.add(since);
+    final answer = membershipRemovals;
+    if (answer == null) {
+      throw RelayException(403, '{"error":"restricted: p-gated kinds"}');
+    }
+    return answer(since);
+  }
+
+  @override
   Future<List<NostrEvent>> queryRelay(
     List<NostrFilter> filters, {
     Duration timeout = const Duration(seconds: 8),
@@ -3341,11 +3366,14 @@ class _FakeRelaySession extends RelaySessionNotifier {
       }
       if (filter.until != null) return const [];
       final myPk = filter.tags['#p']?.single;
+      final since = filter.since;
       return memberships
           .where(
-            (event) => event.tags.any(
-              (tag) => tag.length >= 2 && tag[0] == 'p' && tag[1] == myPk,
-            ),
+            (event) =>
+                (since == null || event.createdAt >= since) &&
+                event.tags.any(
+                  (tag) => tag.length >= 2 && tag[0] == 'p' && tag[1] == myPk,
+                ),
           )
           .toList();
     }

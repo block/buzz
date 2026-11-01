@@ -96,6 +96,7 @@ final channelDirectoryLoadStatusProvider =
 Future<List<NostrEvent>> _fetchChannelMemberships(
   RelaySessionNotifier session,
   String pubkey, {
+  int? since,
   void Function()? ensureCurrent,
 }) => _fetchPaginatedChannelEvents(
   session,
@@ -103,6 +104,7 @@ Future<List<NostrEvent>> _fetchChannelMemberships(
   tags: {
     '#p': [pubkey],
   },
+  since: since,
   operation: 'Channel memberships',
   ensureCurrent: ensureCurrent,
 );
@@ -483,6 +485,7 @@ Future<List<NostrEvent>> _fetchPaginatedChannelEvents(
   required int kind,
   required String operation,
   Map<String, List<String>> tags = const {},
+  int? since,
   void Function()? ensureCurrent,
 }) async {
   final events = <NostrEvent>[];
@@ -496,6 +499,7 @@ Future<List<NostrEvent>> _fetchPaginatedChannelEvents(
         kinds: [kind],
         tags: tags,
         limit: _channelDirectoryPageSize,
+        since: since,
         until: until,
         extensions: {'before_id': ?beforeId},
       ),

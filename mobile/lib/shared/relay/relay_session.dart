@@ -198,9 +198,54 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   static const _profileSearchLimitMax = 100;
   ({String relay, DateTime until})? _profileSearchFallback;
 
+  /// POSTs [filters] to `/query` and returns the decoded JSON answer, for
+  /// relay extensions that answer with an object instead of an event array.
+  Future<Object?> queryRelayJson(
+    List<Object> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    final (response, retired) = await _post(
+      '/query',
+      filters,
+      timeout: timeout,
+    );
+    final decoded = jsonDecode(
+      relayResponseText(response.bodyBytes, response.headers['content-type']),
+    );
+    if (retired()) {
+      throw StateError('Relay query belongs to a retired session');
+    }
+    return decoded;
+  }
+
   /// POSTs [payload] as JSON to relay [path] with NIP-98 auth and decodes
   /// the event array it answers.
   Future<List<NostrEvent>> _postForEvents(
+    String path,
+    Object payload, {
+    required Duration timeout,
+  }) async {
+    final (response, retired) = await _post(path, payload, timeout: timeout);
+    // Decoding runs off the UI isolate, so the session can retire meanwhile.
+    // A retired session reports that, not whatever its bytes decoded to.
+    final List<NostrEvent> events;
+    try {
+      events = await _queryDecoder(response);
+    } catch (_) {
+      if (retired()) {
+        throw StateError('Relay query belongs to a retired session');
+      }
+      rethrow;
+    }
+    if (retired()) {
+      throw StateError('Relay query belongs to a retired session');
+    }
+    return events;
+  }
+
+  /// POSTs [payload] as JSON to relay [path] with NIP-98 auth. Returns the
+  /// 2xx response and whether the session has since retired.
+  Future<(http.Response, bool Function())> _post(
     String path,
     Object payload, {
     required Duration timeout,
@@ -249,21 +294,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       _activateRateLimitGateFromHttpError(body);
       throw RelayException(response.statusCode, body);
     }
-    // Decoding runs off the UI isolate, so the session can retire meanwhile.
-    // A retired session reports that, not whatever its bytes decoded to.
-    final List<NostrEvent> events;
-    try {
-      events = await _queryDecoder(response);
-    } catch (_) {
-      if (retired()) {
-        throw StateError('Relay query belongs to a retired session');
-      }
-      rethrow;
-    }
-    if (retired()) {
-      throw StateError('Relay query belongs to a retired session');
-    }
-    return events;
+    return (response, retired);
   }
 
   void _activateRateLimitGateFromHttpError(String body) {

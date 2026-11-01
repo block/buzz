@@ -24,6 +24,7 @@ import 'unread_badge/observed_unread_event.dart';
 import 'unread_badge/should_notify_for_event.dart';
 
 part 'channel_directory.dart';
+part 'channel_membership_delta.dart';
 part 'channel_unread_deletions.dart';
 part 'channel_unread_catch_up.dart';
 part 'channel_snapshot.dart';
@@ -85,6 +86,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   // the directory status alone cannot say this scope's directory is cached.
   String? _directoryMetasScope;
   Set<String> _hiddenDmIds = const {};
+  _MembershipCache? _membershipCache;
+  ({String relay, DateTime until})? _membershipRemovalsRefused;
 
   /// Fences directory responses to the relay and identity that requested them.
   late final _ChannelRefreshCoordinator _refreshCoordinator =
@@ -183,6 +186,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _directoryMetas = const [];
       _directoryMetasScope = null;
       _hiddenDmIds = const {};
+      _membershipCache = null;
       // Retire any in-flight directory request: its response describes the
       // previous relay or identity and must not reach this scope's state.
       _refreshCoordinator.retireInFlight();
@@ -304,8 +308,12 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     );
 
     // Step 1: find the channels I'm a member of via kind:39002.
+    final membershipRead = await _fenced(
+      fence,
+      _readMemberships(session, myPk, fence),
+    );
     final memberships = _latestChannelEvents(
-      await _fenced(fence, _fetchChannelMemberships(session, myPk)),
+      membershipRead.rosters,
       kind: 39002,
     );
     final memberChannelIds = memberships
@@ -414,6 +422,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // Name resolution may return without a fenced read; check before writing.
     fence.ensureCurrent();
     _cacheMemberSnapshots(memberships, replaceAll: true);
+    _membershipCache = membershipRead.cache;
     _hiddenDmIds = Set.unmodifiable(hiddenDmIds);
 
     final channels = <Channel>[];

@@ -307,6 +307,17 @@ class FakeRelay {
     final filters = (jsonDecode(request.body) as List)
         .cast<Map<String, dynamic>>();
     queries.add(filters);
+    // Like a relay predating the removed-membership read: its kindless filter
+    // trips the p-gate.
+    if (filters.any((filter) => filter.containsKey('membership'))) {
+      return http.Response(
+        jsonEncode({
+          'error':
+              'restricted: p-gated kinds require #p tag matching your pubkey',
+        }),
+        403,
+      );
+    }
     final events = filters.length == 1 && filters.single['top_level'] == true
         ? _channelWindow(filters.single)
         : _query(filters);
