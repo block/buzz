@@ -1,3 +1,5 @@
+import 'package:buzz/features/channels/default_agent_launcher.dart';
+import 'package:buzz/shared/me/default_agent.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/features/channels/send_message_provider.dart';
 import 'package:buzz/features/channels/agent_reply_handoff.dart';
@@ -236,6 +238,7 @@ NostrEvent _edit({
 );
 
 Widget _buildTestable({
+  String? bestie,
   bool useRealChannelProviders = false,
   ProfileNotifier? profileNotifier,
   String? signingPubkey,
@@ -306,6 +309,8 @@ Widget _buildTestable({
   return ProviderScope(
     retry: providerRetry ?? (disableRetries ? (_, _) => null : null),
     overrides: [
+      if (bestie != null)
+        defaultAgentProvider.overrideWith((ref) => Stream.value(bestie)),
       if (sender != null) sendMessageProvider.overrideWithValue(sender),
       if (soloSender != null) ...[
         meSendMessageProvider.overrideWithValue(soloSender),
@@ -578,6 +583,81 @@ double? effectiveFontSizeForText(
 }
 
 void main() {
+  for (final fromLauncher in [false, true]) {
+    testWidgets(
+      'Bestie DM shows replies inline and sends at top level: launcher=$fromLauncher',
+      (tester) async {
+        final sender = _RecordingOrdinarySender();
+        final dm = Channel(
+          id: _channelId,
+          name: 'Bestie',
+          channelType: 'dm',
+          visibility: 'private',
+          description: '',
+          createdBy: 'self',
+          createdAt: DateTime(2026),
+          memberCount: 2,
+          participantPubkeys: const ['self', 'agent'],
+          isMember: true,
+        );
+        await tester.pumpWidget(
+          _buildTestable(
+            personalChat: true,
+            signingPubkey: 'self',
+            bestie: 'agent',
+            organization: Stream.value(const MeGroups()),
+            channel: dm,
+            soloSender: sender,
+            messages: [
+              _textMsg(
+                id: threadIdRoot,
+                pubkey: 'self',
+                content: 'Original question',
+              ),
+              _textMsg(
+                id: threadIdA,
+                pubkey: 'agent',
+                content: 'Existing threaded answer',
+                createdAt: 1001,
+                extraTags: [
+                  ['e', threadIdRoot, '', 'root'],
+                ],
+              ),
+            ],
+            home: fromLauncher
+                ? Scaffold(body: DefaultAgentLauncher(onChooseAgent: () {}))
+                : ChannelDetailPage(
+                    channel: dm,
+                    continuousConversation: true,
+                    initialMessageId: threadIdA,
+                    initialThreadRootId: threadIdRoot,
+                  ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        if (fromLauncher) {
+          await tester.tap(find.byType(IconButton));
+          await tester.pumpAndSettle();
+        }
+        expect(find.text('Existing threaded answer'), findsOneWidget);
+        expect(find.byType(ThreadDetailPage), findsNothing);
+        final row = find.byKey(const ValueKey('message-row-$threadIdRoot'));
+        await tester.tap(row);
+        await tester.pumpAndSettle();
+        expect(find.byType(ThreadDetailPage), findsNothing);
+        await tester.drag(row, const Offset(220, 0));
+        await tester.pumpAndSettle();
+        expect(find.byType(ThreadDetailPage), findsNothing);
+        await tester
+            .widget<ComposeBar>(find.byType(ComposeBar))
+            .onSend('Continue here', []);
+        expect(sender.sent, ['Continue here']);
+        expect(sender.parents, [null]);
+        expect(sender.channels.single?.isDm, isTrue);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
   testWidgets(
     'refresh replaces stale Solo details before opening and sending',
     (tester) async {
@@ -18504,6 +18584,7 @@ class _MutableColorProfileNotifier extends ProfileNotifier {
 class _RecordingOrdinarySender implements SendMessage {
   final sent = <String>[];
   final channels = <Channel?>[];
+  final parents = <String?>[];
   @override
   Future<void> call({
     required String channelId,
@@ -18516,6 +18597,7 @@ class _RecordingOrdinarySender implements SendMessage {
   }) async {
     sent.add(content);
     channels.add(channel);
+    parents.add(parentEventId);
   }
 }
 
