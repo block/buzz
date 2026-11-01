@@ -272,12 +272,15 @@ void main() {
         const again = (channelId: _channelId, query: 'bo', opening: 3);
         open(again);
         expect(shownFor(again), [_bob]);
-        expect(container.read(mentionSearchPendingProvider(again)), isFalse);
-
-        // The query still searches again in the background.
+        // It still searches again in the background, which can add people,
+        // so it is pending until that search finishes.
+        expect(container.read(mentionSearchPendingProvider(again)), isTrue);
         final searched = session.searches.length;
         await passTypingPause();
         expect(session.searches, hasLength(searched + 1));
+        session.searches.last.complete([_profile(_bob, 'Bob')]);
+        await container.pump();
+        expect(container.read(mentionSearchPendingProvider(again)), isFalse);
       },
     );
 

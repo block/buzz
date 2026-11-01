@@ -286,8 +286,9 @@ final mentionSearchFailedProvider = Provider.family
       return search.hasError && !search.isLoading;
     });
 
-/// Whether this chooser's directory search is still running with nothing
-/// searched for its exact query yet, so people may still join its rows.
+/// Whether this chooser's directory search is still running, so people may
+/// still join its rows. A cached query counts too: its refresh can add people
+/// or the retry row below the cached page.
 final mentionSearchPendingProvider = Provider.family
     .autoDispose<bool, MentionChooserArgs>((ref, args) {
       final channel = ref.watch(channelByIdProvider(args.channelId));
@@ -297,7 +298,5 @@ final mentionSearchPendingProvider = Provider.family
           args.query.trim().isEmpty) {
         return false;
       }
-      final search = ref.watch(mentionUserSearchProvider(args.query));
-      if (!search.isLoading) return false;
-      return ref.read(mentionSearchCacheProvider).exact(args.query) == null;
+      return ref.watch(mentionUserSearchProvider(args.query)).isLoading;
     });
