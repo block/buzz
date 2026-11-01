@@ -767,6 +767,61 @@ void main() {
     manager.dispose();
   });
 
+  test(
+    'a read after the clock moves back reopens the live subscription',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final relay = _FakeRelaySession();
+      var now = 1000000 + 7200;
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+        now: () => now,
+      );
+
+      // Initialized while the clock was two hours fast, so the live
+      // subscription's since is in the relay's future.
+      await manager.initialize();
+      expect(
+        relay.subscribeFilters.last.since,
+        now - relayLiveWindowSkewSeconds,
+      );
+
+      // The clock is corrected while connected. The next read resyncs.
+      now = 1000000;
+      manager.markContextRead('channel-a', now);
+      await pumpEventQueue();
+      expect(relay.fetchFilters.last.since, now - readStateHorizonSeconds);
+      expect(
+        relay.subscribeFilters.last.since,
+        now - relayLiveWindowSkewSeconds,
+      );
+      expect(relay.subscribeCount, 2);
+      expect(relay.liveSubscriptions, 1);
+
+      // Once resynced, reads don't resync again.
+      final fetches = relay.fetchCount;
+      manager.markContextRead('channel-b', now);
+      await pumpEventQueue();
+      expect(relay.fetchCount, fetches);
+      expect(relay.subscribeCount, 2);
+
+      manager.dispose();
+    },
+  );
+
   test('remote read-state rollback is ignored', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();

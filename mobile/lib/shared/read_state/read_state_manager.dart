@@ -148,6 +148,7 @@ class ReadStateManager {
 
   void markContextRead(String contextId, int unixTimestamp) {
     if (_disposed || isOverrideContext(contextId)) return;
+    _resyncIfClockMovedBack();
     // Set first: retention keeps the most recently written marks, so the
     // save that follows must already see this read as the newest.
     _contextSourceCreatedAt[contextId] = max(
@@ -386,6 +387,17 @@ class ReadStateManager {
     // next fetch covers the whole horizon again.
     if (sentAt == null || sentAt > _now()) return null;
     return sentAt - relayLiveWindowSkewSeconds;
+  }
+
+  /// The live subscription keeps the `since` it was opened with. When the
+  /// clock has since moved back behind the last fetch, that `since` may be in
+  /// the relay's future and hide other devices' blobs until a reconnect, so
+  /// resync now: the fetch covers the whole horizon and the subscription is
+  /// reopened from the corrected clock.
+  void _resyncIfClockMovedBack() {
+    final sentAt = _lastFetchSentAt;
+    if (_unsubscribeLive == null || sentAt == null || sentAt <= _now()) return;
+    unawaited(reinitializeRemote());
   }
 
   Future<bool> _startLiveSubscription() async {
