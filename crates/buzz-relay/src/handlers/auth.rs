@@ -840,7 +840,8 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             // join default channels at, so a person is joined on admission to
             // the ones they have never been in, under this socket's effect
             // permits. Agents are not.
-            if !state.config.require_relay_membership && !admitted_agent {
+            let auto_join = !state.config.require_relay_membership && !admitted_agent;
+            if auto_join {
                 let state = Arc::clone(&state);
                 let tenant = conn.tenant.clone();
                 let gate = Arc::clone(&conn.nip_fi_gate);
@@ -853,6 +854,12 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     )
                     .await;
                 });
+            }
+            // A test waits on every admission's auto-join outcome, so a skip
+            // reports here as the spawned task does when it finishes.
+            #[cfg(test)]
+            if !auto_join {
+                crate::nip_fi_test_hooks::after_auto_join(conn.tenant.community()).await;
             }
             // _auth_permit drops here — expiry's write guard may proceed.
         }
@@ -2417,7 +2424,8 @@ mod tests {
         }
 
         /// Admits `keys` on a fresh root socket and waits for the admission's
-        /// auto-join task, if it runs one, to finish. Returns the socket.
+        /// auto-join outcome: the spawned task finishing, or the skip.
+        /// Panics if neither arrives. Returns the socket.
         async fn admit_and_settle(
             state: &std::sync::Arc<crate::state::AppState>,
             community: buzz_core::tenant::CommunityId,
@@ -2428,22 +2436,25 @@ mod tests {
             use crate::nip_fi_test_hooks::auto_join_done_hook;
             let (done, release) = auto_join_done_hook::arm(community);
             let (conn, _ctrl) = registered_pending_conn(state, community, challenge);
-            handle_auth(
-                signed_auth(keys, challenge, tag),
-                std::sync::Arc::clone(&conn),
-                std::sync::Arc::clone(state),
-            )
-            .await;
+            // A skip reports inside `handle_auth`, so wait alongside it.
+            tokio::join!(
+                handle_auth(
+                    signed_auth(keys, challenge, tag),
+                    std::sync::Arc::clone(&conn),
+                    std::sync::Arc::clone(state),
+                ),
+                async {
+                    tokio::time::timeout(std::time::Duration::from_secs(10), done)
+                        .await
+                        .unwrap_or_else(|_| panic!("{challenge}: no auto-join outcome"))
+                        .expect("auto-join hook dropped");
+                    release.notify_one();
+                },
+            );
             assert!(
                 matches!(conn.auth_state_snapshot(), AuthState::Authenticated(_)),
                 "{challenge} is admitted"
             );
-            // An agent's admission runs no task; a bounded wait lets one that
-            // runs anyway finish before the caller looks.
-            match tokio::time::timeout(std::time::Duration::from_secs(1), done).await {
-                Ok(_) => release.notify_one(),
-                Err(_) => auto_join_done_hook::disarm(community),
-            }
             conn
         }
 
@@ -2451,10 +2462,10 @@ mod tests {
         /// joins them to the default channels they have never been in. An
         /// agent's (NIP-OA) admission runs no join, and a person who left is
         /// not joined back when they are admitted again. Each check waits for
-        /// the admission's own join task to finish.
+        /// that admission's own auto-join outcome (skip or finished task).
         ///
         /// Mutations: delete the `auto_join_never_joined_channels` spawn →
-        /// nobody is joined (RED); drop `!admitted_agent` → the agent is
+        /// no outcome arrives (RED); drop `!admitted_agent` → the agent is
         /// joined (RED); drop the row check in `put_first_member` → the
         /// leave is undone (RED).
         #[tokio::test]
