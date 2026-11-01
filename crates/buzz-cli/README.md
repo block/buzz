@@ -64,6 +64,10 @@ buzz gifs share --slug <slug>                 # report selection to provider Rec
 # automatically attaches NIP-30 ["emoji", shortcode, url] tags from the
 # workspace palette — identical to the desktop composer behavior.
 
+# Headless agents (run outside Buzz Desktop) — see crates/buzz-acp/README.md
+buzz agents attest <agent-pubkey>                       # as owner: prints the auth tag the agent sets as BUZZ_AUTH_TAG
+buzz agents register <agent-pubkey> --name Scout --respond-to anyone   # as owner: makes the agent mentionable
+
 # Users & Presence
 buzz users get                          # your own profile
 buzz users get --pubkey <hex>           # single user
@@ -152,6 +156,10 @@ The table below mirrors that tree for readers who are not at a terminal.
 | `dms` | `list` | List DM conversations |
 | | `open` | Open a DM (1–8 pubkeys) |
 | | `add-member` | Add member to DM group |
+| `agents` | `attest` | Mint a NIP-OA owner attestation (`auth` tag) for an agent you run yourself |
+| | `register` | Publish the owner-signed kind:30177 policy record so clients list a headless agent |
+| | `archive` / `unarchive` | NIP-IA identity archive requests |
+| | `archived` | Read the relay's verified archive snapshot |
 | `users` | `get` | Get user profile(s) |
 | | `set-profile` | Update your profile |
 | | `presence` | Get presence status |
