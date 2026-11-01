@@ -1,5 +1,4 @@
 export 'accent_colors.dart';
-export 'adaptive_theme.dart';
 export 'app_colors.dart';
 export 'app_markdown_theme.dart';
 export 'app_theme.dart';

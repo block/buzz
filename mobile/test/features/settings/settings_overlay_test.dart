@@ -126,7 +126,6 @@ void main() {
                   onChooseAgent: () => showAgents(context),
                 ),
                 settingsPageBuilder: (_) => SettingsPage(
-                  embedded: true,
                   profileHeader: const SettingsProfileHeader(),
                   identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
                 ),

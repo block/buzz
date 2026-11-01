@@ -314,14 +314,6 @@ void _insertTriggerAtCursor(
   focusNode.requestFocus();
 }
 
-bool hasMention(String text, String name) {
-  final pattern = RegExp(
-    '(?:^|\\s|[*_]{1,3}|\\|\\|)@${RegExp.escape(name)}(?=\\|\\||[\\s,;.!?:)\\]}*_]|\$)',
-    caseSensitive: false,
-  );
-  return pattern.hasMatch(text);
-}
-
 /// Outcome of the non-member mention prompt. `null` (dialog dismissed)
 /// cancels the send and keeps the draft.
 enum _NonMemberMentionChoice { invite, sendWithoutInviting }

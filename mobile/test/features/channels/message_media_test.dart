@@ -91,7 +91,6 @@ void main() {
       expect(entry.duration, 3.25);
       expect(entry.filename, 'voice-note.m4a');
       expect(entry.size, 42);
-      expect(entry.isAudio, isTrue);
     });
   });
 }

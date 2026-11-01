@@ -347,63 +347,6 @@ final communityInviteProfileProvider = FutureProvider.autoDispose
       return CommunityInviteDirectoryUser(pubkey: normalized);
     });
 
-/// Lists inviteable relay identities, excluding the signed-in user.
-final communityInviteDirectoryProvider =
-    FutureProvider.autoDispose<List<CommunityInviteDirectoryUser>>((ref) async {
-      ref.watch(relayConfigProvider);
-      final currentPubkey = ref.watch(myPubkeyProvider)?.toLowerCase();
-      final events = await ref.watch(relaySessionProvider.notifier).queryRelay([
-        const NostrFilter(kinds: [0], limit: 50, extensions: {'page': 1}),
-      ]);
-      final directoryUsers = _directoryUsersFromEvents(
-        events,
-      ).where((user) => user.pubkey != currentPubkey).toList();
-      if (directoryUsers.isNotEmpty) return directoryUsers;
-
-      // Match the existing mobile person picker: older relays may not support
-      // a paged kind:0 directory, so fall back to the membership snapshot and
-      // hydrate whatever profiles are available.
-      final membership = await ref.watch(communityMembershipProvider.future);
-      final memberPubkeys = membership.pubkeys
-          .where((pubkey) => pubkey != currentPubkey)
-          .toList();
-      if (memberPubkeys.isEmpty) return const [];
-      final profileEvents = await ref
-          .watch(relaySessionProvider.notifier)
-          .queryRelay([NostrFilters.profilesBatch(memberPubkeys)]);
-      final profilesByPubkey = {
-        for (final user in _directoryUsersFromEvents(profileEvents))
-          user.pubkey: user,
-      };
-      final fallbackUsers = [
-        for (final pubkey in memberPubkeys)
-          profilesByPubkey[pubkey] ??
-              CommunityInviteDirectoryUser(pubkey: pubkey),
-      ];
-      fallbackUsers.sort((a, b) {
-        final byLabel = a.label.toLowerCase().compareTo(b.label.toLowerCase());
-        return byLabel != 0 ? byLabel : a.pubkey.compareTo(b.pubkey);
-      });
-      return fallbackUsers;
-    });
-
-/// Searches the active relay for inviteable identities matching a query.
-final communityInviteDirectorySearchProvider = FutureProvider.autoDispose
-    .family<List<CommunityInviteDirectoryUser>, String>((ref, query) async {
-      final trimmed = query.trim();
-      if (trimmed.isEmpty) {
-        return ref.watch(communityInviteDirectoryProvider.future);
-      }
-      ref.watch(relayConfigProvider);
-      final currentPubkey = ref.watch(myPubkeyProvider)?.toLowerCase();
-      final events = await ref.watch(relaySessionProvider.notifier).queryRelay([
-        NostrFilters.searchUsers(trimmed, limit: 50),
-      ]);
-      return _directoryUsersFromEvents(
-        events,
-      ).where((user) => user.pubkey != currentPubkey).toList();
-    });
-
 /// Shares [inviteUrl] from an optional platform anchor rectangle.
 typedef ShareCommunityInvite =
     Future<void> Function(String inviteUrl, Rect? sharePositionOrigin);

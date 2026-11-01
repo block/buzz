@@ -124,48 +124,4 @@ void main() {
       expect(isSameDay(a, b), isFalse);
     });
   });
-
-  group('formatThreadSummaryLastReplyTime', () {
-    const now = 2_000_000;
-
-    test('uses expanded relative units', () {
-      expect(
-        formatThreadSummaryLastReplyTime(now - 30, nowSeconds: now),
-        'just now',
-      );
-      expect(
-        formatThreadSummaryLastReplyTime(now - 60, nowSeconds: now),
-        '1 minute ago',
-      );
-      expect(
-        formatThreadSummaryLastReplyTime(now - 3 * 3600, nowSeconds: now),
-        '3 hours ago',
-      );
-      expect(
-        formatThreadSummaryLastReplyTime(now - 2 * 86400, nowSeconds: now),
-        '2 days ago',
-      );
-    });
-
-    test('dates older replies with a short month and no ordinal', () {
-      final may19 = _ts(DateTime(2026, 5, 19, 12));
-      final may1 = _ts(DateTime(2026, 5, 1, 12));
-
-      expect(
-        formatThreadSummaryLastReplyTime(
-          may19,
-          nowSeconds: _ts(DateTime(2026, 5, 27, 12)),
-        ),
-        'on May 19',
-      );
-      // The 1st is where an ordinal is most tempting.
-      expect(
-        formatThreadSummaryLastReplyTime(
-          may1,
-          nowSeconds: _ts(DateTime(2026, 5, 27, 12)),
-        ),
-        'on May 1',
-      );
-    });
-  });
 }

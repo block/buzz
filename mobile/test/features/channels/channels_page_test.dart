@@ -20,7 +20,6 @@ import 'package:buzz/shared/channels/channel_list_snapshot.dart';
 import '../profile/presence_snapshot_test.dart'
     show PresenceTestRelay, presenceEvent;
 
-import 'dart:math';
 import 'dart:io';
 import 'dart:ui' as ui;
 
@@ -46,7 +45,6 @@ import 'package:buzz/features/channels/channels_page.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
-import 'package:buzz/features/profile/profile_avatar.dart';
 import 'package:buzz/features/pairing/pairing_page.dart';
 import 'package:buzz/features/pairing/pairing_qr_scanner.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
@@ -146,30 +144,16 @@ void main() {
                 ),
                 settingsPageBuilder: _buildSettingsPage,
               )
-            : Stack(
-                children: [
-                  ChannelsPage(
-                    settingsPageBuilder: _buildSettingsPage,
-                    communityInvitePageBuilder: (_) =>
-                        const Scaffold(body: Text('Invite destination')),
-                    communityAppearancePageBuilder: (_) =>
-                        const Scaffold(body: Text('Appearance destination')),
-                    onSettingsTransitionProgress:
-                        onSettingsTransitionProgress ?? (_) {},
-                    tabReselection: tabReselection,
-                    soloSliver: soloSliver,
-                  ),
-                  const Positioned.fill(
-                    child: ChannelQuickActionsLauncher(
-                      visible: true,
-                      navigationBarHeight: 60,
-                      navigationBarBottomGap: 12,
-                      navigationBarWidth: 218,
-                      systemBottomInset: 0,
-                      rightInset: 16,
-                    ),
-                  ),
-                ],
+            : ChannelsPage(
+                settingsPageBuilder: _buildSettingsPage,
+                communityInvitePageBuilder: (_) =>
+                    const Scaffold(body: Text('Invite destination')),
+                communityAppearancePageBuilder: (_) =>
+                    const Scaffold(body: Text('Appearance destination')),
+                onSettingsTransitionProgress:
+                    onSettingsTransitionProgress ?? (_) {},
+                tabReselection: tabReselection,
+                soloSliver: soloSliver,
               ),
       ),
     );
@@ -454,7 +438,7 @@ void main() {
     expect(find.text('FORUMS'), findsNothing);
     expect(find.text('DMs'), findsOneWidget);
     expect(find.text('Community'), findsNothing);
-    expect(find.byTooltip('Create or start conversation'), findsOneWidget);
+    expect(find.byTooltip('Create'), findsOneWidget);
     expect(find.byTooltip('Channels options'), findsOneWidget);
     expect(find.byIcon(BuzzIcons.ellipsis), findsWidgets);
     expect(find.byIcon(BuzzIcons.arrowUpDown), findsNothing);
@@ -1261,10 +1245,6 @@ void main() {
         matching: find.byType(ClipRSuperellipse),
       );
       expect(tester.getSize(community), const Size.square(36));
-      expect(
-        find.descendant(of: appBar, matching: find.byType(ProfileAvatar)),
-        findsNothing,
-      );
       expect(find.byTooltip('Create'), findsOneWidget);
     },
   );
@@ -2776,150 +2756,6 @@ void main() {
     await tester.pump();
   });
 
-  testWidgets('hidden quick actions move behind the left-aligned navigation', (
-    tester,
-  ) async {
-    Widget buildLauncher({required bool visible}) {
-      return ProviderScope(
-        overrides: [profileProvider.overrideWith(() => _FakeProfileNotifier())],
-        child: MaterialApp(
-          theme: AppTheme.light(),
-          home: Stack(
-            children: [
-              Positioned.fill(
-                child: ChannelQuickActionsLauncher(
-                  visible: visible,
-                  navigationBarHeight: 60,
-                  navigationBarBottomGap: 12,
-                  navigationBarWidth: 218,
-                  systemBottomInset: 0,
-                  rightInset: 16,
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
-    await tester.pumpWidget(buildLauncher(visible: true));
-    await tester.pumpAndSettle();
-    Transform motionTransform() => tester.widget<Transform>(
-      find.byKey(const Key('channel-quick-actions-transform')),
-    );
-
-    expect(motionTransform().transform.getTranslation().x, 0);
-
-    await tester.pumpWidget(buildLauncher(visible: false));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 110));
-    final midpoint = motionTransform().transform.getTranslation().x;
-    expect(midpoint, lessThan(0));
-    expect(midpoint, greaterThan(-550));
-
-    await tester.pumpAndSettle();
-    expect(motionTransform().transform.getTranslation().x, closeTo(-550, 0.01));
-    final hiddenOpacity = tester.widget<Opacity>(
-      find.byKey(const Key('channel-quick-actions-opacity')),
-    );
-    expect(hiddenOpacity.opacity, 0);
-    final hiddenPointerGate = tester.widget<IgnorePointer>(
-      find
-          .ancestor(
-            of: find.byKey(const Key('channel-quick-actions-transform')),
-            matching: find.byType(IgnorePointer),
-          )
-          .first,
-    );
-    expect(hiddenPointerGate.ignoring, isTrue);
-  });
-
-  testWidgets('quick actions spring into spaced muted cards', (tester) async {
-    await tester.pumpWidget(
-      buildTestable(
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    final surface = find.byKey(const Key('quick-actions-surface'));
-    expect(tester.getSize(surface), const Size.square(56));
-
-    await tester.tap(find.byTooltip('Create or start conversation'));
-    await tester.pump();
-
-    var largestHeight = tester.getSize(surface).height;
-    for (var frame = 0; frame < 20; frame++) {
-      await tester.pump(const Duration(milliseconds: 16));
-      largestHeight = max(largestHeight, tester.getSize(surface).height);
-    }
-    await tester.pumpAndSettle();
-
-    expect(largestHeight, greaterThan(142));
-    expect(tester.getSize(surface).height, closeTo(142, 0.01));
-    final screenWidth = MediaQuery.sizeOf(tester.element(surface)).width;
-    final surfaceRect = tester.getRect(surface);
-    expect(surfaceRect.left, closeTo(20, 0.01));
-    expect(surfaceRect.right, closeTo(screenWidth - 20, 0.01));
-
-    final menuRect = tester.getRect(
-      find.byKey(const Key('quick-actions-menu')),
-    );
-    final createCard = find.byKey(
-      const Key('quick-action-create-channel-card'),
-    );
-    final dmCard = find.byKey(const Key('quick-action-new-dm-card'));
-    final createRect = tester.getRect(createCard);
-    final dmRect = tester.getRect(dmCard);
-
-    expect(createRect.left - menuRect.left, closeTo(8, 0.01));
-    expect(menuRect.right - createRect.right, closeTo(8, 0.01));
-    expect(dmRect.left - menuRect.left, closeTo(8, 0.01));
-    expect(menuRect.right - dmRect.right, closeTo(8, 0.01));
-    expect(dmRect.top - createRect.bottom, closeTo(6, 0.01));
-    expect(dmRect.width, createRect.width);
-    expect(dmRect.width, closeTo(menuRect.width - 16, 0.01));
-
-    final expectedCardColor = Color.alphaBlend(
-      Colors.white.withValues(alpha: 0.1),
-      const Color(0xFF262626),
-    );
-    final createMaterial = tester.widget<Material>(
-      find.descendant(of: createCard, matching: find.byType(Material)).first,
-    );
-    final dmMaterial = tester.widget<Material>(
-      find.descendant(of: dmCard, matching: find.byType(Material)).first,
-    );
-    expect(createMaterial.color, expectedCardColor);
-    expect(dmMaterial.color, expectedCardColor);
-    expect(
-      (createMaterial.shape as RoundedSuperellipseBorder).borderRadius,
-      const BorderRadius.vertical(
-        top: Radius.circular(20),
-        bottom: Radius.circular(8),
-      ),
-    );
-    expect(
-      (dmMaterial.shape as RoundedSuperellipseBorder).borderRadius,
-      const BorderRadius.vertical(
-        top: Radius.circular(8),
-        bottom: Radius.circular(20),
-      ),
-    );
-
-    expect(find.text('Start a new stream channel'), findsNothing);
-    expect(tester.widget<Text>(find.text('New channel')).style?.fontSize, 16);
-    expect(tester.widget<Text>(find.text('New DM')).style?.fontSize, 16);
-    expect(
-      find.byKey(const Key('quick-action-browse-channels-card')),
-      findsNothing,
-    );
-    expect(find.text('Message one or more people'), findsNothing);
-    expect(find.byKey(const Key('browse-channels-button')), findsNothing);
-  });
-
   testWidgets('create channel sheet lists type and visibility radio options', (
     tester,
   ) async {
@@ -2932,7 +2768,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byTooltip('Create or start conversation'));
+    await tester.tap(find.byTooltip('Create'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('New channel'));
     await tester.pumpAndSettle();
@@ -3049,7 +2885,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byTooltip('Create or start conversation'));
+    await tester.tap(find.byTooltip('Create'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('New DM'));
     await tester.pumpAndSettle();
@@ -3213,7 +3049,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byTooltip('Create or start conversation'));
+    await tester.tap(find.byTooltip('Create'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('New DM'));
     await tester.pumpAndSettle();
@@ -3281,7 +3117,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byTooltip('Create or start conversation'));
+    await tester.tap(find.byTooltip('Create'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('New DM'));
     await tester.pumpAndSettle();

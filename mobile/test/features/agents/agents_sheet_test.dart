@@ -37,13 +37,8 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
     addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
     final h = await AgentsHarness.create();
-    await h.open(
-      tester,
-      directory: [existing, otherAgentKeys.public],
-      botDirectory: ['b' * 64],
-    );
+    await h.open(tester, directory: [existing, otherAgentKeys.public]);
     expect(find.byKey(ValueKey(otherAgentKeys.public)), findsNothing);
-    expect(find.byKey(ValueKey('b' * 64)), findsNothing);
     expect(find.byKey(ValueKey(oldAppAgentKeys.public)), findsNothing);
     if (!supportsRemoteAgents(h.community)) {
       expect(find.text('Sign in to create an agent'), findsNothing);

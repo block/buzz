@@ -53,7 +53,11 @@ void main() {
               return Scaffold(
                 body: UserProfileSheet(
                   pubkey: scout,
-                  names: liveIdentityNamesProvider(opened),
+                  names: Provider.autoDispose<IdentityNames>(
+                    (ref) => opened.withSources(
+                      ref.watch(identityNameSourcesProvider),
+                    ),
+                  ),
                 ),
               );
             },

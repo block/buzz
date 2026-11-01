@@ -352,23 +352,4 @@ void main() {
       expect(label.text, 'Thread in');
     });
   });
-
-  group('inboxDayLabel', () {
-    final now = DateTime(2026, 7, 25, 12);
-    int at(DateTime d) => d.millisecondsSinceEpoch ~/ 1000;
-
-    test('today / yesterday / weekday / date buckets', () {
-      expect(inboxDayLabel(at(DateTime(2026, 7, 25, 9)), now: now), 'Today');
-      expect(
-        inboxDayLabel(at(DateTime(2026, 7, 24, 9)), now: now),
-        'Yesterday',
-      );
-      expect(inboxDayLabel(at(DateTime(2026, 7, 21, 9)), now: now), 'Tuesday');
-      expect(inboxDayLabel(at(DateTime(2026, 1, 2)), now: now), 'Jan 2');
-      expect(
-        inboxDayLabel(at(DateTime(2025, 12, 31)), now: now),
-        'Dec 31, 2025',
-      );
-    });
-  });
 }

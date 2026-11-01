@@ -9,7 +9,6 @@ import 'package:buzz/shared/community/community_membership_provider.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/theme/theme.dart';
-import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/shared/push/dev_push_lease.dart';
 import 'package:buzz/shared/push/push_relay_capability_provider.dart';
 import 'package:buzz/shared/relay/app_lifecycle_provider.dart';
@@ -102,7 +101,6 @@ void main() {
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
       final capability = Completer<BuzzPushLeaseDescriptor?>();
-      var permissionReads = 0;
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
@@ -115,12 +113,6 @@ void main() {
             ),
             currentRelayPushDescriptorProvider.overrideWith(
               (ref) => capability.future,
-            ),
-            buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
-              () async {
-                permissionReads += 1;
-                return BuzzPushAuthorizationStatus.authorized;
-              },
             ),
           ],
           child: MaterialApp(
@@ -144,7 +136,6 @@ void main() {
       expect(find.text('Notifications'), findsNothing);
       expect(find.text('Push notifications'), findsNothing);
       expect(find.byType(Switch), findsNothing);
-      expect(permissionReads, 0);
       expect(tester.takeException(), isNull);
       debugDefaultTargetPlatformOverride = null;
     });
@@ -171,9 +162,6 @@ void main() {
           activeCommunityProvider.overrideWith((ref) async => community),
           currentRelayPushDescriptorProvider.overrideWith((ref) => capability),
           appLifecycleProvider.overrideWith(_SettingsLifecycleNotifier.new),
-          buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
-            () async => BuzzPushAuthorizationStatus.authorized,
-          ),
         ],
         child: MaterialApp(
           theme: AppTheme.light(),

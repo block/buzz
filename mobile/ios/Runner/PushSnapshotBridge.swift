@@ -69,8 +69,7 @@ final class BuzzPushSnapshotBridge {
       purgeAgeRestrictedNotifications(result: result)
       return true
     }
-    let strictAgeGateWrite = call.method == "syncAgeGatePushSnapshot"
-    guard strictAgeGateWrite || call.method == "syncPushSnapshot",
+    guard call.method == "syncPushSnapshot",
       let arguments = call.arguments as? [String: Any],
       let section = arguments["section"] as? String
     else {
@@ -78,11 +77,7 @@ final class BuzzPushSnapshotBridge {
     }
     switch section {
     case "communities":
-      syncCommunities(
-        arguments,
-        requiresStore: strictAgeGateWrite,
-        result: result
-      )
+      syncCommunities(arguments, result: result)
     default: return false
     }
     return true
@@ -135,13 +130,11 @@ final class BuzzPushSnapshotBridge {
 
   private func syncCommunities(
     _ arguments: [String: Any],
-    requiresStore: Bool,
     result: @escaping FlutterResult
   ) {
     guard let communities = arguments["communities"] as? [[String: Any]],
       let signingKeys = arguments["signingKeys"] as? [String: String],
-      communities.count <= BuzzPushPresentationCacheStore.maximumCommunities,
-      !requiresStore || arguments["settleFence"] is Bool
+      communities.count <= BuzzPushPresentationCacheStore.maximumCommunities
     else {
       result(
         FlutterError(
@@ -155,29 +148,11 @@ final class BuzzPushSnapshotBridge {
     queue.async { [weak self] in
       do {
         guard let self else {
-          Self.complete(
-            result,
-            value: requiresStore
-              ? FlutterError(
-                code: "snapshot_sync_unavailable",
-                message: "The push snapshot bridge is unavailable.",
-                details: nil
-              )
-              : nil
-          )
+          Self.complete(result, value: nil)
           return
         }
         guard let store else {
-          Self.complete(
-            result,
-            value: requiresStore
-              ? FlutterError(
-                code: "snapshot_sync_unavailable",
-                message: "The push snapshot store is unavailable.",
-                details: nil
-              )
-              : nil
-          )
+          Self.complete(result, value: nil)
           return
         }
         // Relay-metadata enrichment is optional presentation state. A damaged

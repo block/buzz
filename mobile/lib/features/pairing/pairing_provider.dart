@@ -4,7 +4,6 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:http/http.dart' as http;
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/auth/auth.dart';
@@ -22,13 +21,6 @@ import 'package:buzz/shared/crypto/event_signing.dart';
 
 part 'pairing_provider_helpers.dart';
 part 'pairing_state.dart';
-
-/// HTTP client used by [PairingNotifier] for the validation request.
-final pairingHttpClientProvider = Provider<http.Client>((ref) {
-  final client = http.Client();
-  ref.onDispose(client.close);
-  return client;
-});
 
 typedef PairingSocketFactory =
     PairingSocket Function({

@@ -41,7 +41,6 @@ class SettingsPage extends HookConsumerWidget {
     required this.profileHeader,
     required this.identityRecoveryPageBuilder,
     this.profileEditPageBuilder = _emptyProfileEditPage,
-    this.embedded = false,
     this.onSetStatus,
     this.onEditDisplayName,
     this.onEditProfileDescription,
@@ -49,9 +48,6 @@ class SettingsPage extends HookConsumerWidget {
 
   /// Header widget displayed at the top of settings.
   final Widget profileHeader;
-
-  /// The profile destination in the main tab bar.
-  final bool embedded;
 
   /// Builds the identity-recovery page pushed from the recovery settings row.
   final WidgetBuilder identityRecoveryPageBuilder;
@@ -82,20 +78,15 @@ class SettingsPage extends HookConsumerWidget {
       child: FrostedScaffold(
         useUtilitySurfaceTheme: true,
         appBar: FrostedAppBar(
-          nativeTitle: embedded ? '' : 'Settings',
-          nativeLeading: embedded
-              ? null
-              : IosNavigationAction(
-                  label: 'Close settings',
-                  symbol: 'xmark',
-                  onPressed: () => Navigator.of(context).pop(),
-                ),
+          nativeTitle: 'Settings',
+          nativeLeading: IosNavigationAction(
+            label: 'Close settings',
+            symbol: 'xmark',
+            onPressed: () => Navigator.of(context).pop(),
+          ),
           automaticallyImplyLeading: false,
           horizontalInset: Grid.gutter,
-
-          leading: embedded
-              ? null
-              : Theme.of(context).platform == TargetPlatform.iOS
+          leading: Theme.of(context).platform == TargetPlatform.iOS
               ? IosGlassNavigationButton(
                   key: const ValueKey('settings-ios-glass-close'),
                   icon: IosGlassNavigationIcon.close,

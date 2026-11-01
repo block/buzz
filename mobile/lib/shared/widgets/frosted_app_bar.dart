@@ -41,22 +41,6 @@ double _barContentHeight(
       : _kBarContentMinHeight;
 }
 
-/// Height for a compact title rail below the app bar's action row.
-///
-/// The rail normally stays at 40dp, but grows with an accessible title rather
-/// than clipping text at larger system text sizes.
-double frostedAppBarLowerTitleHeight(
-  BuildContext context, {
-  TextStyle? titleStyle,
-}) {
-  final style = _effectiveTitleStyle(context, titleStyle);
-  final scaledFontSize = MediaQuery.textScalerOf(
-    context,
-  ).scale(style.fontSize ?? 16);
-  final titleHeight = scaledFontSize * (style.height ?? 1);
-  return titleHeight > 40 ? titleHeight : 40;
-}
-
 /// Returns the total height of the [FrostedAppBar] including safe area padding.
 ///
 /// Use this to add top spacing to body content so it starts below the bar.

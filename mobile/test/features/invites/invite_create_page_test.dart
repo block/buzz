@@ -54,18 +54,6 @@ void main() {
             ),
           ),
           myPubkeyProvider.overrideWithValue(owner),
-          communityInviteDirectoryProvider.overrideWith(
-            (ref) async => const [
-              CommunityInviteDirectoryUser(
-                pubkey: alice,
-                displayName: 'Alice',
-                nip05Handle: 'alice@example.com',
-              ),
-            ],
-          ),
-          communityInviteDirectorySearchProvider.overrideWith(
-            (ref, query) async => const [],
-          ),
           communityInviteProfileProvider.overrideWith(
             (ref, pubkey) async => CommunityInviteDirectoryUser(
               pubkey: pubkey,
@@ -362,9 +350,6 @@ void main() {
               snapshotFound: true,
               members: [],
             ),
-          ),
-          communityInviteDirectoryProvider.overrideWith(
-            (ref) async => const [],
           ),
           communityInviteActionsProvider.overrideWithValue(actions),
         ],

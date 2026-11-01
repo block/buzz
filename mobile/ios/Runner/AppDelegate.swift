@@ -49,7 +49,6 @@ import os.log
   private var nativeProfileSetupCoordinator: NativeProfileSetupCoordinator?
   private var nativeCommunityEntryCoordinator: NativeCommunityEntryCoordinator?
   private var nativeProfileTextEditorCoordinator: NativeProfileTextEditorCoordinator?
-  private var nativeMessageActionSurfaceSupportChannel: FlutterMethodChannel?
   private var identityFilePlugin: IdentityFilePlugin?
   private var hostedHpkeChannel: FlutterMethodChannel?
   private var browserAuthBridge: BuzzBrowserAuthBridge?
@@ -329,27 +328,6 @@ import os.log
       messenger: messenger,
       parentViewController: nativeProfileTextEditorRegistrar?.viewController
     )
-    if #available(iOS 16.0, *),
-      let nativeMessageActionsRegistrar = engineBridge.pluginRegistry.registrar(
-        forPlugin: "BuzzNativeMessageActionSurface"
-      )
-    {
-      nativeMessageActionsRegistrar.register(
-        NativeMessageActionSurfaceFactory(messenger: messenger),
-        withId: "buzz/native_message_action_surface"
-      )
-      nativeMessageActionSurfaceSupportChannel = FlutterMethodChannel(
-        name: "buzz/native_message_action_surface",
-        binaryMessenger: messenger
-      )
-      nativeMessageActionSurfaceSupportChannel?.setMethodCallHandler { call, result in
-        guard call.method == "isSupported" else {
-          result(FlutterMethodNotImplemented)
-          return
-        }
-        result(true)
-      }
-    }
   }
 
   func handleAgeSignalMethodCall(
@@ -578,14 +556,6 @@ import os.log
       startPushRegistration(result: result)
     case "takePendingNotificationResponse":
       result(pushNavigationBuffer.take()?.flutterArguments)
-    case "notificationAuthorizationStatus":
-      UNUserNotificationCenter.current().getNotificationSettings { settings in
-        DispatchQueue.main.async {
-          result(Self.pushAuthorizationStatusName(settings.authorizationStatus))
-        }
-      }
-    case "openNotificationSettings":
-      openNotificationSettings(result: result)
     case "endpointGrants":
       do {
         guard let arguments = call.arguments as? [String: Any],
@@ -611,41 +581,6 @@ import os.log
       handleDevPushEnrollment(call, result: result)
     default:
       result(FlutterMethodNotImplemented)
-    }
-  }
-
-  static func pushAuthorizationStatusName(_ status: UNAuthorizationStatus) -> String {
-    switch status {
-    case .notDetermined:
-      return "notDetermined"
-    case .denied:
-      return "denied"
-    case .authorized:
-      return "authorized"
-    case .provisional:
-      return "provisional"
-    case .ephemeral:
-      return "ephemeral"
-    @unknown default:
-      return "unknown"
-    }
-  }
-
-  private func openNotificationSettings(result: @escaping FlutterResult) {
-    let settingsURLString: String
-    if #available(iOS 16.0, *) {
-      settingsURLString = UIApplication.openNotificationSettingsURLString
-    } else {
-      settingsURLString = UIApplication.openSettingsURLString
-    }
-    guard let url = URL(string: settingsURLString) else {
-      result(false)
-      return
-    }
-    UIApplication.shared.open(url, options: [:]) { opened in
-      DispatchQueue.main.async {
-        result(opened)
-      }
     }
   }
 

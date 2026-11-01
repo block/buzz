@@ -12,15 +12,6 @@ const int kMaxExplicitChannelValues = 128;
 /// Centralising filter shapes keeps relay queries consistent across providers
 /// and makes kind/tag conventions easy to audit.
 abstract final class NostrFilters {
-  /// Channels where I'm a member (kind:39002 with `#p` = my pubkey).
-  static NostrFilter myChannels(String myPk) => NostrFilter(
-    kinds: [39002],
-    tags: {
-      '#p': [myPk],
-    },
-    limit: 500,
-  );
-
   /// Channel metadata for the given channel IDs.
   static NostrFilter channelMetadata(List<String> ids) =>
       NostrFilter(kinds: [39000], tags: {'#d': ids}, limit: ids.length);
@@ -123,14 +114,6 @@ abstract final class NostrFilters {
     limit: 200,
   );
 
-  /// Reactions (kind:7) on a specific event.
-  static NostrFilter reactions(String eventId) => NostrFilter(
-    kinds: [7],
-    tags: {
-      '#e': [eventId],
-    },
-  );
-
   /// Canvas event for a channel.
   static NostrFilter canvas(String channelId) => NostrFilter(
     kinds: [40100],
@@ -138,23 +121,6 @@ abstract final class NostrFilters {
       '#h': [channelId],
     },
     limit: 1,
-  );
-
-  /// Workflows (kind:30620) in a channel.
-  static NostrFilter workflows(String channelId) => NostrFilter(
-    kinds: [30620],
-    tags: {
-      '#h': [channelId],
-    },
-  );
-
-  /// DM channels where I'm a participant.
-  static NostrFilter dmList(String myPk) => NostrFilter(
-    kinds: [39000],
-    tags: {
-      '#t': ['dm'],
-      '#p': [myPk],
-    },
   );
 
   /// Latest per-viewer hidden-DM snapshot (kind:30622, `#p` = my pubkey).
@@ -190,22 +156,6 @@ abstract final class NostrFilters {
         },
       );
 
-  /// NIP-50 message search, optionally scoped to a channel.
-  static NostrFilter searchMessages(
-    String query, {
-    String? channelId,
-    int limit = 20,
-  }) => NostrFilter(
-    kinds: [9, 40002, 45001, 45003],
-    tags: channelId != null
-        ? {
-            '#h': [channelId],
-          }
-        : const {},
-    search: query,
-    limit: limit,
-  );
-
   /// Global user search over kind:0 profiles (NIP-50 via the HTTP bridge).
   ///
   /// `search_mode: "prefix"` is a Buzz bridge-only extension: every caller is
@@ -227,8 +177,4 @@ abstract final class NostrFilters {
   /// Agent profiles (kind:10100).
   static NostrFilter agentProfiles() =>
       const NostrFilter(kinds: [10100], limit: 100);
-
-  /// User status (NIP-38, kind:30315).
-  static NostrFilter userStatus(String pubkey) =>
-      NostrFilter(kinds: [30315], authors: [pubkey], limit: 1);
 }
