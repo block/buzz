@@ -425,9 +425,10 @@ pub struct ChannelIdentity {
 pub struct LockedMemberSnapshot {
     /// Canonical active members captured behind the lock.
     pub members: Vec<MemberRecord>,
-    /// The channel's type, labels and creator, read on the same connection, so the
-    /// roster carries the same identity tags as the channel's other
-    /// group-state events. `None` when no channel row exists.
+    /// The channel's type, labels and creator, from the same row read as
+    /// `channel`, so the roster carries the same identity tags as the
+    /// channel's other group-state events. Present for a deleted channel;
+    /// `None` when no channel row exists.
     pub identity: Option<ChannelIdentity>,
     /// The live channel row, read on the same connection. `None` when the
     /// channel is missing or deleted.
@@ -625,19 +626,12 @@ pub async fn lock_member_snapshot(
         .into_iter()
         .map(row_to_member_record)
         .collect::<Result<Vec<_>>>()?;
-    let identity = sqlx::query_as::<_, (String, Vec<String>, Vec<u8>)>(
-        "SELECT channel_type::text, labels, created_by FROM channels WHERE community_id = $1 AND id = $2",
-    )
-    .bind(community_id.as_uuid())
-    .bind(channel_id)
-    .fetch_optional(tx.conn())
-    .await?
-    .map(|(channel_type, labels, created_by)| ChannelIdentity {
-        channel_type,
-        labels,
-        created_by,
-    });
-    let channel = crate::channel::live_channel_in_transaction(&mut tx, channel_id).await?;
+    // One read feeds both: the roster's identity tags (kept for a deleted
+    // channel) and the live row behind 39000/39001. Label edits do not take
+    // the membership lock, so two reads could straddle one.
+    let row = crate::channel::channel_in_transaction(&mut tx, channel_id).await?;
+    let identity = row.as_ref().map(ChannelRecord::identity);
+    let channel = row.filter(|channel| channel.deleted_at.is_none());
     Ok(LockedMemberSnapshot {
         members,
         identity,
@@ -5160,6 +5154,11 @@ mod postgres_tests {
             Some(channel.id),
             "the live channel row is captured behind the same locks"
         );
+        assert_eq!(
+            snapshot.identity,
+            snapshot.channel.as_ref().map(ChannelRecord::identity),
+            "the roster's identity comes from the captured row, not a second read"
+        );
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(39002), "")
             .tags(vec![
                 nostr::Tag::parse(["d", &channel.id.to_string()]).expect("d tag"),
@@ -5240,6 +5239,45 @@ mod postgres_tests {
                 .len(),
             2
         );
+    }
+
+    /// A deleted channel has no live row for 39000/39001, but its roster keeps
+    /// the identity tags, so reconciliation still publishes a valid 39002.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn locked_member_snapshot_of_deleted_channel_keeps_identity() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner = random_pubkey();
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "snapshot-deleted-identity",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .expect("create channel");
+        assert!(
+            crate::channel::soft_delete_channel(&pool, community, channel.id)
+                .await
+                .expect("soft delete channel")
+        );
+
+        let snapshot = lock_member_snapshot(&pool, community, channel.id, &[7u8; 32])
+            .await
+            .expect("capture deleted channel");
+        assert!(
+            snapshot.channel.is_none(),
+            "a deleted channel has no live row"
+        );
+        assert_eq!(snapshot.identity, Some(channel.identity()));
+        assert!(snapshot.members.is_empty());
+        snapshot.release().await.expect("release snapshot");
     }
 
     /// Captured roster publication must hold the same shared community-deletion

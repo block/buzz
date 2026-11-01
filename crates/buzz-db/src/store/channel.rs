@@ -706,9 +706,9 @@ pub struct ReapedEphemeralChannel {
     pub channel_id: Uuid,
 }
 
-/// The live (not deleted) channel row on a caller-owned transaction, or
-/// `None` when it is missing or deleted.
-pub(crate) async fn live_channel_in_transaction(
+/// The channel row, deleted or not, on a caller-owned transaction, or `None`
+/// when it is missing.
+pub(crate) async fn channel_in_transaction(
     tx: &mut crate::AdmittedTx,
     channel_id: Uuid,
 ) -> Result<Option<ChannelRecord>> {
@@ -722,7 +722,7 @@ pub(crate) async fn live_channel_in_transaction(
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
                ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
-        FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL
+        FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
     .bind(community_id.as_uuid())
