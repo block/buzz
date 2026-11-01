@@ -685,6 +685,143 @@ void main() {
     expect(relay.liveSubscriptions, 0);
   });
 
+  test('a re-sync asks only for blobs stored since the last fetch', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+    final relay = _FakeRelaySession();
+    final manager = ReadStateManager(
+      pubkey: keychain.public,
+      relayUrl: _relayUrl,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: relay,
+      signedEventRelay: _FakeSignedEventRelay(),
+      remoteEnabled: true,
+      onChanged: () {},
+    );
+
+    final before = currentUnixSeconds();
+    await manager.initialize();
+    final after = currentUnixSeconds();
+    // The first fetch covers the whole horizon.
+    expect(
+      relay.fetchFilters.single.since,
+      inInclusiveRange(
+        before - readStateHorizonSeconds,
+        after - readStateHorizonSeconds,
+      ),
+    );
+    final firstSince = inInclusiveRange(
+      before - relayLiveWindowSkewSeconds,
+      after - relayLiveWindowSkewSeconds,
+    );
+    expect(relay.subscribeFilters.single.since, firstSince);
+
+    // A failed re-sync fetch leaves the next one starting from the last
+    // successful fetch.
+    relay.failNextFetch = true;
+    await manager.reinitializeRemote();
+    await manager.reinitializeRemote();
+    expect(relay.fetchFilters, hasLength(3));
+    expect(relay.fetchFilters[1].since, firstSince);
+    expect(relay.fetchFilters[2].since, firstSince);
+    expect(relay.subscribeFilters.last.since, isNotNull);
+
+    manager.dispose();
+  });
+
+  test('a clock set back after a fetch resyncs the whole horizon', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+    final relay = _FakeRelaySession();
+    var now = 1000000 + 7200;
+    final manager = ReadStateManager(
+      pubkey: keychain.public,
+      relayUrl: _relayUrl,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: relay,
+      signedEventRelay: _FakeSignedEventRelay(),
+      remoteEnabled: true,
+      onChanged: () {},
+      now: () => now,
+    );
+
+    // The first fetch ran while the clock was two hours fast.
+    await manager.initialize();
+    now = 1000000;
+    await manager.reinitializeRemote();
+    expect(relay.fetchFilters.last.since, now - readStateHorizonSeconds);
+    expect(relay.subscribeFilters.last.since, now - relayLiveWindowSkewSeconds);
+
+    manager.dispose();
+  });
+
+  test(
+    'a read after the clock moves back reopens the live subscription',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final relay = _FakeRelaySession();
+      var now = 1000000 + 7200;
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+        now: () => now,
+      );
+
+      // Initialized while the clock was two hours fast, so the live
+      // subscription's since is in the relay's future.
+      await manager.initialize();
+      expect(
+        relay.subscribeFilters.last.since,
+        now - relayLiveWindowSkewSeconds,
+      );
+
+      // The clock is corrected while connected. The next read resyncs.
+      now = 1000000;
+      manager.markContextRead('channel-a', now);
+      await pumpEventQueue();
+      expect(relay.fetchFilters.last.since, now - readStateHorizonSeconds);
+      expect(
+        relay.subscribeFilters.last.since,
+        now - relayLiveWindowSkewSeconds,
+      );
+      expect(relay.subscribeCount, 2);
+      expect(relay.liveSubscriptions, 1);
+
+      // Once resynced, reads don't resync again.
+      final fetches = relay.fetchCount;
+      manager.markContextRead('channel-b', now);
+      await pumpEventQueue();
+      expect(relay.fetchCount, fetches);
+      expect(relay.subscribeCount, 2);
+
+      manager.dispose();
+    },
+  );
+
   test('remote read-state rollback is ignored', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -874,6 +1011,8 @@ class _FakeRelaySession extends RelaySessionNotifier {
   int fetchCount = 0;
   int subscribeCount = 0;
   int liveSubscriptions = 0;
+  final List<NostrFilter> fetchFilters = [];
+  final List<NostrFilter> subscribeFilters = [];
 
   @override
   Future<List<NostrEvent>> fetchHistory(
@@ -881,6 +1020,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     fetchCount++;
+    fetchFilters.add(filter);
     await fetchGate;
     if (failNextFetch) {
       failNextFetch = false;
@@ -896,6 +1036,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     void Function(String message)? onClosed,
   }) async {
     subscribeCount++;
+    subscribeFilters.add(filter);
     liveSubscriptions++;
     var open = true;
     return () {

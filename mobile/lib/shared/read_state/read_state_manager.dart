@@ -81,6 +81,10 @@ class ReadStateManager {
   Completer<void>? _publishCompleter;
   bool _remoteUnsupported = false;
   int _maxFetchedCreatedAt = 0;
+  // When the last successful history fetch was sent. A later fetch and the
+  // live subscription ask only for blobs stored since then.
+  int? _lastFetchSentAt;
+  final int Function() _now;
   final Map<String, int> _contextSourceCreatedAt = {};
   final Set<String> _pendingSyncedAdvances = {};
 
@@ -93,7 +97,9 @@ class ReadStateManager {
     required SignedEventRelay? signedEventRelay,
     required bool remoteEnabled,
     required VoidCallback onChanged,
-  }) : _crypto = crypto,
+    @visibleForTesting int Function() now = currentUnixSeconds,
+  }) : _now = now,
+       _crypto = crypto,
        _storage = ReadStateStorage(prefs),
        _relaySession = relaySession,
        _signedEventRelay = signedEventRelay,
@@ -142,6 +148,7 @@ class ReadStateManager {
 
   void markContextRead(String contextId, int unixTimestamp) {
     if (_disposed || isOverrideContext(contextId)) return;
+    _resyncIfClockMovedBack();
     // Set first: retention keeps the most recently written marks, so the
     // save that follows must already see this read as the newest.
     _contextSourceCreatedAt[contextId] = max(
@@ -274,6 +281,7 @@ class ReadStateManager {
   }
 
   Future<bool> _fetchAndMerge() async {
+    final sentAt = _now();
     try {
       final events = await _relaySession!.fetchHistory(
         NostrFilter(
@@ -282,11 +290,15 @@ class ReadStateManager {
           tags: const {
             '#t': ['read-state'],
           },
-          since: currentUnixSeconds() - readStateHorizonSeconds,
+          since: max(
+            sentAt - readStateHorizonSeconds,
+            _storedSinceLastFetch ?? 0,
+          ),
           limit: readStateFetchLimit,
         ),
       );
       _mergeEvents(events);
+      _lastFetchSentAt = sentAt;
       _persistLocalState();
       _onChanged();
       return true;
@@ -364,6 +376,30 @@ class ReadStateManager {
     return changed;
   }
 
+  /// The earliest `created_at` a blob stored since the last successful fetch
+  /// was sent can carry, or null before one. Merging takes the newest mark per
+  /// context, so blobs from before it add nothing. The relay rejects a
+  /// `created_at` more than 900s from its clock;
+  /// [relayLiveWindowSkewSeconds] adds 60s of client clock skew.
+  int? get _storedSinceLastFetch {
+    final sentAt = _lastFetchSentAt;
+    // A clock set back since then can't place blobs relative to it, so the
+    // next fetch covers the whole horizon again.
+    if (sentAt == null || sentAt > _now()) return null;
+    return sentAt - relayLiveWindowSkewSeconds;
+  }
+
+  /// The live subscription keeps the `since` it was opened with. When the
+  /// clock has since moved back behind the last fetch, that `since` may be in
+  /// the relay's future and hide other devices' blobs until a reconnect, so
+  /// resync now: the fetch covers the whole horizon and the subscription is
+  /// reopened from the corrected clock.
+  void _resyncIfClockMovedBack() {
+    final sentAt = _lastFetchSentAt;
+    if (_unsubscribeLive == null || sentAt == null || sentAt <= _now()) return;
+    unawaited(reinitializeRemote());
+  }
+
   Future<bool> _startLiveSubscription() async {
     try {
       final unsub = await _relaySession!.subscribe(
@@ -373,6 +409,8 @@ class ReadStateManager {
           tags: const {
             '#t': ['read-state'],
           },
+          // The fetch just merged everything stored before this.
+          since: _storedSinceLastFetch,
           limit: readStateFetchLimit,
         ),
         _handleIncomingEvent,
