@@ -375,8 +375,14 @@ class NostrBindDeepLink extends BuzzDeepLink {
 class AddCommunityDeepLink extends BuzzDeepLink {
   @override
   final String relayUrl;
-  final String name;
-  const AddCommunityDeepLink({required this.relayUrl, required this.name});
+
+  final String _name;
+
+  /// User-facing label, shortening hosted host-name fallbacks like [Community].
+  String get name => HostedEnvironment.communityDisplayName(_name, relayUrl);
+
+  const AddCommunityDeepLink({required this.relayUrl, required String name})
+    : _name = name;
 }
 
 bool _webHandoffShape(Uri uri, String host, Set<String> allowed) =>

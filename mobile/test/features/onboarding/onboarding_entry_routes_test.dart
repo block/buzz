@@ -200,7 +200,7 @@ void main() {
       f.beforeAdmission = null;
       await tester.tap(find.text('Try again').hitTestable());
       await tester.pumpAndSettle();
-      expect(f.admitted, ['paired']);
+      expect(f.admitted, ['paired.communities.buzz.xyz']);
       expect(f.remembered, contains('wss://paired.communities.buzz.xyz'));
       expect(find.byType(OnboardingAppEntry), findsNothing);
       expect(find.text('Add community').hitTestable(), findsOneWidget);

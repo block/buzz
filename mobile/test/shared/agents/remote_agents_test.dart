@@ -57,6 +57,9 @@ Future<RelayFakeController> _controller(FakeRegistry registry) async {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  // Registrations go to a real loopback relay. The binding's mocked HTTP
+  // client would reject the WebSocket upgrade.
+  HttpOverrides.global = null;
   setUp(() {
     FlutterSecureStorage.setMockInitialValues({});
     SharedPreferences.setMockInitialValues({});

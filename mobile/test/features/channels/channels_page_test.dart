@@ -1,7 +1,9 @@
 import 'package:buzz/shared/widgets/ios_message_create_button.dart';
 import 'package:buzz/features/channels/default_agent_launcher.dart';
 import 'package:buzz/features/agents/agents_page.dart';
+
 import 'dart:convert';
+
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 import 'package:buzz/shared/read_state/read_state_storage.dart';
@@ -1663,8 +1665,9 @@ void main() {
       ),
       Community(
         id: 'bravo',
-        name: 'Bravo',
-        relayUrl: 'wss://bravo.example.com',
+        // Hosted communities without relay metadata store their host.
+        name: 'bravo.communities.buzz.xyz',
+        relayUrl: 'wss://bravo.communities.buzz.xyz',
         addedAt: DateTime(2025),
       ),
     ];
@@ -1711,7 +1714,11 @@ void main() {
 
     expect(find.byTooltip('Close community switcher'), findsOneWidget);
     expect(find.text('alpha.example.com'), findsNothing);
-    expect(find.text('bravo.example.com'), findsNothing);
+    expect(find.text('bravo.communities.buzz.xyz'), findsNothing);
+    expect(
+      find.descendant(of: options, matching: find.text('bravo')),
+      findsOneWidget,
+    );
 
     expect(find.text('Rename'), findsNothing);
     expect(
@@ -1784,13 +1791,13 @@ void main() {
     expect(activeSelection, findsNothing);
     expect(inactiveSelection, findsNothing);
 
-    await tester.tap(find.byTooltip('Remove Bravo'));
+    await tester.tap(find.byTooltip('Remove bravo'));
     await tester.pumpAndSettle();
 
     expect(find.text('Remove community?'), findsOneWidget);
     expect(
       find.text(
-        'Are you sure you want to remove “Bravo”? '
+        'Are you sure you want to remove “bravo”? '
         'You can pair with it again later.',
       ),
       findsOneWidget,
@@ -1801,7 +1808,7 @@ void main() {
 
     expect(communityNotifier.removedIds, ['bravo']);
     expect(find.text('Switch Community'), findsOneWidget);
-    expect(find.text('Bravo'), findsNothing);
+    expect(find.text('bravo'), findsNothing);
     expect(find.text('Done'), findsOneWidget);
 
     await tester.tap(find.text('Done'));
@@ -3479,72 +3486,104 @@ void main() {
     );
   });
 
-  testWidgets('bolds channels with unread thread activity without a badge', (
-    tester,
-  ) async {
-    final channels = [
-      Channel(
-        id: '1',
-        name: 'general',
-        channelType: 'stream',
-        visibility: 'open',
-        description: 'General discussion',
-        createdBy: 'abc',
-        createdAt: DateTime(2025),
-        memberCount: 10,
-        lastMessageAt: DateTime.fromMillisecondsSinceEpoch(
-          30 * 1000,
-          isUtc: true,
-        ),
-        isMember: true,
-      ),
-    ];
-    final readState = _FakeReadStateNotifier(
-      const ReadStateState(
-        isReady: true,
-        pubkey: 'pk',
-        contexts: {'1': 10},
-        version: 0,
-      ),
-    );
-
-    await tester.pumpWidget(
-      buildTestable(
-        overrides: [
-          channelsProvider.overrideWith(
-            () => _FakeNotifier(
-              channels,
-              observedEventsByChannel: {
-                '1': [
-                  _observed(
-                    id: 'reply-1',
-                    createdAt: 20,
-                    rootId: threadIdRoot,
-                    isThreadedReply: true,
-                  ),
-                  _observed(
-                    id: 'reply-2',
-                    createdAt: 30,
-                    rootId: threadIdRoot,
-                    isThreadedReply: true,
-                  ),
-                ],
-              },
-            ),
+  for (final viaMenu in [false, true]) {
+    testWidgets('dots, not bolds, channels with only unread thread replies '
+        '(cleared ${viaMenu ? 'by Mark read' : 'by reading the thread'})', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      final channels = [
+        Channel(
+          id: '1',
+          name: 'general',
+          channelType: 'stream',
+          visibility: 'open',
+          description: 'General discussion',
+          createdBy: 'abc',
+          createdAt: DateTime(2025),
+          memberCount: 10,
+          lastMessageAt: DateTime.fromMillisecondsSinceEpoch(
+            30 * 1000,
+            isUtc: true,
           ),
-          readStateProvider.overrideWith(() => readState),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
+          isMember: true,
+        ),
+      ];
+      final readState = _FakeReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'pk',
+          contexts: {'1': 10},
+          version: 0,
+        ),
+      );
 
-    expect(
-      tester.widget<Text>(find.text('general')).style?.fontWeight,
-      FontWeight.w600,
-    );
-  });
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            channelsProvider.overrideWith(
+              () => _FakeNotifier(
+                channels,
+                observedEventsByChannel: {
+                  '1': [
+                    _observed(
+                      id: 'reply-1',
+                      createdAt: 20,
+                      rootId: threadIdRoot,
+                      isThreadedReply: true,
+                    ),
+                    _observed(
+                      id: 'reply-2',
+                      createdAt: 30,
+                      rootId: threadIdRoot,
+                      isThreadedReply: true,
+                    ),
+                  ],
+                },
+              ),
+            ),
+            readStateProvider.overrideWith(() => readState),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
 
-  for (final (label, events, bold) in [
+      expect(
+        tester.widget<Text>(find.text('general')).style?.fontWeight,
+        FontWeight.w400,
+      );
+      expect(
+        find.byKey(const ValueKey('channel-attention-dot-1')),
+        findsOneWidget,
+      );
+      expect(
+        find.bySemanticsLabel(RegExp(r'general[\s\S]*Needs your attention')),
+        findsOneWidget,
+      );
+
+      if (viaMenu) {
+        await tester.longPress(find.text('general'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Mark Read'));
+        await tester.pumpAndSettle();
+      } else {
+        readState.markContextRead('thread-activity:$threadIdRoot', 30);
+        await tester.pump();
+      }
+
+      expect(
+        find.byKey(const ValueKey('channel-attention-dot-1')),
+        findsNothing,
+      );
+      expect(
+        find.bySemanticsLabel(RegExp('Needs your attention')),
+        findsNothing,
+      );
+      semantics.dispose();
+    });
+  }
+
+  for (final (label, events, bold, dot) in [
     (
       'catch-up marks read ordinary messages and thread replies',
       [
@@ -3557,10 +3596,21 @@ void main() {
         ),
       ],
       false,
+      false,
     ),
     (
-      'channel catch-up does not read a mention',
+      'channel catch-up leaves a mention as a dot',
       [_observed(id: 'mention-1', createdAt: 20, highPriority: true)],
+      false,
+      true,
+    ),
+    (
+      'unread backlog bolds alongside a mention dot',
+      [
+        _observed(id: 'msg-1', createdAt: 28),
+        _observed(id: 'mention-1', createdAt: 20, highPriority: true),
+      ],
+      true,
       true,
     ),
   ]) {
@@ -3613,6 +3663,10 @@ void main() {
       expect(
         tester.widget<Text>(find.text('general')).style?.fontWeight,
         bold ? FontWeight.w600 : FontWeight.w400,
+      );
+      expect(
+        find.byKey(const ValueKey('channel-attention-dot-1')),
+        dot ? findsOneWidget : findsNothing,
       );
     });
   }
@@ -3699,7 +3753,7 @@ class _FakeNotifier extends ChannelsNotifier {
   }
 
   @override
-  Future<void> ensureDirectoryLoaded() async {
+  Future<void> ensureDirectoryLoaded({Duration? maxAge}) async {
     ref
         .read(channelDirectoryLoadStatusProvider.notifier)
         .markLoaded(_activeDirectoryScope(ref));
