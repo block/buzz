@@ -378,3 +378,51 @@ test("unmount disposes both established and pending channel streams", async () =
     h.restore();
   }
 });
+
+test("a DM sent while away is still alerted after the subscription start moves forward", async () => {
+  const dms = [];
+  const opts = {
+    onDmMessage: (event, channel) => dms.push([channel.id, event.id]),
+  };
+  const h = await mount(channels(1), opts);
+  try {
+    // A membership resync (or reconnect) restamps the subscription start.
+    h.rerender(channels(2), opts);
+    await h.settle();
+    const now = Math.floor(Date.now() / 1000);
+    await h.deliver(
+      h.subscriptions[0],
+      message("missed", { created_at: now - 60 }),
+    );
+    await h.deliver(
+      h.subscriptions[0],
+      message("stale", { created_at: now - 3600 }),
+    );
+    assert.deepEqual(
+      dms,
+      [["channel-0", "missed"]],
+      "recent missed DM alerts, old backlog stays silent",
+    );
+  } finally {
+    h.restore();
+  }
+});
+
+test("a channel that appears after the initial sync subscribes slightly in the past", async () => {
+  const h = await mount(channels(1));
+  try {
+    const initialSince = h.subscriptions[0].filter.since;
+    h.rerender(channels(2));
+    await h.settle();
+    const added = h.subscriptions.find(
+      (sub) => sub.filter["#h"]?.[0] === "channel-1",
+    );
+    assert.ok(added, "new channel subscribed");
+    assert.ok(
+      added.filter.since <= initialSince - 100,
+      "new channel backfills so the message that created it is delivered",
+    );
+  } finally {
+    h.restore();
+  }
+});
