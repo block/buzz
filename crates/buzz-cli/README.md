@@ -80,6 +80,9 @@ buzz dms list
 # Workflows
 buzz workflows list --channel <uuid>
 buzz workflows trigger --workflow <uuid>
+buzz workflows runs --workflow <uuid> --limit 20
+buzz workflows runs --workflow <uuid> --before <next.before> --before-id <next.before_id>
+buzz workflows approvals --workflow <uuid> --run <run-uuid>
 buzz workflows approve --token <uuid>
 buzz workflows approve --token <uuid> --approved false --note "needs revision"
 
@@ -159,11 +162,12 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `set-status` | Set or clear your NIP-38 profile status |
 | `workflows` | `list` | List workflows |
 | | `get` | Get workflow definition |
-| | `create` | Create a workflow |
+| | `create` | Create a workflow (adds `webhook_secret` for webhook triggers; treat it as a secret) |
 | | `update` | Update a workflow |
 | | `delete` | Delete a workflow |
 | | `trigger` | Trigger a workflow |
-| | `runs` | Get workflow run history |
+| | `runs` | Get workflow run history (`{runs, next}`; pass `next` back as `--before`/`--before-id` for the next page) |
+| | `approvals` | List approvals of a run (`{approvals}`; `approval_ref` is opaque, not a token) |
 | | `approve` | Approve/deny a workflow step |
 | `feed` | `get` | Get your activity feed |
 | `social` | `publish` | Publish a NIP-01 note |
