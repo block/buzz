@@ -507,6 +507,18 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     return true;
   });
 
+  Future<void> setPushMuteAgents(String id, bool muted) =>
+      _serializePushMutation(() async {
+        final storage = ref.read(communityStorageProvider);
+        final current = state.value ?? await storage.loadAll();
+        final index = current.indexWhere((community) => community.id == id);
+        if (index < 0 || current[index].pushMuteAgents == muted) return;
+
+        final updated = current[index].copyWith(pushMuteAgents: muted);
+        await storage.save(updated);
+        state = AsyncData([...current]..[index] = updated);
+      });
+
   Future<void> setPushNotificationsEnabled(String id, bool enabled) async {
     var shouldDeactivate = false;
     await _serializePushMutation(() async {
