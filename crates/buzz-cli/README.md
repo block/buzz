@@ -199,9 +199,14 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `rm` | Publish a tombstone to delete memory |
 
 `personas list` and `teams catalog` print one entry per shared head, sorted by
-name; a newer unshared or unreadable head hides older versions. A listing is
-not an adoptability check: the CLI checks only that the name is present, and
-Desktop can still reject an entry the CLI lists. `teams list`
+name; a newer unshared or unreadable head hides older versions. Both commands
+apply the validators Desktop uses when it adopts an entry (`buzz-core`). An
+entry Desktop would reject is still listed, with `validation_error` set to the
+reason and only its identity fields (`event_id`, `owner_pubkey`, `persona_id` or
+`team_id`, `created_at`) present (this includes a team with an unknown schema
+version or an unparseable member, which older CLIs skipped); the reason has
+non-ASCII characters escaped and is capped at 200 characters; rejected entries sort last, and adoptable
+entries carry `validation_error: null`. `teams list`
 prints `persona_ids: null` when the publisher never recorded membership.
 `agents metrics` prints `{event_id, agent, created_at, metric}` with the
 decrypted NIP-AM payload in `metric`; it needs the owner's own key (exit 3 under an agent

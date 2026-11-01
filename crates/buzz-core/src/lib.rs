@@ -9,6 +9,8 @@
 pub mod agent_turn_metric;
 /// Channel and membership enums shared across crates.
 pub mod channel;
+/// Validation for human-reviewed agent definition text and portable ACP commands.
+pub mod definition_validation;
 /// NIP-AE Agent Engrams — slug grammar, conversation key, d-tag derivation,
 /// body parse/serialize, envelope build/validate, head selection.
 pub mod engram;
@@ -38,6 +40,8 @@ pub mod presence;
 pub mod private_managed_agent;
 /// Canonical relay runtime identities.
 pub mod relay;
+/// Wire contract and validation for kind:30178 team catalog bodies.
+pub mod team_catalog;
 /// Tenant identity — the server-resolved community key carried on scoped paths.
 pub mod tenant;
 /// NIP-CW thread-mode normalized newest-first window contract.
