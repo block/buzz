@@ -612,12 +612,13 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         // profile-publishing user already holds.
         KIND_IA_ARCHIVE_REQUEST | KIND_IA_UNARCHIVE_REQUEST => Ok(Scope::UsersWrite),
         KIND_NIP29_EDIT_METADATA => {
-            // kind:9002 scope split: archived tag → AdminChannels, else ChannelsWrite
-            let has_archived = event
-                .tags
-                .iter()
-                .any(|t| t.kind().to_string() == "archived");
-            if has_archived {
+            // kind:9002 scope split: archived or auto_join tag → AdminChannels,
+            // else ChannelsWrite
+            let has_admin_tag = event.tags.iter().any(|t| {
+                let k = t.kind().to_string();
+                k == "archived" || k == "auto_join"
+            });
+            if has_admin_tag {
                 Ok(Scope::AdminChannels)
             } else {
                 Ok(Scope::ChannelsWrite)

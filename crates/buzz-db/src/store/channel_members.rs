@@ -41,9 +41,11 @@ pub struct MemberRecord {
 /// concurrent demotions (or a demotion racing a removal) to each observe two
 /// owners, each pass, and together leave zero — the exact governance loss the
 /// guards exist to prevent. An advisory key rather than `SELECT ... FOR UPDATE`
-/// on the channel row: membership is its own contention domain and must not
-/// serialize against unrelated channel metadata writers (`update_channel`,
-/// `set_topic`, the TTL transition). Distinct key domain from
+/// on the channel row, so a removal, which takes only this key, does not
+/// serialize against the row's writers that leave admission alone
+/// (`set_topic`, `set_canvas`, the TTL transition). Admissions also lock the
+/// row, after this key (see [`lock_channel_for_member_put`]), because the row
+/// is what orders an archive against them. Distinct key domain from
 /// `buzz_channel_ttl:`.
 const CHANNEL_MEMBERSHIP_LOCK_NAMESPACE: &str = "buzz_channel_membership:";
 
@@ -652,6 +654,11 @@ pub async fn add_member(
 /// neither a membership write nor a setting change can slip between the
 /// decision and the write.
 ///
+/// An archived channel admits nobody new: a target who is not an active
+/// member is refused with `AccessDenied` while `archived_at` is set. The
+/// archive state is read under the channel row lock, which every archive
+/// write needs too (see [`lock_channel_for_member_put`]).
+///
 /// There is no creator exception: channel creation installs the creator as
 /// owner in the same transaction, so a creator without an active row was
 /// removed and is admitted like anyone else.
@@ -719,12 +726,69 @@ pub async fn put_members(
     )
     .await?;
 
-    // First statement: serialize the whole decision / owner-count / upsert
-    // sequence against concurrent membership writes on this channel.
-    acquire_channel_membership_lock(tx.conn(), community_id, channel_id).await?;
+    // First statements: serialize the whole decision / owner-count / upsert
+    // sequence against concurrent membership writes and archives of this
+    // channel.
+    lock_channel_for_member_put(&mut tx, channel_id).await?;
     let results = put_members_on(&mut tx, channel_id, targets, invited_by).await?;
     tx.commit().await?;
     Ok(results)
+}
+
+/// Self-join `pubkey` to `channel_id` as [`put_member`] with no actor and no
+/// requested role (so the channel's `join_role` applies), but only if
+/// `pubkey` has never had a membership row in the channel, active or removed.
+/// Returns `None`, writing nothing, when such a row exists.
+///
+/// The row is checked under the [`put_member`] locks, so a leave, a join or
+/// another first join of the same person commits wholly before or after this
+/// write: two sign-ins racing each other write once, and a leave that commits
+/// first keeps the person out. A refusal (an archived or private channel) is
+/// the [`put_member`] error.
+pub async fn put_first_member(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+) -> Result<Option<MemberRecord>> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    lock_channel_for_member_put(&mut tx, channel_id).await?;
+    let seen: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM channel_members \
+         WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3)",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(pubkey)
+    .fetch_one(tx.conn())
+    .await?;
+    if seen {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    let target = MemberPut {
+        pubkey,
+        requested: None,
+    };
+    let put = put_members_on(&mut tx, channel_id, &[target], None)
+        .await?
+        .pop()
+        .ok_or_else(|| DbError::InvalidData("membership put returned no result".to_string()))?;
+    match put {
+        Ok(put) => {
+            tx.commit().await?;
+            Ok(Some(put.member))
+        }
+        Err(refused) => {
+            tx.rollback().await?;
+            Err(refused)
+        }
+    }
 }
 
 /// The result of [`Db::put_members_with_event`].
@@ -748,9 +812,8 @@ pub enum MemberPutEventWrite {
 /// transaction. If any write fails, nothing is stored, so the client can
 /// resend the same event and have it applied.
 ///
-/// The membership lock comes first, as in [`put_members`] and the channel
-/// settings writers, so a second copy of the event waits for the first and
-/// then finds it stored.
+/// The locks of [`put_members`] come first, so a second copy of the event
+/// waits for the first and then finds it stored.
 pub(crate) async fn put_members_with_event(
     pool: &PgPool,
     push_enqueue: Option<crate::runtime::push_enqueue::PushEnqueue>,
@@ -768,7 +831,7 @@ pub(crate) async fn put_members_with_event(
     )
     .await?;
     tx.set_push_enqueue(push_enqueue);
-    acquire_channel_membership_lock(tx.conn(), community_id, channel_id).await?;
+    lock_channel_for_member_put(&mut tx, channel_id).await?;
 
     // The same writes as `Db::insert_event_with_thread_metadata`.
     let (stored, inserted) = crate::event::insert_event_with_thread_metadata_tx(
@@ -796,6 +859,23 @@ pub(crate) async fn put_members_with_event(
     Ok(MemberPutEventWrite::Applied { stored, results })
 }
 
+/// Take the locks of a [`put_members`] write on `tx`, in the channel lock
+/// order (see `channel::lock_channel_for_settings_write`): the membership
+/// lock, the shared TTL lock, then the channel row `FOR NO KEY UPDATE`.
+///
+/// The row lock is what orders the write against an archive. Every archive
+/// and unarchive updates that row (`archive_channel`, a kind:9002 `archived`
+/// tag, the TTL reaper's single UPDATE), and none of them takes the
+/// membership lock. So an archive either commits before [`put_members_on`]
+/// reads `archived_at`, or waits until this write commits.
+async fn lock_channel_for_member_put(tx: &mut AdmittedTx, channel_id: Uuid) -> Result<()> {
+    let community_id = tx.community();
+    acquire_channel_membership_lock(tx.conn(), community_id, channel_id).await?;
+    lock_channel_ttl_shared_in_transaction(tx, channel_id).await?;
+    lock_channel_archived_at_in_transaction(tx, channel_id).await?;
+    Ok(())
+}
+
 fn check_distinct_targets(targets: &[MemberPut<'_>]) -> Result<()> {
     let mut seen = std::collections::HashSet::with_capacity(targets.len());
     match targets.iter().find(|t| !seen.insert(t.pubkey)) {
@@ -808,7 +888,8 @@ fn check_distinct_targets(targets: &[MemberPut<'_>]) -> Result<()> {
 }
 
 /// The decisions and upsert of [`put_members`], on a transaction that holds
-/// `channel_id`'s membership lock. The caller owns the commit.
+/// `channel_id`'s [`lock_channel_for_member_put`] locks. The caller owns the
+/// commit.
 async fn put_members_on(
     tx: &mut AdmittedTx,
     channel_id: Uuid,
@@ -817,6 +898,7 @@ async fn put_members_on(
 ) -> Result<Vec<Result<PutMemberResult>>> {
     let community_id = tx.community();
     let channel = get_channel_tx(tx.conn(), community_id, channel_id).await?;
+    let archived = channel.archived_at.is_some();
     let private = channel.visibility == "private";
     let join_role = buzz_core::channel::ChannelJoinRole::parse_fail_closed(&channel.join_role);
 
@@ -854,6 +936,12 @@ async fn put_members_on(
         }
         let actor = invited_by.unwrap_or(target.pubkey);
         let current_role = roles.get(target.pubkey).cloned();
+        if archived && current_role.is_none() {
+            decided.push(Err(DbError::AccessDenied(
+                "channel is archived".to_string(),
+            )));
+            continue;
+        }
         let actor_role: Option<MemberRole> = roles
             .get(actor)
             .map(|r| {
@@ -1741,7 +1829,7 @@ async fn get_channel_tx(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role, unlisted
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
         FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
     )
@@ -1839,7 +1927,7 @@ pub async fn get_accessible_channels(
                c.nip29_group_id, c.topic_required, c.max_members,
                c.topic, c.topic_set_by, c.topic_set_at,
                c.purpose, c.purpose_set_by, c.purpose_set_at,
-               c.ttl_seconds, c.ttl_deadline, c.labels, c.join_role, c.unlisted,
+               c.ttl_seconds, c.ttl_deadline, c.labels, c.join_role, c.unlisted, c.auto_join,
                (cm.channel_id IS NOT NULL) AS is_member
         FROM channels c
         LEFT JOIN channel_members cm
@@ -2140,6 +2228,18 @@ impl Db {
             invited_by,
         )
         .await
+    }
+
+    /// Self-joins `pubkey` with the channel's `join_role` only if they have
+    /// never been a member of the channel (see [`put_first_member`]).
+    #[datastore_span(name = "put_first_member", system = "postgresql")]
+    pub async fn put_first_member(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+    ) -> Result<Option<MemberRecord>> {
+        put_first_member(&self.pool, community_id, channel_id, pubkey).await
     }
 
     /// Stores a kind:9000 `event` and applies its [`put_members`] writes,
@@ -2518,6 +2618,113 @@ mod postgres_tests {
         .expect("insert owner membership");
 
         crate::channel::get_channel(pool, CommunityId::from_uuid(community_id), id).await
+    }
+
+    /// A person who has never been in a flagged channel is listed for it and
+    /// joined once, with the channel's `join_role`; a second put finds the
+    /// row; after a leave the channel is neither listed nor joined again. An
+    /// unflagged channel is never listed.
+    ///
+    /// Two racing first joins write once.
+    ///
+    /// Mutations: drop the row check from `put_first_member` → the leave is
+    /// undone (RED); take the locks after the row check → racing joins both
+    /// write (RED); drop the `NOT EXISTS` from
+    /// `list_never_joined_auto_join_channels` → the left channel is still
+    /// listed (RED).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn first_member_put_joins_once_and_never_undoes_a_leave() {
+        use crate::channel::{list_never_joined_auto_join_channels, update_channel, ChannelUpdate};
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let (owner, person) = (random_pubkey(), random_pubkey());
+        let mut channels = Vec::new();
+        for name in ["general", "announcements", "random"] {
+            let channel = create_test_channel(
+                &pool,
+                *community.as_uuid(),
+                name,
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                &owner,
+                None,
+            )
+            .await
+            .expect("create channel");
+            channels.push(channel.id);
+        }
+        let (general, announcements, unflagged) = (channels[0], channels[1], channels[2]);
+        for (channel, join_role) in [(general, None), (announcements, Some("guest"))] {
+            update_channel(
+                &pool,
+                community,
+                channel,
+                ChannelUpdate {
+                    auto_join: Some(true),
+                    join_role: join_role.map(str::to_string),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("flag channel");
+        }
+
+        let never_joined = || list_never_joined_auto_join_channels(&pool, community, &person);
+        assert_eq!(
+            never_joined().await.expect("list"),
+            [general, announcements]
+        );
+
+        let put_first = |channel| put_first_member(&pool, community, channel, &person);
+        assert_eq!(
+            put_first(general).await.expect("first put").map(|m| m.role),
+            Some("member".to_string())
+        );
+        assert_eq!(
+            put_first(announcements)
+                .await
+                .expect("first put")
+                .map(|m| m.role),
+            Some("guest".to_string()),
+            "the channel's join_role applies"
+        );
+        assert!(put_first(general).await.expect("second put").is_none());
+        assert!(never_joined().await.expect("list").is_empty());
+
+        // Two first joins of the same person racing each other write once.
+        for _ in 0..5 {
+            let racer = random_pubkey();
+            let (a, b) = tokio::join!(
+                put_first_member(&pool, community, general, &racer),
+                put_first_member(&pool, community, general, &racer),
+            );
+            let written = [a.expect("racing put"), b.expect("racing put")]
+                .iter()
+                .filter(|put| put.is_some())
+                .count();
+            assert_eq!(written, 1, "racing first joins write once");
+        }
+
+        remove_member(&pool, community, general, &person, &person)
+            .await
+            .expect("leave");
+        assert!(never_joined().await.expect("list").is_empty());
+        assert!(put_first(general).await.expect("put after leave").is_none());
+        assert_eq!(
+            get_member_role(&pool, community, general, &person)
+                .await
+                .expect("role"),
+            None,
+            "a leave stands"
+        );
+        assert_eq!(
+            get_member_role(&pool, community, unflagged, &person)
+                .await
+                .expect("role"),
+            None
+        );
     }
 
     #[tokio::test]
@@ -3853,6 +4060,205 @@ mod postgres_tests {
             .await
             .expect("update task")
             .expect("join_role change");
+    }
+
+    /// An archive and an admission are ordered by the channel row lock, and an
+    /// archived channel admits nobody new. A join that waits on an uncommitted
+    /// archive is refused once it commits, with no row, and re-adding a
+    /// removed member is refused too. A kind:9000 add that waits on an
+    /// uncommitted archive is refused the same way, and its event is not
+    /// stored. The other order: an archive waits for an admission that holds
+    /// the locks.
+    /// The archive here is the TTL reaper's single UPDATE, which takes no
+    /// advisory lock. The join and the kind:9000 add each wait on their own
+    /// archive, so neither queues behind the other's membership lock.
+    /// Mutations: drop the row lock from `lock_channel_for_member_put`, take
+    /// only the membership lock in `put_members_with_event`, or drop the
+    /// archived refusal from `put_members_on` → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn put_member_waits_for_a_concurrent_archive() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner_keys = Keys::generate();
+        let owner = owner_keys.public_key().to_bytes().to_vec();
+        let joiner = random_pubkey();
+        let removed = random_pubkey();
+        let invitee = random_pubkey();
+        for pk in [&owner, &joiner, &removed, &invitee] {
+            ensure_user(&pool, community, pk)
+                .await
+                .expect("ensure user");
+        }
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "put-member-archive-race",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .expect("create channel");
+        put_member(&pool, community, channel.id, &removed, None, None)
+            .await
+            .expect("join before the archive");
+        remove_member(&pool, community, channel.id, &removed, &removed)
+            .await
+            .expect("leave before the archive");
+
+        let mut archive = pool.begin().await.expect("begin archive");
+        sqlx::query(
+            "UPDATE channels SET archived_at = NOW() \
+             WHERE community_id = $1 AND id = $2 AND archived_at IS NULL",
+        )
+        .bind(community_id)
+        .bind(channel.id)
+        .execute(&mut *archive)
+        .await
+        .expect("archive");
+
+        let join_pool = crate::test_support::named_pool("put-member-archive-race").await;
+        let join = tokio::spawn({
+            let channel_id = channel.id;
+            let joiner = joiner.clone();
+            async move { put_member(&join_pool, community, channel_id, &joiner, None, None).await }
+        });
+        crate::test_support::wait_for_lock_wait(&pool, "put-member-archive-race").await;
+        assert!(!join.is_finished(), "the join must wait for the archive");
+        archive.commit().await.expect("commit archive");
+
+        let err = join
+            .await
+            .expect("join task")
+            .expect_err("the join is decided on the archived channel");
+        assert!(
+            matches!(&err, DbError::AccessDenied(reason) if reason == "channel is archived"),
+            "{err:?}"
+        );
+        let readd = put_member(&pool, community, channel.id, &removed, None, Some(&owner))
+            .await
+            .expect_err("an archived channel does not reactivate a removed member");
+        assert!(
+            matches!(&readd, DbError::AccessDenied(reason) if reason == "channel is archived"),
+            "{readd:?}"
+        );
+
+        // A kind:9000 add stores its event in the same transaction as the
+        // write, so it takes the same locks: it waits on an uncommitted
+        // archive, then is refused and stores nothing.
+        crate::channel::unarchive_channel(&pool, community, channel.id)
+            .await
+            .expect("unarchive before the kind:9000 race");
+        let mut archive = pool.begin().await.expect("begin second archive");
+        sqlx::query(
+            "UPDATE channels SET archived_at = NOW() \
+             WHERE community_id = $1 AND id = $2 AND archived_at IS NULL",
+        )
+        .bind(community_id)
+        .bind(channel.id)
+        .execute(&mut *archive)
+        .await
+        .expect("archive again");
+        let add = nostr::EventBuilder::new(nostr::Kind::Custom(9000), "")
+            .tags([
+                nostr::Tag::parse(["h", &channel.id.to_string()]).unwrap(),
+                nostr::Tag::parse(["p", &hex::encode(&invitee)]).unwrap(),
+            ])
+            .sign_with_keys(&owner_keys)
+            .expect("sign 9000");
+        let add_pool = crate::test_support::named_pool("put-members-event-archive-race").await;
+        let add_write = tokio::spawn({
+            let channel_id = channel.id;
+            let add = add.clone();
+            let invitee = invitee.clone();
+            async move {
+                let targets = [MemberPut {
+                    pubkey: &invitee,
+                    requested: None,
+                }];
+                put_members_with_event(&add_pool, None, community, channel_id, &add, &targets, None)
+                    .await
+            }
+        });
+        crate::test_support::wait_for_lock_wait(&pool, "put-members-event-archive-race").await;
+        assert!(
+            !add_write.is_finished(),
+            "the kind:9000 add must wait for the archive"
+        );
+        archive.commit().await.expect("commit second archive");
+        let write = add_write
+            .await
+            .expect("kind:9000 task")
+            .expect("kind:9000 write");
+        assert!(
+            matches!(&write, MemberPutEventWrite::Refused(errors)
+                if matches!(errors.as_slice(),
+                    [DbError::AccessDenied(reason)] if reason == "channel is archived")),
+            "expected an archived refusal"
+        );
+        assert!(
+            crate::event::get_event_by_id(&pool, community, add.id.as_bytes())
+                .await
+                .expect("read event")
+                .is_none(),
+            "a refused kind:9000 is not stored"
+        );
+
+        let mut roles = Vec::new();
+        for pk in [&owner, &joiner, &removed, &invitee] {
+            roles.push(
+                get_member_role(&pool, community, channel.id, pk)
+                    .await
+                    .expect("read role"),
+            );
+        }
+        assert_eq!(roles, [Some("owner".to_string()), None, None, None]);
+
+        // The other order: an archive waits for an admission that holds the
+        // locks, and the member it admitted stays a member.
+        crate::channel::unarchive_channel(&pool, community, channel.id)
+            .await
+            .expect("unarchive");
+        let mut admission = crate::begin_community_write_transaction(
+            &pool,
+            community,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await
+        .expect("begin admission");
+        lock_channel_for_member_put(&mut admission, channel.id)
+            .await
+            .expect("lock for the admission");
+        let targets = [MemberPut {
+            pubkey: &joiner,
+            requested: None,
+        }];
+        let admitted = put_members_on(&mut admission, channel.id, &targets, None)
+            .await
+            .expect("admission");
+        assert!(admitted[0].is_ok(), "{admitted:?}");
+        let archive_pool = crate::test_support::named_pool("archive-vs-admission").await;
+        let archive = tokio::spawn({
+            let channel_id = channel.id;
+            async move { crate::channel::archive_channel(&archive_pool, community, channel_id).await }
+        });
+        crate::test_support::wait_for_lock_wait(&pool, "archive-vs-admission").await;
+        assert!(
+            !archive.is_finished(),
+            "an archive must wait for an admission in progress"
+        );
+        admission.commit().await.expect("commit admission");
+        archive.await.expect("archive task").expect("archive");
+        assert_eq!(
+            get_member_role(&pool, community, channel.id, &joiner)
+                .await
+                .expect("read role"),
+            Some("member".to_string())
+        );
     }
 
     /// A `join_role` change on an ephemeral channel and a roster publication

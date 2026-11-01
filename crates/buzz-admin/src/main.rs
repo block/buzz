@@ -56,7 +56,9 @@ enum Command {
     ///
     /// Accepts a bech32 npub or 64-char hex pubkey. After inserting the DB row,
     /// publishes a kind:13534 membership roster via Redis so live clients see
-    /// the updated list immediately.
+    /// the updated list immediately. Does not join the member to the
+    /// community's default (`auto_join`) channels: the relay does that on an
+    /// invite claim or a kind:9030 add, which this command bypasses.
     AddMember {
         /// Nostr public key — bech32 npub or 64-char hex.
         #[arg(long)]
