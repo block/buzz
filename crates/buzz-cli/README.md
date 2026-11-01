@@ -73,6 +73,10 @@ buzz users set-presence --status online
 buzz users set-status --text "heads down on the CLI" --emoji "🚀"
 buzz users set-status --clear                 # remove your status
 
+# Agent activity (read-only; owner key required)
+buzz agents activity --agent Scout                       # listen 10s, last 5 min
+buzz agents activity --agent <hex|npub> --since 1783497600 --limit 20 --wait 30
+
 # DMs
 buzz dms open --pubkey <hex>
 buzz dms list
@@ -120,6 +124,7 @@ The table below mirrors that tree for readers who are not at a terminal.
 
 | Group | Subcommand | Description |
 |-------|-----------|-------------|
+| `agents` | `activity` | Read an owned agent's recent observer frames (read-only) |
 | `messages` | `send` | Send a message to a channel |
 | | `send-diff` | Send a code diff with metadata |
 | | `edit` | Edit a message you sent |
@@ -187,6 +192,27 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `set` | Write a memory value (use `-` for stdin) |
 | | `patch` | Apply unified diff to memory value |
 | | `rm` | Publish a tombstone to delete memory |
+
+### Agent activity output
+
+`agents activity` prints a JSON array of `{created_at, timestamp, seq, type,
+channel_id?, turn_id?, session_id?, ...}`, oldest first, keeping the newest
+`--limit` (1-200, default 50). Extra fields depend on `type`:
+
+| `type` | Extra fields |
+|--------|--------------|
+| `turn_started` | `source`, `thread_root_event_id`, `triggering_event_count` |
+| `turn_error`, `agent_panic` | `outcome`, `code`, `error` |
+| `control_result` | `control`, `status`, `request_id`, `model_id` |
+| `acp_read`, `acp_write` | `method`, `update_type`, `text` (280 chars max), `tool_call_id`, `tool_title`, `tool_status`, `stop_reason` |
+
+Observer frames are NIP-44 encrypted to the agent's owner and are never stored
+by the relay, so the command listens for `--wait` seconds (1-60, default 10)
+and returns the frames that arrive. `--since` defaults to 5 minutes ago and may
+not be older than 1 hour. An empty array means no frames arrived in the window.
+The harness sends frames in `batch` envelopes; the command expands them, so `--limit` counts events. A non-owner key fails with exit code 3 before any subscription opens. A connection failure exits 2. Frames
+that cannot be decrypted are counted in a stderr warning; if none can be read
+the command fails.
 
 ## Architecture
 

@@ -454,6 +454,33 @@ Examples:\n  \
 buzz agents archived"
     )]
     Archived,
+    /// Read an owned agent's recent activity frames (read-only)
+    #[command(
+        after_help = "Observer frames are encrypted to the agent's owner and are never stored \
+by the relay, so this command listens for `--wait` seconds and returns the frames that \
+arrive. An empty list means no frames arrived in that window. It fails with an auth error \
+when your key is not the agent's owner.\n\n\
+Output: array of {created_at, timestamp, seq, type, channel_id?, turn_id?, session_id?, ...} \
+oldest first, newest `--limit` kept. Types: turn_started, turn_liveness, turn_completed, \
+turn_error, agent_panic, control_result, acp_read, acp_write.\n\n\
+Examples:\n  \
+buzz agents activity --agent Scout\n  \
+buzz agents activity --agent npub1... --since 1783497600 --limit 20 --wait 30"
+    )]
+    Activity {
+        /// Agent: 64-char hex pubkey, npub, or exact display name
+        #[arg(long)]
+        agent: String,
+        /// Earliest frame time (unix seconds); default 5 minutes ago, at most 1 hour ago
+        #[arg(long)]
+        since: Option<u64>,
+        /// Newest frames to return (1-200)
+        #[arg(long, default_value_t = commands::agent_activity::DEFAULT_LIMIT)]
+        limit: usize,
+        /// Seconds to listen for frames (1-60)
+        #[arg(long, default_value_t = commands::agent_activity::DEFAULT_WAIT_SECS)]
+        wait: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2519,6 +2546,7 @@ mod tests {
         assert_eq!(
             names(&cmd, "agents"),
             vec![
+                "activity",
                 "archive",
                 "archived",
                 "draft-create",
@@ -2666,7 +2694,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 5),
+            ("agents", 6),
             ("canvas", 4),
             ("channels", 16),
             ("dms", 4),
