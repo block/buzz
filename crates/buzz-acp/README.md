@@ -116,11 +116,24 @@ All configuration is via environment variables (or CLI flags — every env var h
 | `BUZZ_ACP_AGENT_COMMAND` | no | `goose` | Agent binary to spawn. |
 | `BUZZ_ACP_AGENT_ARGS` | no | `acp` | Agent arguments (comma-separated). |
 | `BUZZ_ACP_MCP_COMMAND` | no | `""` (empty) | Path to an optional MCP server binary to provide to the agent subprocess. |
+| `BUZZ_ACP_EXTRA_MCP_COMMANDS` | no | — | Newline-separated extra MCP commands, each shell-split with POSIX quoting. Commas and quoted empty arguments are preserved. Optional `name=command` prefixes keep names stable across reordering; duplicate explicit names fail startup. Derived names are bounded to 128 bytes and disambiguated. Malformed quoting fails without logging command contents. |
 | `BUZZ_ACP_IDLE_TIMEOUT` | no | `620` | Idle timeout: max seconds of silence before cancelling a turn. Resets on any agent stdout activity. |
 | `BUZZ_ACP_MAX_TURN_DURATION` | no | `7200` | Absolute wall-clock cap per turn (safety valve). |
 | `BUZZ_API_TOKEN` | no | — | API token (required if relay enforces token auth). |
 
 **Note:** `BUZZ_ACP_AGENT_ARGS` splits on commas. For args with values, use: `-c,key="value"`.
+
+Extra MCP servers receive no explicit Buzz identity environment entries. The
+`trusted` field is enforced by `buzz-agent`'s MCP spawn boundary, which removes
+Buzz credentials from untrusted children. Third-party ACP adapters that spawn
+MCP children themselves can inherit the adapter's parent environment, including
+`BUZZ_PRIVATE_KEY`; this setting does not provide credential isolation there.
+MCP servers use the session cwd; per-server/project cwd is outside this change.
+
+```bash
+export BUZZ_ACP_EXTRA_MCP_COMMANDS='memory=npx -y memory-mcp --filter "a,b"
+search=npx -y search-mcp'
+```
 
 **Legacy env vars:** `BUZZ_ACP_PRIVATE_KEY`, `BUZZ_ACP_API_TOKEN`, and `BUZZ_ACP_TURN_TIMEOUT` (replaced by `BUZZ_ACP_IDLE_TIMEOUT`) are still accepted as fallbacks.
 
