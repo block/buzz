@@ -220,7 +220,7 @@ pairingRelay:
   replicaCount: 1
   service:
     type: ClusterIP
-    port: 5000
+    port: 18765
     annotations: {}
   podAnnotations: {}
   # tags.datadoghq.com/version is chart-owned; see README "Datadog version label".
