@@ -28,6 +28,7 @@ export function ProfilePrimaryActions({
   agentStartBlockReason,
   agentActionLabel,
   agentActionLive,
+  agentRestartLabel = "Restart agent",
   className,
   concealed = false,
   followMutation,
@@ -48,6 +49,7 @@ export function ProfilePrimaryActions({
   agentStartBlockReason?: string;
   agentActionLabel?: string;
   agentActionLive?: boolean;
+  agentRestartLabel?: string;
   className?: string;
   concealed?: boolean;
   followMutation: ReturnType<typeof useFollowMutation>;
@@ -108,7 +110,7 @@ export function ProfilePrimaryActions({
         <ProfileActionTile
           disabled={agentActionDisabled}
           icon={RefreshCw}
-          label="Restart agent"
+          label={agentRestartLabel}
           onClick={onAgentRestart}
           testId="user-profile-agent-restart"
         />
