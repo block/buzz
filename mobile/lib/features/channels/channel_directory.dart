@@ -555,18 +555,28 @@ String _encodeRootIdSet(Set<String> values) => jsonEncode(values.toList());
 /// ceiling enforced by `just file-size-check`. Private members stay reachable:
 /// a part shares its parent's library.
 extension _ObservedUnreadRecording on ChannelsNotifier {
-  void _recordUnreadEvent(Channel channel, NostrEvent event, String myPk) {
+  void _recordUnreadEvent(
+    Channel channel,
+    NostrEvent event,
+    String myPk, {
+    bool countQuiet = false,
+  }) {
+    if (!countQuiet && isQuietAgentMessage(event.tags)) return;
+    // A counted quiet event is only a backlog marker: it never earns attention
+    // through its mentions or thread.
     final isThreadedReply =
-        event.threadReference.parentId != null && !_isBroadcastReply(event);
+        !countQuiet &&
+        event.threadReference.parentId != null &&
+        !_isBroadcastReply(event);
     final isHighPriority =
-        channel.isDm || isHighPriorityEvent(event.tags, myPk);
+        channel.isDm || (!countQuiet && isHighPriorityEvent(event.tags, myPk));
     recordObservedUnreadEvent(
       _observedUnreadEventsByChannel,
       channel.id,
       makeObservedUnreadEvent(
         id: event.id,
         createdAt: event.createdAt,
-        rootId: _observedUnreadRootId(event),
+        rootId: countQuiet ? null : _observedUnreadRootId(event),
         highPriority: isHighPriority,
         channelType: channel.channelType,
         isThreadedReply: isThreadedReply,
