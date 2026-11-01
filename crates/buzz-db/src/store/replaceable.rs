@@ -9,7 +9,7 @@ use crate::observability::{self, LockType, TransactionOperation};
 use crate::AdmittedTx;
 use crate::{Db, DbError, Result};
 
-/// Result category for a parameterized-replaceable event write.
+/// Result category for a replaceable or parameterized-replaceable event write.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ParameterizedReplaceStatus {
     /// The incoming event was inserted as the coordinate's live head.
@@ -26,13 +26,15 @@ pub enum ParameterizedReplaceStatus {
     ReplayOnlyMiss,
 }
 
-/// Structural precondition for a parameterized-replaceable write.
+/// Structural precondition for a replaceable or parameterized-replaceable write.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ParameterizedReplacePrecondition<'a> {
     /// Apply normal NIP-33 ordering without a revision precondition.
     Unconditional,
     /// Require the live head to match this validated event ID.
     ExpectedRevision(&'a [u8]),
+    /// Require that the coordinate has no live head.
+    ExpectNoHead,
     /// Accept only an exact live-head replay and perform no mutation otherwise.
     ExactReplayOnly,
 }
@@ -94,6 +96,48 @@ pub(crate) fn event_replacement_lock_key(
         }
     }
     hash as i64
+}
+
+/// Check a revision precondition against the live head of a coordinate.
+///
+/// Returns the failure status, or `None` when the precondition holds or the
+/// write carries no revision precondition.
+fn revision_precondition_failure(
+    precondition: ParameterizedReplacePrecondition<'_>,
+    head: Option<&(DateTime<Utc>, Vec<u8>)>,
+) -> Option<ParameterizedReplaceStatus> {
+    match (precondition, head) {
+        (ParameterizedReplacePrecondition::ExpectedRevision(_), None) => {
+            Some(ParameterizedReplaceStatus::RevisionMissing)
+        }
+        (ParameterizedReplacePrecondition::ExpectedRevision(expected), Some((_, head_id)))
+            if head_id.as_slice() != expected =>
+        {
+            Some(ParameterizedReplaceStatus::RevisionMismatch)
+        }
+        (ParameterizedReplacePrecondition::ExpectNoHead, Some(_)) => {
+            Some(ParameterizedReplaceStatus::RevisionMismatch)
+        }
+        _ => None,
+    }
+}
+
+/// Status for an insert that collided with a retained, non-live row of the
+/// same event ID.
+///
+/// The live-head replay already returned `Duplicate`, so the row is
+/// soft-deleted. A revision-tagged write must not be acknowledged: its event
+/// did not become the head.
+fn retired_row_status(
+    precondition: ParameterizedReplacePrecondition<'_>,
+) -> ParameterizedReplaceStatus {
+    match precondition {
+        ParameterizedReplacePrecondition::ExpectedRevision(_)
+        | ParameterizedReplacePrecondition::ExpectNoHead => {
+            ParameterizedReplaceStatus::RevisionMismatch
+        }
+        _ => ParameterizedReplaceStatus::Duplicate,
+    }
 }
 
 /// Replace a parameterized event in a caller-owned transaction.
@@ -217,22 +261,13 @@ async fn replace_parameterized_event_in_transaction_impl(
         ));
     }
 
-    if let ParameterizedReplacePrecondition::ExpectedRevision(expected_revision) = precondition {
-        let status = match existing.as_ref() {
-            None => Some(ParameterizedReplaceStatus::RevisionMissing),
-            Some((_, existing_id)) if existing_id.as_slice() != expected_revision => {
-                Some(ParameterizedReplaceStatus::RevisionMismatch)
-            }
-            Some(_) => None,
-        };
-        if let Some(status) = status {
-            return Ok(ParameterizedReplaceResult::new(
-                event,
-                received_at,
-                channel_id,
-                status,
-            ));
-        }
+    if let Some(status) = revision_precondition_failure(precondition, existing.as_ref()) {
+        return Ok(ParameterizedReplaceResult::new(
+            event,
+            received_at,
+            channel_id,
+            status,
+        ));
     }
 
     let dominated = existing
@@ -365,7 +400,7 @@ async fn replace_parameterized_event_in_transaction_impl(
             sqlx::query("ROLLBACK TO SAVEPOINT parameterized_replace")
                 .execute(tx.conn())
                 .await?;
-            ParameterizedReplaceStatus::Duplicate
+            retired_row_status(precondition)
         }
         Err(error) => {
             // Restore the caller's transaction; the original error is the
@@ -403,13 +438,39 @@ impl Db {
     /// Same-second ties are broken by lowest event `id` (NIP-16 deterministic ordering).
     /// Returns `(event, false)` for stale writes and duplicate IDs — callers should
     /// skip fan-out/dispatch when `was_inserted` is false.
-    #[datastore_span(name = "replace_addressable_event", system = "postgresql")]
     pub async fn replace_addressable_event(
         &self,
         community_id: CommunityId,
         event: &nostr::Event,
         channel_id: Option<Uuid>,
     ) -> Result<(StoredEvent, bool)> {
+        let (stored, status) = self
+            .replace_addressable_event_checked(
+                community_id,
+                event,
+                channel_id,
+                ParameterizedReplacePrecondition::Unconditional,
+            )
+            .await?;
+        Ok((stored, status == ParameterizedReplaceStatus::Inserted))
+    }
+
+    /// Atomically replace a replaceable event under a revision precondition.
+    ///
+    /// Behaves like [`Db::replace_addressable_event`], and checks `precondition`
+    /// against the live head under the same advisory lock and transaction as the
+    /// replacement. A failed precondition, or a tagged write that does not
+    /// supersede the head, stores nothing and reports why in the status.
+    /// [`ParameterizedReplacePrecondition::Unconditional`] reports a dominated
+    /// write as [`ParameterizedReplaceStatus::Duplicate`], as before.
+    #[datastore_span(name = "replace_addressable_event", system = "postgresql")]
+    pub async fn replace_addressable_event_checked(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Option<Uuid>,
+        precondition: ParameterizedReplacePrecondition<'_>,
+    ) -> Result<(StoredEvent, ParameterizedReplaceStatus)> {
         let kind_i32 = buzz_core::kind::event_kind_i32(event);
         let pubkey_bytes = event.pubkey.to_bytes();
         let created_at_secs = event.created_at.as_secs() as i64;
@@ -468,23 +529,42 @@ impl Db {
                 // NIP-16: created_at is second-resolution. On same-second tie, lowest
                 // event id (lexicographic) wins — deterministic across relays.
                 let incoming_id = event.id.as_bytes().as_slice();
-                if let Some((existing_ts, existing_id)) = existing {
-                    let dominated = created_at < existing_ts
-                        || (created_at == existing_ts
-                            && incoming_id >= existing_id.as_slice());
-                    if dominated {
-                        tx.rollback().await?;
-                        let received_at = chrono::Utc::now();
-                        return Ok((
-                            StoredEvent::with_received_at(
-                                event.clone(),
-                                received_at,
-                                channel_id,
-                                false,
-                            ),
+                let status = if existing
+                    .as_ref()
+                    .is_some_and(|(_, existing_id)| existing_id.as_slice() == incoming_id)
+                {
+                    Some(ParameterizedReplaceStatus::Duplicate)
+                } else if precondition == ParameterizedReplacePrecondition::ExactReplayOnly {
+                    Some(ParameterizedReplaceStatus::ReplayOnlyMiss)
+                } else if let Some(failure) =
+                    revision_precondition_failure(precondition, existing.as_ref())
+                {
+                    Some(failure)
+                } else if existing.as_ref().is_some_and(|(existing_ts, existing_id)| {
+                    created_at < *existing_ts
+                        || (created_at == *existing_ts && incoming_id >= existing_id.as_slice())
+                }) {
+                    Some(
+                        if precondition == ParameterizedReplacePrecondition::Unconditional {
+                            ParameterizedReplaceStatus::Duplicate
+                        } else {
+                            ParameterizedReplaceStatus::Superseded
+                        },
+                    )
+                } else {
+                    None
+                };
+                if let Some(status) = status {
+                    tx.rollback().await?;
+                    return Ok((
+                        StoredEvent::with_received_at(
+                            event.clone(),
+                            chrono::Utc::now(),
+                            channel_id,
                             false,
-                        ));
-                    }
+                        ),
+                        status,
+                    ));
                 }
 
                 let tags_json = serde_json::to_value(&event.tags)?;
@@ -543,7 +623,7 @@ impl Db {
                             channel_id,
                             false,
                         ),
-                        false,
+                        retired_row_status(precondition),
                     ));
                 }
 
@@ -565,7 +645,7 @@ impl Db {
 
                 Ok((
                     StoredEvent::with_received_at(event.clone(), received_at, channel_id, true),
-                    true,
+                    ParameterizedReplaceStatus::Inserted,
                 ))
             })
             .await
@@ -596,7 +676,6 @@ impl Db {
     ///
     /// Replacement keys on `(kind, pubkey, d_tag)` across channels. The
     /// highest timestamp wins; same-second ties use the lowest event ID.
-    #[datastore_span(name = "replace_parameterized_event", system = "postgresql")]
     pub async fn replace_parameterized_event(
         &self,
         community_id: CommunityId,
@@ -604,6 +683,33 @@ impl Db {
         d_tag: &str,
         channel_id: Option<Uuid>,
     ) -> Result<(StoredEvent, bool)> {
+        let (stored, status) = self
+            .replace_parameterized_event_checked(
+                community_id,
+                event,
+                d_tag,
+                channel_id,
+                ParameterizedReplacePrecondition::Unconditional,
+            )
+            .await?;
+        Ok((stored, status == ParameterizedReplaceStatus::Inserted))
+    }
+
+    /// Atomically replace a NIP-33 event under a revision precondition.
+    ///
+    /// Behaves like [`Db::replace_parameterized_event`], and checks
+    /// `precondition` against the live head under the coordinate's advisory
+    /// lock, in the same transaction as the replacement. A failed precondition
+    /// stores nothing and reports why in the status.
+    #[datastore_span(name = "replace_parameterized_event", system = "postgresql")]
+    pub async fn replace_parameterized_event_checked(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        d_tag: &str,
+        channel_id: Option<Uuid>,
+        precondition: ParameterizedReplacePrecondition<'_>,
+    ) -> Result<(StoredEvent, ParameterizedReplaceStatus)> {
         let mut tx = crate::begin_community_event_write_transaction_with_legacy_metrics(
             &self.pool,
             community_id,
@@ -621,16 +727,15 @@ impl Db {
                         event,
                         d_tag,
                         channel_id,
-                        ParameterizedReplacePrecondition::Unconditional,
+                        precondition,
                     )
                     .await?;
-                let was_inserted = result.status == ParameterizedReplaceStatus::Inserted;
-                if was_inserted {
+                if result.status == ParameterizedReplaceStatus::Inserted {
                     tx.commit().await?;
                 } else {
                     tx.rollback().await?;
                 }
-                Ok((result.event, was_inserted))
+                Ok((result.event, result.status))
             })
             .await
     }
@@ -1512,6 +1617,83 @@ mod postgres_tests {
         .expect("caller transaction remains usable after duplicate");
         assert_eq!(live_id, old.id.as_bytes().to_vec());
         tx.rollback().await.expect("roll back caller transaction");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn tagged_replay_of_a_retired_event_is_a_conflict_not_a_duplicate() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let db = setup_db().await;
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let keys = Keys::generate();
+        let d_tag = format!("retired-project-{}", Uuid::new_v4().simple());
+        let project = EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_PROJECT as u16), "p")
+            .tags(vec![Tag::parse(["d", d_tag.as_str()]).expect("d tag")])
+            .sign_with_keys(&keys)
+            .expect("sign project");
+        let profile = EventBuilder::new(Kind::Metadata, "{}")
+            .custom_created_at(Timestamp::now())
+            .sign_with_keys(&keys)
+            .expect("sign profile");
+
+        assert!(
+            db.replace_parameterized_event(community, &project, &d_tag, None)
+                .await
+                .expect("insert project")
+                .1
+        );
+        assert!(
+            db.replace_addressable_event(community, &profile, None)
+                .await
+                .expect("insert profile")
+                .1
+        );
+        sqlx::query("UPDATE events SET deleted_at=NOW() WHERE community_id=$1 AND pubkey=$2")
+            .bind(community.as_uuid())
+            .bind(keys.public_key().to_bytes())
+            .execute(&db.pool)
+            .await
+            .expect("retire both heads");
+
+        let (_, status) = db
+            .replace_parameterized_event_checked(
+                community,
+                &project,
+                &d_tag,
+                None,
+                replaceable::ParameterizedReplacePrecondition::ExpectNoHead,
+            )
+            .await
+            .expect("replay retired project");
+        assert_eq!(
+            status,
+            replaceable::ParameterizedReplaceStatus::RevisionMismatch
+        );
+
+        let (_, status) = db
+            .replace_addressable_event_checked(
+                community,
+                &profile,
+                None,
+                replaceable::ParameterizedReplacePrecondition::ExpectNoHead,
+            )
+            .await
+            .expect("replay retired profile");
+        assert_eq!(
+            status,
+            replaceable::ParameterizedReplaceStatus::RevisionMismatch
+        );
+
+        let live: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events WHERE community_id=$1 AND pubkey=$2 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .fetch_one(&db.pool)
+        .await
+        .expect("count live heads");
+        assert_eq!(live, 0);
     }
 
     #[tokio::test]
