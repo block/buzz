@@ -21,6 +21,7 @@ buzz-search = { workspace = true }
 buzz-audit = { workspace = true }
 buzz-workflow = { workspace = true }
 buzz-media = { workspace = true }
+buzz-sdk = { workspace = true }
 nostr = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
