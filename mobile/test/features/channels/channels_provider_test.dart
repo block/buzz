@@ -2177,6 +2177,102 @@ void main() {
       },
     );
 
+    group('a latest-message query starts over', () {
+      int now() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      bool isLatest(List<NostrFilter> batch) =>
+          batch.isNotEmpty &&
+          batch.every(
+            (filter) =>
+                filter.limit != 1000 &&
+                filter.kinds.contains(EventKind.streamMessageV2),
+          );
+
+      Future<void> refreshed(
+        _FakeRelaySession session,
+        ChannelsNotifier notifier,
+      ) async {
+        final before = session.queryBatches.where(isLatest).length;
+        await notifier.refresh();
+        await _waitUntil(
+          () => session.queryBatches.where(isLatest).length > before,
+        );
+        await _settle();
+      }
+
+      test('from the last query whose channel did not fail', () async {
+        final first = now() - 3600;
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [_meta(id: _channelA, name: 'general')],
+          recentMessages: [message('m1', first)],
+        );
+        final container = _buildContainer(session: session);
+        addTearDown(container.dispose);
+        final notifier = container.read(channelsProvider.notifier);
+        int? lastLatestSince() =>
+            session.queryBatches.lastWhere(isLatest).single.since;
+
+        final firstFrom = now();
+        await container.read(channelsProvider.future);
+        await _settle();
+        final firstTo = now();
+        // Let the clock move on, so a start taken from the failed query below
+        // differs from one taken from the first.
+        while (now() <= firstTo) {
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+        }
+
+        // The batch fails and so does its websocket fallback, without a
+        // deadline: the query completes with no events for the channel.
+        session
+          ..messageBatchError = Exception('batch unavailable')
+          ..messageHistoryError = Exception('CLOSED: socket error');
+        await refreshed(session, notifier);
+        expect(
+          container.read(channelsProvider).value!.single.lastMessageAt,
+          DateTime.fromMillisecondsSinceEpoch(first * 1000, isUtc: true),
+        );
+
+        session
+          ..messageBatchError = null
+          ..messageHistoryError = null;
+        await refreshed(session, notifier);
+        expect(
+          lastLatestSince(),
+          inInclusiveRange(firstFrom - 960, firstTo - 960),
+          reason: 'the failed query fetched nothing for the channel',
+        );
+      });
+
+      test('for a channel back in the list', () async {
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [_meta(id: _channelA, name: 'general')],
+          recentMessages: [message('m1', now() - 3600)],
+        );
+        final container = _buildContainer(session: session);
+        addTearDown(container.dispose);
+        final notifier = container.read(channelsProvider.notifier);
+        await container.read(channelsProvider.future);
+        await _settle();
+
+        // Left, then joined again: the channel's earlier messages are not
+        // in the list any more.
+        session.memberships = [];
+        await notifier.refresh();
+        await _settle();
+        expect(container.read(channelsProvider).value, isEmpty);
+
+        session.memberships = [_membership(_channelA, myPk)];
+        await refreshed(session, notifier);
+        expect(session.queryBatches.lastWhere(isLatest).single.since, isNull);
+        expect(
+          container.read(channelsProvider).value!.single.lastMessageAt,
+          isNotNull,
+        );
+      });
+    });
+
     test(
       'a cold-start latest-message deadline is filled by unread catch-up',
       () async {
@@ -3485,6 +3581,12 @@ class _FakeRelaySession extends RelaySessionNotifier {
     for (final filter in filters) {
       final matches = messageSnapshot.where((event) {
         if (!filter.kinds.contains(event.kind)) return false;
+        if (filter.since case final since? when event.createdAt < since) {
+          return false;
+        }
+        if (filter.until case final until? when event.createdAt > until) {
+          return false;
+        }
         for (final entry in filter.tags.entries) {
           final tagName = entry.key.startsWith('#')
               ? entry.key.substring(1)

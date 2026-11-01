@@ -402,16 +402,22 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // Latest-message filters depend on channel identity/privacy, not names.
     // Start them alongside profiles, and observe both errors immediately.
     final latestSentAt = currentUnixSeconds();
+    final latestFailedIds = <String>{};
     final latestSinceById = fetchLastMessage
         ? _latestMessageSince()
         : const <String, int>{};
     final latestEventsRequest = fetchLastMessage
-        ? _fetchLastMessageEvents(session, [
-            for (final entry in visibleMetas)
-              if (memberChannelIds.contains(entry.value.id) &&
-                  !entry.value.isArchived)
-                entry.value,
-          ], latestSinceById)
+        ? _fetchLastMessageEvents(
+            session,
+            [
+              for (final entry in visibleMetas)
+                if (memberChannelIds.contains(entry.value.id) &&
+                    !entry.value.isArchived)
+                  entry.value,
+            ],
+            latestSinceById,
+            latestFailedIds,
+          )
         : Future.value(const <NostrEvent>[]);
     final (displayNames, latestEvents) = await _fenced(fence, () async {
       await Future.wait(eagerError: true, [
@@ -479,6 +485,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       }
       if (events != null) {
         for (final id in channelById.keys) {
+          // A failed channel's next query still needs its earlier window.
+          if (latestFailedIds.contains(id)) continue;
           _latestMessageSentAtById[id] = latestSentAt;
         }
       }
@@ -580,6 +588,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     RelaySessionNotifier session,
     List<ChannelData> channels,
     Map<String, int> sinceById,
+    Set<String> failedChannelIds,
   ) async {
     if (channels.isEmpty) return const [];
 
@@ -599,6 +608,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       session,
       filters,
       operation: 'latest-message query',
+      failedChannelIds: failedChannelIds,
     );
   }
 
@@ -612,13 +622,25 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   /// one saw every message stored before it was sent, and the relay stores no
   /// event with a `created_at` more than 900s behind its own clock, so this
   /// still sees every message stored since, however late it arrived.
-  Map<String, int> _latestMessageSince() => {
-    for (final MapEntry(key: id, value: sentAt)
-        in _latestMessageSentAtById.entries)
-      id: sentAt - relayLiveWindowSkewSeconds,
-  };
+  ///
+  /// Only channels the current list shows with a known latest message start
+  /// there: one that left the list (a hidden DM, a channel left and rejoined)
+  /// or never got a timestamp needs the full query to find it again.
+  Map<String, int> _latestMessageSince() {
+    final known = {
+      for (final channel in state.value ?? const <Channel>[])
+        if (channel.lastMessageAt != null) channel.id,
+    };
+    return {
+      for (final MapEntry(key: id, value: sentAt)
+          in _latestMessageSentAtById.entries)
+        if (known.contains(id)) id: sentAt - relayLiveWindowSkewSeconds,
+    };
+  }
 
   /// Returns null when the batch is unavailable: it hit a relay deadline.
+  /// Adds to [failedChannelIds] the channels whose fallback filter failed
+  /// another way; the result has none of their events.
   ///
   /// The relay rejects a request whose filters name more than
   /// [kMaxExplicitChannelValues] channels in aggregate, so larger batches are
@@ -627,6 +649,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     RelaySessionNotifier session,
     List<NostrFilter> filters, {
     required String operation,
+    Set<String>? failedChannelIds,
   }) async {
     final requests = <List<NostrFilter>>[];
     var channelValues = 0;
@@ -686,6 +709,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     final fallbackEvents = await _fetchChannelHistoryFallback(
       session,
       fallback,
+      failedChannelIds,
     );
     return fallbackEvents == null ? null : [...events, ...fallbackEvents];
   }
@@ -693,6 +717,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   Future<List<NostrEvent>?> _fetchChannelHistoryFallback(
     RelaySessionNotifier session,
     List<NostrFilter> filters,
+    Set<String>? failedChannelIds,
   ) async {
     final events = <NostrEvent>[];
     var deadline = false;
@@ -711,7 +736,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
             return await session.fetchHistory(filter);
           } catch (error) {
             // A timed-out filter makes the batch unavailable, not empty.
-            if (isRelayDeadlineError(error)) deadline = true;
+            if (isRelayDeadlineError(error)) {
+              deadline = true;
+            } else {
+              failedChannelIds?.addAll(filter.tags['#h'] ?? const []);
+            }
             return const <NostrEvent>[];
           }
         }),
