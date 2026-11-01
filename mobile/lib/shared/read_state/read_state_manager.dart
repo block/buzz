@@ -42,6 +42,9 @@ class ReadStateCrypto {
 enum _ApplyRemoteContextResult { unchanged, advanced }
 
 class ReadStateManager {
+  static const _localPublishDelay = Duration(seconds: 5);
+  static const _convergencePublishDelay = Duration(seconds: 60);
+
   final String pubkey;
   final String relayUrl;
   final ReadStateCrypto _crypto;
@@ -447,7 +450,7 @@ class ReadStateManager {
 
     if (decoded.blob.clientId != _clientId &&
         !_isIdenticalToLastPublished(_currentContexts())) {
-      _schedulePublish();
+      _scheduleConvergencePublish();
     }
   }
 
@@ -472,14 +475,27 @@ class ReadStateManager {
     return result;
   }
 
-  void _schedulePublish() {
+  void _schedulePublish({Duration delay = _localPublishDelay}) {
     if (!_remoteEnabled || _remoteUnsupported || _disposed) return;
 
     _debounceTimer?.cancel();
-    _debounceTimer = Timer(const Duration(seconds: 5), () {
+    _debounceTimer = Timer(delay, () {
       _debounceTimer = null;
       unawaited(_publish());
     });
+  }
+
+  /// Carries marks merged from another device into this device's blob.
+  ///
+  /// Other devices already read the original blob, so nothing waits on this
+  /// copy. Each publish costs a read-before-write of the whole blob, the
+  /// write and its echo on the live subscription, and an active peer
+  /// publishes every few seconds, so these wait [_convergencePublishDelay]
+  /// and never push back a publish already pending. Going to the background
+  /// flushes one early, and a local mark publishes everything sooner.
+  void _scheduleConvergencePublish() {
+    if (_debounceTimer != null) return;
+    _schedulePublish(delay: _convergencePublishDelay);
   }
 
   Future<void> _publish({bool allowDisposed = false}) async {

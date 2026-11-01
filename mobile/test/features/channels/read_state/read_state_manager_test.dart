@@ -208,6 +208,82 @@ void main() {
     });
   });
 
+  test('carries marks from another device over at most once a minute', () {
+    SharedPreferences.setMockInitialValues({});
+    fakeAsync((async) {
+      late SharedPreferences prefs;
+      SharedPreferences.getInstance().then((p) => prefs = p);
+      async.flushMicrotasks();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final session = _FakeRelaySession();
+      final relay = _FakeSignedEventRelay();
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: session,
+        signedEventRelay: relay,
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+      manager.initialize();
+      async.flushMicrotasks();
+      void peerPublishes(Map<String, int> contexts, int createdAt) {
+        session.onEvent!(
+          _readStateEvent(
+            pubkey: keychain.public,
+            crypto: crypto,
+            clientId: 'desktop-client',
+            slotId: 'desktop-slot',
+            contexts: contexts,
+            createdAt: createdAt,
+          ),
+        );
+        async.flushMicrotasks();
+      }
+
+      // An active peer publishes every few seconds; this device carries its
+      // marks over once, a minute after the first.
+      peerPublishes({'channel-1': 100}, 100);
+      async.elapse(const Duration(seconds: 30));
+      peerPublishes({'channel-1': 100, 'channel-2': 200}, 130);
+      async.elapse(const Duration(seconds: 29));
+      expect(relay.contents, isEmpty);
+      async.elapse(const Duration(seconds: 1));
+      expect(relay.contents, hasLength(1));
+      expect(
+        decodeReadStateBlob(crypto.decrypt(relay.contents.last))!.contexts,
+        {'channel-1': 100, 'channel-2': 200},
+      );
+
+      // A local read still publishes within seconds, with the peer's marks.
+      peerPublishes({'channel-3': 300}, 200);
+      async.elapse(const Duration(seconds: 1));
+      manager.markContextRead('channel-4', 400);
+      async.elapse(const Duration(seconds: 5));
+      expect(relay.contents, hasLength(2));
+      expect(
+        decodeReadStateBlob(crypto.decrypt(relay.contents.last))!.contexts,
+        containsPair('channel-3', 300),
+      );
+
+      // Going to the background flushes a pending carry-over early.
+      peerPublishes({'channel-5': 500}, 300);
+      manager.flush();
+      async.flushMicrotasks();
+      expect(relay.contents, hasLength(3));
+      async.elapse(const Duration(minutes: 2));
+      expect(relay.contents, hasLength(3));
+
+      manager.dispose(flushPending: false);
+    });
+  });
+
   test('publishes again when a debounce fires during a publish', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -871,6 +947,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
   List<NostrEvent> historyEvents = [];
   Future<void>? fetchGate;
   bool failNextFetch = false;
+  void Function(NostrEvent)? onEvent;
   int fetchCount = 0;
   int subscribeCount = 0;
   int liveSubscriptions = 0;
@@ -898,6 +975,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     subscribeCount++;
     liveSubscriptions++;
     var open = true;
+    this.onEvent = onEvent;
     return () {
       if (open) liveSubscriptions--;
       open = false;
