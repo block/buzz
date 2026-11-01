@@ -34,7 +34,7 @@ class MessagesNavigationBar extends HookWidget {
         children: [
           _MenuNudge(
             offset: nudge,
-            hidden: menuOpen.value,
+            menuOpen: menuOpen.value,
             alignment: Alignment.centerRight,
             child: NavigationButtonSurface(
               child: SizedBox.square(
@@ -75,7 +75,7 @@ class MessagesNavigationBar extends HookWidget {
           const SizedBox(width: Grid.xs),
           _MenuNudge(
             offset: -nudge,
-            hidden: menuOpen.value,
+            menuOpen: menuOpen.value,
             alignment: Alignment.centerLeft,
             child: agent,
           ),
@@ -88,12 +88,12 @@ class MessagesNavigationBar extends HookWidget {
 class _MenuNudge extends StatelessWidget {
   const _MenuNudge({
     required this.offset,
-    required this.hidden,
+    required this.menuOpen,
     required this.alignment,
     required this.child,
   });
   final double offset;
-  final bool hidden;
+  final bool menuOpen;
   final Alignment alignment;
   final Widget child;
 
@@ -102,23 +102,18 @@ class _MenuNudge extends StatelessWidget {
     final duration = MediaQuery.disableAnimationsOf(context)
         ? Duration.zero
         : const Duration(milliseconds: 180);
-    final scale = hidden ? .9 : 1.0;
+    final scale = menuOpen ? .9 : 1.0;
     return IgnorePointer(
-      ignoring: hidden,
+      ignoring: menuOpen,
       child: ExcludeSemantics(
-        excluding: hidden,
+        excluding: menuOpen,
         child: AnimatedContainer(
           duration: duration,
           curve: Curves.easeOutCubic,
           transformAlignment: alignment,
           transform: Matrix4.translationValues(offset, 0, 0)
             ..scaleByDouble(scale, scale, 1, 1),
-          child: AnimatedOpacity(
-            duration: duration,
-            curve: Curves.easeOutCubic,
-            opacity: hidden ? 0 : 1,
-            child: child,
-          ),
+          child: child,
         ),
       ),
     );

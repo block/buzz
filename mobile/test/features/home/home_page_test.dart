@@ -304,11 +304,6 @@ void main() {
         (tester.getTopRight(search).dx - tester.getTopLeft(search).dx),
         closeTo(initialWidth * .9, .01),
       );
-      final fade = find.ancestor(
-        of: search,
-        matching: find.byType(FadeTransition),
-      );
-      expect(tester.widget<FadeTransition>(fade.first).opacity.value, 0);
       expect(search.hitTestable(), findsNothing);
       creationMenu.onMenuVisibilityChanged!(false);
       await tester.pumpAndSettle();
@@ -317,7 +312,6 @@ void main() {
         (tester.getTopRight(search).dx - tester.getTopLeft(search).dx),
         closeTo(initialWidth, .01),
       );
-      expect(tester.widget<FadeTransition>(fade.first).opacity.value, 1);
       expect(search.hitTestable(), findsOneWidget);
       final communityMenu = tester.widget<IosMessageCreateButton>(
         find.byWidgetPredicate(
