@@ -39,6 +39,13 @@ case "${BUZZ_TEST_PLATFORM:-$(uname -s)}" in
         remove_path "${XDG_CONFIG_HOME:-$HOME/.config}/$instance_id"
         remove_path "${XDG_CACHE_HOME:-$HOME/.cache}/$instance_id"
         ;;
+    MINGW*|MSYS*|CYGWIN*)
+        remove_path "${APPDATA:-$HOME/AppData/Roaming}/$instance_id"
+        remove_path "${LOCALAPPDATA:-$HOME/AppData/Local}/$instance_id"
+        if command -v cmdkey >/dev/null 2>&1; then
+            cmdkey "/delete:secrets.${keyring_service}" >/dev/null 2>&1 || true
+        fi
+        ;;
     *)
         echo "reset-desktop-standalone-state: unsupported platform" >&2
         exit 1
