@@ -133,6 +133,12 @@ macro_rules! make_hook {
                 (rx, release)
             }
 
+            /// Remove an armed barrier that production code never reached.
+            #[allow(dead_code)]
+            pub(crate) fn disarm(community: CommunityId) {
+                GATE.lock().unwrap().remove(&community);
+            }
+
             pub(crate) async fn trigger(community: CommunityId) {
                 let gate = GATE.lock().unwrap().remove(&community);
                 if let Some(g) = gate {
@@ -198,6 +204,13 @@ make_hook!(audio_membership_check_hook, before_membership_check);
 // immediately before the relay membership lookup. Closing the pool here makes
 // that lookup fail with the tenant already bound.
 make_hook!(git_membership_hook, before_git_membership);
+// `before_auto_join_channel`: fires in the admission auto-join before each
+// default channel's effect permit. Cancelling the socket here proves that
+// channel is not joined.
+make_hook!(auto_join_channel_hook, before_auto_join_channel);
+// `after_auto_join`: fires when an admission auto-join task has finished, so
+// a test can assert what it did (or did not) write.
+make_hook!(auto_join_done_hook, after_auto_join);
 // `before_http_ban_recheck`: fires in `buzz_v1` and Git settings after the
 // shared membership check passes, immediately before the fresh ban reread.
 // A ban or closed pool here makes only the reread refuse.

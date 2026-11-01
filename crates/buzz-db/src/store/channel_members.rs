@@ -2625,8 +2625,11 @@ mod postgres_tests {
     /// row; after a leave the channel is neither listed nor joined again. An
     /// unflagged channel is never listed.
     ///
+    /// Two racing first joins write once.
+    ///
     /// Mutations: drop the row check from `put_first_member` → the leave is
-    /// undone (RED); drop the `NOT EXISTS` from
+    /// undone (RED); take the locks after the row check → racing joins both
+    /// write (RED); drop the `NOT EXISTS` from
     /// `list_never_joined_auto_join_channels` → the left channel is still
     /// listed (RED).
     #[tokio::test]
@@ -2689,6 +2692,20 @@ mod postgres_tests {
         );
         assert!(put_first(general).await.expect("second put").is_none());
         assert!(never_joined().await.expect("list").is_empty());
+
+        // Two first joins of the same person racing each other write once.
+        for _ in 0..5 {
+            let racer = random_pubkey();
+            let (a, b) = tokio::join!(
+                put_first_member(&pool, community, general, &racer),
+                put_first_member(&pool, community, general, &racer),
+            );
+            let written = [a.expect("racing put"), b.expect("racing put")]
+                .iter()
+                .filter(|put| put.is_some())
+                .count();
+            assert_eq!(written, 1, "racing first joins write once");
+        }
 
         remove_member(&pool, community, general, &person, &person)
             .await

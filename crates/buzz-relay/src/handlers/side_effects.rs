@@ -2891,19 +2891,35 @@ pub(crate) async fn auto_join_default_channels(
 /// (`require_relay_membership = false`) to every effective `auto_join`
 /// channel they have never been a member of, as kind:9021 self-joins.
 ///
-/// Runs on every human WebSocket admission there, because such a community
-/// has no roster insert to run [`auto_join_default_channels`] at. "Never a
-/// member" is the channel's own membership history: a kind:9022 leave or a
-/// kind:9001 removal keeps a removed row, so the person is not joined back,
-/// and a channel flagged later is joined on their next admission.
+/// Runs after every human WebSocket admission there, because such a
+/// community has no roster insert to run [`auto_join_default_channels`] at.
+/// "Never a member" is the channel's own membership history: a kind:9022
+/// leave or a kind:9001 removal keeps a removed row, so the person is not
+/// joined back, and a channel flagged later is joined on their next
+/// admission.
 ///
-/// A membership write that fails leaves no row, so the next admission tries
-/// that channel again. Failures are logged and counted
-/// (`buzz_auto_join_failures_total`).
+/// Each channel's write and announcement hold an effect permit from the
+/// admitting socket's `gate`, as every other session effect does, so nothing
+/// is written once the session has expired or the socket is cancelled; the
+/// task stops at the first refusal. A channel it stops before, or whose
+/// membership write fails, has no row, so the next admission tries it again.
+/// Failures are logged and counted (`buzz_auto_join_failures_total`).
 pub(crate) async fn auto_join_never_joined_channels(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     pubkey: &[u8],
+    gate: &Arc<crate::nip_fi_gate::SessionAdmissionGate>,
+) {
+    join_never_joined_channels(tenant, state, pubkey, gate).await;
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::after_auto_join(tenant.community()).await;
+}
+
+async fn join_never_joined_channels(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    pubkey: &[u8],
+    gate: &Arc<crate::nip_fi_gate::SessionAdmissionGate>,
 ) {
     let member = hex::encode(pubkey);
     let channels = match state
@@ -2919,6 +2935,12 @@ pub(crate) async fn auto_join_never_joined_channels(
         }
     };
     for channel_id in channels {
+        #[cfg(test)]
+        crate::nip_fi_test_hooks::before_auto_join_channel(tenant.community()).await;
+        let Ok(_permit) = gate.acquire_effect().await else {
+            info!(channel = %channel_id, %member, "auto-join stopped: the session ended");
+            return;
+        };
         let joined = match state
             .db
             .put_first_member(tenant.community(), channel_id, pubkey)
