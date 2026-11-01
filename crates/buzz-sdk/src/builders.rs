@@ -437,6 +437,21 @@ pub fn build_edit(
     Ok(EventBuilder::new(Kind::Custom(40003), new_content).tags(tags))
 }
 
+/// Build a pin event for an existing channel message (kind 40004).
+///
+/// A pin is removed by deleting the pin event itself (kind 9005 via
+/// [`build_delete_message`]), not the pinned message.
+pub fn build_pin_message(
+    channel_id: Uuid,
+    target_event_id: nostr::EventId,
+) -> Result<EventBuilder, SdkError> {
+    let tags = vec![
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["e", &target_event_id.to_hex()])?,
+    ];
+    Ok(EventBuilder::new(Kind::Custom(40004), "").tags(tags))
+}
+
 /// Optional metadata for moderator delete tombstones (kind 9005).
 #[derive(Debug, Clone, Default)]
 pub struct DeleteMessageOptions<'a> {
@@ -3196,6 +3211,17 @@ mod tests {
             build_edit(cid, eid, &big),
             Err(SdkError::ContentTooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn pin_message_happy_path() {
+        let cid = uuid();
+        let eid = event_id();
+        let ev = sign(build_pin_message(cid, eid).unwrap());
+        assert_eq!(ev.kind.as_u16(), 40004);
+        assert!(has_tag(&ev, "h", &cid.to_string()));
+        assert!(has_tag(&ev, "e", &eid.to_hex()));
+        assert_eq!(ev.content, "");
     }
 
     #[test]

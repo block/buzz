@@ -1063,7 +1063,7 @@ impl ThreadMetadataOwned {
 /// Whether `target` is in `channel_id` and readable by `reader`. Write paths
 /// that reference an event reject a target failing this exactly as a missing
 /// one, so the rejection never reveals whether, or where, the target exists.
-fn target_readable_in_channel(
+pub(super) fn target_readable_in_channel(
     target: &buzz_core::StoredEvent,
     channel_id: Uuid,
     reader: &[u8],
@@ -3136,6 +3136,12 @@ async fn ingest_event_inner(
 
     if kind_u32 == KIND_STREAM_MESSAGE_EDIT {
         validate_edit_ownership(tenant.community(), &event, state)
+            .await
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
+    if kind_u32 == KIND_STREAM_MESSAGE_PINNED {
+        super::pins::validate_pin_event(tenant.community(), &event, state)
             .await
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
