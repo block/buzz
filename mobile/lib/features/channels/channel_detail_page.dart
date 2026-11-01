@@ -1,4 +1,5 @@
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
+
 import 'message_swipe_reply.dart';
 import 'agent_reply_handoff.dart';
 import 'huddle_timeline.dart';
@@ -6,6 +7,7 @@ import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
 import 'message_footer_layout.dart';
 import 'reply_summary_link.dart';
+
 import 'dart:async';
 import 'dart:math' show cos, max, min, pi;
 import 'dart:ui' show ImageFilter, lerpDouble;
@@ -267,6 +269,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
 
   /// Uses personal assistant routing for a chat placed in Me.
   final bool personalChat;
+  final bool continuousConversation;
   final bool placementKnown;
   final String? initialAssistant;
   final String? initialMessageId;
@@ -279,6 +282,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     super.key,
     required this.channel,
     required this.personalChat,
+    required this.continuousConversation,
     required this.placementKnown,
     this.initialAssistant,
     this.initialMessageId,
@@ -288,7 +292,8 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final messagesProvider = personalChat
+    final flatConversation = personalChat || continuousConversation;
+    final messagesProvider = flatConversation
         ? meMessagesProvider(channel.id)
         : channelMessagesProvider(channel.id);
     final stickyDateHeaderState = useValueNotifier(
@@ -299,7 +304,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     final composerFocusNode = useFocusNode();
     final restoreComposerFocus = useRef<VoidCallback?>(null);
     final sendMessage = ref.read(
-      personalChat ? meSendMessageProvider : sendMessageProvider,
+      flatConversation ? meSendMessageProvider : sendMessageProvider,
     );
     final messagesState = ref.watch(messagesProvider);
     final assistant = useMeChatAssistant(
@@ -336,7 +341,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                     .observedUnreadEventsByChannel[channel.id]
                     ?.values ??
                 const <ObservedUnreadEvent>[])
-          if ((personalChat || event.rootId == null) &&
+          if ((flatConversation || event.rootId == null) &&
               event.createdAt >
                   (observedUnreadEventReadAt(
                         event,
@@ -446,11 +451,10 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       channelBotPubkeys:
           channelBotPubkeysState.asData?.value ?? const <String>{},
     );
-    // Keep the working-agent reply link on channel and DM roots. Solo
-    // conversations already flatten their replies into the timeline.
+    // Flat conversations show agent work inline instead of linking to threads.
     final threadWorking = _threadWorkingAgents(
       ref,
-      personalChat
+      flatConversation
           ? ''
           : ref.watch(
               channelTypingProvider(
@@ -470,7 +474,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
             channel.id,
             selfPubkey: currentPubkey,
             include: (e) =>
-                personalChat ||
+                flatConversation ||
                 e.threadHeadId == null ||
                 ownedThreadTypers.contains(e.pubkey.toLowerCase()) ||
                 (resolvedChannel.isDm &&
@@ -673,7 +677,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
             (message) => !isCollapsedHuddleEnding(message, timelineMessages),
           )
           .toList(),
-      flat: personalChat,
+      flat: flatConversation,
       relaySummaries: ref.read(messagesProvider.notifier).threadSummaries,
     );
 
@@ -848,14 +852,15 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                                   ? typingEntries
                                   : const [],
                               threadWorking: threadWorking,
+                              allowThreads: !continuousConversation,
                               stickyDateHeaderState: stickyDateHeaderState,
                               entries: timelineEntries,
                               allMessages: timelineMessages,
-                              initialMessageId: personalChat
+                              initialMessageId: flatConversation
                                   ? initialMessageId ?? initialThreadRootId
                                   : initialMessageId,
                               initialThreadRootId:
-                                  personalChat || !placementKnown
+                                  flatConversation || !placementKnown
                                   ? null
                                   : initialThreadRootId,
                               initialThreadRouteBehavior:

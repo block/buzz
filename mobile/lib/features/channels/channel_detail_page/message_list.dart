@@ -18,6 +18,7 @@ class _MessageList extends HookConsumerWidget {
   final String channelId;
   final ChannelMessagesNotifier notifier;
   final bool isDm;
+  final bool allowThreads;
   final String? currentPubkey;
   final bool isMember;
   final bool isArchived;
@@ -42,6 +43,7 @@ class _MessageList extends HookConsumerWidget {
     required this.channelId,
     required this.notifier,
     required this.isDm,
+    this.allowThreads = true,
     required this.currentPubkey,
     required this.isMember,
     required this.isArchived,
@@ -1036,7 +1038,7 @@ class _MessageList extends HookConsumerWidget {
                             channelNames: channelNamesMap,
                             currentChannelId: channelId,
                             currentPubkey: currentPubkey,
-                            allMessages: allMessages,
+                            allMessages: allowThreads ? allMessages : null,
                             isMember: isMember,
                             isArchived: isArchived,
                             composerFocusNode: composerFocusNode,
