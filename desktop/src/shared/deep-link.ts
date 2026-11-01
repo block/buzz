@@ -51,12 +51,13 @@ export type NostrBindDeepLinkPayload = {
 
 /**
  * Payload emitted by the Rust deep-link handler for `buzz://join?…` —
- * a relay invite from the web landing page (`/invite/<code>`).
+ * a relay invite from the web landing page (`/invite/<code>`). Any
+ * `policy_receipt` the link carries is ignored: the app collects consent
+ * itself (see `startCommunityOnboarding`).
  */
 export type JoinDeepLinkPayload = {
   relayUrl: string;
   code: string;
-  policyReceipt: string | null;
 };
 
 type PendingCommunityDeepLink = {
@@ -65,7 +66,6 @@ type PendingCommunityDeepLink = {
   relayUrl: string;
   code: string | null;
   name: string | null;
-  policyReceipt: string | null;
 };
 
 type PendingEntityDeepLink = {
@@ -89,7 +89,6 @@ function acceptPendingCommunityDeepLink(
             pending.kind === "join" ? "deep-link-join" : "deep-link-connect",
           relayUrl: pending.relayUrl,
           inviteCode: pending.code ?? undefined,
-          policyReceipt: pending.policyReceipt ?? undefined,
         });
   return accepted
     ? invoke<boolean>("acknowledge_pending_community_deep_link", {
