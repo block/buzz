@@ -27,13 +27,15 @@ class MessagesNavigationBar extends HookWidget {
   @override
   Widget build(BuildContext context) {
     final menuOpen = useState(false);
-    final nudge = menuOpen.value ? Grid.xs / 2 : 0.0;
+    final nudge = menuOpen.value ? Grid.xs : 0.0;
     return Builder(
       builder: (controlsContext) => Row(
         mainAxisSize: MainAxisSize.min,
         children: [
           _MenuNudge(
             offset: nudge,
+            hidden: menuOpen.value,
+            alignment: Alignment.centerRight,
             child: NavigationButtonSurface(
               child: SizedBox.square(
                 dimension: 56,
@@ -71,7 +73,12 @@ class MessagesNavigationBar extends HookWidget {
               sectionTitles: const {0: 'Solo', 2: 'Team'},
             ),
           const SizedBox(width: Grid.xs),
-          _MenuNudge(offset: -nudge, child: agent),
+          _MenuNudge(
+            offset: -nudge,
+            hidden: menuOpen.value,
+            alignment: Alignment.centerLeft,
+            child: agent,
+          ),
         ],
       ),
     );
@@ -79,17 +86,41 @@ class MessagesNavigationBar extends HookWidget {
 }
 
 class _MenuNudge extends StatelessWidget {
-  const _MenuNudge({required this.offset, required this.child});
+  const _MenuNudge({
+    required this.offset,
+    required this.hidden,
+    required this.alignment,
+    required this.child,
+  });
   final double offset;
+  final bool hidden;
+  final Alignment alignment;
   final Widget child;
 
   @override
-  Widget build(BuildContext context) => AnimatedContainer(
-    duration: MediaQuery.disableAnimationsOf(context)
+  Widget build(BuildContext context) {
+    final duration = MediaQuery.disableAnimationsOf(context)
         ? Duration.zero
-        : const Duration(milliseconds: 180),
-    curve: Curves.easeOutCubic,
-    transform: Matrix4.translationValues(offset, 0, 0),
-    child: child,
-  );
+        : const Duration(milliseconds: 180);
+    final scale = hidden ? .9 : 1.0;
+    return IgnorePointer(
+      ignoring: hidden,
+      child: ExcludeSemantics(
+        excluding: hidden,
+        child: AnimatedContainer(
+          duration: duration,
+          curve: Curves.easeOutCubic,
+          transformAlignment: alignment,
+          transform: Matrix4.translationValues(offset, 0, 0)
+            ..scaleByDouble(scale, scale, 1, 1),
+          child: AnimatedOpacity(
+            duration: duration,
+            curve: Curves.easeOutCubic,
+            opacity: hidden ? 0 : 1,
+            child: child,
+          ),
+        ),
+      ),
+    );
+  }
 }

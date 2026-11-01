@@ -289,18 +289,36 @@ void main() {
         ),
       );
       final search = find.byTooltip('Search');
-      final initialX = tester.getCenter(search).dx;
+      final initialX = tester.getTopRight(search).dx;
+      final initialWidth =
+          (tester.getTopRight(search).dx - tester.getTopLeft(search).dx);
       creationMenu.onMenuVisibilityChanged!(true);
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 90));
-      final midwayX = tester.getCenter(search).dx;
-      expect(midwayX, greaterThan(initialX + 4));
-      expect(midwayX, lessThan(initialX + 8));
+      final midwayX = tester.getTopRight(search).dx;
+      expect(midwayX, greaterThan(initialX + 8));
+      expect(midwayX, lessThan(initialX + 16));
       await tester.pumpAndSettle();
-      expect(tester.getCenter(search).dx, closeTo(initialX + 8, .01));
+      expect(tester.getTopRight(search).dx, closeTo(initialX + 16, .01));
+      expect(
+        (tester.getTopRight(search).dx - tester.getTopLeft(search).dx),
+        closeTo(initialWidth * .9, .01),
+      );
+      final fade = find.ancestor(
+        of: search,
+        matching: find.byType(FadeTransition),
+      );
+      expect(tester.widget<FadeTransition>(fade.first).opacity.value, 0);
+      expect(search.hitTestable(), findsNothing);
       creationMenu.onMenuVisibilityChanged!(false);
       await tester.pumpAndSettle();
-      expect(tester.getCenter(search).dx, closeTo(initialX, .01));
+      expect(tester.getTopRight(search).dx, closeTo(initialX, .01));
+      expect(
+        (tester.getTopRight(search).dx - tester.getTopLeft(search).dx),
+        closeTo(initialWidth, .01),
+      );
+      expect(tester.widget<FadeTransition>(fade.first).opacity.value, 1);
+      expect(search.hitTestable(), findsOneWidget);
       final communityMenu = tester.widget<IosMessageCreateButton>(
         find.byWidgetPredicate(
           (w) =>
