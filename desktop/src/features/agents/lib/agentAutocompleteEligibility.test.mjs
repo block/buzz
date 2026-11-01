@@ -140,6 +140,94 @@ test("relayAgentIsSharedWithUser: accepts allowlist agents for the current user"
   );
 });
 
+test("relayAgentIsSharedWithUser: admits the owner of an allowlist agent", () => {
+  const sharedChannelIds = new Set(["general"]);
+
+  // `author_allowed` ORs the explicit list with the owner check, so an owner
+  // absent from the array is still answered by the harness.
+  assert.equal(
+    relayAgentIsSharedWithUser(
+      {
+        respondTo: "allowlist",
+        respondToAllowlist: [OTHER_OWNER_PUBKEY],
+        ownerPubkey: CURRENT_PUBKEY,
+        channelIds: ["general"],
+      },
+      sharedChannelIds,
+      CURRENT_PUBKEY,
+    ),
+    true,
+  );
+
+  // An empty allowlist is the first configuration an owner reaches for, and it
+  // used to hide the agent from everyone, the owner included, without an error.
+  assert.equal(
+    relayAgentIsSharedWithUser(
+      {
+        respondTo: "allowlist",
+        respondToAllowlist: [],
+        ownerPubkey: CURRENT_PUBKEY.toUpperCase(),
+        channelIds: ["general"],
+      },
+      sharedChannelIds,
+      CURRENT_PUBKEY,
+    ),
+    true,
+  );
+
+  // Someone else's agent is unchanged: the array alone decides.
+  assert.equal(
+    relayAgentIsSharedWithUser(
+      {
+        respondTo: "allowlist",
+        respondToAllowlist: [OTHER_OWNER_PUBKEY],
+        ownerPubkey: OWNER_PUBKEY,
+        channelIds: ["general"],
+      },
+      sharedChannelIds,
+      CURRENT_PUBKEY,
+    ),
+    false,
+  );
+
+  // An owner that does not resolve must keep failing closed. On closed relays
+  // the NIP-OA attestation often never materializes, and admitting on absence
+  // would expose the agent to every viewer.
+  for (const ownerPubkey of [undefined, null, ""]) {
+    assert.equal(
+      relayAgentIsSharedWithUser(
+        {
+          respondTo: "allowlist",
+          respondToAllowlist: [OTHER_OWNER_PUBKEY],
+          ownerPubkey,
+          channelIds: ["general"],
+        },
+        sharedChannelIds,
+        CURRENT_PUBKEY,
+      ),
+      false,
+    );
+  }
+});
+
+test("relayAgentCanRespondInChannel: an allowlist owner still needs the agent in the channel", () => {
+  const agent = {
+    respondTo: "allowlist",
+    respondToAllowlist: [],
+    ownerPubkey: CURRENT_PUBKEY,
+    channelIds: ["general"],
+  };
+
+  assert.equal(
+    relayAgentCanRespondInChannel(agent, "general", CURRENT_PUBKEY),
+    true,
+  );
+  assert.equal(
+    relayAgentCanRespondInChannel(agent, "other", CURRENT_PUBKEY),
+    false,
+  );
+});
+
 test("relayAgentCanRespondInChannel: requires exact channel membership and viewer access", () => {
   const agent = {
     respondTo: "allowlist",
