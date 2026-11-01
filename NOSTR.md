@@ -359,6 +359,33 @@ nak req -k 44100 -k 44101 --tag "p=<your-hex-pubkey>" \
   --auth --sec <privkey> ws://localhost:3000
 ```
 
+### Memberships removed since a time
+
+Kind:39002 rosters can only show a membership that still exists, so a client
+that refreshes from `since` cannot see a roster it was removed from, or a
+channel that was deleted. `POST /query` (not `/count`) answers that directly.
+The body is exactly one filter with exactly these two keys:
+
+```json
+[{"membership":"removed","since":1793569000}]
+```
+
+```json
+{"asOf":1793570000,"removed":[{"channelId":"<uuid>","at":1793569500,"reason":"removed"}]}
+```
+
+- `reason: "removed"`: the authenticated reader's membership row in that
+  channel was removed (kick or leave) at or after `since`, whatever the
+  channel's visibility now. A rejoined channel is not reported.
+- `reason: "deleted"`: the channel was deleted at or after `since` while the
+  reader's membership was still active.
+- `asOf` is the relay's clock (unix seconds) when the read ran. Start the next
+  read from `asOf` minus an overlap (artifact sync uses 120s), since a change
+  can commit after its timestamp.
+- Missing or invalid `since`, extra keys, a second filter, or `/count` give
+  HTTP 400. More than 2048 changes give HTTP 413: read memberships in full.
+- Relays advertise support as `membership.removedSince` in NIP-11.
+
 ### Workflow Owner Attribution
 
 A workflow message is a kind:9 event that the relay signs and marks with

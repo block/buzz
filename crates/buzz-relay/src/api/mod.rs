@@ -870,3 +870,4 @@ mod parse_query_tests {
 
 mod artifact;
 pub(crate) mod artifact_sync;
+pub(crate) mod membership_changes;

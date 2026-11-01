@@ -39,6 +39,10 @@ pub struct RelayInfo {
     pub buzz_v1: Option<BuzzV1Descriptor>,
     /// NIP-AR artifact query transport and enforced resource limits.
     pub artifacts: serde_json::Value,
+    /// Membership-change reads: `removedSince` marks support for
+    /// `POST /query` with `{"membership":"removed","since":T}`.
+    #[serde(default)]
+    pub membership: serde_json::Value,
     /// Relay operator's public key (hex), if published.
     pub pubkey: Option<String>,
     /// Contact address for the relay operator.
@@ -283,6 +287,7 @@ impl RelayInfo {
             icon: icon.filter(|s| !s.is_empty()).map(|s| s.to_string()),
             read_state_snapshot: None,
             buzz_v1: None,
+            membership: crate::api::membership_changes::capability(),
             artifacts: serde_json::json!({
                 "version": 1, "revision_kind": 45010, "removal_kind": 45011,
                 "query": "/query", "count": "/count",
@@ -878,6 +883,22 @@ mod tests {
             auth: crate::config::AdminAuth::Nip98,
             web_dir: None,
         }
+    }
+
+    /// The membership-removals read is unconditional and advertised for gating.
+    #[test]
+    fn membership_removed_since_is_advertised() {
+        let info = RelayInfo::build(
+            None,
+            None,
+            RelayCapabilityFlags::default(),
+            DEFAULT_MAX_FRAME_BYTES,
+            None,
+            None,
+            None,
+        );
+        let json = serde_json::to_value(&info).expect("serialize");
+        assert_eq!(json["membership"]["removedSince"], true);
     }
 
     /// The admin surface is unconfigured: `admin_api` must be absent, and the

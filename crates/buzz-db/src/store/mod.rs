@@ -85,10 +85,15 @@ pub mod artifact;
 mod artifact_query;
 /// Timestamp-based incremental artifact reads.
 pub mod artifact_sync;
+/// Memberships that ended since a time.
+pub mod membership_changes;
 pub use artifact_query::{ArtifactSnapshot, SnapshotDenied};
 
 #[cfg(test)]
 mod artifact_postgres_tests;
+
+#[cfg(test)]
+mod membership_changes_postgres_tests;
 
 #[cfg(test)]
 mod legacy_channel_types_postgres_tests;

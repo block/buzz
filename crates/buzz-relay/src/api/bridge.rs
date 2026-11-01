@@ -1507,6 +1507,11 @@ async fn query_member_events(
     // depth_limit, feed_types) that nostr::Filter silently drops.
     let raw_filters: Vec<Value> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    if let Some(result) =
+        super::membership_changes::query(state, tenant, &pubkey, &raw_filters, false).await
+    {
+        return result;
+    }
     if let Some(result) = super::artifact::query(state, tenant, &pubkey, &raw_filters, false).await
     {
         return result;
@@ -2197,6 +2202,10 @@ async fn count_member_events(
     let pubkey_bytes = pubkey.to_bytes().to_vec();
     let raw: Vec<Value> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    if let Some(result) = super::membership_changes::query(state, tenant, &pubkey, &raw, true).await
+    {
+        return result;
+    }
     if let Some(result) = super::artifact::query(state, tenant, &pubkey, &raw, true).await {
         return result;
     }
@@ -3183,6 +3192,10 @@ fn ban_json(b: &buzz_db::moderation::BanRecord) -> Value {
 #[cfg(test)]
 #[path = "artifact_postgres_tests.rs"]
 mod artifact_postgres_tests;
+
+#[cfg(test)]
+#[path = "membership_changes_postgres_tests.rs"]
+mod membership_changes_postgres_tests;
 
 #[cfg(test)]
 #[path = "typing_postgres_tests.rs"]
