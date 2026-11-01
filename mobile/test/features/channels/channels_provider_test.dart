@@ -2163,12 +2163,13 @@ void main() {
     });
 
     test(
-      'a repeated catch-up starts near the newest message it already has',
+      'a repeated catch-up starts before the last one by the relay drift',
       () async {
+        int now() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
         final session = _FakeRelaySession(
           memberships: [_membership(_channelA, myPk)],
           metadata: [_meta(id: _channelA, name: 'general')],
-          recentMessages: [message('seen', 10000, mention: true)],
+          recentMessages: [message('seen', now() - 3600, mention: true)],
         );
         final container = _buildContainer(session: session);
         addTearDown(container.dispose);
@@ -2177,34 +2178,48 @@ void main() {
           for (final filter in session.queryBatches.lastWhere(isUnread))
             filter.since,
         ];
+        Future<(int, int)> refreshed() async {
+          final before = session.queryBatches.where(isUnread).length;
+          final from = now();
+          await notifier.refresh();
+          await _waitUntil(
+            () => session.queryBatches.where(isUnread).length > before,
+          );
+          await _settle();
+          return (from, now());
+        }
 
+        final firstFrom = now();
         await container.read(channelsProvider.future);
         await _waitUntil(() => session.queryBatches.any(isUnread));
         await _settle();
+        final firstTo = now();
         // Never read: the first catch-up asks for the whole window.
         expect(lastUnreadSince(), [0, 0]);
 
-        // A message lands while the app is away, then a refresh catches up.
-        session.recentMessages.add(message('missed', 10030, mention: true));
-        final before = session.queryBatches.where(isUnread).length;
-        await notifier.refresh();
-        await _waitUntil(
-          () => session.queryBatches.where(isUnread).length > before,
+        // While the app is away, a message composed offline reaches the relay
+        // with a created_at well before the newest one the app has seen.
+        session.recentMessages.add(
+          message('late', firstFrom - 600, mention: true),
         );
-        await _settle();
-        expect(lastUnreadSince(), [10000 - 60, 10000 - 60]);
+        final (secondFrom, secondTo) = await refreshed();
+        for (final since in lastUnreadSince()) {
+          expect(
+            since,
+            inInclusiveRange(firstFrom - 960, firstTo - 960),
+            reason: 'starts 960s before the previous catch-up was sent',
+          );
+        }
         expect(
           notifier.observedUnreadEventsByChannel[_channelA]?.keys,
-          unorderedEquals(['seen', 'missed']),
+          unorderedEquals(['seen', 'late']),
         );
 
         // Each catch-up moves the start forward.
-        final again = session.queryBatches.where(isUnread).length;
-        await notifier.refresh();
-        await _waitUntil(
-          () => session.queryBatches.where(isUnread).length > again,
-        );
-        expect(lastUnreadSince(), [10030 - 60, 10030 - 60]);
+        await refreshed();
+        for (final since in lastUnreadSince()) {
+          expect(since, inInclusiveRange(secondFrom - 960, secondTo - 960));
+        }
       },
     );
 

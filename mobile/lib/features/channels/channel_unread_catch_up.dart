@@ -73,7 +73,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
         return;
       }
 
-      _recordUnreadCaughtUp(events, readAtByChannel, requestedAt);
+      _recordUnreadCaughtUp(readAtByChannel, requestedAt);
 
       // Keep this response's deletion evidence independently of the bounded
       // cross-request tombstones: a large batch can evict its own early IDs.
@@ -192,44 +192,27 @@ extension _UnreadCatchUp on ChannelsNotifier {
   /// refresh path catches up again (resume, reconnect, join), and on a slow
   /// link re-downloading up to [_unreadCatchUpLimit] messages per channel each
   /// time keeps the batch from ever finishing. A later catch-up therefore
-  /// starts from the newest message an earlier one returned, less
-  /// [_unreadCatchUpOverlap] for events that reach the relay out of order.
-  /// Messages before that point were already recorded or skipped. A read
-  /// timestamp that moved back since then makes the full window apply again.
+  /// starts [relayLiveWindowSkewSeconds] before an earlier one was sent. The
+  /// earlier one returned every message stored before it was sent, and the
+  /// relay stores no event with a `created_at` more than 900s behind its own
+  /// clock, so anything stored since then is newer than that start, however
+  /// late it arrived. A read timestamp that moved back since then makes the
+  /// full window apply again.
   int _unreadCatchUpSince(String channelId, int? readAt) {
     final afterRead = (readAt ?? -1) + 1;
     final caughtUp = _unreadCaughtUpByChannel[channelId];
     if (caughtUp == null || (readAt ?? -1) < (caughtUp.readAt ?? -1)) {
       return afterRead;
     }
-    return max(afterRead, caughtUp.through - _unreadCatchUpOverlap);
+    return max(afterRead, caughtUp.sentAt - relayLiveWindowSkewSeconds);
   }
 
-  /// Remembers, per channel, the newest event [events] returned, capped at
-  /// [requestedAt] so a client clock running ahead cannot skip messages.
-  void _recordUnreadCaughtUp(
-    List<NostrEvent> events,
-    Map<String, int?> readAtByChannel,
-    int requestedAt,
-  ) {
-    final newest = <String, int>{};
-    for (final event in events) {
-      final channelId = event.channelId;
-      if (channelId == null || !readAtByChannel.containsKey(channelId)) {
-        continue;
-      }
-      newest.update(
-        channelId,
-        (at) => max(at, event.createdAt),
-        ifAbsent: () => event.createdAt,
-      );
-    }
-    for (final MapEntry(key: channelId, value: at) in newest.entries) {
-      final previous = _unreadCaughtUpByChannel[channelId]?.through;
-      _unreadCaughtUpByChannel[channelId] = (
-        through: max(previous ?? 0, min(at, requestedAt)),
-        readAt: readAtByChannel[channelId],
-      );
+  /// Remembers when a catch-up that covered every channel in
+  /// [readAtByChannel] was sent, and the read timestamps it used.
+  void _recordUnreadCaughtUp(Map<String, int?> readAtByChannel, int sentAt) {
+    for (final MapEntry(key: channelId, value: readAt)
+        in readAtByChannel.entries) {
+      _unreadCaughtUpByChannel[channelId] = (sentAt: sentAt, readAt: readAt);
     }
   }
 }

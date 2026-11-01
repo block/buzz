@@ -34,10 +34,6 @@ part 'channels_provider_lifecycle.dart';
 const _channelTypeOrder = {'stream': 0, 'forum': 1, 'dm': 2};
 const _unreadCatchUpLimit = 1000;
 
-/// How far before the newest message it already returned a later unread
-/// catch-up starts. See `_unreadCatchUpSince`.
-const _unreadCatchUpOverlap = 60;
-
 /// Relay requests one channel-history batch keeps in flight at most.
 const _historyRequestConcurrency = 4;
 const _participatedRootIdsPrefix = 'buzz-thread-participation.v1';
@@ -68,9 +64,9 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   String? _subscriptionRelayBaseUrl;
   Timer? _backstopTimer;
   final Map<String, int> _latestObservedByChannel = {};
-  // Per channel, the newest message an earlier unread catch-up in this session
-  // returned and the read timestamp it used. See [_UnreadCatchUp].
-  final Map<String, ({int through, int? readAt})> _unreadCaughtUpByChannel = {};
+  // Per channel, when an earlier unread catch-up in this session was sent and
+  // the read timestamp it used. See [_UnreadCatchUp].
+  final Map<String, ({int sentAt, int? readAt})> _unreadCaughtUpByChannel = {};
   final Map<String, Map<String, ObservedUnreadEvent>>
   _observedUnreadEventsByChannel = {};
   final Map<String, Set<String>> _unreadDeletedIdsByChannel = {};
