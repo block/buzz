@@ -168,6 +168,15 @@ pub struct Config {
     /// independently so reader capacity can be tuned against the replica's
     /// headroom without touching the writer pool.
     pub db_read_pool_size: Option<u32>,
+    /// Seconds one acquire may take — waiting for a free slot, pinging an
+    /// idle connection, or opening a new one — in the relay's writer, audit,
+    /// and search pools (`BUZZ_DB_ACQUIRE_TIMEOUT_SECS`, clamped to
+    /// [`MAX_DB_ACQUIRE_TIMEOUT_SECS`]). The replica read pool keeps its own
+    /// fixed budget. `None` keeps the `buzz-db` default. A host whose database
+    /// round trips are slow, such as a laptop running Postgres in a container
+    /// VM, can exceed the default while the pool is nearly idle; every request
+    /// then fails with `PoolTimedOut`.
+    pub db_acquire_timeout_secs: Option<u64>,
     /// Public WebSocket URL of this relay, advertised in NIP-11.
     pub relay_url: String,
     /// Public WebSocket URL of the dedicated device-pairing relay, when configured.
@@ -655,6 +664,32 @@ fn inert_env_vars<'a>(names: &[&'a str], lookup: impl Fn(&str) -> Option<String>
         .collect()
 }
 
+/// Ceiling for `BUZZ_DB_ACQUIRE_TIMEOUT_SECS`. Requests queue behind a stuck
+/// pool for the whole budget, and sqlx panics on a deadline that overflows
+/// `Instant`, so the override stays bounded.
+pub const MAX_DB_ACQUIRE_TIMEOUT_SECS: u64 = 300;
+
+impl Config {
+    /// The relay's Postgres pool configuration, before the shared
+    /// `BUZZ_DB_*_TIMEOUT_MS` session-timeout overlay.
+    pub fn db_config(&self) -> buzz_db::DbConfig {
+        let defaults = buzz_db::DbConfig::default();
+        buzz_db::DbConfig {
+            push_enabled: self.push_enabled,
+            database_url: self.database_url.clone(),
+            read_database_url: self.read_database_url.clone(),
+            replica_read_max_age_ms: self.replica_read_max_age_ms,
+            usage_metrics_replica_max_age_ms: self.usage_metrics_replica_max_age_ms,
+            max_connections: self.db_pool_size,
+            read_max_connections: self.db_read_pool_size,
+            acquire_timeout_secs: self
+                .db_acquire_timeout_secs
+                .unwrap_or(defaults.acquire_timeout_secs),
+            ..defaults
+        }
+    }
+}
+
 impl Config {
     /// Loads configuration from environment variables, falling back to development defaults.
     pub fn from_env() -> Result<Self, ConfigError> {
@@ -739,6 +774,13 @@ impl Config {
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
             .filter(|&v| v > 0);
+
+        // Zero would fail every acquire immediately, so it is ignored.
+        let db_acquire_timeout_secs = std::env::var("BUZZ_DB_ACQUIRE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&v| v > 0)
+            .map(|v| v.min(MAX_DB_ACQUIRE_TIMEOUT_SECS));
 
         let relay_url =
             std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string());
@@ -1436,6 +1478,7 @@ impl Config {
             redis_pool_size,
             db_pool_size,
             db_read_pool_size,
+            db_acquire_timeout_secs,
             relay_url,
             pairing_relay_url,
             max_connections,
@@ -2347,6 +2390,53 @@ mod tests {
         assert_eq!(overridden, 80);
         assert_eq!(zero, 50, "zero must fall back to the default");
         assert_eq!(junk, 50, "unparsable value must fall back to the default");
+    }
+
+    #[test]
+    fn db_acquire_timeout_secs_env_override_and_invalid_fallback() {
+        let _guards = env_guards();
+        let previous = std::env::var_os("BUZZ_DB_ACQUIRE_TIMEOUT_SECS");
+
+        std::env::remove_var("BUZZ_DB_ACQUIRE_TIMEOUT_SECS");
+        let unset_config = Config::from_env().expect("config");
+        let unset = unset_config.db_acquire_timeout_secs;
+        let unset_pool = unset_config.db_config().acquire_timeout_secs;
+
+        std::env::set_var("BUZZ_DB_ACQUIRE_TIMEOUT_SECS", "15");
+        let overridden_config = Config::from_env().expect("config");
+        let overridden = overridden_config.db_acquire_timeout_secs;
+        let overridden_pool = overridden_config.db_config().acquire_timeout_secs;
+
+        std::env::set_var("BUZZ_DB_ACQUIRE_TIMEOUT_SECS", "18446744073709551615");
+        let huge = Config::from_env().expect("config").db_acquire_timeout_secs;
+
+        std::env::set_var("BUZZ_DB_ACQUIRE_TIMEOUT_SECS", "0");
+        let zero = Config::from_env().expect("config").db_acquire_timeout_secs;
+
+        std::env::set_var("BUZZ_DB_ACQUIRE_TIMEOUT_SECS", "not-a-number");
+        let junk = Config::from_env().expect("config").db_acquire_timeout_secs;
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_DB_ACQUIRE_TIMEOUT_SECS", value);
+        } else {
+            std::env::remove_var("BUZZ_DB_ACQUIRE_TIMEOUT_SECS");
+        }
+
+        assert_eq!(unset, None, "unset must keep the buzz-db default");
+        assert_eq!(
+            unset_pool,
+            buzz_db::DbConfig::default().acquire_timeout_secs,
+            "unset must leave the pool on the buzz-db default"
+        );
+        assert_eq!(overridden, Some(15));
+        assert_eq!(overridden_pool, 15, "the override must reach the pool");
+        assert_eq!(
+            huge,
+            Some(MAX_DB_ACQUIRE_TIMEOUT_SECS),
+            "values above the ceiling must clamp"
+        );
+        assert_eq!(zero, None, "zero would fail every acquire and is ignored");
+        assert_eq!(junk, None, "unparsable value must keep the buzz-db default");
     }
 
     #[test]

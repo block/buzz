@@ -533,17 +533,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         "Prometheus metrics exporter started"
     );
 
-    let db_config = DbConfig {
-        push_enabled: config.push_enabled,
-        database_url: config.database_url.clone(),
-        read_database_url: config.read_database_url.clone(),
-        replica_read_max_age_ms: config.replica_read_max_age_ms,
-        usage_metrics_replica_max_age_ms: config.usage_metrics_replica_max_age_ms,
-        max_connections: config.db_pool_size,
-        read_max_connections: config.db_read_pool_size,
-        ..DbConfig::default()
-    }
-    .with_session_timeouts_from_env();
+    let db_config = config.db_config().with_session_timeouts_from_env();
     let step = StepTimer::start(StartupStep::DbConnect);
     let db = Db::new(&db_config).await.map_err(|e| {
         error!("Failed to connect to Postgres: {e}");
