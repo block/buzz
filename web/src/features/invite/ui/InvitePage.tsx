@@ -57,7 +57,6 @@ export function InvitePage({ code }: { code: string }) {
   const [document, setDocument] = React.useState<PolicyDocument | null>(null);
   const [ageConfirmed, setAgeConfirmed] = React.useState(false);
   const [agreementConfirmed, setAgreementConfirmed] = React.useState(false);
-  const [opening, setOpening] = React.useState(false);
   const [joiningBrowser, setJoiningBrowser] = React.useState(false);
   const [browserJoinError, setBrowserJoinError] = React.useState<string | null>(
     null,
@@ -113,18 +112,6 @@ export function InvitePage({ code }: { code: string }) {
     return ((await response.json()) as { receipt: string }).receipt;
   };
 
-  const openInvite = async () => {
-    setOpening(true);
-    try {
-      const receipt = await acceptPolicy();
-      const query = new URLSearchParams({ relay, code });
-      if (receipt) query.set("policy_receipt", receipt);
-      window.location.href = `buzz://join?${query.toString()}`;
-    } finally {
-      setOpening(false);
-    }
-  };
-
   const joinInBrowser = async () => {
     setBrowserJoinError(null);
     setJoiningBrowser(true);
@@ -144,7 +131,6 @@ export function InvitePage({ code }: { code: string }) {
   const browserSigningAvailable = hasNip07Provider();
   const disabled =
     policy === undefined ||
-    opening ||
     joiningBrowser ||
     Boolean(policy?.age_attestation_required && !ageConfirmed) ||
     Boolean(
@@ -153,7 +139,8 @@ export function InvitePage({ code }: { code: string }) {
         !agreementConfirmed,
     );
   const hasPolicyRequirements = Boolean(
-    policy &&
+    browserSigningAvailable &&
+      policy &&
       (policy.age_attestation_required ||
         policy.terms_markdown ||
         policy.privacy_markdown),
@@ -234,34 +221,18 @@ export function InvitePage({ code }: { code: string }) {
                 {joiningBrowser ? "Joining…" : "Join in browser"}
               </Button>
             ) : null}
-            {policy === null ? (
-              <Button
-                asChild
-                className={`h-10 w-full ${
-                  browserSigningAvailable
-                    ? "border border-black bg-white text-black hover:bg-black/5"
-                    : "bg-black text-white hover:bg-black/90 focus-visible:ring-black"
-                }`}
-              >
-                <a
-                  href={`buzz://join?relay=${encodeURIComponent(relay)}&code=${encodeURIComponent(code)}`}
-                >
-                  Accept invite in Buzz
-                </a>
-              </Button>
-            ) : (
-              <Button
-                className={`h-10 w-full disabled:cursor-not-allowed disabled:bg-black/30 disabled:text-white/70 ${
-                  browserSigningAvailable
-                    ? "border border-black bg-white text-black hover:bg-black/5"
-                    : "bg-black text-white hover:bg-black/90 focus-visible:ring-black"
-                }`}
-                disabled={disabled}
-                onClick={openInvite}
-              >
-                Accept invite in Buzz
-              </Button>
-            )}
+            <Button
+              asChild
+              className={`h-10 w-full ${
+                browserSigningAvailable
+                  ? "border border-black bg-white text-black hover:bg-black/5"
+                  : "bg-black text-white hover:bg-black/90 focus-visible:ring-black"
+              }`}
+            >
+              <a href={`buzz://join?${new URLSearchParams({ relay, code })}`}>
+                Open invite in Buzz
+              </a>
+            </Button>
             {browserJoinError ? (
               <p className="text-sm text-red-700" role="alert">
                 {browserJoinError}
