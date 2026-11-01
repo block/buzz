@@ -2015,7 +2015,7 @@ void main() {
     final channels = await container.read(channelsProvider.future);
     await _waitUntil(
       () => session.queryBatches.any(
-        (batch) => batch.isNotEmpty && batch.every((f) => f.since != null),
+        (batch) => batch.isNotEmpty && batch.every((f) => f.limit == 1000),
       ),
     );
     await _settle();
@@ -2070,7 +2070,7 @@ void main() {
   group('deadline-unavailable channel batches', () {
     Object deadline() => RelayException(503, '{"error":"query timed out"}');
     bool isUnread(List<NostrFilter> batch) =>
-        batch.isNotEmpty && batch.every((filter) => filter.since != null);
+        batch.isNotEmpty && batch.every((filter) => filter.limit == 1000);
     NostrEvent message(
       String id,
       int createdAt, {
@@ -2109,6 +2109,73 @@ void main() {
       );
       expect(session.messageHistoryCount, 0);
     });
+
+    test(
+      'a repeated latest-message query asks only for newer messages',
+      () async {
+        int now() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final first = now() - 3600;
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [_meta(id: _channelA, name: 'general')],
+          recentMessages: [message('m1', first)],
+        );
+        final container = _buildContainer(session: session);
+        addTearDown(container.dispose);
+        final notifier = container.read(channelsProvider.notifier);
+        bool isLatest(List<NostrFilter> batch) =>
+            batch.isNotEmpty &&
+            batch.every(
+              (filter) =>
+                  filter.limit != 1000 &&
+                  filter.kinds.contains(EventKind.streamMessageV2),
+            );
+        int? lastLatestSince() =>
+            session.queryBatches.lastWhere(isLatest).single.since;
+        DateTime at(int seconds) =>
+            DateTime.fromMillisecondsSinceEpoch(seconds * 1000, isUtc: true);
+        DateTime? lastMessageAt() =>
+            container.read(channelsProvider).value!.single.lastMessageAt;
+        Future<(int, int)> refreshed() async {
+          final before = session.queryBatches.where(isLatest).length;
+          final from = now();
+          await notifier.refresh();
+          await _waitUntil(
+            () => session.queryBatches.where(isLatest).length > before,
+          );
+          await _settle();
+          return (from, now());
+        }
+
+        final firstFrom = now();
+        await container.read(channelsProvider.future);
+        await _settle();
+        final firstTo = now();
+        expect(lastLatestSince(), isNull);
+        expect(lastMessageAt(), at(first));
+
+        // Nothing newer: the relay answers nothing and the timestamp stays.
+        // The query starts 960s before the previous one was sent.
+        session.recentMessages = [];
+        final (secondFrom, secondTo) = await refreshed();
+        expect(
+          lastLatestSince(),
+          inInclusiveRange(firstFrom - 960, firstTo - 960),
+        );
+        expect(lastMessageAt(), at(first));
+
+        // A message composed offline reaches the relay late, backdated before
+        // the previous query: it is inside the window and moves the timestamp.
+        final late = secondFrom - 600;
+        session.recentMessages = [message('late', late)];
+        await refreshed();
+        expect(
+          lastLatestSince(),
+          inInclusiveRange(secondFrom - 960, secondTo - 960),
+        );
+        expect(lastMessageAt(), at(late));
+      },
+    );
 
     test(
       'a cold-start latest-message deadline is filled by unread catch-up',
@@ -3391,11 +3458,12 @@ class _FakeRelaySession extends RelaySessionNotifier {
       throw RelayException(400, '{"error":"too many explicit channels"}');
     }
     if (messageBatchError case final error?) throw error;
-    // The unread catch-up is the only batch that carries `since` on every
-    // filter; the latest-message batch leaves it null. Snapshot the messages at
-    // request time so a parked response reflects the scope that asked for it.
+    // The unread catch-up is the only batch whose filters use its 1000-event
+    // window; the latest-message batch asks for 20 (1 for DMs). Snapshot the
+    // messages at request time so a parked response reflects the scope that
+    // asked for it.
     final isUnreadCatchUp =
-        filters.isNotEmpty && filters.every((filter) => filter.since != null);
+        filters.isNotEmpty && filters.every((filter) => filter.limit == 1000);
     if (!isUnreadCatchUp && latestBatchError != null) throw latestBatchError!;
     final messageSnapshot = List.of(recentMessages);
     if (isUnreadCatchUp) {
@@ -3536,7 +3604,7 @@ class _BridgeDownRelaySession extends _FakeRelaySession {
     if (filter == null) return null;
     if (filter.kinds.contains(EventKind.huddleStarted)) return 'huddle';
     if (!filter.kinds.contains(EventKind.streamMessageV2)) return null;
-    return filter.since == null ? 'latest' : 'unread';
+    return filter.limit == 1000 ? 'unread' : 'latest';
   }
 
   Future<T> _held<T>(String? batch, Future<T> Function() request) async {

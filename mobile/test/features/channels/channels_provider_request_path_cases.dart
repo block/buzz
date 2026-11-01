@@ -277,7 +277,7 @@ class _RequestPathSession extends _FakeRelaySession {
   }) async {
     if (filters.isNotEmpty &&
         filters.every(
-          (filter) => filter.kinds.contains(9) && filter.since == null,
+          (filter) => filter.kinds.contains(9) && filter.limit != 1000,
         )) {
       latestRequests++;
       final gate = latestGate;

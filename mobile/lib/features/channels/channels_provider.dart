@@ -16,6 +16,7 @@ import 'channel_management_provider.dart'
 import 'channel_mutes/channel_mutes_provider.dart';
 import 'huddle_channel_filter.dart';
 import '../../shared/read_state/read_state_provider.dart';
+import '../../shared/read_state/read_state_time.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import 'thread_follows/thread_follows_provider.dart';
 import 'unread_badge/is_high_priority_event.dart';
@@ -63,6 +64,9 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   String? _subscriptionRelayBaseUrl;
   Timer? _backstopTimer;
   final Map<String, int> _latestObservedByChannel = {};
+  // Per channel, when this session's last successful latest-message query was
+  // sent. A later query asks only for messages stored since then.
+  final Map<String, int> _latestMessageSentAtById = {};
   final Map<String, Map<String, ObservedUnreadEvent>>
   _observedUnreadEventsByChannel = {};
   final Map<String, Set<String>> _unreadDeletedIdsByChannel = {};
@@ -240,6 +244,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _refreshCoordinator.retireInFlight();
       _clearLiveSubscriptions();
       _latestObservedByChannel.clear();
+      _latestMessageSentAtById.clear();
       _observedUnreadEventsByChannel.clear();
       _unreadDeletedIdsByChannel.clear();
       _unscopedUnreadDeletedIds.clear();
@@ -396,13 +401,17 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     );
     // Latest-message filters depend on channel identity/privacy, not names.
     // Start them alongside profiles, and observe both errors immediately.
+    final latestSentAt = currentUnixSeconds();
+    final latestSinceById = fetchLastMessage
+        ? _latestMessageSince()
+        : const <String, int>{};
     final latestEventsRequest = fetchLastMessage
         ? _fetchLastMessageEvents(session, [
             for (final entry in visibleMetas)
               if (memberChannelIds.contains(entry.value.id) &&
                   !entry.value.isArchived)
                 entry.value,
-          ])
+          ], latestSinceById)
         : Future.value(const <NostrEvent>[]);
     final (displayNames, latestEvents) = await _fenced(fence, () async {
       await Future.wait(eagerError: true, [
@@ -459,13 +468,18 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       final events = latestEvents;
       final lastMessageMap = <String, int>{};
       // An unavailable batch keeps the timestamps already known rather than
-      // installing channels whose latest message looks absent.
-      if (events == null) {
-        for (final channel in state.value ?? const <Channel>[]) {
-          final at = channel.lastMessageAt;
-          if (at != null) {
-            lastMessageMap[channel.id] = at.millisecondsSinceEpoch ~/ 1000;
-          }
+      // installing channels whose latest message looks absent. A channel asked
+      // only for newer messages keeps its known timestamp too.
+      for (final channel in state.value ?? const <Channel>[]) {
+        final at = channel.lastMessageAt;
+        if (at != null &&
+            (events == null || latestSinceById.containsKey(channel.id))) {
+          lastMessageMap[channel.id] = at.millisecondsSinceEpoch ~/ 1000;
+        }
+      }
+      if (events != null) {
+        for (final id in channelById.keys) {
+          _latestMessageSentAtById[id] = latestSentAt;
         }
       }
       final mutedChannelIds = _mutedChannelIds();
@@ -565,6 +579,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   Future<List<NostrEvent>?> _fetchLastMessageEvents(
     RelaySessionNotifier session,
     List<ChannelData> channels,
+    Map<String, int> sinceById,
   ) async {
     if (channels.isEmpty) return const [];
 
@@ -575,6 +590,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
           tags: {
             '#h': [channel.id],
           },
+          since: sinceById[channel.id],
           limit: channel.channelType == 'dm' ? 1 : 20,
         ),
     ];
@@ -585,6 +601,22 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       operation: 'latest-message query',
     );
   }
+
+  /// Where each channel's latest-message query starts.
+  ///
+  /// Every refresh path (resume, reconnect, join) asks again for each
+  /// channel's latest messages, and on a slow link re-downloading 20 per
+  /// channel each time keeps the batch from finishing. Once this session has
+  /// fetched a channel's latest messages, a later query starts
+  /// [relayLiveWindowSkewSeconds] before the earlier one was sent. The earlier
+  /// one saw every message stored before it was sent, and the relay stores no
+  /// event with a `created_at` more than 900s behind its own clock, so this
+  /// still sees every message stored since, however late it arrived.
+  Map<String, int> _latestMessageSince() => {
+    for (final MapEntry(key: id, value: sentAt)
+        in _latestMessageSentAtById.entries)
+      id: sentAt - relayLiveWindowSkewSeconds,
+  };
 
   /// Returns null when the batch is unavailable: it hit a relay deadline.
   ///

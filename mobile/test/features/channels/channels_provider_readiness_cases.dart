@@ -141,7 +141,7 @@ class _UnreadFailureSession extends _FakeRelaySession {
   }) async {
     if (failDestination &&
         filters.isNotEmpty &&
-        filters.every((filter) => filter.since != null)) {
+        filters.every((filter) => filter.limit == 1000)) {
       started.complete();
       await release.future;
       if (failure == 'deadline') {
@@ -158,7 +158,7 @@ class _UnreadFailureSession extends _FakeRelaySession {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     if (failDestination &&
-        filter.since != null &&
+        filter.limit == 1000 &&
         filter.kinds.contains(EventKind.streamMessageV2)) {
       throw StateError('Unread fallback unavailable');
     }
