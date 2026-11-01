@@ -14,6 +14,7 @@ import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 
 part 'channels_provider_live_cases.dart';
+part 'channels_provider_deletion_cases.dart';
 part 'channels_provider_terminal_cases.dart';
 part 'channels_provider_readiness_cases.dart';
 part 'channels_provider_request_path_cases.dart';
@@ -32,6 +33,7 @@ part 'channels_provider_request_path_cases.dart';
 /// events on demand.
 void main() {
   _unreadReadinessCases();
+  _unreadDeletionCases();
   _requestPathCases();
   const myPk = 'me';
 
@@ -2061,8 +2063,8 @@ void main() {
 
     // Every HTTP chunk failed, so each batch also ran the websocket fallback.
     expect(session.peakInFlight, {'latest': 4, 'unread': 4, 'huddle': 4});
-    // The fallback covered every channel of both batches.
-    expect(session.messageHistoryCount, 2 * ids.length);
+    // The fallback covered latest messages, unread messages, and deletions.
+    expect(session.messageHistoryCount, 3 * ids.length);
   });
 
   group('deadline-unavailable channel batches', () {
@@ -2188,36 +2190,54 @@ void main() {
     // Quiet messages that fill the bounded catch-up window can hide an older
     // unread event, so the full window still counts its oldest one, as plain
     // backlog even when it mentions the reader.
-    for (final (count, expected) in [
-      (999, <String>[]),
-      (1000, ['quiet-0']),
+    for (final (count, deleted, expected) in [
+      (999, false, <String>[]),
+      (1000, false, ['quiet-0']),
+      (999, true, <String>[]),
+      (1000, true, ['quiet-1']),
     ]) {
-      test('$count quiet catch-up messages record $expected', () async {
-        final session = _FakeRelaySession(
-          memberships: [_membership(_channelA, myPk)],
-          metadata: [_meta(id: _channelA, name: 'general')],
-          recentMessages: [
-            for (var i = count - 1; i >= 0; i--)
-              message('quiet-$i', 100 + i, mention: true, quiet: true),
-          ],
-        );
-        final container = _buildContainer(session: session);
-        addTearDown(container.dispose);
-        await container.read(channelsProvider.future);
-        await _waitUntil(() => session.queryBatches.any(isUnread));
-        await _settle();
-        final notifier = container.read(channelsProvider.notifier);
-        expect(
-          notifier.observedUnreadEventsByChannel[_channelA]?.keys ?? const [],
-          expected,
-        );
-        for (final event
-            in notifier.observedUnreadEventsByChannel[_channelA]?.values ??
-                const <ObservedUnreadEvent>[]) {
-          expect(event.highPriority, isFalse);
-          expect(event.channelCatchUp, isTrue);
-        }
-      });
+      test(
+        '$count quiet messages, deletion $deleted, record $expected',
+        () async {
+          final session = _FakeRelaySession(
+            memberships: [_membership(_channelA, myPk)],
+            metadata: [_meta(id: _channelA, name: 'general')],
+            recentMessages: [
+              for (var i = count - 1; i >= 0; i--)
+                message('quiet-$i', 100 + i, mention: true, quiet: true),
+              if (deleted)
+                const NostrEvent(
+                  id: 'quiet-deletion',
+                  pubkey: 'alice',
+                  createdAt: 2000,
+                  kind: EventKind.deletion,
+                  tags: [
+                    ['h', _channelA],
+                    ['e', 'quiet-0'],
+                  ],
+                  content: '',
+                  sig: 'sig',
+                ),
+            ],
+          );
+          final container = _buildContainer(session: session);
+          addTearDown(container.dispose);
+          await container.read(channelsProvider.future);
+          await _waitUntil(() => session.queryBatches.any(isUnread));
+          await _settle();
+          final notifier = container.read(channelsProvider.notifier);
+          expect(
+            notifier.observedUnreadEventsByChannel[_channelA]?.keys ?? const [],
+            expected,
+          );
+          for (final event
+              in notifier.observedUnreadEventsByChannel[_channelA]?.values ??
+                  const <ObservedUnreadEvent>[]) {
+            expect(event.highPriority, isFalse);
+            expect(event.channelCatchUp, isTrue);
+          }
+        },
+      );
     }
 
     // HTTP fails ordinarily, then a per-filter websocket fallback times out:
@@ -2309,7 +2329,18 @@ void main() {
             .toSet(),
         {_channelA, _channelB},
       );
-      expect(session.queryBatches.last, hasLength(2));
+      expect(session.queryBatches.last, hasLength(4));
+      for (final channelId in [_channelA, _channelB]) {
+        expect(
+          session.queryBatches.last
+              .where((filter) => filter.tags['#h']!.single == channelId)
+              .map((filter) => filter.kinds),
+          [
+            EventKind.channelMessageEventKinds,
+            [EventKind.deletion, EventKind.nip29DeleteEvent],
+          ],
+        );
+      }
       expect(
         session.queryBatches.last.every(
           (filter) => filter.limit == 1000 && filter.since == 0,
@@ -2958,6 +2989,8 @@ class _FakeRelaySession extends RelaySessionNotifier {
     this.hiddenDmEvents = const [],
     this.huddleStarts = const [],
     this.recentMessages = const [],
+    this.deletionChannels = const {},
+    this.enforceHistoryLimits = false,
     this.membershipFailures = 0,
   });
 
@@ -2973,6 +3006,8 @@ class _FakeRelaySession extends RelaySessionNotifier {
   final List<NostrEvent> hiddenDmEvents;
   final List<NostrEvent> huddleStarts;
   List<NostrEvent> recentMessages;
+  final Map<String, String> deletionChannels;
+  final bool enforceHistoryLimits;
   int membershipFailures;
   int directoryFailures = 0;
   bool failClaimedMemberMetadataQuery = false;
@@ -3378,13 +3413,21 @@ class _FakeRelaySession extends RelaySessionNotifier {
         }
       }
     }
-    return messageSnapshot.where((event) {
-      return filters.any((filter) {
+    final matched = <String, NostrEvent>{};
+    for (final filter in filters) {
+      final matches = messageSnapshot.where((event) {
         if (!filter.kinds.contains(event.kind)) return false;
         for (final entry in filter.tags.entries) {
           final tagName = entry.key.startsWith('#')
               ? entry.key.substring(1)
               : entry.key;
+          // Relay #h matching uses stored channel metadata for h-less NIP-09.
+          if (tagName == 'h' &&
+              event.kind == EventKind.deletion &&
+              event.channelId == null &&
+              entry.value.contains(deletionChannels[event.id])) {
+            continue;
+          }
           if (!event.tags.any(
             (tag) =>
                 tag.length > 1 &&
@@ -3395,8 +3438,16 @@ class _FakeRelaySession extends RelaySessionNotifier {
           }
         }
         return true;
-      });
-    }).toList();
+      }).toList();
+      if (enforceHistoryLimits) {
+        matches.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      }
+      for (final event
+          in enforceHistoryLimits ? matches.take(filter.limit) : matches) {
+        matched[event.id] = event;
+      }
+    }
+    return matched.values.toList();
   }
 
   @override

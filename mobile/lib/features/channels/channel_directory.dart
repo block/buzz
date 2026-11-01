@@ -555,13 +555,17 @@ String _encodeRootIdSet(Set<String> values) => jsonEncode(values.toList());
 /// ceiling enforced by `just file-size-check`. Private members stay reachable:
 /// a part shares its parent's library.
 extension _ObservedUnreadRecording on ChannelsNotifier {
-  void _recordUnreadEvent(
+  bool _recordUnreadEvent(
     Channel channel,
     NostrEvent event,
     String myPk, {
     bool countQuiet = false,
   }) {
-    if (!countQuiet && isQuietAgentMessage(event.tags)) return;
+    if (_unscopedUnreadDeletedIds.contains(event.id) ||
+        _unreadDeletedIdsByChannel[channel.id]?.contains(event.id) == true) {
+      return false;
+    }
+    if (!countQuiet && isQuietAgentMessage(event.tags)) return false;
     // A counted quiet event is only a backlog marker: it never earns attention
     // through its mentions or thread.
     final isThreadedReply =
@@ -588,5 +592,6 @@ extension _ObservedUnreadRecording on ChannelsNotifier {
     if (event.createdAt > current) {
       _latestObservedByChannel[channel.id] = event.createdAt;
     }
+    return true;
   }
 }
