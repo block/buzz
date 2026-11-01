@@ -173,26 +173,36 @@ fn signal_group(pid: i32, signal: i32) {
 #[cfg(unix)]
 fn leader_exited_by(pid: i32, deadline: Instant) -> bool {
     loop {
-        // SAFETY: `info` is a valid, fully-initialised out-pointer for the
-        // duration of the call. `WNOWAIT` leaves the child waitable, so the
-        // later `wait` still returns its status.
-        let exited = unsafe {
-            let mut info: libc::siginfo_t = std::mem::zeroed();
-            let rc = libc::waitid(
-                libc::P_PID,
-                pid as libc::id_t,
-                &mut info,
-                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-            );
-            rc == 0 && info.si_pid() == pid
-        };
-        if exited {
+        if child_exited_without_reaping(pid as u32) {
             return true;
         }
         if Instant::now() >= deadline {
             return false;
         }
         std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Reports whether a direct child has exited without reaping it.
+///
+/// `kill(pid, 0)` cannot make this distinction: it still succeeds for a
+/// zombie. `WNOWAIT` observes the exit while keeping the child waitable and
+/// its PID reserved, which lets callers safely finish process-group cleanup
+/// before releasing that PID back to the kernel.
+#[cfg(unix)]
+pub fn child_exited_without_reaping(pid: u32) -> bool {
+    // SAFETY: `info` is a valid, fully-initialised out-pointer for the
+    // duration of the call. `WNOWAIT` leaves the child waitable, so a later
+    // `wait` still returns its status.
+    unsafe {
+        let mut info: libc::siginfo_t = std::mem::zeroed();
+        let rc = libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        );
+        rc == 0 && info.si_pid() == pid as i32
     }
 }
 
