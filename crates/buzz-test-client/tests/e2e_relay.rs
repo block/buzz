@@ -3833,6 +3833,14 @@ async fn test_nip29_announce_channel_wire() {
     assert!(msg.contains("relay owner or admin"), "{msg}");
     let relay_owner = Keys::generate();
     seed_relay_owner(&relay_owner).await;
+    // Join first so the relay owner's later admissions have nothing to
+    // auto-join: otherwise an admission while auto_join is on joins it here,
+    // and that join's kind:39000 republish can race the 9002 below and
+    // re-advertise the tag.
+    assert_eq!(
+        join_ws(&url, &channel_id, &relay_owner).await,
+        (true, String::new())
+    );
     assert_eq!(
         set_metadata_ws(&url, &channel_id, &relay_owner, "auto_join", "true").await,
         (true, String::new())
