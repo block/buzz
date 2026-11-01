@@ -12,6 +12,7 @@ xcrun --sdk iphonesimulator swiftc \
   -target "$(uname -m)-apple-ios16.0-simulator" \
   -F "$frameworks" -framework Flutter \
   -Xlinker -rpath -Xlinker "$frameworks" \
+  "$repo_root/mobile/ios/Runner/NavigationTopEdge.swift" \
   "$repo_root/mobile/ios/Runner/NativeAddMembersSheet.swift" \
   "$repo_root/mobile/ios/NativeControlTests/AddMembersIdentityTests.swift" \
   -o "$fixture/member-picker-tests"

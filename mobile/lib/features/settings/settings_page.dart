@@ -92,7 +92,7 @@ class SettingsPage extends HookConsumerWidget {
                 ),
           automaticallyImplyLeading: false,
           horizontalInset: Grid.gutter,
-          showBottomDivider: false,
+
           leading: embedded
               ? null
               : Theme.of(context).platform == TargetPlatform.iOS

@@ -5,6 +5,7 @@ import 'package:flutter/semantics.dart';
 
 import '../theme/theme.dart';
 import 'ios_navigation_bar.dart';
+import 'navigation_backdrop.dart';
 
 /// Opaque onboarding chrome shared by account setup and identity import.
 /// A scrollable minimum-height body keeps actions at the bottom without
@@ -106,16 +107,18 @@ class OnboardingStepPage extends StatelessWidget {
                                 ),
                               )
                             else if (onBack != null)
-                              Align(
-                                alignment: AlignmentDirectional.centerStart,
-                                child: Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: Grid.xxs,
-                                  ),
-                                  child: IconButton(
-                                    tooltip: 'Back',
-                                    onPressed: onBack,
-                                    icon: const BackButtonIcon(),
+                              NavigationBackdrop(
+                                child: Align(
+                                  alignment: AlignmentDirectional.centerStart,
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: Grid.xxs,
+                                    ),
+                                    child: IconButton(
+                                      tooltip: 'Back',
+                                      onPressed: onBack,
+                                      icon: const BackButtonIcon(),
+                                    ),
                                   ),
                                 ),
                               ),

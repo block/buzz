@@ -2,7 +2,6 @@ part of 'channel_actions_sheet.dart';
 
 const _channelMemberPreviewLimit = 5;
 const _channelDetailsHeaderFrostScrollDistance = Grid.xxl;
-const _channelDetailsHeaderFrostMaxBlurSigma = 20.0;
 const _channelDetailsSectionPadding = Grid.twelve;
 
 /// Opens the combined mobile channel settings page.
@@ -294,11 +293,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
           ),
         ],
         frosted: headerFrostProgress.value > 0,
-        frostedSurfaceOpacity: 0.5 * headerFrostProgress.value,
-        frostedBlurSigma:
-            _channelDetailsHeaderFrostMaxBlurSigma * headerFrostProgress.value,
-        showBottomDivider: headerFrostProgress.value > 0,
-        bottomDividerOpacity: 0.07 * headerFrostProgress.value,
+
         title: AnimatedSwitcher(
           duration: reducedMotion
               ? Duration.zero

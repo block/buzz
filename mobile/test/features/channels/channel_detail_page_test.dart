@@ -12487,9 +12487,7 @@ void main() {
         find.byType(FrostedAppBar).last,
       );
       expect(detailsAppBar.frosted, isFalse);
-      expect(detailsAppBar.frostedSurfaceOpacity, 0);
-      expect(detailsAppBar.frostedBlurSigma, 0);
-      expect(detailsAppBar.showBottomDivider, isFalse);
+
       expect(detailsAppBar.centerTitle, isTrue);
 
       final descriptionBottom = tester
@@ -12542,10 +12540,7 @@ void main() {
         find.byType(FrostedAppBar).last,
       );
       expect(detailsAppBar.frosted, isTrue);
-      expect(detailsAppBar.frostedSurfaceOpacity, 0.5);
-      expect(detailsAppBar.frostedBlurSigma, 20);
-      expect(detailsAppBar.showBottomDivider, isTrue);
-      expect(detailsAppBar.bottomDividerOpacity, 0.07);
+
       expect(
         tester
             .widget<AppListCard>(

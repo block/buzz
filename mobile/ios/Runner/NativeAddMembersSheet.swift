@@ -142,12 +142,7 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     definesPresentationContext = true
     navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .cancel, target: self, action: #selector(cancel))
     navigationItem.rightBarButtonItem = UIBarButtonItem(title: "Add", style: .done, target: self, action: #selector(add))
-    let appearance = UINavigationBarAppearance()
-    appearance.configureWithOpaqueBackground()
-    appearance.backgroundColor = pageColor
-    appearance.shadowColor = .clear
-    navigationItem.standardAppearance = appearance
-    navigationItem.scrollEdgeAppearance = appearance
+    NavigationTopEdge.configure(tableView, item: navigationItem)
     applyState()
   }
 

@@ -39,7 +39,6 @@ import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/buzz_setting_menu.dart';
 import '../../shared/widgets/concentric_sheet_surface.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
-import '../../shared/widgets/ios_navigation_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/mobile_tab_footer_backdrop.dart';
 import '../../shared/widgets/modal_presentation.dart';
@@ -102,7 +101,6 @@ const double _kTopSectionBottomPadding = Grid.xxs;
 /// Inset for the community and profile avatar row.
 const double _kTopSectionInset = Grid.twelve;
 const double _kHeaderFrostScrollDistance = Grid.xxl;
-const double _kHeaderFrostMaxBlurSigma = 23.12;
 
 class ChannelsPage extends HookConsumerWidget {
   const ChannelsPage({
@@ -618,17 +616,6 @@ class ChannelsPage extends HookConsumerWidget {
             !usesPinnedGradient ||
             headerFrostProgress.value > 0,
         alwaysFrosted: messagesFilters != null,
-        frostedSurfaceOpacity: messagesFilters != null
-            ? 0.45
-            : usesPinnedGradient
-            ? 0
-            : 0.5,
-        frostedBlurSigma: messagesFilters != null
-            ? 20
-            : usesPinnedGradient
-            ? _kHeaderFrostMaxBlurSigma * headerFrostProgress.value
-            : 20,
-        showBottomDivider: false,
         leading: messagesFilters != null
             ? null
             : _CommunityIndicator(

@@ -58,7 +58,7 @@ class _ThemePreviewExperience extends HookConsumerWidget {
       appBar: FrostedAppBar(
         automaticallyImplyLeading: false,
         centerTitle: true,
-        showBottomDivider: false,
+
         nativeLeading: IosNavigationAction(
           label: 'Close',
           symbol: 'xmark',

@@ -284,8 +284,7 @@ class AgentsPage extends HookConsumerWidget {
           onPressed: onClose,
         ),
         horizontalInset: Grid.gutter,
-        showBottomDivider: true,
-        bottomDividerOpacity: 0.07,
+
         title: Text('Agents', style: headerStyle),
         titleStyle: headerStyle,
         bottomHeight: Grid.xxs,

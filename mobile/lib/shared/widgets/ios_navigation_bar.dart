@@ -131,6 +131,7 @@ class IosNavigationBar extends HookConsumerWidget {
     this.onTitlePressed,
     this.largeTitle = false,
     this.alwaysFrosted = false,
+    this.backdropOnly = false,
     this.leading,
     this.actions = const [],
     this.onBack,
@@ -150,6 +151,9 @@ class IosNavigationBar extends HookConsumerWidget {
 
   /// Keeps the navigation backdrop visible before the first scroll update.
   final bool alwaysFrosted;
+
+  /// Paints only the native edge beneath custom Flutter header controls.
+  final bool backdropOnly;
   final IosNavigationAction? leading;
   final List<IosNavigationAction> actions;
   final VoidCallback? onBack;
@@ -312,6 +316,7 @@ class IosNavigationBar extends HookConsumerWidget {
       'titleEnabled': onTitlePressed != null,
       'largeTitle': largeTitle,
       'alwaysFrosted': alwaysFrosted,
+      'backdropOnly': backdropOnly,
       'back': onBack != null,
       'leading': leading == null ? null : encodeAction(leading!, 'leading'),
       'actions': [

@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
+import 'package:buzz/shared/widgets/frosted_scaffold.dart';
+import 'package:buzz/shared/widgets/navigation_backdrop.dart';
 
 void main() {
   group('Buzz theme catalog entries', () {
@@ -146,28 +148,13 @@ void main() {
   });
 
   group('theme threading', () {
-    BoxDecoration barDecoration(WidgetTester tester) {
-      final container = tester
-          .widgetList<Container>(
-            find.descendant(
-              of: find.byType(FrostedAppBar),
-              matching: find.byType(Container),
-            ),
-          )
-          .first;
-      return container.decoration! as BoxDecoration;
-    }
-
     Widget harness(ThemeData theme) => MaterialApp(
       theme: theme,
       home: Builder(
-        builder: (context) => Stack(
-          children: [
-            FrostedAppBar(
-              gradient: context.appColors.topSectionGradient,
-              title: const Text('Home'),
-            ),
-          ],
+        builder: (context) => FrostedScaffold(
+          backgroundGradient: context.appColors.topSectionGradient,
+          appBar: const FrostedAppBar(title: Text('Home'), alwaysFrosted: true),
+          body: const SizedBox.expand(),
         ),
       ),
     );
@@ -186,10 +173,11 @@ void main() {
         ),
       );
 
-      final decoration = barDecoration(tester);
-      expect(decoration.gradient, isNotNull);
-      // A BoxDecoration cannot paint a color and a gradient at once.
-      expect(decoration.color, isNull);
+      final background = tester.widget<DecoratedBox>(
+        find.byKey(const ValueKey('frosted-scaffold-pinned-gradient')),
+      );
+      expect((background.decoration as BoxDecoration).gradient, isNotNull);
+      expect(find.byType(NavigationBackdrop), findsOneWidget);
     });
 
     testWidgets('non-Buzz themes keep the frosted surface fill', (
@@ -197,9 +185,11 @@ void main() {
     ) async {
       await tester.pumpWidget(harness(AppTheme.light()));
 
-      final decoration = barDecoration(tester);
-      expect(decoration.gradient, isNull);
-      expect(decoration.color, isNotNull);
+      expect(
+        find.byKey(const ValueKey('frosted-scaffold-pinned-gradient')),
+        findsNothing,
+      );
+      expect(find.byType(NavigationBackdrop), findsOneWidget);
     });
 
     testWidgets('Buzz section labels use 80% neutral foreground', (

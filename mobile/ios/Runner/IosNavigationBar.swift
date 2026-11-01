@@ -231,15 +231,13 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   private let container: NavigationClipView
   private let material = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterial))
   private let materialFade = CAGradientLayer()
-  // A transparent, noninteractive viewport provides the system status fade
-  // independently of the layout-only scroll view that collapses large titles.
-  private let edgeScrollView = UIScrollView()
   private let content = NavigationContentController()
   private let navigation: UINavigationController
   private let channel: FlutterMethodChannel
   private var offset: CGFloat = 0
   private var controlBackground = UIColor.secondarySystemBackground
   private var alwaysFrosted = false
+  private var backdropOnly = false
   private var usesSystemScrollEdge = false
   private var expandedBarHeight: CGFloat = 0
   private var titleIsCollapsed: Bool?
@@ -273,18 +271,6 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     materialFade.locations = [0, 0.55, 1]
     material.layer.mask = materialFade
     container.addSubview(material)
-    if #available(iOS 27.0, *) {
-      edgeScrollView.accessibilityIdentifier = "navigation-status-edge"
-      edgeScrollView.isUserInteractionEnabled = false
-      edgeScrollView.scrollsToTop = false
-      edgeScrollView.accessibilityElementsHidden = true
-      edgeScrollView.backgroundColor = .clear
-      edgeScrollView.contentInsetAdjustmentBehavior = .never
-      edgeScrollView.contentSize = CGSize(width: 1, height: 10000)
-      edgeScrollView.topEdgeEffect.style = .soft
-      edgeScrollView.bottomEdgeEffect.isHidden = true
-      container.addSubview(edgeScrollView)
-    }
     navigation.view.backgroundColor = .clear
     navigation.navigationBar.isTranslucent = true
     parent?.addChild(navigation)
@@ -317,14 +303,19 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     // needed for UIKit's scroll-edge and large-title calculations.
     guard !measuring else { return }
     let viewportHeight = container.window?.bounds.height ?? container.bounds.height
-    edgeScrollView.frame = CGRect(x: 0, y: 0, width: container.bounds.width, height: viewportHeight)
-    navigation.view.frame = edgeScrollView.frame
+    navigation.view.frame = CGRect(x: 0, y: 0, width: container.bounds.width, height: viewportHeight)
     // Flutter's route can begin offscreen, where UIKit infers a zero safe area.
     // Keep the toolbar below the status region throughout that transition.
     // Read the unmodified host inset, never the inset we are adjusting.
     // During a slide UIKit may not yet have applied the previous adjustment.
     let automaticTop = container.safeAreaInsets.top
-    let requiredTop = max(0, flutterSafeTop - automaticTop)
+    // An empty native bar supplies the same edge geometry beneath a custom
+    // Flutter header. Place its lower edge at the end of that header so the
+    // system fade protects the filters as well as the status area.
+    let protectedTop = backdropOnly
+      ? max(flutterSafeTop, container.bounds.height - max(44, navigation.navigationBar.bounds.height))
+      : flutterSafeTop
+    let requiredTop = max(0, protectedTop - automaticTop)
     if abs(navigation.additionalSafeAreaInsets.top - requiredTop) > 0.5 {
       navigation.additionalSafeAreaInsets.top = requiredTop
     }
@@ -379,7 +370,6 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     flutterSafeTop = (args["safeTop"] as? NSNumber)?.doubleValue ?? 0
     navigation.overrideUserInterfaceStyle = args["dark"] as? Bool == true ? .dark : .light
     material.overrideUserInterfaceStyle = navigation.overrideUserInterfaceStyle
-    edgeScrollView.overrideUserInterfaceStyle = navigation.overrideUserInterfaceStyle
     // Let the ultra-thin system material provide its own adaptive tint.
     material.contentView.backgroundColor = .clear
     let bar = navigation.navigationBar
@@ -387,27 +377,26 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     bar.tintColor = color
     titleColor = color
     largeTitleOpacity = -1
+    backdropOnly = args["backdropOnly"] as? Bool == true
+    container.isUserInteractionEnabled = !backdropOnly
+    navigation.view.isUserInteractionEnabled = !backdropOnly
+    navigation.view.accessibilityElementsHidden = backdropOnly
     let largeTitle = args["largeTitle"] as? Bool == true
     alwaysFrosted = args["alwaysFrosted"] as? Bool == true
     if #available(iOS 26.0, *) {
       if #available(iOS 27.0, *) { usesSystemScrollEdge = true }
       content.scrollView.topEdgeEffect.style = .soft
-      content.scrollView.topEdgeEffect.isHidden = !usesSystemScrollEdge || !alwaysFrosted || largeTitle
-      edgeScrollView.isHidden = alwaysFrosted && !largeTitle
+      content.scrollView.topEdgeEffect.isHidden = !usesSystemScrollEdge
     }
-    // Large-title pages need material across the whole header: the stationary
-    // system edge only blurs the status area, leaving expanded text over rows.
-    // iOS 26 does not composite this native edge over sibling Flutter content
-    // in our embedding, so retain the ultra-thin material fallback there.
-    // Conversations use the navigation controller's native edge. Other pages
-    // use a stationary native edge so UIKit's large-title inset adjustments
-    // cannot hide the status-area fade when the title expands or collapses.
-    material.isHidden = usesSystemScrollEdge && !largeTitle
+    // Every header uses the same native soft edge on iOS 27, including
+    // custom Flutter controls and large titles. Older embedded views retain
+    // the material fallback because their edge cannot sample Flutter content.
+    material.isHidden = usesSystemScrollEdge
     // Let the native fade extend past the bar without enlarging its hit area.
     // The mirrored content is transparent and the bottom edge is hidden.
     container.clipsToBounds = !usesSystemScrollEdge
     let appearance = UINavigationBarAppearance()
-    if usesSystemScrollEdge && !largeTitle {
+    if usesSystemScrollEdge {
       appearance.configureWithDefaultBackground()
     } else {
       appearance.configureWithTransparentBackground()
