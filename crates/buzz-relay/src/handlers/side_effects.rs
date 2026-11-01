@@ -4706,129 +4706,133 @@ mod tests {
         assert!(actor_is_channel_owner_or_admin(&members, &actor));
     }
 
-    /// The `auto_join` tag of the channel's live kind:39000 head.
-    async fn metadata_head_has_auto_join(
-        state: &Arc<AppState>,
-        community: buzz_core::tenant::CommunityId,
-        channel_id: Uuid,
-    ) -> bool {
-        let heads = state
-            .db
-            .query_events_for_event_write(&buzz_db::event::EventQuery {
-                kinds: Some(vec![KIND_NIP29_GROUP_METADATA as i32]),
-                channel_id: Some(channel_id),
-                limit: Some(1),
-                ..buzz_db::event::EventQuery::for_community(community)
-            })
-            .await
-            .expect("read metadata head");
-        let head = heads.first().expect("a metadata head");
-        head.event
-            .tags
-            .iter()
-            .any(|tag| tag.as_slice() == ["auto_join"])
-    }
+    mod postgres_tests {
+        use super::*;
 
-    /// A membership emission that captured the channel before a kind:9002
-    /// edit committed must not replace the edit's own emission: the edit's
-    /// emission waits for the held capture, then reads and publishes the
-    /// edited row last. Before the fence, the edit's emission published
-    /// first and the held one replaced it with the stale `auto_join` tag.
-    ///
-    /// Mutation: restore the unlocked channel read and per-kind replacement
-    /// of 39000 in `emit_group_discovery_events` (the hook between them) →
-    /// the edit's emission finishes while the capture is held → RED.
-    #[tokio::test]
-    #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
-    async fn held_group_state_capture_cannot_replace_a_newer_metadata_edit() {
-        use crate::nip_fi_test_hooks::group_state_capture_hook;
-        use buzz_db::channel::{ChannelType, ChannelUpdate, ChannelVisibility};
-        use std::time::Duration;
-
-        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
-            .await
-            .expect("PostgreSQL must be available — set BUZZ_TEST_DATABASE_URL");
-        let state = crate::state::tests::test_state_with_database_pool(pool).await;
-        let community_id = Uuid::new_v4();
-        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
-            .bind(community_id)
-            .bind(format!("group-state-{}.example", community_id.simple()))
-            .execute(state.db.pool())
-            .await
-            .expect("insert community");
-        let community = buzz_core::tenant::CommunityId::from_uuid(community_id);
-        let tenant = TenantContext::resolved(community, "test.local".to_string());
-        let owner = nostr::Keys::generate();
-        state
-            .db
-            .ensure_user_for_authorization(community, owner.public_key().as_bytes())
-            .await
-            .expect("seed owner");
-        let channel_id = state
-            .db
-            .create_channel(
-                community,
-                "general",
-                ChannelType::Stream,
-                ChannelVisibility::Open,
-                None,
-                &owner.public_key().to_bytes(),
-                None,
-            )
-            .await
-            .expect("create channel")
-            .id;
-        let set_auto_join = |value: bool| {
-            let state = Arc::clone(&state);
-            async move {
-                state
-                    .db
-                    .update_channel(
-                        community,
-                        channel_id,
-                        ChannelUpdate {
-                            auto_join: Some(value),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .expect("update auto_join");
-            }
-        };
-        set_auto_join(true).await;
-        emit_group_discovery_events(&tenant, &state, channel_id)
-            .await
-            .expect("baseline emission");
-        assert!(metadata_head_has_auto_join(&state, community, channel_id).await);
-
-        let (captured, release) = group_state_capture_hook::arm(community);
-        let held = tokio::spawn({
-            let (tenant, state) = (tenant.clone(), Arc::clone(&state));
-            async move { emit_group_discovery_events(&tenant, &state, channel_id).await }
-        });
-        tokio::time::timeout(Duration::from_secs(10), captured)
-            .await
-            .expect("the held emission reaches its capture")
-            .expect("capture hook dropped");
-
-        set_auto_join(false).await;
-        let mut edit = tokio::spawn({
-            let (tenant, state) = (tenant.clone(), Arc::clone(&state));
-            async move { emit_group_discovery_events(&tenant, &state, channel_id).await }
-        });
-        assert!(
-            tokio::time::timeout(Duration::from_secs(2), &mut edit)
+        /// The `auto_join` tag of the channel's live kind:39000 head.
+        async fn metadata_head_has_auto_join(
+            state: &Arc<AppState>,
+            community: buzz_core::tenant::CommunityId,
+            channel_id: Uuid,
+        ) -> bool {
+            let heads = state
+                .db
+                .query_events_for_event_write(&buzz_db::event::EventQuery {
+                    kinds: Some(vec![KIND_NIP29_GROUP_METADATA as i32]),
+                    channel_id: Some(channel_id),
+                    limit: Some(1),
+                    ..buzz_db::event::EventQuery::for_community(community)
+                })
                 .await
-                .is_err(),
-            "the edit's emission must wait for the held capture"
-        );
+                .expect("read metadata head");
+            let head = heads.first().expect("a metadata head");
+            head.event
+                .tags
+                .iter()
+                .any(|tag| tag.as_slice() == ["auto_join"])
+        }
 
-        release.notify_one();
-        held.await.expect("held task").expect("held emission");
-        edit.await.expect("edit task").expect("edit emission");
-        assert!(
-            !metadata_head_has_auto_join(&state, community, channel_id).await,
-            "the edited row is the live kind:39000 head"
-        );
+        /// A membership emission that captured the channel before a kind:9002
+        /// edit committed must not replace the edit's own emission: the edit's
+        /// emission waits for the held capture, then reads and publishes the
+        /// edited row last. Before the fence, the edit's emission published
+        /// first and the held one replaced it with the stale `auto_join` tag.
+        ///
+        /// Mutation: restore the unlocked channel read and per-kind replacement
+        /// of 39000 in `emit_group_discovery_events` (the hook between them) →
+        /// the edit's emission finishes while the capture is held → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn held_group_state_capture_cannot_replace_a_newer_metadata_edit() {
+            use crate::nip_fi_test_hooks::group_state_capture_hook;
+            use buzz_db::channel::{ChannelType, ChannelUpdate, ChannelVisibility};
+            use std::time::Duration;
+
+            let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+                .await
+                .expect("PostgreSQL must be available — set BUZZ_TEST_DATABASE_URL");
+            let state = crate::state::tests::test_state_with_database_pool(pool).await;
+            let community_id = Uuid::new_v4();
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community_id)
+                .bind(format!("group-state-{}.example", community_id.simple()))
+                .execute(state.db.pool())
+                .await
+                .expect("insert community");
+            let community = buzz_core::tenant::CommunityId::from_uuid(community_id);
+            let tenant = TenantContext::resolved(community, "test.local".to_string());
+            let owner = nostr::Keys::generate();
+            state
+                .db
+                .ensure_user_for_authorization(community, owner.public_key().as_bytes())
+                .await
+                .expect("seed owner");
+            let channel_id = state
+                .db
+                .create_channel(
+                    community,
+                    "general",
+                    ChannelType::Stream,
+                    ChannelVisibility::Open,
+                    None,
+                    &owner.public_key().to_bytes(),
+                    None,
+                )
+                .await
+                .expect("create channel")
+                .id;
+            let set_auto_join = |value: bool| {
+                let state = Arc::clone(&state);
+                async move {
+                    state
+                        .db
+                        .update_channel(
+                            community,
+                            channel_id,
+                            ChannelUpdate {
+                                auto_join: Some(value),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .expect("update auto_join");
+                }
+            };
+            set_auto_join(true).await;
+            emit_group_discovery_events(&tenant, &state, channel_id)
+                .await
+                .expect("baseline emission");
+            assert!(metadata_head_has_auto_join(&state, community, channel_id).await);
+
+            let (captured, release) = group_state_capture_hook::arm(community);
+            let held = tokio::spawn({
+                let (tenant, state) = (tenant.clone(), Arc::clone(&state));
+                async move { emit_group_discovery_events(&tenant, &state, channel_id).await }
+            });
+            tokio::time::timeout(Duration::from_secs(10), captured)
+                .await
+                .expect("the held emission reaches its capture")
+                .expect("capture hook dropped");
+
+            set_auto_join(false).await;
+            let mut edit = tokio::spawn({
+                let (tenant, state) = (tenant.clone(), Arc::clone(&state));
+                async move { emit_group_discovery_events(&tenant, &state, channel_id).await }
+            });
+            assert!(
+                tokio::time::timeout(Duration::from_secs(2), &mut edit)
+                    .await
+                    .is_err(),
+                "the edit's emission must wait for the held capture"
+            );
+
+            release.notify_one();
+            held.await.expect("held task").expect("held emission");
+            edit.await.expect("edit task").expect("edit emission");
+            assert!(
+                !metadata_head_has_auto_join(&state, community, channel_id).await,
+                "the edited row is the live kind:39000 head"
+            );
+        }
     }
 }
