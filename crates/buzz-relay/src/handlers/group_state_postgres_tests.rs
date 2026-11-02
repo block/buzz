@@ -1251,6 +1251,81 @@ async fn a_relay_operator_may_only_rename_a_channel() {
     );
 }
 
+/// An owner may make a channel private or unlisted after the relay has
+/// validated an operator's rename and before the rename is stored. The store
+/// decides under the channel row lock, so the rename is refused then and the
+/// name is unchanged.
+/// Mutation: drop the `operator_rename && !locked.listed()` check in
+/// `apply_channel_metadata_event`, or never set `operator_rename` in
+/// `persist_edit_metadata` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn an_operator_rename_is_refused_when_the_channel_stops_being_listed() {
+    let state = state().await;
+    let tenant = community(&state, "group-state-operator-race").await;
+    let owner = Keys::generate();
+    let operator = Keys::generate();
+    state
+        .db
+        .upsert_relay_operator(
+            &operator.public_key().to_bytes(),
+            "operator",
+            &owner.public_key().to_bytes(),
+            true,
+        )
+        .await
+        .expect("grant relay role");
+    let edit = |keys: &Keys, channel: Uuid, tag: [&str; 2]| {
+        EventBuilder::new(Kind::Custom(9002), "")
+            .tags([
+                Tag::parse(["h", &channel.to_string()]).unwrap(),
+                Tag::parse(tag).unwrap(),
+            ])
+            .sign_with_keys(keys)
+            .expect("sign 9002")
+    };
+
+    for change in [["visibility", "private"], ["unlisted", "true"]] {
+        let channel = create_channel(&state, &tenant, &owner, &[]).await;
+        let before = state
+            .db
+            .get_channel(tenant.community(), channel)
+            .await
+            .expect("channel")
+            .name;
+        let rename = edit(&operator, channel, ["name", "by-operator"]);
+        super::side_effects::validate_admin_event(&tenant, 9002, &rename, &state)
+            .await
+            .unwrap_or_else(|error| panic!("{change:?}: the listed channel validates: {error}"));
+
+        let hidden = ingest_event(
+            &state,
+            &tenant,
+            edit(&owner, channel, change),
+            http_auth(&owner),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{change:?}: owner change: {error:?}"));
+        assert!(hidden.accepted, "{change:?}: {}", hidden.message);
+
+        let error = super::side_effects::persist_edit_metadata(&tenant, &rename, &state)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{change:?}: the rename must be refused"));
+        assert!(
+            format!("{error:#}").contains("only a listed channel"),
+            "{change:?}: {error:#}"
+        );
+        let after = state
+            .db
+            .get_channel(tenant.community(), channel)
+            .await
+            .expect("channel")
+            .name;
+        assert_eq!(after, before, "{change:?}");
+    }
+}
+
 /// The operator rename covers only listed channels: open, not unlisted, a
 /// stream or forum. A relay operator may not rename a private channel, an
 /// unlisted channel or a DM.

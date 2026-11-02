@@ -1056,6 +1056,7 @@ pub(crate) struct ChannelSettingsWriter<'tx> {
     ttl: TtlLock,
     previous_visibility: String,
     archived: bool,
+    listed: bool,
 }
 
 impl ChannelSettingsWriter<'_> {
@@ -1068,6 +1069,12 @@ impl ChannelSettingsWriter<'_> {
     /// lock keeps this current until the transaction ends.
     pub(crate) fn archived(&self) -> bool {
         self.archived
+    }
+
+    /// Whether the channel was listed ([`LISTED_CHANNEL_SQL`]) when the lock
+    /// was taken. The row lock keeps this current until the transaction ends.
+    pub(crate) fn listed(&self) -> bool {
+        self.listed
     }
 
     /// The locked transaction, for writes that are not channel settings
@@ -1158,15 +1165,16 @@ async fn lock_channel_row(
     // `FOR NO KEY UPDATE`, like a huddle join: it orders this write against
     // every other settings write and a huddle join, but not against the
     // `KEY SHARE` lock that a membership INSERT takes for its foreign key.
-    let (previous_visibility, archived): (String, bool) = sqlx::query_as(
-        "SELECT visibility::text, archived_at IS NOT NULL FROM channels \
-         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL FOR NO KEY UPDATE",
-    )
-    .bind(community_id.as_uuid())
-    .bind(channel_id)
-    .fetch_optional(tx.conn())
-    .await?
-    .ok_or(DbError::ChannelNotFound(channel_id))?;
+    let (previous_visibility, archived, listed): (String, bool, bool) =
+        sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT visibility::text, archived_at IS NOT NULL, {LISTED_CHANNEL_SQL} FROM channels \
+             WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL FOR NO KEY UPDATE"
+        )))
+        .bind(community_id.as_uuid())
+        .bind(channel_id)
+        .fetch_optional(tx.conn())
+        .await?
+        .ok_or(DbError::ChannelNotFound(channel_id))?;
     Ok(ChannelSettingsWriter {
         tx,
         channel_id,
@@ -1174,6 +1182,7 @@ async fn lock_channel_row(
         ttl,
         previous_visibility,
         archived,
+        listed,
     })
 }
 
@@ -1496,9 +1505,11 @@ pub struct ChannelMetadataEdit {
     pub purpose: Option<String>,
     /// `Some(true)` archives the channel; `Some(false)` restores it.
     pub archived: Option<bool>,
-    /// Lets this edit change an archived channel, which stays archived. Only
-    /// a relay operator's name-only rename sets it.
-    pub keep_archived: bool,
+    /// Set for a relay operator's name-only rename, made without channel
+    /// authority. The edit then applies only to a listed channel
+    /// ([`LISTED_CHANNEL_SQL`]), checked under the row lock, and may rename
+    /// an archived channel, which stays archived.
+    pub operator_rename: bool,
 }
 
 /// The result of [`Db::apply_channel_metadata_event`].
@@ -1550,13 +1561,20 @@ pub(crate) async fn apply_channel_metadata_event(
             previous_visibility,
         });
     }
-    // Decide the archive state here, after the duplicate check and under
-    // the row lock, not during validation. A resend that races the first
-    // commit then sees that commit as a duplicate (above), never as a
-    // channel already in the requested state.
+    // Decide the archive state and an operator's right to rename here,
+    // after the duplicate check and under the row lock, not during
+    // validation. A resend that races the first commit then sees that commit
+    // as a duplicate (above), never as a channel already in the requested
+    // state, and an owner who makes the channel private or unlisted
+    // meanwhile is seen.
+    if edit.operator_rename && !locked.listed() {
+        return Err(DbError::AccessDenied(
+            "a relay operator may rename only a listed channel".to_string(),
+        ));
+    }
     match (locked.archived(), edit.archived) {
         (true, Some(false)) | (false, None | Some(true)) => {}
-        (true, None) if edit.keep_archived => {}
+        (true, None) if edit.operator_rename => {}
         (true, _) => return Err(DbError::AccessDenied("channel is archived".to_string())),
         (false, Some(false)) => {
             return Err(DbError::AccessDenied("channel is not archived".to_string()));
@@ -1592,7 +1610,7 @@ pub(crate) async fn apply_channel_metadata_event(
         topic,
         purpose,
         archived,
-        keep_archived: _,
+        operator_rename: _,
     } = edit;
     let actor = event.pubkey.to_bytes();
     if !columns.is_empty() {

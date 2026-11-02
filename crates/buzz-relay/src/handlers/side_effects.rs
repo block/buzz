@@ -545,6 +545,26 @@ fn check_deletion_privacy_k_tag(event: &Event, target_kind: u32) -> anyhow::Resu
 ///
 /// Checking all active owners (not just the first) is correct under co-ownership:
 /// an agent may be promoted to owner later, or multiple agents may co-own a channel.
+/// True when `actor` may change a channel's privileged metadata: a channel
+/// owner or admin, or the owning human of an active owner-role agent in the
+/// channel, even when that human is not a member (this diverges from
+/// kind:9001 intentionally).
+async fn actor_has_channel_authority(
+    state: &Arc<AppState>,
+    community_id: buzz_core::CommunityId,
+    channel_id: Uuid,
+    actor_bytes: &[u8],
+) -> anyhow::Result<bool> {
+    let members = state.db.get_members(community_id, channel_id).await?;
+    if members
+        .iter()
+        .any(|m| m.pubkey == actor_bytes && (m.role == "owner" || m.role == "admin"))
+    {
+        return Ok(true);
+    }
+    actor_owns_any_owner_agent(state, community_id, &members, actor_bytes).await
+}
+
 async fn actor_owns_any_owner_agent(
     state: &Arc<AppState>,
     community_id: buzz_core::CommunityId,
@@ -820,37 +840,23 @@ pub async fn validate_admin_event(
                 .iter()
                 .any(|t| PRIVILEGED_METADATA_TAGS.contains(&t.kind().to_string().as_str()));
             if has_privileged_tag {
-                let members = state.db.get_members(tenant.community(), channel_id).await?;
-                let actor_member = members.iter().find(|m| m.pubkey == actor_bytes);
-                match actor_member {
-                    Some(m) if m.role == "owner" || m.role == "admin" => Ok(()),
-                    _ => {
-                        // Allow the owning human of any active owner-role agent in the
-                        // channel, even when the human is not a channel member —
-                        // diverges from kind:9001 intentionally.
-                        if actor_owns_any_owner_agent(
-                            state,
-                            tenant.community(),
-                            &members,
-                            &actor_bytes,
-                        )
-                        .await?
-                        {
-                            return Ok(());
-                        }
-                        // A relay operator may rename a listed channel, so that
-                        // duplicate names can be repaired through this path
-                        // (scripts/maintenance/rename_duplicate_listed_channel_names.sh).
-                        // Every other privileged change still needs a channel
-                        // owner or admin.
-                        if operator_may_rename(state, event, &channel).await? {
-                            return Ok(());
-                        }
-                        Err(anyhow::anyhow!(
-                            "actor not authorized for name/about/archived/visibility/ttl/label/join_role/unlisted changes"
-                        ))
-                    }
+                if actor_has_channel_authority(state, tenant.community(), channel_id, &actor_bytes)
+                    .await?
+                {
+                    return Ok(());
                 }
+                // A relay operator may rename a listed channel, so that
+                // duplicate names can be repaired through this path
+                // (scripts/maintenance/rename_duplicate_listed_channel_names.sh).
+                // Every other privileged change still needs a channel owner
+                // or admin. The store checks "listed" again under the row
+                // lock (`ChannelMetadataEdit::operator_rename`).
+                if operator_may_rename(state, event, &channel).await? {
+                    return Ok(());
+                }
+                Err(anyhow::anyhow!(
+                    "actor not authorized for name/about/archived/visibility/ttl/label/join_role/unlisted changes"
+                ))
             } else if has_member_tag {
                 // topic/purpose: any member whose role may post (never a
                 // guest).
@@ -2227,17 +2233,15 @@ pub(crate) async fn persist_edit_metadata(
     if let Some(labels) = channel_labels_from_tags(event) {
         edit.columns.labels = Some(labels.map_err(|e| anyhow::anyhow!("{e}"))?);
     }
-    // An operator's rename may repair an archived duplicate name, so it
-    // applies to an archived channel and leaves it archived. Look up the
-    // operator only for a rename of an archived channel.
-    if is_rename_only(event) {
-        let channel = state
-            .db
-            .get_channel_for_event_write(tenant.community(), channel_id)
+    // A relay operator without channel authority may rename only a listed
+    // channel, archived ones included, so that duplicate names can be
+    // repaired. The store decides that under the channel row lock, so an
+    // owner who makes the channel private or unlisted meanwhile is seen.
+    // Channel authority is looked up only for an operator's rename.
+    edit.operator_rename = is_rename_only(event)
+        && actor_is_relay_operator(state, event.pubkey.to_bytes()).await?
+        && !actor_has_channel_authority(state, tenant.community(), channel_id, &actor_bytes)
             .await?;
-        edit.keep_archived =
-            channel.archived_at.is_some() && operator_may_rename(state, event, &channel).await?;
-    }
 
     let now = chrono::Utc::now();
     let mut notices = Vec::new();
