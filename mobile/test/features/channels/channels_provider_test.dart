@@ -7,6 +7,8 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/channel_mutes/channel_mutes_provider.dart';
+import 'package:buzz/features/channels/channel_mutes/channel_mutes_storage.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -2162,6 +2164,177 @@ void main() {
       );
     });
 
+    test(
+      'a repeated catch-up starts before the last one by the relay drift',
+      () async {
+        int now() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [_meta(id: _channelA, name: 'general')],
+          recentMessages: [message('seen', now() - 3600, mention: true)],
+        );
+        final container = _buildContainer(session: session);
+        addTearDown(container.dispose);
+        final notifier = container.read(channelsProvider.notifier);
+        List<int?> lastUnreadSince() => [
+          for (final filter in session.queryBatches.lastWhere(isUnread))
+            filter.since,
+        ];
+        Future<(int, int)> refreshed() async {
+          final before = session.queryBatches.where(isUnread).length;
+          final from = now();
+          await notifier.refresh();
+          await _waitUntil(
+            () => session.queryBatches.where(isUnread).length > before,
+          );
+          await _settle();
+          return (from, now());
+        }
+
+        final firstFrom = now();
+        await container.read(channelsProvider.future);
+        await _waitUntil(() => session.queryBatches.any(isUnread));
+        await _settle();
+        final firstTo = now();
+        // Never read: the first catch-up asks for the whole window.
+        expect(lastUnreadSince(), [0, 0]);
+
+        // While the app is away, a message composed offline reaches the relay
+        // with a created_at well before the newest one the app has seen.
+        session.recentMessages.add(
+          message('late', firstFrom - 600, mention: true),
+        );
+        final (secondFrom, secondTo) = await refreshed();
+        for (final since in lastUnreadSince()) {
+          expect(
+            since,
+            inInclusiveRange(firstFrom - 960, firstTo - 960),
+            reason: 'starts 960s before the previous catch-up was sent',
+          );
+        }
+        expect(
+          notifier.observedUnreadEventsByChannel[_channelA]?.keys,
+          unorderedEquals(['seen', 'late']),
+        );
+
+        // Each catch-up moves the start forward.
+        await refreshed();
+        for (final since in lastUnreadSince()) {
+          expect(since, inInclusiveRange(secondFrom - 960, secondTo - 960));
+        }
+      },
+    );
+
+    test('a channel whose fallback failed catches up over its whole window '
+        'again', () async {
+      int now() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final session =
+          _FakeRelaySession(
+              memberships: [_membership(_channelA, myPk)],
+              metadata: [_meta(id: _channelA, name: 'general')],
+              recentMessages: [message('old', now() - 3600, mention: true)],
+            )
+            // The batch fails and so does its websocket fallback, without a
+            // deadline: the catch-up completes with no events for the channel.
+            ..messageBatchError = Exception('batch unavailable')
+            ..messageHistoryError = Exception('CLOSED: socket error');
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      final notifier = container.read(channelsProvider.notifier);
+      await container.read(channelsProvider.future);
+      await _waitUntil(() => session.queryBatches.any(isUnread));
+      await _settle();
+      expect(notifier.observedUnreadEventsByChannel[_channelA], isNull);
+
+      session
+        ..messageBatchError = null
+        ..messageHistoryError = null;
+      final before = session.queryBatches.where(isUnread).length;
+      await notifier.refresh();
+      await _waitUntil(
+        () => session.queryBatches.where(isUnread).length > before,
+      );
+      await _settle();
+      expect(
+        [
+          for (final filter in session.queryBatches.lastWhere(isUnread))
+            filter.since,
+        ],
+        [0, 0],
+      );
+      expect(notifier.observedUnreadEventsByChannel[_channelA]?.keys, ['old']);
+    });
+
+    test('a channel unmuted since catches up over its whole window', () async {
+      int now() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+        recentMessages: [message('backlog', now() - 3600)],
+      );
+      final mutes = _TestMutes(initiallyMuted: {_channelA});
+      final container = _buildContainer(session: session, mutes: mutes);
+      addTearDown(container.dispose);
+      final notifier = container.read(channelsProvider.notifier);
+      Future<void> refreshed() async {
+        final before = session.queryBatches.where(isUnread).length;
+        await notifier.refresh();
+        await _waitUntil(
+          () => session.queryBatches.where(isUnread).length > before,
+        );
+        await _settle();
+      }
+
+      await container.read(channelsProvider.future);
+      await _waitUntil(() => session.queryBatches.any(isUnread));
+      await _settle();
+      // Muted: ordinary backlog doesn't count, and the next catch-up is
+      // incremental.
+      await refreshed();
+      expect(notifier.observedUnreadEventsByChannel[_channelA], isNull);
+      expect(
+        session.queryBatches.lastWhere(isUnread).map((f) => f.since),
+        everyElement(isNot(0)),
+      );
+
+      mutes.unmute();
+      await refreshed();
+      expect(
+        session.queryBatches.lastWhere(isUnread).map((f) => f.since),
+        everyElement(0),
+      );
+      expect(notifier.observedUnreadEventsByChannel[_channelA]?.keys, [
+        'backlog',
+      ]);
+    });
+
+    test('a rebuilt channel list catches up over the whole window', () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+        recentMessages: [message('seen', 10000, mention: true)],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      await _waitUntil(() => session.queryBatches.any(isUnread));
+      await _settle();
+
+      container.invalidate(channelsProvider);
+      final before = session.queryBatches.where(isUnread).length;
+      await container.read(channelsProvider.future);
+      await _waitUntil(
+        () => session.queryBatches.where(isUnread).length > before,
+      );
+      expect(
+        [
+          for (final filter in session.queryBatches.lastWhere(isUnread))
+            filter.since,
+        ],
+        [0, 0],
+      );
+    });
+
     test('quiet agent messages never count as unread', () async {
       final session = _FakeRelaySession(
         memberships: [_membership(_channelA, myPk)],
@@ -2236,6 +2409,46 @@ void main() {
             expect(event.highPriority, isFalse);
             expect(event.channelCatchUp, isTrue);
           }
+          if (expected.isEmpty) return;
+
+          // Deleting the marker reopens the whole window, which still hides
+          // an older unread event, so the next quiet message stands in. The
+          // deletion lands while an incremental catch-up is out, which must
+          // not restore the cursor the deletion cleared.
+          session.pauseNextUnreadCatchUpQuery();
+          final parked = notifier.refresh();
+          await session.nextUnreadCatchUpQueryStarted;
+          session.emit(
+            NostrEvent(
+              id: 'marker-deletion',
+              pubkey: 'alice',
+              createdAt: 3000,
+              kind: EventKind.deletion,
+              tags: [
+                const ['h', _channelA],
+                ['e', expected.single],
+              ],
+              content: '',
+              sig: 'sig',
+            ),
+          );
+          await _settle();
+          session.resumePausedUnreadCatchUpQuery();
+          await parked;
+          await _settle();
+          final before = session.queryBatches.where(isUnread).length;
+          await notifier.refresh();
+          await _waitUntil(
+            () => session.queryBatches.where(isUnread).length > before,
+          );
+          await _settle();
+          expect(
+            session.queryBatches.lastWhere(isUnread).map((f) => f.since),
+            everyElement(0),
+          );
+          expect(notifier.observedUnreadEventsByChannel[_channelA]?.keys, [
+            deleted ? 'quiet-2' : 'quiet-1',
+          ]);
         },
       );
     }
@@ -2928,16 +3141,42 @@ NostrEvent _meta({
   sig: 'sig',
 );
 
-ProviderContainer _buildContainer({required _FakeRelaySession session}) {
+ProviderContainer _buildContainer({
+  required _FakeRelaySession session,
+  _TestMutes? mutes,
+}) {
   return ProviderContainer(
     retry: (_, _) => null,
     overrides: [
+      if (mutes != null) channelMutesProvider.overrideWith(() => mutes),
       appLifecycleProvider.overrideWith(() => _FakeAppLifecycleNotifier()),
       relaySessionProvider.overrideWith(() => session),
       // Route the pubkey through a mutable notifier so tests can switch the
       // signing identity mid-flight the way an account change does at runtime.
       myPubkeyProvider.overrideWith((ref) => ref.watch(_testPubkeyProvider)),
     ],
+  );
+}
+
+/// Channel mutes a test sets directly.
+class _TestMutes extends ChannelMutesNotifier {
+  _TestMutes({this.initiallyMuted = const {}});
+
+  final Set<String> initiallyMuted;
+
+  @override
+  ChannelMutesState build() => _muted(initiallyMuted);
+
+  void unmute() => state = _muted(const {});
+
+  static ChannelMutesState _muted(Set<String> channelIds) => ChannelMutesState(
+    isReady: true,
+    store: ChannelMuteStore(
+      channels: {
+        for (final id in channelIds)
+          id: const ChannelMuteEntry(muted: true, updatedAt: 1),
+      },
+    ),
   );
 }
 
@@ -3417,6 +3656,12 @@ class _FakeRelaySession extends RelaySessionNotifier {
     for (final filter in filters) {
       final matches = messageSnapshot.where((event) {
         if (!filter.kinds.contains(event.kind)) return false;
+        if (filter.since case final since? when event.createdAt < since) {
+          return false;
+        }
+        if (filter.until case final until? when event.createdAt > until) {
+          return false;
+        }
         for (final entry in filter.tags.entries) {
           final tagName = entry.key.startsWith('#')
               ? entry.key.substring(1)
