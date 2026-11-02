@@ -90,6 +90,7 @@ mod external_infra_process {
         let owner = Keys::generate();
         let log = tempfile::NamedTempFile::new().unwrap();
         let spawn = |enabled: bool| {
+            let output = log.reopen().unwrap();
             Relay(
                 Command::new(env!("CARGO_BIN_EXE_buzz-relay"))
                     .env("DATABASE_URL", &database)
@@ -108,6 +109,7 @@ mod external_infra_process {
                     .env("BUZZ_ARTIFACT_INCREMENTAL_ENABLED", enabled.to_string())
                     .env("BUZZ_PUSH_ENABLED", "false")
                     .env("BUZZ_AUDIT_ENABLED", "false")
+                    .env("BUZZ_GIT_CONFORMANCE_PROBE", "false")
                     .stdout(log.reopen().unwrap())
                     .stderr(log.reopen().unwrap())
                     .spawn()
@@ -195,20 +197,6 @@ mod external_infra_process {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         assert!(reset, "recovery must reset without a writer retry");
-        let (_, recovered) = post(
-            &client,
-            &base,
-            &owner,
-            "/query",
-            json!([{
-                "artifact":"incremental", "query":query
-            }]),
-        )
-        .await;
-        assert_eq!(recovered["changes"][0]["event"]["id"], event.id.to_hex());
-        let (status, ordinary) = post(&client, &base, &owner, "/query", json!([query])).await;
-        assert_eq!(status, 200);
-        assert!(ordinary.to_string().contains(&event.id.to_hex()));
         let mut remaining = 500;
         for _ in 0..15 {
             remaining = sqlx::query_scalar::<_, i64>(
@@ -224,6 +212,20 @@ mod external_infra_process {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         assert_eq!(remaining, 0);
+        let (_, recovered) = post(
+            &client,
+            &base,
+            &owner,
+            "/query",
+            json!([{
+                "artifact":"incremental", "query":query
+            }]),
+        )
+        .await;
+        assert_eq!(recovered["changes"][0]["event"]["id"], event.id.to_hex());
+        let (status, ordinary) = post(&client, &base, &owner, "/query", json!([query])).await;
+        assert_eq!(status, 200);
+        assert!(ordinary.to_string().contains(&event.id.to_hex()));
         drop(relay);
 
         let _relay = spawn(false);
