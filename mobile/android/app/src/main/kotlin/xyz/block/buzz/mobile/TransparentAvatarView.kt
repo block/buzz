@@ -68,6 +68,10 @@ private class TransparentAvatarView(
         channel.setMethodCallHandler { call, result ->
             if (!valid) {
                 result.error("unsupported_avatar", "The avatar is not a bundled HTTPS WebM.", null)
+            } else if (call.method == "isReady") {
+                webView.evaluateJavascript(
+                    "(function(){var v=document.getElementById('avatar');return !!v && v.dataset.ready==='true';})()",
+                ) { value -> result.success(value == "true") }
             } else if (call.method == "setPlaying") {
                 playing = call.arguments == true
                 updatePlayback()
@@ -84,7 +88,7 @@ private class TransparentAvatarView(
                 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
                 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https://dwwgwmfqqjotj.cloudfront.net; media-src https://dwwgwmfqqjotj.cloudfront.net; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
                 <style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}video{width:100%;height:100%;object-fit:contain;pointer-events:none}</style>
-                </head><body><video id="avatar" muted loop playsinline preload="auto" poster="$poster" src="$url"></video></body></html>""",
+                </head><body><video id="avatar" muted loop playsinline preload="auto" poster="$poster" src="$url"></video><script>document.getElementById('avatar').requestVideoFrameCallback(function(){document.getElementById('avatar').dataset.ready='true';});</script></body></html>""",
                 "text/html", "UTF-8", null,
             )
         }

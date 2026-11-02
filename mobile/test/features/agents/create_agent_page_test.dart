@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/preset_agent_avatar.dart';
 import 'package:buzz/shared/agents/agent_avatar_catalog.dart';
 import 'package:buzz/features/agents/agent_avatar_editor_page.dart';
@@ -101,18 +102,58 @@ void main() {
       final originalAvatar = tester
           .widget<PresetAgentAvatar>(find.byType(PresetAgentAvatar))
           .imageUrl;
-      final targetIndex = originalAvatar == agentAvatarCatalog.first.url
-          ? 1
-          : 0;
+      final originalPack = AgentAvatarPack.values.firstWhere(
+        (pack) => pack.indices.any(
+          (i) => agentAvatarCatalog[i].url == originalAvatar,
+        ),
+      );
+      final targetIndex = originalPack.indices.firstWhere(
+        (i) => agentAvatarCatalog[i].url != originalAvatar,
+      );
       await tester.ensureVisible(find.text('Choose avatar'));
-      await tester.tap(find.text('Choose avatar'));
+      // Repeated callbacks before the next rebuild must still open one editor.
+      final openAvatar = tester
+          .widget<FilledButton>(
+            find.widgetWithText(FilledButton, 'Choose avatar'),
+          )
+          .onPressed!;
+      openAvatar();
+      openAvatar();
       await tester.pumpAndSettle();
       expect(find.byType(AgentAvatarEditorPage), findsOneWidget);
       expect(find.text('Instructions'), findsNothing);
       await tester.tap(find.byKey(ValueKey('agent-avatar-$targetIndex')));
       await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('Cancel'));
+      await tester.pump();
+      // The source control remains disabled until the reverse Hero finishes.
+      final chooseButton = find.widgetWithText(
+        FilledButton,
+        'Choose avatar',
+        skipOffstage: false,
+      );
+      expect(tester.widget<FilledButton>(chooseButton).onPressed, isNull);
+      final playback = find.byKey(
+        const ValueKey('create-agent-avatar-playback'),
+        skipOffstage: false,
+      );
+      expect(tester.widget<TickerMode>(playback).enabled, isFalse);
+      final sourceBar = find.descendant(
+        of: find.byType(CreateAgentPage, skipOffstage: false),
+        matching: find.byType(FrostedAppBar, skipOffstage: false),
+        skipOffstage: false,
+      );
+      expect(
+        tester.widget<FrostedAppBar>(sourceBar).nativeViewSuppressed?.value,
+        isTrue,
+      );
       await tester.pumpAndSettle();
+      expect(tester.widget<FilledButton>(chooseButton).onPressed, isNotNull);
+      expect(tester.widget<TickerMode>(playback).enabled, isTrue);
+      expect(
+        tester.widget<FrostedAppBar>(sourceBar).nativeViewSuppressed?.value,
+        isFalse,
+      );
       expect(
         tester
             .widget<PresetAgentAvatar>(find.byType(PresetAgentAvatar))

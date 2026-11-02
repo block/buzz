@@ -60,7 +60,9 @@ class IosGlassNavigationButton extends HookWidget {
     this.swatchColor,
     this.isBusy = false,
     this.isSelected = false,
+    this.tintsSelection = true,
     this.nativeViewSuppressed,
+    this.artwork,
   });
 
   static const viewType = 'buzz/navigation_glass';
@@ -104,13 +106,21 @@ class IosGlassNavigationButton extends HookWidget {
   /// Whether the native control exposes its selected state.
   final bool isSelected;
 
+  /// Whether selection changes the glass fill as well as accessibility state.
+  final bool tintsSelection;
+
   /// When true, substitutes an accessible Flutter control for the native view.
   final ValueListenable<bool>? nativeViewSuppressed;
+
+  /// Flutter artwork over the native glass control; UIKit still handles touch.
+  final Widget? artwork;
 
   @override
   Widget build(BuildContext context) {
     assert(defaultTargetPlatform == TargetPlatform.iOS);
     final nativeChannel = useState<MethodChannel?>(null);
+    final highlighted = useState(false);
+    final artworkChannel = useState<MethodChannel?>(null);
     final onPressedRef = useRef(onPressed)..value = onPressed;
     final brightness = context.theme.brightness.name;
     final effectiveForeground = foregroundColor ?? context.colors.primary;
@@ -122,6 +132,9 @@ class IosGlassNavigationButton extends HookWidget {
       final channel = nativeChannel.value;
       if (channel == null) return null;
       channel.setMethodCallHandler((call) async {
+        if (call.method == 'highlighted') {
+          highlighted.value = call.arguments == true;
+        }
         if (call.method == 'pressed') {
           onPressedRef.value?.call();
         }
@@ -129,10 +142,26 @@ class IosGlassNavigationButton extends HookWidget {
       return () => channel.setMethodCallHandler(null);
     }, [nativeChannel.value]);
 
+    useEffect(() {
+      final channel = artworkChannel.value;
+      if (channel == null) return null;
+      channel.setMethodCallHandler((call) async {
+        if (call.method == 'pressed') onPressedRef.value?.call();
+        if (call.method == 'highlighted') {
+          highlighted.value = call.arguments == true;
+          await nativeChannel.value?.invokeMethod<void>(
+            'setArtworkPressed',
+            call.arguments == true,
+          );
+        }
+      });
+      return () => channel.setMethodCallHandler(null);
+    }, [artworkChannel.value]);
+
     useEffect(
       () {
-        final channel = nativeChannel.value;
-        if (channel != null) {
+        for (final channel in [nativeChannel.value, artworkChannel.value]) {
+          if (channel == null) continue;
           unawaited(
             channel.invokeMethod<void>('setAppearance', <String, Object>{
               'brightness': brightness,
@@ -140,6 +169,7 @@ class IosGlassNavigationButton extends HookWidget {
               'enabled': enabled,
               'busy': isBusy,
               'selected': isSelected,
+              'tintsSelection': tintsSelection,
               'swatchColor': ?swatchColorValue,
             }),
           );
@@ -148,11 +178,13 @@ class IosGlassNavigationButton extends HookWidget {
       },
       [
         nativeChannel.value,
+        artworkChannel.value,
         brightness,
         foregroundValue,
         enabled,
         isBusy,
         isSelected,
+        tintsSelection,
         swatchColorValue,
       ],
     );
@@ -275,11 +307,13 @@ class IosGlassNavigationButton extends HookWidget {
       final creationParams = <String, Object>{
         'icon': icon.name,
         'accessibilityLabel': semanticLabel,
+        'accessibilityHidden': artwork != null,
         'brightness': brightness,
         'foregroundColor': foregroundValue,
         'enabled': enabled,
         'busy': isBusy,
         'selected': isSelected,
+        'tintsSelection': tintsSelection,
         'controlSize': controlSize,
         'controlWidth': controlSize,
         'fillWidth': fillWidth,
@@ -289,7 +323,7 @@ class IosGlassNavigationButton extends HookWidget {
         'swatchColor': ?swatchColorValue,
       };
       if (label != null) creationParams['label'] = label!;
-      return UiKitView(
+      final nativeControl = UiKitView(
         viewType: viewType,
         hitTestBehavior: PlatformViewHitTestBehavior.opaque,
         creationParams: creationParams,
@@ -297,6 +331,45 @@ class IosGlassNavigationButton extends HookWidget {
         onPlatformViewCreated: (viewId) {
           nativeChannel.value = MethodChannel('$viewType/$viewId');
         },
+      );
+      if (artwork == null) return nativeControl;
+      return Stack(
+        alignment: Alignment.center,
+        children: [
+          Positioned.fill(child: nativeControl),
+          IgnorePointer(
+            child: ExcludeSemantics(
+              child: AnimatedScale(
+                scale: highlighted.value && enabled ? 0.94 : 1,
+                duration: MediaQuery.disableAnimationsOf(context)
+                    ? Duration.zero
+                    : const Duration(milliseconds: 100),
+                child: SizedBox.square(
+                  dimension: controlSize - 8,
+                  child: artwork,
+                ),
+              ),
+            ),
+          ),
+          // A transparent UIKit control above the native video receives
+          // touches that cannot pass through AVPlayerLayer platform views.
+          Positioned.fill(
+            child: UiKitView(
+              viewType: viewType,
+              hitTestBehavior: PlatformViewHitTestBehavior.opaque,
+              creationParams: {
+                ...creationParams,
+                'plain': true,
+                'label': '',
+                'accessibilityHidden': false,
+              },
+              creationParamsCodec: const StandardMessageCodec(),
+              onPlatformViewCreated: (viewId) {
+                artworkChannel.value = MethodChannel('$viewType/$viewId');
+              },
+            ),
+          ),
+        ],
       );
     }
 

@@ -794,6 +794,57 @@ void main() {
       }
     });
 
+    testWidgets('avatar picker excludes custom emoji from native sheet', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final prefs = await _prefs();
+      MethodCall? presentation;
+      _setMockNativeEmojiPickerHandler((call) async {
+        presentation = call;
+        return true;
+      });
+      try {
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              savedPrefsProvider.overrideWithValue(prefs),
+              myPubkeyProvider.overrideWithValue('self'),
+              customEmojiPaletteProvider.overrideWith(
+                () => _FakeCustomEmojiPaletteNotifier(
+                  Completer<List<CustomEmoji>>().future,
+                ),
+              ),
+            ],
+            child: MaterialApp(
+              theme: AppTheme.light(),
+              home: Builder(
+                builder: (context) => FilledButton(
+                  onPressed: () => showEmojiPicker(
+                    context: context,
+                    nativeEmojiOnly: true,
+                    onSelect: (_) {},
+                  ),
+                  child: const Text('Open avatar picker'),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.tap(find.text('Open avatar picker'));
+        await tester.pump();
+        expect(presentation?.method, 'present');
+        final arguments = presentation?.arguments as Map<Object?, Object?>;
+        expect(arguments['customEmoji'], isEmpty);
+        expect(arguments['largeEmoji'], isTrue);
+        await _sendNativeEmojiPickerCall(tester, 'dismissed');
+      } finally {
+        _setMockNativeEmojiPickerHandler(null);
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
     testWidgets('shows cancellable feedback while loading the custom palette', (
       tester,
     ) async {

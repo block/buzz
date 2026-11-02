@@ -57,6 +57,7 @@ class _AgentsNavigation extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final communityId = ref.watch(activeCommunityProvider).asData?.value?.id;
+    final heroController = useMemoized(HeroController.new);
     final navigator = useMemoized(() => GlobalKey<NavigatorState>(), [
       communityId,
     ]);
@@ -68,6 +69,7 @@ class _AgentsNavigation extends HookConsumerWidget {
       },
       child: Navigator(
         key: navigator,
+        observers: [heroController],
         onGenerateRoute: (_) => MaterialPageRoute<void>(
           builder: (listContext) => Material(
             color: context.colors.surface,
