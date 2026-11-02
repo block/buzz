@@ -103,12 +103,25 @@ Future<String?> loadAgentInstructions(
 }
 
 /// Read-only instructions, with explicit unavailable and retry states.
+///
+/// A remote agent's instructions live in its Builderlab registry row, not in
+/// published config, so [registryRow] (when set) is the only source. Like
+/// desktop, an absent `agent_instructions` field means none are set, and a
+/// non-string value is an invalid listing.
 class AgentInstructions extends ConsumerWidget {
-  const AgentInstructions({required this.pubkey, super.key});
+  const AgentInstructions({required this.pubkey, this.registryRow, super.key});
   final String pubkey;
+  final Map<String, dynamic>? registryRow;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final row = registryRow;
+    if (row != null) {
+      final text = row['agent_instructions'] ?? '';
+      return text is String
+          ? _InstructionsText(text)
+          : const Text('Could not load instructions.');
+    }
     final instructions = ref.watch(agentInstructionsProvider(pubkey));
     return instructions.when(
       loading: () => const Center(
@@ -130,14 +143,25 @@ class AgentInstructions extends ConsumerWidget {
           ),
         ],
       ),
-      data: (text) => SelectableText(
-        text == null
-            ? 'Instructions aren’t available on mobile for this agent. View them on desktop.'
-            : text.trim().isEmpty
-            ? 'No instructions set.'
-            : text,
-        style: context.textTheme.bodyMedium,
-      ),
+      data: _InstructionsText.new,
+    );
+  }
+}
+
+class _InstructionsText extends StatelessWidget {
+  const _InstructionsText(this.text);
+  final String? text;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = this.text;
+    return SelectableText(
+      text == null
+          ? 'Instructions aren’t available on mobile for this agent. View them on desktop.'
+          : text.trim().isEmpty
+          ? 'No instructions set.'
+          : text,
+      style: context.textTheme.bodyMedium,
     );
   }
 }

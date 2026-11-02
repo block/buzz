@@ -203,6 +203,7 @@ void main() {
           'agent_pubkey': fakeAgent,
           'agent_id': 'remote-id',
           'agent_name': 'Scout',
+          'agent_instructions': 'Review carefully.',
         },
       ];
       await h.controller.run(h.controller.refresh);
@@ -212,6 +213,15 @@ void main() {
       expect(
         find.textContaining('This agent runs on Builderbot.'),
         findsOneWidget,
+      );
+      // Remote instructions come from the registry row, not published config.
+      expect(h.registry.bodies['/v3/beekeeper/list-agents'], {
+        'include_instructions': true,
+      });
+      expect(find.text('Review carefully.'), findsOneWidget);
+      expect(
+        find.textContaining('Instructions aren’t available'),
+        findsNothing,
       );
       await tester.pumpAndSettle();
       await tester.ensureVisible(find.text('Delete agent'));
