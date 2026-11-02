@@ -62,6 +62,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   int _nextLiveChunkGeneration = 0;
   final Set<String> _terminallyClosedLiveChunks = {};
   String? _subscriptionRelayBaseUrl;
+  // The refresh whose channels the live chunks currently cover.
+  _ChannelRefreshFence? _liveFence;
   Timer? _backstopTimer;
   // Live events that may have changed the channel list, and how many of them
   // the last completed read covered. See [_ChannelListChanges].
@@ -69,8 +71,12 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   int _channelListChangesRead = 0;
   void Function()? _listNoticesUnsubscribe;
   bool _listNoticesSubscribed = false;
-  bool _listNoticesRefused = false;
   int _listNoticesGeneration = 0;
+  final _listNoticesRetry = _SubscriptionRetry();
+  final _liveChunksRetry = _SubscriptionRetry();
+  // Reopened by a retry since the last backstop tick.
+  bool _listNoticesReopened = false;
+  final Set<String> _reopenedLiveChunks = {};
   final Map<String, int> _latestObservedByChannel = {};
   final Map<String, Map<String, ObservedUnreadEvent>>
   _observedUnreadEventsByChannel = {};
@@ -219,10 +225,12 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       if (waitingForInitialConnection && !connected.isCompleted) {
         connected.complete();
       } else if (previous?.status != SessionStatus.connected) {
-        // A new authenticated connection can change relay admission policy.
-        // Ordinary refreshes must not retry an unchanged terminal rejection.
+        // A new authenticated connection can change relay admission policy,
+        // so this refresh retries anything refused at once, and any later
+        // refusal backs off afresh.
         _terminallyClosedLiveChunks.clear();
-        _listNoticesRefused = false;
+        _liveChunksRetry.cancel();
+        _listNoticesRetry.cancel();
         unawaited(_refreshInBackground(queueIfBusy: true));
       }
     });
@@ -313,6 +321,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       fetchesDirectory: fetchDirectory,
     );
 
+    // Notices from here on arrive live, so this read covers everything before.
+    unawaited(_subscribeChannelListNotices(myPk));
     // Live changes from here on may not be in this read.
     final listChanges = _channelListChanges;
 

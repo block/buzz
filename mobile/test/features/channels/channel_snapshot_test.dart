@@ -421,8 +421,9 @@ class _SnapshotSession extends RelaySessionNotifier {
   int membershipRequests = 0;
   int latestReads = 0;
   final listeners = <void Function(NostrEvent)>[];
+  final noticeListeners = <void Function(NostrEvent)>[];
   void emit(NostrEvent event) {
-    for (final listener in List.of(listeners)) {
+    for (final listener in [...listeners, ...noticeListeners]) {
       listener(event);
     }
   }
@@ -504,8 +505,12 @@ class _SnapshotSession extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String)? onClosed,
   }) async {
-    listeners.add(onEvent);
-    return () => listeners.remove(onEvent);
+    // The channel list notices are not a live channel subscription.
+    final target = filter.kinds.contains(EventKind.memberAddedNotification)
+        ? noticeListeners
+        : listeners;
+    target.add(onEvent);
+    return () => target.remove(onEvent);
   }
 }
 

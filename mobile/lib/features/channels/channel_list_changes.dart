@@ -14,6 +14,7 @@ const _channelListNoticeKinds = [
 const _channelChangeSystemTypes = {
   'auto_join_changed',
   'channel_archived',
+  'channel_auto_archived',
   'channel_deleted',
   'channel_unarchived',
   'join_role_changed',
@@ -30,6 +31,12 @@ const _channelChangeSystemTypes = {
 /// Between those, live events say when it changed: a notice for this reader,
 /// or a metadata edit or system notice on a listed channel. The backstop timer
 /// reads the list again only after one of them, instead of every minute.
+///
+/// The live subscriptions ask for no stored events (`limit: 0`), so nothing
+/// sent while one is down is replayed. Each list read therefore opens the
+/// notice subscription before it reads, and a subscription reopened between
+/// reads that is still up at the next tick counts as a change, so that tick
+/// reads what it missed.
 extension _ChannelListChanges on ChannelsNotifier {
   /// Notes a live event on a listed channel that changes the channel itself.
   /// Returns whether it was one.
@@ -42,12 +49,20 @@ extension _ChannelListChanges on ChannelsNotifier {
     return changed;
   }
 
-  /// Subscribes to [_channelListNoticeKinds] once per relay and identity, and
-  /// again after a new connection if the relay refused it.
-  Future<void> _subscribeChannelListNotices(String myPk) async {
-    if (_listNoticesSubscribed || _listNoticesRefused) return;
+  /// Subscribes to [_channelListNoticeKinds] unless already subscribed. The
+  /// notifier rebuilds when the relay or identity changes, so one subscription
+  /// serves its whole lifetime. A refused or failed subscription is retried
+  /// with backoff. Notices sent while it was down are not replayed, so one
+  /// that [isRetry] reopens is caught up by [_noteReopenedSubscriptions].
+  Future<void> _subscribeChannelListNotices(
+    String myPk, {
+    bool isRetry = false,
+  }) async {
+    if (_listNoticesSubscribed) return;
     _listNoticesSubscribed = true;
+    _listNoticesRetry.cancelPending();
     final generation = ++_listNoticesGeneration;
+    var closed = false;
     try {
       final unsubscribe = await _lifecycleRef
           .read(relaySessionProvider.notifier)
@@ -57,12 +72,6 @@ extension _ChannelListChanges on ChannelsNotifier {
               tags: {
                 '#p': [myPk],
               },
-              // Overlap the list read that came just before, so a notice sent
-              // while it was out still arrives. A replayed older notice only
-              // costs one extra read.
-              since:
-                  DateTime.now().millisecondsSinceEpoch ~/ 1000 -
-                  relayLiveWindowSkewSeconds,
               limit: 0,
             ),
             (_) {
@@ -70,29 +79,44 @@ extension _ChannelListChanges on ChannelsNotifier {
             },
             onClosed: (message) {
               if (generation != _listNoticesGeneration) return;
-              // Terminal: a new connection may admit it again.
+              closed = true;
               _listNoticesUnsubscribe = null;
-              _listNoticesSubscribed = false;
-              _listNoticesRefused = true;
               debugPrint(
                 '[ChannelsNotifier] channel list notices closed: $message',
               );
+              _retryChannelListNotices(myPk);
             },
           );
-      if (generation != _listNoticesGeneration) {
+      if (generation != _listNoticesGeneration || closed) {
         unsubscribe();
         return;
       }
       _listNoticesUnsubscribe = unsubscribe;
+      if (isRetry) _listNoticesReopened = true;
     } catch (error) {
       if (generation != _listNoticesGeneration) return;
-      _listNoticesSubscribed = false;
       debugPrint('[ChannelsNotifier] channel list notices failed: $error');
+      _retryChannelListNotices(myPk);
     }
+  }
+
+  void _retryChannelListNotices(String myPk) {
+    _listNoticesSubscribed = false;
+    _listNoticesRetry.schedule(() {
+      // Disconnected: the reconnect's list read subscribes again.
+      if (!_lifecycleRef.mounted ||
+          _lifecycleRef.read(relaySessionProvider).status !=
+              SessionStatus.connected) {
+        return;
+      }
+      unawaited(_subscribeChannelListNotices(myPk, isRetry: true));
+    });
   }
 
   void _clearChannelListNotices() {
     _listNoticesGeneration++;
+    _listNoticesRetry.cancel();
+    _listNoticesReopened = false;
     _listNoticesUnsubscribe?.call();
     _listNoticesUnsubscribe = null;
     _listNoticesSubscribed = false;

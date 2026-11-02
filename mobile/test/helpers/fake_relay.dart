@@ -40,6 +40,8 @@ class FakeRelay {
   final sockets = <FakeRelaySocket>[];
   final unanswerable = <String>[];
   final _rejections = <({bool Function(NostrEvent) match, String message})>[];
+  final _refusals =
+      <({bool Function(Map<String, dynamic>) match, String message})>[];
   Completer<void>? _okHold;
   Completer<void>? _echoHold;
   Completer<void>? _reqHold;
@@ -66,6 +68,13 @@ class FakeRelay {
     relayConfigProvider.overrideWith(() => _FixedRelayConfig(keys.nsec)),
     authProvider.overrideWith(_SignedInAuth.new),
   ];
+
+  /// Answers the next REQ with a filter [match] accepts with CLOSED [message]
+  /// instead of admitting it.
+  void refuseReq(
+    bool Function(Map<String, dynamic> filter) match,
+    String message,
+  ) => _refusals.add((match: match, message: message));
 
   /// Stores history without notifying live subscriptions.
   void seed(Iterable<NostrEvent> events) => stored.addAll(events);
@@ -161,6 +170,12 @@ class FakeRelay {
         }
         reqs.add(message);
         final filters = message.skip(2).cast<Map<String, dynamic>>().toList();
+        final refusal = _refusals.indexWhere((r) => filters.any(r.match));
+        if (refusal >= 0) {
+          final reason = _refusals.removeAt(refusal).message;
+          scheduleMicrotask(() => socket._reply(['CLOSED', subId, reason]));
+          return;
+        }
         void admit() {
           if (!socket._authenticated) return;
           final history = _query(filters);

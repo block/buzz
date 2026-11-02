@@ -120,6 +120,10 @@ void main() {
       relay.deliver(system('channel_archived'));
       minutes(1);
       expect(membershipReads(), 4);
+      // So does the relay archiving an idle ephemeral channel.
+      relay.deliver(system('channel_auto_archived'));
+      minutes(1);
+      expect(membershipReads(), 5);
 
       // Several changes within a minute cost one read.
       // The relay replaces the channel's roster with one without the reader.
@@ -130,10 +134,119 @@ void main() {
       relay.deliver(notice(EventKind.memberRemovedNotification, _added));
       relay.deliver(system('topic_changed'));
       minutes(1);
-      expect(membershipReads(), 5);
+      expect(membershipReads(), 6);
       expect(names(), ['renamed']);
       minutes(3);
-      expect(membershipReads(), 5);
+      expect(membershipReads(), 6);
+    });
+  });
+
+  test('refused live subscriptions are retried, then the list catches up '
+      'once', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    fakeAsync((async) {
+      final relay = FakeRelay();
+      var version = 0;
+      NostrEvent roster(String channel) => relay.sign(
+        kind: 39002,
+        createdAt: 1700000000 + ++version,
+        tags: [
+          ['d', channel],
+          ['p', relay.pubkey],
+        ],
+      );
+      NostrEvent meta(String channel, String name) => relay.sign(
+        kind: 39000,
+        createdAt: 1700000000 + ++version,
+        tags: [
+          ['d', channel],
+          ['name', name],
+          ['t', 'stream'],
+          ['public'],
+        ],
+      );
+      bool isNotices(Map<String, dynamic> f) =>
+          (f['kinds'] as List).contains(EventKind.memberAddedNotification);
+      bool isChunk(Map<String, dynamic> f) =>
+          f.containsKey('#h') && f['limit'] == 0;
+      int reqs(bool Function(Map<String, dynamic>) match) => relay.reqs
+          .where((m) => m.skip(2).cast<Map<String, dynamic>>().any(match))
+          .length;
+      // The relay is over its subscription limit at launch: it refuses the
+      // notices twice and the channel's live chunk once.
+      const full = 'error: too many subscriptions';
+      relay
+        ..refuseReq(isNotices, full)
+        ..refuseReq(isNotices, full)
+        ..refuseReq(isChunk, full)
+        ..seed([roster(_channel), meta(_channel, 'general')]);
+      final container = ProviderContainer(
+        overrides: [
+          ...relay.overrides,
+          savedPrefsProvider.overrideWithValue(prefs),
+        ],
+      );
+      addTearDown(container.dispose);
+      final channels = container.listen(channelsProvider, (_, _) {});
+      int membershipReads() => relay.queries
+          .expand((filters) => filters)
+          .where(
+            (f) =>
+                f.containsKey('#p') &&
+                f['kinds'].contains(39002) &&
+                f['until'] == null,
+          )
+          .length;
+      List<String> names() => [
+        for (final channel in channels.read().requireValue) channel.name,
+      ];
+
+      async.elapse(const Duration(milliseconds: 50));
+      expect(names(), ['general']);
+      expect(membershipReads(), 1);
+
+      // While both are down, the reader is added to a channel. The notice
+      // has nowhere to go.
+      relay.seed([roster(_added), meta(_added, 'added')]);
+      relay.deliver(
+        relay.sign(
+          kind: EventKind.memberAddedNotification,
+          tags: [
+            ['p', relay.pubkey],
+            ['h', _added],
+          ],
+        ),
+      );
+
+      // Both are retried with backoff and admitted within half a minute.
+      // Reopening them sends no list read by itself ...
+      async.elapse(const Duration(seconds: 30));
+      expect(reqs(isNotices), 3);
+      expect(reqs(isChunk), 2);
+      expect(membershipReads(), 1);
+      // ... but the next tick reads once to catch up on what they missed.
+      async.elapse(const Duration(seconds: 31));
+      expect(membershipReads(), 2);
+      expect(names(), unorderedEquals(['general', 'added']));
+      async.elapse(const Duration(minutes: 3));
+      expect(membershipReads(), 2);
+      expect(reqs(isNotices), 3);
+
+      // Both are live again: a rename on the reopened chunk is picked up.
+      relay.seed([meta(_channel, 'renamed')]);
+      relay.deliver(
+        relay.sign(
+          kind: EventKind.nip29EditMetadata,
+          tags: [
+            ['h', _channel],
+            ['name', 'renamed'],
+          ],
+        ),
+      );
+      async.elapse(const Duration(minutes: 1));
+      expect(membershipReads(), 3);
+      expect(names(), unorderedEquals(['renamed', 'added']));
     });
   });
 
