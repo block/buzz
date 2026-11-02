@@ -87,6 +87,9 @@ void main() {
   group('organization relay assertions', () {
     late List<http.Request> requests;
     late Object? boundIdentity;
+    late int assertionLifetimeSeconds;
+    late DateTime sessionExpiry;
+    final now = DateTime.now().toUtc();
 
     BuilderlabAccountClient organizationClient() => BuilderlabAccountClient(
       accountOrigin: organization,
@@ -98,7 +101,7 @@ void main() {
           '/api/goose/v1/auth/me' => http.Response(
             jsonEncode({
               'subject': 'member',
-              'expires_at': expiry.toIso8601String(),
+              'expires_at': sessionExpiry.toIso8601String(),
             }),
             200,
           ),
@@ -110,7 +113,8 @@ void main() {
             jsonEncode({
               'assertion': 'org-token',
               'nostr_pubkey': keys.public,
-              'expires_at': DateTime.now().millisecondsSinceEpoch ~/ 1000 + 120,
+              'expires_at':
+                  now.millisecondsSinceEpoch ~/ 1000 + assertionLifetimeSeconds,
             }),
             200,
           ),
@@ -125,7 +129,7 @@ void main() {
         'origin': organization.toString(),
         'credential': 'org-secret',
         'subject': 'member',
-        'expires_at': expiry.toIso8601String(),
+        'expires_at': sessionExpiry.toIso8601String(),
       }),
     );
 
@@ -140,12 +144,74 @@ void main() {
           organizationRelay: (relay) =>
               OrganizationEnvironment.matches(relay, [relayHost]),
           enabled: true,
+          now: () => now,
         );
 
     setUp(() {
       requests = [];
       boundIdentity = null;
+      assertionLifetimeSeconds = 120;
+      sessionExpiry = now.add(const Duration(days: 8));
     });
+
+    test(
+      'accepts issuer lifetimes and rejects expired or unrepresentable expiry',
+      () async {
+        await saveSession();
+        for (final lifetime in [
+          300,
+          3600,
+          86400,
+          86401,
+          604800,
+          0,
+          -1,
+          8640000000001,
+          18446744073709552,
+        ]) {
+          assertionLifetimeSeconds = lifetime;
+          final auth = relayAuth(organizationClient());
+          if (lifetime > 0 && lifetime < 8640000000001) {
+            expect(
+              await auth.headers(relay),
+              contains('Nostr-Federated-Identity'),
+            );
+          } else {
+            await expectLater(
+              auth.headers(relay),
+              throwsA(AccountFailure.invalidResponse),
+            );
+          }
+          auth.dispose();
+        }
+      },
+    );
+
+    test(
+      'assertion expiry can equal but cannot exceed the account session expiry',
+      () async {
+        for (final sessionLifetime in [120, 119]) {
+          sessionExpiry = DateTime.fromMillisecondsSinceEpoch(
+            (now.millisecondsSinceEpoch ~/ 1000 + sessionLifetime) * 1000,
+            isUtc: true,
+          );
+          await saveSession();
+          final auth = relayAuth(organizationClient());
+          if (sessionLifetime == 120) {
+            expect(
+              await auth.headers(relay),
+              contains('Nostr-Federated-Identity'),
+            );
+          } else {
+            await expectLater(
+              auth.headers(relay),
+              throwsA(AccountFailure.invalidResponse),
+            );
+          }
+          auth.dispose();
+        }
+      },
+    );
 
     test(
       'signed-in member gets an assertion for the exact relay and its key',
