@@ -6,6 +6,8 @@ struct MeAgentAccessibilityTests {
   @MainActor static func main() {
     for locked in [false, true] {
       for empty in [false, true] {
+        let savedName = "Saved agent"
+        var submitted: [String: String]?
         let controller = NativeProfileTextEditorViewController(
           title: "New chat", initialValue: "Chat", placeholder: "Chat name",
           multiline: false, pageBackgroundColor: .systemGroupedBackground,
@@ -14,17 +16,61 @@ struct MeAgentAccessibilityTests {
           channelDescription: nil, originalName: nil, originalDescription: nil,
           canEditDetails: true, canEditCanvas: false, canvasContent: "",
           canvasLoaded: false,
-          chatOptions: ["fieldsLocked": locked, "assistants": empty ? [] : [["id": "agent", "name": "Agent"]]],
-          onCancel: {}, onSet: { _ in }
+          chatOptions: ["selectedAssistant": "agent", "savedAssistant": ["id": "agent", "name": savedName], "presentationId": "test", "assistantsLoading": empty, "fieldsLocked": locked, "assistants": empty ? [] : [["id": "agent", "name": "Agent"]]],
+          onCancel: {}, onSet: { submitted = $0 as? [String: String] }
         )
         controller.loadViewIfNeeded()
-        let cell = controller.tableView(controller.tableView, cellForRowAt: IndexPath(row: 0, section: 1))
+        precondition(controller.numberOfSections(in: controller.tableView) == 3)
+        let projectCell = controller.tableView(controller.tableView, cellForRowAt: IndexPath(row: 0, section: 1))
+        let project = projectCell.accessoryView as! UIButton
+        precondition(project.accessibilityLabel == "Project")
+        precondition(project.accessibilityValue == "No project")
+        precondition(project.titleColor(for: .normal) == .label)
+        precondition(project.isEnabled == !locked)
+        precondition(project.showsMenuAsPrimaryAction && project.menu != nil)
+        let cell = controller.tableView(controller.tableView, cellForRowAt: IndexPath(row: 0, section: 2))
+        let content = cell.contentConfiguration as! UIListContentConfiguration
+        precondition(content.text == (empty ? (locked ? savedName : "Choose an agent") : "Agent"))
+        precondition((content.image != nil) == (locked || !empty))
         let disabled = locked || empty
         precondition(cell.accessibilityTraits.contains(.notEnabled) == disabled)
         precondition(cell.accessibilityTraits.contains(.button) == !disabled)
         precondition((cell.selectionStyle == .none) == disabled)
+        let canSubmit = locked || !empty
+        precondition(controller.navigationItem.rightBarButtonItem?.isEnabled == canSubmit)
+        // Invoke the action even when disabled to check its independent gate.
+        _ = controller.perform(NSSelectorFromString("setTapped"))
+        precondition(submitted?["assistant"] == (canSubmit ? "agent" : nil))
+        if empty && !locked {
+          controller.tableView.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+          controller.tableView.reloadData()
+          controller.tableView.layoutIfNeeded()
+          precondition(controller.tableView(controller.tableView, titleForFooterInSection: 1) == nil)
+          precondition(controller.tableView(controller.tableView, titleForFooterInSection: 2) == "Loading agents…")
+          controller.updateChatAssistants([
+            "presentationId": "test",
+            "assistants": [["id": "agent", "name": "Agent"]],
+          ])
+          controller.tableView.layoutIfNeeded()
+          let updated = controller.tableView.cellForRow(at: IndexPath(row: 0, section: 2))!
+          precondition(updated.accessibilityTraits.contains(.button))
+          precondition(!updated.accessibilityTraits.contains(.notEnabled))
+          precondition(controller.tableView(controller.tableView, titleForFooterInSection: 2) == nil)
+        }
+        submitted = nil
+        controller.updateChatAssistants([
+          "presentationId": "test",
+          "assistants": empty ? [] : [["id": "agent", "name": "Agent"]],
+        ])
+        let refreshedCell = controller.tableView(controller.tableView, cellForRowAt: IndexPath(row: 0, section: 2))
+        let refreshed = refreshedCell.contentConfiguration as! UIListContentConfiguration
+        precondition(refreshed.text == (empty ? (locked ? savedName : "Choose an agent") : "Agent"))
+        precondition(controller.navigationItem.rightBarButtonItem?.isEnabled == canSubmit)
+        _ = controller.perform(NSSelectorFromString("setTapped"))
+        precondition(submitted?["assistant"] == (canSubmit ? "agent" : nil))
       }
     }
+    messageTests()
     avatarTests()
     print("Me agent accessibility and bounded avatar loading passed")
   }
@@ -125,4 +171,62 @@ private final class AvatarProtocol: URLProtocol {
     precondition(MeAvatarLoader.thumbnail(huge) == nil)
   }
   loader.cancelAll()
+}
+
+@MainActor private func messageTests() {
+  let message = String(repeating: "Plan my trip. ", count: 20)
+  for locked in [false, true] {
+    var submitted: [String: String]?
+    let controller = NativeProfileTextEditorViewController(
+      title: "New chat", initialValue: message, placeholder: "Message",
+      multiline: true, pageBackgroundColor: .systemGroupedBackground,
+      containerBackgroundColor: .secondarySystemGroupedBackground,
+      containerCornerRadius: 16, allowUnchangedSubmission: false,
+      channelDescription: nil, originalName: nil, originalDescription: nil,
+      canEditDetails: true, canEditCanvas: false, canvasContent: "",
+      canvasLoaded: false,
+      chatOptions: ["messageMode": true, "presentationId": "message", "fieldsLocked": locked,
+                    "selectedAssistant": locked ? "saved" : NSNull(),
+                    "savedAssistant": ["id": "saved", "name": "Saved agent"], "assistants": []],
+      onCancel: {}, onSet: { submitted = $0 as? [String: String] }
+    )
+    controller.loadViewIfNeeded()
+    let cell = controller.tableView(controller.tableView, cellForRowAt: IndexPath(row: 0, section: 0))
+    let input = cell.contentView.subviews.compactMap { $0 as? UITextView }.first!
+    precondition(input.accessibilityLabel == "Message")
+    precondition(input.isEditable == !locked)
+    precondition(controller.navigationItem.rightBarButtonItem?.title == (locked ? "Retry" : "Send"))
+    precondition(controller.navigationItem.rightBarButtonItem?.isEnabled == locked)
+    controller.updateChatAssistants(["presentationId": "stale", "defaultAssistant": "bestie",
+                                     "assistants": [["id": "bestie", "name": "Bestie"]]])
+    precondition(controller.navigationItem.rightBarButtonItem?.isEnabled == locked)
+    controller.updateChatAssistants(["presentationId": "message", "defaultAssistant": "missing",
+                                     "assistants": [["id": "bestie", "name": "Bestie"]]])
+    precondition(controller.navigationItem.rightBarButtonItem?.isEnabled == locked)
+    controller.updateChatAssistants(["presentationId": "message", "defaultAssistant": "bestie",
+                                     "assistants": [["id": "bestie", "name": "Bestie"]]])
+    precondition(controller.navigationItem.rightBarButtonItem?.isEnabled == true)
+    controller.updateChatAssistants(["presentationId": "message", "defaultAssistant": "other",
+                                     "assistants": [["id": "bestie", "name": "Bestie"], ["id": "other", "name": "Other"]]])
+    if !locked {
+      let navigation = UINavigationController(rootViewController: controller)
+      controller.tableView(controller.tableView, didSelectRowAt: IndexPath(row: 0, section: 2))
+      let picker = navigation.topViewController as! MeAssistantListController
+      picker.tableView(picker.tableView, didSelectRowAt: IndexPath(row: 0, section: 0))
+      controller.updateChatAssistants(["presentationId": "message", "defaultAssistant": "other",
+                                      "assistants": [["id": "bestie", "name": "Bestie"], ["id": "other", "name": "Other"]]])
+    }
+    _ = controller.perform(NSSelectorFromString("setTapped"))
+    precondition(submitted?["name"] == message)
+    precondition(submitted?["assistant"] == (locked ? "saved" : "bestie"))
+    if !locked {
+      submitted = nil
+      input.text = String(repeating: "🐝", count: 2049)
+      controller.textViewDidChange(input)
+      _ = controller.perform(NSSelectorFromString("setTapped"))
+      precondition(submitted == nil)
+      precondition(input.isEditable)
+    }
+    precondition(controller.tableView(controller.tableView, heightForRowAt: IndexPath(row: 0, section: 1)) == 52)
+  }
 }

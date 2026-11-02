@@ -1,8 +1,26 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
+
 import 'package:nostr/nostr.dart' as nostr;
 
 import 'nostr_models.dart';
+
+/// Snapshot bytes and the authenticated scope they must match.
+typedef ReadStateSnapshotInput = ({
+  String text,
+  String viewer,
+  String community,
+});
+
+/// Decodes and validates a complete snapshot.
+typedef ReadStateSnapshotDecoder =
+    Future<List<NostrEvent>> Function(ReadStateSnapshotInput input);
+
+/// Keeps snapshot parsing and Schnorr verification off the UI isolate.
+Future<List<NostrEvent>> decodeReadStateSnapshot(
+  ReadStateSnapshotInput input,
+) => compute(validateReadStateSnapshot, input);
 
 /// Hard bounds of the version-1 atomic snapshot protocol.
 const readStateSnapshotMaxBytes = 8 * 1024 * 1024;
@@ -26,9 +44,7 @@ String readStateSnapshotCommunity(Object? descriptor) {
 
 /// Validates the entire snapshot atomically, on a worker isolate via compute.
 /// No decryption or read-state namespace selection occurs in this transport.
-List<NostrEvent> validateReadStateSnapshot(
-  ({String text, String viewer, String community}) input,
-) {
+List<NostrEvent> validateReadStateSnapshot(ReadStateSnapshotInput input) {
   final raw = jsonDecode(input.text);
   if (raw is! Map<String, dynamic> ||
       raw['read_state_snapshot'] != 1 ||

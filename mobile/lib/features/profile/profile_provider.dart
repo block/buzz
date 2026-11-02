@@ -75,16 +75,36 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
   Future<void> _patchQueue = Future.value();
 
   @override
-  Future<UserProfile?> build() {
+  Future<UserProfile?> build() async {
     final config = ref.watch(relayConfigProvider);
     final pubkey = ref.watch(myPubkeyProvider);
-    ref.watch(relaySessionProvider);
     final context = _ProfileWriteContext(
       config: config,
       pubkey: pubkey,
       session: ref.read(relaySessionProvider.notifier),
     );
     _hasHydrated = false;
+    if (pubkey != null) {
+      final connected = Completer<void>();
+      ref.listen(relaySessionProvider.select((value) => value.status), (
+        previous,
+        next,
+      ) {
+        if (next != SessionStatus.connected) return;
+        if (!connected.isCompleted) {
+          connected.complete();
+        } else if (previous != SessionStatus.connected) {
+          // Revalidate once per authenticated connection. Intermediate socket
+          // states must not enqueue duplicate profile reads or erase the avatar.
+          ref.invalidateSelf();
+        }
+      });
+      if (ref.read(relaySessionProvider).status == SessionStatus.connected) {
+        connected.complete();
+      }
+      await connected.future;
+      _requireCurrentWriteContext(context);
+    }
     return _fetch(context);
   }
 
@@ -133,6 +153,12 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
 
   /// Updates the current user's display name while preserving the other
   /// metadata fields in their latest kind:0 profile event.
+  Future<void> updateSetup(String displayName, String? avatarUrl) =>
+      _publishProfilePatch({
+        'display_name': displayName.trim(),
+        'picture': ?avatarUrl,
+      });
+
   Future<void> updateDisplayName(String displayName) =>
       _publishProfilePatch({'display_name': displayName.trim()});
 

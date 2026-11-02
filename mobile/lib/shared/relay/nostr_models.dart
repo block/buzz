@@ -6,7 +6,7 @@ import 'thread_reference.dart';
 
 /// Nostr event kind constants.
 ///
-/// Keep in sync with `desktop/src/shared/constants/kinds.ts`.
+/// Keep in sync with `crates/buzz-core/src/kind.rs`.
 abstract final class EventKind {
   /// Kind:0 user profile metadata.
   static const profile = 0;
@@ -83,12 +83,14 @@ abstract final class EventKind {
     streamMessageEdit,
   ];
 
-  /// Visible content kinds requested by the NIP-CW channel-window path.
-  static const channelTimelineContentKinds = [
+  /// Row kinds a NIP-CW channel-window page reads. System notices (40099)
+  /// are read apart by [NostrFilters.channelNotices]: a page counts every row
+  /// kind against its limit, so a burst of joins would otherwise fill the
+  /// first page and hold the messages back.
+  static const channelWindowPageKinds = [
     streamMessage,
     streamMessageV2,
     streamMessageDiff,
-    systemMessage,
     jobRequest,
     jobAccepted,
     jobProgress,
@@ -97,6 +99,12 @@ abstract final class EventKind {
     jobError,
     huddleStarted,
     huddleEnded,
+  ];
+
+  /// Visible content kinds of the channel timeline.
+  static const channelTimelineContentKinds = [
+    ...channelWindowPageKinds,
+    systemMessage,
   ];
 }
 
@@ -276,6 +284,12 @@ class ChannelData {
   final String id;
   final String name;
   final String channelType;
+
+  /// NIP-CL labels in `t` tags after the leading channel-type tag.
+  final List<String> labels;
+
+  /// Original channel creator from the relay-authored uppercase `P` tag.
+  final String? creator;
   final String visibility;
   final String description;
   final String? topic;
@@ -291,6 +305,8 @@ class ChannelData {
     required this.visibility,
     required this.description,
     this.topic,
+    this.labels = const [],
+    this.creator,
     this.participantPubkeys = const [],
     this.ttlSeconds,
     this.ttlDeadline,
@@ -336,6 +352,12 @@ class ChannelData {
       id: id,
       name: name,
       channelType: channelType,
+      labels: event.tags
+          .where((t) => t.length >= 2 && t[0] == 't')
+          .skip(1)
+          .map((t) => t[1])
+          .toList(),
+      creator: event.getTagValue('P'),
       visibility: visibility,
       description: description,
       topic: topic,

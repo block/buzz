@@ -128,7 +128,18 @@ async fn reporter_can_read(
     if token_channels.is_some_and(|allowed| !allowed.contains(&channel_id)) {
         return Ok(false);
     }
-    match super::ingest::check_channel_membership(tenant, state, channel_id, reporter, None).await {
+    // Reading is enough to report: the role-table write rule does not
+    // apply, so a guest may report what it can read.
+    match super::ingest::check_channel_membership(
+        tenant.community(),
+        state,
+        channel_id,
+        reporter,
+        None,
+        super::ingest::ChannelWrite::Membership,
+    )
+    .await
+    {
         Ok(()) => Ok(true),
         Err(reason) if reason.starts_with("error:") => Err(reason),
         Err(_) => Ok(false),

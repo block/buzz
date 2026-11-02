@@ -4,6 +4,9 @@ class _MessageList extends HookConsumerWidget {
   final ValueNotifier<StickyDateHeaderState> stickyDateHeaderState;
   final List<MainTimelineEntry> entries;
   final List<TypingEntry> inlineTyping;
+
+  /// Agents typing in each thread, by lowercase root message ID.
+  final Map<String, List<String>> threadWorking;
   final List<TimelineMessage> allMessages;
   final String? initialMessageId;
   final String? initialThreadRootId;
@@ -15,6 +18,7 @@ class _MessageList extends HookConsumerWidget {
   final String channelId;
   final ChannelMessagesNotifier notifier;
   final bool isDm;
+  final bool allowThreads;
   final String? currentPubkey;
   final bool isMember;
   final bool isArchived;
@@ -26,6 +30,7 @@ class _MessageList extends HookConsumerWidget {
   const _MessageList({
     required this.entries,
     this.inlineTyping = const [],
+    this.threadWorking = const {},
     required this.stickyDateHeaderState,
     required this.allMessages,
     required this.initialMessageId,
@@ -38,6 +43,7 @@ class _MessageList extends HookConsumerWidget {
     required this.channelId,
     required this.notifier,
     required this.isDm,
+    this.allowThreads = true,
     required this.currentPubkey,
     required this.isMember,
     required this.isArchived,
@@ -51,6 +57,9 @@ class _MessageList extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final handoff = useAgentReplyHandoffs(channelId, inlineTyping, allMessages);
     final displayedTyping = handoff.typing;
+    final workingAgents = {
+      for (final agents in threadWorking.values) ...agents,
+    };
     final appView = View.of(context);
     final localSendAnimations = ref.watch(
       localMessageSendAnimationProvider(channelId),
@@ -91,6 +100,10 @@ class _MessageList extends HookConsumerWidget {
     final oldestUnreadMessageId = useState<String?>(null);
     final unreadBoundaryLoadFailed = useState(false);
     final unreadBoundaryFetchCount = useRef(0);
+    // Reaching the oldest page publishes no messages, so nothing else
+    // rebuilds this list to re-run the unread effect below. A count, not a
+    // flag: a reconnect can reset the notifier and reach the oldest page again.
+    final unreadBoundaryReachedOldestCount = useState(0);
     final hasUnreadDeepLink =
         initialMessageId != null || initialThreadRootId != null;
     final dayTimestampByReversedIndex = <int, int>{};
@@ -172,7 +185,10 @@ class _MessageList extends HookConsumerWidget {
           unawaited(
             Future<void>(() async {
               final loaded = await notifier.fetchOlder();
-              if (!cancelled && !loaded && !notifier.reachedOldest) {
+              if (cancelled || loaded) return;
+              if (notifier.reachedOldest) {
+                unreadBoundaryReachedOldestCount.value += 1;
+              } else {
                 unreadBoundaryLoadFailed.value = true;
               }
             }),
@@ -791,7 +807,8 @@ class _MessageList extends HookConsumerWidget {
       },
     );
 
-    if (entries.isEmpty && displayedTyping.isNotEmpty) {
+    if (entries.isEmpty &&
+        (displayedTyping.isNotEmpty || TypingMotionPreview.enabled)) {
       return Align(
         alignment: Alignment.bottomCenter,
         child: Padding(
@@ -801,23 +818,19 @@ class _MessageList extends HookConsumerWidget {
             Grid.gutter,
             composerBottomInset,
           ),
-          child: InlineAgentTyping(
-            channelId: channelId,
-            entries: displayedTyping,
-          ),
+          child: TypingMotionPreview.enabled
+              ? TypingMotionPreview(channelId: channelId)
+              : InlineAgentTyping(
+                  channelId: channelId,
+                  entries: displayedTyping,
+                  knownAgents: workingAgents,
+                ),
         ),
       );
     }
     if (entries.isEmpty) return const _EmptyMessages();
 
-    // Build channel names map once for all message bubbles.
-    final channelsAsync = ref.watch(channelsProvider);
-    final channelNamesMap = <String, String>{};
-    channelsAsync.whenData((channels) {
-      for (final ch in channels) {
-        channelNamesMap[ch.name.toLowerCase()] = ch.id;
-      }
-    });
+    final channelNamesMap = ref.watch(channelIdsByNameProvider);
 
     return Stack(
       children: [
@@ -963,6 +976,13 @@ class _MessageList extends HookConsumerWidget {
                         if (message.isSystem)
                           _SystemMessageRow(
                             message: message,
+                            startsDay: showDayDivider,
+                            endsDay:
+                                nextMessage != null &&
+                                !isSameDay(
+                                  message.createdAt,
+                                  nextMessage.createdAt,
+                                ),
                             groupedMessages: entryGroup.length > 1
                                 ? entryGroup
                                       .map((entry) => entry.message)
@@ -977,6 +997,13 @@ class _MessageList extends HookConsumerWidget {
                         else ...[
                           _MessageBubble(
                             message: message,
+                            startsDay: showDayDivider,
+                            endsDay:
+                                nextMessage != null &&
+                                !isSameDay(
+                                  message.createdAt,
+                                  nextMessage.createdAt,
+                                ),
                             showAuthor:
                                 showAuthor ||
                                 isRecentAgentReplyHandoff(
@@ -989,10 +1016,18 @@ class _MessageList extends HookConsumerWidget {
                             ),
                             showAvatar: showAvatar,
                             hasReplies: entry.summary != null,
-                            replyFooter: entry.summary == null
+                            replyFooter:
+                                entry.summary == null &&
+                                    !threadWorking.containsKey(
+                                      message.id.toLowerCase(),
+                                    )
                                 ? null
                                 : _ThreadSummaryRow(
-                                    summary: entry.summary!,
+                                    summary: entry.summary,
+                                    working:
+                                        threadWorking[message.id
+                                            .toLowerCase()] ??
+                                        const [],
                                     message: message,
                                     allMessages: allMessages,
                                     channelId: channelId,
@@ -1003,18 +1038,24 @@ class _MessageList extends HookConsumerWidget {
                             channelNames: channelNamesMap,
                             currentChannelId: channelId,
                             currentPubkey: currentPubkey,
-                            allMessages: allMessages,
+                            allMessages: allowThreads ? allMessages : null,
                             isMember: isMember,
                             isArchived: isArchived,
                             composerFocusNode: composerFocusNode,
                             restoreComposerFocus: restoreComposerFocus,
                           ),
                         ],
-                        if (index == 0 && displayedTyping.isNotEmpty)
-                          InlineAgentTyping(
-                            channelId: channelId,
-                            entries: displayedTyping,
-                          ),
+                        if (index == 0 &&
+                            (displayedTyping.isNotEmpty ||
+                                TypingMotionPreview.enabled))
+                          if (TypingMotionPreview.enabled)
+                            TypingMotionPreview(channelId: channelId)
+                          else
+                            InlineAgentTyping(
+                              channelId: channelId,
+                              entries: displayedTyping,
+                              knownAgents: workingAgents,
+                            ),
                       ],
                     ),
                   ),

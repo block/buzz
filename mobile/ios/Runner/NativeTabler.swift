@@ -16,10 +16,6 @@ enum NativeTabler {
   }()
 
   static func image(_ symbol: String, size: CGFloat = 20) -> UIImage? {
-    // Back and Close deliberately retain native navigation artwork.
-    if ["chevron.backward", "chevron.left", "xmark", "xmark.circle.fill"].contains(symbol) {
-      return UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: size, weight: .semibold))
-    }
     guard let code = glyphs[symbol], let scalar = UnicodeScalar(code),
       let name = fontName, let font = UIFont(name: name, size: size) else {
       assertionFailure("Missing Tabler icon: \(symbol)")
@@ -41,14 +37,17 @@ enum NativeTabler {
     "chevron.left": 0xea60, // chevron-left
     "chevron.right": 0xea61, // chevron-right
     "camera": 0xea54, // camera
-    "photo.on.rectangle": 0xeb0a, // photo
-    "photo.on.rectangle.angled": 0xeb0a, // photo
+    "photo.on.rectangle": 0xfd4a, // images — matches BuzzIcons.images
+    "photo.on.rectangle.angled": 0xfd4a, // images — matches BuzzIcons.images
     "paintpalette": 0xeb01, // palette
     "drop": 0xea97, // droplet
     "drop.fill": 0xea97, // droplet
     "face.smiling": 0xeaf7, // mood-smile
     "person": 0xeb4d, // user
     "person.crop.circle": 0xeb4d, // user
+    "arrow.left.arrow.right": 0xf1f4, // arrows-left-right
+    "person.badge.plus": 0xeb4b, // user-plus
+    "gearshape": 0xeb20, // settings
     "person.2": 0xebf2, // users
     "rectangle.stack": 0xeb0a, // photo
     "crop": 0xea85, // crop
@@ -76,6 +75,7 @@ enum NativeTabler {
     "doc": 0xeaa4, // file
     "plus": 0xeb0b, // plus
     "building.2.crop.circle": 0xebf6, // building-community
+    "workspace": 0xecd7, // cube-3d-sphere
     "folder.badge.plus": 0xeaab, // folder-plus
     "headphones": 0xeabd, // headphones
     "line.3.horizontal.decrease": 0xeaa5, // filter
@@ -90,6 +90,7 @@ enum NativeTabler {
     "checkmark": 0xea5e, // check
     "checkmark.circle": 0xea67, // circle-check
     "bell.slash": 0xece9, // bell-off
+    "number": 0xeabc, // hash — matches BuzzIcons.hash
     "bubble.left": 0xeaef, // message
     "bubble.left.and.bubble.right": 0xeb6c, // messages
     "arrow.uturn.backward": 0xeb77, // arrow-back-up

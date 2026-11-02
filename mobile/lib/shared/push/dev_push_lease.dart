@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:math';
 
+import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:http/http.dart' as http;
 import 'package:nostr/nostr.dart' as nostr;
 
@@ -19,6 +20,9 @@ const _installationIdPattern = r'^[0-9a-f]{32}$';
 
 class BuzzPushLeaseDescriptor {
   final String origin;
+
+  /// Canonical channel-ID grammar advertised by this relay.
+  final String hGrammar;
   final String executorKeyId;
   final String executorPubkey;
   final String transport;
@@ -30,6 +34,7 @@ class BuzzPushLeaseDescriptor {
 
   const BuzzPushLeaseDescriptor({
     required this.origin,
+    this.hGrammar = 'uuid-v4-lowercase',
     required this.executorKeyId,
     required this.executorPubkey,
     required this.transport,
@@ -115,7 +120,8 @@ class BuzzPushLeaseDescriptor {
       );
     }
     final hGrammar = _nonEmptyString(push['h_grammar'], name: 'h_grammar');
-    if (hGrammar != 'uuid-v4-lowercase') {
+    // Retain the advertised grammar so publication can enforce legacy limits.
+    if (hGrammar != 'uuid-lowercase' && hGrammar != 'uuid-v4-lowercase') {
       throw const FormatException('Unsupported push h_grammar');
     }
 
@@ -185,6 +191,7 @@ class BuzzPushLeaseDescriptor {
 
     return BuzzPushLeaseDescriptor(
       origin: origin,
+      hGrammar: hGrammar,
       executorKeyId: currentKey['id'] as String,
       executorPubkey: currentKey['pubkey'] as String,
       transport: transport,
@@ -194,6 +201,33 @@ class BuzzPushLeaseDescriptor {
       maxEndpointLength: limitation['max_endpoint_len'] as int,
       maxStringLength: maxStringLength,
     );
+  }
+}
+
+/// The desired lease requires channel IDs that this relay cannot accept yet.
+class BuzzPushChannelGrammarException implements Exception {
+  const BuzzPushChannelGrammarException();
+
+  @override
+  String toString() =>
+      'Push lease requires uuid-lowercase support from the relay';
+}
+
+/// Validate both positive and ignore filters without weakening mute semantics.
+void validateBuzzPushChannelGrammar(
+  BuzzPushLeaseDescriptor descriptor,
+  List<BuzzPushSubscription> subscriptions,
+) {
+  if (descriptor.hGrammar == 'uuid-lowercase') return;
+  for (final subscription in subscriptions) {
+    for (final filter in [subscription.filter, ...subscription.ignore]) {
+      for (final channel in filter.hTags ?? const <String>[]) {
+        // The legacy Rust validator checked version 4, not the UUID variant.
+        if (channel[14] != '4') {
+          throw const BuzzPushChannelGrammarException();
+        }
+      }
+    }
   }
 }
 
@@ -260,6 +294,7 @@ Future<BuzzPushLeasePublication> publishBuzzDevPushLease({
   required BuzzPushLeaseSubmit submit,
   DateTime Function() now = DateTime.now,
 }) async {
+  validateBuzzPushChannelGrammar(descriptor, subscriptions);
   _validateGrant(grant, descriptor);
   final effectiveLeaseInstallationId =
       leaseInstallationId ?? grant.installationId;
@@ -281,7 +316,7 @@ Future<BuzzPushLeasePublication> publishBuzzDevPushLease({
   if (decoded.prefix != nostr.Nip19Prefix.nsec || decoded.data.length != 64) {
     throw const FormatException('Signing key must be a 32-byte nsec');
   }
-  final signingPubkey = nostr.Keys(decoded.data).public;
+  final signingPubkey = derivePublicKeyHex(decoded.data);
   if (signingPubkey != normalizedMemberPubkey) {
     throw const FormatException(
       'Authenticated signing key does not match the lease member pubkey',
@@ -393,7 +428,7 @@ Future<BuzzPushLeasePublication> publishBuzzPushLeaseTombstone({
   if (decoded.prefix != nostr.Nip19Prefix.nsec || decoded.data.length != 64) {
     throw const FormatException('Signing key must be a 32-byte nsec');
   }
-  if (nostr.Keys(decoded.data).public != normalizedMemberPubkey) {
+  if (derivePublicKeyHex(decoded.data) != normalizedMemberPubkey) {
     throw const FormatException(
       'Authenticated signing key does not match the lease member pubkey',
     );
@@ -439,24 +474,6 @@ Future<BuzzPushLeasePublication> publishBuzzPushLeaseTombstone({
     plaintext: plaintext,
   );
 }
-
-Future<BuzzPushLeasePublication> publishBuzzPushLeaseTombstoneThroughRelay({
-  required BuzzPushLeaseDescriptor descriptor,
-  required String installationId,
-  required int generation,
-  required String nsec,
-  required String memberPubkey,
-  required SignedEventRelay relay,
-  DateTime Function() now = DateTime.now,
-}) => publishBuzzPushLeaseTombstone(
-  descriptor: descriptor,
-  installationId: installationId,
-  generation: generation,
-  nsec: nsec,
-  memberPubkey: memberPubkey,
-  submit: relay.submit,
-  now: now,
-);
 
 void _validateGrant(
   BuzzPushEndpointGrant grant,

@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -65,7 +66,9 @@ double _searchHeaderFiltersHeight(BuildContext context) {
 }
 
 class SearchPage extends HookConsumerWidget {
-  const SearchPage({this.tabReselection, super.key});
+  const SearchPage({this.tabReselection, this.embedded = false, super.key});
+
+  final bool embedded;
 
   /// Notifies this page when its already-selected tab is tapped again.
   final ValueListenable<int>? tabReselection;
@@ -142,30 +145,35 @@ class SearchPage extends HookConsumerWidget {
               ),
               child: Row(
                 children: [
-                  if (nativeIos)
-                    IosGlassNavigationButton(
-                      key: const Key('search-close'),
-                      icon: IosGlassNavigationIcon.close,
-                      semanticLabel: 'Close search',
-                      onPressed: closeSearch,
-                      controlSize: 48,
-                      foregroundColor: searchPrimaryColor,
-                    )
-                  else
-                    SizedBox.square(
-                      key: const Key('search-close'),
-                      dimension: 48,
-                      child: IconButton(
-                        tooltip: 'Close search',
+                  if (!embedded) ...[
+                    if (nativeIos)
+                      IosGlassNavigationButton(
+                        key: const Key('search-close'),
+                        icon: IosGlassNavigationIcon.close,
+                        semanticLabel: 'Close search',
                         onPressed: closeSearch,
-                        style: IconButton.styleFrom(
-                          backgroundColor: searchSurfaceColor,
-                          foregroundColor: searchPrimaryColor,
+                        controlSize: 48,
+                        foregroundColor: searchPrimaryColor,
+                      )
+                    else
+                      SizedBox.square(
+                        key: const Key('search-close'),
+                        dimension: 48,
+                        child: IconButton(
+                          tooltip: 'Close search',
+                          onPressed: closeSearch,
+                          style: IconButton.styleFrom(
+                            backgroundColor: searchSurfaceColor,
+                            foregroundColor: searchPrimaryColor,
+                          ),
+                          icon: const Icon(
+                            BuzzIcons.x,
+                            size: buzzSearchControlIconSize,
+                          ),
                         ),
-                        icon: const Icon(BuzzIcons.x),
                       ),
-                    ),
-                  const SizedBox(width: Grid.xxs),
+                    const SizedBox(width: Grid.xxs),
+                  ],
                   Expanded(
                     child: SizedBox(
                       key: const Key('search-field-container'),
@@ -304,12 +312,27 @@ class _SearchBody extends ConsumerWidget {
     final showMessages =
         filter == _SearchFilter.all || filter == _SearchFilter.messages;
 
+    // Only the active tab's results count, so a tab with none of its own
+    // says so rather than showing a blank list.
     final hasAnyResults =
-        state.channelResults.isNotEmpty ||
-        state.userResults.isNotEmpty ||
-        state.messageResults.isNotEmpty;
+        (showChannels && state.channelResults.isNotEmpty) ||
+        (showPeople && state.userResults.isNotEmpty) ||
+        (showMessages && state.messageResults.isNotEmpty);
     void recordResultSelection() =>
         ref.read(recentSearchesProvider.notifier).record(state.query);
+    // A failed directory means unjoined open channels may be missing, so the
+    // page must not claim there are no results.
+    final channelsFailed = showChannels && state.channelSearchFailed;
+    void retryChannels() => ref.read(searchProvider.notifier).retryChannels();
+
+    if (!state.isLoading && !hasAnyResults && channelsFailed) {
+      return Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.viewInsetsOf(context).bottom,
+        ),
+        child: Center(child: _ChannelSearchFailed(onRetry: retryChannels)),
+      );
+    }
 
     if (!state.isLoading && !hasAnyResults) {
       return Padding(
@@ -328,42 +351,88 @@ class _SearchBody extends ConsumerWidget {
       );
     }
 
-    return ListView(
+    return CustomScrollView(
       key: const Key('search-results-list'),
-      padding: EdgeInsets.only(
-        bottom:
-            Grid.xl +
-            MediaQuery.paddingOf(context).bottom +
-            MediaQuery.viewInsetsOf(context).bottom,
+      slivers: [
+        SliverPadding(
+          padding: EdgeInsets.only(
+            bottom:
+                Grid.xl +
+                MediaQuery.paddingOf(context).bottom +
+                MediaQuery.viewInsetsOf(context).bottom,
+          ),
+          sliver: SliverMainAxisGroup(
+            slivers: [
+              if (showChannels && state.channelResults.isNotEmpty)
+                _ChannelsSection(
+                  channels: state.channelResults,
+                  onResultSelected: recordResultSelection,
+                ),
+              if (channelsFailed)
+                SliverToBoxAdapter(
+                  child: _ChannelSearchFailed(onRetry: retryChannels),
+                ),
+              if (showPeople && state.userResults.isNotEmpty)
+                _PeopleSection(
+                  users: state.userResults,
+                  onResultSelected: recordResultSelection,
+                ),
+              if (showMessages && state.messageResults.isNotEmpty)
+                _MessagesSection(
+                  hits: state.messageResults,
+                  currentPubkey: currentPubkey,
+                  onResultSelected: recordResultSelection,
+                ),
+              if (state.isLoading)
+                const SliverToBoxAdapter(
+                  child: Padding(
+                    padding: EdgeInsets.all(Grid.sm),
+                    child: Center(
+                      child: BuzzLoadingIndicator(
+                        size: 36,
+                        semanticLabel: 'Loading more search results',
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Tells the user open-channel search failed, with desktop's Retry channels.
+class _ChannelSearchFailed extends StatelessWidget {
+  final VoidCallback onRetry;
+
+  const _ChannelSearchFailed({required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      key: const Key('search-channels-failed'),
+      padding: const EdgeInsets.symmetric(
+        horizontal: Grid.gutter,
+        vertical: Grid.xs,
       ),
-      children: [
-        if (showChannels && state.channelResults.isNotEmpty)
-          _ChannelsSection(
-            channels: state.channelResults,
-            onResultSelected: recordResultSelection,
-          ),
-        if (showPeople && state.userResults.isNotEmpty)
-          _PeopleSection(
-            users: state.userResults,
-            onResultSelected: recordResultSelection,
-          ),
-        if (showMessages && state.messageResults.isNotEmpty)
-          _MessagesSection(
-            hits: state.messageResults,
-            currentPubkey: currentPubkey,
-            onResultSelected: recordResultSelection,
-          ),
-        if (state.isLoading)
-          const Padding(
-            padding: EdgeInsets.all(Grid.sm),
-            child: Center(
-              child: BuzzLoadingIndicator(
-                size: 36,
-                semanticLabel: 'Loading more search results',
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Semantics(
+            liveRegion: true,
+            child: Text(
+              "Open channel search couldn't finish.",
+              textAlign: TextAlign.center,
+              style: context.textTheme.bodyMedium?.copyWith(
+                color: context.colors.onSurfaceVariant,
               ),
             ),
           ),
-      ],
+          TextButton(onPressed: onRetry, child: const Text('Retry channels')),
+        ],
+      ),
     );
   }
 }
@@ -472,57 +541,57 @@ class _ChannelsSection extends ConsumerWidget {
   });
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _SectionLabel(label: 'Channels'),
-        for (final channel in channels)
-          ListTile(
-            key: ValueKey('search-channel-row-${channel.id}'),
-            contentPadding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
-            leading: Icon(
-              channelIcon(channel),
-              key: ValueKey('search-channel-leading-${channel.id}'),
-              size: 20,
-            ),
-            title: Text(
-              channel.name,
-              key: ValueKey('search-channel-title-${channel.id}'),
-              style: contentListTitleTextStyle,
-            ),
-            subtitle: channel.isMember
-                ? Text(
-                    '${channel.memberCount} member${channel.memberCount == 1 ? '' : 's'}',
-                    style: contentListBodyTextStyle.copyWith(
-                      color: context.colors.onSurfaceVariant,
-                    ),
-                  )
-                : null,
-            trailing: !channel.isMember && !channel.isDm
-                ? Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: Grid.half + 2,
-                      vertical: 3,
-                    ),
-                    decoration: BoxDecoration(
-                      color: context.colors.primary.withValues(alpha: 0.1),
-                      borderRadius: BorderRadius.circular(Radii.sm),
-                    ),
-                    child: Text(
-                      'Open',
-                      style: context.textTheme.labelSmall?.copyWith(
-                        color: context.colors.primary,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  )
-                : null,
-            onTap: () {
-              onResultSelected();
-              _openSearchChannel(context, channel);
-            },
+    return SliverList.builder(
+      itemCount: channels.length + 1,
+      itemBuilder: (context, index) {
+        if (index == 0) return const _SectionLabel(label: 'Channels');
+        final channel = channels[index - 1];
+        return ListTile(
+          key: ValueKey('search-channel-row-${channel.id}'),
+          contentPadding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
+          leading: Icon(
+            channelIcon(channel),
+            key: ValueKey('search-channel-leading-${channel.id}'),
+            size: 20,
           ),
-      ],
+          title: Text(
+            channel.name,
+            key: ValueKey('search-channel-title-${channel.id}'),
+            style: contentListTitleTextStyle,
+          ),
+          subtitle: channel.isMember
+              ? Text(
+                  '${channel.memberCount} member${channel.memberCount == 1 ? '' : 's'}',
+                  style: contentListBodyTextStyle.copyWith(
+                    color: context.colors.onSurfaceVariant,
+                  ),
+                )
+              : null,
+          trailing: !channel.isMember && !channel.isDm
+              ? Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: Grid.half + 2,
+                    vertical: 3,
+                  ),
+                  decoration: BoxDecoration(
+                    color: context.colors.primary.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(Radii.sm),
+                  ),
+                  child: Text(
+                    'Open',
+                    style: context.textTheme.labelSmall?.copyWith(
+                      color: context.colors.primary,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                )
+              : null,
+          onTap: () {
+            onResultSelected();
+            _openSearchChannel(context, channel);
+          },
+        );
+      },
     );
   }
 }
@@ -545,46 +614,49 @@ class _PeopleSection extends ConsumerWidget {
       },
       fallbackNames: {for (final user in users) user.pubkey: user.label},
     );
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _SectionLabel(label: 'People'),
-        for (final user in users)
-          ListTile(
-            key: ValueKey('search-person-row-${user.pubkey}'),
-            contentPadding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
-            leading: AvatarImage(
-              key: ValueKey('search-person-leading-${user.pubkey}'),
-              imageUrl: user.avatarUrl,
-              radius: 20,
-              fallback: Text(user.initial),
-              isAgent: user.isAgent,
-            ),
-            title: Text(
-              names.labelFor(user.pubkey),
-              key: ValueKey('search-person-title-${user.pubkey}'),
-              style: contentListTitleTextStyle,
-            ),
-            subtitle: Text(
-              user.secondaryLabel,
-              style: contentListBodyTextStyle.copyWith(
-                color: context.colors.onSurfaceVariant,
-              ),
-            ),
-            onTap: () async {
-              onResultSelected();
-              final channel = await ref
-                  .read(channelActionsProvider)
-                  .openDm(pubkeys: [user.pubkey]);
-              if (!context.mounted) return;
-              await Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                  builder: (_) => ChannelDetailPage(channel: channel),
-                ),
-              );
-            },
+    return SliverList.builder(
+      itemCount: users.length + 1,
+      itemBuilder: (context, index) {
+        if (index == 0) return const _SectionLabel(label: 'People');
+        final user = users[index - 1];
+        return ListTile(
+          key: ValueKey('search-person-row-${user.pubkey}'),
+          contentPadding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
+          leading: AvatarImage(
+            key: ValueKey('search-person-leading-${user.pubkey}'),
+            imageUrl: user.avatarUrl,
+            radius: 20,
+            fallback: Text(user.initial),
+            isAgent: user.isAgent,
           ),
-      ],
+          title: Text(
+            names.labelFor(user.pubkey),
+            key: ValueKey('search-person-title-${user.pubkey}'),
+            style: contentListTitleTextStyle,
+          ),
+          subtitle: Text(
+            user.secondaryLabel,
+            style: contentListBodyTextStyle.copyWith(
+              color: context.colors.onSurfaceVariant,
+            ),
+          ),
+          onTap: () async {
+            onResultSelected();
+            final channel = await ref
+                .read(channelActionsProvider)
+                .openDm(pubkeys: [user.pubkey], waitForChannelList: false);
+            if (!context.mounted) return;
+            await Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => ChannelDetailPage(
+                  channel: channel,
+                  placement: ChannelRoutePlacement.ordinary,
+                ),
+              ),
+            );
+          },
+        );
+      },
     );
   }
 }
@@ -616,20 +688,20 @@ class _MessagesSection extends HookConsumerWidget {
       return null;
     }, [preloadPubkeysKey]);
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _SectionLabel(label: 'Messages'),
-        for (final hit in hits)
-          _MessageTile(
-            hit: hit,
-            authorProfile: profiles[hit.pubkey.toLowerCase()],
-            userCache: profiles,
-            channel: channels.where((c) => c.id == hit.channelId).firstOrNull,
-            currentPubkey: currentPubkey,
-            onResultSelected: onResultSelected,
-          ),
-      ],
+    return SliverList.builder(
+      itemCount: hits.length + 1,
+      itemBuilder: (context, index) {
+        if (index == 0) return const _SectionLabel(label: 'Messages');
+        final hit = hits[index - 1];
+        return _MessageTile(
+          hit: hit,
+          authorProfile: profiles[hit.pubkey.toLowerCase()],
+          userCache: profiles,
+          channel: channels.where((c) => c.id == hit.channelId).firstOrNull,
+          currentPubkey: currentPubkey,
+          onResultSelected: onResultSelected,
+        );
+      },
     );
   }
 }
@@ -654,10 +726,9 @@ Future<void> _openSearchChannel(BuildContext context, Channel channel) async {
     );
   } catch (_) {
     if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Couldn’t open this conversation. Try again.'),
-      ),
+    ScaffoldMessenger.of(context).showFeedbackSnackBar(
+      const SnackBar(content: Text('Couldn’t open conversation')),
+      kind: ToastKind.error,
     );
   }
 }

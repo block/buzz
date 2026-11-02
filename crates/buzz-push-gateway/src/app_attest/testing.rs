@@ -336,28 +336,14 @@ fn certificate_chain(change: impl FnOnce(&mut X509Builder)) -> Vec<Vec<u8>> {
     ]
 }
 
-/// Run the same signed-certificate corpus against an alternative adapter.
-pub fn compare_certificate_constraints<E: std::fmt::Debug>(
-    verify_chain: impl Fn(&[Vec<u8>], &[u8]) -> Result<(), E>,
-    verify_nonce: impl Fn(&[u8], &[u8]) -> Result<(), E>,
-) {
+/// Signed certificate chains that each break one path or usage constraint.
+pub fn rejected_certificate_chains() -> Vec<(&'static str, Vec<Vec<u8>>)> {
     use openssl::x509::extension::KeyUsage;
-    let root = X509::from_pem(TEST_ROOT_CA_CERT_PEM)
-        .unwrap()
-        .to_der()
-        .unwrap();
-    let valid = certificate_chain(|builder| {
-        builder
-            .append_extension(KeyUsage::new().digital_signature().build().unwrap())
-            .unwrap();
-    });
-    verify_chain(&valid, &root).unwrap();
     let wrong_usage = certificate_chain(|builder| {
         builder
             .append_extension(KeyUsage::new().key_encipherment().build().unwrap())
             .unwrap();
     });
-    assert!(verify_chain(&wrong_usage, &root).is_err());
     let expired = certificate_chain(|builder| {
         builder
             .set_not_before(&Asn1Time::from_unix(0).unwrap())
@@ -366,7 +352,6 @@ pub fn compare_certificate_constraints<E: std::fmt::Debug>(
             .set_not_after(&Asn1Time::from_unix(1).unwrap())
             .unwrap();
     });
-    assert!(verify_chain(&expired, &root).is_err());
     let unknown_critical = certificate_chain(|builder| {
         let oid = Asn1Object::from_str("1.2.3.4.5").unwrap();
         let value = Asn1OctetString::new_from_bytes(b"\x05\x00").unwrap();
@@ -376,8 +361,29 @@ pub fn compare_certificate_constraints<E: std::fmt::Debug>(
             )
             .unwrap();
     });
-    assert!(verify_chain(&unknown_critical, &root).is_err());
-    let duplicate_nonce = certificate_chain(|builder| {
+    let mut trailing = valid_certificate_chain();
+    trailing[0].push(0);
+    vec![
+        ("wrong usage", wrong_usage),
+        ("expired", expired),
+        ("unknown critical", unknown_critical),
+        ("duplicate nonce", duplicate_nonce_chain()),
+        ("trailing", trailing),
+    ]
+}
+
+/// A signed chain that satisfies every path and usage constraint.
+pub fn valid_certificate_chain() -> Vec<Vec<u8>> {
+    use openssl::x509::extension::KeyUsage;
+    certificate_chain(|builder| {
+        builder
+            .append_extension(KeyUsage::new().digital_signature().build().unwrap())
+            .unwrap();
+    })
+}
+
+fn duplicate_nonce_chain() -> Vec<Vec<u8>> {
+    certificate_chain(|builder| {
         let oid = Asn1Object::from_str("1.2.840.113635.100.8.2").unwrap();
         let value = Asn1OctetString::new_from_bytes(b"\x30\x00").unwrap();
         builder
@@ -385,10 +391,26 @@ pub fn compare_certificate_constraints<E: std::fmt::Debug>(
                 openssl::x509::X509Extension::new_from_der(&oid, false, &value).unwrap(),
             )
             .unwrap();
-    });
-    assert!(verify_chain(&duplicate_nonce, &root).is_err());
-    assert!(verify_nonce(&duplicate_nonce[0], &[7; 32]).is_err());
-    let mut trailing = valid;
-    trailing[0].push(0);
-    assert!(verify_chain(&trailing, &root).is_err());
+    })
+}
+
+/// DER of the test root that signs every chain above.
+pub fn test_root_der() -> Vec<u8> {
+    X509::from_pem(TEST_ROOT_CA_CERT_PEM)
+        .unwrap()
+        .to_der()
+        .unwrap()
+}
+
+/// Run the same signed-certificate corpus against an alternative adapter.
+pub fn compare_certificate_constraints<E: std::fmt::Debug>(
+    verify_chain: impl Fn(&[Vec<u8>], &[u8]) -> Result<(), E>,
+    verify_nonce: impl Fn(&[u8], &[u8]) -> Result<(), E>,
+) {
+    let root = test_root_der();
+    verify_chain(&valid_certificate_chain(), &root).unwrap();
+    for (name, chain) in rejected_certificate_chains() {
+        assert!(verify_chain(&chain, &root).is_err(), "{name}");
+    }
+    assert!(verify_nonce(&duplicate_nonce_chain()[0], &[7; 32]).is_err());
 }

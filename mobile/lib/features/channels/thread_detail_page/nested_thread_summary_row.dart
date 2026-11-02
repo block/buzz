@@ -23,29 +23,41 @@ class _NestedThreadSummaryRow extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    return Padding(
-      padding: const EdgeInsets.only(
-        left: messageAvatarSize + messageAvatarContentGap + Grid.xxs,
-        bottom: Grid.xxs,
-      ),
-      child: ReplySummaryLink(
-        key: ValueKey('nested-thread-summary-${replyMessage.id}'),
-        summary: summary,
-        hasReactions: replyMessage.reactions.isNotEmpty,
-        onTap: () {
-          Navigator.of(context).push(
-            MaterialPageRoute<void>(
-              builder: (_) => ThreadDetailPage(
-                threadHead: replyMessage,
-                allMessages: allMessages,
-                channelId: channelId,
-                currentPubkey: currentPubkey,
-                isMember: isMember,
-                isArchived: isArchived,
-              ),
-            ),
-          );
-        },
+    final ownMessage =
+        currentPubkey?.toLowerCase() == replyMessage.pubkey.toLowerCase();
+    return Align(
+      alignment: ownMessage ? Alignment.centerRight : Alignment.centerLeft,
+      child: Directionality(
+        textDirection: Directionality.of(context),
+        child: Padding(
+          padding: EdgeInsets.only(
+            left: ownMessage
+                ? 0
+                : messageAvatarSize + messageAvatarContentGap + Grid.xxs,
+            right: ownMessage ? Grid.xxs : 0,
+            bottom: Grid.xxs,
+          ),
+          child: ReplySummaryLink(
+            key: ValueKey('nested-thread-summary-${replyMessage.id}'),
+            summary: summary,
+            mirrored: ownMessage,
+            hasReactions: replyMessage.reactions.isNotEmpty,
+            onTap: () {
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => ThreadDetailPage(
+                    threadHead: replyMessage,
+                    allMessages: allMessages,
+                    channelId: channelId,
+                    currentPubkey: currentPubkey,
+                    isMember: isMember,
+                    isArchived: isArchived,
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
       ),
     );
   }

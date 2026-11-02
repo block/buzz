@@ -109,8 +109,15 @@ async fn accessory_router_signed_url_body_replay_and_actor_boundary() {
     for key in [&actor, &other] {
         state
             .db
-            .add_relay_member(community, &key.public_key().to_hex(), "member", None)
+            .add_relay_member(
+                community,
+                &key.public_key().to_hex(),
+                "member",
+                None,
+                &nostr::Keys::generate(),
+            )
             .await
+            .map(|write| write.outcome)
             .unwrap();
     }
     assert_eq!(
@@ -382,8 +389,15 @@ async fn accessory_write_revocation_is_terminal_before_persistence() {
     let actor = Keys::generate();
     state
         .db
-        .add_relay_member(community, &actor.public_key().to_hex(), "member", None)
+        .add_relay_member(
+            community,
+            &actor.public_key().to_hex(),
+            "member",
+            None,
+            &nostr::Keys::generate(),
+        )
         .await
+        .map(|write| write.outcome)
         .unwrap();
     let channel = state
         .db
@@ -431,8 +445,13 @@ async fn accessory_write_revocation_is_terminal_before_persistence() {
             .expect("admitted before revoke");
     state
         .db
-        .remove_relay_member(community, &actor.public_key().to_hex())
+        .remove_relay_member(
+            community,
+            &actor.public_key().to_hex(),
+            &nostr::Keys::generate(),
+        )
         .await
+        .map(|write| write.outcome)
         .unwrap();
     // Exercise the same per-item function the batch handler uses after admission.
     let result = super::handlers::write_intent(&state, &headers, &principal, &intent).await;
@@ -607,8 +626,15 @@ async fn signed_sidebar_deletion(deletion_kind: u16) {
     for key in [&admin, &author, &reader] {
         state
             .db
-            .add_relay_member(community, &key.public_key().to_hex(), "member", None)
+            .add_relay_member(
+                community,
+                &key.public_key().to_hex(),
+                "member",
+                None,
+                &nostr::Keys::generate(),
+            )
             .await
+            .map(|write| write.outcome)
             .unwrap();
     }
     let channel = state

@@ -1,10 +1,10 @@
 import 'dart:convert';
 
-import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import 'relay_provider.dart';
+import 'package:buzz/shared/crypto/event_signing.dart';
 
 const _mediaGetAuthKind = 24242;
 const _mediaGetAuthLifetimeSeconds = 60;
@@ -31,6 +31,7 @@ const _mediaGetAuthRefreshMarginSeconds = 60;
 class MediaGetAuthService {
   final String _baseUrl;
   final String? _nsec;
+  final String? _pubkey;
   final DateTime Function() _now;
 
   Map<String, String>? _cachedHeaders;
@@ -39,9 +40,11 @@ class MediaGetAuthService {
   MediaGetAuthService({
     required String baseUrl,
     required String? nsec,
+    String? pubkey,
     DateTime Function()? now,
   }) : _baseUrl = baseUrl,
        _nsec = nsec,
+       _pubkey = pubkey,
        _now = now ?? DateTime.now;
 
   bool isRelayMediaUrl(String url) {
@@ -117,32 +120,25 @@ class MediaGetAuthService {
         ['server', authority],
     ];
 
-    return nostr.Event.from(
+    return signNostrEvent(
       kind: _mediaGetAuthKind,
       content: 'Get buzz-media',
       tags: tags,
       secretKey: privkeyHex,
-      verify: false,
+      // Reuse the cached pubkey rather than deriving it per image.
+      pubkey: _pubkey,
     );
   }
 }
 
 final mediaGetAuthServiceProvider = Provider<MediaGetAuthService>((ref) {
   final config = ref.watch(relayConfigProvider);
-  return MediaGetAuthService(baseUrl: config.baseUrl, nsec: config.nsec);
+  return MediaGetAuthService(
+    baseUrl: config.baseUrl,
+    nsec: config.nsec,
+    pubkey: ref.watch(myPubkeyProvider),
+  );
 });
-
-Map<String, String> mediaGetHeadersFor(WidgetRef ref, String url) {
-  return ref.read(mediaGetAuthServiceProvider).headersFor(url);
-}
-
-Map<String, String> mediaGetHeadersForContext(
-  BuildContext context,
-  String url,
-) {
-  final container = ProviderScope.containerOf(context, listen: false);
-  return container.read(mediaGetAuthServiceProvider).headersFor(url);
-}
 
 String? extractServerAuthority(String baseUrl) {
   final uri = Uri.parse(baseUrl);

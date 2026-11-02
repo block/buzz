@@ -64,6 +64,7 @@ Example kind:39000 (signing fields and unrelated tags omitted):
 | later `t` | 39000–39002 | Channel labels. |
 | `P` | 39000–39002 | Public key that signed the kind:9007 that created the channel. |
 | `created_at` | 39000 | Time the channel was created, in unix seconds, as a decimal string. |
+| `auto_join` | 39000 | Present (bare, no value) while the relay joins new community members into this channel: the channel's `auto_join` setting is on and it is open and unarchived. |
 
 **Channel type.** Clients MUST read the channel type from the first `t` tag.
 Later `t` tags are labels.
@@ -170,25 +171,89 @@ NIP-29 `hidden` tag.
 
 The relay leaves system channels out of every read that does not name them.
 Clients that do not know about system channels then stay correct with no
-change. This applies to:
+change.
+
+A client sees a channel only if it knows the channel's type. A read that does
+not name a channel returns only the **legacy types**: `stream`, `forum`, `dm`
+and `workflow`, the types that every client knew before this NIP. This list is
+frozen. The relay leaves out every other type, so a channel type added later
+is also hidden from clients that do not know it. A filter that names such a
+channel (see below) reads it under the ordinary rules, and no other filter in
+the same request gains it. The opt-in in "Asking for system channels"
+(`#t:["system"]` or `#P`) adds system channels only, never a channel of
+another type. Each new type needs its own way to ask for all its channels.
+This applies to:
 
 - a filter without `#h`, for example the channels or messages a reader can see;
 - kind:39002 `#p:["<reader>"]`, the channels a reader belongs to;
 - COUNT and NIP-50 search; and
 - any relay-specific query API that does the same reads.
 
-A filter **names** a system channel when it has the channel ID in `#h`, or in
-`#d` on a filter whose kinds are all 39000–39003. Then the ordinary read rules
-apply: the reader can read the channel if they are a member or if it is open.
+A filter **names** a channel when it has the channel ID in `#h`, or in `#d` on
+a filter whose kinds are all 39000–39003. This is the same for a system
+channel and for a type added later. Then the ordinary read rules apply: the
+reader can read the channel if they are a member or if it is open.
 A client that has the ID, for example from a link, can open the channel. Thus
 a system channel stays an ordinary NIP-29 group.
 
-The relay decides this for each filter. A filter that names a system channel
-does not add it to another filter in the same request.
+The relay decides this for each filter. A filter that names a channel does
+not add it to another filter in the same request.
 
-The relay MUST NOT send push notifications or kind:44100/44101 membership
-notifications for system channels. A client that received one would show the
-channel.
+An **unlisted** open channel (Buzz's `unlisted` setting, see NOSTR.md) is
+named-only in the same way for readers who are not members, whatever its
+type. Its members read it like any other channel. The system-channel opt-in
+never adds it.
+
+Push notifications (NIP-PL) use the same rule. A lease filter wakes its
+author for an event in a system channel or a channel of a type added later
+only when the filter names that channel. A lease filter cannot have `#t` or
+`#P`, so here "names" means `#h`. The relay still checks that the author can
+read the event, as for every other channel.
+
+### Membership notices carry the channel type
+
+Every kind:44100 (added) and kind:44101 (removed) notice has one more tag,
+`["t", <channel_type>]`, for example `["t", "stream"]` or `["t", "system"]`.
+The relay sets it from the channel type when it sends the notice. A channel's
+type does not change. The relay stores the notice like any other 44100/44101.
+
+A client sees a notice only if it knows the notice's channel type. Old
+clients do not know types added later, such as `system`, and would show the
+channel from such a notice. So the relay MUST apply this rule:
+
+- **A filter with `#t`** matches a notice only when the notice's type is one
+  of the `#t` values.
+- **A filter without `#t`** matches a notice only when its type is one of the
+  **legacy types**: `stream`, `forum`, `dm`, `workflow`. This list is fixed.
+  A type added later is never on it, so old clients never see its notices.
+- **A notice without a `t` tag** was stored before this rule. Every such
+  notice is about a legacy type, so the relay treats it as all of them: it
+  matches a filter without `#t`, and a filter whose `#t` has a legacy type.
+  On these two kinds, this replaces the plain NIP-01 `#t` match.
+
+The rule applies on every path: REQ history, live delivery, COUNT, and any
+relay-specific query API. Existing clients do not send `#t` on these kinds,
+so they see no change.
+
+A client that knows every current type sends one filter:
+
+```json
+{"kinds": [44100, 44101], "#p": ["<me>"], "#t": ["stream", "forum", "dm", "workflow", "system"]}
+```
+
+When Buzz adds a type, a client adds its value to `#t` when it supports that
+type.
+
+The `#p` rule for 44100/44101 still applies: it must be the reader's own
+pubkey. An `ids` filter does not lift it: the relay returns, counts or
+delivers a 44100/44101 only to the pubkey in its `p` tag, even to a reader
+who knows the event id.
+
+Because the notices are stored, a client that reconnects can set `since` to
+the newest notice it has seen. One subscription then returns the notices it
+missed and the new ones, so no change falls between a read and a
+subscription. A notice is a hint: the channel's group-state events decide
+membership.
 
 ### Asking for system channels
 
@@ -200,7 +265,8 @@ the reader can read when it has:
   result, so it does not fill generic channel lists.
 
 The filter then matches as usual. A label alone does not ask for system
-channels.
+channels. These filters add only system channels. A channel of a type added
+later reaches only a filter that names it.
 
 | To find | Filter |
 | --- | --- |

@@ -2,6 +2,7 @@ import 'package:buzz/shared/deeplink/deep_link.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 void main() {
@@ -13,6 +14,22 @@ void main() {
   tearDown(() {
     PendingDeepLinkNotifier.debugUriStreamOverride = null;
     pendingPushNotificationLink.value = null;
+  });
+
+  test('unsupported callback does not log its code or state', () {
+    final messages = <String?>[];
+    final previous = debugPrint;
+    debugPrint = (message, {wrapWidth}) => messages.add(message);
+    addTearDown(() => debugPrint = previous);
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container
+        .read(pendingDeepLinkProvider.notifier)
+        .open(Uri.parse('buzz://auth?code=secret-code&state=secret-state'));
+    expect(container.read(pendingDeepLinkProvider), isNull);
+    expect(messages.join(), isNot(contains('secret-code')));
+    expect(messages.join(), isNot(contains('secret-state')));
+    expect(messages, isNotEmpty);
   });
 
   test('parks and consumes a native notification message link', () async {

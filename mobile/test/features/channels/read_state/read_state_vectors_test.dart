@@ -235,6 +235,44 @@ void main() {
     expect(store.writes, greaterThan(1));
   });
 
+  test(
+    'reconnect during pending save requires a fresh capacity snapshot',
+    () async {
+      final store = _FailingJournalStore()..fail = false;
+      final harness = await _Owner.create(corpus['now'], store: store);
+      var interrupted = false;
+      store.afterSave = (value) {
+        final journal = jsonDecode(value as String) as Map;
+        if (!interrupted && (journal['pending'] as Map).isNotEmpty) {
+          interrupted = true;
+          harness.session.debugSupersedeConnection();
+        }
+      };
+      harness.advance({'room': harness.now});
+      await harness.manager.flush();
+      expect(interrupted, isTrue);
+      expect(harness.session.attempts, isEmpty);
+      expect(harness.manager.syncError, isNotNull);
+      final journalKey =
+          '${harness.keys.public}:${Uri.encodeComponent('https://relay.example')}';
+      final saved = ReadStateStorage(harness.prefs).readJournal(journalKey)!;
+      final pending = (saved['pending'] as Map).values.single;
+      // The new connection discovers capacity consumed during the gap. Neither
+      // the exact pending retry nor its successor may bypass this new snapshot.
+      harness.session.history.addAll(
+        List.generate(4096, (i) => harness.unrelated('other-$i', '')),
+      );
+      await harness.manager.flush();
+      expect(harness.session.attempts, isEmpty);
+      expect(harness.manager.syncError, isNotNull);
+      harness.session.history.clear();
+      await harness.manager.flush();
+      expect(harness.manager.syncError, isNull);
+      expect(harness.session.attempts.single.toJson(), pending);
+      expect(harness.published, {'room': harness.now});
+    },
+  );
+
   test('retired ACK cannot replace successor journal', () async {
     final harness = await _Owner.create(corpus['now']);
     final gate = Completer<void>();
@@ -256,9 +294,9 @@ void main() {
     await oldFlush;
     harness.restart();
     expect(harness.manager.getEffectiveTimestamp('successor'), harness.now);
-    final saved = ReadStateStorage(
-      harness.prefs,
-    ).readJournal(harness.keys.public)!;
+    final saved = ReadStateStorage(harness.prefs).readJournal(
+      '${harness.keys.public}:${Uri.encodeComponent('https://relay.example')}',
+    )!;
     expect((saved['pending'] as Map).length, 1);
     await harness.manager.flush();
     expect(harness.manager.syncError, isNull);
@@ -364,9 +402,9 @@ void main() {
       harness.advance(frontiers);
       // Inspect the actual journal at the network boundary, not after send.
       harness.session.beforePublish = (event) {
-        final saved = ReadStateStorage(
-          harness.prefs,
-        ).readJournal(harness.keys.public)!;
+        final saved = ReadStateStorage(harness.prefs).readJournal(
+          '${harness.keys.public}:${Uri.encodeComponent('https://relay.example')}',
+        )!;
         final slot = event.tags
             .firstWhere((tag) => tag.first == 'd')[1]
             .substring(readStateDTagPrefix.length);
@@ -379,9 +417,9 @@ void main() {
       if (id == 'partial-publish-restart') {
         expect(harness.manager.syncError, isNotNull);
         final unknown = harness.session.attempts.last;
-        final saved = ReadStateStorage(
-          harness.prefs,
-        ).readJournal(harness.keys.public)!;
+        final saved = ReadStateStorage(harness.prefs).readJournal(
+          '${harness.keys.public}:${Uri.encodeComponent('https://relay.example')}',
+        )!;
         expect(saved['local'], frontiers);
         expect((saved['pending'] as Map).length, 1);
         harness.restart();
@@ -474,6 +512,7 @@ class _Owner {
   void _open() {
     manager = ReadStateManager(
       pubkey: keys.public,
+      relayUrl: 'https://relay.example',
       prefs: prefs,
       crypto: crypto,
       relaySession: session,
@@ -585,13 +624,18 @@ class _VectorRelay extends RelaySessionNotifier {
 class _FailingJournalStore extends InMemorySharedPreferencesStore {
   bool fail = true;
   int writes = 0;
+  void Function(Object)? afterSave;
   _FailingJournalStore() : super.empty();
   @override
-  Future<bool> setValue(String type, String key, Object value) {
+  Future<bool> setValue(String type, String key, Object value) async {
     if (key.startsWith('flutter.buzz.nip-rs.journal.v1:')) {
       writes++;
       if (fail) return Future.value(false);
     }
-    return super.setValue(type, key, value);
+    final result = await super.setValue(type, key, value);
+    if (key.startsWith('flutter.buzz.nip-rs.journal.v1:')) {
+      afterSave?.call(value);
+    }
+    return result;
   }
 }

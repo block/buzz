@@ -134,17 +134,6 @@ void main() {
     });
   });
 
-  test('mergeReadStateContexts keeps the maximum timestamp per context', () {
-    expect(
-      mergeReadStateContexts([
-        {'channel-a': 10, 'channel-b': 5},
-        {'channel-a': 7, 'channel-c': 1},
-        {'channel-b': 12},
-      ]),
-      {'channel-a': 10, 'channel-b': 12, 'channel-c': 1},
-    );
-  });
-
   test('pruneStaleContexts prunes all old hints without count eviction', () {
     const now = 10 * readStateHorizonSeconds;
     final fresh = now - 60;

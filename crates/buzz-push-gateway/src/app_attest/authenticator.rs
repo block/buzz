@@ -5,7 +5,7 @@ use super::{
     properties::ClientProperties,
 };
 use aws_lc_rs::digest::{digest, SHA256};
-use p256::elliptic_curve::sec1::ToEncodedPoint;
+use p256::elliptic_curve::sec1::ToSec1Point;
 
 pub(super) struct Checked {
     pub counter: u32,
@@ -130,7 +130,7 @@ fn credential_key(tail: &[u8]) -> Result<([u8; 65], usize), Error> {
     let key = p256::PublicKey::from_sec1_bytes(&encoded).map_err(|_| Error::InvalidPublicKey)?;
 
     Ok((
-        key.to_encoded_point(false)
+        key.to_sec1_point(false)
             .as_bytes()
             .try_into()
             .map_err(|_| Error::InvalidPublicKey)?,

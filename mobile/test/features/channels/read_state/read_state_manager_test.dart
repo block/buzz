@@ -10,6 +10,8 @@ import 'package:buzz/shared/read_state/read_state_manager.dart';
 import 'package:buzz/shared/read_state/read_state_storage.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
+const _relayUrl = 'https://relay.example';
+
 void main() {
   test('dispose flushes a pending publish after marking disposed', () async {
     SharedPreferences.setMockInitialValues({});
@@ -23,6 +25,7 @@ void main() {
     final relay = _FakeSignedEventRelay();
     final manager = ReadStateManager(
       pubkey: keychain.public,
+      relayUrl: _relayUrl,
       prefs: prefs,
       crypto: crypto!,
       relaySession: null,
@@ -59,6 +62,7 @@ void main() {
     final relay = _UnsupportedKindSignedEventRelay();
     final manager = ReadStateManager(
       pubkey: keychain.public,
+      relayUrl: _relayUrl,
       prefs: prefs,
       crypto: crypto!,
       relaySession: null,
@@ -92,6 +96,7 @@ void main() {
       final relay = _MissingScopeSignedEventRelay();
       final manager = ReadStateManager(
         pubkey: keychain.public,
+        relayUrl: _relayUrl,
         prefs: prefs,
         crypto: crypto!,
         relaySession: null,
@@ -123,6 +128,7 @@ void main() {
     final relay = _FakeSignedEventRelay();
     final manager = ReadStateManager(
       pubkey: keychain.public,
+      relayUrl: _relayUrl,
       prefs: prefs,
       crypto: crypto,
       relaySession: null,
@@ -175,6 +181,7 @@ void main() {
     final relay = _FakeSignedEventRelay();
     final manager = ReadStateManager(
       pubkey: keychain.public,
+      relayUrl: _relayUrl,
       prefs: prefs,
       crypto: crypto,
       relaySession: session,
@@ -221,6 +228,7 @@ void main() {
         final relay = _ParkedSignedEventRelay(failFirst: failFirst);
         final manager = ReadStateManager(
           pubkey: keychain.public,
+          relayUrl: _relayUrl,
           prefs: prefs,
           crypto: crypto,
           relaySession: null,
@@ -266,6 +274,7 @@ void main() {
       const now = 1800000000;
       ReadStateManager create() => ReadStateManager(
         pubkey: keys.public,
+        relayUrl: 'https://relay.example',
         prefs: prefs,
         crypto: crypto,
         relaySession: null,
@@ -288,6 +297,36 @@ void main() {
     },
   );
 
+  test('each community keeps its own slot, seeded from the shared one, '
+      'and none takes the shared marks', () async {
+    SharedPreferences.setMockInitialValues({
+      'buzz.nip-rs.slot-id:pk': 'a' * 32,
+      'buzz.channel-read-state.v2:pk':
+          '{"channel-1":"2026-01-01T00:00:00.000",'
+          '"thread-activity:root-1":"2026-01-01T00:00:00.000"}',
+      'buzz.channel-read-state.publishable.v1:pk':
+          '["channel-1","thread-activity:root-1"]',
+    });
+    final prefs = await SharedPreferences.getInstance();
+    final storage = ReadStateStorage(prefs);
+
+    // Both communities keep publishing to the slot they already have.
+    expect(storage.getOrCreateSlotId('pk', _relayUrl), 'a' * 32);
+    expect(storage.getOrCreateSlotId('pk', 'https://other.example'), 'a' * 32);
+    storage.writeSlotId('pk', 'https://other.example', 'b' * 32);
+    expect(storage.getOrCreateSlotId('pk', _relayUrl), 'a' * 32);
+
+    // The shared marks may be another community's, and the relay keeps
+    // the published ones, so neither community takes them.
+    expect(storage.read('pk', _relayUrl).contexts, isEmpty);
+    expect(storage.read('pk', 'https://other.example').contexts, isEmpty);
+    expect(prefs.containsKey('buzz.channel-read-state.v2:pk'), isFalse);
+    expect(
+      prefs.containsKey('buzz.channel-read-state.publishable.v1:pk'),
+      isFalse,
+    );
+  });
+
   test('carries its own override keys and takes none from others', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -297,8 +336,8 @@ void main() {
       pubkey: keychain.public,
     )!;
     final storage = ReadStateStorage(prefs);
-    final clientId = storage.getOrCreateClientId(keychain.public);
-    final slotId = storage.getOrCreateSlotId(keychain.public);
+    final clientId = storage.getOrCreateClientId(keychain.public, _relayUrl);
+    final slotId = storage.getOrCreateSlotId(keychain.public, _relayUrl);
     const ownGroup = {
       'ov_s:channel-1': 2,
       'ov_c:channel-1': 1,
@@ -337,6 +376,7 @@ void main() {
     final relay = _FakeSignedEventRelay();
     final manager = ReadStateManager(
       pubkey: keychain.public,
+      relayUrl: _relayUrl,
       prefs: prefs,
       crypto: crypto,
       relaySession: session,
@@ -373,6 +413,7 @@ void main() {
     final restartedRelay = _FakeSignedEventRelay();
     final restarted = ReadStateManager(
       pubkey: keychain.public,
+      relayUrl: _relayUrl,
       prefs: prefs,
       crypto: crypto,
       relaySession: null,
@@ -406,8 +447,8 @@ void main() {
       pubkey: keychain.public,
     )!;
     final storage = ReadStateStorage(prefs);
-    final clientId = storage.getOrCreateClientId(keychain.public);
-    final slotId = storage.getOrCreateSlotId(keychain.public);
+    final clientId = storage.getOrCreateClientId(keychain.public, _relayUrl);
+    final slotId = storage.getOrCreateSlotId(keychain.public, _relayUrl);
     final session = _FakeRelaySession()
       ..historyEvents = [
         _readStateEvent(
@@ -435,6 +476,7 @@ void main() {
     final relay = _FakeSignedEventRelay();
     final manager = ReadStateManager(
       pubkey: keychain.public,
+      relayUrl: _relayUrl,
       prefs: prefs,
       crypto: crypto,
       relaySession: session,
@@ -472,8 +514,8 @@ void main() {
       pubkey: keychain.public,
     )!;
     final storage = ReadStateStorage(prefs);
-    final clientId = storage.getOrCreateClientId(keychain.public);
-    final slotId = storage.getOrCreateSlotId(keychain.public);
+    final clientId = storage.getOrCreateClientId(keychain.public, _relayUrl);
+    final slotId = storage.getOrCreateSlotId(keychain.public, _relayUrl);
     final session = _FakeRelaySession()
       ..historyEvents = [
         _readStateEvent(
@@ -495,6 +537,7 @@ void main() {
     final relay = _FakeSignedEventRelay();
     final manager = ReadStateManager(
       pubkey: keychain.public,
+      relayUrl: _relayUrl,
       prefs: prefs,
       crypto: crypto,
       relaySession: session,
@@ -525,6 +568,7 @@ void main() {
       final session = _JournalRelaySession();
       ReadStateManager create() => ReadStateManager(
         pubkey: keys.public,
+        relayUrl: 'https://relay.example',
         prefs: prefs,
         crypto: crypto,
         relaySession: session,
@@ -544,7 +588,9 @@ void main() {
       expect(manager.syncError, isNotNull);
       expect(session.attempts, hasLength(2));
       final unknown = session.attempts.last;
-      final saved = ReadStateStorage(prefs).readJournal(keys.public)!;
+      final saved = ReadStateStorage(prefs).readJournal(
+        '${keys.public}:${Uri.encodeComponent('https://relay.example')}',
+      )!;
       expect((saved['pending'] as Map).length, 1);
       expect((saved['local'] as Map).length, 1100);
       manager.dispose(flushPending: false);
@@ -555,7 +601,10 @@ void main() {
       expect(restarted.syncError, isNull);
       expect(session.attempts[2].toJson(), unknown.toJson());
       expect(
-        (ReadStateStorage(prefs).readJournal(keys.public)!['pending'] as Map),
+        (ReadStateStorage(prefs).readJournal(
+              '${keys.public}:${Uri.encodeComponent('https://relay.example')}',
+            )!['pending']
+            as Map),
         isEmpty,
       );
       final published = mergeReadStateContexts([
@@ -581,6 +630,7 @@ void main() {
     final relay = _FakeSignedEventRelay();
     ReadStateManager create() => ReadStateManager(
       pubkey: keys.public,
+      relayUrl: 'https://relay.example',
       prefs: prefs,
       crypto: crypto,
       relaySession: null,
@@ -632,9 +682,9 @@ void main() {
     )!;
     ReadStateManager create(String origin) => ReadStateManager(
       pubkey: keys.public,
+      relayUrl: origin,
       prefs: prefs,
       crypto: crypto,
-      relayUrl: origin,
       relaySession: null,
       signedEventRelay: _FakeSignedEventRelay(),
       remoteEnabled: true,
@@ -650,6 +700,134 @@ void main() {
     second.dispose(flushPending: false);
   });
 
+  test(
+    'a connect during a successful initialize does not sync again',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      // First connect: initialize waits on a history REQ held for the socket
+      // while the session reports connected and the provider's listener fires.
+      final gate = Completer<void>();
+      final relay = _FakeRelaySession()..fetchGate = gate.future;
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+
+      final initializing = manager.initialize();
+      final reinitializing = manager.reinitializeRemote();
+      relay.fetchGate = null;
+      gate.complete();
+      await Future.wait([initializing, reinitializing]);
+
+      expect(relay.fetchCount, 1);
+      expect(relay.subscribeCount, 1);
+      expect(relay.liveSubscriptions, 1);
+
+      // A later reconnect syncs again and still leaves one subscription.
+      await manager.reinitializeRemote();
+      expect(relay.fetchCount, 2);
+      expect(relay.subscribeCount, 2);
+      expect(relay.liveSubscriptions, 1);
+
+      manager.dispose();
+      expect(relay.liveSubscriptions, 0);
+    },
+  );
+
+  test('a connect during a failed initialize syncs again', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+    final gate = Completer<void>();
+    final relay = _FakeRelaySession()
+      ..fetchGate = gate.future
+      ..failNextFetch = true;
+    final manager = ReadStateManager(
+      pubkey: keychain.public,
+      relayUrl: _relayUrl,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: relay,
+      signedEventRelay: _FakeSignedEventRelay(),
+      remoteEnabled: true,
+      onChanged: () {},
+    );
+
+    final initializing = manager.initialize();
+    final reinitializing = manager.reinitializeRemote();
+    relay.fetchGate = null;
+    gate.complete();
+    await Future.wait([initializing, reinitializing]);
+
+    // Both passes subscribed, but the later one replaced the earlier one.
+    expect(relay.fetchCount, 2);
+    expect(relay.subscribeCount, 2);
+    expect(relay.liveSubscriptions, 1);
+
+    manager.dispose();
+    expect(relay.liveSubscriptions, 0);
+  });
+
+  test('reconnects during a re-sync leave one live subscription', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+    final relay = _FakeRelaySession();
+    final manager = ReadStateManager(
+      pubkey: keychain.public,
+      relayUrl: _relayUrl,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: relay,
+      signedEventRelay: _FakeSignedEventRelay(),
+      remoteEnabled: true,
+      onChanged: () {},
+    );
+    await manager.initialize();
+
+    // The first re-sync holds its fetch; three more connects arrive.
+    final gate = Completer<void>();
+    relay.fetchGate = gate.future;
+    final first = manager.reinitializeRemote();
+    await Future<void>.delayed(Duration.zero);
+    final later = [
+      manager.reinitializeRemote(),
+      manager.reinitializeRemote(),
+      manager.reinitializeRemote(),
+    ];
+    relay.fetchGate = null;
+    gate.complete();
+    await Future.wait([first, ...later]);
+
+    // One initial pass, the held re-sync, and one shared re-sync after it.
+    expect(relay.fetchCount, 3);
+    expect(relay.subscribeCount, 3);
+    expect(relay.liveSubscriptions, 1);
+
+    manager.dispose();
+    expect(relay.liveSubscriptions, 0);
+  });
+
   test('remote read-state rollback is ignored', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -661,6 +839,7 @@ void main() {
     final relay = _FakeRelaySession();
     final manager = ReadStateManager(
       pubkey: keychain.public,
+      relayUrl: _relayUrl,
       prefs: prefs,
       crypto: crypto!,
       relaySession: relay,
@@ -834,24 +1013,49 @@ NostrEvent _readStateEvent({
 
 class _FakeRelaySession extends RelaySessionNotifier {
   List<NostrEvent> historyEvents = [];
+  Future<void>? fetchGate;
+  bool failNextFetch = false;
+  int fetchCount = 0;
+  int subscribeCount = 0;
+  int liveSubscriptions = 0;
+  final List<NostrFilter> fetchFilters = [];
+  final List<NostrFilter> subscribeFilters = [];
 
   @override
   Future<List<NostrEvent>> fetchReadStateSnapshot({
     Duration timeout = const Duration(seconds: 8),
-  }) async => historyEvents;
+  }) => fetchHistory(const NostrFilter(kinds: [30078]));
 
   @override
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-  }) async => historyEvents;
+  }) async {
+    fetchCount++;
+    fetchFilters.add(filter);
+    await fetchGate;
+    if (failNextFetch) {
+      failNextFetch = false;
+      throw TimeoutException('history timed out');
+    }
+    return historyEvents;
+  }
 
   @override
   Future<void Function()> subscribe(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
-  }) async => () {};
+  }) async {
+    subscribeCount++;
+    subscribeFilters.add(filter);
+    liveSubscriptions++;
+    var open = true;
+    return () {
+      if (open) liveSubscriptions--;
+      open = false;
+    };
+  }
 }
 
 class _JournalRelaySession extends _FakeRelaySession {

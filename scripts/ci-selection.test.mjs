@@ -217,7 +217,17 @@ const scenarios = [
     ["mobile"],
   ],
   ["mobile lockfile", ["mobile/pubspec.lock"], ["mobile"]],
+  [
+    "mobile release source helper",
+    ["scripts/mobile-release-source.sh"],
+    ["mobile"],
+  ],
   ["mobile release script", ["scripts/mobile-release.sh"], ["mobile"]],
+  [
+    "mobile gateway recipe tests",
+    ["scripts/test-mobile-gateway-recipes.sh"],
+    ["mobile"],
+  ],
   ["desktop", ["desktop/src/main.tsx"], ["desktop"]],
   ["Tauri", ["desktop/src-tauri/src/main.rs"], ["desktop", "desktop-rust"]],
   ["relay", ["crates/buzz-relay/src/main.rs"], ["rust"]],
@@ -232,8 +242,9 @@ const scenarios = [
     [".github/workflows/_ci-desktop.yml"],
     ["desktop", "mobile", "rust"],
   ],
-  ["Justfile", ["Justfile"], ["desktop", "rust"]],
+  ["Justfile", ["Justfile"], ["desktop", "mobile", "rust"]],
   ["CI apt retry", ["scripts/ci-apt-retry.sh"], ["desktop", "rust"]],
+  ["CI Hermit retry", ["scripts/ci-hermit-retry.sh"], ["mobile", "rust"]],
   ["integration services", ["docker-compose.yml"], ["rust"]],
   ["CI integration images", ["docker-compose.ci.yml"], ["rust"]],
   [

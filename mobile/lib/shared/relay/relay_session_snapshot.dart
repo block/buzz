@@ -71,7 +71,7 @@ extension on RelaySessionNotifier {
       });
     final text = await send(request, readStateSnapshotMaxBytes + 4096);
     // Parsing and Schnorr verification must not block Flutter's UI isolate.
-    final events = await compute(validateReadStateSnapshot, (
+    final events = await _snapshotDecoder((
       text: text,
       viewer: viewer,
       community: community,

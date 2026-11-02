@@ -10,13 +10,16 @@ use uuid::Uuid;
 
 use crate::error::{DbError, Result};
 use crate::Db;
-use buzz_core::CommunityId;
+use buzz_core::{CommunityId, StoredEvent};
 use buzz_datastore_tracing::datastore_span;
 
 // Re-export the canonical enum definitions from buzz-core.
 // These live in core (zero I/O deps) so the SDK can share them
 // without pulling in sqlx/tokio.
-pub use buzz_core::channel::{ChannelType, ChannelVisibility, MemberRole};
+pub use buzz_core::channel::{
+    decide_member_put, ChannelJoinRole, ChannelType, ChannelVisibility, MemberPut, MemberPutDenial,
+    MemberRole,
+};
 
 // Keep the established channel module paths compatible while membership SQL
 // and invariants live in their dedicated store module.
@@ -24,9 +27,9 @@ pub use crate::channel_members::{
     add_member, get_accessible_channel_ids, get_accessible_channels, get_bot_members,
     get_member_count, get_member_counts_bulk, get_member_role, get_members, get_members_bulk,
     get_users_bulk, is_member, list_large_channel_rosters_needing_reconciliation,
-    lock_member_snapshot, membership_pairs, remove_member, verify_channel_roster_fence_behavior,
-    verify_channel_roster_fence_catalog, AccessibleChannel, BotChannelEntry, BotMemberRecord,
-    ChannelIdentity, LargeChannelRoster, LockedMemberSnapshot, MemberRecord, UserRecord,
+    lock_member_snapshot, membership_pairs, remove_member, AccessibleChannel, BotChannelEntry,
+    BotMemberRecord, ChannelIdentity, LargeChannelRoster, LockedMemberSnapshot, MemberRecord,
+    UserRecord,
 };
 
 /// A channel row as returned from the database.
@@ -78,6 +81,18 @@ pub struct ChannelRecord {
     pub ttl_deadline: Option<DateTime<Utc>>,
     /// Labels published as `["t", <label>]` after the channel type tag.
     pub labels: Vec<String>,
+    /// The role a new person gets (`"member"` or `"guest"`). Parse with
+    /// [`buzz_core::channel::ChannelJoinRole::parse_fail_closed`].
+    pub join_role: String,
+    /// Whether the channel is left out of channel listings for non-members.
+    /// It matters only while the channel is open: anyone can still read and
+    /// join an unlisted open channel by naming it, and private channels are
+    /// never listed to non-members.
+    pub unlisted: bool,
+    /// Whether the relay joins new community members into this channel. Only
+    /// effective while the channel is open and unarchived; see
+    /// [`group_metadata_tags`] and [`list_auto_join_channels`].
+    pub auto_join: bool,
 }
 
 impl ChannelRecord {
@@ -103,6 +118,7 @@ pub async fn create_channel(
     created_by: &[u8],
     ttl_seconds: Option<i32>,
     labels: &[String],
+    unlisted: bool,
 ) -> Result<ChannelRecord> {
     if created_by.len() != 32 {
         return Err(DbError::InvalidData(format!(
@@ -127,9 +143,9 @@ pub async fn create_channel(
 
     sqlx::query(
         r#"
-        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline, labels)
+        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline, labels, unlisted)
         VALUES ($1, $2, $3, $4::channel_type, $5::channel_visibility, $6, $7, $8,
-                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END, $9)
+                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END, $9, $10)
         "#,
     )
     .bind(id)
@@ -141,6 +157,7 @@ pub async fn create_channel(
     .bind(created_by)
     .bind(ttl_seconds)
     .bind(labels)
+    .bind(unlisted)
     .execute(tx.conn())
     .await?;
 
@@ -149,6 +166,7 @@ pub async fn create_channel(
         INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
         VALUES ($1, $2, $3, 'owner', $4)
         ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
+            sync_modified_at = CASE WHEN channel_members.removed_at IS NOT NULL THEN clock_timestamp() ELSE channel_members.sync_modified_at END,
             removed_at = NULL,
             removed_by = NULL,
             role = EXCLUDED.role
@@ -169,7 +187,7 @@ pub async fn create_channel(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -200,6 +218,147 @@ pub async fn create_channel_with_id(
     ttl_seconds: Option<i32>,
     labels: &[String],
 ) -> Result<(ChannelRecord, bool)> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+
+    let was_created = insert_channel_rows(
+        &mut tx,
+        channel_id,
+        NewChannel {
+            name,
+            channel_type,
+            visibility,
+            description,
+            created_by,
+            ttl_seconds,
+            labels,
+            unlisted: false,
+            members: &[],
+        },
+    )
+    .await?;
+
+    let row = sqlx::query(
+        r#"
+        SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
+               description, canvas,
+               created_by, created_at, updated_at, archived_at, deleted_at,
+               nip29_group_id, topic_required, max_members,
+               topic, topic_set_by, topic_set_at,
+               purpose, purpose_set_by, purpose_set_at,
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
+        FROM channels WHERE community_id = $1 AND id = $2
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_one(tx.conn())
+    .await?;
+
+    let record = row_to_channel_record(row)?;
+    tx.commit().await?;
+    Ok((record, was_created))
+}
+
+/// A channel to create: the fields a kind:9007 sets.
+pub struct NewChannel<'a> {
+    /// Display name, canonicalized before storage.
+    pub name: &'a str,
+    /// Stream, forum, DM, …
+    pub channel_type: ChannelType,
+    /// Open or private.
+    pub visibility: ChannelVisibility,
+    /// The `about` text.
+    pub description: Option<&'a str>,
+    /// The creator's 32-byte pubkey; becomes the owner.
+    pub created_by: &'a [u8],
+    /// Ephemeral channel lifetime.
+    pub ttl_seconds: Option<i32>,
+    /// Labels validated by `buzz_core::channel::parse_channel_labels`.
+    pub labels: &'a [String],
+    /// Leave the channel out of listings for non-members from the start.
+    pub unlisted: bool,
+    /// 32-byte pubkeys added as ordinary members invited by the creator. The
+    /// caller has authorized each addition.
+    pub members: &'a [Vec<u8>],
+}
+
+/// What [`Db::create_channel_with_event`] did.
+#[derive(Debug)]
+pub enum ChannelCreate {
+    /// The channel, its members and the create event committed together.
+    Created(Box<StoredEvent>),
+    /// The UUID was already taken and nothing was written. `resent` is true
+    /// when the stored create that took it is this same event.
+    Exists {
+        /// This exact event is the channel's stored create.
+        resent: bool,
+    },
+}
+
+/// See [`Db::create_channel_with_event`].
+pub(crate) async fn create_channel_with_event(
+    pool: &PgPool,
+    push_enqueue: Option<crate::runtime::push_enqueue::PushEnqueue>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    channel: NewChannel<'_>,
+    event: &nostr::Event,
+) -> Result<ChannelCreate> {
+    let mut tx = crate::begin_community_event_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    tx.set_push_enqueue(push_enqueue);
+
+    if !insert_channel_rows(&mut tx, channel_id, channel).await? {
+        let resent = sqlx::query(
+            "SELECT 1 FROM events WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL LIMIT 1",
+        )
+        .bind(community_id.as_uuid())
+        .bind(event.id.as_bytes().as_slice())
+        .fetch_optional(tx.conn())
+        .await?
+        .is_some();
+        return Ok(ChannelCreate::Exists { resent });
+    }
+
+    // The same writes as `Db::insert_event_with_thread_metadata`.
+    let (stored, inserted) =
+        crate::event::insert_event_with_thread_metadata_tx(&mut tx, event, Some(channel_id), None)
+            .await?;
+    if inserted {
+        crate::insert_mentions_in_transaction(&mut tx, event, Some(channel_id)).await?;
+    }
+    tx.commit().await?;
+    Ok(ChannelCreate::Created(Box::new(stored)))
+}
+
+/// Inserts the channel row, its owner and its initial members on `tx`.
+/// Returns `false`, having written nothing, when `channel_id` already exists.
+async fn insert_channel_rows(
+    tx: &mut crate::AdmittedTx,
+    channel_id: Uuid,
+    channel: NewChannel<'_>,
+) -> Result<bool> {
+    let NewChannel {
+        name,
+        channel_type,
+        visibility,
+        description,
+        created_by,
+        ttl_seconds,
+        labels,
+        unlisted,
+        members,
+    } = channel;
+    let community_id = tx.community();
     if created_by.len() != 32 {
         return Err(DbError::InvalidData(format!(
             "pubkey must be 32 bytes, got {}",
@@ -218,18 +377,11 @@ pub async fn create_channel_with_id(
         return Err(DbError::InvalidData("channel name is required".into()));
     }
 
-    let mut tx = crate::begin_community_write_transaction(
-        pool,
-        community_id,
-        crate::observability::WriterOperation::EventWrite,
-    )
-    .await?;
-
     let rows_affected = sqlx::query(
         r#"
-        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline, labels)
+        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline, labels, unlisted)
         VALUES ($1, $2, $3, $4::channel_type, $5::channel_visibility, $6, $7, $8,
-                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END, $9)
+                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END, $9, $10)
         ON CONFLICT (community_id, id) DO NOTHING
         "#,
     )
@@ -242,6 +394,7 @@ pub async fn create_channel_with_id(
     .bind(created_by)
     .bind(ttl_seconds)
     .bind(labels)
+    .bind(unlisted)
     .execute(tx.conn())
     .await?
     .rows_affected();
@@ -255,6 +408,7 @@ pub async fn create_channel_with_id(
             INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
             VALUES ($1, $2, $3, 'owner', $4)
             ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
+                sync_modified_at = CASE WHEN channel_members.removed_at IS NOT NULL THEN clock_timestamp() ELSE channel_members.sync_modified_at END,
                 removed_at = NULL,
                 removed_by = NULL,
                 role = EXCLUDED.role
@@ -266,28 +420,48 @@ pub async fn create_channel_with_id(
         .bind(created_by)
         .execute(tx.conn())
         .await?;
+
+        for member in members
+            .iter()
+            .filter(|member| member.as_slice() != created_by)
+        {
+            if member.len() != 32 {
+                return Err(DbError::InvalidData(format!(
+                    "pubkey must be 32 bytes, got {}",
+                    member.len()
+                )));
+            }
+            sqlx::query(
+                r#"
+                INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
+                VALUES ($1, $2, $3, 'member', $4)
+                ON CONFLICT (community_id, channel_id, pubkey) DO NOTHING
+                "#,
+            )
+            .bind(community_id.as_uuid())
+            .bind(channel_id)
+            .bind(member)
+            .bind(created_by)
+            .execute(tx.conn())
+            .await?;
+        }
     }
 
-    let row = sqlx::query(
-        r#"
-        SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
-               description, canvas,
-               created_by, created_at, updated_at, archived_at, deleted_at,
-               nip29_group_id, topic_required, max_members,
-               topic, topic_set_by, topic_set_at,
-               purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels
-        FROM channels WHERE community_id = $1 AND id = $2
-        "#,
-    )
-    .bind(community_id.as_uuid())
-    .bind(channel_id)
-    .fetch_one(tx.conn())
-    .await?;
+    Ok(was_created)
+}
 
-    let record = row_to_channel_record(row)?;
-    tx.commit().await?;
-    Ok((record, was_created))
+/// SQL that is true when `column` holds a legacy channel type
+/// ([`buzz_core::channel::LEGACY_CHANNEL_TYPES`]): `<column> IN ('stream', …)`.
+///
+/// A query that a client did not ask to widen uses this, not
+/// `<> 'system'`, so a channel type added later stays hidden (NIP-CL).
+pub(crate) fn legacy_channel_type_sql(column: &str) -> String {
+    let types = buzz_core::channel::LEGACY_CHANNEL_TYPES
+        .iter()
+        .map(|channel_type| format!("'{channel_type}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{column} IN ({types})")
 }
 
 /// Fetches a channel record by `(community_id, id)`. Returns `ChannelNotFound` if missing or deleted.
@@ -320,7 +494,7 @@ async fn get_channel_with_operation(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
         FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
     )
@@ -409,7 +583,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline, labels
+                   ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL AND visibility::text = $2
             ORDER BY created_at DESC
@@ -429,7 +603,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline, labels
+                   ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL
             ORDER BY created_at DESC
@@ -442,6 +616,83 @@ async fn list_channels_with_operation(
     };
 
     rows.into_iter().map(row_to_channel_record).collect()
+}
+
+/// Lists the channels whose `auto_join` is effective: set on a stream channel
+/// that is open, unarchived and not deleted. Oldest first, so the first
+/// default channel a member sees is the one that was flagged first.
+///
+/// Every effective channel, not a page of them: kind:9002 accepts the flag on
+/// any number of channels, and the kind:39000 `auto_join` tag promises the
+/// relay joins new members there, so a cap here would silently break that
+/// promise for the channels past it. The set is bounded by the community's
+/// channels, each flagged by a relay owner or admin.
+pub async fn list_auto_join_channels(
+    pool: &PgPool,
+    community_id: CommunityId,
+) -> Result<Vec<ChannelRecord>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
+               description, canvas,
+               created_by, created_at, updated_at, archived_at, deleted_at,
+               nip29_group_id, topic_required, max_members,
+               topic, topic_set_by, topic_set_at,
+               purpose, purpose_set_by, purpose_set_at,
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
+        FROM channels
+        WHERE community_id = $1 AND auto_join AND channel_type = 'stream'
+          AND visibility = 'open' AND archived_at IS NULL AND deleted_at IS NULL
+        ORDER BY created_at ASC
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .fetch_all(&mut *connection)
+    .await?;
+    rows.into_iter().map(row_to_channel_record).collect()
+}
+
+/// The effective `auto_join` channels (see [`list_auto_join_channels`]) where
+/// `pubkey` has never had a membership row, active or removed; oldest first.
+///
+/// A kind:9022 leave or a kind:9001 removal keeps the row with `removed_at`
+/// set, so a channel the person left is not listed. Read without the
+/// membership lock: [`crate::channel_members::put_first_member`] decides
+/// again under it.
+pub async fn list_never_joined_auto_join_channels(
+    pool: &PgPool,
+    community_id: CommunityId,
+    pubkey: &[u8],
+) -> Result<Vec<Uuid>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    let ids = sqlx::query_scalar(
+        r#"
+        SELECT c.id
+        FROM channels c
+        WHERE c.community_id = $1 AND c.auto_join AND c.channel_type = 'stream'
+          AND c.visibility = 'open' AND c.archived_at IS NULL AND c.deleted_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM channel_members m
+              WHERE m.community_id = c.community_id AND m.channel_id = c.id
+                AND m.pubkey = $2
+          )
+        ORDER BY c.created_at ASC
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(pubkey)
+    .fetch_all(&mut *connection)
+    .await?;
+    Ok(ids)
 }
 
 /// A channel archived by the ephemeral-channel reaper.
@@ -494,7 +745,117 @@ pub(crate) fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<Channe
         ttl_seconds,
         ttl_deadline,
         labels: row.try_get("labels")?,
+        // Selected by every channel-record query. A missing column is an
+        // error, never a silent `member`: the write gate depends on it.
+        join_role: row.try_get("join_role")?,
+        // Selected by every channel-record query, like `join_role`.
+        unlisted: row.try_get("unlisted")?,
+        auto_join: row.try_get("auto_join")?,
     })
+}
+
+/// The tags of a channel's relay-signed NIP-29 kind:39000 metadata event.
+///
+/// This is the single builder for kind:39000: the relay's discovery emitter
+/// and the `buzz-admin` backfill both call it, so the published flags cannot
+/// drift apart. `members` is used only for DM participant `p` tags.
+///
+/// The NIP-29 access flags follow the channel's settings:
+/// - `private` (members-only read), or Buzz's explicit `public`;
+/// - `restricted` (only a writing role may write) for private channels and
+///   for open channels with `join_role = guest`; an unknown `join_role` fails
+///   closed to `guest`;
+/// - `closed` (join requests ignored) only when kind:9021 cannot self-join,
+///   which is every non-open channel.
+///
+/// Buzz also publishes the explicit `["join_role", ...]` value, so clients
+/// can tell what joining gives (show Join or Follow) without inferring it
+/// from the flags, a bare `["unlisted"]` flag when the channel is
+/// unlisted, and a bare `auto_join` tag while the relay joins new
+/// community members into the channel. The `unlisted` flag is published as
+/// stored, whatever the visibility, so clients see the setting; it only
+/// changes listings while the channel is open. `auto_join` is published only
+/// while the column is set and the channel is open and unarchived: a stale
+/// `true` on a private or archived channel is not published, so what
+/// kind:39000 says is what the relay does.
+pub fn group_metadata_tags(channel: &ChannelRecord, members: &[MemberRecord]) -> Vec<Vec<String>> {
+    let tag = |parts: &[&str]| parts.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>();
+    let mut tags = vec![
+        tag(&["d", &channel.id.to_string()]),
+        tag(&["name", &channel.name]),
+    ];
+    if let Some(desc) = channel.description.as_deref().filter(|d| !d.is_empty()) {
+        tags.push(tag(&["about", desc]));
+    }
+    let open = channel.visibility == ChannelVisibility::Open.as_str();
+    if open {
+        // Explicit "public" tag complements NIP-29's absence-of-"private"
+        // convention, making channel visibility self-describing for clients.
+        tags.push(tag(&["public"]));
+    } else {
+        tags.push(tag(&["private"]));
+    }
+    if channel.unlisted {
+        tags.push(tag(&["unlisted"]));
+    }
+    let join_role = ChannelJoinRole::parse_fail_closed(&channel.join_role);
+    if !open || join_role == ChannelJoinRole::Guest {
+        tags.push(tag(&["restricted"]));
+    }
+    // NIP-29 hidden tag: hide metadata from non-members. Set for DMs and
+    // for private system channels. Not a security boundary — access control
+    // is handled by channel-scoped storage.
+    if channel.channel_type == ChannelType::System.as_str() && !open {
+        tags.push(tag(&["hidden"]));
+    }
+    if channel.channel_type == ChannelType::Dm.as_str() {
+        tags.push(tag(&["hidden"]));
+        // Include participant pubkeys in kind:39000 for DMs so clients can
+        // resolve display names without a separate kind:39002 fetch.
+        for m in members {
+            tags.push(tag(&["p", &hex::encode(&m.pubkey)]));
+        }
+    }
+    if !open {
+        tags.push(tag(&["closed"]));
+    }
+    // Channel type tag so clients can distinguish stream/forum/dm without
+    // inference, then one `t` per label, then the creator. The same tags lead
+    // 39001 and 39002 (see `buzz_core::channel::group_state_identity_tags`).
+    tags.push(tag(&["t", &channel.channel_type]));
+    for label in &channel.labels {
+        tags.push(tag(&["t", label]));
+    }
+    tags.push(tag(&["P", &hex::encode(&channel.created_by)]));
+    // Creation time, so readers can pick the oldest of two channels. The
+    // event's own created_at changes on every edit.
+    tags.push(tag(&[
+        buzz_core::channel::CHANNEL_CREATED_AT_TAG,
+        &channel.created_at.timestamp().to_string(),
+    ]));
+    tags.push(tag(&["join_role", join_role.as_str()]));
+    if channel.auto_join && open && channel.archived_at.is_none() {
+        tags.push(tag(&["auto_join"]));
+    }
+    // Optional topic / purpose for richer client UX
+    if let Some(topic) = channel.topic.as_deref().filter(|t| !t.is_empty()) {
+        tags.push(tag(&["topic", topic]));
+    }
+    if let Some(purpose) = channel.purpose.as_deref().filter(|p| !p.is_empty()) {
+        tags.push(tag(&["purpose", purpose]));
+    }
+    // Archived state — clients use this to hide channels from the sidebar.
+    if channel.archived_at.is_some() {
+        tags.push(tag(&["archived", "true"]));
+    }
+    // Ephemeral channel TTL — clients use this to show countdown timers.
+    if let Some(ttl) = channel.ttl_seconds {
+        tags.push(tag(&["ttl", &ttl.to_string()]));
+    }
+    if let Some(deadline) = channel.ttl_deadline {
+        tags.push(tag(&["ttl_deadline", &deadline.to_rfc3339()]));
+    }
+    tags
 }
 
 /// Partial update for channel metadata. Every field is `None` to leave the
@@ -514,6 +875,35 @@ pub struct ChannelUpdate {
     /// Replacement label set (empty clears it), or `None` to leave unchanged.
     /// Callers validate with `buzz_core::channel::parse_channel_labels`.
     pub labels: Option<Vec<String>>,
+    /// New join role (`"member"`/`"guest"`), or `None` to leave unchanged.
+    pub join_role: Option<String>,
+    /// New unlisted flag, or `None` to leave unchanged. It decides listing,
+    /// not admission, so it does not take the membership lock.
+    pub unlisted: Option<bool>,
+    /// Whether the relay joins new community members into the channel, or
+    /// `None` to leave unchanged. `Some(true)` needs an open, unarchived
+    /// channel; `apply_channel_metadata_event` refuses it otherwise.
+    pub auto_join: Option<bool>,
+}
+
+impl ChannelUpdate {
+    /// True when no field is set.
+    pub fn is_empty(&self) -> bool {
+        self.name.is_none()
+            && self.description.is_none()
+            && self.visibility.is_none()
+            && self.ttl_seconds.is_none()
+            && self.labels.is_none()
+            && self.join_role.is_none()
+            && self.unlisted.is_none()
+            && self.auto_join.is_none()
+    }
+
+    /// True when the update changes a setting that decides admission:
+    /// visibility or `join_role`.
+    pub fn changes_admission(&self) -> bool {
+        self.visibility.is_some() || self.join_role.is_some()
+    }
 }
 
 /// Updates channel metadata dynamically.
@@ -524,19 +914,200 @@ pub async fn update_channel(
     pool: &PgPool,
     community_id: CommunityId,
     channel_id: Uuid,
-    mut updates: ChannelUpdate,
+    updates: ChannelUpdate,
 ) -> Result<ChannelRecord> {
-    if updates.name.is_none()
-        && updates.description.is_none()
-        && updates.visibility.is_none()
-        && updates.ttl_seconds.is_none()
-        && updates.labels.is_none()
-    {
+    if updates.is_empty() {
         return Err(DbError::InvalidData(
             "at least one field must be provided for update".to_string(),
         ));
     }
 
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let mut locked = lock_channel_for_settings_write(&mut tx, channel_id, &updates).await?;
+    update_channel_on(&mut locked, updates).await?;
+    tx.commit().await?;
+
+    get_channel_with_operation(
+        pool,
+        community_id,
+        channel_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum TtlLock {
+    Shared,
+    Exclusive,
+}
+
+/// Takes the per-channel TTL advisory lock (see [`channel_ttl_lock_key`]) on `tx`.
+async fn lock_channel_ttl(
+    tx: &mut crate::AdmittedTx,
+    channel_id: Uuid,
+    mode: TtlLock,
+) -> Result<()> {
+    let sql = match mode {
+        TtlLock::Shared => "SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))",
+        TtlLock::Exclusive => "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+    };
+    sqlx::query(sql)
+        .bind(channel_ttl_lock_key(tx.community(), channel_id))
+        .execute(tx.conn())
+        .await?;
+    Ok(())
+}
+
+/// The only way to write a channel's settings. Only
+/// [`lock_channel_for_settings_write`] makes one, after it takes the locks
+/// on the transaction it borrows, and every settings write is a method on
+/// it. The borrow binds the locks to that transaction: a writer cannot use
+/// them with another transaction or after its commit, skip a lock, or take
+/// the locks in a different order.
+pub(crate) struct ChannelSettingsWriter<'tx> {
+    tx: &'tx mut crate::AdmittedTx,
+    channel_id: Uuid,
+    admission: bool,
+    ttl: TtlLock,
+    previous_visibility: String,
+    archived: bool,
+}
+
+impl ChannelSettingsWriter<'_> {
+    /// The channel's visibility when the lock was taken (`"open"` or `"private"`).
+    pub(crate) fn previous_visibility(&self) -> &str {
+        &self.previous_visibility
+    }
+
+    /// Whether the channel was archived when the lock was taken. The row
+    /// lock keeps this current until the transaction ends.
+    pub(crate) fn archived(&self) -> bool {
+        self.archived
+    }
+
+    /// The locked transaction, for writes that are not channel settings
+    /// (for example, storing the event that requested the change).
+    pub(crate) fn tx(&mut self) -> &mut crate::AdmittedTx {
+        self.tx
+    }
+
+    /// Refuse `updates` if this lock does not cover them. This catches a
+    /// caller that took the lock for one set of changes and then writes
+    /// another set.
+    fn check_covers(&self, updates: &ChannelUpdate) -> Result<()> {
+        let covered = (self.admission || !updates.changes_admission())
+            && (matches!(self.ttl, TtlLock::Exclusive) || updates.ttl_seconds.is_none());
+        if covered {
+            Ok(())
+        } else {
+            Err(DbError::InvalidData(
+                "channel settings write is not covered by its lock".into(),
+            ))
+        }
+    }
+}
+
+/// Takes, on `tx`, every lock a write to `channel_id`'s settings needs, in
+/// the one order that all channel writers use:
+///
+/// 1. the channel's membership lock, when `updates` changes visibility or
+///    `join_role`. Those two settings decide admission, and `put_member` and
+///    a huddle join decide admission under this lock. So an admission either
+///    sees the old setting and commits first, or sees the new one.
+/// 2. the channel's TTL lock: EXCLUSIVE for a TTL change, SHARED otherwise.
+///    A TTL change can switch the event-commit fast path
+///    (`event_follow_up::refresh_channel_ttls`, which reads `ttl_seconds`
+///    under the SHARED lock). With the EXCLUSIVE lock, a concurrent event
+///    either sees the new TTL or commits before this change.
+/// 3. the channel row, `FOR NO KEY UPDATE`.
+///
+/// Roster publication holds the membership lock and then, at commit, takes
+/// the TTL lock and updates the row. A huddle join and a `put_members`
+/// membership write take the membership lock, then the TTL lock, then the
+/// row; the row lock is what orders them against an archive, which does not
+/// take the membership lock. A writer that took these locks in any other
+/// order could wait for one of them while it waits for this one.
+///
+/// Returns `ChannelNotFound` when the channel is missing or deleted.
+pub(crate) async fn lock_channel_for_settings_write<'tx>(
+    tx: &'tx mut crate::AdmittedTx,
+    channel_id: Uuid,
+    updates: &ChannelUpdate,
+) -> Result<ChannelSettingsWriter<'tx>> {
+    let ttl = if updates.ttl_seconds.is_some() {
+        TtlLock::Exclusive
+    } else {
+        TtlLock::Shared
+    };
+    lock_channel_row(tx, channel_id, updates.changes_admission(), ttl).await
+}
+
+/// Takes the locks that deleting `channel_id` needs, in the same order as
+/// [`lock_channel_for_settings_write`]. A delete ends admission, so it takes
+/// the membership lock: a membership write or a huddle join either commits
+/// first or, under the lock, finds the channel deleted. A delete does not
+/// change the TTL, so the TTL lock is SHARED.
+async fn lock_channel_for_delete(
+    tx: &mut crate::AdmittedTx,
+    channel_id: Uuid,
+) -> Result<ChannelSettingsWriter<'_>> {
+    lock_channel_row(tx, channel_id, true, TtlLock::Shared).await
+}
+
+async fn lock_channel_row(
+    tx: &mut crate::AdmittedTx,
+    channel_id: Uuid,
+    admission: bool,
+    ttl: TtlLock,
+) -> Result<ChannelSettingsWriter<'_>> {
+    let community_id = tx.community();
+    if admission {
+        crate::channel_members::acquire_channel_membership_lock(
+            tx.conn(),
+            community_id,
+            channel_id,
+        )
+        .await?;
+    }
+    lock_channel_ttl(tx, channel_id, ttl).await?;
+    // `FOR NO KEY UPDATE`, like a huddle join: it orders this write against
+    // every other settings write and a huddle join, but not against the
+    // `KEY SHARE` lock that a membership INSERT takes for its foreign key.
+    let (previous_visibility, archived): (String, bool) = sqlx::query_as(
+        "SELECT visibility::text, archived_at IS NOT NULL FROM channels \
+         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL FOR NO KEY UPDATE",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_optional(tx.conn())
+    .await?
+    .ok_or(DbError::ChannelNotFound(channel_id))?;
+    Ok(ChannelSettingsWriter {
+        tx,
+        channel_id,
+        admission,
+        ttl,
+        previous_visibility,
+        archived,
+    })
+}
+
+/// Writes the set fields of `updates` to the locked channel row on `tx`.
+/// The caller owns the commit.
+async fn update_channel_on(
+    w: &mut ChannelSettingsWriter<'_>,
+    mut updates: ChannelUpdate,
+) -> Result<()> {
+    w.check_covers(&updates)?;
+    let channel_id = w.channel_id;
+    let tx = &mut *w.tx;
+    let community_id = tx.community();
     if let Some(name) = updates.name.as_mut() {
         *name = buzz_core::channel::canonical_channel_name(name).to_owned();
         if name.is_empty() {
@@ -558,6 +1129,18 @@ pub async fn update_channel(
     }
     if updates.visibility.is_some() {
         set_parts.push(format!("visibility = ${param_idx}::channel_visibility"));
+        param_idx += 1;
+    }
+    if updates.join_role.is_some() {
+        set_parts.push(format!("join_role = ${param_idx}"));
+        param_idx += 1;
+    }
+    if updates.unlisted.is_some() {
+        set_parts.push(format!("unlisted = ${param_idx}"));
+        param_idx += 1;
+    }
+    if updates.auto_join.is_some() {
+        set_parts.push(format!("auto_join = ${param_idx}"));
         param_idx += 1;
     }
     if let Some(ref ttl) = updates.ttl_seconds {
@@ -592,6 +1175,15 @@ pub async fn update_channel(
     if let Some(ref vis) = updates.visibility {
         q = q.bind(vis);
     }
+    if let Some(ref join_role) = updates.join_role {
+        q = q.bind(join_role);
+    }
+    if let Some(unlisted) = updates.unlisted {
+        q = q.bind(unlisted);
+    }
+    if let Some(auto_join) = updates.auto_join {
+        q = q.bind(auto_join);
+    }
     if let Some(ref ttl) = updates.ttl_seconds {
         q = q.bind(*ttl);
     }
@@ -601,50 +1193,30 @@ pub async fn update_channel(
     q = q.bind(community_id.as_uuid());
     q = q.bind(channel_id);
 
-    // T1a repair: a TTL change can flip this channel's event-commit fast
-    // path (`event_follow_up::refresh_channel_ttls` reads ttl_seconds under
-    // a SHARED per-channel advisory lock). Take the same key EXCLUSIVE
-    // before the UPDATE so a concurrent event either sees the committed TTL
-    // or strictly precedes this transition — whose own deadline reset is
-    // then the latest word. Non-TTL updates don't touch the fast path and
-    // skip the lock.
-    if updates.ttl_seconds.is_some() {
-        let mut tx = crate::begin_community_write_transaction(
-            pool,
-            community_id,
-            crate::observability::WriterOperation::EventWrite,
-        )
-        .await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(channel_ttl_lock_key(community_id, channel_id))
-            .execute(tx.conn())
-            .await?;
-        let result = q.execute(tx.conn()).await?;
-        if result.rows_affected() == 0 {
-            return Err(DbError::ChannelNotFound(channel_id));
-        }
-        tx.commit().await?;
+    let policy_changed = if updates.visibility.is_some()
+        || updates.ttl_seconds.is_some()
+        || updates.unlisted.is_some()
+    {
+        sqlx::query_scalar::<_,bool>("SELECT (($3::text IS NOT NULL AND visibility::text IS DISTINCT FROM $3) OR ($4 AND ttl_seconds IS DISTINCT FROM $5::int) OR ($6::bool IS NOT NULL AND unlisted IS DISTINCT FROM $6)) FROM channels WHERE community_id=$1 AND id=$2")
+            .bind(community_id.as_uuid()).bind(channel_id).bind(updates.visibility.as_deref())
+            .bind(updates.ttl_seconds.is_some()).bind(updates.ttl_seconds.flatten()).bind(updates.unlisted)
+            .fetch_one(tx.conn()).await?
     } else {
-        let mut tx = crate::begin_community_write_transaction(
-            pool,
-            community_id,
-            crate::observability::WriterOperation::EventWrite,
-        )
-        .await?;
-        let result = q.execute(tx.conn()).await?;
-        if result.rows_affected() == 0 {
-            return Err(DbError::ChannelNotFound(channel_id));
-        }
-        tx.commit().await?;
+        false
+    };
+    let result = q.execute(tx.conn()).await?;
+    if result.rows_affected() == 0 {
+        return Err(DbError::ChannelNotFound(channel_id));
     }
-
-    get_channel_with_operation(
-        pool,
-        community_id,
-        channel_id,
-        crate::observability::WriterOperation::EventWrite,
-    )
-    .await
+    if policy_changed {
+        sqlx::query(
+            "UPDATE communities SET artifact_policy_modified_at=clock_timestamp() WHERE id=$1",
+        )
+        .bind(community_id.as_uuid())
+        .execute(tx.conn())
+        .await?;
+    }
+    Ok(())
 }
 
 /// Sets the topic for a channel, recording who set it and when.
@@ -661,20 +1233,29 @@ pub async fn set_topic(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    let mut locked =
+        lock_channel_for_settings_write(&mut tx, channel_id, &ChannelUpdate::default()).await?;
+    set_topic_on(&mut locked, topic, set_by).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn set_topic_on(w: &mut ChannelSettingsWriter<'_>, topic: &str, set_by: &[u8]) -> Result<()> {
+    let channel_id = w.channel_id;
+    let tx = &mut *w.tx;
     let result = sqlx::query(
         "UPDATE channels SET topic = $1, topic_set_by = $2, topic_set_at = NOW() \
          WHERE community_id = $3 AND id = $4 AND deleted_at IS NULL",
     )
     .bind(topic)
     .bind(set_by)
-    .bind(community_id.as_uuid())
+    .bind(tx.community().as_uuid())
     .bind(channel_id)
     .execute(tx.conn())
     .await?;
     if result.rows_affected() == 0 {
         return Err(DbError::ChannelNotFound(channel_id));
     }
-    tx.commit().await?;
     Ok(())
 }
 
@@ -692,20 +1273,33 @@ pub async fn set_purpose(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    let mut locked =
+        lock_channel_for_settings_write(&mut tx, channel_id, &ChannelUpdate::default()).await?;
+    set_purpose_on(&mut locked, purpose, set_by).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn set_purpose_on(
+    w: &mut ChannelSettingsWriter<'_>,
+    purpose: &str,
+    set_by: &[u8],
+) -> Result<()> {
+    let channel_id = w.channel_id;
+    let tx = &mut *w.tx;
     let result = sqlx::query(
         "UPDATE channels SET purpose = $1, purpose_set_by = $2, purpose_set_at = NOW() \
          WHERE community_id = $3 AND id = $4 AND deleted_at IS NULL",
     )
     .bind(purpose)
     .bind(set_by)
-    .bind(community_id.as_uuid())
+    .bind(tx.community().as_uuid())
     .bind(channel_id)
     .execute(tx.conn())
     .await?;
     if result.rows_affected() == 0 {
         return Err(DbError::ChannelNotFound(channel_id));
     }
-    tx.commit().await?;
     Ok(())
 }
 
@@ -724,36 +1318,9 @@ pub async fn archive_channel(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
-    // First check: does the channel exist and what is its state?
-    let row = sqlx::query(
-        "SELECT archived_at FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
-    )
-        .bind(community_id.as_uuid())
-        .bind(channel_id)
-        .fetch_optional(tx.conn())
-        .await?;
-
-    match row {
-        None => return Err(DbError::ChannelNotFound(channel_id)),
-        Some(r) => {
-            let archived_at: Option<DateTime<Utc>> = r.try_get("archived_at")?;
-            if archived_at.is_some() {
-                return Err(DbError::AccessDenied(
-                    "channel is already archived".to_string(),
-                ));
-            }
-        }
-    }
-
-    sqlx::query(
-        "UPDATE channels SET archived_at = NOW() \
-         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL AND archived_at IS NULL",
-    )
-    .bind(community_id.as_uuid())
-    .bind(channel_id)
-    .execute(tx.conn())
-    .await?;
-
+    let mut locked =
+        lock_channel_for_settings_write(&mut tx, channel_id, &ChannelUpdate::default()).await?;
+    set_archived_on(&mut locked, true).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -773,40 +1340,195 @@ pub async fn unarchive_channel(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
-    // First check: does the channel exist and what is its state?
+    let mut locked =
+        lock_channel_for_settings_write(&mut tx, channel_id, &ChannelUpdate::default()).await?;
+    set_archived_on(&mut locked, false).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Archives (`archive = true`) or restores the channel on `tx`. Refuses with
+/// `AccessDenied` when the channel is already in that state. Restoring an
+/// ephemeral channel restarts its TTL deadline.
+async fn set_archived_on(w: &mut ChannelSettingsWriter<'_>, archive: bool) -> Result<()> {
+    let channel_id = w.channel_id;
+    let tx = &mut *w.tx;
+    let community_id = tx.community();
     let row = sqlx::query(
         "SELECT archived_at FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
     )
-        .bind(community_id.as_uuid())
-        .bind(channel_id)
-        .fetch_optional(tx.conn())
-        .await?;
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_optional(tx.conn())
+    .await?;
 
     match row {
         None => return Err(DbError::ChannelNotFound(channel_id)),
         Some(r) => {
             let archived_at: Option<DateTime<Utc>> = r.try_get("archived_at")?;
-            if archived_at.is_none() {
+            if archive && archived_at.is_some() {
+                return Err(DbError::AccessDenied(
+                    "channel is already archived".to_string(),
+                ));
+            }
+            if !archive && archived_at.is_none() {
                 return Err(DbError::AccessDenied("channel is not archived".to_string()));
             }
         }
     }
 
-    sqlx::query(
+    let sql = if archive {
+        "UPDATE channels SET archived_at = NOW() \
+         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL AND archived_at IS NULL"
+    } else {
         "UPDATE channels SET archived_at = NULL, \
              ttl_deadline = CASE \
                  WHEN ttl_seconds IS NOT NULL THEN NOW() + (ttl_seconds || ' seconds')::interval \
                  ELSE ttl_deadline \
              END \
-         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL AND archived_at IS NOT NULL",
-    )
-    .bind(community_id.as_uuid())
-    .bind(channel_id)
-    .execute(tx.conn())
-    .await?;
-
-    tx.commit().await?;
+         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL AND archived_at IS NOT NULL"
+    };
+    sqlx::query(sql)
+        .bind(community_id.as_uuid())
+        .bind(channel_id)
+        .execute(tx.conn())
+        .await?;
     Ok(())
+}
+
+/// The channel changes named by one kind:9002 event. `None` leaves a value
+/// unchanged.
+#[derive(Default)]
+pub struct ChannelMetadataEdit {
+    /// Name, description, visibility, TTL, labels, `join_role` and `auto_join`.
+    pub columns: ChannelUpdate,
+    /// New topic, recorded as set by the event's author.
+    pub topic: Option<String>,
+    /// New purpose, recorded as set by the event's author.
+    pub purpose: Option<String>,
+    /// `Some(true)` archives the channel; `Some(false)` restores it.
+    pub archived: Option<bool>,
+}
+
+/// The result of [`Db::apply_channel_metadata_event`].
+pub struct ChannelMetadataWrite {
+    /// The stored kind:9002 event.
+    pub stored: StoredEvent,
+    /// `false` when the event was already stored. Nothing was changed then:
+    /// its changes committed with it the first time.
+    pub inserted: bool,
+    /// The channel's visibility before this event (`"open"` or `"private"`).
+    pub previous_visibility: String,
+}
+
+pub(crate) async fn apply_channel_metadata_event(
+    pool: &PgPool,
+    push_enqueue: Option<crate::runtime::push_enqueue::PushEnqueue>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    event: &nostr::Event,
+    edit: ChannelMetadataEdit,
+    system_messages: &[nostr::Event],
+) -> Result<ChannelMetadataWrite> {
+    let mut tx = crate::begin_community_event_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    tx.set_push_enqueue(push_enqueue);
+
+    // The row lock also orders two copies of the same event: the second
+    // waits, then sees the first stored.
+    let mut locked = lock_channel_for_settings_write(&mut tx, channel_id, &edit.columns).await?;
+    let previous_visibility = locked.previous_visibility().to_owned();
+
+    // The same writes as `Db::insert_event_with_thread_metadata`.
+    let (stored, inserted) = crate::event::insert_event_with_thread_metadata_tx(
+        locked.tx(),
+        event,
+        Some(channel_id),
+        None,
+    )
+    .await?;
+    if !inserted {
+        tx.rollback().await?;
+        return Ok(ChannelMetadataWrite {
+            stored,
+            inserted,
+            previous_visibility,
+        });
+    }
+    // Decide the archive state here, after the duplicate check and under
+    // the row lock, not during validation. A resend that races the first
+    // commit then sees that commit as a duplicate (above), never as a
+    // channel already in the requested state.
+    match (locked.archived(), edit.archived) {
+        (true, Some(false)) | (false, None | Some(true)) => {}
+        (true, _) => return Err(DbError::AccessDenied("channel is archived".to_string())),
+        (false, Some(false)) => {
+            return Err(DbError::AccessDenied("channel is not archived".to_string()));
+        }
+    }
+    // `auto_join` only makes sense where a kind:9021 self-join would work:
+    // an open, unarchived channel. Decide it here, under the row lock and
+    // after the archive decision, on the state this event leaves behind, so
+    // one event may open a channel and flag it, and a concurrent archive
+    // cannot slip past a check made before the lock. Either value needs the
+    // event to leave the channel open: the relay role that authorizes
+    // `auto_join` needs no channel membership, so a `false` on a private
+    // channel would store and fan out an event, with its mentions and
+    // notice, in a channel its sender cannot read. One refusal for both
+    // values also keeps the response from telling them apart.
+    if let Some(auto_join) = edit.columns.auto_join {
+        let visibility = edit
+            .columns
+            .visibility
+            .as_deref()
+            .unwrap_or(locked.previous_visibility());
+        let archived = edit.archived.unwrap_or(locked.archived());
+        if visibility != ChannelVisibility::Open.as_str() || (auto_join && archived) {
+            return Err(DbError::AccessDenied(
+                "auto_join requires an open, unarchived channel".to_string(),
+            ));
+        }
+    }
+    crate::insert_mentions_in_transaction(locked.tx(), event, Some(channel_id)).await?;
+
+    let ChannelMetadataEdit {
+        columns,
+        topic,
+        purpose,
+        archived,
+    } = edit;
+    let actor = event.pubkey.to_bytes();
+    if !columns.is_empty() {
+        update_channel_on(&mut locked, columns).await?;
+    }
+    if let Some(topic) = topic {
+        set_topic_on(&mut locked, &topic, &actor).await?;
+    }
+    if let Some(purpose) = purpose {
+        set_purpose_on(&mut locked, &purpose, &actor).await?;
+    }
+    if let Some(archive) = archived {
+        set_archived_on(&mut locked, archive).await?;
+    }
+    // The same writes as `Db::insert_event`.
+    for message in system_messages {
+        let (_, message_inserted) =
+            crate::event::insert_event_in_transaction(locked.tx(), message, Some(channel_id))
+                .await?;
+        if message_inserted {
+            crate::insert_mentions_in_transaction(locked.tx(), message, Some(channel_id)).await?;
+        }
+    }
+    tx.commit().await?;
+    Ok(ChannelMetadataWrite {
+        stored,
+        inserted,
+        previous_visibility,
+    })
 }
 
 /// Soft-delete a channel by setting `deleted_at = NOW()`.
@@ -824,16 +1546,34 @@ pub async fn soft_delete_channel(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
-    let result = sqlx::query(
-        "UPDATE channels SET deleted_at = NOW() WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
-    )
-            .bind(community_id.as_uuid())
-            .bind(channel_id)
-            .execute(tx.conn())
-            .await?;
-
+    let mut writer = match lock_channel_for_delete(&mut tx, channel_id).await {
+        Ok(writer) => writer,
+        Err(DbError::ChannelNotFound(_)) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    soft_delete_on(&mut writer).await?;
     tx.commit().await?;
-    Ok(result.rows_affected() > 0)
+    Ok(true)
+}
+
+async fn soft_delete_on(w: &mut ChannelSettingsWriter<'_>) -> Result<()> {
+    if !w.admission {
+        return Err(DbError::InvalidData(
+            "channel delete is not covered by its lock".into(),
+        ));
+    }
+    let channel_id = w.channel_id;
+    let community_id = w.tx.community();
+    sqlx::query("UPDATE channels SET deleted_at = NOW() WHERE community_id = $1 AND id = $2")
+        .bind(community_id.as_uuid())
+        .bind(channel_id)
+        .execute(w.tx.conn())
+        .await?;
+    sqlx::query("UPDATE communities SET artifact_policy_modified_at=clock_timestamp() WHERE id=$1")
+        .bind(community_id.as_uuid())
+        .execute(w.tx.conn())
+        .await?;
+    Ok(())
 }
 
 /// Archive ephemeral channels whose TTL deadline has passed.
@@ -866,6 +1606,16 @@ pub async fn reap_expired_ephemeral_channels(pool: &PgPool) -> Result<Vec<Reaped
         crate::observability::WriterOperation::Maintenance,
         "ephemeral_channel_reap",
         |id, mut tx| async move {
+            // This archive takes no advisory lock, unlike
+            // `lock_channel_for_settings_write`. It does not need one: it is
+            // a single UPDATE whose WHERE clause holds every condition for
+            // the archive. The UPDATE waits for the row lock of any writer
+            // that holds the row (a TTL refresh, a settings write, a huddle
+            // join). Under READ COMMITTED, PostgreSQL then checks the WHERE
+            // clause again against the version that writer committed. So a
+            // refresh that moved the deadline wins, a channel archived or
+            // deleted meanwhile is skipped, and a join that held the row
+            // commits first. Do not split this into a read and a write.
             let rows = sqlx::query(
                 "UPDATE channels AS ch SET archived_at = NOW() \
                  FROM communities AS c \
@@ -920,6 +1670,7 @@ impl Db {
             created_by,
             ttl_seconds,
             &[],
+            false,
         )
         .await
     }
@@ -955,40 +1706,60 @@ impl Db {
         .await
     }
 
-    /// Creates a channel with a client-supplied UUID and an initial label set.
+    /// Creates `channel_id` from its kind:9007 `event`: the channel, its
+    /// owner, its initial members and the event itself commit in one
+    /// transaction, so a channel row always has its create event beside it.
     ///
-    /// The same as [`Db::create_channel_with_id`], plus `labels`, which the
-    /// caller has validated with `buzz_core::channel::parse_channel_labels`.
-    #[allow(clippy::too_many_arguments)]
-    #[datastore_span(name = "create_labeled_channel_with_id", system = "postgresql")]
-    pub async fn create_labeled_channel_with_id(
+    /// A concurrent copy of the same create waits on the first one's channel
+    /// insert, then sees either the committed event (`Exists { resent: true }`)
+    /// or, if the first rolled back, an untaken UUID.
+    #[datastore_span(name = "create_channel_with_event", system = "postgresql")]
+    pub async fn create_channel_with_event(
         &self,
         community_id: CommunityId,
         channel_id: Uuid,
-        name: &str,
-        channel_type: ChannelType,
-        visibility: ChannelVisibility,
-        description: Option<&str>,
-        created_by: &[u8],
-        ttl_seconds: Option<i32>,
-        labels: &[String],
-    ) -> Result<(ChannelRecord, bool)> {
-        create_channel_with_id(
+        channel: NewChannel<'_>,
+        event: &nostr::Event,
+    ) -> Result<ChannelCreate> {
+        create_channel_with_event(
             &self.pool,
+            self.push_enqueue.clone(),
             community_id,
             channel_id,
-            name,
-            channel_type,
-            visibility,
-            description,
-            created_by,
-            ttl_seconds,
-            labels,
+            channel,
+            event,
         )
         .await
     }
 
-    /// Creates a channel with a relay-chosen UUID and an initial label set.
+    /// Stores the kind:9002 `event` for `channel_id`, applies `edit`, and
+    /// stores the relay-signed `system_messages` that announce it, all in one
+    /// transaction. If any write fails, nothing is stored, so a client can
+    /// resend the same event. A resend of a stored event changes nothing and
+    /// returns `inserted: false`.
+    #[datastore_span(name = "apply_channel_metadata_event", system = "postgresql")]
+    pub async fn apply_channel_metadata_event(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        event: &nostr::Event,
+        edit: ChannelMetadataEdit,
+        system_messages: &[nostr::Event],
+    ) -> Result<ChannelMetadataWrite> {
+        apply_channel_metadata_event(
+            &self.pool,
+            self.push_enqueue.clone(),
+            community_id,
+            channel_id,
+            event,
+            edit,
+            system_messages,
+        )
+        .await
+    }
+
+    /// Creates a channel with a relay-chosen UUID, an initial label set and
+    /// an initial unlisted flag.
     #[allow(clippy::too_many_arguments)]
     #[datastore_span(name = "create_labeled_channel", system = "postgresql")]
     pub async fn create_labeled_channel(
@@ -1001,6 +1772,7 @@ impl Db {
         created_by: &[u8],
         ttl_seconds: Option<i32>,
         labels: &[String],
+        unlisted: bool,
     ) -> Result<ChannelRecord> {
         create_channel(
             &self.pool,
@@ -1012,6 +1784,7 @@ impl Db {
             created_by,
             ttl_seconds,
             labels,
+            unlisted,
         )
         .await
     }
@@ -1072,6 +1845,28 @@ impl Db {
         visibility: Option<&str>,
     ) -> Result<Vec<ChannelRecord>> {
         list_channels(&self.pool, community_id, visibility).await
+    }
+
+    /// Lists the channels the relay joins new community members into:
+    /// `auto_join` set, open, unarchived and not deleted; oldest first.
+    #[datastore_span(name = "list_auto_join_channels", system = "postgresql")]
+    pub async fn list_auto_join_channels(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<Vec<ChannelRecord>> {
+        list_auto_join_channels(&self.pool, community_id).await
+    }
+
+    /// Lists the effective `auto_join` channels `pubkey` has never been a
+    /// member of, active or removed (see
+    /// [`list_never_joined_auto_join_channels`]).
+    #[datastore_span(name = "list_never_joined_auto_join_channels", system = "postgresql")]
+    pub async fn list_never_joined_auto_join_channels(
+        &self,
+        community_id: CommunityId,
+        pubkey: &[u8],
+    ) -> Result<Vec<Uuid>> {
+        list_never_joined_auto_join_channels(&self.pool, community_id, pubkey).await
     }
 
     /// Lists channels during startup reconciliation.
@@ -1160,10 +1955,176 @@ impl Db {
 
 /// The per-channel TTL advisory lock key. Event commits take it SHARED
 /// (`event_follow_up::refresh_channel_ttls`); TTL transitions in
-/// [`update_channel`] take it EXCLUSIVE. Both sides build it here, so the keys
+/// [`update_channel`] and [`apply_channel_metadata_event`] take it EXCLUSIVE. Both sides build it here, so the keys
 /// cannot drift.
 pub(crate) fn channel_ttl_lock_key(community: CommunityId, channel: Uuid) -> String {
     format!("buzz_channel_ttl:{}:{channel}", community.as_uuid())
+}
+
+#[cfg(test)]
+mod group_metadata_tag_tests {
+    use super::*;
+
+    fn channel(visibility: &str, join_role: &str) -> ChannelRecord {
+        let now = Utc::now();
+        ChannelRecord {
+            id: Uuid::nil(),
+            name: "news".into(),
+            channel_type: "stream".into(),
+            visibility: visibility.into(),
+            description: None,
+            canvas: None,
+            created_by: vec![1; 32],
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+            deleted_at: None,
+            nip29_group_id: None,
+            topic_required: false,
+            max_members: None,
+            topic: None,
+            topic_set_by: None,
+            topic_set_at: None,
+            purpose: None,
+            purpose_set_by: None,
+            purpose_set_at: None,
+            ttl_seconds: None,
+            ttl_deadline: None,
+            labels: Vec::new(),
+            join_role: join_role.into(),
+            unlisted: false,
+            auto_join: false,
+        }
+    }
+
+    fn flags(channel: &ChannelRecord) -> Vec<&'static str> {
+        let tags = group_metadata_tags(channel, &[]);
+        ["private", "public", "restricted", "closed"]
+            .into_iter()
+            .filter(|flag| tags.iter().any(|t| t == &vec![flag.to_string()]))
+            .collect()
+    }
+
+    /// The NIP-29 access flags follow visibility and join_role. Open channels
+    /// never publish `closed`: kind:9021 self-join works there.
+    #[test]
+    fn access_flags_follow_settings() {
+        let cases: &[(&str, &str, &[&str])] = &[
+            ("open", "member", &["public"]),
+            ("open", "guest", &["public", "restricted"]),
+            ("private", "member", &["private", "restricted", "closed"]),
+            ("private", "guest", &["private", "restricted", "closed"]),
+            // An unknown join_role value fails closed to `guest`.
+            ("open", "bogus", &["public", "restricted"]),
+        ];
+        for (visibility, join_role, expected) in cases {
+            assert_eq!(
+                flags(&channel(visibility, join_role)),
+                *expected,
+                "{visibility}/{join_role}"
+            );
+        }
+    }
+
+    #[test]
+    fn publishes_the_explicit_join_role_value() {
+        let tags = group_metadata_tags(&channel("open", "guest"), &[]);
+        assert!(tags.contains(&vec!["join_role".to_string(), "guest".to_string()]));
+        let tags = group_metadata_tags(&channel("open", "member"), &[]);
+        assert!(tags.contains(&vec!["join_role".to_string(), "member".to_string()]));
+        // An unknown stored value is published as the value the relay enforces.
+        let tags = group_metadata_tags(&channel("open", "bogus"), &[]);
+        assert!(tags.contains(&vec!["join_role".to_string(), "guest".to_string()]));
+    }
+
+    /// The bare `auto_join` tag is effective-state: published only while the
+    /// column is set and the channel is open and unarchived.
+    #[test]
+    fn publishes_auto_join_only_while_effective() {
+        let has_tag = |channel: &ChannelRecord| {
+            group_metadata_tags(channel, &[]).contains(&vec!["auto_join".to_string()])
+        };
+        let mut flagged = channel("open", "member");
+        assert!(!has_tag(&flagged), "unset");
+        flagged.auto_join = true;
+        assert!(has_tag(&flagged), "open, unarchived");
+        let mut archived = channel("open", "member");
+        archived.auto_join = true;
+        archived.archived_at = Some(Utc::now());
+        assert!(!has_tag(&archived), "archived");
+        let mut private = channel("private", "member");
+        private.auto_join = true;
+        assert!(!has_tag(&private), "private");
+    }
+
+    /// The type `t` tag comes first among `t` tags, then the creator `P`,
+    /// as on 39001 and 39002; kind:39000 also carries the creation time.
+    #[test]
+    fn publishes_the_type_creator_and_creation_time() {
+        let channel = channel("open", "member");
+        let tags = group_metadata_tags(&channel, &[]);
+        let at = |name: &str| tags.iter().position(|t| t[0] == name).expect(name);
+        assert_eq!(tags[at("t")], vec!["t", "stream"]);
+        assert_eq!(at("P"), at("t") + 1);
+        assert_eq!(tags[at("P")], vec!["P".to_string(), "01".repeat(32)]);
+        assert_eq!(
+            tags[at("created_at")],
+            vec![
+                "created_at".to_string(),
+                channel.created_at.timestamp().to_string()
+            ]
+        );
+    }
+
+    /// Labels follow the type `t` tag and come before the creator `P`, the
+    /// same order as `buzz_core::channel::group_state_identity_tags`.
+    #[test]
+    fn publishes_labels_between_the_type_and_the_creator() {
+        let mut channel = channel("open", "member");
+        channel.labels = vec!["workspace".into(), "agent-attention".into()];
+        let tags = group_metadata_tags(&channel, &[]);
+        let identity: Vec<&Vec<String>> =
+            tags.iter().filter(|t| t[0] == "t" || t[0] == "P").collect();
+        let expected = buzz_core::channel::group_state_identity_tags(
+            &channel.channel_type,
+            &channel.labels,
+            &channel.created_by,
+        )
+        .expect("identity tags")
+        .into_iter()
+        .map(|tag| tag.to_vec())
+        .collect::<Vec<_>>();
+        assert_eq!(identity, expected.iter().collect::<Vec<_>>());
+    }
+
+    /// `unlisted` is a bare flag, published as stored for either visibility,
+    /// and absent for a listed channel. It never adds NIP-29 `hidden`: an
+    /// unlisted channel's metadata stays readable by id.
+    #[test]
+    fn publishes_the_unlisted_flag_as_stored() {
+        let unlisted = vec!["unlisted".to_string()];
+        let hidden = vec!["hidden".to_string()];
+        for visibility in ["open", "private"] {
+            let mut channel = channel(visibility, "member");
+            assert!(!group_metadata_tags(&channel, &[]).contains(&unlisted));
+            channel.unlisted = true;
+            let tags = group_metadata_tags(&channel, &[]);
+            assert!(tags.contains(&unlisted), "{visibility}");
+            assert!(!tags.contains(&hidden), "{visibility}");
+        }
+    }
+
+    /// Private system channels are hidden, like DMs; open ones are not.
+    #[test]
+    fn hides_private_system_channels() {
+        let hidden = |visibility: &str| {
+            let mut channel = channel(visibility, "member");
+            channel.channel_type = "system".into();
+            group_metadata_tags(&channel, &[]).contains(&vec!["hidden".to_string()])
+        };
+        assert!(hidden("private"));
+        assert!(!hidden("open"));
+    }
 }
 
 #[cfg(test)]
@@ -1318,6 +2279,64 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn join_role_defaults_to_member_and_updates_round_trip() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner_pk = random_pubkey();
+        ensure_user(&pool, community, &owner_pk)
+            .await
+            .expect("ensure owner");
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "test-join-role-round-trip",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner_pk,
+            None,
+        )
+        .await
+        .expect("create channel");
+        assert_eq!(channel.join_role, "member");
+
+        let updated = update_channel(
+            &pool,
+            community,
+            channel.id,
+            ChannelUpdate {
+                join_role: Some("guest".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("set join_role");
+        assert_eq!(updated.join_role, "guest");
+        assert_eq!(
+            get_channel(&pool, community, channel.id)
+                .await
+                .expect("reload")
+                .join_role,
+            "guest"
+        );
+
+        // The column CHECK rejects values the relay does not know.
+        assert!(update_channel(
+            &pool,
+            community,
+            channel.id,
+            ChannelUpdate {
+                join_role: Some("admin".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn test_unarchive_expired_ephemeral_channel_renews_ttl_deadline() {
         let pool = setup_pool().await;
         let community_id = make_test_community(&pool).await;
@@ -1424,6 +2443,261 @@ mod postgres_tests {
                     && row.channel_id == channel.id
             }),
             "reaper should carry the archived row's community id and host"
+        );
+    }
+
+    fn create_event(creator: &Keys, channel_id: Uuid) -> nostr::Event {
+        nostr::EventBuilder::new(nostr::Kind::Custom(9007), "")
+            .tags([
+                nostr::Tag::parse(["h", &channel_id.to_string()]).expect("h tag"),
+                nostr::Tag::parse(["name", "start"]).expect("name tag"),
+            ])
+            .sign_with_keys(creator)
+            .expect("sign 9007")
+    }
+
+    fn new_channel<'a>(created_by: &'a [u8], members: &'a [Vec<u8>]) -> NewChannel<'a> {
+        NewChannel {
+            name: "start",
+            channel_type: ChannelType::Stream,
+            visibility: ChannelVisibility::Private,
+            description: None,
+            created_by,
+            ttl_seconds: None,
+            labels: &[],
+            unlisted: false,
+            members,
+        }
+    }
+
+    /// Holds a create open on its own transaction (channel row and event both
+    /// written, not committed) while the same create runs again beside it.
+    async fn resend_beside_open_create(commit_first: bool) -> ChannelCreate {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let creator = Keys::generate();
+        let creator_bytes = creator.public_key().to_bytes().to_vec();
+        let members = vec![random_pubkey()];
+        let channel_id = Uuid::new_v4();
+        let event = create_event(&creator, channel_id);
+
+        let mut first = crate::begin_community_write_transaction(
+            &pool,
+            community,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await
+        .expect("begin first create");
+        assert!(insert_channel_rows(
+            &mut first,
+            channel_id,
+            new_channel(&creator_bytes, &members)
+        )
+        .await
+        .expect("first create's rows"));
+        crate::event::insert_event_with_thread_metadata_tx(
+            &mut first,
+            &event,
+            Some(channel_id),
+            None,
+        )
+        .await
+        .expect("first create's event");
+
+        let resend = tokio::spawn({
+            let (pool, event, creator_bytes, members) = (
+                pool.clone(),
+                event.clone(),
+                creator_bytes.clone(),
+                members.clone(),
+            );
+            async move {
+                create_channel_with_event(
+                    &pool,
+                    None,
+                    community,
+                    channel_id,
+                    new_channel(&creator_bytes, &members),
+                    &event,
+                )
+                .await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !resend.is_finished(),
+            "the resend waits for the open create instead of answering early"
+        );
+
+        if commit_first {
+            first.commit().await.expect("commit first create");
+        } else {
+            drop(first);
+        }
+        let outcome = resend.await.expect("resend task").expect("resend outcome");
+        let roster = sqlx::query_scalar::<_, Vec<u8>>(
+            "SELECT pubkey FROM channel_members WHERE community_id = $1 AND channel_id = $2 \
+             AND removed_at IS NULL ORDER BY pubkey",
+        )
+        .bind(community.as_uuid())
+        .bind(channel_id)
+        .fetch_all(&pool)
+        .await
+        .expect("roster");
+        let mut expected = vec![creator_bytes, members[0].clone()];
+        expected.sort();
+        assert_eq!(
+            roster, expected,
+            "the channel has its owner and member once"
+        );
+        outcome
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn a_resend_beside_an_open_create_confirms_it_once_committed() {
+        let outcome = resend_beside_open_create(true).await;
+        assert!(
+            matches!(outcome, ChannelCreate::Exists { resent: true }),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn a_resend_beside_a_failed_create_creates_the_channel() {
+        let outcome = resend_beside_open_create(false).await;
+        assert!(matches!(outcome, ChannelCreate::Created(_)), "{outcome:?}");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn a_create_whose_event_fails_leaves_no_channel() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let creator = Keys::generate();
+        let creator_bytes = creator.public_key().to_bytes().to_vec();
+        let channel_id = Uuid::new_v4();
+        // An ephemeral kind is refused by the event insert, after the rows.
+        let unstorable = nostr::EventBuilder::new(nostr::Kind::Custom(20_000), "")
+            .sign_with_keys(&creator)
+            .expect("sign");
+        let members = [random_pubkey()];
+        create_channel_with_event(
+            &pool,
+            None,
+            community,
+            channel_id,
+            new_channel(&creator_bytes, &members),
+            &unstorable,
+        )
+        .await
+        .expect_err("the event insert fails");
+        assert!(
+            get_channel(&pool, community, channel_id).await.is_err(),
+            "the channel rolls back with its event"
+        );
+        let retry = create_channel_with_event(
+            &pool,
+            None,
+            community,
+            channel_id,
+            new_channel(&creator_bytes, &members),
+            &create_event(&creator, channel_id),
+        )
+        .await
+        .expect("retry");
+        assert!(matches!(retry, ChannelCreate::Created(_)), "{retry:?}");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn another_create_for_a_taken_channel_writes_nothing() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let creator = Keys::generate();
+        let creator_bytes = creator.public_key().to_bytes().to_vec();
+        let channel_id = Uuid::new_v4();
+        let first = create_channel_with_event(
+            &pool,
+            None,
+            community,
+            channel_id,
+            new_channel(&creator_bytes, &[]),
+            &create_event(&creator, channel_id),
+        )
+        .await
+        .expect("first create");
+        assert!(matches!(first, ChannelCreate::Created(_)), "{first:?}");
+
+        let other = Keys::generate();
+        let other_bytes = other.public_key().to_bytes().to_vec();
+        let intruder = random_pubkey();
+        let second = create_channel_with_event(
+            &pool,
+            None,
+            community,
+            channel_id,
+            new_channel(&other_bytes, std::slice::from_ref(&intruder)),
+            &create_event(&other, channel_id),
+        )
+        .await
+        .expect("second create");
+        assert!(
+            matches!(second, ChannelCreate::Exists { resent: false }),
+            "{second:?}"
+        );
+        let members = crate::channel_members::get_members(&pool, community, channel_id)
+            .await
+            .expect("members");
+        assert_eq!(members.len(), 1, "only the first creator is a member");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn soft_delete_waits_for_membership_lock() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner = random_pubkey();
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "delete-vs-roster",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        // A roster publication holds the membership lock. A delete ends
+        // admission, so it must wait, like any membership write.
+        let snapshot =
+            crate::channel_members::lock_member_snapshot(&pool, community, channel.id, &[9u8; 32])
+                .await
+                .expect("capture locked roster");
+        let delete_pool = crate::test_support::named_pool("delete-vs-roster").await;
+        let channel_id = channel.id;
+        let delete =
+            tokio::spawn(
+                async move { soft_delete_channel(&delete_pool, community, channel_id).await },
+            );
+        crate::test_support::wait_for_lock_wait(&pool, "delete-vs-roster").await;
+        assert!(
+            !delete.is_finished(),
+            "delete must wait for the roster fence"
+        );
+        snapshot.release().await.expect("release roster fence");
+        assert!(delete.await.expect("delete task").expect("delete"));
+
+        assert!(
+            !soft_delete_channel(&pool, community, channel.id)
+                .await
+                .expect("second delete"),
+            "a second delete finds no live channel"
         );
     }
 }

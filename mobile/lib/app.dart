@@ -1,4 +1,9 @@
+import 'features/activity/activity_provider.dart';
+import 'features/channels/default_agent_launcher.dart';
+import 'features/agents/agents_page.dart';
 import 'dart:async';
+import 'hosted_app_gate.dart';
+import 'onboarding_app_entry.dart';
 import 'shared/widgets/ios_navigation_metrics.dart';
 import 'shared/community/paired_community_landing.dart';
 import 'shared/community/community_loading_surface.dart';
@@ -12,9 +17,6 @@ import 'package:uuid/uuid.dart';
 
 import 'features/age_gate/age_restriction_page.dart';
 import 'features/age_gate/age_signal_provider.dart';
-import 'features/activity/activity_provider.dart';
-import 'features/activity/inbox_local_state_provider.dart';
-import 'features/activity/inbox_read_state.dart';
 import 'features/channels/channel.dart';
 import 'features/channels/channel_management_provider.dart';
 import 'features/channels/channels_provider.dart';
@@ -28,7 +30,6 @@ import 'features/pairing/pairing_page.dart';
 import 'features/pairing/pairing_provider.dart';
 import 'features/channels/agent_activity/observer_subscription.dart';
 import 'features/channels/channel_detail_page.dart';
-import 'features/channels/deep_link_dispatcher.dart';
 import 'shared/widgets/app_route_observer.dart';
 import 'features/profile/user_status_cache_provider.dart';
 import 'features/profile/settings_profile_header.dart';
@@ -41,12 +42,10 @@ import 'features/settings/theme_picker_page.dart';
 import 'shared/auth/auth.dart';
 import 'shared/deeplink/pending_deep_link_provider.dart';
 import 'shared/emoji/emoji_burst.dart';
-import 'shared/push/push_subscription_provider.dart';
-import 'shared/push/push_relay_capability_provider.dart';
 import 'shared/relay/relay.dart';
-import 'shared/read_state/read_state_provider.dart';
 import 'shared/theme/theme.dart';
 import 'shared/widgets/buzz_loading_indicator.dart';
+import 'shared/widgets/buzz_toast_host.dart';
 
 const _starterChannelNamespace = '3ce33bea-8f09-5f1b-9c85-8a7d2659e6b0';
 
@@ -246,9 +245,9 @@ InviteJoinRecovery buildMobileInviteJoinRecovery(
           .read(_inviteRelayConnectedProvider(scope.relayHttpOrigin).future)
           .timeout(const Duration(seconds: 15));
       ensureScopeCurrent();
-      await ref.read(channelsProvider.notifier).refresh(fetchDirectory: true);
-      ensureScopeCurrent();
-      final channels = await ref.read(channelsProvider.future);
+      final channels = await ref
+          .read(channelsProvider.notifier)
+          .fetchFresh(fetchDirectory: true);
       ensureScopeCurrent();
       return channels;
     },
@@ -273,28 +272,6 @@ InviteJoinRecovery buildMobileInviteJoinRecovery(
     isScopeCurrent: isScopeCurrent,
   );
 }
-
-/// App-shell projection that joins Activity state for the Home navigation.
-///
-/// This belongs at the composition root because it deliberately aggregates
-/// Activity feature providers for a sibling navigation surface.
-final _unreadInboxItemCountProvider = Provider<int>((ref) {
-  final readState = ref.watch(readStateProvider);
-  if (!readState.isReady) return 0;
-
-  final localState = ref.watch(inboxLocalStateProvider);
-  final items = ref.watch(inboxItemsProvider);
-  return items
-      .where(
-        (item) => !isInboxItemDone(
-          item,
-          markerOf: readState.effectiveTimestamp,
-          localUnreadOverrides: localState.unreadIds,
-          localDoneSet: localState.doneIds,
-        ),
-      )
-      .length;
-});
 
 final _mobileRootNavigatorKey = GlobalKey<NavigatorState>();
 
@@ -325,21 +302,18 @@ class App extends HookConsumerWidget {
 
     // Eagerly initialize websocket session and lifecycle observer when
     // authenticated. These providers connect and manage the websocket.
-    var hasUnreadInbox = false;
-    var hasUnreadSolo = false;
     if (ageSignalState != AgeSignalState.restricted &&
         authState.value?.status == AuthStatus.authenticated) {
       ref.watch(relaySessionProvider);
-      ref.watch(observerRelayProvider);
+      // Listen, not watch: these publish often, and an App rebuild rebuilds
+      // every route, including an open chat.
+      ref.listen(observerRelayProvider, (_, _) {});
       ref.watch(appLifecycleProvider);
-      ref.watch(userStatusCacheProvider);
-      if (ref.watch(activeCommunityProvider).value?.pushNotificationsEnabled ==
-              true &&
-          ref.watch(currentRelayPushDescriptorProvider).value != null) {
-        ref.watch(pushSubscriptionSyncProvider);
-      }
-      hasUnreadInbox = ref.watch(_unreadInboxItemCountProvider) > 0;
-      hasUnreadSolo = ref.watch(meUnreadChannelIdsProvider).isNotEmpty;
+      ref.listen(userStatusCacheProvider, (_, _) {});
+      // Activity owns hidden-DM recovery even when Inbox is never opened.
+      ref.listen(activityProvider, (_, _) {});
+      // Preserve initial read seeding even while Solo is hidden.
+      ref.listen(meUnreadChannelIdsProvider, (_, _) {});
     }
 
     // Start listening for buzz:// links immediately (even pre-auth) so a
@@ -381,29 +355,31 @@ class App extends HookConsumerWidget {
       // route that was pushed while the store signal request was in flight.
       builder: (context, child) => switch (ageSignalState) {
         AgeSignalState.restricted => const AgeRestrictionPage(),
-        _ => IosNavigationMetricsHost(
-          child: AppMarkdownTheme(
-            child: MobileHuddleShell(
-              navigatorKey: _mobileRootNavigatorKey,
-              child: EmojiBurstOverlay(
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    ExcludeSemantics(
-                      excluding: pairedCommunity != null,
-                      child: AbsorbPointer(
-                        absorbing: pairedCommunity != null,
-                        child: child ?? const SizedBox.shrink(),
+        _ => BuzzToastHost(
+          child: IosNavigationMetricsHost(
+            child: AppMarkdownTheme(
+              child: MobileHuddleShell(
+                navigatorKey: _mobileRootNavigatorKey,
+                child: EmojiBurstOverlay(
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      ExcludeSemantics(
+                        excluding: pairedCommunity != null,
+                        child: AbsorbPointer(
+                          absorbing: pairedCommunity != null,
+                          child: child ?? const SizedBox.shrink(),
+                        ),
                       ),
-                    ),
-                    // Cover the navigator while onboarding is removed and the
-                    // destination installs the matching avatar-flight route.
-                    if (pairedCommunity != null)
-                      CommunityLoadingSurface(
-                        name: pairedCommunity.name,
-                        relayUrl: pairedCommunity.relayUrl,
-                      ),
-                  ],
+                      // Cover the navigator while onboarding is removed and the
+                      // destination installs the matching avatar-flight route.
+                      if (pairedCommunity != null)
+                        CommunityLoadingSurface(
+                          name: pairedCommunity.name,
+                          relayUrl: pairedCommunity.relayUrl,
+                        ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -414,19 +390,26 @@ class App extends HookConsumerWidget {
         loading: () => const _SplashScreen(),
         error: (_, _) => const PairingPage(),
         data: (state) => switch (state.status) {
-          AuthStatus.authenticated => DeepLinkDispatcher(
+          AuthStatus.authenticated => HostedAppGate(
+            authenticated: true,
             child: HomePage(
-              mePageBuilder: (_, action) => MePage(newChatAction: action),
+              onAgents: showAgents,
+              defaultAgentBuilder: (context) => DefaultAgentLauncher(
+                onChooseAgent: () => showAgents(context),
+              ),
+              mePageBuilder: (_, chat, workspace) => MePage(
+                sliver: true,
+                newChatAction: chat,
+                newWorkspaceAction: workspace,
+              ),
               settingsPageBuilder: _buildSettingsPage,
               communityInvitePageBuilder: (_) => const CommunityInvitePage(),
               communityAppearancePageBuilder: (_) => const ThemePickerPage(),
-              hasUnreadInbox: hasUnreadInbox,
-              hasUnreadSolo: hasUnreadSolo,
             ),
           ),
-          _ => const DeepLinkDispatcher(
-            dispatchMessageLinks: false,
-            child: PairingPage(),
+          _ => const HostedAppGate(
+            authenticated: false,
+            child: OnboardingAppEntry(),
           ),
         },
       ),

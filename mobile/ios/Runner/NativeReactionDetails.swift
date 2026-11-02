@@ -72,7 +72,7 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
       configuration.baseBackgroundColor = .secondarySystemBackground
     }
     configuration.cornerStyle = .capsule
-    configuration.image = NativeTabler.image("xmark", size: 17)
+    configuration.image = NativeTabler.image("xmark", size: 24)
     configuration.baseForegroundColor = foregroundColor
     close.configuration = configuration
     close.tintColor = foregroundColor

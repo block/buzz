@@ -66,7 +66,9 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('Chat color'), findsOneWidget);
-    final green = chatColorChoices.indexWhere((color) => color.name == 'Green');
+    final green = chatColorChoices.indexWhere((color) => color.name == 'Jade');
+    await tester.ensureVisible(find.byKey(ValueKey('accent-option-$green')));
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(ValueKey('accent-option-$green')));
     await tester.pumpAndSettle();
     expect(notifier.preferenceWrites, 0);
@@ -126,7 +128,7 @@ void main() {
           .color;
       final surface = surfaceColor();
       final fills = <Color>[];
-      for (final name in ['Blue', 'Green', 'Neutral']) {
+      for (final name in ['Cobalt', 'Jade', 'Chartreuse', 'Gray']) {
         await tester.tap(
           find.byKey(const ValueKey('theme-preview-accent-action-button')),
         );
@@ -135,6 +137,8 @@ void main() {
           (color) => color.name == name,
         );
         final option = find.byKey(ValueKey('accent-option-$index'));
+        await tester.ensureVisible(option);
+        await tester.pumpAndSettle();
         await tester.tap(option);
         await tester.pumpAndSettle();
         Navigator.of(tester.element(option)).pop();
@@ -150,7 +154,7 @@ void main() {
         expect(notifier.preferenceWrites, 0);
         fills.add(bubbleColor());
       }
-      expect(fills.toSet(), hasLength(3));
+      expect(fills.toSet(), hasLength(4));
       expect(tester.takeException(), isNull);
     });
   }

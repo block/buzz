@@ -580,7 +580,7 @@ mod tests {
         let mono = fixture(sample_rate, seconds, amplitude);
         let mono_data = &mono[44..];
         let mut stereo_data = Vec::with_capacity(mono_data.len() * 2);
-        for sample in mono_data.chunks_exact(2) {
+        for sample in mono_data.as_chunks::<2>().0 {
             stereo_data.extend_from_slice(sample);
             stereo_data.extend_from_slice(sample);
         }

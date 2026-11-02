@@ -513,7 +513,12 @@ class _RecordingPairAuthNotifier extends _UnauthenticatedAuthNotifier {
   int imports = 0;
 
   @override
-  Future<void> authenticateWithCommunity(Community community) async {
+  Future<void> authenticateWithCommunity(
+    Community community, {
+    bool Function()? shouldContinue,
+    bool activate = true,
+  }) async {
+    if (shouldContinue != null && !shouldContinue()) return;
     imports += 1;
   }
 }

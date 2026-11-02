@@ -195,16 +195,16 @@ where
     .await?)
 }
 
-/// Owns the detached Postgres session holding the relay usage-metrics advisory lock.
+/// Owns the detached Postgres session holding a deployment-wide leader advisory lock.
 ///
 /// The connection deliberately does not return to the main pool: session advisory
-/// locks must remain bound to this exact physical connection, and the poller
-/// pings it before each leader-only collection tick.
-pub struct UsageMetricsLeader {
+/// locks must remain bound to this exact physical connection, and each leader-only
+/// loop (usage metrics, NIP-43 snapshot reconciliation) pings it before working.
+pub struct SessionLeader {
     connection: PgConnection,
 }
 
-impl UsageMetricsLeader {
+impl SessionLeader {
     /// Returns whether the lock-owning session is still reachable.
     ///
     /// Bounded to 5 seconds — a blackholed connection (no RST) would otherwise
@@ -604,17 +604,15 @@ fn into_community_hosts(rows: Vec<(Uuid, String)>) -> Vec<CommunityHost> {
 }
 
 impl Db {
-    /// Try to acquire the detached session advisory lock for relay usage metrics.
+    /// Try to acquire the detached session advisory lock `lock_key`, making this
+    /// replica the leader for the job that key names.
     ///
     /// The returned guard owns the exact connection that acquired the lock. It is
     /// detached from the shared pool so a stable leader neither returns a locked
     /// session to other callers nor permanently consumes a pool slot. Dropping the
     /// guard closes the connection and releases the session-scoped lock.
-    #[datastore_span(name = "try_lock_usage_metrics", system = "postgresql")]
-    pub async fn try_lock_usage_metrics(
-        &self,
-        lock_key: i64,
-    ) -> Result<Option<UsageMetricsLeader>> {
+    #[datastore_span(name = "try_lock_session_leader", system = "postgresql")]
+    pub async fn try_lock_session_leader(&self, lock_key: i64) -> Result<Option<SessionLeader>> {
         let mut connection = observability::acquire_writer_with_legacy_metrics(
             &self.pool,
             observability::WriterOperation::Maintenance,
@@ -625,7 +623,7 @@ impl Db {
             .fetch_one(&mut *connection)
             .await?;
         if acquired {
-            Ok(Some(UsageMetricsLeader {
+            Ok(Some(SessionLeader {
                 connection: connection.detach(),
             }))
         } else {
@@ -770,12 +768,6 @@ impl Db {
     pub async fn active_community_hosts(&self) -> Result<Vec<CommunityHost>> {
         active_community_hosts(&self.pool, observability::WriterOperation::Maintenance).await
     }
-
-    /// Return active community host mappings during startup bootstrap work.
-    #[datastore_span(name = "bootstrap_community_hosts", system = "postgresql")]
-    pub async fn bootstrap_community_hosts(&self) -> Result<Vec<CommunityHost>> {
-        active_community_hosts(&self.pool, observability::WriterOperation::Bootstrap).await
-    }
 }
 
 #[cfg(test)]
@@ -854,42 +846,15 @@ mod tests {
 #[cfg(test)]
 mod postgres_tests {
     use super::*;
+    use crate::test_support::ScratchDb;
     use buzz_core::CommunityId;
     use nostr::Keys;
-    use sqlx::postgres::PgPoolOptions;
     use sqlx::PgPool;
 
     async fn get_pool() -> PgPool {
         PgPool::connect(&crate::test_support::database_url())
             .await
             .expect("connect to test DB")
-    }
-
-    async fn create_scratch_db(admin: &PgPool, prefix: &str) -> (PgPool, String) {
-        let name = format!("{}_{}", prefix, Uuid::new_v4().simple());
-        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
-            .execute(admin)
-            .await
-            .expect("create scratch db");
-        let base = crate::test_support::database_url();
-        let idx = base.rfind('/').expect("db url has a path segment");
-        let scratch_url = format!("{}/{}", &base[..idx], name);
-        let pool = PgPool::connect(&scratch_url)
-            .await
-            .expect("connect scratch db");
-        crate::migration::run_migrations(&pool)
-            .await
-            .expect("migrate scratch db");
-        (pool, name)
-    }
-
-    async fn drop_scratch_db(admin: &PgPool, pool: PgPool, name: &str) {
-        pool.close().await;
-        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
-        )))
-        .execute(admin)
-        .await;
     }
 
     #[tokio::test]
@@ -900,12 +865,7 @@ mod postgres_tests {
         // USAGE_METRICS_LOCK_KEY (0x4255_5A5A_4D45_5452) on the shared test DB
         // races any live buzz-relay on the same database (see #3619).
         let admin_url = crate::test_support::database_url();
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&admin_url)
-            .await
-            .expect("connect admin to create scratch db");
-        let (pool, scratch_name) = create_scratch_db(&admin, "usage_metrics_lock").await;
+        let (pool, _scratch) = ScratchDb::migrated(&admin_url, "usage_metrics_lock").await;
         let first = Db::from_pool(pool.clone());
         let second = Db::from_pool(pool.clone());
         // Same key as production (`buzz-relay` USAGE_METRICS_LOCK_KEY) — safe here
@@ -913,14 +873,14 @@ mod postgres_tests {
         let key = 0x4255_5A5A_4D45_5452;
 
         let mut leader = first
-            .try_lock_usage_metrics(key)
+            .try_lock_session_leader(key)
             .await
             .expect("first lock attempt")
             .expect("first database handle becomes leader");
         assert!(leader.is_live().await, "lock owner remains reachable");
         assert!(
             second
-                .try_lock_usage_metrics(key)
+                .try_lock_session_leader(key)
                 .await
                 .expect("second lock attempt")
                 .is_none(),
@@ -933,7 +893,7 @@ mod postgres_tests {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         let successor = loop {
             let attempt = second
-                .try_lock_usage_metrics(key)
+                .try_lock_session_leader(key)
                 .await
                 .expect("lock attempt after leader drop");
             if attempt.is_some() || tokio::time::Instant::now() >= deadline {
@@ -946,11 +906,6 @@ mod postgres_tests {
             "dropping the detached session releases its advisory lock"
         );
         drop(successor);
-
-        // Release any remaining session state before DROP DATABASE.
-        drop(first);
-        drop(second);
-        drop_scratch_db(&admin, pool, &scratch_name).await;
     }
 
     fn random_pubkey() -> Vec<u8> {
@@ -1183,10 +1138,7 @@ mod postgres_tests {
 
         let db = Db::from_pool(pool.clone());
         for sweep in 0..2 {
-            for (caller, hosts) in [
-                ("maintenance", db.active_community_hosts().await),
-                ("bootstrap", db.bootstrap_community_hosts().await),
-            ] {
+            for (caller, hosts) in [("maintenance", db.active_community_hosts().await)] {
                 let hosts = hosts.unwrap_or_else(|e| panic!("{caller} sweep {sweep}: {e}"));
                 let ids: std::collections::HashSet<Uuid> = hosts.iter().map(|h| h.id).collect();
                 assert_eq!(
@@ -1438,12 +1390,7 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn fleet_snapshots_match_seeded_stock_and_activity_exactly() {
         let admin_url = crate::test_support::database_url();
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&admin_url)
-            .await
-            .expect("connect admin to create scratch db");
-        let (pool, scratch_name) = create_scratch_db(&admin, "usage_snapshot").await;
+        let (pool, _scratch) = ScratchDb::migrated(&admin_url, "usage_snapshot").await;
         let (community_id, _, _) = make_community(&pool).await;
 
         let human = random_pubkey();
@@ -1640,8 +1587,6 @@ mod postgres_tests {
             (activity.human_30d, activity.agent_30d, activity.unknown_30d,),
             (1, 1, 1)
         );
-
-        drop_scratch_db(&admin, pool, &scratch_name).await;
     }
 
     /// Fleet collection must read a proved replica and skip instead of
@@ -1650,13 +1595,8 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn fleet_collection_is_replica_only_and_skips_without_reader() {
         let admin_url = crate::test_support::database_url();
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&admin_url)
-            .await
-            .expect("connect admin to create scratch db");
-        let (writer, writer_name) = create_scratch_db(&admin, "usage_writer").await;
-        let (reader, reader_name) = create_scratch_db(&admin, "usage_reader").await;
+        let (writer, _writer_db) = ScratchDb::migrated(&admin_url, "usage_writer").await;
+        let (reader, _reader_db) = ScratchDb::migrated(&admin_url, "usage_reader").await;
         let (writer_community, _, _) = make_community(&writer).await;
         let (reader_community, _, _) = make_community(&reader).await;
         insert_user(&writer, writer_community, &random_pubkey(), false).await;
@@ -1684,78 +1624,6 @@ mod postgres_tests {
             snapshot.users_human, 2,
             "fixture proves the reader served the query"
         );
-
-        drop(db);
-        drop_scratch_db(&admin, reader, &reader_name).await;
-        drop_scratch_db(&admin, writer, &writer_name).await;
-    }
-
-    /// Loopback TCP proxy that can make the reader go dark. While dark, any
-    /// session that receives bytes stops relaying for good but keeps both
-    /// sockets open, like a replica that stops answering mid-query. Sessions
-    /// opened after the proxy comes back relay normally.
-    struct DarkeningProxy {
-        port: u16,
-        dark: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    }
-
-    impl DarkeningProxy {
-        async fn spawn(upstream_host: String, upstream_port: u16) -> Self {
-            use std::sync::atomic::{AtomicBool, Ordering};
-            use std::sync::Arc;
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-            async fn pump(
-                mut from: tokio::net::tcp::OwnedReadHalf,
-                mut to: tokio::net::tcp::OwnedWriteHalf,
-                dark: Arc<AtomicBool>,
-            ) {
-                let mut buf = [0u8; 8192];
-                loop {
-                    let Ok(n) = from.read(&mut buf).await else {
-                        return;
-                    };
-                    if n == 0 {
-                        return;
-                    }
-                    if dark.load(Ordering::SeqCst) {
-                        // Swallow the bytes and hold both sockets open.
-                        let _held = (from, to);
-                        std::future::pending::<()>().await;
-                        return;
-                    }
-                    if to.write_all(&buf[..n]).await.is_err() {
-                        return;
-                    }
-                }
-            }
-
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("bind proxy");
-            let port = listener.local_addr().expect("proxy addr").port();
-            let dark = Arc::new(AtomicBool::new(false));
-            let accept_dark = dark.clone();
-            tokio::spawn(async move {
-                while let Ok((client, _)) = listener.accept().await {
-                    let Ok(server) =
-                        tokio::net::TcpStream::connect((upstream_host.as_str(), upstream_port))
-                            .await
-                    else {
-                        continue;
-                    };
-                    let (client_read, client_write) = client.into_split();
-                    let (server_read, server_write) = server.into_split();
-                    tokio::spawn(pump(client_read, server_write, accept_dark.clone()));
-                    tokio::spawn(pump(server_read, client_write, accept_dark.clone()));
-                }
-            });
-            Self { port, dark }
-        }
-
-        fn set_dark(&self, dark: bool) {
-            self.dark.store(dark, std::sync::atomic::Ordering::SeqCst);
-        }
     }
 
     /// A fleet collection abandoned at its relay-side deadline on a reader
@@ -1770,33 +1638,27 @@ mod postgres_tests {
         use std::time::{Duration, Instant};
 
         let admin_url = crate::test_support::database_url();
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&admin_url)
-            .await
-            .expect("connect admin to create scratch db");
-        let (writer, writer_name) = create_scratch_db(&admin, "usage_writer").await;
-        let (reader, reader_name) = create_scratch_db(&admin, "usage_reader").await;
+        let (writer, _writer_db) = ScratchDb::migrated(&admin_url, "usage_writer").await;
+        let (reader, _reader_db) = ScratchDb::migrated(&admin_url, "usage_reader").await;
         let (reader_community, _, _) = make_community(&reader).await;
         insert_user(&reader, reader_community, &random_pubkey(), false).await;
 
         let reader_options = reader.connect_options();
-        let proxy = DarkeningProxy::spawn(
+        let proxy = crate::test_support::PausingProxy::spawn(
             reader_options.get_host().to_owned(),
             reader_options.get_port(),
         )
         .await;
         let proxied: PgConnectOptions =
             (*reader_options).clone().host("127.0.0.1").port(proxy.port);
-        // One slot, so a stranded slot blocks every later acquire. No
-        // before-acquire ping, so the stall lands after the checkout is
-        // handed out, where the relay deadline drops it.
-        let read_pool = PgPoolOptions::new()
-            .max_connections(1)
+        // The production reader options with one slot, so a stranded slot
+        // blocks every later acquire, and no warm floor, so nothing redials
+        // it. No before-acquire ping, so the stall lands after the checkout
+        // is handed out, where the relay deadline drops it.
+        let read_pool = Db::read_pool_options(1)
             .min_connections(0)
-            .test_before_acquire(false)
             .acquire_timeout(Duration::from_secs(15))
-            .connect_with(proxied)
+            .connect_with(Db::reader_connect_options(proxied))
             .await
             .expect("connect reader through proxy");
         let db = Db::from_pools(writer.clone(), read_pool.clone());
@@ -1822,33 +1684,39 @@ mod postgres_tests {
         // a failed boot ping. This pins close-on-drop ahead of that await.
         let cold = Db::from_pools(writer.clone(), read_pool.clone());
         cold.fence().force_open_for_tests(Utc::now());
-        proxy.set_dark(true);
-        tokio::time::timeout(Duration::from_secs(1), cold.usage_fleet_stock_snapshot())
-            .await
-            .expect_err("a dark reader must stall the collection until its deadline");
-        proxy.set_dark(false);
+        proxy.set_paused(true);
+        // Under the reader's 1s fence-proof bound, so the caller deadline
+        // (not the proof timeout) is what abandons the checkout.
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            cold.usage_fleet_stock_snapshot(),
+        )
+        .await
+        .expect_err("a dark reader must stall the collection until its deadline");
 
+        // Still paused: only close-on-drop can free the slot this fast. The
+        // reader pool's release check would free it too, but only after its
+        // 5s timeout, and its follow-up sqlx ping is not bounded at all.
         let started = Instant::now();
+        while read_pool.size() != 0 {
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "slot release must be bounded by close-on-drop, still held after {:?}",
+                started.elapsed()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        proxy.set_paused(false);
+
         let mut replacement = read_pool
             .acquire()
             .await
-            .expect("the abandoned collection must release its reader slot");
-        assert!(
-            started.elapsed() < Duration::from_secs(8),
-            "slot release must be bounded by close-on-drop, took {:?}",
-            started.elapsed()
-        );
+            .expect("the released slot must accept a replacement connection");
         let one: i32 = sqlx::query_scalar("SELECT 1")
             .fetch_one(&mut *replacement)
             .await
             .expect("replacement reader is usable");
         assert_eq!(one, 1);
         drop(replacement);
-
-        drop(cold);
-        drop(db);
-        read_pool.close().await;
-        drop_scratch_db(&admin, reader, &reader_name).await;
-        drop_scratch_db(&admin, writer, &writer_name).await;
     }
 }

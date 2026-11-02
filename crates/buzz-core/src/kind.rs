@@ -169,9 +169,20 @@ pub fn k_tag_kinds(event: &nostr::Event) -> impl Iterator<Item = u32> + '_ {
 /// `#p` tag to receive the event. This closes the kindless `{ids:[…]}` read
 /// path for events whose existence must not be leaked.
 ///
-/// Used by `filter_can_match_result_gated_kinds` to force the per-event
-/// fallback path in COUNT rather than the fast SQL `count_events()`.
-pub const RESULT_GATED_KINDS: &[u32] = &[KIND_DM_VISIBILITY, KIND_AGENT_TURN_METRIC];
+/// Membership notices (44100/44101) are here because the relay signs them, so
+/// their id is not author-bound, and they name the target, the channel and
+/// the actor. A system channel's notice must not reach anyone but its target.
+///
+/// This is the one list every delivery surface reads: the filter-level `ids`
+/// exemption, `reader_authorized_for_event` (WS/HTTP history, push), live
+/// fan-out (same pod and Redis), and the COUNT fallback
+/// (`filter_can_match_result_gated_kinds`).
+pub const RESULT_GATED_KINDS: &[u32] = &[
+    KIND_DM_VISIBILITY,
+    KIND_AGENT_TURN_METRIC,
+    KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_MEMBER_REMOVED_NOTIFICATION,
+];
 
 /// Kinds whose stored events have `#p`-bound read access — readable only by
 /// subscribers whose pubkey appears in the event's `#p` tag.
@@ -874,12 +885,16 @@ pub const fn is_command_kind(kind: u32) -> bool {
     )
 }
 
+/// NIP-85 relay-signed NIP-FI verified profile (output only).
+pub const KIND_VERIFIED_PROFILE: u32 = 30382;
+
 /// Returns `true` if `kind` may only be authored by the relay.
 /// Client submission of these kinds must be rejected.
 pub const fn is_relay_only_kind(kind: u32) -> bool {
     matches!(
         kind,
-        KIND_ARTIFACT_REMOVAL
+        KIND_VERIFIED_PROFILE
+            | KIND_ARTIFACT_REMOVAL
             | KIND_NIP43_MEMBERSHIP_LIST
             | KIND_CHANNEL_SUMMARY
             | KIND_PRESENCE_SNAPSHOT

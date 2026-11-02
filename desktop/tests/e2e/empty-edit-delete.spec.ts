@@ -1,6 +1,8 @@
 import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
+import { openGeneral, pressRowAction } from "../helpers/channelHeadReady";
+import { clearComposer, replaceComposerText } from "../helpers/composer";
 
 // A message the mock identity authors in #general. Editing/deleting one's own
 // message is exactly Sam's workflow: "delete a message by clearing its edit."
@@ -16,9 +18,7 @@ async function openMoreActionsMenu(
   page: import("@playwright/test").Page,
   messageId: string,
 ) {
-  const row = page.locator(`[data-message-id="${messageId}"]`);
-  await row.hover();
-  await page.getByTestId(`more-actions-${messageId}`).click();
+  await pressRowAction(page.getByTestId(`more-actions-${messageId}`));
   await expect(page.locator('[role="menuitem"]').first()).toBeVisible({
     timeout: 5_000,
   });
@@ -37,17 +37,14 @@ async function submitEmptyEdit(
   // wait for it to populate before we clear it.
   const input = page.getByTestId("message-input");
   await expect(input).not.toBeEmpty({ timeout: 5_000 });
-  await input.click();
-  await page.keyboard.press("ControlOrMeta+A");
-  await page.keyboard.press("Backspace");
-  await expect(input).toBeEmpty();
+  await clearComposer(input);
   await page.keyboard.press("Enter");
 }
 
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
   await page.goto("/");
-  await page.getByTestId("channel-general").click();
+  await openGeneral(page);
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await expect
     .poll(() =>
@@ -140,9 +137,7 @@ test("a non-empty edit still edits and never deletes", async ({ page }) => {
   await expect(input).not.toBeEmpty({ timeout: 5_000 });
   const editedContent = `Edited, not deleted ${Date.now()}`;
 
-  await input.click();
-  await page.keyboard.press("ControlOrMeta+A");
-  await page.keyboard.type(editedContent);
+  await replaceComposerText(input, editedContent);
   await page.keyboard.press("Enter");
 
   // No delete confirmation, edit mode exits, the row survives with new text.
@@ -156,3 +151,42 @@ test("a non-empty edit still edits and never deletes", async ({ page }) => {
     RENDERED_ORIGINAL_CONTENT,
   );
 });
+
+// Clearing a draft must close its autocomplete at once. An Enter inside the
+// 120 ms debounce used to pick the stale suggestion instead of submitting, so
+// the delete prompt never appeared. The draft's trailing `#general` opens the
+// channel list on its own; the other triggers are typed after it.
+for (const { trigger, typed, popover } of [
+  { trigger: "#channel", typed: "", popover: "channel-autocomplete" },
+  { trigger: "@mention", typed: " @al", popover: "mention-autocomplete" },
+  { trigger: ":emoji", typed: " :smi", popover: "emoji-autocomplete" },
+]) {
+  test(`an empty edit submits while the ${trigger} autocomplete is open`, async ({
+    page,
+  }) => {
+    const row = page.locator(`[data-message-id="${OWN_MESSAGE_ID}"]`);
+    await expect(row).toBeVisible({ timeout: 10_000 });
+    await openMoreActionsMenu(page, OWN_MESSAGE_ID);
+    await page.getByTestId(`edit-message-${OWN_MESSAGE_ID}`).click();
+    await expect(page.getByTestId("edit-target")).toBeVisible({
+      timeout: 5_000,
+    });
+    // The channel list opens only once the caret has landed after `#general`.
+    await expect(page.getByTestId("channel-autocomplete")).toBeVisible({
+      timeout: 5_000,
+    });
+    await page.keyboard.type(typed);
+    await expect(page.getByTestId(popover)).toBeVisible({ timeout: 5_000 });
+
+    // Clear and submit back-to-back, well inside the debounce.
+    await page.keyboard.press("ControlOrMeta+A");
+    await page.keyboard.press("Backspace");
+    await page.keyboard.press("Enter");
+
+    await expect(page.getByRole("alertdialog")).toContainText(
+      "Delete message?",
+      { timeout: 5_000 },
+    );
+    await expect(page.getByTestId("message-input")).toBeEmpty();
+  });
+}

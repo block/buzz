@@ -1,0 +1,14 @@
+# nextest reads its configuration from the workspace root, so the desktop
+# Tauri workspace carries its own. Only the advisory pull-request flake lane
+# (scripts/flake-check.mjs tauri) runs nextest here; the Desktop Tauri lanes
+# use `cargo test`.
+
+[profile.flake]
+# Mirrors the root .config/nextest.toml profile: the lane repeats a selection
+# and must see every failed repetition, so no retries; the JUnit report gives
+# it per-test statuses.
+retries = 0
+fail-fast = false
+
+[profile.flake.junit]
+path = "junit.xml"

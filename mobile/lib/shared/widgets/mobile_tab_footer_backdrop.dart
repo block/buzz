@@ -8,6 +8,19 @@ const mobileTabBarHeight = 56.0;
 /// Gap between the floating mobile tab bar and the bottom safe area.
 const mobileTabBarBottomGap = Grid.twelve;
 
+/// Distance from the screen bottom to the floating mobile tab bar's bottom.
+double mobileTabBarBottom(BuildContext context) {
+  final inset = MediaQuery.viewPaddingOf(context).bottom;
+  return inset > mobileTabBarBottomGap ? inset : mobileTabBarBottomGap;
+}
+
+/// Distance from the screen bottom to the floating mobile tab bar's top.
+///
+/// Overlays drawn above Home, such as sign-in banners, sit above this so the
+/// bar's controls do not cover them.
+double mobileTabBarTop(BuildContext context) =>
+    mobileTabBarBottom(context) + mobileTabBarHeight;
+
 /// Fixed visual height of the shared footer fade behind the floating tab bar.
 double mobileTabFooterBackdropHeight(BuildContext _) => 180;
 

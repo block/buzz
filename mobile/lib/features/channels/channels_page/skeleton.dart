@@ -34,7 +34,7 @@ class _ChannelsSkeleton extends StatelessWidget {
     if (widths.isEmpty) widths.addAll(fallbackWidths);
 
     return ListView.builder(
-      cacheExtent: 0,
+      scrollCacheExtent: const ScrollCacheExtent.pixels(0),
       physics: const NeverScrollableScrollPhysics(),
       padding: EdgeInsets.fromLTRB(
         Grid.gutter,
@@ -83,6 +83,17 @@ class _ChannelSkeletonSection extends StatelessWidget {
             ),
             child: Row(
               children: [
+                const SizedBox(
+                  width: _kChannelLeadingWidth,
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: SkeletonBar(
+                      width: _kChannelIconSize,
+                      height: _kChannelIconSize,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: _kChannelLabelGap),
                 SkeletonBar(
                   key: Key('channels-skeleton-row-label-$index'),
                   width: widths[index],

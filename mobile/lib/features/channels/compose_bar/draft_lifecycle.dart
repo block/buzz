@@ -38,10 +38,9 @@ Future<void> _sendTextOnlyDraft({
     // A draft that changed while adding ran is not the draft the user sent.
     // Keep it and send nothing.
     if (context.mounted && draftRevision.value != submittedDraftRevision) {
-      messenger?.showSnackBar(
-        const SnackBar(
-          content: Text('Not sent: the message changed while adding people.'),
-        ),
+      messenger?.showFeedbackSnackBar(
+        const SnackBar(content: Text('Not sent. Message changed.')),
+        kind: ToastKind.error,
       );
       return;
     }
@@ -65,8 +64,9 @@ Future<void> _sendTextOnlyDraft({
     // The caller runs unawaited, so surface publish failures and restore the
     // sent draft unless the user has already started a new one.
     restoreClearedDraft();
-    messenger?.showSnackBar(
+    messenger?.showFeedbackSnackBar(
       SnackBar(content: Text(_composeSendErrorMessage(error))),
+      kind: ToastKind.error,
     );
   }
 }
@@ -178,4 +178,54 @@ void _useComposeDraftLifecycle({
     controller.addListener(persistDraft);
     return () => controller.removeListener(persistDraft);
   }, [controller, draftKey, draftIdentity, onDraftIdentityChanged]);
+}
+
+// Report aggregate work independently of rebuilds, including sub-frame failures.
+void _useComposerBusy({
+  required ValueNotifier<bool> isSending,
+  required ValueNotifier<int> uploadingCount,
+  required ValueNotifier<int> preparingAttachments,
+  required bool isDraft,
+  required ValueChanged<bool>? onChanged,
+}) {
+  final busyCallback = useRef(onChanged);
+  busyCallback.value = onChanged;
+  useEffect(() {
+    var active = true;
+    void reportCurrent() {
+      if (!active) return;
+      busyCallback.value?.call(
+        isSending.value ||
+            uploadingCount.value > 0 ||
+            (isDraft && preparingAttachments.value > 0),
+      );
+    }
+
+    void reportBusy() {
+      // Scope changes can reset the composer from a build-time effect.
+      // Ordinary operation completions still release the parent immediately.
+      if (SchedulerBinding.instance.schedulerPhase ==
+          SchedulerPhase.persistentCallbacks) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => reportCurrent());
+      } else {
+        reportCurrent();
+      }
+    }
+
+    final sources = [isSending, uploadingCount, preparingAttachments];
+    for (final source in sources) {
+      source.addListener(reportBusy);
+    }
+    return () {
+      active = false;
+      for (final source in sources) {
+        source.removeListener(reportBusy);
+      }
+      // Disposal can happen during a parent build. Release after that frame.
+      final callback = busyCallback.value;
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => callback?.call(false),
+      );
+    };
+  }, [isSending, uploadingCount, preparingAttachments, isDraft]);
 }

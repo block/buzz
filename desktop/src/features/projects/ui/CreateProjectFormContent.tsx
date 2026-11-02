@@ -2,6 +2,7 @@ import { ArrowLeft } from "lucide-react";
 import * as React from "react";
 
 import type { CreateProjectInput } from "@/features/projects/useCreateProject";
+import { CREATE_PROJECT_REFOCUS_DELAY_MS } from "@/features/projects/ui/createProjectFormFocus";
 import { CreateProjectFormSettings } from "@/features/projects/ui/CreateProjectFormSettings";
 import { useCreateProjectFormSettings } from "@/features/projects/ui/useCreateProjectFormSettings";
 import { cn } from "@/shared/lib/cn";
@@ -46,7 +47,7 @@ export function CreateProjectFormContent({
 
     const timerId = globalThis.setTimeout(() => {
       nameInputRef.current?.focus();
-    }, 50);
+    }, CREATE_PROJECT_REFOCUS_DELAY_MS);
     return () => globalThis.clearTimeout(timerId);
   }, [active, initialName]);
 

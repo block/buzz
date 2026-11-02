@@ -11,6 +11,8 @@ class _ThreadMessageList extends HookWidget {
   final ItemPositionsListener itemPositionsListener;
   final double bottomInset;
   final List<TimelineMessage> replies;
+  final List<TypingEntry> inlineTyping;
+  final Set<String> knownAgents;
   final AsyncValue<List<NostrEvent>> relayReplyState;
   final VoidCallback onRetryReplies;
   final Map<String, DateTime> localSendAnimations;
@@ -40,6 +42,8 @@ class _ThreadMessageList extends HookWidget {
     required this.itemPositionsListener,
     required this.bottomInset,
     required this.replies,
+    required this.inlineTyping,
+    required this.knownAgents,
     required this.relayReplyState,
     required this.onRetryReplies,
     required this.localSendAnimations,
@@ -97,6 +101,7 @@ class _ThreadMessageList extends HookWidget {
           ),
           _ThreadMessage(
             message: head,
+            startsDay: true,
             channelNames: channelNames,
             channelId: channelId,
             currentPubkey: currentPubkey,
@@ -137,6 +142,12 @@ class _ThreadMessageList extends HookWidget {
               ],
             ),
           ),
+          if (replies.isEmpty && inlineTyping.isNotEmpty)
+            InlineAgentTyping(
+              channelId: channelId,
+              entries: inlineTyping,
+              knownAgents: knownAgents,
+            ),
         ],
       ),
     );
@@ -300,6 +311,13 @@ class _ThreadMessageList extends HookWidget {
                                     ),
                                   _ThreadMessage(
                                     message: reply,
+                                    startsDay: showDayDivider,
+                                    endsDay:
+                                        nextReply != null &&
+                                        !isSameDay(
+                                          reply.createdAt,
+                                          nextReply.createdAt,
+                                        ),
                                     channelNames: channelNames,
                                     channelId: channelId,
                                     currentPubkey: currentPubkey,
@@ -322,6 +340,13 @@ class _ThreadMessageList extends HookWidget {
                                       currentPubkey: currentPubkey,
                                       isMember: isMember,
                                       isArchived: isArchived,
+                                    ),
+                                  if (nextReply == null &&
+                                      inlineTyping.isNotEmpty)
+                                    InlineAgentTyping(
+                                      channelId: channelId,
+                                      entries: inlineTyping,
+                                      knownAgents: knownAgents,
                                     ),
                                 ],
                               ),

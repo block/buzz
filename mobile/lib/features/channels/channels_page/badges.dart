@@ -12,11 +12,16 @@ class _EphemeralBadge extends StatelessWidget {
 
     return Tooltip(
       message: display.tooltipLabel,
-      child: Icon(
-        BuzzIcons.clockFading,
-        key: Key('channel-ephemeral-${channel.id}'),
-        size: 16,
-        color: context.colors.onSurfaceVariant,
+      child: SizedBox(
+        width: _kChannelIconSize,
+        child: Center(
+          child: Icon(
+            BuzzIcons.clockFading,
+            key: Key('channel-ephemeral-${channel.id}'),
+            size: 16,
+            color: context.colors.onSurfaceVariant,
+          ),
+        ),
       ),
     );
   }

@@ -315,6 +315,38 @@ fn plan_maintenance(
     })
 }
 
+impl PartitionTableAudit {
+    /// Whether rows timestamped now route to an empty catch-all that a
+    /// maintenance pass under `policy` would replace.
+    ///
+    /// Only the current month counts: a catch-all that serves just the far
+    /// end of the lookahead window is the routine monthly advance, which can
+    /// wait for the next pass. Any layout the planner refuses, such as an
+    /// occupied catch-all, needs an operator and is false.
+    pub fn awaits_catch_all_advance(&self, policy: PartitionMaintenancePolicy) -> bool {
+        self.months
+            .first()
+            .is_some_and(|month| month.kind == MonthCoverageKind::CoveredByCatchAll)
+            && matches!(
+                plan_maintenance(self, policy),
+                MaintenancePlan::Apply(MaintenanceChange {
+                    catch_all: Some(_),
+                    ..
+                })
+            )
+    }
+}
+
+impl PartitionAudit {
+    /// Whether any managed parent awaits catch-all advancement. See
+    /// [`PartitionTableAudit::awaits_catch_all_advance`].
+    pub fn awaits_catch_all_advance(&self, policy: PartitionMaintenancePolicy) -> bool {
+        self.tables
+            .iter()
+            .any(|table| table.awaits_catch_all_advance(policy))
+    }
+}
+
 /// Audit, then issue only the DDL `policy` permits, one bounded transaction per table.
 ///
 /// A table that is already at the desired layout, or whose required DDL is

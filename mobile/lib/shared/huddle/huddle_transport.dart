@@ -6,13 +6,11 @@ import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../relay/relay_websocket.dart';
 import 'huddle_auth.dart';
 import 'huddle_wire.dart';
 
 typedef HuddleWebSocketFactory = WebSocketChannel Function(Uri uri);
-
-WebSocketChannel _openHuddleWebSocket(Uri uri) =>
-    IOWebSocketChannel.connect(uri, pingInterval: const Duration(seconds: 30));
 
 enum HuddleTransportPhase {
   idle,
@@ -138,7 +136,8 @@ final class HuddleTransport implements HuddleTransportClient {
   final HuddleConnectionParameters parameters;
   final Duration connectTimeout;
   final Duration handshakeTimeout;
-  final HuddleWebSocketFactory _channelFactory;
+  final HuddleWebSocketFactory? _channelFactory;
+  final Future<Map<String, String>> Function()? headers;
 
   final StreamController<HuddleTransportState> _stateController =
       StreamController.broadcast(sync: true);
@@ -167,7 +166,8 @@ final class HuddleTransport implements HuddleTransportClient {
     required this.parameters,
     this.connectTimeout = const Duration(seconds: 8),
     this.handshakeTimeout = const Duration(seconds: 5),
-    HuddleWebSocketFactory channelFactory = _openHuddleWebSocket,
+    HuddleWebSocketFactory? channelFactory,
+    this.headers,
   }) : _channelFactory = channelFactory;
 
   @override
@@ -229,9 +229,22 @@ final class HuddleTransport implements HuddleTransportClient {
     );
 
     try {
-      final channel = _channelFactory(parameters.audioWebSocketUri);
+      final deadline = Stopwatch()..start();
+      final authentication =
+          await headers?.call().timeout(connectTimeout) ??
+          const <String, String>{};
+      if (!_isCurrent(generation)) return;
+      final channel =
+          _channelFactory?.call(parameters.audioWebSocketUri) ??
+          IOWebSocketChannel(
+            openRelayWebSocket(
+              parameters.audioWebSocketUri,
+              headers: authentication,
+              pingInterval: const Duration(seconds: 30),
+            ),
+          );
       _channel = channel;
-      await channel.ready.timeout(connectTimeout);
+      await channel.ready.timeout(connectTimeout - deadline.elapsed);
       if (!_isCurrent(generation)) {
         throw const HuddleTransportError(
           code: HuddleTransportErrorCode.cancelled,

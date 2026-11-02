@@ -249,6 +249,10 @@ impl RelayInfo {
             "nip-cl".to_string(),
             // Bridge `/query` search accepts `search_sort: "newest"`.
             "buzz-search-sort".to_string(),
+            // kind:9002 `unlisted` (NOSTR.md, Unlisted channels). A relay
+            // without it ignores the tag beside `visibility`, so a client
+            // checks this before opening a channel as unlisted.
+            "buzz-unlisted-channels".to_string(),
         ];
         let gif = gif_provider.map(|provider| {
             supported_extensions.push("buzz-gif".to_string());
@@ -282,8 +286,12 @@ impl RelayInfo {
             artifacts: serde_json::json!({
                 "version": 1, "revision_kind": 45010, "removal_kind": 45011,
                 "query": "/query", "count": "/count",
-                "modes": ["current", "history"],
-                "websocket_query_extensions": false,
+                "modes": ["current", "history", "head"],
+                "sync": {
+                    "version": 1,
+                    "max_events": buzz_core::artifact_sync::MAX_SYNC_EVENTS,
+                },
+                "websocket_query_extensions": true,
                 "max_tags": buzz_core::artifact::MAX_TAGS,
                 "max_tag_name_bytes": buzz_core::artifact::MAX_TAG_NAME_BYTES,
                 "max_tag_value_bytes": buzz_core::artifact::MAX_TAG_VALUE_BYTES,
@@ -387,7 +395,15 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
         admin_api.as_deref(),
         state.config.klipy.as_ref().map(|_| "klipy"),
     );
+    if state.config.artifact_incremental_enabled {
+        info.artifacts["incremental"] = crate::api::artifact_sync::capability();
+    }
     if let Ok(tenant) = crate::tenant::bind_community(&state.db, raw_host).await {
+        if let Some(profile) = crate::verified_profiles::discovery(state, &tenant).await {
+            if let Some(fi) = info.federated_identity.as_mut() {
+                fi["public_profile"] = profile;
+            }
+        }
         if state.config.buzz_v1_enabled {
             use buzz_db::personal_read::{ELIGIBLE_KINDS, MAX_CHANNELS, MAX_INTENTS};
             info.buzz_v1 = Some(BuzzV1Descriptor {
@@ -520,8 +536,10 @@ mod tests {
     #[tokio::test]
     async fn shadow_serves_the_same_nip11_document_as_enforce() {
         use buzz_auth::NipFiMode;
-        let base =
-            crate::state::tests::test_state_with_database_url("postgres://127.0.0.1:1/none").await;
+        let base = crate::state::tests::test_state_with_unreachable_database_url(
+            "postgres://127.0.0.1:1/none",
+        )
+        .await;
         let mut docs = Vec::new();
         for mode in [NipFiMode::Off, NipFiMode::Enforce, NipFiMode::Shadow] {
             let mut state = (*base).clone();
@@ -668,11 +686,11 @@ mod tests {
             .contains(&"buzz-gif".to_string()));
     }
 
-    /// Clients refuse NIP-CL labels and system channels, and newest-first
-    /// search, unless the relay says it supports them, so every document must
-    /// advertise both.
+    /// Clients refuse NIP-CL labels and system channels, newest-first
+    /// search, and unlisted channels unless the relay says it supports them,
+    /// so every document must advertise all three.
     #[test]
-    fn advertises_nip_cl_and_search_sort_extensions() {
+    fn advertises_nip_cl_search_sort_and_unlisted_extensions() {
         let info = RelayInfo::build(
             None,
             None,
@@ -685,6 +703,7 @@ mod tests {
         let extensions = info.supported_extensions.expect("extensions");
         assert!(extensions.contains(&"nip-cl".to_string()));
         assert!(extensions.contains(&"buzz-search-sort".to_string()));
+        assert!(extensions.contains(&"buzz-unlisted-channels".to_string()));
     }
 
     /// NIP-WP → NIP-11 mirror: a set workspace icon is served in the standard

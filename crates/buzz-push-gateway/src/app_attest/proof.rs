@@ -3,7 +3,7 @@ use super::{
     authenticator,
     cbor::{self, Value},
     certificate,
-    error::AppAttestError as Error,
+    error::{AppAttestError as Error, CertificateCheck},
     properties::ClientProperties,
 };
 use aws_lc_rs::{
@@ -49,22 +49,24 @@ pub(super) fn enroll(
     let statement = envelope.field("attStmt")?;
     statement.text_keys()?;
     let Value::Array(chain) = statement.field("x5c")? else {
-        return Err(Error::InvalidCertificate);
+        return Err(Error::InvalidCertificate(CertificateCheck::Chain));
     };
     let certificates = chain
         .iter()
         .map(|c| c.bytes().map(|b| b.to_vec()))
         .collect::<Result<Vec<_>, _>>()?;
-    let leaf = certificates.first().ok_or(Error::InvalidCertificate)?;
+    let leaf = certificates
+        .first()
+        .ok_or(Error::InvalidCertificate(CertificateCheck::Chain))?;
     statement.field("receipt")?.bytes()?;
     let auth_bytes = envelope.field("authData")?.bytes()?;
     if root_pem.len() > cbor::MAX_BYTES {
         return Err(Error::ResourceLimit);
     }
-    let (rest, root) =
-        x509_parser::pem::parse_x509_pem(root_pem).map_err(|_| Error::InvalidCertificate)?;
+    let (rest, root) = x509_parser::pem::parse_x509_pem(root_pem)
+        .map_err(|_| Error::InvalidCertificate(CertificateCheck::Root))?;
     if root.label != "CERTIFICATE" || !rest.iter().all(u8::is_ascii_whitespace) {
-        return Err(Error::InvalidCertificate);
+        return Err(Error::InvalidCertificate(CertificateCheck::Root));
     }
     certificate::verify_chain(&certificates, &root.contents)?;
     let public_key = certificate::public_key(leaf)?;

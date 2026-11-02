@@ -185,11 +185,7 @@ impl BoundedChild {
     /// still holding the captured-output descriptors.
     fn kill_tree(&mut self) {
         #[cfg(unix)]
-        // SAFETY: `killpg` on the group led by the child; ignored result is
-        // intentional — `ESRCH` on a dead group is the success case.
-        unsafe {
-            libc::killpg(self.child.id() as i32, libc::SIGKILL);
-        }
+        kill_group(self.child.id());
         #[cfg(windows)]
         // Closing the kill-on-close job reaps every descendant, even once the
         // root has exited — which `taskkill /T <root>` cannot. `spawn` is
@@ -214,6 +210,15 @@ impl BoundedChild {
     /// Take the captured stderr pipe.
     fn take_stderr(&mut self) -> Option<ChildStderr> {
         self.child.stderr.take()
+    }
+}
+
+#[cfg(unix)]
+fn kill_group(pid: u32) {
+    // SAFETY: `killpg` on the group led by the child; ignored result is
+    // intentional — `ESRCH` on a dead group is the success case.
+    unsafe {
+        libc::killpg(pid as i32, libc::SIGKILL);
     }
 }
 
@@ -367,7 +372,10 @@ pub(crate) fn output_with_timeout(mut command: Command, timeout: Duration) -> Op
         .stderr(Stdio::piped());
 
     let mut child = BoundedChild::spawn(command)?;
+    collect_output_with_timeout(&mut child, timeout)
+}
 
+fn collect_output_with_timeout(child: &mut BoundedChild, timeout: Duration) -> Option<Output> {
     let stdout_pipe = child.take_stdout();
     let stderr_pipe = child.take_stderr();
 
@@ -577,31 +585,121 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reaps_descendant_on_timeout() {
-        let pid_file = tempfile::NamedTempFile::new().expect("temp file for descendant pid");
-        let pid_path = pid_file
-            .path()
-            .to_str()
-            .expect("utf-8 temp path")
-            .to_string();
-        let script = format!(
-            "trap '' TERM; sleep 300 & echo $! > '{pid_path}'; \
-             while :; do sleep 1; done"
-        );
-        let mut cmd = Command::new("/bin/sh");
-        cmd.args(["-c", &script]);
-        let result = run_watchdogged(cmd, Duration::from_millis(300), Duration::from_secs(5));
-        assert!(result.is_none(), "a timed-out tree must yield None");
+        // Cleanup must also run on a setup assertion or an expired outer
+        // watchdog. Keep independent group ownership after handing the child
+        // to the worker; do not clean up a successful result before asserting
+        // that the production collector killed the descendant itself.
+        struct FixtureTree {
+            pid: u32,
+            child: Option<BoundedChild>,
+            armed: bool,
+        }
+        impl FixtureTree {
+            fn disarm(&mut self) {
+                self.armed = false;
+            }
+        }
+        impl Drop for FixtureTree {
+            fn drop(&mut self) {
+                if self.armed {
+                    kill_group(self.pid);
+                    if let Some(child) = self.child.as_mut() {
+                        child.reap();
+                    }
+                }
+            }
+        }
 
-        let descendant_pid: i32 = std::fs::read_to_string(&pid_path)
-            .expect("descendant must have written its PID")
-            .trim()
-            .parse()
-            .expect("descendant PID must be numeric");
+        let started = Instant::now();
+        let bound = Duration::from_secs(5);
+        let pid_file = tempfile::NamedTempFile::new().expect("temp file for descendant pid");
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args([
+            "-c",
+            "trap '' TERM; sleep 300 & echo $! > \"$1\"; while :; do sleep 1; done",
+            "timeout-fixture",
+        ])
+        .arg(pid_file.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+        let child = BoundedChild::spawn(cmd).expect("spawn timeout fixture");
+        let mut fixture = FixtureTree {
+            pid: child.child.id(),
+            child: Some(child),
+            armed: true,
+        };
+
+        let mut worker = FixtureTree {
+            pid: fixture.pid,
+            child: fixture.child.take(),
+            armed: true,
+        };
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            // spawn() does not mean the shell has forked or published its child.
+            // Start the short *cleanup* timeout only once that precondition is
+            // observable, while keeping setup inside the original outer bound.
+            let ready_deadline = started + Duration::from_secs(3);
+            let descendant_pid = loop {
+                let recorded =
+                    std::fs::read_to_string(pid_file.path()).expect("read descendant pid");
+                if recorded.ends_with('\n') {
+                    let pid: i32 = recorded
+                        .trim()
+                        .parse()
+                        .expect("descendant PID must be numeric");
+                    assert!(
+                        pid > 0 && pid_alive(pid),
+                        "descendant {pid} must be alive before timeout"
+                    );
+                    break pid;
+                }
+                let status = worker
+                    .child
+                    .as_mut()
+                    .expect("owned fixture")
+                    .try_wait()
+                    .expect("probe fixture");
+                assert!(
+                    status.is_none(),
+                    "fixture exited before readiness: {status:?}, pid file {recorded:?}"
+                );
+                assert!(
+                    Instant::now() < ready_deadline,
+                    "fixture did not publish a complete PID within 3s: leader {}, pid file {recorded:?}",
+                    worker.pid
+                );
+                std::thread::sleep(DRAIN_IDLE_POLL);
+            };
+            eprintln!(
+                "timeout fixture ready: leader {}, descendant {descendant_pid}, elapsed {:?}",
+                worker.pid,
+                started.elapsed()
+            );
+
+            let result = collect_output_with_timeout(
+                worker.child.as_mut().expect("owned fixture"),
+                Duration::from_millis(300),
+            );
+            worker.disarm();
+            let _ = tx.send((descendant_pid, result));
+        });
+        let (descendant_pid, result) = rx
+            .recv_timeout(bound.saturating_sub(started.elapsed()))
+            .unwrap_or_else(|err| {
+                panic!(
+                    "ready tree did not return within {bound:?}: {err}; leader {}",
+                    fixture.pid
+                )
+            });
+        assert!(result.is_none(), "a timed-out tree must yield None");
         std::thread::sleep(Duration::from_millis(200));
         assert!(
             !pid_alive(descendant_pid),
             "backgrounded descendant {descendant_pid} must be group-killed on timeout, but it survived"
         );
+        fixture.disarm();
     }
 
     // Deterministic seam regression (Thufir's finding): a drain fed a reader

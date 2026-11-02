@@ -139,7 +139,7 @@ One per returned row with replies. Tag cardinality is exact: one `e`, one `d`, o
 
 - `reply_count` — direct replies to the row. `descendant_count` — all events in the row's thread subtree.
 - `last_reply_at` — unix seconds of the newest descendant, or `null`.
-- `participants` — up to 10 distinct author pubkeys from the thread, most recent first.
+- `participants` — up to 10 distinct author pubkeys from the thread's newest 1000 replies, deleted replies included, most recent first. Deleted replies contribute no author, and an author silent for 1000 replies drops out.
 - The `e` and `d` tags both carry the row's event id: `e` for reference-following, `d` for replaceable addressing.
 
 ### `kind:39006` — window bounds

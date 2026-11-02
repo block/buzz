@@ -102,7 +102,7 @@ class _MediaViewerCircleButton extends StatelessWidget {
               child: IconButton(
                 onPressed: onPressed,
                 tooltip: tooltip,
-                icon: Icon(icon, color: Colors.white, size: 20),
+                icon: Icon(icon, color: Colors.white, size: 24),
               ),
             ),
     );

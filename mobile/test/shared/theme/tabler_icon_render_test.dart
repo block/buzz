@@ -46,6 +46,10 @@ void main() {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       const ListTile(
+                        leading: Icon(BuzzIcons.filter2),
+                        title: Text('Filter inbox'),
+                      ),
+                      const ListTile(
                         leading: Icon(BuzzIcons.archive),
                         title: Text('Archive'),
                       ),

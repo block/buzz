@@ -13,6 +13,7 @@ import 'read_state_format.dart';
 import 'read_state_storage.dart';
 import 'read_state_packing.dart';
 import 'read_state_time.dart';
+import '../theme/community_theme_preference.dart';
 
 class ReadStateCrypto {
   final Uint8List conversationKey;
@@ -45,6 +46,7 @@ enum _ApplyRemoteContextResult { unchanged, advanced }
 
 class ReadStateManager {
   final String pubkey;
+  final String relayUrl;
   final String _journalKey;
   final ReadStateCrypto _crypto;
   final ReadStateStorage _storage;
@@ -76,6 +78,16 @@ class ReadStateManager {
   Timer? _debounceTimer;
   void Function()? _unsubscribeLive;
   bool _initialized = false;
+  // Pending first fetch and subscribe. A reconnect while it runs waits for it
+  // so two passes cannot each install a live subscription and leak one.
+  Future<void>? _initializing;
+  // The reconnect pass running now, and the one waiting to start after it.
+  Future<void>? _runningResync;
+  Future<void>? _queuedResync;
+  // Whether the first fetch and subscribe both succeeded. A connect that
+  // lands while they run (the cold-start connect) then has nothing to redo.
+  bool _initialSyncSucceeded = false;
+
   bool _disposed = false;
   bool _isPublishing = false;
   // Set when a publish is asked for while one is running. The running
@@ -95,10 +107,9 @@ class ReadStateManager {
     required bool remoteEnabled,
     required VoidCallback onChanged,
     int Function()? now,
-    String? relayUrl,
-  }) : _journalKey = relayUrl == null
-           ? pubkey
-           : '$pubkey:${Uri.encodeComponent(relayUrl)}',
+    required this.relayUrl,
+  }) : _journalKey =
+           '$pubkey:${Uri.encodeComponent(normalizeCommunityRelayUrl(relayUrl))}',
        _now = now ?? currentUnixSeconds,
        _crypto = crypto,
        _storage = ReadStateStorage(prefs),
@@ -107,8 +118,8 @@ class ReadStateManager {
        _remoteEnabled = remoteEnabled,
        _onChanged = onChanged {
     _journalOwner = _storage.claimJournal(_journalKey);
-    _clientId = _storage.getOrCreateClientId(pubkey);
-    _slotId = _storage.getOrCreateSlotId(pubkey);
+    _clientId = _storage.getOrCreateClientId(pubkey, relayUrl);
+    _slotId = _storage.getOrCreateSlotId(pubkey, relayUrl);
     _slots.add(_slotId);
     _hydrateFromLocalStorage();
   }
@@ -129,9 +140,21 @@ class ReadStateManager {
       return;
     }
 
-    await _startLiveSubscription();
-    await _fetchAndMerge();
-    _schedulePublish();
+    final initializing = Completer<void>();
+    _initializing = initializing.future;
+    try {
+      final subscribed = await _startLiveSubscription();
+      final fetched = await _fetchAndMerge();
+      _initialSyncSucceeded = fetched && subscribed;
+    } finally {
+      _initializing = null;
+      initializing.complete();
+    }
+    if (_localContexts.isNotEmpty ||
+        _pending.isNotEmpty ||
+        _carriedOverrides.isNotEmpty) {
+      _schedulePublish();
+    }
 
     _onChanged();
     debugPrint(
@@ -141,15 +164,32 @@ class ReadStateManager {
 
   void markContextRead(String contextId, int unixTimestamp) {
     if (_disposed || isOverrideContext(contextId) || unixTimestamp < 0) return;
-    _advanceContext(
+    if (_advanceContext(
       contextId,
       unixTimestamp,
       publishable: !contextId.startsWith(msgContextPrefix),
-    );
+    )) {
+      _persistLocalState();
+      _onChanged();
+      if (!contextId.startsWith(msgContextPrefix)) _schedulePublish();
+    }
   }
 
   void seedContextRead(String contextId, int unixTimestamp) {
-    _advanceContext(contextId, unixTimestamp, publishable: false);
+    seedContextsRead({contextId: unixTimestamp});
+  }
+
+  /// Advance local-only seeds together, saving and notifying once per batch.
+  void seedContextsRead(Map<String, int> contexts) {
+    var changed = false;
+    for (final entry in contexts.entries) {
+      if (_advanceContext(entry.key, entry.value, publishable: false)) {
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    _persistLocalState();
+    _onChanged();
   }
 
   Future<void> flush() async {
@@ -159,8 +199,43 @@ class ReadStateManager {
     await _publish();
   }
 
-  Future<void> reinitializeRemote() async {
-    if (_disposed || !_remoteEnabled || !_initialized) return;
+  /// Fetch and resubscribe after a reconnect. Passes run one at a time, so
+  /// each replaces the previous live subscription instead of leaking one.
+  /// Reconnects while a pass waits to start share that pass.
+  Future<void> reinitializeRemote() {
+    if (_disposed || !_remoteEnabled || !_initialized) return Future.value();
+    final queued = _queuedResync;
+    if (queued != null) return queued;
+    final running = _runningResync;
+    final initializing = _initializing;
+    final pass = Completer<void>();
+    _queuedResync = pass.future;
+    unawaited(() async {
+      try {
+        if (running != null) {
+          await running;
+        } else if (initializing != null) {
+          await initializing;
+          // Connected while the first sync ran: it already used this
+          // connection.
+          if (_initialSyncSucceeded) return;
+        }
+        if (_disposed) return;
+        if (identical(_queuedResync, pass.future)) _queuedResync = null;
+        _runningResync = pass.future;
+        await _resyncRemote();
+      } catch (e) {
+        debugPrint('[ReadStateManager] reinitializeRemote failed: $e');
+      } finally {
+        if (identical(_queuedResync, pass.future)) _queuedResync = null;
+        if (identical(_runningResync, pass.future)) _runningResync = null;
+        pass.complete();
+      }
+    }());
+    return pass.future;
+  }
+
+  Future<void> _resyncRemote() async {
     debugPrint('[ReadStateManager] reinitializeRemote');
     if (_isPublishing) {
       await _publishCompleter?.future;
@@ -192,39 +267,40 @@ class ReadStateManager {
     _unsubscribeLive = null;
   }
 
-  void _advanceContext(
+  bool _advanceContext(
     String contextId,
     int unixTimestamp, {
     required bool publishable,
   }) {
-    if (_disposed || unixTimestamp < 0) return;
+    if (_disposed || unixTimestamp < 0) return false;
 
     final current = _effectiveState[contextId] ?? 0;
     final local = _localContexts[contextId] ?? 0;
     final localAdvanced = publishable && unixTimestamp > local;
-    if (unixTimestamp <= current && !localAdvanced) return;
+    if (unixTimestamp <= current && !localAdvanced) return false;
     _effectiveState[contextId] = max(current, unixTimestamp);
     if (localAdvanced) _localContexts[contextId] = unixTimestamp;
-    _persistLocalState();
-    _onChanged();
-    if (localAdvanced) _schedulePublish();
+    return true;
   }
 
-  Future<void> _fetchAndMerge() async {
+  Future<bool> _fetchAndMerge() async {
     try {
       // Snapshot transport validates completeness and fences retired sessions.
       final events = await _relaySession!.fetchReadStateSnapshot();
-      if (_disposed) return;
+      if (_disposed || !_servesThisCommunity) return false;
       _mergeEvents(events);
       await _persistLocalState();
       _onChanged();
+      return true;
     } catch (error) {
       syncError = error;
       debugPrint('[ReadStateManager] snapshot failed: $error');
+      return false;
     }
   }
 
   void _mergeEvents(List<NostrEvent> events) {
+    if (!_servesThisCommunity) return;
     for (final event in events) {
       final decoded = decodeReadStateEvent(
         event,
@@ -290,7 +366,7 @@ class ReadStateManager {
     return changed;
   }
 
-  Future<void> _startLiveSubscription() async {
+  Future<bool> _startLiveSubscription() async {
     try {
       final unsub = await _relaySession!.subscribe(
         NostrFilter(
@@ -305,17 +381,19 @@ class ReadStateManager {
       );
       if (_disposed) {
         unsub.call();
-        return;
+        return false;
       }
       _unsubscribeLive = unsub;
       debugPrint('[ReadStateManager] live subscription established');
+      return true;
     } catch (e) {
       debugPrint('[ReadStateManager] live subscription FAILED: $e');
+      return false;
     }
   }
 
   void _handleIncomingEvent(NostrEvent event) {
-    if (_disposed) return;
+    if (_disposed || !_servesThisCommunity) return;
     _mergeEvents([event]);
     _persistLocalState();
     _onChanged();
@@ -385,12 +463,18 @@ class ReadStateManager {
     required bool allowDisposed,
   }) async {
     try {
-      if (!_ownsJournal) return;
+      if (!_servesThisCommunity || !_ownsJournal) return;
       await _persistLocalState();
+      final checkConnection = _relaySession?.captureConnectionFence();
       var snapshot = <NostrEvent>[];
       if (_relaySession != null) {
         final events = await _relaySession.fetchReadStateSnapshot();
-        if (!_ownsJournal || (_disposed && !allowDisposed)) return;
+        if (!_servesThisCommunity ||
+            !_ownsJournal ||
+            (_disposed && !allowDisposed)) {
+          return;
+        }
+        checkConnection?.call();
         snapshot = events;
         _mergeEvents(events);
         if (events.any(
@@ -471,9 +555,18 @@ class ReadStateManager {
         if (_relaySession == null) {
           throw StateError('No relay for pending retry');
         }
-        if (!_ownsJournal || (_disposed && !allowDisposed)) return;
+        if (!_servesThisCommunity ||
+            !_ownsJournal ||
+            (_disposed && !allowDisposed)) {
+          return;
+        }
+        checkConnection?.call();
         await _relaySession.publish(entry.value);
-        if (!_ownsJournal || (_disposed && !allowDisposed)) return;
+        if (!_servesThisCommunity ||
+            !_ownsJournal ||
+            (_disposed && !allowDisposed)) {
+          return;
+        }
         _acknowledge(entry.key, entry.value);
         await _persistLocalState();
       }
@@ -485,7 +578,12 @@ class ReadStateManager {
             mapEquals(_published[slot] ?? const <String, int>{}, contexts)) {
           continue;
         }
-        if (!_ownsJournal || (_disposed && !allowDisposed)) return;
+        if (!_servesThisCommunity ||
+            !_ownsJournal ||
+            (_disposed && !allowDisposed)) {
+          return;
+        }
+        checkConnection?.call();
         await signedEventRelay.submit(
           kind: event.kind,
           content: event.content,
@@ -494,7 +592,9 @@ class ReadStateManager {
           onSigned: (event) async {
             _pending[slot] = event;
             await _persistLocalState();
-            if (!_ownsJournal ||
+            checkConnection?.call();
+            if (!_servesThisCommunity ||
+                !_ownsJournal ||
                 (_disposed && !allowDisposed) ||
                 _slots[index] != slot) {
               throw StateError(
@@ -503,7 +603,11 @@ class ReadStateManager {
             }
           },
         );
-        if (!_ownsJournal || (_disposed && !allowDisposed)) return;
+        if (!_servesThisCommunity ||
+            !_ownsJournal ||
+            (_disposed && !allowDisposed)) {
+          return;
+        }
         _published[slot] = contexts;
         _pending.remove(slot);
         _maxFetchedCreatedAt = event.createdAt;
@@ -588,7 +692,7 @@ class ReadStateManager {
       }
       _maxFetchedCreatedAt = journal['createdAt'] as int;
     } else {
-      final stored = _storage.read(pubkey);
+      final stored = _storage.read(pubkey, relayUrl);
       _effectiveState.addEntries(
         stored.contexts.entries.where((entry) => !isOverrideContext(entry.key)),
       );
@@ -619,7 +723,9 @@ class ReadStateManager {
     _saveScheduled = true;
     Future<void> save() async {
       _saveScheduled = false;
-      if (!_ownsJournal) throw StateError('Read-state journal writer retired');
+      if (!_ownsJournal) {
+        throw StateError('Read-state journal writer retired');
+      }
       final observed = pruneStaleContexts(
         _effectiveState,
         nowUnixSeconds: _now(),
@@ -657,6 +763,13 @@ class ReadStateManager {
       }),
     );
     return _saved;
+  }
+
+  /// Switching community rebuilds the session in place before this manager
+  /// is retired, so in between it must neither take in nor publish data.
+  bool get _servesThisCommunity {
+    final served = _relaySession?.relayUrl;
+    return served == null || served == relayUrl;
   }
 
   bool _isPlausibleCreatedAt(int createdAt) =>

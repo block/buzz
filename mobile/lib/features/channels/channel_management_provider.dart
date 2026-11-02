@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
@@ -52,6 +53,25 @@ Iterable<String> dmParticipantPubkeys(
 ) => members != null && members.isNotEmpty
     ? members.map((member) => member.pubkey)
     : channel.participantPubkeys;
+
+/// Whether a joined, unarchived DM contains exactly this account and peer.
+bool isActiveDirectConversation(
+  Channel channel,
+  List<ChannelMember>? members,
+  String? currentPubkey,
+  String peerPubkey,
+) {
+  if (currentPubkey == null ||
+      !channel.isDm ||
+      !channel.isMember ||
+      channel.isArchived) {
+    return false;
+  }
+  final expected = {currentPubkey, peerPubkey};
+  final participants = dmParticipantPubkeys(channel, members).toSet();
+  return participants.length == expected.length &&
+      participants.containsAll(expected);
+}
 
 @immutable
 class ChannelMember {
@@ -490,10 +510,11 @@ ChannelDetails channelDetailsFromEvent(NostrEvent event) {
     id: data.id,
     name: data.name,
     channelType: data.channelType,
+    labels: data.labels,
     visibility: data.visibility,
     description: data.description,
     topic: data.topic,
-    createdBy: event.pubkey,
+    createdBy: data.creator ?? event.pubkey,
     createdAt: eventTime,
     memberCount: 0,
     // Same archival-timestamp convention as `_channelFromMeta` — the event's
@@ -668,6 +689,7 @@ List<List<String>> buildCreateChannelTags({
   required String name,
   required String channelType,
   required String visibility,
+  List<String> labels = const [],
   String? description,
   int? ttlSeconds,
 }) {
@@ -680,6 +702,7 @@ List<List<String>> buildCreateChannelTags({
     ['name', name],
     ['visibility', visibility],
     ['channel_type', channelType],
+    for (final label in labels) ['t', label],
     if (description case final about? when about.trim().isNotEmpty)
       ['about', about.trim()],
     if (ttlSeconds != null) ['ttl', ttlSeconds.toString()],

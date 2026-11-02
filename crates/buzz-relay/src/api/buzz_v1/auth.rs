@@ -7,6 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use buzz_auth::DenialClass;
 use buzz_core::TenantContext;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -79,6 +80,7 @@ pub(super) struct Principal {
     pub(super) tenant: TenantContext,
     pub(super) actor: nostr::PublicKey,
     signed_at: Option<u64>,
+    token_owner: Option<nostr::PublicKey>,
 }
 
 pub(super) async fn authorize(
@@ -110,6 +112,7 @@ pub(super) async fn authorize(
             body.is_some(),
         ),
     )
+    .await
     .map_err(|response| {
         if state.config.nip_fi.mode.restricts() {
             // Preserve the shared NIP-FI wire contract, not just its status.
@@ -119,6 +122,7 @@ pub(super) async fn authorize(
         }
     })?;
     let actor = *admission.proven_pubkey();
+    let token_owner = admission.token_owner();
     let (event_id, signed_at) = admission.into_extra();
     bridge::enforce_http_admission(state, &tenant, &actor)
         .await
@@ -130,6 +134,7 @@ pub(super) async fn authorize(
         tenant,
         actor,
         signed_at,
+        token_owner,
     };
     recheck(state, headers, &principal).await?;
     Ok(principal)
@@ -142,20 +147,36 @@ pub(super) async fn recheck(
 ) -> Result<(), Error> {
     relay_members::enforce_relay_membership(
         state,
-        principal.tenant.community(),
+        &principal.tenant,
         &principal.actor.to_bytes(),
         relay_members::extract_auth_tag_header(headers),
         principal.signed_at,
+        principal.token_owner,
     )
     .await
-    .map_err(bridge_error)?;
+    .map_err(|refusal| match refusal {
+        relay_members::MembershipRefusal::Api(refusal) => bridge_error(refusal),
+        // Preserve the shared NIP-FI wire contract, as admission does.
+        refusal => Error::Admission(Box::new(refusal.into_response())),
+    })?;
+    // A verified agent token gets only NIP-FI's fixed denial here too, so a
+    // ban or outage between the two reads never shows which step refused it.
+    let refuse = |class, legacy: Error| match principal.token_owner {
+        Some(_) => Error::Admission(Box::new(crate::nip_fi_core::http_denial(class))),
+        None => legacy,
+    };
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_http_ban_recheck(principal.tenant.community()).await;
     let restrictions = state
         .db
         .moderation_restriction_state(principal.tenant.community(), &principal.actor.to_bytes())
         .await
-        .map_err(|_| Error::unavailable())?;
+        .map_err(|_| refuse(DenialClass::AuthorizationUnavailable, Error::unavailable()))?;
     if restrictions.banned {
-        return Err(Error::new(StatusCode::FORBIDDEN, "forbidden"));
+        return Err(refuse(
+            DenialClass::AuthorizationDenied,
+            Error::new(StatusCode::FORBIDDEN, "forbidden"),
+        ));
     }
     // Timeouts block posting conversation content, not personal reading.
     Ok(())

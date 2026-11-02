@@ -28,7 +28,7 @@ class _ActivityMembersSheet extends ConsumerWidget {
             child: ListView.separated(
               key: const ValueKey('activity-members-list'),
               shrinkWrap: true,
-              cacheExtent: 0,
+              scrollCacheExtent: const ScrollCacheExtent.pixels(0),
               padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
               itemCount: pubkeys.length,
               separatorBuilder: (context, index) => Divider(

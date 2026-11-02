@@ -57,7 +57,7 @@ void bubbleContentTests() {
             surface.color,
             own
                 ? theme.extension<ChatColors>()!.outgoing
-                : theme.colorScheme.secondaryContainer,
+                : receivedMessageSurface(brightness),
           );
         }
       }
@@ -105,11 +105,9 @@ void bubbleContentTests() {
         inspect(text.text, null);
         expect(colors, [foreground]);
       }
-      final linkColor = foreground == Colors.white
-          ? foreground
-          : dark
-          ? const Color(0xFF83C4FF)
-          : const Color(0xFF0B5FA8);
+      final linkColor = ChatColors.of(
+        tester.element(find.byType(MessageContent)),
+      ).foreground;
       for (final label in ['Alice', 'Helper']) {
         expect(tester.widget<Text>(find.text(label)).style?.color, linkColor);
       }

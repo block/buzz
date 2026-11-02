@@ -1,5 +1,7 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
 
+import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -10,9 +12,10 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:package_info_plus/package_info_plus.dart';
 
 import '../../shared/auth/auth.dart';
+import '../../shared/identity_transfer/nsec_export_sheet.dart';
 import '../../shared/clipboard_utils.dart';
-import '../../shared/success_haptic.dart';
 import '../../shared/push/push_relay_capability_provider.dart';
+import '../../shared/push/push_bootstrap.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/utils/string_utils.dart';
 import '../pairing/pairing_provider.dart';
@@ -83,7 +86,6 @@ class SettingsPage extends HookConsumerWidget {
           ),
           automaticallyImplyLeading: false,
           horizontalInset: Grid.gutter,
-          showBottomDivider: false,
           leading: Theme.of(context).platform == TargetPlatform.iOS
               ? IosGlassNavigationButton(
                   key: const ValueKey('settings-ios-glass-close'),
@@ -112,7 +114,10 @@ class SettingsPage extends HookConsumerWidget {
           bottom: const SizedBox.expand(),
         ),
         body: ListView(
-          padding: EdgeInsets.only(top: topSectionHeight, bottom: Grid.xs),
+          padding: EdgeInsets.only(
+            top: topSectionHeight,
+            bottom: MediaQuery.paddingOf(context).bottom + Grid.xs,
+          ),
           children: [
             profileHeader,
             _StatusSection(onSetStatus: onSetStatus),

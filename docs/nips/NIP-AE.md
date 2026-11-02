@@ -149,6 +149,23 @@ A body MAY reference other slugs using wiki-link syntax: `[[<slug>]]`, where `<s
 
 A **reachability graph** rooted at `core.profile`, with edges being the `[[…]]` references in `profile` and in reachable memories' `value`, gives implementations a deterministic answer to "which memories are referenced from the agent's identity surface." Slugs outside this set are **orphans**. Clients that present this view to users SHOULD expose orphans for review and MUST NOT delete them automatically. A companion NIP may make this normative.
 
+Because `core` is the bootstrap address an agent reads every session, it serves as the index of its memory: a memory reachable from `core` stays discoverable, and an orphan is found only by *Listing*. Agents following this convention keep each fact in one place, reference it from elsewhere rather than copying it, and update references when a slug is renamed or tombstoned.
+
+## Entry metadata (non-normative)
+
+This section describes an optional text convention, after [AgentMemoryRepo](https://github.com/AgentMemoryRepo/agentmemoryrepo#memorymd); conformance does not require honoring it, and validity is unaffected. Structured provenance fields remain the province of companion NIPs (see *Bodies*).
+
+A line in `profile` or `value` MAY end with inline metadata of the form `[key: value; key: value]`. Keys are open. Two are recommended:
+
+- `source` — where the information was learned: preferably a link, such as the message it came from or a URL; otherwise a file path (with its commit, for repository files) or the command whose output showed it.
+- `added` — the date the line was stored, as `YYYY-MM-DD`.
+
+```
+- Payments and website share a 2026-10-15 launch deadline [source: https://example.com/sessions/102; added: 2026-09-03]
+```
+
+Metadata is the agent's own claim, not a verified attestation. `added` dates a single line, which the event's `created_at` cannot do once other lines in the same body change.
+
 ## Concurrency
 
 The verification step of *Writing* detects two concurrent writers whose events both reached the relay union: whichever loses (does not become the head) surfaces a conflict. Detection is best-effort — disjoint relay sets, network partitions, and writes arriving after verification will not be caught, and may converge to different heads at different observers until the next read crosses them.

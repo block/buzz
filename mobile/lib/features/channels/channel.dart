@@ -11,6 +11,9 @@ const privateChannelAddDeniedMessage =
 class Channel {
   final String id;
   final String name;
+
+  /// NIP-CL labels from metadata; presentation hints, never access grants.
+  final List<String> labels;
   final String channelType; // "stream", "forum", "dm"
   final String visibility; // "open", "private"
   final String description;
@@ -31,6 +34,7 @@ class Channel {
     required this.id,
     required this.name,
     required this.channelType,
+    this.labels = const [],
     required this.visibility,
     required this.description,
     required this.createdBy,
@@ -51,6 +55,7 @@ class Channel {
     id: json['id'] as String,
     name: json['name'] as String,
     channelType: json['channel_type'] as String,
+    labels: (json['labels'] as List<dynamic>? ?? const []).cast<String>(),
     visibility: json['visibility'] as String,
     description: (json['description'] as String?) ?? '',
     topic: json['topic'] as String?,
@@ -76,7 +81,37 @@ class Channel {
         : null,
   );
 
+  /// Inverse of [Channel.fromJson].
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    'channel_type': channelType,
+    'labels': labels,
+    'visibility': visibility,
+    'description': description,
+    'topic': topic,
+    'purpose': purpose,
+    'created_by': createdBy,
+    'created_at': createdAt.toIso8601String(),
+    'member_count': memberCount,
+    'last_message_at': lastMessageAt?.toIso8601String(),
+    'archived_at': archivedAt?.toIso8601String(),
+    'participants': participants,
+    'participant_pubkeys': participantPubkeys,
+    'is_member': isMember,
+    'ttl_seconds': ttlSeconds,
+    'ttl_deadline': ttlDeadline?.toIso8601String(),
+  };
+
   bool get isEphemeral => ttlSeconds != null || ttlDeadline != null;
+
+  /// Solo presentation is carried by NIP-CL metadata, not project filing.
+  bool get isSolo => isStream && isPrivate && labels.contains('buzz.solo');
+
+  /// Keep old mobile-created chats visible while older clients migrate.
+  bool isPersonalChat(String? viewer, Iterable<String> legacyChannels) => isSolo
+      ? viewer != null && createdBy == viewer
+      : legacyChannels.contains(id);
 
   bool get isStream => channelType == 'stream';
   bool get isForum => channelType == 'forum';
@@ -131,6 +166,7 @@ class Channel {
     id: id,
     name: details.name,
     channelType: details.channelType,
+    labels: details.labels,
     visibility: details.visibility,
     description: details.description,
     topic: details.topic,
@@ -158,6 +194,7 @@ class Channel {
     id: id,
     name: name ?? this.name,
     channelType: channelType,
+    labels: labels,
     visibility: visibility,
     description: description ?? this.description,
     topic: topic,
@@ -183,6 +220,9 @@ class Channel {
 class ChannelDetails {
   final String id;
   final String name;
+
+  /// NIP-CL labels from metadata; presentation hints, never access grants.
+  final List<String> labels;
   final String channelType;
   final String visibility;
   final String description;
@@ -199,6 +239,7 @@ class ChannelDetails {
     required this.id,
     required this.name,
     required this.channelType,
+    this.labels = const [],
     required this.visibility,
     required this.description,
     required this.createdBy,
@@ -215,6 +256,7 @@ class ChannelDetails {
     id: json['id'] as String,
     name: json['name'] as String,
     channelType: json['channel_type'] as String,
+    labels: (json['labels'] as List<dynamic>? ?? const []).cast<String>(),
     visibility: json['visibility'] as String,
     description: (json['description'] as String?) ?? '',
     topic: json['topic'] as String?,
@@ -235,6 +277,7 @@ class ChannelDetails {
     id: channel.id,
     name: channel.name,
     channelType: channel.channelType,
+    labels: channel.labels,
     visibility: channel.visibility,
     description: channel.description,
     topic: channel.topic,

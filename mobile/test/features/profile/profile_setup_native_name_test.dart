@@ -1,0 +1,154 @@
+import 'dart:async';
+
+import 'package:buzz/features/profile/profile_setup_page.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/material.dart';
+import 'package:buzz/shared/theme/app_theme.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+import '../../helpers/hosted_communities_fixture.dart';
+import '../../helpers/widget_helpers.dart';
+
+void main() {
+  testWidgets(
+    'native profile requires a valid name and allows skipping the avatar',
+    (tester) async {
+      FlutterSecureStorage.setMockInitialValues({});
+      final fixture = HostedCommunitiesFixture();
+      await fixture.initialize(widget: true);
+      addTearDown(fixture.dispose);
+      for (final grapheme in ['😀', 'e\u0301', '👨‍👩‍👧‍👦']) {
+        for (final count in [0, 100, 101]) {
+          const channel = MethodChannel('buzz/profile_setup');
+          final messenger = tester.binding.defaultBinaryMessenger;
+          final presented = Completer<Map<dynamic, dynamic>>();
+          final dismissed = Completer<String>();
+          messenger.setMockMethodCallHandler(channel, (call) async {
+            if (call.method == 'present') {
+              presented.complete(call.arguments as Map);
+              return dismissed.future;
+            }
+            return null;
+          });
+          addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+          final writes = <String>[];
+          final pending = fixture.flow.requestProfile(
+            (name) async => writes.add(name),
+          );
+          await tester.pumpWidget(
+            WidgetHelpers.testable(child: ProfileSetupPage(flow: fixture.flow)),
+          );
+          await tester.pumpAndSettle();
+          final configuration = await presented.future;
+          final name = List.filled(count, grapheme).join();
+          final response = Completer<Map<dynamic, dynamic>>();
+          messenger.handlePlatformMessage(
+            channel.name,
+            const StandardMethodCodec().encodeMethodCall(
+              MethodCall('save', {
+                'session': configuration['session'],
+                'name': name,
+              }),
+            ),
+            (data) => response.complete(
+              const StandardMethodCodec().decodeEnvelope(data!) as Map,
+            ),
+          );
+          expect(await response.future, {'saved': count == 100});
+          expect(writes, count == 100 ? [name] : isEmpty);
+          dismissed.complete(count == 100 ? 'saved' : 'skip');
+          await tester.pumpAndSettle();
+          await pending;
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pumpAndSettle();
+        }
+      }
+      const channel = MethodChannel('buzz/profile_setup');
+      final messenger = tester.binding.defaultBinaryMessenger;
+      final presented = Completer<Map<dynamic, dynamic>>();
+      final dismissed = Completer<String>();
+      final appearanceUpdates = <Map>[];
+      final brightness = ValueNotifier(Brightness.light);
+      addTearDown(brightness.dispose);
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        if (call.method == 'appearance') {
+          appearanceUpdates.add(call.arguments as Map);
+        }
+        if (call.method == 'present') {
+          presented.complete(call.arguments as Map);
+          return dismissed.future;
+        }
+        return null;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      final writes = <String>[];
+      final pending = fixture.flow.requestProfile(
+        (_) async {},
+        saveDraft: (name, upload) async {
+          expect(upload, isNull);
+          writes.add(name);
+        },
+      );
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          child: ValueListenableBuilder<Brightness>(
+            valueListenable: brightness,
+            builder: (context, value, child) => Theme(
+              data: value == Brightness.dark
+                  ? AppTheme.dark()
+                  : AppTheme.light(),
+              child: child!,
+            ),
+            child: ProfileSetupPage(flow: fixture.flow),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final configuration = await presented.future;
+      Future<dynamic> invoke(
+        String method,
+        Map<String, dynamic> arguments,
+      ) async {
+        final result = Completer<dynamic>();
+        messenger.handlePlatformMessage(
+          channel.name,
+          const StandardMethodCodec().encodeMethodCall(
+            MethodCall(method, {
+              'session': configuration['session'],
+              ...arguments,
+            }),
+          ),
+          (data) => result.complete(
+            const StandardMethodCodec().decodeEnvelope(data!),
+          ),
+        );
+        await tester.pump();
+        return result.future;
+      }
+
+      await invoke('avatarDraft', {
+        'draft': {'type': 'url', 'url': 'https://example.com/avatar.png'},
+      });
+      for (final value in [Brightness.dark, Brightness.light]) {
+        brightness.value = value;
+        await tester.pumpAndSettle();
+        expect(appearanceUpdates.last['dark'], value == Brightness.dark);
+        expect(appearanceUpdates.last['session'], configuration['session']);
+        expect(dismissed.isCompleted, isFalse);
+      }
+      expect(await invoke('save', {'name': '   ', 'skipAvatar': true}), {
+        'saved': false,
+      });
+      expect(writes, isEmpty);
+      expect(await invoke('save', {'name': ' Kenny ', 'skipAvatar': true}), {
+        'saved': true,
+      });
+      expect(writes, ['Kenny']);
+      dismissed.complete('saved');
+      await tester.pumpAndSettle();
+      await pending;
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
+}

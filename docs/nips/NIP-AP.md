@@ -368,7 +368,7 @@ In every case the client keeps only channels whose type is `system`, whose label
 
 | Type | Channel | `title` | Extra tags | Content |
 | --- | --- | --- | --- | --- |
-| `buzz.agent.settings` | agent config | `Agent settings` | | `{"version": 1, "settings": { ... }}` |
+| `buzz.agent.settings` | agent config | `Agent settings` | | `{"version": 1, "agentType": "<string>", "settings": { ... }}` |
 | `buzz.agent.instructions` | agent config | `Agent instructions` | | `{"version": 1, "text": "<string>"}` |
 | `buzz.team` | team config | the team name | `["team", "<team-id>"]` | `{"version": 1, "name": "<string>", "instructions": "<string>"}` |
 
@@ -381,6 +381,8 @@ A config channel holds at most one artifact of each of its types. Its `d` is the
 **Instructions.** `text` and `instructions` MAY be empty, which means "no instructions". They MUST be valid UTF-8 and MUST NOT contain U+0000.
 
 **Settings.** `settings` is a JSON object of the agent's launch configuration. Its fields are defined by the client and harness that launch the agent, not by this NIP. It MUST NOT contain credentials, secrets, machine-local paths, or device state. A client MUST NOT launch an agent with a setting it does not support silently replaced by a default; it shows the error instead.
+
+**Agent type.** `agentType` is a string that names the agent type the settings are for. Its values are defined by the client, and clients compare them as exact strings. A writer MUST include it. A reader treats settings without `agentType` as being for the agent's current type. A client MUST NOT launch an agent with settings for a different agent type; it shows the error instead. Changing an agent's type is an edit that writes the new `agentType`. A client that reads a current revision naming a type other than the agent's MAY change the agent to that type when it supports it.
 
 **Size.** A config artifact's `content` MUST NOT exceed 131,072 bytes after JSON encoding, and `buzz.agent.settings` content MUST NOT exceed 65,535 bytes. The signed event MUST also fit within the relay's advertised event-size limits. Writers check these limits on the encoded content and the signed event, reject an edit that exceeds them, and MUST NOT truncate.
 
@@ -404,7 +406,7 @@ Only an absent artifact lets a client fall back to another source (see "Launch c
 
 Every channel member who is not a guest can edit the channel's artifacts. This includes members who are not on the team, such as humans and agents with another owner. On a relay whose guest roles are read-only, guests can only read them, and the owner can make an agent read-only for a config channel by giving it the guest role there.
 
-Every edit is a new NIP-AR revision and names the current revision in `prev`. On conflict, the client reconciles with the current revision as NIP-AR requires. An edit MUST keep any JSON fields and tags the client does not recognise.
+Every edit is a new NIP-AR revision and names the current revision in `prev`. On conflict, the client reconciles with the current revision as NIP-AR requires. An edit MUST keep any JSON fields and tags the client does not recognise. The one exception: an edit of `buzz.agent.settings` that changes `agentType` MAY drop the fields inside `settings`, because they belong to the old type.
 
 ### History
 

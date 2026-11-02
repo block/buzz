@@ -13,6 +13,7 @@ void main() {
     var changes = 0;
     final manager = ChannelStarsManager(
       pubkey: keys.public,
+      relayUrl: 'https://relay.example',
       prefs: prefs,
       crypto: ChannelStarsCrypto(keys.nsec, keys.public),
       relaySession: null,
@@ -37,6 +38,7 @@ void main() {
     var changes = 0;
     final manager = ChannelMutesManager(
       pubkey: keys.public,
+      relayUrl: 'https://relay.example',
       prefs: prefs,
       crypto: ChannelMutesCrypto(keys.nsec, keys.public),
       relaySession: null,

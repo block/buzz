@@ -25,7 +25,8 @@ use buzz_core::tenant::TenantContext;
 use buzz_db::relay_members::RemoveResult;
 
 use crate::handlers::side_effects::{
-    publish_nip43_member_added, publish_nip43_member_removed, publish_nip43_membership_list,
+    auto_join_default_channels, fan_out_nip43_membership_list, publish_nip43_member_added,
+    publish_nip43_member_removed,
 };
 use crate::state::AppState;
 
@@ -192,6 +193,8 @@ pub(super) async fn handle_relay_admin_event(
     //
     // This gate wraps execution rather than opening it so no future early
     // return inside the command body can precede it.
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_command_ban_check(tenant.community()).await;
     let restriction = state
         .db
         .moderation_restriction_state(tenant.community(), &event.pubkey.to_bytes())
@@ -333,11 +336,18 @@ async fn execute_relay_admin_command(
             // Note: idempotent — if target already exists at any role, this is a
             // silent no-op. The existing role is NOT overwritten. Use kind:9032
             // to change an existing member's role.
-            let was_inserted = state
+            let write = state
                 .db
-                .add_relay_member(tenant.community(), &target_hex, &role, Some(&sender_hex))
+                .add_relay_member(
+                    tenant.community(),
+                    &target_hex,
+                    &role,
+                    Some(&sender_hex),
+                    &state.relay_keypair,
+                )
                 .await
                 .map_err(|e| format!("database error: {e}"))?;
+            let was_inserted = write.outcome;
 
             info!(
                 sender = %sender_hex,
@@ -353,10 +363,17 @@ async fn execute_relay_admin_command(
                 if let Err(e) = publish_nip43_member_added(tenant, state, &target_hex).await {
                     warn!(error = %e, "failed to publish NIP-43 member added event");
                 }
-                if let Err(e) = publish_nip43_membership_list(tenant, state).await {
-                    warn!(error = %e, "failed to publish NIP-43 membership list");
-                }
+                // The sender adds someone else, so the target's
+                // `channel_add_policy` decides whether they are auto-joined.
+                auto_join_default_channels(
+                    tenant,
+                    state,
+                    &target_hex,
+                    Some(&event.pubkey.to_bytes()),
+                )
+                .await;
             }
+            fan_out_nip43_membership_list(tenant, state, write.snapshot).await;
         }
 
         // kind:9031 — Remove relay member
@@ -376,22 +393,27 @@ async fn execute_relay_admin_command(
             //   This eliminates the TOCTOU race where the target could be promoted
             //   between a prior role read and the delete.
             // - Owners: can remove admins and members, not other owners.
-            let remove_result = if sender_role == "admin" {
+            let write = if sender_role == "admin" {
                 state
                     .db
-                    .remove_relay_member_if_role(tenant.community(), &target_hex, "member")
+                    .remove_relay_member_if_role(
+                        tenant.community(),
+                        &target_hex,
+                        "member",
+                        &state.relay_keypair,
+                    )
                     .await
                     .map_err(|e| format!("database error: {e}"))?
             } else {
                 // Owner path — atomic delete that refuses to remove other owners.
                 state
                     .db
-                    .remove_relay_member(tenant.community(), &target_hex)
+                    .remove_relay_member(tenant.community(), &target_hex, &state.relay_keypair)
                     .await
                     .map_err(|e| format!("database error: {e}"))?
             };
 
-            match remove_result {
+            match write.outcome {
                 RemoveResult::Removed => {}
                 RemoveResult::IsOwner => {
                     return Err("cannot remove the relay owner".to_string());
@@ -428,9 +450,7 @@ async fn execute_relay_admin_command(
             if let Err(e) = publish_nip43_member_removed(tenant, state, &target_hex).await {
                 warn!(error = %e, "failed to publish NIP-43 member removed event");
             }
-            if let Err(e) = publish_nip43_membership_list(tenant, state).await {
-                warn!(error = %e, "failed to publish NIP-43 membership list");
-            }
+            fan_out_nip43_membership_list(tenant, state, write.snapshot).await;
             revoked
                 .map_err(|e| format!("error: member removed but live revoke incomplete: {e}"))?;
         }
@@ -460,13 +480,18 @@ async fn execute_relay_admin_command(
                 return Err(format!("invalid role: {new_role}"));
             }
 
-            let updated = state
+            let write = state
                 .db
-                .update_relay_member_role(tenant.community(), &target_hex, &new_role)
+                .update_relay_member_role(
+                    tenant.community(),
+                    &target_hex,
+                    &new_role,
+                    &state.relay_keypair,
+                )
                 .await
                 .map_err(|e| format!("database error: {e}"))?;
 
-            if !updated {
+            if !write.outcome {
                 // Distinguish "owner (protected)" from "doesn't exist"
                 let exists = state
                     .db
@@ -487,9 +512,7 @@ async fn execute_relay_admin_command(
                 "relay member role changed"
             );
 
-            if let Err(e) = publish_nip43_membership_list(tenant, state).await {
-                warn!(error = %e, "failed to publish NIP-43 membership list");
-            }
+            fan_out_nip43_membership_list(tenant, state, write.snapshot).await;
         }
 
         other => {
@@ -828,8 +851,10 @@ mod postgres_tests {
                 &owner.public_key().to_hex(),
                 "owner",
                 None,
+                &nostr::Keys::generate(),
             )
             .await
+            .map(|write| write.outcome)
             .expect("seed owner");
         let refused = submit_9033(&state, &tenant, &roleless, "https://evil.example/pwn.png").await;
         assert_eq!(
@@ -875,8 +900,10 @@ mod postgres_tests {
                 &member.public_key().to_hex(),
                 "member",
                 None,
+                &nostr::Keys::generate(),
             )
             .await
+            .map(|write| write.outcome)
             .expect("seed member");
         state
             .db
@@ -885,8 +912,10 @@ mod postgres_tests {
                 &admin.public_key().to_hex(),
                 "admin",
                 None,
+                &nostr::Keys::generate(),
             )
             .await
+            .map(|write| write.outcome)
             .expect("seed admin");
 
         for (keys, label) in [(&roleless, "roleless"), (&member, "member")] {
@@ -933,8 +962,15 @@ mod postgres_tests {
         ] {
             state
                 .db
-                .add_relay_member(tenant.community(), &keys.public_key().to_hex(), role, None)
+                .add_relay_member(
+                    tenant.community(),
+                    &keys.public_key().to_hex(),
+                    role,
+                    None,
+                    &nostr::Keys::generate(),
+                )
                 .await
+                .map(|write| write.outcome)
                 .expect("seed member");
         }
         let bound = |keys: &Keys| {
@@ -960,6 +996,163 @@ mod postgres_tests {
 
         assert!(member_socket.cancellation_token().is_cancelled());
         assert!(!bystander_socket.cancellation_token().is_cancelled());
+    }
+
+    /// A kind:9030 add joins the new relay member to the community's
+    /// effective default channels, once: the flagged open channel gains them
+    /// as a member with one kind:44100; the unflagged channel does not. A
+    /// kind:9022 leave followed by a repeat kind:9030 (an idempotent no-op on
+    /// the roster) does not re-add them. An added agent's `channel_add_policy`
+    /// holds against the adder. Mutations: delete the
+    /// `auto_join_default_channels` call → RED; pass no actor, or drop the
+    /// policy check → the `nobody` agent is joined (RED); check the policy
+    /// against anyone but the adder → the owned `owner_only` agent is not
+    /// (RED).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn adding_a_member_auto_joins_default_channels() {
+        use crate::handlers::group_state_postgres_tests::{
+            create_channel, edit_channel, http_auth,
+        };
+        use crate::handlers::ingest::ingest_event;
+
+        let host = format!("add-auto-join-{}.example", uuid::Uuid::new_v4().simple());
+        let (state, tenant) = workspace_profile_test_state(&host, true).await;
+        let (owner, target) = (Keys::generate(), Keys::generate());
+        state
+            .db
+            .add_relay_member(
+                tenant.community(),
+                &owner.public_key().to_hex(),
+                "owner",
+                None,
+                &nostr::Keys::generate(),
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("seed owner");
+        let flagged = create_channel(&state, &tenant, &owner, &[]).await;
+        let control = create_channel(&state, &tenant, &owner, &[]).await;
+        edit_channel(&state, &tenant, &owner, flagged, &[&["auto_join", "true"]])
+            .await
+            .expect("relay owner flags channel");
+
+        let roles = |keys: &Keys| {
+            let state = state.clone();
+            let community = tenant.community();
+            let pubkey = keys.public_key().to_bytes();
+            async move {
+                let mut roles = Vec::new();
+                for channel_id in [flagged, control] {
+                    roles.push(
+                        state
+                            .db
+                            .get_member_role(community, channel_id, &pubkey)
+                            .await
+                            .expect("member role"),
+                    );
+                }
+                roles
+            }
+        };
+        let added_notifications = || {
+            let state = state.clone();
+            let community = tenant.community();
+            let target_hex = target.public_key().to_hex();
+            async move {
+                state
+                    .db
+                    .count_events(&buzz_db::EventQuery {
+                        kinds: Some(vec![buzz_core::kind::KIND_MEMBER_ADDED_NOTIFICATION as i32]),
+                        p_tag_hex: Some(target_hex),
+                        global_only: true,
+                        ..buzz_db::EventQuery::for_community(community)
+                    })
+                    .await
+                    .expect("count 44100")
+            }
+        };
+        let add = || {
+            EventBuilder::new(Kind::Custom(RELAY_ADMIN_ADD_MEMBER as u16), "")
+                .tags(vec![Tag::public_key(target.public_key())])
+                .sign_with_keys(&owner)
+                .expect("sign 9030")
+        };
+
+        handle_relay_admin_event(&tenant, &state, &add())
+            .await
+            .expect("owner adds member");
+        assert_eq!(roles(&target).await, [Some("member".to_string()), None]);
+        assert_eq!(added_notifications().await, 1);
+
+        let leave = EventBuilder::new(Kind::Custom(9022), "")
+            .tags([Tag::parse(["h", &flagged.to_string()]).expect("h tag")])
+            .sign_with_keys(&target)
+            .expect("sign 9022");
+        let left = ingest_event(&state, &tenant, leave, http_auth(&target))
+            .await
+            .expect("ingest 9022");
+        assert!(left.accepted, "{:?}", left.message);
+        handle_relay_admin_event(&tenant, &state, &add())
+            .await
+            .expect("repeat add is a roster no-op");
+        assert_eq!(
+            roles(&target).await,
+            [None, None],
+            "a repeat kind:9030 must not resurrect a kind:9022 leave"
+        );
+        assert_eq!(added_notifications().await, 1);
+
+        // The adder acts for someone else, so the added agent's
+        // `channel_add_policy` decides, as for the same actor's kind:9000:
+        // `nobody` refuses every default channel; `owner_only` admits only
+        // the agent's owner.
+        let (refusing, owned) = (Keys::generate(), Keys::generate());
+        for keys in [&owner, &refusing, &owned] {
+            state
+                .db
+                .ensure_user(tenant.community(), &keys.public_key().to_bytes())
+                .await
+                .expect("user row");
+        }
+        for (agent, policy) in [(&refusing, "nobody"), (&owned, "owner_only")] {
+            state
+                .db
+                .set_channel_add_policy(tenant.community(), &agent.public_key().to_bytes(), policy)
+                .await
+                .expect("agent policy");
+        }
+        state
+            .db
+            .set_agent_owner(
+                tenant.community(),
+                &owned.public_key().to_bytes(),
+                &owner.public_key().to_bytes(),
+            )
+            .await
+            .expect("agent owner");
+        for (agent, expected) in [
+            (&refusing, [None, None]),
+            (&owned, [Some("member".to_string()), None]),
+        ] {
+            let add = EventBuilder::new(Kind::Custom(RELAY_ADMIN_ADD_MEMBER as u16), "")
+                .tags(vec![Tag::public_key(agent.public_key())])
+                .sign_with_keys(&owner)
+                .expect("sign 9030");
+            handle_relay_admin_event(&tenant, &state, &add)
+                .await
+                .expect("owner adds agent");
+            assert!(
+                state
+                    .db
+                    .get_relay_member(tenant.community(), &agent.public_key().to_hex())
+                    .await
+                    .expect("relay member")
+                    .is_some(),
+                "the roster add stands either way"
+            );
+            assert_eq!(roles(agent).await, expected);
+        }
     }
 
     /// A pod-local root socket registered and bound to `keys`, as root AUTH
@@ -1024,8 +1217,10 @@ mod postgres_tests {
                 &member.public_key().to_hex(),
                 "member",
                 None,
+                &nostr::Keys::generate(),
             )
             .await
+            .map(|write| write.outcome)
             .expect("seed member");
         for keys in [&member, &agent] {
             state
@@ -1172,8 +1367,15 @@ mod postgres_tests {
         ] {
             state
                 .db
-                .add_relay_member(tenant.community(), &keys.public_key().to_hex(), role, None)
+                .add_relay_member(
+                    tenant.community(),
+                    &keys.public_key().to_hex(),
+                    role,
+                    None,
+                    &nostr::Keys::generate(),
+                )
                 .await
+                .map(|write| write.outcome)
                 .expect("seed member");
         }
         let target_socket = bound_root_socket(&state, tenant.community(), &target);
@@ -1213,8 +1415,8 @@ mod postgres_tests {
 
         let error = result.expect_err("the audit failure is reported");
         assert!(
-            error.contains("audit"),
-            "reports the audit failure: {error}"
+            matches!(&error, crate::handlers::ingest::IngestError::Rejected(m) if m.contains("audit")),
+            "reports the audit failure: {error:?}"
         );
         assert!(
             state
@@ -1242,8 +1444,15 @@ mod postgres_tests {
         for (keys, role) in [(&owner, "owner"), (&target, "member")] {
             state
                 .db
-                .add_relay_member(tenant.community(), &keys.public_key().to_hex(), role, None)
+                .add_relay_member(
+                    tenant.community(),
+                    &keys.public_key().to_hex(),
+                    role,
+                    None,
+                    &nostr::Keys::generate(),
+                )
                 .await
+                .map(|write| write.outcome)
                 .expect("seed member");
         }
         let key = (tenant.community(), target.public_key().to_bytes().to_vec());
@@ -1276,7 +1485,7 @@ mod postgres_tests {
                 &tenant, &state, &event,
             )
             .await
-            .unwrap_or_else(|e| panic!("kind {} must apply: {e}", event.kind.as_u16()));
+            .unwrap_or_else(|e| panic!("kind {} must apply: {e:?}", event.kind.as_u16()));
             assert_eq!(
                 state.restriction_cache.get(&key),
                 None,

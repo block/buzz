@@ -433,7 +433,10 @@ void main() {
             presentations.add(
               Map<Object?, Object?>.from(call.arguments as Map),
             );
-            expect(call.method, 'presentChannel');
+            // Cancel instead of looping if a failed save keeps re-presenting.
+            if (call.method != 'presentChannel' || presentations.length > 2) {
+              return {'action': 'cancel'};
+            }
             return {
               'action': 'save',
               'name': 'renamed',
@@ -444,7 +447,7 @@ void main() {
         () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
             .setMockMethodCallHandler(bridge, null),
       );
-      var attempts = 0;
+      final updates = <(String?, String?)>[];
       await tester.pumpWidget(
         _modalApp(
           channel: _channel(),
@@ -455,13 +458,12 @@ void main() {
               joinedAt: DateTime(2025),
             ),
           ],
+          // Record rather than assert here: the sheet catches update errors.
           createChannelActions: (ref) => _FakeChannelActions(
             ref,
             onUpdateChannel: (_, name, description) async {
-              attempts++;
-              if (attempts == 1) throw Exception('offline');
-              expect(name, 'renamed');
-              expect(description, 'Updated description');
+              updates.add((name, description));
+              if (updates.length == 1) throw Exception('offline');
             },
           ),
         ),
@@ -471,6 +473,10 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Manage channel'));
       await tester.pumpAndSettle();
+      expect(updates, [
+        ('renamed', 'Updated description'),
+        ('renamed', 'Updated description'),
+      ]);
       expect(presentations, hasLength(2));
       expect(presentations.first['title'], 'Edit channel');
       expect(presentations.first['multiline'], false);
@@ -489,13 +495,15 @@ void main() {
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
     final canvas = Completer<ChannelCanvas>();
     const bridge = MethodChannel('buzz/profile_text_editor');
-    var opened = false;
+    final opened = <(bool, Object?)>[];
     var saved = false;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(bridge, (call) async {
-          expect(canvas.isCompleted, isFalse);
-          expect((call.arguments as Map)['canvasLoaded'], isFalse);
-          opened = true;
+          opened.add((
+            canvas.isCompleted,
+            (call.arguments as Map)['canvasLoaded'],
+          ));
+          if (opened.length > 1) return null;
           return {
             'action': 'save',
             'name': 'renamed',
@@ -530,7 +538,8 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Manage channel'));
     await tester.pump();
-    expect(opened, isTrue);
+    // Presented once, before the canvas resolved, and marked not loaded.
+    expect(opened, [(false, false)]);
     expect(saved, isTrue);
     canvas.complete(
       const ChannelCanvas(content: null, updatedAt: null, authorPubkey: null),
@@ -545,34 +554,22 @@ void main() {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
     const bridge = MethodChannel('buzz/profile_text_editor');
-    var channelPresentations = 0;
-    var savedDetails = false;
-    var savedCanvas = false;
+    final canvasPresentations = <Map<Object?, Object?>>[];
+    final channelPresentations = <Map<Object?, Object?>>[];
+    final updates = <(String?, String?)>[];
+    final canvases = <String>[];
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(bridge, (call) async {
           final args = Map<Object?, Object?>.from(call.arguments as Map);
           if (call.method == 'present') {
-            expect(args['title'], 'Canvas');
-            expect(args['multiline'], true);
+            canvasPresentations.add(args);
             return 'New canvas';
           }
-          expect(call.method, 'presentChannel');
-          channelPresentations++;
-          if (channelPresentations == 1) {
-            return {
-              'action': 'canvas',
-              'name': 'Draft name',
-              'description': 'Draft description',
-            };
-          }
-          expect(args['canvasContent'], 'New canvas');
-          expect(args['canvasLoaded'], true);
-          expect(args['initialValue'], 'Draft name');
-          expect(args['description'], 'Draft description');
-          expect(args['originalName'], 'general');
-          expect(args['originalDescription'], '');
+          channelPresentations.add(args);
+          // Cancel instead of looping if a failed save keeps re-presenting.
+          if (channelPresentations.length > 2) return {'action': 'cancel'};
           return {
-            'action': 'save',
+            'action': channelPresentations.length == 1 ? 'canvas' : 'save',
             'name': 'Draft name',
             'description': 'Draft description',
           };
@@ -593,15 +590,10 @@ void main() {
         ],
         createChannelActions: (ref) => _FakeChannelActions(
           ref,
-          onUpdateChannel: (_, name, description) async {
-            expect(name, 'Draft name');
-            expect(description, 'Draft description');
-            savedDetails = true;
-          },
-          onSetCanvas: (content) async {
-            expect(content, 'New canvas');
-            savedCanvas = true;
-          },
+          // Record rather than assert here: the sheet catches save errors.
+          onUpdateChannel: (_, name, description) async =>
+              updates.add((name, description)),
+          onSetCanvas: (content) async => canvases.add(content),
         ),
       ),
     );
@@ -610,9 +602,20 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Manage channel'));
     await tester.pumpAndSettle();
-    expect(channelPresentations, 2);
-    expect(savedDetails, isTrue);
-    expect(savedCanvas, isTrue);
+    expect(canvasPresentations, [containsPair('title', 'Canvas')]);
+    expect(canvasPresentations.single['multiline'], true);
+    expect(channelPresentations, hasLength(2));
+    expect(channelPresentations.last, {
+      ...channelPresentations.last,
+      'canvasContent': 'New canvas',
+      'canvasLoaded': true,
+      'initialValue': 'Draft name',
+      'description': 'Draft description',
+      'originalName': 'general',
+      'originalDescription': '',
+    });
+    expect(updates, [('Draft name', 'Draft description')]);
+    expect(canvases, ['New canvas']);
     expect(find.byType(ManageChannelSheet), findsNothing);
     debugDefaultTargetPlatformOverride = null;
   });
@@ -620,7 +623,7 @@ void main() {
   testWidgets(
     'canvas preview opens its content and removal retries without losing drafts',
     (tester) async {
-      var removals = 0;
+      final removals = <String>[];
       await tester.pumpWidget(
         _modalApp(
           channel: _channel(),
@@ -635,8 +638,8 @@ void main() {
           createChannelActions: (ref) => _FakeChannelActions(
             ref,
             onSetCanvas: (content) async {
-              expect(content, '');
-              if (++removals == 1) throw Exception('offline');
+              removals.add(content);
+              if (removals.length == 1) throw Exception('offline');
             },
           ),
         ),
@@ -670,7 +673,7 @@ void main() {
         await tester.ensureVisible(find.text('Remove Canvas'));
         await tester.tap(find.text('Remove Canvas'));
         await tester.pumpAndSettle();
-        expect(removals, attempt);
+        expect(removals, List.filled(attempt, ''));
         await tester.tap(find.text('Remove'));
         await tester.pumpAndSettle();
         if (attempt == 0) {
@@ -701,22 +704,15 @@ void main() {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
       const bridge = MethodChannel('buzz/profile_text_editor');
-      var presentations = 0;
-      var attempts = 0;
+      final presentations = <(String, Map<Object?, Object?>)>[];
+      final attempts = <String>[];
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(bridge, (call) async {
-            final args = Map<Object?, Object?>.from(call.arguments as Map);
-            expect(call.method, 'presentChannel');
-            expect(args['canvasLoaded'], true);
-            expect(
-              args['canvasContent'],
-              presentations < 2 ? 'Existing canvas' : '',
-            );
-            if (presentations > 0) {
-              expect(args['initialValue'], 'Draft name');
-              expect(args['description'], 'Draft description');
-            }
-            if (++presentations == 3) return null;
+            presentations.add((
+              call.method,
+              Map<Object?, Object?>.from(call.arguments as Map),
+            ));
+            if (presentations.length >= 3) return null;
             return {
               'action': 'removeCanvas',
               'name': 'Draft name',
@@ -735,8 +731,8 @@ void main() {
           createChannelActions: (ref) => _FakeChannelActions(
             ref,
             onSetCanvas: (content) async {
-              expect(content, '');
-              if (++attempts == 1) throw Exception('offline');
+              attempts.add(content);
+              if (attempts.length == 1) throw Exception('offline');
             },
           ),
         ),
@@ -746,8 +742,22 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Manage channel'));
       await tester.pumpAndSettle();
-      expect(presentations, 3);
-      expect(attempts, 2);
+      expect(presentations.map((p) => p.$1), List.filled(3, 'presentChannel'));
+      expect(presentations.map((p) => p.$2['canvasLoaded']), [
+        true,
+        true,
+        true,
+      ]);
+      expect(presentations.map((p) => p.$2['canvasContent']), [
+        'Existing canvas',
+        'Existing canvas',
+        '',
+      ]);
+      for (final (_, args) in presentations.skip(1)) {
+        expect(args['initialValue'], 'Draft name');
+        expect(args['description'], 'Draft description');
+      }
+      expect(attempts, ['', '']);
       debugDefaultTargetPlatformOverride = null;
     },
   );

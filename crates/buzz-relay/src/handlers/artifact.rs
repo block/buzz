@@ -73,26 +73,18 @@ fn head_unavailable() -> IngestError {
 }
 
 /// Live delivery only; unlike kind 9 there are no audit, workflow, or thread
-/// side effects. Missed deliveries are recovered by replaying stored events.
+/// side effects. A failed publish is retried, because syncs depend on it.
 async fn publish(state: &Arc<AppState>, tenant: &TenantContext, stored: &StoredEvent) {
     let Some(channel) = stored.channel_id else {
         return;
     };
-    state.mark_local_event(tenant.community(), &stored.event.id);
-    if let Err(e) = state
-        .pubsub
-        .publish_event(
-            tenant,
-            buzz_pubsub::EventTopic::Channel(channel),
-            &stored.event,
-        )
-        .await
-    {
-        state
-            .local_event_ids
-            .invalidate(&(tenant.community(), stored.event.id.to_bytes()));
-        tracing::warn!(error=%e, "artifact Redis publish failed");
-    }
+    super::artifact_sync::publish_reliably(
+        state,
+        tenant,
+        buzz_pubsub::EventTopic::Channel(channel),
+        stored,
+    )
+    .await;
     super::event::fan_out_event_to_local_subscribers(state, tenant.community(), stored).await;
 }
 

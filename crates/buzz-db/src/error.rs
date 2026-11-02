@@ -37,6 +37,14 @@ pub enum DbError {
     #[error("access denied: {0}")]
     AccessDenied(String),
 
+    /// Invitation admission or minting was denied by authoritative restrictions.
+    #[error("invitation principal is restricted")]
+    InviteRestricted,
+
+    /// A verified invitation owner conflicts with the recorded owner.
+    #[error("invitation owner does not match the recorded owner")]
+    InviteOwnerMismatch,
+
     /// JSON serialization or deserialization failed.
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
@@ -69,6 +77,10 @@ pub enum DbError {
     #[error("deletion safety error: {0}")]
     DeletionSafety(String),
 
+    /// An artifact sync page exceeds its resource limit.
+    #[error("artifact sync limit exceeded")]
+    ArtifactSyncLimit,
+
     /// A complete read-state snapshot exceeds its bounded resource budget.
     #[error("read-state snapshot exceeds event or byte limit")]
     ReadStateSnapshotTooLarge,
@@ -91,8 +103,16 @@ pub enum DbError {
 
 impl DbError {
     /// Whether Postgres cancelled the statement (SQLSTATE 57014:
-    /// `statement_timeout` or an explicit cancel). Re-running such a query on
-    /// the writer would only repeat the same expensive work.
+    /// `statement_timeout` or an explicit cancel).
+    ///
+    /// Replica-routed reads surface a cancel instead of re-running on the
+    /// writer. Usually the cancel means expensive work that the writer would
+    /// only repeat at the primary's cost. It can also mean the replica waited
+    /// on a lock that only it holds (a replayed `ACCESS EXCLUSIVE` from
+    /// primary DDL), when the writer would have answered quickly. That miss is
+    /// the accepted price of keeping runaway reads off the primary. Per-call
+    /// routed reads record it as the `statement_cancelled` route reason;
+    /// `ReadSession` reads return it to the relay, which logs the failed read.
     pub fn is_statement_cancelled(&self) -> bool {
         matches!(
             self,

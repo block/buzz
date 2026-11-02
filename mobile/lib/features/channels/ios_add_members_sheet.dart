@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
 import 'dart:collection';
 
@@ -149,8 +150,9 @@ class _IosAddMembersSheetState extends State<IosAddMembersSheet> {
   void _failed() {
     if (!mounted || _closed) return;
     _closed = true;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text("Couldn't open Add members. Try again.")),
+    ScaffoldMessenger.of(context).showFeedbackSnackBar(
+      const SnackBar(content: Text('Couldn’t open Add members')),
+      kind: ToastKind.error,
     );
     widget.onClose();
   }

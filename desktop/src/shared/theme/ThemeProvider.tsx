@@ -52,7 +52,15 @@ export const ACCENT_COLORS = [
   { name: "Lilac", value: "#c0a2f1" },
   { name: "Purple", value: "#a855f7" },
   { name: "Indigo", value: "#6366f1" },
+  { name: "Chartreuse", value: "#d7d72e" },
 ] as const;
+
+/**
+ * Accents too light to read as `text-primary` on light themes. They darken
+ * there; the legacy accents keep their established rendering.
+ */
+const LIGHT_ONLY_ACCENTS = new Set<string>(["#d7d72e"]);
+const ACCENT_TEXT_CONTRAST = 4.5;
 
 const DEFAULT_ACCENT = "#3b82f6";
 
@@ -195,6 +203,62 @@ function rgbToHex({ r, g, b }: Rgb): string {
     .join("")}`;
 }
 
+/** Parses a `--background`-style `H S% L%` triplet. */
+function hslTripletToRgb(value: string): Rgb | null {
+  const m = /^(-?[\d.]+)\s+([\d.]+)%\s+([\d.]+)%$/.exec(value.trim());
+  if (!m) return null;
+  const h = Number(m[1]) / 360;
+  const s = Number(m[2]) / 100;
+  const l = Number(m[3]) / 100;
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  const channel = (offset: number) => {
+    const t = (((h + offset) % 1) + 1) % 1;
+    if (t < 1 / 6) return (p + (q - p) * 6 * t) * 255;
+    if (t < 1 / 2) return q * 255;
+    if (t < 2 / 3) return (p + (q - p) * (2 / 3 - t) * 6) * 255;
+    return p * 255;
+  };
+  return { r: channel(1 / 3), g: channel(0), b: channel(-1 / 3) };
+}
+
+/**
+ * The `--primary` fill and its ink for an accent on the theme `background`.
+ * `--primary` is also drawn directly as text, so a light-only accent darkens
+ * until it reads on that background.
+ */
+export function accentPrimary(
+  value: string,
+  background: string,
+): { fill: string; ink: string } {
+  const accent = hexToRgb(value);
+  const surface = hslTripletToRgb(background);
+  let fill = value;
+  if (
+    LIGHT_ONLY_ACCENTS.has(value) &&
+    surface &&
+    contrastRatio(accent, surface) < ACCENT_TEXT_CONTRAST
+  ) {
+    const black = { r: 0, g: 0, b: 0 };
+    // Search over rounded hex so the published fill itself meets the ratio.
+    const darken = (amount: number) => rgbToHex(mixRgb(accent, black, amount));
+    let low = 0;
+    let high = 1;
+    for (let i = 0; i < 20; i++) {
+      const mid = (low + high) / 2;
+      if (
+        contrastRatio(hexToRgb(darken(mid)), surface) >= ACCENT_TEXT_CONTRAST
+      ) {
+        high = mid;
+      } else {
+        low = mid;
+      }
+    }
+    fill = darken(high);
+  }
+  return { fill, ink: getContrastColor(fill) };
+}
+
 function applyAccentColor(value: string) {
   const root = document.documentElement;
   if (value === NEUTRAL_ACCENT) {
@@ -219,14 +283,18 @@ function applyAccentColor(value: string) {
     return;
   }
 
-  const hex = value;
-  const accentHsl = hexToHsl(hex);
-  const fgHsl = hexToHsl(getContrastColor(hex));
+  const { fill, ink } = accentPrimary(
+    value,
+    window.getComputedStyle(root).getPropertyValue("--background"),
+  );
+  const accentHsl = hexToHsl(fill);
+  const fgHsl = hexToHsl(ink);
   root.style.setProperty("--buzz-selected-accent", accentHsl);
-  root.style.setProperty("--buzz-video-review-accent", accentHsl);
+  // The review chip sits on its own dark surface, so it keeps the raw accent.
+  root.style.setProperty("--buzz-video-review-accent", hexToHsl(value));
   root.style.setProperty(
     "--buzz-video-review-accent-foreground",
-    getReviewAccentForeground(hex),
+    getReviewAccentForeground(value),
   );
   root.style.setProperty("--primary", accentHsl);
   root.style.setProperty("--primary-foreground", fgHsl);

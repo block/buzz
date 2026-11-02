@@ -466,9 +466,7 @@ void _loadingReviewTests() {
     }
   });
 
-  testWidgets('reconnect snapshot puts newest cached media at the bottom', (
-    tester,
-  ) async {
+  testWidgets('reconnect keeps cached media in place', (tester) async {
     final relay = _ReconnectingRelaySession(
       initialStatus: SessionStatus.connected,
     );
@@ -505,26 +503,24 @@ void _loadingReviewTests() {
       tester.getCenter(olderPreview).dy,
       lessThan(tester.getCenter(newerPreview).dy),
     );
+    final newerCenter = tester.getCenter(newerPreview);
     relay.setReconnecting();
     await tester.pump();
     await tester.pump(const Duration(seconds: 3));
-    final olderShape = find.byKey(
-      const ValueKey('message-skeleton-image:https://example.com/0.jpg'),
-    );
-    final newerShape = find.byKey(
-      const ValueKey('message-skeleton-image:https://example.com/1.jpg'),
+    expect(
+      tester.widget<SkeletonReveal>(find.byType(SkeletonReveal)).loading,
+      isFalse,
     );
     expect(
-      tester.getCenter(olderShape).dy,
-      lessThan(tester.getCenter(newerShape).dy),
+      tester
+          .widget<Opacity>(find.byKey(const Key('skeleton-reveal-placeholder')))
+          .opacity,
+      0,
     );
-    final list = find
-        .ancestor(of: newerShape, matching: find.byType(ListView))
-        .first;
-    expect(tester.widget<ListView>(list).reverse, isTrue);
+    expect(tester.getCenter(newerPreview), newerCenter);
     expect(
-      tester.getCenter(newerShape).dy,
-      greaterThan(tester.getSize(find.byType(Scaffold).first).height / 2),
+      tester.getCenter(olderPreview).dy,
+      lessThan(tester.getCenter(newerPreview).dy),
     );
     relay.connect();
     await tester.pumpAndSettle();

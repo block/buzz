@@ -185,6 +185,13 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
 
       if (debounceTimerRef.current !== null) {
         clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+
+      // A cleared draft closes now; see useChannelLinks.
+      if (value.length === 0) {
+        setEmojiQuery(null);
+        return;
       }
 
       debounceTimerRef.current = setTimeout(() => {

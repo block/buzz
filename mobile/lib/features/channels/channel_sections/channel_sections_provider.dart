@@ -1,6 +1,5 @@
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:nostr/nostr.dart' as nostr;
 
 import '../../../shared/relay/relay.dart';
 import '../../../shared/theme/theme_provider.dart';
@@ -42,15 +41,9 @@ class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
       return const ChannelSectionsState();
     }
 
-    final pubkey = _safePubkeyFromNsec(nsec);
-    if (pubkey == null || pubkey.isEmpty) {
-      return const ChannelSectionsState();
-    }
-
-    final ChannelSectionsCrypto crypto;
-    try {
-      crypto = ChannelSectionsCrypto(nsec, pubkey);
-    } catch (_) {
+    final pubkey = ref.watch(myPubkeyProvider);
+    final crypto = ref.watch(channelSectionsCryptoProvider);
+    if (pubkey == null || crypto == null) {
       return const ChannelSectionsState();
     }
 
@@ -63,6 +56,7 @@ class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
     late final ChannelSectionsManager manager;
     manager = ChannelSectionsManager(
       pubkey: pubkey,
+      relayUrl: relayConfig.baseUrl,
       prefs: prefs,
       crypto: crypto,
       relaySession: ref.read(relaySessionProvider.notifier),
@@ -131,12 +125,16 @@ final channelSectionsProvider =
       ChannelSectionsNotifier.new,
     );
 
-String? _safePubkeyFromNsec(String nsec) {
+/// Identity-scoped crypto survives connection status changes. A community or
+/// signing-key change replaces it through [relayConfigProvider].
+final channelSectionsCryptoProvider = Provider<ChannelSectionsCrypto?>((ref) {
+  final config = ref.watch(relayConfigProvider);
+  final pubkey = ref.watch(myPubkeyProvider);
+  final nsec = config.nsec?.trim();
+  if (nsec == null || nsec.isEmpty || pubkey == null) return null;
   try {
-    final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
-    if (privkeyHex.isEmpty) return null;
-    return nostr.Keys(privkeyHex).public;
+    return ChannelSectionsCrypto(nsec, pubkey);
   } catch (_) {
     return null;
   }
-}
+});

@@ -88,10 +88,11 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
     _forcedUnreadContexts.clear();
 
     final relayConfig = ref.watch(relayConfigProvider);
-    // Connection status changes must not replace the journal owner while an
-    // ACK is in flight. The listener below handles reconnects.
+    // Watch the session notifier, not its state: a status change (app resume,
+    // reconnect) must not rebuild the manager and drop session-local forced
+    // unread flags. The listener below re-syncs on reconnect instead.
     ref.watch(relaySessionProvider.notifier);
-    final activeCommunity = ref.watch(activeCommunityProvider).value;
+    ref.watch(activeCommunityProvider);
 
     final nsec = relayConfig.nsec?.trim();
     if (nsec == null || nsec.isEmpty) {
@@ -102,14 +103,9 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       session: ref.read(relaySessionProvider.notifier),
       nsec: nsec,
     );
-    final pubkey =
-        _normalizePubkey(activeCommunity?.pubkey) ??
-        _safeDerivedPubkey(signedRelay);
-    if (pubkey == null) {
-      return const ReadStateState.inert();
-    }
-
-    final crypto = ReadStateCrypto.tryCreate(nsec: nsec, pubkey: pubkey);
+    final pubkey = ref.watch(_readStatePubkeyProvider);
+    if (pubkey == null) return const ReadStateState.inert();
+    final crypto = ref.watch(readStateCryptoProvider);
     if (crypto == null) {
       return const ReadStateState.inert();
     }
@@ -225,6 +221,11 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
     _manager?.seedContextRead(contextId, unixTimestamp);
   }
 
+  /// Seed a channel-list snapshot with one local save and state emission.
+  void seedContextsRead(Map<String, int> contexts) {
+    _manager?.seedContextsRead(contexts);
+  }
+
   void _emitManagerState(ReadStateManager manager) {
     if (_manager != manager) return;
     final advances = manager.drainSyncedAdvances();
@@ -268,11 +269,18 @@ String? _normalizePubkey(String? value) {
   return normalized;
 }
 
-String? _safeDerivedPubkey(SignedEventRelay relay) {
-  try {
-    return _normalizePubkey(relay.pubkey);
-  } catch (e) {
-    debugPrint('[ReadStateManager] pubkey derivation failed: $e');
-    return null;
-  }
-}
+final _readStatePubkeyProvider = Provider<String?>((ref) {
+  final active = ref.watch(activeCommunityProvider).value;
+  final config = ref.watch(relayConfigProvider);
+  return _normalizePubkey(active?.pubkey) ??
+      _normalizePubkey(pubkeyFromNsec(config.nsec?.trim()));
+});
+
+/// Retains read-state encryption material across connection status changes.
+final readStateCryptoProvider = Provider<ReadStateCrypto?>((ref) {
+  final config = ref.watch(relayConfigProvider);
+  final pubkey = ref.watch(_readStatePubkeyProvider);
+  final nsec = config.nsec?.trim();
+  if (nsec == null || nsec.isEmpty || pubkey == null) return null;
+  return ReadStateCrypto.tryCreate(nsec: nsec, pubkey: pubkey);
+});

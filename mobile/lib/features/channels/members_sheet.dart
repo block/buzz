@@ -19,6 +19,8 @@ import 'channel.dart';
 import 'channel_identity_names_provider.dart';
 import 'channel_management_provider.dart';
 
+part 'members_sheet/member_section.dart';
+
 class MembersSheet extends HookConsumerWidget {
   final Channel channel;
   final String? currentPubkey;
@@ -94,66 +96,71 @@ class MembersSheet extends HookConsumerWidget {
         key: const ValueKey('members-sheet-viewport'),
         constraints: BoxConstraints(maxHeight: 400 + bottomClearance),
         child: membersAsync.when(
-          data: (_) => ListView(
+          data: (_) => CustomScrollView(
             key: const ValueKey('members-sheet-list'),
+            semanticChildCount: allMembers.length,
             shrinkWrap: true,
-            padding: EdgeInsets.only(top: Grid.xxs, bottom: bottomClearance),
-            children: [
+            slivers: [
+              const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
               if (people.isNotEmpty)
-                SheetActionSection(
+                _MemberSection(
                   label: 'People · ${people.length}',
-                  dividerIndent: Grid.xs + 40 + Grid.xs,
-                  children: [
-                    for (final member in people)
-                      _MemberTile(
-                        member: member,
-                        currentPubkey: currentPubkey,
-                        profile: userCache[member.pubkey.toLowerCase()],
-                        canManage: canManage,
-                        isSelf:
-                            member.pubkey.toLowerCase() ==
-                            currentPubkey?.toLowerCase(),
-                        channelId: channel.id,
-                        userStatus: statusCache[member.pubkey.toLowerCase()],
-                        onActivityTap: onMemberTap == null
-                            ? null
-                            : () => onMemberTap!(context, member.pubkey),
-                      ),
-                  ],
+                  itemCount: people.length,
+                  itemBuilder: (context, index) {
+                    final member = people[index];
+                    return _MemberTile(
+                      member: member,
+                      currentPubkey: currentPubkey,
+                      profile: userCache[member.pubkey.toLowerCase()],
+                      canManage: canManage,
+                      isSelf:
+                          member.pubkey.toLowerCase() ==
+                          currentPubkey?.toLowerCase(),
+                      channelId: channel.id,
+                      userStatus: statusCache[member.pubkey.toLowerCase()],
+                      onActivityTap: onMemberTap == null
+                          ? null
+                          : () => onMemberTap!(context, member.pubkey),
+                    );
+                  },
                 ),
               if (bots.isNotEmpty)
-                SheetActionSection(
+                _MemberSection(
                   label: 'Agents · ${bots.length}',
-                  dividerIndent: Grid.xs + 40 + Grid.xs,
-                  children: [
-                    for (final bot in bots)
-                      _MemberTile(
-                        member: bot,
-                        currentPubkey: currentPubkey,
-                        profile: userCache[bot.pubkey.toLowerCase()],
-                        canManage: canManage,
-                        isSelf: false,
-                        channelId: channel.id,
-                        isWorking: typingBotPubkeys.contains(
-                          bot.pubkey.toLowerCase(),
-                        ),
-                        onViewActivity: () => openActivity(bot),
-                        onActivityTap:
-                            typingBotPubkeys.contains(bot.pubkey.toLowerCase())
-                            ? () => openActivity(bot)
-                            : null,
+                  semanticIndexOffset: people.length,
+                  itemCount: bots.length,
+                  itemBuilder: (context, index) {
+                    final bot = bots[index];
+                    return _MemberTile(
+                      member: bot,
+                      currentPubkey: currentPubkey,
+                      profile: userCache[bot.pubkey.toLowerCase()],
+                      canManage: canManage,
+                      isSelf: false,
+                      channelId: channel.id,
+                      isWorking: typingBotPubkeys.contains(
+                        bot.pubkey.toLowerCase(),
                       ),
-                  ],
+                      onViewActivity: () => openActivity(bot),
+                      onActivityTap:
+                          typingBotPubkeys.contains(bot.pubkey.toLowerCase())
+                          ? () => openActivity(bot)
+                          : null,
+                    );
+                  },
                 ),
               if (people.isEmpty && bots.isEmpty)
-                Center(
-                  child: Text(
-                    'No members found.',
-                    style: context.textTheme.bodySmall?.copyWith(
-                      color: context.colors.onSurfaceVariant,
+                SliverToBoxAdapter(
+                  child: Center(
+                    child: Text(
+                      'No members found.',
+                      style: context.textTheme.bodySmall?.copyWith(
+                        color: context.colors.onSurfaceVariant,
+                      ),
                     ),
                   ),
                 ),
+              SliverToBoxAdapter(child: SizedBox(height: bottomClearance)),
             ],
           ),
           loading: () => const Center(

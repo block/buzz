@@ -33,6 +33,7 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
   private let channel: FlutterMethodChannel
   private let corners: String
   private let usesGlass: Bool
+  private let topRadius: Double?
 
   init(
     frame: CGRect,
@@ -45,6 +46,7 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
     let backdropColorValue = (arguments?["backdropColor"] as? NSNumber)?.uint32Value
     let minimumRadius = (arguments?["minimumRadius"] as? NSNumber)?.doubleValue ?? 24
     corners = arguments?["corners"] as? String ?? "all"
+    topRadius = (arguments?["topRadius"] as? NSNumber)?.doubleValue
     usesGlass = (arguments?["usesGlass"] as? NSNumber)?.boolValue == true
 
     rootView = UIView(frame: frame)
@@ -172,7 +174,13 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
           topLeftRadius: nil,
           topRightRadius: nil
         )
-        : .uniformCorners(radius: radius)
+        : topRadius.map {
+          .uniformBottomRadius(
+            radius,
+            topLeftRadius: .fixed($0),
+            topRightRadius: .fixed($0)
+          )
+        } ?? .uniformCorners(radius: radius)
     } else {
       surfaceView.layer.cornerRadius = minimumRadius
       if corners == "bottom" {

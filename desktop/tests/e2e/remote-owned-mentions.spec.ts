@@ -5,6 +5,7 @@ import {
   openNewMessagePage,
   TEST_IDENTITIES,
 } from "../helpers/bridge";
+import { clearComposer, replaceComposerText } from "../helpers/composer";
 
 const OWNER = "deadbeef".repeat(8);
 const REMOTE = "ed".repeat(32);
@@ -520,8 +521,9 @@ for (const incoming of ["unrelated thread B draft", "@RemoteScout hello"]) {
     await page.getByRole("button", { name: "Invite", exact: true }).click();
     await waitForInviteGate(page);
     await expect(input).toHaveText("");
-    await input.fill("new authored text");
-    await input.fill("");
+    // Closing the dialog hands focus back to the editor a frame later.
+    await replaceComposerText(input, "new authored text");
+    await clearComposer(input);
     const sourceRecord = () =>
       page.evaluate(([root, otherRoot]) => {
         const key = Object.keys(localStorage).find((key) =>
@@ -644,8 +646,16 @@ for (const incoming of ["B preserved"]) {
     await expect(input).toHaveText(incoming);
     await navigate(roots[0]);
     await expect(input).toHaveAttribute("data-lifecycle-host", "retained");
-    await input.fill("new authored text");
-    await input.fill("");
+    const authored = "new authored text";
+    await input.fill(authored);
+    await expect(input).toHaveText(authored);
+    // fill("") can leave ProseMirror's text in place (see clearComposer), and
+    // leaving A would then save it as A's draft. Backspace from the caret at
+    // the end needs no DOM-selection hand-off.
+    for (let i = 0; i < authored.length; i += 1) {
+      await input.press("Backspace");
+    }
+    await expect(input).toHaveText("");
     const sourceRecord = () =>
       page.evaluate(([root, otherRoot]) => {
         const key = Object.keys(localStorage).find((key) =>

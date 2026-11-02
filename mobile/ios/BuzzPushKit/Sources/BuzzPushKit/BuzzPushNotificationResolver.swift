@@ -50,6 +50,8 @@ public struct BuzzPushResolution: Decodable, Equatable, Sendable {
 /// Resolves the content used to mutate a generic Buzz push notification.
 public protocol BuzzPushNotificationResolving {
   func resolve(completion: @escaping (BuzzPushResolution?) -> Void)
+  /// Cancels any retry in flight and prevents new ones. Call when the notification is delivered.
+  func cancel()
 }
 
 /// Reads configured Buzz communities and resolves their newest unread event.
@@ -60,6 +62,12 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
   static let maximumPresentationResponseBytes = 2 * 1_024 * 1_024
 
   private let session: URLSession
+  private let makeRetrySession: () -> URLSession
+  // Recursive because a retry that fails synchronously completes while the lock is held,
+  // and that completion may finish the notification and call cancel().
+  private let retryLock = NSRecursiveLock()
+  private var isCancelled = false
+  private var retrySessions: [URLSession] = []
   private let loadCommunitiesData: () -> Data?
   private let loadPrivateKey: (String) -> String?
   private let now: () -> Date
@@ -73,8 +81,10 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     loadPrivateKey: @escaping (String) -> String?,
     notificationCache: BuzzNotificationCache? = nil,
     avatarLoader: BuzzNotificationAvatarLoader? = nil,
-    now: @escaping () -> Date = Date.init
+    now: @escaping () -> Date = Date.init,
+    makeRetrySession: (() -> URLSession)? = nil
   ) {
+    self.makeRetrySession = makeRetrySession ?? { URLSession(configuration: session.configuration) }
     self.notificationCache = notificationCache
     self.avatarLoader = avatarLoader
     self.session = session
@@ -154,21 +164,10 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       completion(nil)
       return
     }
-    var request = URLRequest(url: url)
-    request.httpMethod = "POST"
-    request.httpBody = body
-    request.timeoutInterval = 8
-    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    guard
-      let auth = try? NostrHTTPAuth.authorizationHeader(
-        url: url, method: "POST", body: body, privateKeyHex: privateKey
-      )
-    else {
-      completion(nil)
-      return
-    }
-    request.setValue(auth, forHTTPHeaderField: "Authorization")
-    session.dataTask(with: request) { data, response, _ in
+    send(
+      url: url, body: body, privateKey: privateKey, session: session,
+      canRetry: { self.matchingPrivateKey(for: community) == privateKey }
+    ) { data, response in
       guard self.matchingPrivateKey(for: community) != nil,
         let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode),
         let data, let events = try? JSONDecoder().decode([VerifiedNostrEvent].self, from: data)
@@ -186,6 +185,63 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
         community: community
       )
       completion(candidate.map { ($0, community) })
+    }
+  }
+
+  /// Sends one signed `/query`. A timeout or dropped connection is retried once on a new
+  /// session, because the failed attempt may have used a pooled connection that went stale
+  /// when the network path changed. Each attempt is signed afresh so the relay's NIP-98
+  /// replay guard accepts it. `canRetry` rechecks the account first; nil means no retry.
+  public func cancel() {
+    retryLock.lock()
+    isCancelled = true
+    let sessions = retrySessions
+    retrySessions = []
+    retryLock.unlock()
+    sessions.forEach { $0.invalidateAndCancel() }
+  }
+
+  private func send(
+    url: URL, body: Data, privateKey: String, session: URLSession, canRetry: (() -> Bool)?,
+    completion: @escaping (Data?, URLResponse?) -> Void
+  ) {
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.httpBody = body
+    request.timeoutInterval = 8
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    guard
+      let auth = try? NostrHTTPAuth.authorizationHeader(
+        url: url, method: "POST", body: body, privateKeyHex: privateKey
+      )
+    else {
+      completion(nil, nil)
+      return
+    }
+    request.setValue(auth, forHTTPHeaderField: "Authorization")
+    session.dataTask(with: request) { data, response, error in
+      guard let error = error as? URLError,
+        [.timedOut, .networkConnectionLost].contains(error.code), canRetry?() == true
+      else {
+        completion(data, response)
+        return
+      }
+      // Creating the retry under the lock means cancel() either stops it or sees its session.
+      self.retryLock.lock()
+      guard !self.isCancelled else {
+        self.retryLock.unlock()
+        completion(data, response)
+        return
+      }
+      defer { self.retryLock.unlock() }
+      let retrySession = self.makeRetrySession()
+      self.retrySessions.append(retrySession)
+      self.send(
+        url: url, body: body, privateKey: privateKey, session: retrySession, canRetry: nil
+      ) { data, response in
+        retrySession.finishTasksAndInvalidate()
+        completion(data, response)
+      }
     }.resume()
   }
 

@@ -1,6 +1,10 @@
 part of '../channels_page.dart';
 
 class _ChannelsBody extends StatelessWidget {
+  final Widget? soloSliver;
+  final bool showTeam;
+  final bool showTeamHeading;
+  final VoidCallback? onInbox;
   final List<Channel>? channels;
   final AsyncValue<List<Channel>> channelsAsync;
   final bool showError;
@@ -14,6 +18,10 @@ class _ChannelsBody extends StatelessWidget {
   final Future<void> Function(Channel channel) onSelectChannel;
 
   const _ChannelsBody({
+    this.soloSliver,
+    this.showTeam = true,
+    this.showTeamHeading = false,
+    required this.onInbox,
     required this.channels,
     required this.channelsAsync,
     required this.showError,
@@ -29,6 +37,48 @@ class _ChannelsBody extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final inbox = Semantics(
+      label: 'Inbox',
+      button: true,
+      onTap: onInbox,
+      excludeSemantics: true,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(Radii.md),
+        onTap: onInbox,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: _kChannelSectionInset,
+            vertical: _kChannelRowVerticalPadding,
+          ),
+          child: Row(
+            children: [
+              SizedBox(
+                width: _kChannelLeadingWidth,
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Icon(
+                    BuzzIcons.bell,
+                    size: _kChannelIconSize,
+                    color: channelNavigationForeground(context),
+                  ),
+                ),
+              ),
+              const SizedBox(width: _kChannelLabelGap),
+              Expanded(
+                child: Text(
+                  'Inbox',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: navigationChatTitleTextStyle.copyWith(
+                    color: channelNavigationForeground(context),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
     final barHeight = topSectionHeight;
     final loadedChannels = channels;
     final loading = loadedChannels == null && !showError;
@@ -50,31 +100,87 @@ class _ChannelsBody extends StatelessWidget {
               hitTestBehavior: HitTestBehavior.translucent,
               slivers: [
                 SliverToBoxAdapter(child: SizedBox(height: barHeight)),
-                if (usesPinnedGradient)
-                  _SliverChannelsList(
-                    channels: loadedChannels,
-                    currentPubkey: currentPubkey,
-                    onSelectChannel: onSelectChannel,
-                  )
-                else
-                  DecoratedSliver(
-                    decoration: BoxDecoration(
-                      color: context.colors.surface,
-                      borderRadius: const BorderRadius.vertical(
-                        top: Radius.circular(Radii.dialog),
+                if (onInbox != null)
+                  SliverPadding(
+                    padding: const EdgeInsets.only(top: Grid.twelve),
+                    sliver: SliverToBoxAdapter(child: inbox),
+                  ),
+                if (soloSliver != null && showTeamHeading)
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(
+                        Grid.gutter,
+                        Grid.xs,
+                        Grid.gutter,
+                        Grid.twelve,
+                      ),
+                      child: Semantics(
+                        header: true,
+                        child: Text(
+                          'Solo',
+                          style: navigationSectionTextStyle.copyWith(
+                            fontSize: 17,
+                            height: 22 / 17,
+                            color: navigationPrimaryForeground(context),
+                          ),
+                        ),
                       ),
                     ),
-                    sliver: _SliverChannelsList(
-                      channels: loadedChannels,
-                      currentPubkey: currentPubkey,
-                      onSelectChannel: onSelectChannel,
+                  ),
+                ?soloSliver,
+                if (showTeamHeading && showTeam)
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(
+                        Grid.gutter,
+                        Grid.sm,
+                        Grid.gutter,
+                        0,
+                      ),
+                      child: Semantics(
+                        header: true,
+                        child: Text(
+                          'Team',
+                          style: navigationSectionTextStyle.copyWith(
+                            fontSize: 17,
+                            height: 22 / 17,
+                            color: navigationPrimaryForeground(context),
+                          ),
+                        ),
+                      ),
                     ),
                   ),
+                SliverOffstage(
+                  key: const ValueKey('messages-team-inventory'),
+                  offstage: !showTeam,
+                  sliver: usesPinnedGradient
+                      ? _SliverChannelsList(
+                          channels: loadedChannels,
+                          currentPubkey: currentPubkey,
+                          onSelectChannel: onSelectChannel,
+                        )
+                      : DecoratedSliver(
+                          decoration: BoxDecoration(
+                            color: context.colors.surface,
+                            borderRadius: const BorderRadius.vertical(
+                              top: Radius.circular(Radii.dialog),
+                            ),
+                          ),
+                          sliver: _SliverChannelsList(
+                            channels: loadedChannels,
+                            currentPubkey: currentPubkey,
+                            onSelectChannel: onSelectChannel,
+                          ),
+                        ),
+                ),
+                SliverToBoxAdapter(
+                  child: SizedBox(height: MediaQuery.paddingOf(context).bottom),
+                ),
               ],
             ),
           );
 
-    return SkeletonReveal(
+    final reveal = SkeletonReveal(
       onReadyChanged: onReadyChanged,
       loading: loading,
       loadingSemanticsKey: const Key('channels-connection-skeleton'),
@@ -86,9 +192,18 @@ class _ChannelsBody extends StatelessWidget {
       shimmerEnabled: sessionStatus != SessionStatus.disconnected,
       skeleton: _ChannelsSkeleton(
         channels: loadedChannels,
-        topInset: barHeight,
+        topInset:
+            barHeight + (onInbox != null && loadedChannels == null ? 56 : 0),
       ),
       content: content,
+    );
+    return Stack(
+      children: [
+        reveal,
+        if (onInbox != null &&
+            (loadedChannels == null || (showError && channelsAsync.hasError)))
+          Positioned(top: barHeight, left: 0, right: 0, child: inbox),
+      ],
     );
   }
 }
@@ -168,32 +283,32 @@ class _SliverChannelsList extends HookConsumerWidget {
           return;
         }
 
-        final notifier = ref.read(readStateProvider.notifier);
+        final seeds = <String, int>{};
         for (final channel in visibleChannels) {
-          if (readState.effectiveTimestamp(channel.id) != null) {
+          if (readState.contexts.containsKey(channel.id)) {
             continue;
           }
 
           final lastMessageAt = dateTimeToUnixSeconds(channel.lastMessageAt);
           if (lastMessageAt != null) {
-            notifier.seedContextRead(channel.id, lastMessageAt);
+            seeds[channel.id] = lastMessageAt;
           }
         }
+        ref.read(readStateProvider.notifier).seedContextsRead(seeds);
         initialSeedComplete.value = true;
       });
     }, [readState.isReady, readState.pubkey, visibleChannels]);
 
-    final unreadState = computeUnreadChannelIds(
+    final highlights = computeChannelListHighlights(
       channels: visibleChannels,
       readState: readState,
       channelsNotifier: ref.read(channelsProvider.notifier),
     );
-    final unreadChannelIds = {
-      for (final channelId in unreadState)
-        if (seedCompleteForPubkey ||
-            readState.effectiveTimestamp(channelId) != null)
-          channelId,
-    };
+    bool seeded(String channelId) =>
+        seedCompleteForPubkey ||
+        readState.effectiveTimestamp(channelId) != null;
+    final unreadChannelIds = highlights.unread.where(seeded).toSet();
+    final attentionChannelIds = highlights.attention.where(seeded).toSet();
     // Build sorted user-defined sections and compute which stream channels
     // belong to each section. Channels not assigned to any valid section fall
     // through to the built-in "Channels" list.
@@ -248,10 +363,7 @@ class _SliverChannelsList extends HookConsumerWidget {
     }
 
     return SliverPadding(
-      padding: EdgeInsets.only(
-        top: Grid.xxs,
-        bottom: MediaQuery.paddingOf(context).bottom,
-      ),
+      padding: EdgeInsets.zero,
       sliver: SliverList.list(
         children: [
           if (visibleChannels.isEmpty)
@@ -261,11 +373,11 @@ class _SliverChannelsList extends HookConsumerWidget {
             if (starredStreamChannels.isNotEmpty)
               _ChannelSection(
                 title: 'Starred',
-                showTopDivider: false,
                 expanded: starredExpanded.value,
                 onToggle: () => starredExpanded.value = !starredExpanded.value,
                 channels: starredStreamChannels,
                 unreadChannelIds: unreadChannelIds,
+                attentionChannelIds: attentionChannelIds,
                 mutedChannelIds: mutedChannelIds,
                 currentPubkey: currentPubkey,
                 emptyLabel: '',
@@ -274,7 +386,10 @@ class _SliverChannelsList extends HookConsumerWidget {
                 onSelectChannel: onSelectChannel,
               ),
             // User-defined sections for stream channels, in user-defined order.
-            for (final section in userSections)
+            for (final section in userSections) ...[
+              if (section != userSections.first ||
+                  starredStreamChannels.isNotEmpty)
+                const SizedBox(height: Grid.twelve),
               _CustomChannelSection(
                 section: section,
                 channels: sortChannelsForList(
@@ -288,14 +403,12 @@ class _SliverChannelsList extends HookConsumerWidget {
                   sortState.sortModeFor(sectionSortGroupKey(section.id)),
                 ),
                 unreadChannelIds: unreadChannelIds,
+                attentionChannelIds: attentionChannelIds,
                 mutedChannelIds: mutedChannelIds,
                 currentPubkey: currentPubkey,
                 expanded: sectionExpanded(section.id),
                 isFirst: userSections.first.id == section.id,
                 isLast: userSections.last.id == section.id,
-                showTopDivider:
-                    starredStreamChannels.isNotEmpty ||
-                    userSections.first.id != section.id,
                 onToggle: () => toggleSection(section.id),
                 onRename: () async {
                   final name = await showBuzzDialog<String>(
@@ -369,14 +482,16 @@ class _SliverChannelsList extends HookConsumerWidget {
                   }
                 },
               ),
+            ],
+            if (userSections.isNotEmpty || starredStreamChannels.isNotEmpty)
+              const SizedBox(height: Grid.twelve),
             _ChannelSection(
               title: 'Channels',
-              showTopDivider:
-                  starredStreamChannels.isNotEmpty || userSections.isNotEmpty,
               expanded: channelsExpanded.value,
               onToggle: () => channelsExpanded.value = !channelsExpanded.value,
               channels: ungroupedStreamChannels,
               unreadChannelIds: unreadChannelIds,
+              attentionChannelIds: attentionChannelIds,
               mutedChannelIds: mutedChannelIds,
               currentPubkey: currentPubkey,
               emptyLabel: 'No stream channels yet',
@@ -384,13 +499,14 @@ class _SliverChannelsList extends HookConsumerWidget {
               onSortModeChange: (mode) => setSortMode('channels', mode),
               onSelectChannel: onSelectChannel,
             ),
+            const SizedBox(height: Grid.twelve),
             _ChannelSection(
               title: 'DMs',
-              showTopDivider: true,
               expanded: dmsExpanded.value,
               onToggle: () => dmsExpanded.value = !dmsExpanded.value,
               channels: sortedDmChannels,
               unreadChannelIds: unreadChannelIds,
+              attentionChannelIds: attentionChannelIds,
               mutedChannelIds: mutedChannelIds,
               currentPubkey: currentPubkey,
               emptyLabel: 'No direct messages yet',

@@ -7,9 +7,9 @@
 --
 -- Everything SchemaBot cannot apply lives in this directory's other
 -- subdirectories: `types/`, `functions/`, `partitions/`, `triggers/` (including
--- write-fence attachment), `seeds/`, and the `community_write_fence.sql`
--- bootstrap. This file composes all of them into one fresh database, in load
--- order: types → functions → tables → partitions → triggers → seeds → fence.
+-- explicit legacy write-fence attachment), and `seeds/`. This file composes
+-- them into one fresh database, in load order:
+-- types → functions → tables → partitions → triggers → seeds.
 --
 -- `./bin/pgschema apply --file schema/schema.sql` resolves the `\i` includes
 -- relative to this file (it refuses `..`). `pgschema` skips INSERTs and some
@@ -106,6 +106,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i tables/public/moderation_actions.sql
 \i tables/public/moderation_reports.sql
 \i tables/public/community_bans.sql
+\i tables/public/community_nip_fi_issuers.sql
 \i tables/public/_operator_global_tables.sql
 \i tables/public/git_repo_names.sql
 \i tables/public/parameterized_event_watermarks.sql
@@ -121,6 +122,10 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i tables/public/push_gateway_delivery_request_replays.sql
 \i tables/public/replica_heartbeat.sql
 \i tables/public/community_deletion_requests.sql
+\i tables/public/entity_deletion_approvals.sql
+\i tables/public/entity_deletion_requests.sql
+\i tables/public/entity_deletion_stage_history.sql
+\i tables/public/user_deletion_fences.sql
 \i tables/public/community_deletion_approvals.sql
 \i tables/public/community_deletion_checkpoints.sql
 \i tables/public/community_deletion_manifest_keys.sql
@@ -153,6 +158,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i triggers/audit_log.sql
 \i triggers/channel_members.sql
 \i triggers/community_bans.sql
+\i triggers/community_nip_fi_issuers.sql
 \i triggers/delivery_log.sql
 \i triggers/event_mentions.sql
 \i triggers/git_repo_names.sql
@@ -192,6 +198,10 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i seeds/push_gateway_delivery_request_replays.sql
 \i seeds/replica_heartbeat.sql
 \i seeds/community_deletion_requests.sql
+\i seeds/entity_deletion_approvals.sql
+\i seeds/entity_deletion_requests.sql
+\i seeds/entity_deletion_stage_history.sql
+\i seeds/user_deletion_fences.sql
 \i seeds/community_deletion_approvals.sql
 \i seeds/community_deletion_checkpoints.sql
 \i seeds/community_deletion_manifest_keys.sql
@@ -206,5 +216,4 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i seeds/relay_operator_audit.sql
 \i seeds/storage_accounting_snapshots.sql
 
--- Fence any community-scoped table that lacks an explicit attach.
-\i community_write_fence.sql
+\i tables/public/nip_fi_profile_heads.sql

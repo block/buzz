@@ -43,3 +43,13 @@ threads-required = "num-test-threads"
 filter = "(test(/postgres_tests::/) or binary(/^postgres_/)) and not test(/(^|::)external_infra[^:]*::/)"
 setup = "postgres-template"
 run-wrapper = "postgres-isolation"
+
+[profile.flake]
+# The advisory pull-request flake lane (scripts/flake-check.mjs rust) repeats
+# a selection and must see every failed repetition, so no retries; the JUnit
+# report gives it per-test statuses.
+retries = 0
+fail-fast = false
+
+[profile.flake.junit]
+path = "junit.xml"

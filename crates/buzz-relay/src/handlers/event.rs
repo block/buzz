@@ -119,6 +119,33 @@ pub async fn filter_fanout_by_access(
     matches: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
     threaded: Option<&crate::state::ThreadedChannelVisibility>,
 ) -> Vec<(crate::subscription::ConnId, crate::subscription::SubId)> {
+    check_fanout_access(state, community_id, stored_event, matches, threaded)
+        .await
+        .allowed
+}
+
+/// The result of the fan-out access gate.
+struct FanoutAccess {
+    /// Recipients that may receive the event.
+    allowed: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
+    /// Recipients dropped because a visibility or membership lookup failed,
+    /// not because they lack access.
+    unverified: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
+}
+
+/// `filter_fanout_by_access`, also reporting the recipients it dropped
+/// only because a lookup failed.
+async fn check_fanout_access(
+    state: &AppState,
+    community_id: CommunityId,
+    stored_event: &StoredEvent,
+    matches: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
+    threaded: Option<&crate::state::ThreadedChannelVisibility>,
+) -> FanoutAccess {
+    let verified = |allowed| FanoutAccess {
+        allowed,
+        unverified: Vec::new(),
+    };
     // First enforce the receiver-side tenant label. Subscription indexes are
     // community-scoped, but stale/injected matches and future fan-out helpers
     // must still fail closed at the send chokepoint: a connection bound to
@@ -174,14 +201,13 @@ pub async fn filter_fanout_by_access(
         matches
     };
 
-    // Owner-only kinds (kind:30622 DM visibility, kind:44200 agent turn
-    // metrics) reach only the pubkey named in their `p` tag. Same predicate as
-    // the pull paths, applied here so local and Redis delivery share it — a
-    // kindless `ids:[…]` subscription can otherwise match these events.
+    // Owner-only kinds (`RESULT_GATED_KINDS`: DM visibility, agent turn
+    // metrics, membership notices) reach only the pubkey named in their `p`
+    // tag. Same predicate as the pull paths, applied here so local and Redis
+    // delivery share it — a kindless `ids:[…]` subscription can otherwise
+    // match these events.
     let kind = event_kind_u32(&stored_event.event);
-    let matches = if kind == buzz_core::kind::KIND_DM_VISIBILITY
-        || kind == buzz_core::kind::KIND_AGENT_TURN_METRIC
-    {
+    let matches = if buzz_core::kind::RESULT_GATED_KINDS.contains(&kind) {
         matches
             .into_iter()
             .filter(|(conn_id, _)| {
@@ -201,7 +227,7 @@ pub async fn filter_fanout_by_access(
     };
 
     let Some(channel_id) = stored_event.channel_id else {
-        return matches;
+        return verified(matches);
     };
     // Fence 3 (§4.8 phase-2): the threaded value is used only when it was
     // resolved under exactly this (community_id, channel_id); anything else
@@ -218,17 +244,21 @@ pub async fn filter_fanout_by_access(
         }
     };
     match visibility {
-        Ok(v) if v != "private" => return matches,
+        Ok(v) if v != "private" => return verified(matches),
         Ok(_) => {}
         Err(e) => {
             // Fail closed: if we cannot determine visibility, do not leak a
             // possibly-private channel's events.
             warn!(%channel_id, "fan-out access filter: visibility lookup failed: {e}");
-            return Vec::new();
+            return FanoutAccess {
+                allowed: Vec::new(),
+                unverified: matches,
+            };
         }
     }
 
     let mut allowed = Vec::with_capacity(matches.len());
+    let mut unverified = Vec::new();
     for (conn_id, sub_id) in matches {
         let Some(pubkey) = state.conn_manager.pubkey_for_conn(conn_id) else {
             continue;
@@ -241,10 +271,35 @@ pub async fn filter_fanout_by_access(
             Ok(false) => {}
             Err(e) => {
                 warn!(%channel_id, "fan-out access filter: membership lookup failed: {e}");
+                unverified.push((conn_id, sub_id));
             }
         }
     }
-    allowed
+    FanoutAccess {
+        allowed,
+        unverified,
+    }
+}
+
+/// Pass fan-out matches through the access gate, and return the ones that
+/// receive the event itself. Syncs among the matches get its change signal
+/// instead (NIP-AR rule 5), and each fan-out path calls this, so none of them
+/// can skip a sync.
+pub(crate) async fn route_fanout_matches(
+    state: &AppState,
+    community_id: CommunityId,
+    stored: &StoredEvent,
+    matches: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
+    threaded: Option<&crate::state::ThreadedChannelVisibility>,
+) -> Vec<(crate::subscription::ConnId, crate::subscription::SubId)> {
+    state.artifact_syncs.signal_access_change(stored, &matches);
+    let access = check_fanout_access(state, community_id, stored, matches, threaded).await;
+    // A sync that the gate could not check loses this change, so its copy is
+    // no longer exact. It must not stay open as if it were.
+    state
+        .artifact_syncs
+        .resync_matches(&access.unverified, "resync: access check failed");
+    state.artifact_syncs.divert(stored, access.allowed)
 }
 
 /// Deliver one event to this relay's local subscribers through the access gate.
@@ -268,7 +323,7 @@ pub(crate) async fn fan_out_event_to_local_subscribers(
     stored: &StoredEvent,
 ) {
     let matches = state.sub_registry.fan_out_scoped(community_id, stored);
-    let matches = filter_fanout_by_access(state, community_id, stored, matches, None).await;
+    let matches = route_fanout_matches(state, community_id, stored, matches, None).await;
     metrics::histogram!("buzz_fanout_recipients").record(matches.len() as f64);
     if matches.is_empty() {
         return;
@@ -328,7 +383,7 @@ pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pub
     }
 
     let matches = state.sub_registry.fan_out_scoped(community_id, &stored);
-    let matches = filter_fanout_by_access(state, community_id, &stored, matches, None).await;
+    let matches = route_fanout_matches(state, community_id, &stored, matches, None).await;
     metrics::counter!("buzz_multinode_fanout_total").increment(1);
     if matches.is_empty() {
         return;
@@ -438,24 +493,12 @@ async fn dispatch_persistent_event_inner(
         Some(channel_id) => EventTopic::Channel(channel_id),
         None => EventTopic::Global,
     };
-    state.mark_local_event(tenant.community(), &stored_event.event.id);
-    #[cfg(test)]
-    crate::nip_fi_test_hooks::before_event_publish(tenant.community());
-    if let Err(e) = state
-        .pubsub
-        .publish_event(tenant, topic, &stored_event.event)
-        .await
-    {
-        state
-            .local_event_ids
-            .invalidate(&(tenant.community(), stored_event.event.id.to_bytes()));
-        warn!(event_id = %event_id_hex, "Redis publish failed: {e}");
-    }
+    super::artifact_sync::publish_reliably(state, tenant, topic, stored_event).await;
 
     let matches = state
         .sub_registry
         .fan_out_scoped(tenant.community(), stored_event);
-    let matches = filter_fanout_by_access(
+    let matches = route_fanout_matches(
         state,
         tenant.community(),
         stored_event,
@@ -686,8 +729,9 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         )
         .await
         {
-            let (message, reason) = match e {
-                IngestError::Internal(_) => (
+            let (message, reason) = match e.into_legacy() {
+                // `into_legacy` never returns `Ban`; it would fail closed here.
+                IngestError::Internal(_) | IngestError::Ban { .. } => (
                     "error: internal error checking restriction state".to_string(),
                     "error",
                 ),
@@ -822,11 +866,15 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                 // fixed, sanitized message strings, so unlike the
                 // persistent arm below, `Internal` text is safe to forward
                 // verbatim.
-                let (message, reason) = match e {
+                let (message, reason) = match e.into_legacy() {
                     IngestError::Rejected(message) => (message, "invalid"),
                     IngestError::CanvasConflict(message) => (message, "invalid"),
                     IngestError::AuthFailed(message) => (message, "auth"),
                     IngestError::Internal(message) => (message, "error"),
+                    // `into_legacy` never returns `Ban`; it would fail closed here.
+                    IngestError::Ban { .. } => {
+                        ("error: internal server error".to_string(), "error")
+                    }
                 };
                 reject(reason);
                 conn.send(RelayMessage::ok(&event_id_hex, false, &message));
@@ -886,12 +934,16 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             ));
         }
         Err(e) => {
+            let e = e.into_legacy();
             // Sanitize internal errors — don't leak DB/system details over WS.
             let (msg, reason) = match &e {
                 IngestError::Rejected(m) => (m.clone(), "invalid"),
                 IngestError::CanvasConflict(m) => (m.clone(), "invalid"),
                 IngestError::AuthFailed(m) => (m.clone(), "auth"),
-                IngestError::Internal(_) => ("error: internal server error".to_string(), "error"),
+                // `into_legacy` never returns `Ban`; it would fail closed here.
+                IngestError::Internal(_) | IngestError::Ban { .. } => {
+                    ("error: internal server error".to_string(), "error")
+                }
             };
             reject(reason);
             conn.send(RelayMessage::ok(&event_id_hex, false, &msg));
@@ -1125,9 +1177,16 @@ async fn publish_channel_ephemeral(
 ) -> Result<(), IngestError> {
     // Membership refusals are client-input rejections, and the shared
     // gate's message text is surfaced verbatim.
-    super::ingest::check_channel_membership(tenant, state, ch_id, pubkey_bytes, None)
-        .await
-        .map_err(IngestError::Rejected)?;
+    super::ingest::check_channel_membership(
+        tenant.community(),
+        state,
+        ch_id,
+        pubkey_bytes,
+        None,
+        super::ingest::ChannelWrite::Post,
+    )
+    .await
+    .map_err(IngestError::Rejected)?;
 
     // Mark as local before Redis publish to prevent double-delivery when
     // the event comes back through the Redis subscriber loop.
@@ -3335,6 +3394,92 @@ mod tests {
             )
             .await;
             assert_eq!(out, matches);
+        }
+        /// A sync among the fan-out matches must resync when the access gate
+        /// cannot check it: the gate drops the change, so the sync's copy is
+        /// no longer exact. Runs through both production fan-out entries.
+        /// Mutation: drop the `resync_matches` call in `route_fanout_matches`
+        /// → the failed lookups leave every sync open with no resync → RED.
+        #[tokio::test]
+        async fn failed_access_lookup_resyncs_the_syncs_it_drops() {
+            let state = test_state().await;
+            // Every database lookup now fails at once.
+            state.db.pool().close().await;
+            let community_id = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
+            let pk = vec![1u8; 32];
+            let artifact = |channel_id| {
+                let event = EventBuilder::new(Kind::Custom(45010), "{}")
+                    .tags([nostr::Tag::parse(["d", &Uuid::new_v4().to_string()]).expect("d")])
+                    .sign_with_keys(&Keys::generate())
+                    .expect("sign");
+                StoredEvent::new(event, Some(channel_id))
+            };
+            let sync_on = |channel_id| {
+                let conn = register_conn(&state, Some(pk.clone()));
+                state.sub_registry.register_channels_scoped(
+                    community_id,
+                    conn,
+                    "s".to_string(),
+                    vec![nostr::Filter::new()],
+                    vec![channel_id],
+                );
+                state.artifact_syncs.insert_idle(conn, "s");
+                conn
+            };
+            let private = |channel_id| {
+                state
+                    .channel_visibility_cache
+                    .insert((community_id, channel_id), "private".to_string());
+            };
+
+            // Control: a member whose access is known gets the change signal.
+            let known = Uuid::new_v4();
+            private(known);
+            state
+                .membership_cache
+                .insert((community_id, known, pk.clone()), true);
+            let conn = sync_on(known);
+            super::super::fan_out_event_to_local_subscribers(
+                &state,
+                community_id,
+                &artifact(known),
+            )
+            .await;
+            assert_eq!(state.artifact_syncs.pending_resync(conn, "s"), None);
+
+            // The visibility lookup fails (local fan-out).
+            let channel_id = Uuid::new_v4();
+            let conn = sync_on(channel_id);
+            super::super::fan_out_event_to_local_subscribers(
+                &state,
+                community_id,
+                &artifact(channel_id),
+            )
+            .await;
+            assert_eq!(
+                state.artifact_syncs.pending_resync(conn, "s"),
+                Some("resync: access check failed"),
+                "visibility lookup"
+            );
+
+            // The membership lookup fails (Redis fan-out).
+            let channel_id = Uuid::new_v4();
+            private(channel_id);
+            let conn = sync_on(channel_id);
+            super::super::fan_out_pubsub_event(
+                &state,
+                buzz_pubsub::ChannelEvent {
+                    community_id,
+                    topic: buzz_pubsub::EventTopic::Channel(channel_id),
+                    event: artifact(channel_id).event,
+                },
+            )
+            .await;
+            assert_eq!(
+                state.artifact_syncs.pending_resync(conn, "s"),
+                Some("resync: access check failed"),
+                "membership lookup"
+            );
         }
     }
 
