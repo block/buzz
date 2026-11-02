@@ -243,6 +243,27 @@ void main() {
       minutes(10);
       expect(membershipReads(), readsAfterRebuild);
 
+      // A slow read is still running when the next change comes due. The
+      // change waits for the read to finish and then for the 10s gap, not
+      // just for the read. Each of the read's queries takes seven seconds.
+      var slowQuery = relay.holdQuery();
+      relay.deliver(system('topic_changed'));
+      seconds(3);
+      final slowRead = membershipReads();
+      seconds(4);
+      relay.deliver(system('topic_changed'));
+      seconds(2);
+      slowQuery.complete();
+      slowQuery = relay.holdQuery();
+      seconds(4);
+      slowQuery.complete();
+      seconds(1);
+      expect(membershipReads(), slowRead);
+      seconds(9);
+      expect(membershipReads(), slowRead + 1);
+      minutes(10);
+      expect(membershipReads(), slowRead + 1);
+
       // On a cold load with no saved list, as after a fresh sign-in, the
       // read doesn't get the hidden DMs. It keeps the DM shown and is
       // retried.
@@ -723,6 +744,38 @@ void main() {
         expect(unread(), 1);
         async.elapse(const Duration(minutes: 10));
         expect(catchUps(), catchUpsBefore + 2);
+
+        // Again, but the batch is only partly unavailable: it falls back to
+        // per-channel reads, and only one channel's read fails. That channel
+        // is caught up on the retry.
+        relay
+          ..failQuery(isCatchUp)
+          ..refuseReq(
+            (f) =>
+                isCatchUp(f) &&
+                f['limit'] != 0 &&
+                (f['#h'] as List? ?? const []).contains(_channel),
+            'error: unavailable',
+          )
+          ..drop()
+          ..seed([
+            relay.sign(
+              kind: EventKind.streamMessage,
+              content: 'while down again',
+              createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+              tags: [
+                ['h', _channel],
+              ],
+            ),
+          ]);
+        async.elapse(const Duration(seconds: 2));
+        expect(catchUps(), catchUpsBefore + 3);
+        expect(unread(), 1);
+        async.elapse(const Duration(seconds: 15));
+        expect(catchUps(), catchUpsBefore + 4);
+        expect(unread(), 2);
+        async.elapse(const Duration(minutes: 10));
+        expect(catchUps(), catchUpsBefore + 4);
       });
     },
   );

@@ -304,7 +304,8 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
         _backgroundRefreshInFlight = false;
         if (_backgroundRefreshQueued) {
           _backgroundRefreshQueued = false;
-          unawaited(_refreshInBackground());
+          // The queued read still waits out the gap after the read before it.
+          _readListIfChanged();
         } else if (_needsSnapshotRevalidation ||
             _channelListChangesRead < _channelListChanges) {
           // The read failed or was incomplete. Nothing else would retry it
