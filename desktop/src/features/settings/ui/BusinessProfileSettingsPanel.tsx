@@ -8,7 +8,7 @@ import { useCommunities } from "@/features/communities/useCommunities";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
 import { CopyIcon } from "./settingsIcons";
 
-/** "ws://lerato.colony.example:443/" reads "lerato.colony.example". */
+/** "ws://studio.colony.example:443/" reads "studio.colony.example". */
 function communityAddress(relayUrl: string | undefined): string {
   if (!relayUrl) return "";
   try {

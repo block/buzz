@@ -5,7 +5,7 @@ import {
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
-/** First word of a display name: the design says "managed by Lerato". */
+/** First word of a display name, used in the manager attribution. */
 export function firstName(name: string | null | undefined): string | null {
   const trimmed = name?.trim();
   return trimmed ? (trimmed.split(/\s+/)[0] ?? null) : null;
@@ -13,7 +13,7 @@ export function firstName(name: string | null | undefined): string | null {
 
 /**
  * The line under an agent's name in a direct message: its job title and who
- * manages it ("Business Development · managed by Lerato"). Shows what is
+ * manages it ("Business Development · managed by the owner"). Shows what is
  * known and nothing for what is not.
  */
 export function DmAgentSubtitle({ pubkey }: { pubkey: string }) {

@@ -140,6 +140,7 @@ test("a complete place maps to a valid unreviewed prospect", () => {
     industry: "Home & Living",
     vertical: "Home Decor & Gift Shops",
     fitScore: 100,
+    origin: "discovery",
     discoveryTags: [],
     potentialMonthlyValueMinor: null,
     website: "https://olive.example/",

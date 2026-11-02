@@ -3,6 +3,7 @@ import type { ChannelTemplate, RelayEvent } from "../../src/shared/api/types";
 import type { VoiceRegistryEntry } from "../../src/features/settings/ui/voiceSettingsLogic";
 import type {
   Colony3Extras,
+  MockCofounderLeadStatus,
   MockCofounderSettings,
   MockAgentConfigSurfaceOverride,
   MockCompanyFunctionHead,
@@ -656,6 +657,7 @@ type MockBridgeOptions = {
   }>;
   /** Relay-signed co-founder heads used by the co-founder UI E2E fixture. */
   cofounderSettings?: MockCofounderSettings;
+  companyLeadStatus?: MockCofounderLeadStatus | null;
   companyFunctionHeads?: MockCompanyFunctionHead[];
   companyWorkerRuns?: MockWorkerRun[];
   /** Access list, capability gap and slot hire records, signed as the relay. */

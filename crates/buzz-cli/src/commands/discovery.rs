@@ -457,6 +457,7 @@ fn map_place_to_prospect(
             industry,
             vertical,
             fit_score: Some(fit_score(place)),
+            origin: Some(buzz_core::business_records::ProspectOrigin::Discovery),
             discovery_tags: Vec::new(),
             potential_monthly_value_minor: None,
             website,

@@ -212,7 +212,7 @@ export type LinkedWorkView = {
   title: string;
   status: string;
   statusLabel: string;
-  /** "The Olive House · Mina": the channel only when it is not the ask's own. */
+  /** "Client workspace · team member": the channel only when not the ask's own. */
   meta: string;
 };
 

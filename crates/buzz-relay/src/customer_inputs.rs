@@ -353,6 +353,7 @@ mod tests {
                 },
                 "industry": "Hospitality",
                 "vertical": "guesthouses",
+                "origin": "discovery",
                 "website": null,
                 "location": "Parkhurst",
                 "email": null,

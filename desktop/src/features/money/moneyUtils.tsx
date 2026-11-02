@@ -232,7 +232,7 @@ export function formatDisplayDate(timestamp: number | null) {
   return `${date.getDate()} ${MONTHS[date.getMonth()]} ${date.getFullYear()}`;
 }
 
-/** "CC" for Cedar Café, "OH" for The Olive House. */
+/** Initials derived from the client's display name. */
 export function clientInitials(name: string) {
   const words = name
     .trim()

@@ -91,6 +91,7 @@ export function createChanges(
     industry,
     vertical: industry,
     fitScore: null,
+    origin: "manual",
     potentialMonthlyValueMinor: null,
     website: null,
     contactName: null,

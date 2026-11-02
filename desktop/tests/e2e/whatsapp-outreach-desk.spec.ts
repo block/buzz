@@ -93,6 +93,31 @@ async function emitOutreachEvent(
 }
 
 test.describe("Outreach desk", () => {
+  test("chat and pipeline use the active business name", async ({ page }) => {
+    const businessName = "Northbank Studio";
+    await installWhatsAppMockBridge(page, "light", {
+      businessName,
+      deskFixture: true,
+    });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await openOutreachFromHome(page);
+    await expect(
+      page.getByText(`Private WhatsApp conversations for ${businessName}.`),
+    ).toBeVisible();
+    await page.getByTestId("channel-view-tab-chats").click();
+    await page.getByTestId(`whatsapp-contact-${PLANE_TREE_WA_ID}`).click();
+    await expect
+      .soft(page.getByTestId("whatsapp-reply-input"))
+      .toHaveAttribute("placeholder", `Reply on WhatsApp as ${businessName}`);
+    await page.getByTestId("channel-view-tab-pipeline").click();
+    await expect
+      .soft(page.locator(".c3wa-desk-eyebrow").filter({ hasText: "WhatsApp" }))
+      .toHaveText(`${businessName} · WhatsApp`);
+    await expect
+      .soft(page.getByTestId("outreach-desk-pipeline"))
+      .not.toContainText("Horizon Labs");
+  });
+
   test("opens on Needs you, approves a batch, books a call, and moves a pipeline card with the keyboard", async ({
     page,
   }) => {

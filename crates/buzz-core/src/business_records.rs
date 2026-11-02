@@ -248,6 +248,16 @@ pub struct ProspectEvidence {
     pub observed_at: i64,
 }
 
+/// How a prospect entered the company's pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProspectOrigin {
+    /// Added directly by a company member.
+    Manual,
+    /// Returned by a Discovery search.
+    Discovery,
+}
+
 /// A taxonomy tag matched against fields returned by the discovery provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -307,6 +317,9 @@ pub struct ProspectRecordInput {
     /// Provider or reviewer fit score from zero through one hundred.
     #[serde(default)]
     pub fit_score: Option<u8>,
+    /// Provenance of the prospect. Missing on older records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<ProspectOrigin>,
     /// Generated tag evidence matched from the provider listing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub discovery_tags: Vec<ProspectDiscoveryTagInput>,
@@ -1837,6 +1850,7 @@ mod tests {
                 industry: "Professional Services".into(),
                 vertical: "Marketing Agency".into(),
                 fit_score: None,
+                origin: None,
                 discovery_tags: Vec::new(),
                 potential_monthly_value_minor: None,
                 website: Some("https://example.test".into()),

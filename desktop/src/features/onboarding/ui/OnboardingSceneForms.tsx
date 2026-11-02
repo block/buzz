@@ -408,7 +408,7 @@ export function BusinessChooser({
       ? [
           {
             id: "studio",
-            name: data.business || "Lerato Social",
+            name: data.business || "Your business",
             role: "Owner",
             lastVisited: "today",
           },

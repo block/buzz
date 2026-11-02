@@ -1,6 +1,6 @@
 import { mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
-import { expect, test, type Page, type TestInfo } from "@playwright/test";
+import { dirname, resolve } from "node:path";
+import { expect, test, type Page } from "@playwright/test";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 
@@ -21,7 +21,10 @@ import { installMockBridge, type RelayBridgeIdentity } from "../helpers/bridge";
 import { waitForAnimations } from "../helpers/animations";
 import { installBrowserHostFake } from "./helpers/browserHostFake";
 import { TEST_IDENTITIES } from "../helpers/bridge";
-import type { MockNumbers } from "../../src/testing/e2eBridge";
+import type {
+  MockCofounderLeadStatus,
+  MockNumbers,
+} from "../../src/testing/e2eBridge";
 
 const APPROVAL_SWITCHES = {
   approveEveryHire: true,
@@ -376,6 +379,7 @@ async function boot(
   page: Page,
   options: {
     companyAccessRecords?: MockCompanyAccessRecord[];
+    companyLeadStatus?: MockCofounderLeadStatus | null;
     companyFunctionActionErrors?: string[];
     companyNumbers?: MockNumbers;
     enabled?: boolean;
@@ -456,6 +460,7 @@ async function boot(
         moneyPreference: "cheapest_first",
         approvalSwitches: APPROVAL_SWITCHES,
       },
+      companyLeadStatus: options.companyLeadStatus,
       companyBriefRecord: options.withoutBrief ? null : initiative.brief,
       companyOnboardingRecord: initiative.onboarding,
       companyOnboardingAutoAdvance: true,
@@ -628,12 +633,7 @@ async function boot(
   }, KIND_WHATSAPP_BATCH_DECISION);
 }
 
-async function capture(
-  page: Page,
-  testInfo: TestInfo,
-  name: string,
-  fullPage = true,
-) {
+async function capture(page: Page, name: string, fullPage = true) {
   await waitForAnimations(page);
   const themeName = name.includes("-dark") ? "buzz-dark" : "buzz";
   await expect
@@ -652,8 +652,13 @@ async function capture(
       dark: themeName === "buzz-dark",
       buzzTheme: themeName,
     });
-  const file = testInfo.outputPath(name);
-  await mkdir(dirname(file), { recursive: true });
+  const proofDirectory = process.env.COF_UI_DEFECTS_PROOF_DIR;
+  const file = proofDirectory
+    ? resolve(proofDirectory, name)
+    : test.info().outputPath(name);
+  if (proofDirectory) {
+    await mkdir(dirname(file), { recursive: true });
+  }
   await page.screenshot({ fullPage, path: file });
 }
 
@@ -676,6 +681,7 @@ test.describe("Co-founder mode Phase 2", () => {
   test("enabled co-founder mode opens the Scout direct message from settings", async ({
     page,
   }) => {
+    await page.clock.install({ time: new Date(1_791_273_600_000) });
     await boot(page, {
       scoutDmChannelName: "Lerato and Scout",
       step: "brief",
@@ -708,6 +714,7 @@ test.describe("Co-founder mode Phase 2", () => {
   test("enabled co-founder mode creates a Scout direct message when none exists", async ({
     page,
   }) => {
+    await page.clock.install({ time: new Date(1_791_273_600_000) });
     await boot(page, {
       referenceWorkspace: false,
       step: "brief",
@@ -721,6 +728,83 @@ test.describe("Co-founder mode Phase 2", () => {
     await expect(page).not.toHaveURL(
       new RegExp(`#\\/channels\\/${REFERENCE_CHANNEL_IDS.scoutDm}$`, "u"),
     );
+  });
+
+  test("a stalled Scout card retries by publishing co-founder mode as enabled", async ({
+    page,
+  }) => {
+    await page.clock.install({ time: new Date(1_791_273_600_000) });
+    await boot(page, {
+      identity: TEST_IDENTITIES.tyler,
+      step: "brief",
+      withoutBrief: true,
+      businessName: "Colony",
+    });
+    await page.goto("/#/settings?section=experimental");
+
+    const card = page.getByTestId("cofounder-scout-entry");
+    await expect(
+      card.getByText("Scout is getting to know Colony"),
+    ).toBeVisible();
+    await page.clock.fastForward(3 * 60 * 1000);
+    await expect(card.getByText("Scout has not started yet")).toBeVisible();
+    const retry = page.getByTestId("cofounder-retry-scout");
+    await expect(retry).toHaveText("Try again");
+    await retry.click();
+
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const events =
+            (
+              window as Window & {
+                __BUZZ_E2E_SIGNED_EVENTS__?: Array<{
+                  kind: number;
+                  content?: string;
+                }>;
+              }
+            ).__BUZZ_E2E_SIGNED_EVENTS__ ?? [];
+          return events.some((event) => {
+            if (event.kind !== 47060 || !event.content) return false;
+            try {
+              return (
+                (
+                  JSON.parse(event.content) as {
+                    settings?: { enabled?: boolean };
+                  }
+                ).settings?.enabled === true
+              );
+            } catch {
+              return false;
+            }
+          });
+        }),
+      )
+      .toBe(true);
+  });
+
+  test("the durable wake status explains why Scout could not be reached", async ({
+    page,
+  }) => {
+    await boot(page, {
+      step: "brief",
+      withoutBrief: true,
+      companyLeadStatus: {
+        schemaVersion: 1,
+        state: "unreachable",
+        problem: "several_scouts",
+        detail: "The relay found more than one Scout.",
+        attempts: 3,
+        since: 1_791_273_600,
+        updatedAt: 1_791_273_780,
+      },
+    });
+    await page.goto("/#/settings?section=experimental");
+
+    const card = page.getByTestId("cofounder-scout-entry");
+    await expect(card.getByText("Scout could not be reached")).toBeVisible();
+    await expect(card).toContainText("The relay found more than one Scout.");
+    await expect(page.getByTestId("cofounder-retry-scout")).toBeVisible();
   });
 
   test("co-founder settings hides the getting to know card after Scout sends a brief", async ({
@@ -981,9 +1065,9 @@ test.describe("Co-founder mode Phase 2", () => {
 
     await batch.getByRole("button", { name: /Review batch/u }).click();
     await expect(page.getByTestId("whatsapp-batch-page")).toBeVisible();
-    await expect(page.getByTestId("whatsapp-batch-page")).toContainText(
-      "2 guesthouses in Melville",
-    );
+    const batchPage = page.getByTestId("whatsapp-batch-page");
+    await expect(batchPage).toContainText("2 businesses");
+    await expect(batchPage).toContainText("Guesthouses · 2");
   });
 
   test("Needs you completes real plan and capability-gap steps", async ({
@@ -1155,7 +1239,7 @@ test.describe("Co-founder mode Phase 2", () => {
 
   test("captures each approved surface at desktop and mobile sizes in light and dark", async ({
     browser,
-  }, testInfo) => {
+  }) => {
     test.setTimeout(180_000);
     const cases = [
       {
@@ -1169,6 +1253,14 @@ test.describe("Co-founder mode Phase 2", () => {
         step: "brief" as const,
         withoutBrief: true,
         businessName: "Colony",
+      },
+      {
+        surface: "settings-stalled",
+        route: "/#/settings?section=experimental",
+        step: "brief" as const,
+        withoutBrief: true,
+        businessName: "Colony",
+        stalled: true,
       },
       {
         surface: "plan",
@@ -1192,6 +1284,11 @@ test.describe("Co-founder mode Phase 2", () => {
           const screenshotContext = await browser.newContext();
           try {
             const page = await screenshotContext.newPage();
+            if (item.surface.startsWith("settings")) {
+              await page.clock.install({
+                time: new Date(1_791_273_600_000),
+              });
+            }
             const captureHeight =
               item.surface === "onboarding"
                 ? 2400
@@ -1214,10 +1311,12 @@ test.describe("Co-founder mode Phase 2", () => {
             await boot(page, {
               theme,
               step: item.step,
-              ...(item.surface === "settings"
+              ...(item.surface.startsWith("settings")
                 ? { businessName: "Colony" }
                 : {}),
-              ...(item.surface === "settings" ? { withoutBrief: true } : {}),
+              ...(item.surface.startsWith("settings")
+                ? { withoutBrief: true }
+                : {}),
               identity: TEST_IDENTITIES.tyler,
               ...(needsYouPreview
                 ? {
@@ -1227,6 +1326,9 @@ test.describe("Co-founder mode Phase 2", () => {
                 : {}),
             });
             await page.goto(item.route);
+            if (item.surface === "settings-stalled") {
+              await page.clock.fastForward(3 * 60 * 1000);
+            }
             const expected = (target: Page) =>
               item.surface === "onboarding"
                 ? target.getByTestId("cofounder-onboarding")
@@ -1236,8 +1338,15 @@ test.describe("Co-founder mode Phase 2", () => {
                     ? target.getByTestId("cofounder-needs-you-screen")
                     : item.surface === "access"
                       ? target.getByTestId("cofounder-access-screen")
-                      : target.getByTestId("cofounder-open-scout");
+                      : item.surface === "settings-stalled"
+                        ? target.getByTestId("cofounder-retry-scout")
+                        : target.getByTestId("cofounder-open-scout");
             await expect(expected(page)).toBeVisible();
+            if (item.surface === "settings-stalled") {
+              await expect(
+                page.getByText("Scout has not started yet"),
+              ).toBeVisible();
+            }
             if (item.surface === "onboarding") {
               await expect(
                 page.getByText("pinterest login is open in the browser"),
@@ -1246,10 +1355,13 @@ test.describe("Co-founder mode Phase 2", () => {
             if (needsYouPreview) await expectNeedsYouContentLoaded(page);
             await capture(
               page,
-              testInfo,
               `cofounder-phase2-${item.surface}-${viewport.name}-${theme}.png`,
             );
-            if (viewport.name === "390" && item.surface !== "settings") {
+            if (
+              viewport.name === "390" &&
+              item.surface !== "settings" &&
+              item.surface !== "settings-stalled"
+            ) {
               const viewportContext = await browser.newContext({
                 viewport: { width: 390, height: 844 },
               });
@@ -1282,7 +1394,6 @@ test.describe("Co-founder mode Phase 2", () => {
                   await expectNeedsYouContentLoaded(viewportPage);
                 await capture(
                   viewportPage,
-                  testInfo,
                   `cofounder-phase2-${item.surface}-390-${theme}-viewport.png`,
                   false,
                 );

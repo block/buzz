@@ -2,6 +2,7 @@ import * as React from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { useCustomerRecords } from "@/features/cofounder/customerHooks";
 import { useCofounderMode } from "@/features/cofounder/customerRecordAccess";
 
 import type { WorkItemHead } from "@/features/clients/lib/businessRecords";
@@ -22,6 +23,16 @@ import {
 
 /** The work item a client row shows: the one that most needs a person. */
 const WORK_PRIORITY = ["review", "blocked", "active", "paused", "complete"];
+
+type ClientDirectoryRow = {
+  event: { id: string };
+  value: {
+    partyId: string;
+    clientId: string | null;
+    displayName: string;
+    status: string;
+  };
+};
 
 export function sharedWorkForClient(
   work: readonly { value: WorkItemHead }[],
@@ -44,7 +55,37 @@ export function ClientsScreen() {
   const cofounderMode = useCofounderMode();
   const cofounderOn = cofounderMode.enabled;
   const clientsQuery = workQuery.directoryQuery;
-  const records = clientsQuery.data ?? [];
+  const customerRecordsQuery = useCustomerRecords(cofounderOn);
+  const records = React.useMemo<ClientDirectoryRow[]>(() => {
+    const byPartyId = new Map<string, ClientDirectoryRow>();
+    for (const { event, value } of clientsQuery.data ?? []) {
+      byPartyId.set(value.partyId, {
+        event,
+        value: {
+          partyId: value.partyId,
+          clientId: value.clientId,
+          displayName: value.displayName,
+          status: value.status,
+        },
+      });
+    }
+    if (cofounderOn) {
+      for (const record of customerRecordsQuery.data ?? []) {
+        if (record.stage !== "client") continue;
+        const existing = byPartyId.get(record.partyId);
+        byPartyId.set(record.partyId, {
+          event: { id: existing?.event.id ?? record.eventId },
+          value: {
+            partyId: record.partyId,
+            clientId: existing?.value.clientId ?? record.clientId,
+            displayName: record.displayName,
+            status: record.clientStatus ?? existing?.value.status ?? "active",
+          },
+        });
+      }
+    }
+    return [...byPartyId.values()];
+  }, [clientsQuery.data, cofounderOn, customerRecordsQuery.data]);
   const work = workQuery.data;
   const channelNameById = React.useMemo(
     () =>
@@ -61,7 +102,10 @@ export function ClientsScreen() {
       records.map(({ event, value }) => ({
         event,
         value,
-        work: work ? sharedWorkForClient(work, value.clientId) : null,
+        work:
+          work && value.clientId
+            ? sharedWorkForClient(work, value.clientId)
+            : null,
       })),
     [records, work],
   );
@@ -93,10 +137,18 @@ export function ClientsScreen() {
           Client records could not be loaded.
         </RecordMessage>
       ) : null}
-      {clientsQuery.isPending ? (
+      {cofounderOn && customerRecordsQuery.isError ? (
+        <RecordMessage kind="error">
+          Customer records could not be loaded.
+        </RecordMessage>
+      ) : null}
+      {clientsQuery.isPending ||
+      (cofounderOn && customerRecordsQuery.isPending) ? (
         <RecordMessage kind="loading">Loading clients</RecordMessage>
       ) : null}
-      {clientsQuery.isSuccess && records.length === 0 ? (
+      {clientsQuery.isSuccess &&
+      (!cofounderOn || customerRecordsQuery.isSuccess) &&
+      records.length === 0 ? (
         <RecordMessage>
           No client records are available in this business.
         </RecordMessage>
@@ -133,7 +185,7 @@ export function ClientsScreen() {
                   : null;
                 return (
                   <tr
-                    data-testid={`client-row-${value.clientId}`}
+                    data-testid={`client-row-${value.clientId ?? value.partyId}`}
                     key={event.id}
                     onClick={(clickEvent) => {
                       if (!(clickEvent.target as Element).closest("a")) {
@@ -142,8 +194,13 @@ export function ClientsScreen() {
                             to: "/clients/record/$partyId",
                             params: { partyId: value.partyId },
                           });
-                        } else {
+                        } else if (value.clientId) {
                           void goClient(value.clientId);
+                        } else {
+                          void navigate({
+                            to: "/clients/record/$partyId",
+                            params: { partyId: value.partyId },
+                          });
                         }
                       }
                     }}
@@ -154,7 +211,7 @@ export function ClientsScreen() {
                           {clientInitial(value.displayName)}
                         </span>
                         <span className="b3-stack">
-                          {cofounderOn ? (
+                          {cofounderOn || !value.clientId ? (
                             <Link
                               className="b3-name"
                               params={{ partyId: value.partyId }}
@@ -173,9 +230,11 @@ export function ClientsScreen() {
                           )}
                           <span className="b3-meta">
                             #
-                            {channelNameById.get(
-                              value.clientId.toLowerCase(),
-                            ) ?? value.displayName}
+                            {(value.clientId
+                              ? channelNameById.get(
+                                  value.clientId.toLowerCase(),
+                                )
+                              : null) ?? value.displayName}
                           </span>
                         </span>
                       </span>

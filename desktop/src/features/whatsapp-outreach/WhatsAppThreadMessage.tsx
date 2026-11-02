@@ -186,6 +186,7 @@ function ApprovalDraft({
 }
 
 export function WhatsAppThreadMessage({
+  businessName,
   currentPubkey,
   currentUserName,
   agentName,
@@ -200,6 +201,7 @@ export function WhatsAppThreadMessage({
   onApproveDraft,
   onRejectDraft,
 }: {
+  businessName: string;
   currentPubkey: string | undefined;
   currentUserName: string;
   agentName: string;
@@ -274,7 +276,7 @@ export function WhatsAppThreadMessage({
           </strong>
           {!inbound && agentWritten ? (
             <span className="c3wa-agent-context">
-              managed by {currentUserName} · sent as Horizon Labs
+              managed by {currentUserName} · sent as {businessName}
             </span>
           ) : null}
           <time>{formatWhatsAppDateTime(message.createdAt)}</time>
@@ -310,9 +312,7 @@ export function WhatsAppThreadMessage({
         )}
         {template?.buttons.length ? (
           <fieldset className="c3wa-template-buttons">
-            <legend className="sr-only">
-              Reply buttons the guesthouse sees
-            </legend>
+            <legend className="sr-only">Reply buttons the contact sees</legend>
             {template.buttons.map((button) => (
               <span key={`${button.type}:${button.text}`}>↶ {button.text}</span>
             ))}
@@ -339,7 +339,9 @@ export function WhatsAppThreadMessage({
                 )}
               </>
             ) : (
-              <span>{statusLabel} · you, as Horizon Labs</span>
+              <span>
+                {statusLabel} · you, as {businessName}
+              </span>
             )}
             {canSendNow && message.state === "queued" && sendNowBatchId ? (
               <WhatsAppSendNowAction batchId={sendNowBatchId} size="xs" />

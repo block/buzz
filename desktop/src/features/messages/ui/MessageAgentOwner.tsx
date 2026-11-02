@@ -5,7 +5,7 @@ import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 /**
  * What the header says about the sender besides their name: their job title
  * and, for an agent, who manages it ("Social Media Manager · managed by
- * Lerato"). Shows only what is known. An agent with neither is marked "Agent"
+ * Alex"). Shows only what is known. An agent with neither is marked "Agent"
  * so a person can still tell who is an AI.
  */
 export function MessageAgentOwner({

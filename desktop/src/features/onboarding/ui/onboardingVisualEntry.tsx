@@ -29,10 +29,10 @@ const scene: OnboardingSceneId = ONBOARDING_SCENE_IDS.includes(
   : "account";
 
 const data: OnboardingSceneData = {
-  name: scene === "additional" ? "" : "Lerato Molefe",
-  email: scene === "account" ? "" : "lerato@example.com",
-  signedInEmail: "lerato@example.com",
-  business: scene === "additional" ? "" : "Lerato Social",
+  name: scene === "additional" ? "" : "Alex Example",
+  email: scene === "account" ? "" : "alex@example.com",
+  signedInEmail: "alex@example.com",
+  business: scene === "additional" ? "" : "Sample Business",
   website: "",
   description:
     scene === "additional"

@@ -70,11 +70,11 @@ export function LiveAppearancePreview({
         </span>
       </div>
       <div aria-hidden="true" className="cs-preview-chat">
-        <strong># The Olive House</strong>
+        <strong># Client workspace</strong>
         <div className="cs-preview-message">
           <span className="cs-preview-avatar">M</span>
           <span>
-            <small>Mina</small>
+            <small>Team member</small>
             <span>The next post is ready for your review.</span>
           </span>
         </div>

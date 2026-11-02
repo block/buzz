@@ -1,3 +1,4 @@
+import * as React from "react";
 import { toast } from "sonner";
 
 import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
@@ -13,21 +14,29 @@ import { SettingsSwitchRow } from "@/features/settings/ui/SettingsKit";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 
 import { useCofounderSettingsQuery, useSetCofounderSettings } from "../hooks";
+import { useCofounderLeadStatusQuery } from "../leadStatusHooks";
 import "./cofounderPhase2.css";
+
+const SCOUT_STALL_AFTER_MS = 3 * 60 * 1000;
 
 export function CofounderSettingRow() {
   const { activeCommunity } = useCommunities();
   const membershipQuery = useMyRelayMembershipLookupQuery();
   const settingsQuery = useCofounderSettingsQuery(activeCommunity?.id ?? null);
+  const leadStatusQuery = useCofounderLeadStatusQuery(
+    settingsQuery.data?.settings.enabled === true,
+  );
   const setSettings = useSetCofounderSettings();
   const cofounderEnabled = settingsQuery.data?.settings.enabled === true;
   const onboardingQuery = useOnboardingQuery(cofounderEnabled);
   const briefQuery = useBriefQuery(cofounderEnabled);
+  const onboardingHead = onboardingQuery.data?.head;
   const channelsQuery = useChannelsQuery({
     enabled: cofounderEnabled,
   });
   const openDm = useOpenDmMutation();
   const { goChannel } = useAppNavigation();
+  const [now, setNow] = React.useState(() => Date.now());
   const role = membershipQuery.data?.membership?.role;
   const canChange = role === "owner" || role === "admin";
   const settings = settingsQuery.data?.settings;
@@ -48,13 +57,28 @@ export function CofounderSettingRow() {
       ),
   );
   const briefHead = briefQuery.data?.head;
+  const onboardingStartedAt =
+    onboardingHead?.resumedAt ?? onboardingHead?.startedAt ?? null;
   const showGettingToKnowCard =
     cofounderEnabled &&
-    onboardingQuery.data?.head?.status === "in_progress" &&
+    onboardingHead?.status === "in_progress" &&
     briefHead?.pending == null &&
     briefHead?.confirmed == null &&
     !onboardingQuery.isError &&
     !briefQuery.isError;
+  React.useEffect(() => {
+    if (!showGettingToKnowCard) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 5_000);
+    return () => window.clearInterval(timer);
+  }, [showGettingToKnowCard]);
+  const hasDurableWakeFailure =
+    showGettingToKnowCard && leadStatusQuery.data?.state === "unreachable";
+  const isScoutStalled =
+    showGettingToKnowCard &&
+    (hasDurableWakeFailure ||
+      (onboardingStartedAt !== null &&
+        now - onboardingStartedAt * 1_000 >= SCOUT_STALL_AFTER_MS));
   const disabled =
     !activeCommunity ||
     !canChange ||
@@ -121,20 +145,35 @@ export function CofounderSettingRow() {
             testId="cofounder-scout-avatar"
           />
           <p>
-            <strong>Scout is getting to know {companyName}</strong>
+            <strong>
+              {isScoutStalled
+                ? hasDurableWakeFailure
+                  ? "Scout could not be reached"
+                  : "Scout has not started yet"
+                : `Scout is getting to know ${companyName}`}
+            </strong>
             <span>
-              Reading your website, leads, chats and connected tools. Scout will
-              message you a short brief to check.
+              {isScoutStalled
+                ? hasDurableWakeFailure && leadStatusQuery.data?.detail
+                  ? `${leadStatusQuery.data.detail} Try again to wake Scout and continue setup.`
+                  : `It has been a few minutes since ${companyName} was switched on. Try again to wake Scout and continue setup.`
+                : "Reading your website, leads, chats and connected tools. Scout will message you a short brief to check."}
             </span>
           </p>
           <button
             className="cf-setting-cofounder-scout-button"
-            data-testid="cofounder-open-scout"
-            disabled={!scoutPubkey || openDm.isPending}
-            onClick={() => void openScout()}
+            data-testid={
+              isScoutStalled ? "cofounder-retry-scout" : "cofounder-open-scout"
+            }
+            disabled={
+              isScoutStalled ? disabled : !scoutPubkey || openDm.isPending
+            }
+            onClick={() =>
+              void (isScoutStalled ? changeEnabled(true) : openScout())
+            }
             type="button"
           >
-            Open Scout
+            {isScoutStalled ? "Try again" : "Open Scout"}
           </button>
         </div>
       ) : null}

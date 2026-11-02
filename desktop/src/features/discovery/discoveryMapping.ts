@@ -182,6 +182,7 @@ export function mapPlaceToProspect(
     industry,
     vertical,
     fitScore: fitScore(place),
+    origin: "discovery",
     discoveryTags: context.discoveryTags ?? [],
     potentialMonthlyValueMinor: null,
     website,

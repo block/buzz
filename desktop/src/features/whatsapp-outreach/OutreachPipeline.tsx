@@ -9,6 +9,7 @@ import {
   useCustomerRecords,
 } from "@/features/cofounder/customerHooks";
 import { useCustomerRecordCapabilities } from "@/features/cofounder/customerRecordAccess";
+import { useCommunities } from "@/features/communities/useCommunities";
 import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
 import { useProfileQuery } from "@/features/profile/hooks";
 import { Button } from "@/shared/ui/button";
@@ -221,6 +222,8 @@ function PipelineCard({
 }
 
 export function OutreachPipeline({ channelIsMember, onOpenChat }: Props) {
+  const { activeCommunity } = useCommunities();
+  const businessName = activeCommunity?.name.trim() || "This business";
   const contactsQuery = useWhatsAppContactsQuery();
   const draftsQuery = useWhatsAppDraftsQuery();
   const business = useBusinessRecords({ createIfMissing: false });
@@ -333,7 +336,7 @@ export function OutreachPipeline({ channelIsMember, onOpenChat }: Props) {
     >
       <header className="c3wa-desk-page-head">
         <div>
-          <p className="c3wa-desk-eyebrow">Horizon Labs · WhatsApp</p>
+          <p className="c3wa-desk-eyebrow">{businessName} · WhatsApp</p>
           <h1>Pipeline</h1>
           <p>Move conversations forward as the work happens.</p>
         </div>

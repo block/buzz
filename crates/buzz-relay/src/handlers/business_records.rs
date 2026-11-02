@@ -4448,6 +4448,7 @@ mod tests {
                 industry: "Professional Services".into(),
                 vertical: "Marketing Agency".into(),
                 fit_score: Some(87),
+                origin: Some(buzz_core::business_records::ProspectOrigin::Discovery),
                 discovery_tags: Vec::new(),
                 potential_monthly_value_minor: Some(450_000),
                 website: Some("https://example.test".into()),
