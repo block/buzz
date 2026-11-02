@@ -1,4 +1,5 @@
 import 'package:flutter/widgets.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
 
 /// Holds [child]'s keyboard insets steady while its route is covered.
 ///
@@ -11,35 +12,27 @@ import 'package:flutter/widgets.dart';
 /// view insets and padding it last had as the current route; every other
 /// [MediaQueryData] field passes through. When the route becomes current
 /// again the live values return.
-class CoveredRouteKeyboardInsets extends StatefulWidget {
+class CoveredRouteKeyboardInsets extends HookWidget {
   const CoveredRouteKeyboardInsets({super.key, required this.child});
 
   final Widget child;
 
   @override
-  State<CoveredRouteKeyboardInsets> createState() =>
-      _CoveredRouteKeyboardInsetsState();
-}
-
-class _CoveredRouteKeyboardInsetsState
-    extends State<CoveredRouteKeyboardInsets> {
-  EdgeInsets? _viewInsets;
-  EdgeInsets? _padding;
-
-  @override
   Widget build(BuildContext context) {
     final data = MediaQuery.of(context);
     final current = ModalRoute.isCurrentOf(context) ?? true;
-    if (current || _viewInsets == null || _padding == null) {
-      _viewInsets = data.viewInsets;
-      _padding = data.padding;
+    // The insets and padding from the last build as the current route.
+    final held = useRef<(EdgeInsets, EdgeInsets)?>(null);
+    if (current || held.value == null) {
+      held.value = (data.viewInsets, data.padding);
     }
+    final (viewInsets, padding) = held.value!;
     // Always the same widget shape, so covering never remounts the page.
     return MediaQuery(
       data: current
           ? data
-          : data.copyWith(viewInsets: _viewInsets, padding: _padding),
-      child: widget.child,
+          : data.copyWith(viewInsets: viewInsets, padding: padding),
+      child: child,
     );
   }
 }

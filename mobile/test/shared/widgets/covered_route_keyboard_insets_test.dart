@@ -1,5 +1,6 @@
 import 'package:buzz/shared/widgets/covered_route_keyboard_insets.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// Counts builds and records the insets the page saw last.
@@ -124,22 +125,17 @@ void main() {
   });
 }
 
-class _MountCounter extends StatefulWidget {
+class _MountCounter extends HookWidget {
   const _MountCounter(this.mounts);
 
   final List<int> mounts;
 
   @override
-  State<_MountCounter> createState() => _MountCounterState();
-}
-
-class _MountCounterState extends State<_MountCounter> {
-  @override
-  void initState() {
-    super.initState();
-    widget.mounts[0]++;
+  Widget build(BuildContext context) {
+    useEffect(() {
+      mounts[0]++;
+      return null;
+    }, const []);
+    return const SizedBox();
   }
-
-  @override
-  Widget build(BuildContext context) => const SizedBox();
 }
