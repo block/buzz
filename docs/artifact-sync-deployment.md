@@ -1,8 +1,8 @@
 # Incremental artifact reads deployment
 
 Incremental artifact reads use a 120-second overlap and database modification
-timestamps. `BUZZ_ARTIFACT_INCREMENTAL_ENABLED` is off by default. Enable it only
-after the schema, indexes, and every serving writer are upgraded.
+timestamps. `BUZZ_ARTIFACT_INCREMENTAL_ENABLED` is on by default. Set it to
+`false` until the schema, indexes, and every serving writer are upgraded.
 
 ## Schema and indexes
 
@@ -51,10 +51,12 @@ migration ledger.
 
 ## Enable and rollback
 
-Deploy the timestamp writers to every relay instance with the gate off.
+Set `BUZZ_ARTIFACT_INCREMENTAL_ENABLED=false` while the serving fleet contains
+old writers. Deploy the timestamp writers to every relay instance with the gate off.
 Drain the old writers. All instances must use the same configured relay
 signing key, because that key authenticates the progress tokens. Then enable
-`BUZZ_ARTIFACT_INCREMENTAL_ENABLED=true` on the serving fleet. NIP-11 advertises
+`BUZZ_ARTIFACT_INCREMENTAL_ENABLED=true` on the serving fleet, or remove the
+override to use the enabled default. NIP-11 advertises
 `artifacts.incremental` only when the gate is enabled. The endpoint refuses incremental
 requests while the gate is off.
 

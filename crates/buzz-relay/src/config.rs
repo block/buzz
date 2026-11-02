@@ -801,7 +801,7 @@ impl Config {
             .unwrap_or(false);
         let artifact_incremental_enabled = std::env::var("BUZZ_ARTIFACT_INCREMENTAL_ENABLED")
             .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
+            .unwrap_or(true);
 
         // Defaults true → single-pod (N=1) keeps today's huddle behavior. A
         // horizontally-scaled deployment sets this false; see the field doc.
