@@ -73,6 +73,7 @@ final class NativeCreateChannelViewController: UITableViewController, UITextView
   var onCreate: (([String: Any]) -> Void)?
   private let name = UITextField()
   private let details = UITextView()
+  private let detailsPlaceholder = UILabel()
   private let pageColor: UIColor
   private let rowColor: UIColor
   private var temporary = false
@@ -100,11 +101,13 @@ final class NativeCreateChannelViewController: UITableViewController, UITextView
     tableView.keyboardDismissMode = .interactive
     tableView.rowHeight = UITableView.automaticDimension
     tableView.estimatedRowHeight = 56
-    name.placeholder = "Name"
+    name.placeholder = "release-notes"
     name.accessibilityLabel = "Channel name"
     name.font = .preferredFont(forTextStyle: .body)
     name.adjustsFontForContentSizeCategory = true
-    name.autocapitalizationType = .sentences
+    name.autocapitalizationType = .none
+    name.autocorrectionType = .no
+    name.spellCheckingType = .no
     name.returnKeyType = .next
     name.delegate = self
     name.addTarget(self, action: #selector(nameChanged), for: .editingChanged)
@@ -114,6 +117,20 @@ final class NativeCreateChannelViewController: UITableViewController, UITextView
     details.accessibilityLabel = "Description, optional"
     details.delegate = self
     details.isScrollEnabled = true
+    detailsPlaceholder.text = "What this channel is for"
+    detailsPlaceholder.font = .preferredFont(forTextStyle: .body)
+    detailsPlaceholder.adjustsFontForContentSizeCategory = true
+    detailsPlaceholder.textColor = .placeholderText
+    detailsPlaceholder.numberOfLines = 0
+    detailsPlaceholder.isAccessibilityElement = false
+    detailsPlaceholder.isUserInteractionEnabled = false
+    detailsPlaceholder.translatesAutoresizingMaskIntoConstraints = false
+    details.addSubview(detailsPlaceholder)
+    NSLayoutConstraint.activate([
+      detailsPlaceholder.leadingAnchor.constraint(equalTo: details.leadingAnchor, constant: details.textContainerInset.left + details.textContainer.lineFragmentPadding),
+      detailsPlaceholder.trailingAnchor.constraint(equalTo: details.frameLayoutGuide.trailingAnchor, constant: -(details.textContainerInset.right + details.textContainer.lineFragmentPadding)),
+      detailsPlaceholder.topAnchor.constraint(equalTo: details.topAnchor, constant: details.textContainerInset.top),
+    ])
     navigationItem.leftBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "xmark"), style: .plain, target: self, action: #selector(cancel))
     navigationItem.leftBarButtonItem?.accessibilityLabel = "Close"
     navigationItem.rightBarButtonItem = UIBarButtonItem(title: "Create", style: .done, target: self, action: #selector(create))
@@ -125,6 +142,8 @@ final class NativeCreateChannelViewController: UITableViewController, UITextView
     super.viewDidAppear(animated)
     name.becomeFirstResponder()
   }
+
+  func textViewDidChange(_ textView: UITextView) { detailsPlaceholder.isHidden = !textView.text.isEmpty }
 
   @objc private func nameChanged() { updateControls() }
   func textFieldShouldReturn(_ textField: UITextField) -> Bool { details.becomeFirstResponder(); return false }
