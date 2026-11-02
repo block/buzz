@@ -6,6 +6,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import 'package:nostr/nostr.dart' as nostr;
 
+import '../crypto/event_signing.dart';
 import '../storage/secure_storage.dart';
 
 import 'hosted_environment.dart';
@@ -140,9 +141,9 @@ class AccountIdentityStore {
     checkCurrent?.call();
     // Read before parsing/generating any candidate: corrupt != absent.
     final existing = await _read();
-    final keys = _keys(nsec);
+    final pubkey = publicKeyForNsec(nsec);
     if (existing != null) {
-      if (existing.pubkey != keys.public) throw AccountIdentityFailure.occupied;
+      if (existing.pubkey != pubkey) throw AccountIdentityFailure.occupied;
       if (recoveredBackup == null) return existing.snapshot;
       if (existing.backup != null) {
         if (jsonEncode(existing.backup!._json()) !=
@@ -152,11 +153,11 @@ class AccountIdentityStore {
         return existing.snapshot;
       }
     }
-    if (recoveredBackup != null && recoveredBackup.pubkey != keys.public) {
+    if (recoveredBackup != null && recoveredBackup.pubkey != pubkey) {
       throw AccountIdentityFailure.mismatch;
     }
     checkCurrent?.call();
-    final record = _Record(nsec, keys.public, recoveredBackup);
+    final record = _Record(nsec, pubkey, recoveredBackup);
     await _write(record);
     return record.snapshot;
   });
@@ -268,7 +269,7 @@ class AccountIdentityStore {
       _serialized(() async {
         final record = await _read();
         if (record == null) throw AccountIdentityFailure.absent;
-        return operation(_keys(record.nsec));
+        return operation(keysForHex(_nsecHex(record.nsec)));
       });
 
   Future<_Record?> _read() async {
@@ -288,7 +289,7 @@ class AccountIdentityStore {
       final value = jsonDecode(raw) as Map<String, dynamic>;
       if (value['version'] != 1) throw AccountIdentityFailure.unreadable;
       final nsec = value['nsec'] as String;
-      final pubkey = _keys(nsec).public;
+      final pubkey = publicKeyForNsec(nsec);
       if (value['pubkey'] != pubkey ||
           (_pairingPubkey != null && _pairingPubkey != pubkey)) {
         throw AccountIdentityFailure.unreadable;
@@ -332,10 +333,20 @@ class AccountIdentityStore {
   }
 
   /// Validate a candidate without exposing signing material to the UI.
-  static String publicKeyForNsec(String nsec) => _keys(nsec).public;
+  ///
+  /// Derives the public key with libsecp256k1. This runs on every relay auth
+  /// assertion, where the pure-Dart derivation in `nostr.Keys` cost ~7 ms.
+  static String publicKeyForNsec(String nsec) =>
+      derivePublicKeyHex(_validSecretHex(_nsecHex(nsec)));
 
   /// Rejects invalid secp256k1 scalars before constructing a signing key.
-  static nostr.Keys keysForHex(String hex) {
+  ///
+  /// `nostr.Keys` always derives the public key in pure Dart and cannot take
+  /// a precomputed one, so this stays for the rare callers that need a
+  /// `nostr.Keys` object.
+  static nostr.Keys keysForHex(String hex) => nostr.Keys(_validSecretHex(hex));
+
+  static String _validSecretHex(String hex) {
     if (!RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(hex)) {
       throw AccountIdentityFailure.invalidKey;
     }
@@ -347,17 +358,17 @@ class AccountIdentityStore {
     if (scalar <= BigInt.zero || scalar >= order) {
       throw AccountIdentityFailure.invalidKey;
     }
-    return nostr.Keys(hex);
+    return hex;
   }
 
-  static nostr.Keys _keys(String nsec) {
+  static String _nsecHex(String nsec) {
     try {
       final decoded = nostr.Nip19.decode(payload: nsec);
       if (decoded.prefix != nostr.Nip19Prefix.nsec ||
           !RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(decoded.data)) {
         throw AccountIdentityFailure.invalidKey;
       }
-      return keysForHex(decoded.data);
+      return decoded.data;
     } catch (_) {
       throw AccountIdentityFailure.invalidKey;
     }

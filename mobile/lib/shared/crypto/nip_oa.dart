@@ -1,8 +1,7 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:buzz/shared/crypto/event_signing.dart';
-import 'package:pointycastle/digests/sha256.dart';
+import 'package:crypto/crypto.dart' as crypto;
 import '../relay/nostr_models.dart';
 
 /// Verify the signed profile and all owner-attestation conditions against it.
@@ -70,10 +69,7 @@ String? verifiedOaOwnerPubkey(List<List<String>> tags, String agentPubkey) {
     if (!_validConditions(conditions)) continue;
 
     final preimage = utf8.encode('nostr:agent-auth:$agent:$conditions');
-    final digest = SHA256Digest().process(Uint8List.fromList(preimage));
-    final message = digest
-        .map((b) => b.toRadixString(16).padLeft(2, '0'))
-        .join();
+    final message = crypto.sha256.convert(preimage).toString();
 
     try {
       if (verifySchnorrHex(

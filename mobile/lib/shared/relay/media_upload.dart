@@ -10,7 +10,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:nostr/nostr.dart' as nostr;
-import 'package:pointycastle/digests/sha256.dart';
+import 'package:crypto/crypto.dart' as crypto;
 
 import 'animated_image_sanitizer.dart';
 import 'media_auth.dart';
@@ -790,10 +790,7 @@ Stream<List<int>> _uploadByteStream(
   }
 }
 
-String _sha256Hex(Uint8List bytes) {
-  final digest = SHA256Digest().process(bytes);
-  return digest.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
-}
+String _sha256Hex(Uint8List bytes) => crypto.sha256.convert(bytes).toString();
 
 String? _tryDetectImageMimeType(Uint8List bytes) {
   try {

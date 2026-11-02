@@ -11,6 +11,55 @@ void main() {
   );
   setUp(() => FlutterSecureStorage.setMockInitialValues({}));
 
+  group('publicKeyForNsec', () {
+    test('matches known vectors and the pure-Dart derivation', () {
+      const one =
+          '0000000000000000000000000000000000000000000000000000000000000001';
+      // secp256k1 generator point x coordinate for secret key 1.
+      expect(
+        AccountIdentityStore.publicKeyForNsec(
+          nostr.Bech32Entity.encode(prefix: nostr.Nip19Prefix.nsec, data: one),
+        ),
+        '79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798',
+      );
+      for (final hex in [
+        'b7e151628aed2a6abf7158809cf4f3c762e7160f38b4da56a784d9045190cfef',
+        'fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140',
+      ]) {
+        final keys = nostr.Keys(hex);
+        expect(AccountIdentityStore.publicKeyForNsec(keys.nsec), keys.public);
+      }
+    });
+
+    test('rejects invalid keys with invalidKey', () {
+      final invalid = [
+        'not an nsec',
+        '',
+        nostr.Keys(
+          '0000000000000000000000000000000000000000000000000000000000000001',
+        ).npub,
+        // Scalar zero and the curve order are not valid secret keys.
+        nostr.Bech32Entity.encode(
+          prefix: nostr.Nip19Prefix.nsec,
+          data:
+              '0000000000000000000000000000000000000000000000000000000000000000',
+        ),
+        nostr.Bech32Entity.encode(
+          prefix: nostr.Nip19Prefix.nsec,
+          data:
+              'fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141',
+        ),
+      ];
+      for (final value in invalid) {
+        expect(
+          () => AccountIdentityStore.publicKeyForNsec(value),
+          throwsA(AccountIdentityFailure.invalidKey),
+          reason: value,
+        );
+      }
+    });
+  });
+
   for (final simulated in [false, true]) {
     test(
       'recovery retains scoped receipt; simulated=$simulated cannot authorize',

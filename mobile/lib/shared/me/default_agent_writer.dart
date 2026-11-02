@@ -1,7 +1,6 @@
 import 'dart:convert';
 
-import 'package:nostr/nostr.dart' as nostr;
-
+import '../crypto/event_signing.dart';
 import '../crypto/nip44.dart';
 import '../relay/relay.dart';
 import 'default_agent.dart';
@@ -32,19 +31,19 @@ Future<void> saveDefaultAgent(MeSync sync, String? pubkey) async {
     }
   }
   final event = NostrEvent.fromJson(
-    nostr.Event.from(
+    signNostrEvent(
       kind: 30078,
       content: nip44Encrypt(
         sync.key,
         jsonEncode({'version': 1, 'agent': pubkey}),
       ),
       secretKey: sync.privateHex,
+      pubkey: sync.pubkey,
       createdAt: now,
       tags: [
         ['d', defaultAgentCoordinate(sync.community)],
         ['t', defaultAgentTag],
       ],
-      verify: false,
     ).toMap(),
   );
   await sync.session.publish(event);
