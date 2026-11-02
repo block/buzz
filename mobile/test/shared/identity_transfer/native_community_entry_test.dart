@@ -51,6 +51,7 @@ void main() {
         name: 'Preview',
         dark: false,
         primaryArgb: 0xFF007AFF,
+        onPrimaryArgb: 0xFFFFFFFF,
         choices: const [],
         connect: (_, _, _, _) async => fail('Must not connect'),
       );
@@ -63,6 +64,7 @@ void main() {
             name: 'Preview',
             dark: false,
             primaryArgb: 0xFF007AFF,
+            onPrimaryArgb: 0xFFFFFFFF,
             choices: const [],
             connect: (_, _, _, _) async {},
           ),
@@ -85,6 +87,7 @@ void main() {
         name: 'preview.example.com',
         dark: false,
         primaryArgb: 0xFF000000,
+        onPrimaryArgb: 0xFFFFFFFF,
         choices: const [],
         connect: (_, _, _, _) async => fail('Must use invite claiming'),
         confirmInvite: () async =>
@@ -92,6 +95,9 @@ void main() {
       );
       final config = await presented.future;
       expect(config['invite'], true);
+      // The filled Join button's label must contrast with its primary fill.
+      expect(config['primaryArgb'], 0xFF000000);
+      expect(config['onPrimaryArgb'], 0xFFFFFFFF);
       final args = <String, dynamic>{'session': config['session']};
       expect((await action('join', args))?['error'], 'Try again');
       expect((await action('join', args))?['joined'], true);
@@ -109,6 +115,7 @@ void main() {
         name: 'Preview',
         dark: false,
         primaryArgb: 0xFF007AFF,
+        onPrimaryArgb: 0xFFFFFFFF,
         choices: [],
         connect: (_, nsec, create, current) async {
           expect(nsec, keys.nsec);
@@ -144,6 +151,7 @@ void main() {
         name: 'Preview',
         dark: false,
         primaryArgb: 0xFF007AFF,
+        onPrimaryArgb: 0xFFFFFFFF,
         choices: const [DeviceIdentityChoice('pubkey', 'Saved')],
         connect: (_, _, _, current) async {
           calls++;

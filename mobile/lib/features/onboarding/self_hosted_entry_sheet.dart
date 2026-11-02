@@ -47,6 +47,7 @@ Future<bool> showSelfHostedEntry(
     final storage = container.read(communityStorageProvider);
     final dark = context.theme.brightness == Brightness.dark;
     final primary = context.colors.primary.toARGB32();
+    final onPrimary = context.colors.onPrimary.toARGB32();
     // Keep the existing Flutter error state if saved identities are unreadable.
     List<DeviceIdentityChoice>? choices;
     try {
@@ -62,6 +63,7 @@ Future<bool> showSelfHostedEntry(
         ),
         dark: dark,
         primaryArgb: primary,
+        onPrimaryArgb: onPrimary,
         choices: choices,
         connect: (pubkey, nsec, create, current) async {
           final community = await service.prepare(

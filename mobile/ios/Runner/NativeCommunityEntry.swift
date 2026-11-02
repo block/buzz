@@ -100,6 +100,14 @@ private final class NativeCommunityEntryController: UIViewController, UITextFiel
   private var invite: Bool { configuration["invite"] as? Bool == true }
   private var dark: Bool { configuration["dark"] as? Bool == true }
   private var fieldBackground: UIColor { UIColor(white: dark ? 0.16 : 0.95, alpha: 1) }
+  private var onPrimary: UIColor {
+    guard let argb = (configuration["onPrimaryArgb"] as? NSNumber)?.uint32Value else {
+      return dark ? .black : .white
+    }
+    return UIColor(red: CGFloat((argb >> 16) & 255) / 255,
+      green: CGFloat((argb >> 8) & 255) / 255, blue: CGFloat(argb & 255) / 255,
+      alpha: CGFloat((argb >> 24) & 255) / 255)
+  }
   private var choices: [[String: String]] { configuration["choices"] as? [[String: String]] ?? [] }
 
   init(configuration: [String: Any]) {
@@ -256,7 +264,10 @@ private final class NativeCommunityEntryController: UIViewController, UITextFiel
 
   @discardableResult
   private func addButton(_ title: String, primary: Bool = false, action: @escaping () -> Void) -> UIButton {
-    let config = onboardingButtonConfiguration(title, primary: primary)
+    var config = onboardingButtonConfiguration(title, primary: primary)
+    // The filled background takes the theme primary through tintColor, which is
+    // white in dark mode; its label needs the matching on-primary color.
+    if primary { config.baseForegroundColor = onPrimary }
     let button = UIButton(configuration: config, primaryAction: UIAction { _ in action() })
     button.titleLabel?.numberOfLines = 0
     button.titleLabel?.adjustsFontForContentSizeCategory = true

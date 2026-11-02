@@ -20,6 +20,7 @@ Future<bool?> showInviteJoinSheet(BuildContext context) async {
       name: state.host ?? 'Unknown community',
       dark: Theme.of(context).brightness == Brightness.dark,
       primaryArgb: Theme.of(context).colorScheme.primary.toARGB32(),
+      onPrimaryArgb: Theme.of(context).colorScheme.onPrimary.toARGB32(),
       choices: const [],
       connect: (_, _, _, _) async {},
       confirmInvite: () async {
