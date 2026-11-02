@@ -47,7 +47,7 @@ final _cards = <String, Map<String, Object?>>{
     'collection': 'gloopie',
     'name': 'Owl',
     'avatarUrl': '$_cdn/av_v1/r1/avatar.png',
-    'model_id': 'retired-model',
+    'model': 'retired-model',
   },
   'av_third': {'name': 'Third'},
   'av_fourth': {'name': 'Fourth'},
@@ -161,7 +161,7 @@ void main() {
       await tester.pumpAndSettle();
 
       // A card as published today (no instructions, a model the catalog
-      // lacks, under another key): the draft opens with empty instructions
+      // lacks): the draft opens with empty instructions
       // and the model left for the user, so Create stays disabled.
       await receive(_link('av_v1'));
       expect(find.byType(CreateAgentPage), findsOneWidget);

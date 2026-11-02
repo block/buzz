@@ -96,31 +96,19 @@ void main() {
             model: 'sonnet-5-5',
             effort: 'high',
           ),
-          'snake_case and synonyms': (
+          'other key names are ignored': (
             json: {
-              'display_name': 'Scout',
+              'name': 'Scout',
               'avatar_url': avatar,
               'system_prompt': 'Be kind.',
               'model_id': 'opus-5-5',
               'reasoning_effort': 'low',
             },
             name: 'Scout',
-            instructions: 'Be kind.',
-            avatar: avatar,
-            model: 'opus-5-5',
-            effort: 'low',
-          ),
-          'model object': (
-            json: {
-              'name': 'Scout',
-              'prompt': 'Hi.',
-              'model': {'id': 'opus-5-5', 'effort': 'medium'},
-            },
-            name: 'Scout',
-            instructions: 'Hi.',
+            instructions: '',
             avatar: null,
-            model: 'opus-5-5',
-            effort: 'medium',
+            model: null,
+            effort: null,
           ),
           'wrong types and blanks are left for the user': (
             json: {

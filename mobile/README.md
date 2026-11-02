@@ -51,10 +51,9 @@ any length while the QR stays small.
 }
 ```
 
-- Every field is optional and left for the user when missing. Cards published
-  so far have only `name` and `avatarUrl`. snake_case and a few synonyms
-  (`system_prompt`, `model_id`, `effort`, a `model` object with an `id`) are
-  also read. Other fields are ignored.
+- `name` and `avatarUrl` are on every published card; `instructions`, `model`
+  and `reasoningEffort` are optional. A missing field, or one that isn't a
+  non-blank string, is left for the user. Other keys are ignored.
 - The avatar is used only if it is an `https` URL on the same CDN; otherwise the
   form picks its usual default. It stays editable.
 - `model` and `reasoningEffort` are pre-selected only if the live model catalog

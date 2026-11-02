@@ -105,32 +105,18 @@ class AgentCreationDraft {
     return parseAgentCard(json, cdn);
   }
 
-  /// Reads a card's draft. Only `name`, `avatarUrl`, `instructions`, `model`
-  /// and `reasoningEffort` are defined; cards published before instructions
-  /// and model existed have just the first two. Any field may be missing or
-  /// spelled in snake_case or a common synonym, and is then left for the user.
-  /// An avatar is used only from [cdn], the host the card itself came from.
+  /// Reads a card's draft from the `agent.json` schema's `name`,
+  /// `avatarUrl`, `instructions`, `model` and `reasoningEffort`. Cards
+  /// published before instructions and model existed have just the first two.
+  /// A missing field, or one that isn't a non-blank string, is left for the
+  /// user; other keys are ignored. An avatar is used only from [cdn], the host
+  /// the card itself came from.
   static AgentCreationDraft parseAgentCard(Map<String, dynamic> json, Uri cdn) {
-    final model = json['model'];
-    final avatarUrl = _string(json, const [
-      'avatarUrl',
-      'avatar_url',
-      'avatar',
-      'pictureUrl',
-      'picture_url',
-      'picture',
-    ]);
+    final avatarUrl = _string(json, 'avatarUrl');
     final avatar = Uri.tryParse(avatarUrl ?? '');
     return AgentCreationDraft(
-      name: _string(json, const ['name', 'displayName', 'display_name']) ?? '',
-      instructions:
-          _string(json, const [
-            'instructions',
-            'systemPrompt',
-            'system_prompt',
-            'prompt',
-          ]) ??
-          '',
+      name: _string(json, 'name') ?? '',
+      instructions: _string(json, 'instructions') ?? '',
       avatar:
           avatar != null &&
               avatar.scheme == 'https' &&
@@ -139,30 +125,15 @@ class AgentCreationDraft {
               avatar.userInfo.isEmpty
           ? AgentAvatarSelection.url(avatarUrl!)
           : null,
-      // `model` may also be an object such as {"id": ..., "reasoningEffort": ...}.
-      modelId: model is Map<String, dynamic>
-          ? _string(model, const ['id', 'modelId', 'model_id', 'name'])
-          : _string(json, const ['model', 'modelId', 'model_id']),
-      reasoningEffort:
-          _string(json, _effortKeys) ??
-          (model is Map<String, dynamic> ? _string(model, _effortKeys) : null),
+      modelId: _string(json, 'model'),
+      reasoningEffort: _string(json, 'reasoningEffort'),
     );
   }
 
-  static const _effortKeys = [
-    'reasoningEffort',
-    'reasoning_effort',
-    'effort',
-    'thinking',
-  ];
-
-  /// The first non-blank string among [keys], trimmed.
-  static String? _string(Map<String, dynamic> json, List<String> keys) {
-    for (final key in keys) {
-      final value = json[key];
-      if (value is String && value.trim().isNotEmpty) return value.trim();
-    }
-    return null;
+  /// [key]'s value if it is a non-blank string, trimmed.
+  static String? _string(Map<String, dynamic> json, String key) {
+    final value = json[key];
+    return value is String && value.trim().isNotEmpty ? value.trim() : null;
   }
 
   static Future<List<int>> _readBounded(Stream<List<int>> stream) async {
