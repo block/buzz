@@ -96,27 +96,80 @@ void main() {
       }
       expect(isHexPubkey(canonicalNpub), isFalse);
     });
+
+    test('rejects an invalid character at any position', () {
+      // Every index, so a check that only inspects some positions fails.
+      for (final c in ['g', 'G', ':', '/', ' ']) {
+        for (var i = 0; i < 64; i++) {
+          final value = '${'a' * i}$c${'b' * (63 - i)}';
+          expect(isHexPubkey(value), isFalse, reason: '"$c" at index $i');
+        }
+      }
+      // Middle and final positions of an otherwise valid key.
+      final middle = canonicalHex.replaceRange(32, 33, 'z');
+      final last = canonicalHex.replaceRange(63, 64, 'z');
+      expect(isHexPubkey(middle), isFalse);
+      expect(isHexPubkey(last), isFalse);
+      expect(isHexPubkey(canonicalHex), isTrue);
+    });
   });
 
   group('npub encoding cache', () {
-    test('repeated and evicted keys still encode canonically', () {
-      // More distinct keys than the cache holds, so early ones are evicted
-      // and encoded again.
-      final keys = [
-        for (var i = 0; i < 9000; i++) i.toRadixString(16).padLeft(64, '0'),
-      ];
-      final first = [for (final key in keys) fullNpub(key)];
-      expect(fullNpub(canonicalHex), canonicalNpub);
-      for (var i = 0; i < keys.length; i += 997) {
+    setUp(resetNpubCacheForTesting);
+    tearDown(resetNpubCacheForTesting);
+
+    String keyAt(int i) => i.toRadixString(16).padLeft(64, '0');
+
+    test('the retained entry count is capped at 8192', () {
+      expect(npubCacheLimitForTesting, 8192);
+    });
+
+    test('repeated lookups hit the cache instead of re-encoding', () {
+      final first = fullNpub(canonicalHex);
+      expect(npubEncodeCountForTesting, 1);
+      expect(fullNpub(canonicalHex), first);
+      expect(fullNpub(canonicalHex.toUpperCase()), first);
+      expect(shortPubkey(canonicalHex), canonicalCompact);
+      expect(npubEncodeCountForTesting, 1);
+      expect(npubCacheSizeForTesting, 1);
+    });
+
+    test('never retains more than the limit and evicts the oldest', () {
+      const total = 8192 + 808; // 9000 distinct keys
+      var maxSize = 0;
+      for (var i = 0; i < total; i++) {
+        fullNpub(keyAt(i));
+        if (npubCacheSizeForTesting > maxSize) {
+          maxSize = npubCacheSizeForTesting;
+        }
+      }
+      expect(maxSize, 8192);
+      expect(npubCacheSizeForTesting, 8192);
+      expect(npubEncodeCountForTesting, total);
+
+      // The newest key is still cached; the oldest was evicted and encodes
+      // again, still canonically.
+      fullNpub(keyAt(total - 1));
+      expect(npubEncodeCountForTesting, total);
+      final evicted = fullNpub(keyAt(0));
+      expect(npubEncodeCountForTesting, total + 1);
+      expect(
+        evicted,
+        nostr.Nip19.encode(prefix: nostr.Nip19Prefix.npub, data: keyAt(0)),
+      );
+      expect(npubCacheSizeForTesting, 8192);
+    });
+
+    test('evicted and cached keys still encode canonically', () {
+      for (var i = 0; i < 9000; i += 997) {
         final expected = nostr.Nip19.encode(
           prefix: nostr.Nip19Prefix.npub,
-          data: keys[i],
+          data: keyAt(i),
         );
-        expect(first[i], expected);
-        expect(fullNpub(keys[i]), expected);
-        expect(fullNpub(keys[i].toUpperCase()), expected);
+        expect(fullNpub(keyAt(i)), expected);
+        expect(fullNpub(keyAt(i).toUpperCase()), expected);
       }
-      expect(shortPubkey(canonicalHex), canonicalCompact);
+      expect(fullNpub(canonicalHex), canonicalNpub);
     });
   });
 
