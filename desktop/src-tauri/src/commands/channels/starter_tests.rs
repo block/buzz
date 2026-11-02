@@ -57,20 +57,20 @@ fn channel_event(id: &str, name: &str) -> serde_json::Value {
     serde_json::to_value(&event).unwrap()
 }
 
-/// Runs starter setup against a fake relay whose directory lists only a live
+/// Runs starter setup against a fake relay whose directory lists a live
 /// `general` this user has not joined. The relay refuses every channel create
 /// with `create_refusal`: HTTP 400 for a rejected event, as the relay sends
 /// it, or HTTP 200 with `accepted: false` for a duplicate. With
 /// `renamed_starter`, a live channel under that name holds `welcome-everyone`'s
-/// deterministic id and is served when metadata is read by id. Returns the
-/// result, the kinds of the events the relay accepted, and whether that id is
-/// still marked as pending-owned. With `late_welcome`, a live
-/// `welcome-everyone` under another id joins the directory after the first
-/// read.
+/// deterministic id, and is listed and served like any live channel. With
+/// `writer_only_welcome`, a live `welcome-everyone` under another id is listed
+/// only by reads pinned to the writer, as when a replica lags. Returns the
+/// result, the kinds of the events the relay accepted, and whether the
+/// deterministic id is still marked as pending-owned.
 async fn ensure_with_unusable_welcome(
     create_refusal: (axum::http::StatusCode, &'static str),
     renamed_starter: Option<&'static str>,
-    late_welcome: bool,
+    writer_only_welcome: bool,
 ) -> (Result<Vec<ChannelInfo>, String>, Vec<u64>, bool) {
     use std::sync::{Arc, Mutex};
 
@@ -88,7 +88,6 @@ async fn ensure_with_unusable_welcome(
 
     let general = channel_event(LIVE_GENERAL_ID, "general");
     let welcome = channel_event(LIVE_WELCOME_ID, "welcome-everyone");
-    let directory_reads = Arc::new(Mutex::new(0));
     let renamed = renamed_starter.map(|name| channel_event(&starter_id, name));
     let accepted = Arc::new(Mutex::new(Vec::new()));
     let accepted_kinds = accepted.clone();
@@ -98,15 +97,15 @@ async fn ensure_with_unusable_welcome(
             post(move |Json(filters): Json<serde_json::Value>| {
                 let filter = filters[0].clone();
                 let events = match (filter["kinds"][0].as_u64(), filter.get("#d")) {
-                    // The open directory lists live channels only.
+                    // The open directory lists live channels only. A lagging
+                    // replica misses the late `welcome-everyone`; the writer
+                    // has it.
                     (Some(39000), None) => {
-                        let mut reads = directory_reads.lock().unwrap();
-                        *reads += 1;
-                        if late_welcome && *reads > 1 {
-                            vec![general.clone(), welcome.clone()]
-                        } else {
-                            vec![general.clone()]
-                        }
+                        let from_writer = filter["consistency"] == "strong";
+                        std::iter::once(general.clone())
+                            .chain(renamed.clone())
+                            .chain((writer_only_welcome && from_writer).then(|| welcome.clone()))
+                            .collect()
                     }
                     // Metadata by id.
                     (Some(39000), Some(ids)) => renamed
@@ -260,7 +259,7 @@ async fn other_create_refusals_still_fail_setup() {
 }
 
 #[tokio::test]
-async fn a_starter_name_held_by_a_live_starter_the_first_read_missed_is_joined() {
+async fn a_starter_name_held_by_a_live_starter_a_replica_missed_is_joined() {
     let _serial = crate::relay_admission::TEST_SERIAL.lock().await;
     let (result, accepted, _) = ensure_with_unusable_welcome(
         (

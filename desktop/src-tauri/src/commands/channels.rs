@@ -18,7 +18,9 @@ use crate::{
 // the directory cursor, the not-modified hash, and member-count collection)
 // lives in the `fetch` submodule to keep this file under the per-file line cap.
 mod fetch;
-use fetch::{compute_channels_hash, fetch_channels, DirectoryScope};
+use fetch::{
+    compute_channels_hash, fetch_channels, fetch_open_directory_from_writer, DirectoryScope,
+};
 
 const STARTER_CHANNEL_NAMESPACE: uuid::Uuid = uuid::uuid!("3ce33bea-8f09-5f1b-9c85-8a7d2659e6b0");
 
@@ -437,6 +439,8 @@ async fn ensure_starter_channels_inner(
     // channel that cannot serve as the starter, such as an archived one. They
     // are left out instead of blocking the remaining starters.
     let mut skipped = std::collections::HashSet::new();
+    // Starters the relay refused for good, waiting on a second look.
+    let mut refused = Vec::new();
 
     for spec in STARTER_CHANNELS {
         if existing_channels
@@ -469,23 +473,36 @@ async fn ensure_starter_channels_inner(
             }
             // A retry would be refused the same way. The name may still
             // belong to a live starter the first read missed, such as one
-            // created since, so look again before giving up on it.
+            // created since, so it is looked up again below.
             Err(error) if is_permanent_starter_rejection(&error) => {
-                let refreshed = fetch_channels(state, DirectoryScope::IncludeOpenDirectory).await?;
-                match refreshed
-                    .into_iter()
-                    .find(|channel| is_matching_starter_channel(channel, spec))
-                {
-                    Some(channel) => existing_channels.push(channel),
-                    None => {
-                        skipped.insert(spec.slug);
-                    }
-                }
+                refused.push(spec);
                 continue;
             }
             Err(error) => return Err(error),
         }
         starter_ids.push(channel_uuid_string);
+    }
+
+    if !refused.is_empty() {
+        // Read from the writer: the relay refused the create against the
+        // writer's state, and a lagging replica could miss the same starter
+        // again.
+        let mut directory = fetch_open_directory_from_writer(state).await?;
+        for spec in refused {
+            match directory
+                .iter()
+                .position(|channel| is_matching_starter_channel(channel, spec))
+            {
+                Some(index) => {
+                    let channel = directory.swap_remove(index);
+                    existing_channels.retain(|existing| existing.id != channel.id);
+                    existing_channels.push(channel);
+                }
+                None => {
+                    skipped.insert(spec.slug);
+                }
+            }
+        }
     }
 
     for _ in 0..3 {
@@ -520,9 +537,9 @@ async fn ensure_starter_channels_inner(
 
     if !has_all_starter_channels(&existing_channels, &skipped) {
         existing_channels = fetch_channels(state, DirectoryScope::IncludeOpenDirectory).await?;
-        // A starter id the relay holds but never serves, even from the
-        // writer, belongs to a channel this user cannot see, such as a
-        // deleted one.
+        // A starter id the relay holds but still does not serve, even from
+        // the writer, most likely belongs to a channel this user cannot see,
+        // such as a deleted one.
         for (spec, id) in &duplicate_starters {
             if !existing_channels.iter().any(|channel| channel.id == *id) {
                 state.clear_pending_owned_channel(&creator_pubkey, id);
