@@ -511,6 +511,7 @@ void main() {
         ),
         ('```\nx \\# y\n```', r'x \# y'),
         (r'code `a\#b`', r'a\#b'),
+        (r'\`literal\` then `a\#b`', '`literal` then '),
         // A bare link's trailing backslash stays outside the link.
         (r'see https://example.com/a\', 'see '),
         (

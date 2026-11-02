@@ -51,6 +51,10 @@ String mapMarkdownProse(String content, String Function(String) transform) {
         inlineDelimiterLength = 0;
         proseStart = run.end;
       }
+    } else if (_isEscaped(content, run.start)) {
+      // An escaped backtick is literal; the rest of its run may still open.
+      offset = run.start + 1;
+      continue;
     } else if (_hasInlineCloserOnLine(content, run.end, runLength) ||
         (!_isOpeningFence(content, run.start, runLength) &&
             _hasInlineCloser(content, run.end, runLength))) {
@@ -72,6 +76,15 @@ String mapMarkdownProse(String content, String Function(String) transform) {
     buffer.write(transform(content.substring(proseStart)));
   }
   return buffer.toString();
+}
+
+/// Whether an odd number of backslashes precedes [index].
+bool _isEscaped(String content, int index) {
+  var backslashes = 0;
+  while (index - backslashes > 0 && content[index - backslashes - 1] == r'\') {
+    backslashes++;
+  }
+  return backslashes.isOdd;
 }
 
 bool _isOpeningFence(String content, int runStart, int runLength) {
