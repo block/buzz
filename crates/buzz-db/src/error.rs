@@ -25,6 +25,11 @@ pub enum DbError {
     #[error("channel not found: {0}")]
     ChannelNotFound(uuid::Uuid),
 
+    /// Another live stream or forum channel in the community already uses
+    /// this name (compared case-insensitively).
+    #[error("channel name is already taken: {0}")]
+    ChannelNameTaken(String),
+
     /// The requested member is not in the channel.
     #[error("member not found in channel {0}")]
     MemberNotFound(uuid::Uuid),
