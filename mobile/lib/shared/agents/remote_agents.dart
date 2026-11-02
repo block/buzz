@@ -486,6 +486,83 @@ class RemoteAgentController extends ChangeNotifier {
     }
   });
 
+  /// Renames an active agent owned by this account and, with [pictureUrl],
+  /// replaces its avatar; Beekeeper keeps the stored picture otherwise. Then
+  /// it confirms the agent-signed profile on the relay and republishes this
+  /// owner's registration with the same name and picture, as desktop does.
+  Future<bool> updateProfile({
+    required Community community,
+    required String pubkey,
+    required String name,
+    String? pictureUrl,
+    required bool Function() isCurrent,
+    required Future<List<NostrEvent>> Function(NostrFilter) fetch,
+  }) => run(() async {
+    final subject = account.account?.subject;
+    void check() {
+      if (subject == null ||
+          account.account?.subject != subject ||
+          !isCurrent()) {
+        throw StateError('Community or account changed. Reopen Agents.');
+      }
+    }
+
+    check();
+    if (!HostedEnvironment.supportsRelay(Uri.parse(community.relayUrl))) {
+      throw StateError('This community does not support remote agents.');
+    }
+    final trimmed = name.trim();
+    if (!validAgentName(trimmed)) throw StateError(invalidAgentName);
+    await ensureBinding();
+    check();
+    if (owner != community.pubkey) throw AccountIdentityFailure.mismatch;
+    if (!activeAgents.contains(pubkey)) {
+      throw StateError('Refresh Agents before editing this agent.');
+    }
+    final result = await account.post('/v3/beekeeper/update-agent-profile', {
+      'agent_pubkey': pubkey,
+      'community_url': RelayConfig(baseUrl: community.relayUrl).wsUrl,
+      'agent_name': trimmed,
+      'agent_picture_url': pictureUrl ?? '',
+    }, expectedSubject: subject);
+    check();
+    if (result['error'] != null) throw AccountFailure.rejected;
+    // Beekeeper stores the change only after the relay accepts the profile,
+    // so the relay's newest owner-attested profile is the readback.
+    final profiles = await fetch(NostrFilters.profilesBatch([pubkey]));
+    check();
+    final profile = profiles
+        .where(
+          (event) =>
+              event.pubkey == pubkey &&
+              verifiedProfileOaOwnerPubkey(event) == owner,
+        )
+        .fold<NostrEvent?>(
+          null,
+          (newest, event) =>
+              newest == null || event.createdAt > newest.createdAt
+              ? event
+              : newest,
+        );
+    final content = profile == null ? null : jsonDecode(profile.content);
+    final picture = content is Map ? content['picture'] : null;
+    if (content is! Map ||
+        content['name'] != trimmed ||
+        (pictureUrl != null && picture != pictureUrl)) {
+      throw StateError(
+        'Builderlab may have saved this, but has not confirmed it. Try saving again.',
+      );
+    }
+    await publishPolicy(community.relayUrl, {
+      'pubkey': pubkey,
+      'name': trimmed,
+      'picture': ?(picture is String && picture.isNotEmpty ? picture : null),
+    });
+    _registrationsChanged();
+    check();
+    await refresh();
+  });
+
   Future<void> _savePending(Map<String, dynamic> value) async {
     final scope = _storageScope;
     final prefs = await SharedPreferences.getInstance();
@@ -550,11 +627,7 @@ class RemoteAgentController extends ChangeNotifier {
     }
     if (pending == null) {
       final trimmed = name.trim();
-      if (!RegExp(r'^[\w .-]{1,64}$').hasMatch(trimmed)) {
-        throw StateError(
-          'Use 1 to 64 letters, numbers, spaces, dots, hyphens or underscores.',
-        );
-      }
+      if (!validAgentName(trimmed)) throw StateError(invalidAgentName);
       if (instructions.trim().length > 20000) {
         throw StateError('Use at most 20,000 characters for instructions.');
       }
@@ -856,6 +929,12 @@ class RemoteAgentController extends ChangeNotifier {
     super.dispose();
   }
 }
+
+/// Beekeeper's agent name rule, shared with desktop.
+bool validAgentName(String name) => RegExp(r'^[\w .-]{1,64}$').hasMatch(name);
+
+const invalidAgentName =
+    'Use 1 to 64 letters, numbers, spaces, dots, hyphens or underscores.';
 
 /// Signs the NIP-OA protocol preimage, not a Nostr event ID.
 List<String> signOwnerAuthorization(nostr.Keys owner, String agent) {

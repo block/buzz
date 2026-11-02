@@ -1,8 +1,5 @@
-import 'agent_avatar_hero.dart';
-import 'agent_character_artwork.dart';
 import 'dart:math';
 import 'agent_model_picker.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -14,12 +11,9 @@ import 'agent_avatar_picker.dart';
 import '../../shared/community/community.dart';
 import '../../shared/community/community_provider.dart';
 import '../../shared/theme/theme.dart';
-import '../../shared/widgets/avatar_shape.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
-import '../../shared/widgets/ios_glass_navigation_action.dart';
-import '../../shared/widgets/preset_agent_avatar.dart';
-import 'agent_avatar_editor_page.dart';
+import 'agent_avatar_field.dart';
 import '../../shared/widgets/sheet_action_section.dart';
 
 /// Collects agent details, an avatar, and a service-supported model.
@@ -78,29 +72,6 @@ class CreateAgentPage extends HookConsumerWidget {
         sameCommunity &&
         name.text.trim().isNotEmpty &&
         validAgentModelSelection(catalog, model.value, effort.value);
-    InputDecoration fieldDecoration(String label, {String? hint}) =>
-        InputDecoration(
-          hintText: hint,
-          filled: false,
-          fillColor: context.colors.surfaceContainerHighest,
-          contentPadding: const EdgeInsets.symmetric(
-            horizontal: Grid.xs,
-            vertical: Grid.xs,
-          ),
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(Radii.container),
-            borderSide: BorderSide.none,
-          ),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(Radii.container),
-            borderSide: BorderSide.none,
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(Radii.container),
-            borderSide: BorderSide.none,
-          ),
-        );
-
     Future<void> create() async {
       error.value = null;
       if (controller.account.account?.subject != openingSubject) {
@@ -196,128 +167,13 @@ class CreateAgentPage extends HookConsumerWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Center(
-                  child: Column(
-                    children: [
-                      Semantics(
-                        label: 'Agent avatar',
-                        image: true,
-                        child: AgentAvatarHero(
-                          tag: avatarHeroTag,
-                          selection: avatar.value,
-                          child: TickerMode(
-                            key: const ValueKey('create-agent-avatar-playback'),
-                            enabled: !editingAvatar.value,
-                            child: SizedBox.square(
-                              dimension: 160,
-                              child: avatar.value.bytes != null
-                                  ? AvatarClip(
-                                      isAgent: true,
-                                      child: Image.memory(
-                                        avatar.value.bytes!,
-                                        fit: BoxFit.cover,
-                                      ),
-                                    )
-                                  : PresetAgentAvatar(
-                                      imageUrl: avatar.value.url!,
-                                      posterPlaceholder: characterPoster(
-                                        avatar.value.url!,
-                                      ),
-                                      size: 160,
-                                      fallback: const Icon(
-                                        Icons.smart_toy_outlined,
-                                        size: 80,
-                                      ),
-                                    ),
-                            ),
-                          ),
-                        ),
-                      ),
-                      if (!pending) ...[
-                        const SizedBox(height: Grid.xxs),
-                        _ChooseAvatarButton(
-                          transitioning: editingAvatar.value,
-                          onPressed: busy || editingAvatar.value
-                              ? null
-                              : () async {
-                                  if (editingAvatar.value) return;
-                                  editingAvatar.value = true;
-                                  try {
-                                    FocusScope.of(context).unfocus();
-                                    if (avatar.value.url != null) {
-                                      await precacheImage(
-                                        NetworkImage(avatar.value.url!),
-                                        context,
-                                        onError: (_, _) {},
-                                      ).timeout(
-                                        const Duration(milliseconds: 300),
-                                        onTimeout: () {},
-                                      );
-                                      if (!context.mounted) return;
-                                    }
-                                    // Remove the UIKit control before the Hero
-                                    // crosses its bounds. Keep it absent until the
-                                    // reverse flight's overlay has been removed.
-                                    await WidgetsBinding.instance.endOfFrame;
-                                    if (!context.mounted) return;
-                                    final route =
-                                        PageRouteBuilder<AgentAvatarSelection>(
-                                          transitionDuration:
-                                              MediaQuery.disableAnimationsOf(
-                                                context,
-                                              )
-                                              ? Duration.zero
-                                              : const Duration(
-                                                  milliseconds: 240,
-                                                ),
-                                          reverseTransitionDuration:
-                                              MediaQuery.disableAnimationsOf(
-                                                context,
-                                              )
-                                              ? Duration.zero
-                                              : const Duration(
-                                                  milliseconds: 240,
-                                                ),
-                                          pageBuilder: (_, _, _) =>
-                                              AgentAvatarEditorPage(
-                                                initialSelection: avatar.value,
-                                                heroTag: avatarHeroTag,
-                                              ),
-                                          transitionsBuilder:
-                                              (_, animation, _, child) {
-                                                final progress =
-                                                    CurvedAnimation(
-                                                      parent: animation,
-                                                      curve:
-                                                          Curves.fastOutSlowIn,
-                                                      reverseCurve: Curves
-                                                          .fastOutSlowIn
-                                                          .flipped,
-                                                    );
-                                                return FadeTransition(
-                                                  opacity: progress,
-                                                  child: child,
-                                                );
-                                              },
-                                        );
-                                    final result = await Navigator.of(
-                                      context,
-                                    ).push<AgentAvatarSelection>(route);
-
-                                    if (context.mounted && result != null) {
-                                      avatar.value = result;
-                                    }
-                                    await route.completed;
-                                  } finally {
-                                    if (context.mounted) {
-                                      editingAvatar.value = false;
-                                    }
-                                  }
-                                },
-                        ),
-                      ],
-                    ],
-                  ),
+                AgentAvatarField(
+                  selection: avatar.value,
+                  heroTag: avatarHeroTag,
+                  editing: editingAvatar,
+                  enabled: !busy,
+                  showChoose: !pending,
+                  onChanged: (value) => avatar.value = value,
                 ),
                 const SizedBox(height: Grid.md),
                 SheetActionSection(
@@ -330,7 +186,7 @@ class CreateAgentPage extends HookConsumerWidget {
                         autofocus: false,
                         enabled: !busy && !pending,
                         textCapitalization: TextCapitalization.words,
-                        decoration: fieldDecoration('Name'),
+                        decoration: agentFieldDecoration(context),
                       ),
                     ),
                   ],
@@ -360,8 +216,8 @@ class CreateAgentPage extends HookConsumerWidget {
                         maxLines: 6,
                         textCapitalization: TextCapitalization.sentences,
                         textInputAction: TextInputAction.newline,
-                        decoration: fieldDecoration(
-                          'Instructions',
+                        decoration: agentFieldDecoration(
+                          context,
                           hint:
                               'Describe what this agent should do (optional).',
                         ),
@@ -403,40 +259,22 @@ class CreateAgentPage extends HookConsumerWidget {
   }
 }
 
-/// Platform capsule action for entering the dedicated avatar editor.
-class _ChooseAvatarButton extends StatelessWidget {
-  const _ChooseAvatarButton({
-    required this.onPressed,
-    required this.transitioning,
-  });
-  final bool transitioning;
-  final VoidCallback? onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    if (defaultTargetPlatform == TargetPlatform.iOS) {
-      if (transitioning) {
-        return SizedBox(
-          width: 160,
-          height: 48,
-          child: Center(
-            child: TextButton(
-              onPressed: null,
-              child: const Text('Choose avatar'),
-            ),
-          ),
-        );
-      }
-      return IosGlassNavigationAction(
-        label: 'Choose avatar',
-        width: 160,
-        onPressed: onPressed,
-      );
-    }
-    return FilledButton.tonal(
-      style: FilledButton.styleFrom(shape: const StadiumBorder()),
-      onPressed: onPressed,
-      child: const Text('Choose avatar'),
-    );
-  }
+/// The borderless fill of the agent editors' text fields.
+InputDecoration agentFieldDecoration(BuildContext context, {String? hint}) {
+  final border = OutlineInputBorder(
+    borderRadius: BorderRadius.circular(Radii.container),
+    borderSide: BorderSide.none,
+  );
+  return InputDecoration(
+    hintText: hint,
+    filled: false,
+    fillColor: context.colors.surfaceContainerHighest,
+    contentPadding: const EdgeInsets.symmetric(
+      horizontal: Grid.xs,
+      vertical: Grid.xs,
+    ),
+    border: border,
+    enabledBorder: border,
+    focusedBorder: border,
+  );
 }

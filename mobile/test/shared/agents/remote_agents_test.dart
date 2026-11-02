@@ -152,6 +152,144 @@ void main() {
     },
   );
 
+  /// The relay's agent profile: what Beekeeper published for the last
+  /// update-agent-profile, unless [content] overrides it.
+  Future<List<NostrEvent>> Function(NostrFilter) relayProfile(
+    FakeRegistry registry, {
+    String? content,
+    nostr.Keys? owner,
+  }) => (filter) async {
+    expect(filter.kinds, [0]);
+    final body = registry.bodies['/v3/beekeeper/update-agent-profile'];
+    final picture = body?['agent_picture_url'] as String?;
+    return [
+      signedAgentProfile(
+        fakeAgentKeys,
+        owner ?? fakeOwner,
+        content:
+            content ??
+            jsonEncode({
+              'name': body?['agent_name'],
+              'display_name': body?['agent_name'],
+              'picture': picture == null || picture.isEmpty
+                  ? 'https://example.com/kept.png'
+                  : picture,
+            }),
+      ),
+    ];
+  };
+
+  Future<bool> saveProfile(
+    RelayFakeController controller,
+    FakeRegistry registry, {
+    String name = ' Nova ',
+    String? picture,
+    bool current = true,
+    String? key,
+    Future<List<NostrEvent>> Function(NostrFilter)? fetch,
+  }) => controller.updateProfile(
+    community: _community(),
+    pubkey: key ?? fakeAgent,
+    name: name,
+    pictureUrl: picture,
+    isCurrent: () => current,
+    fetch: fetch ?? relayProfile(registry),
+  );
+
+  test('profile changes rename the agent, confirm the relay profile and '
+      'republish the registration', () async {
+    final (controller, registry) = await editableAgent();
+    expect(
+      await saveProfile(
+        controller,
+        registry,
+        picture: 'https://example.com/new.png',
+      ),
+      isTrue,
+    );
+    expect(registry.bodies['/v3/beekeeper/update-agent-profile'], {
+      'agent_pubkey': fakeAgent,
+      'community_url': 'wss://test.${HostedEnvironment.communitySuffix}',
+      'agent_name': 'Nova',
+      'agent_picture_url': 'https://example.com/new.png',
+    });
+    expect(controller.published.single, {
+      'pubkey': fakeAgent,
+      'name': 'Nova',
+      'picture': 'https://example.com/new.png',
+    });
+    expect(controller.agents.single['agent_name'], 'Nova');
+  });
+
+  test('a rename alone keeps the stored picture in the registration', () async {
+    final (controller, registry) = await editableAgent();
+    expect(await saveProfile(controller, registry), isTrue);
+    expect(
+      registry
+          .bodies['/v3/beekeeper/update-agent-profile']?['agent_picture_url'],
+      '',
+    );
+    expect(
+      controller.published.single['picture'],
+      'https://example.com/kept.png',
+    );
+  });
+
+  test(
+    'an unconfirmed or foreign relay profile does not report success',
+    () async {
+      final (controller, registry) = await editableAgent();
+      final stale = jsonEncode({'name': 'Scout'});
+      expect(
+        await saveProfile(
+          controller,
+          registry,
+          fetch: relayProfile(registry, content: stale),
+        ),
+        isFalse,
+      );
+      expect(controller.failure, contains('not confirmed'));
+      expect(
+        await saveProfile(
+          controller,
+          registry,
+          fetch: relayProfile(registry, owner: _keys('9')),
+        ),
+        isFalse,
+      );
+      expect(
+        await saveProfile(
+          controller,
+          registry,
+          picture: 'https://example.com/new.png',
+          fetch: relayProfile(
+            registry,
+            content: jsonEncode({'name': 'Nova', 'picture': 'old.png'}),
+          ),
+        ),
+        isFalse,
+      );
+      expect(controller.published, isEmpty);
+    },
+  );
+
+  test('profile writes reject invalid names, stale community, foreign agents, '
+      'another binding and server refusal', () async {
+    final (controller, registry) = await editableAgent();
+    expect(await saveProfile(controller, registry, name: 'no/slash'), isFalse);
+    expect(controller.failure, contains('1 to 64'));
+    expect(await saveProfile(controller, registry, current: false), isFalse);
+    expect(await saveProfile(controller, registry, key: 'a' * 64), isFalse);
+    registry.bound = 'a' * 64;
+    expect(await saveProfile(controller, registry), isFalse);
+    expect(registry.calls, isNot(contains('update-agent-profile')));
+    registry.bound = fakeOwner.public;
+    registry.rejectProfile = true;
+    expect(await saveProfile(controller, registry), isFalse);
+    expect(controller.published, isEmpty);
+    expect(controller.agents.single['agent_name'], 'Scout');
+  });
+
   test('model catalog rejects malformed reasoning choices', () async {
     final (controller, registry) = await editableAgent();
     registry.models = [

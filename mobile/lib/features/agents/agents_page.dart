@@ -29,6 +29,7 @@ import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/theme/buzz_icons.dart';
 import 'agent_card_grid.dart';
 import 'delete_agent_action.dart';
+import 'edit_agent_profile_page.dart';
 import 'agent_identity_sections.dart';
 import 'bestie_agent_action.dart';
 
@@ -110,10 +111,19 @@ class _AgentsNavigation extends HookConsumerWidget {
                       pubkey: pubkey,
                       controller: controller,
                     ),
-                    agentSettings: (_) => DeleteAgentAction(
-                      asSettingsRow: true,
-                      controller: controller,
-                      pubkey: pubkey,
+                    agentSettings: (_) => Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        EditAgentProfileAction(
+                          controller: controller,
+                          pubkey: pubkey,
+                        ),
+                        DeleteAgentAction(
+                          asSettingsRow: true,
+                          controller: controller,
+                          pubkey: pubkey,
+                        ),
+                      ],
                     ),
                   ),
                 );

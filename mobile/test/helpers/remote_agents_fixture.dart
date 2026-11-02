@@ -42,6 +42,7 @@ class FakeRegistry extends BuilderlabAccountClient {
   ValueListenable<String?> get subjectChanges => _changes;
   bool failInstructions = false;
   bool ignoreModelUpdate = false;
+  bool rejectProfile = false;
   List<Map<String, dynamic>> models = [
     {
       'id': 'test-model',
@@ -133,6 +134,16 @@ class FakeRegistry extends BuilderlabAccountClient {
           ];
         }
         return {};
+      case '/v3/beekeeper/update-agent-profile':
+        if (rejectProfile) throw AccountFailure.rejected;
+        listed = [
+          for (final row in listed)
+            if (row['agent_pubkey'] == body['agent_pubkey'])
+              {...row, 'agent_name': body['agent_name']}
+            else
+              row,
+        ];
+        return {};
       case '/v3/beekeeper/delete-agent':
         expect(body, {'agent_id': 'remote-id'});
         return {'status': deleteStatus};
@@ -153,9 +164,13 @@ class RelayFakeController extends RemoteAgentController {
   bool rejectRemoval = false;
   FakeRegistry get registry => account as FakeRegistry;
 
+  /// The registrations this controller published, newest last.
+  final published = <Map<String, dynamic>>[];
+
   @override
   Future<void> publishPolicy(String relay, Map<String, dynamic> setup) async {
     registry.calls.add('publish-policy');
+    published.add(setup);
   }
 
   @override
