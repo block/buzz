@@ -165,7 +165,7 @@ class _MarkdownLabelEntityMd extends InlineMd {
 // syntax matches them, shown as themselves.
 class _MarkdownEscapeMd extends InlineMd {
   @override
-  RegExp get exp => RegExp('${shieldedMarkdownEscape.pattern}+');
+  RegExp get exp => RegExp('(?:${shieldedMarkdownEscape.pattern})+');
 
   @override
   InlineSpan span(

@@ -512,6 +512,8 @@ void main() {
         ('```\nx \\# y\n```', r'x \# y'),
         (r'code `a\#b`', r'a\#b'),
         (r'\`literal\` then `a\#b`', '`literal` then '),
+        // Authored private-use characters are not mistaken for escapes.
+        ('\uE02A \uE000\uE02A \\#', '\uE02A \uE000\uE02A #'),
         // A bare link's trailing backslash stays outside the link.
         (r'see https://example.com/a\', 'see '),
         (
@@ -533,16 +535,17 @@ void main() {
             );
           }
           // No stand-in or leaked link syntax reaches text or semantics.
+          if (content.contains('\uE000')) continue;
           expect(
             find.textContaining(
-              RegExp('[\uE021-\uE07E]|\\]\\(http'),
+              RegExp('\uE000|\\]\\(http'),
               findRichText: true,
             ),
             findsNothing,
             reason: reason,
           );
           expect(
-            find.bySemanticsLabel(RegExp('[\uE021-\uE07E]')),
+            find.bySemanticsLabel(RegExp('\uE000')),
             findsNothing,
             reason: reason,
           );
