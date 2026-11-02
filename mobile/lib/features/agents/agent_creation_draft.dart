@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 
@@ -82,8 +83,9 @@ class AgentCreationDraft {
       throw const AgentCardException('This agent card isn’t available.');
     }
     if (response.statusCode != 200) {
-      throw AgentCardException(
-        'Couldn’t load this agent card (HTTP ${response.statusCode}).',
+      debugPrint('agents: agent card HTTP ${response.statusCode}');
+      throw const AgentCardException(
+        'Couldn’t load this agent card. Try again later.',
       );
     }
     final Object? json;

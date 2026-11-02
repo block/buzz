@@ -38,11 +38,12 @@ agent. A Builderlab agent card's QR leads to its share page
 
 The app fetches `<avatars CDN>/<id>/agent.json` from the CDN for this build's
 Builderlab environment (`HostedEnvironment.avatarsCdnOrigin`), never from a
-host named by the link. The link carries only the id, so instructions can be
-any length while the QR stays small.
+host named by the link. The link carries only the id, so the QR stays small
+however long the instructions are.
 
 ```json
 {
+  "id": "<id>",
   "name": "Scout",
   "avatarUrl": "https://<avatars CDN>/<id>/<revision>/avatar.png",
   "instructions": "Reply concisely.",
@@ -55,16 +56,23 @@ any length while the QR stays small.
   required. `instructions`, `model` and `reasoningEffort` are optional and left
   for the user when absent. A missing required field or a known field of the
   wrong type makes the card invalid, and no form opens. Other keys, including
-  `v`, are ignored. The card id is opaque to the app.
+  `v` and `description`, are ignored whatever their type. The card id is opaque
+  to the app.
+- Prefilled values are only a draft: Create applies its usual rules, so a name
+  outside 1 to 64 letters, numbers, spaces, dots, hyphens or underscores, or
+  instructions over 20,000 characters, must be edited before Create succeeds.
 - The fetch shares the image loader's limits (`lib/shared/utils/bounded_fetch.dart`):
   it is aborted after 20 seconds without a byte or 5 minutes overall, and a card
   over 2 MB is rejected.
 - `model` and `reasoningEffort` are pre-selected only if the live model catalog
   offers them (the effort only for that model).
 - The link waits for sign-in and community load. It needs Builderlab login and a
-  hosted community that supports remote agents, and is dropped with a message if
-  an unfinished agent setup exists (resume or discard that first) or the card
-  can't be loaded.
+  hosted community that supports remote agents. It reloads the signed-in
+  account's agents first, and is dropped with a message if an unfinished agent
+  setup exists (resume or discard that first) or the card can't be loaded.
+- A link that arrives while Agents is open replaces it only when the list is
+  all that's showing. With a form, profile or dialog open, the link is dropped
+  with a message so unfinished work is kept.
 
 The parser is `lib/shared/deeplink/agent_creation_link.dart`; the card reader
 is `lib/features/agents/agent_creation_draft.dart`.

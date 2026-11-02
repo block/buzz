@@ -215,11 +215,11 @@ void main() {
       '404': ((_, _) async => respond(404), 'This agent card isn’t available.'),
       'redirect': (
         (_, _) async => respond(302),
-        'Couldn’t load this agent card (HTTP 302).',
+        'Couldn’t load this agent card. Try again later.',
       ),
       '500': (
         (_, _) async => respond(500),
-        'Couldn’t load this agent card (HTTP 500).',
+        'Couldn’t load this agent card. Try again later.',
       ),
       'network error': (
         (_, _) async => throw http.ClientException('offline'),

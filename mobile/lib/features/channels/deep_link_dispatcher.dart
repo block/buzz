@@ -138,7 +138,7 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
       if (mounted) {
         ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
           const SnackBar(
-            content: Text('Couldn’t open this agent draft. Reopen the link.'),
+            content: Text('Couldn’t open this agent card. Reopen the link.'),
           ),
           kind: ToastKind.error,
         );

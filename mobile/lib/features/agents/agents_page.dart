@@ -37,6 +37,10 @@ import 'bestie_agent_action.dart';
 
 Route<Channel>? _openAgentsRoute;
 
+/// The open Agents stack's nested navigator, so a link can tell whether
+/// anything is open above its list.
+GlobalKey<NavigatorState>? _openAgentsNavigator;
+
 /// Opens the active community's full-page Agents navigation stack.
 ///
 /// A [draft] from a `buzz://agent/new` link opens [CreateAgentPage] pre-filled
@@ -47,23 +51,39 @@ Future<void> showAgents(
 }) async {
   final container = ProviderScope.containerOf(context);
   final controller = container.read(remoteAgentControllerProvider);
-  unawaited(controller.run(controller.refresh));
   final navigator = Navigator.of(context);
   // A link replaces an Agents stack that is already open instead of stacking
-  // a second one on top of it.
+  // a second one on top of it, but only while it shows just its list: a form,
+  // profile or dialog above it may hold work the user hasn't finished.
   final open = _openAgentsRoute;
   if (draft != null &&
       open != null &&
       open.isActive &&
       open.navigator == navigator) {
+    if (!open.isCurrent ||
+        (_openAgentsNavigator?.currentState?.canPop() ?? false)) {
+      ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+        const SnackBar(
+          content: Text(
+            'Finish or close what’s open in Agents, then reopen the link.',
+          ),
+        ),
+        kind: ToastKind.error,
+      );
+      return;
+    }
     navigator.removeRoute(open);
   }
+  unawaited(controller.run(controller.refresh));
   final route = MaterialPageRoute<Channel>(
     builder: (_) => _AgentsNavigation(controller: controller, draft: draft),
   );
   _openAgentsRoute = route;
   final channel = await navigator.push(route);
-  if (identical(_openAgentsRoute, route)) _openAgentsRoute = null;
+  if (identical(_openAgentsRoute, route)) {
+    _openAgentsRoute = null;
+    _openAgentsNavigator = null;
+  }
   if (channel != null && context.mounted) {
     await Navigator.of(context).push<void>(
       MaterialPageRoute(builder: (_) => ChannelDetailPage(channel: channel)),
@@ -84,6 +104,9 @@ class _AgentsNavigation extends HookConsumerWidget {
     final navigator = useMemoized(() => GlobalKey<NavigatorState>(), [
       communityId,
     ]);
+    if (identical(ModalRoute.of(context), _openAgentsRoute)) {
+      _openAgentsNavigator = navigator;
+    }
     return NavigatorPopHandler<Channel>(
       onPopWithResult: (result) {
         if (navigator.currentState?.canPop() ?? false) {
@@ -288,6 +311,7 @@ class AgentsPage extends HookConsumerWidget {
     // Open a link's draft once: sign in first if needed, then wait for the
     // registry so an unfinished setup is known before anything is offered.
     final draftStep = useRef(draft == null ? _DraftStep.done : _DraftStep.wait);
+    final draftRefreshFor = useRef<String?>(null);
     // Looked up during build: effects cannot read inherited widgets, and
     // snack bars cannot show while a frame is building.
     final messenger = ScaffoldMessenger.maybeOf(context);
@@ -333,6 +357,18 @@ class AgentsPage extends HookConsumerWidget {
           }
           return null;
         }
+        // The setup check below needs this account's registry, which a
+        // sign-in started by the link doesn't reload by itself.
+        final subject = controller.account.account!.subject;
+        if (!controller.loadedForCurrentAccount) {
+          if (draftRefreshFor.value != subject) {
+            draftRefreshFor.value = subject;
+            unawaited(controller.run(controller.refresh));
+          } else {
+            drop('Couldn’t load your agents. Reopen the link to retry.');
+          }
+          return null;
+        }
         if (controller.listingFailed) {
           drop('Couldn’t load your agents. Reopen the link to retry.');
           return null;
@@ -345,7 +381,6 @@ class AgentsPage extends HookConsumerWidget {
         }
         draftStep.value = _DraftStep.done;
         // The checks above hold for this account; the fetch can take minutes.
-        final subject = controller.account.account?.subject;
         final client = ref.read(agentCardClientProvider)();
         unawaited(() async {
           // Hold Create (+) off while the card loads, like an open form does.
@@ -393,6 +428,7 @@ class AgentsPage extends HookConsumerWidget {
         flow.stage,
         community?.id,
         controller.account.account?.subject,
+        controller.loadedForCurrentAccount,
       ],
     );
 

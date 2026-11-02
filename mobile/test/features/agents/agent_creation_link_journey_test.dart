@@ -142,6 +142,23 @@ void main() {
       // Everything stays editable, then Create submits the edited values.
       await tester.enterText(_field('Name'), 'Scout Two');
       await tester.enterText(_field('Instructions'), 'Be formal.');
+
+      // A link arriving now must not discard the open form or its edits.
+      await receive(_link('av_v1'));
+      expect(find.byType(CreateAgentPage), findsOneWidget);
+      expect(find.text('Scout Two'), findsOneWidget);
+      expect(
+        find.text(
+          'Finish or close what’s open in Agents, then reopen the link.',
+        ),
+        findsOneWidget,
+      );
+      expect(_cdnRequests, hasLength(1));
+      ScaffoldMessenger.of(
+        tester.element(find.byType(CreateAgentPage)),
+      ).removeCurrentSnackBar();
+      await tester.pumpAndSettle();
+
       await tester.ensureVisible(find.text('Thinking'));
       await tester.tap(find.text('Thinking'));
       await tester.pumpAndSettle();
