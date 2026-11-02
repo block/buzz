@@ -25,10 +25,11 @@ Future<void> openChannelLink({
   );
 }
 
-/// Taps still resolving, keyed by community scope and channel id, so a
-/// repeated tap during a slow lookup doesn't open the channel twice while a
-/// tap in another community isn't blocked by a lookup it will discard.
-final _resolving = <String>{};
+/// Taps still resolving, so a repeated tap during a slow lookup doesn't open
+/// the channel twice. Each is keyed by the connection it was made on: the
+/// relay config is replaced on every community or identity switch, even back
+/// to an earlier one, so a lookup that will be discarded blocks no new tap.
+final _resolving = <(RelayConfig, String)>{};
 
 /// Resolves [channelId] for a tap that opens it, or shows why it can't be
 /// opened and returns null.
@@ -43,7 +44,7 @@ Future<Channel?> resolveChannelToOpen(
   WidgetRef ref,
   String channelId,
 ) async {
-  final key = '${_scope(ref)} $channelId';
+  final key = (ref.read(relayConfigProvider), channelId);
   if (!_resolving.add(key)) return null;
   try {
     return await _resolve(context, ref, channelId);
@@ -52,11 +53,6 @@ Future<Channel?> resolveChannelToOpen(
   }
 }
 
-String _scope(WidgetRef ref) => channelDirectoryScope(
-  ref.read(relayConfigProvider).baseUrl,
-  ref.read(myPubkeyProvider),
-);
-
 Future<Channel?> _resolve(
   BuildContext context,
   WidgetRef ref,
@@ -64,7 +60,7 @@ Future<Channel?> _resolve(
 ) async {
   final notifier = ref.read(channelsProvider.notifier);
   final messenger = ScaffoldMessenger.of(context);
-  final startScope = _scope(ref);
+  final connection = ref.read(relayConfigProvider);
   Channel? channel;
   Object? failure;
   try {
@@ -79,8 +75,11 @@ Future<Channel?> _resolve(
   } catch (error) {
     failure = error;
   }
-  // The tap belongs to the community it was made in.
-  if (!context.mounted || _scope(ref) != startScope) return null;
+  // The tap belongs to the connection it was made on.
+  if (!context.mounted ||
+      !identical(ref.read(relayConfigProvider), connection)) {
+    return null;
+  }
   if (channel != null) {
     notifier.rememberOpened(channel);
     return channel;

@@ -14105,7 +14105,7 @@ void main() {
     }
 
     testWidgets(
-      'a channel link tap in a new community is not blocked by the old lookup',
+      'a channel link tap after a community switch is not blocked by the old lookup',
       (tester) async {
         final relay = _ChannelMetadataRelaySession(
           metas: [
@@ -14142,7 +14142,10 @@ void main() {
         final initialPushCount = observer.pushCount;
         await tester.tap(find.text('#random', findRichText: true));
         await tester.pump();
-        relayConfig.switchCommunity();
+        // Away and back again before the first lookup settles.
+        relayConfig.switchTo('https://other.example');
+        await tester.pump();
+        relayConfig.switchTo('https://relay.example');
         await tester.pump();
         await tester.tap(find.text('#random', findRichText: true));
         await tester.pump();
@@ -14153,7 +14156,7 @@ void main() {
 
         relay.gate.complete();
         await tester.pumpAndSettle();
-        // The old community's lookup is dropped; the new tap opens once.
+        // The lookup from before the switch is dropped; the new tap opens once.
         expect(observer.pushCount, initialPushCount + 1);
       },
     );
@@ -18251,8 +18254,8 @@ class _SwitchableRelayConfigNotifier extends RelayConfigNotifier {
   @override
   RelayConfig build() => const RelayConfig(baseUrl: 'https://relay.example');
 
-  void switchCommunity() =>
-      state = const RelayConfig(baseUrl: 'https://other.example');
+  // Each switch is a new config, as the app makes one per connection.
+  void switchTo(String baseUrl) => state = RelayConfig(baseUrl: baseUrl);
 }
 
 class _ChannelMetadataRelaySession extends _IdentityUpdateRelaySession {
