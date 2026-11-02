@@ -66,7 +66,7 @@ extension _ChannelListChanges on ChannelsNotifier {
     try {
       final unsubscribe = await _lifecycleRef
           .read(relaySessionProvider.notifier)
-          .subscribe(
+          .subscribeWithStatus(
             NostrFilter(
               kinds: _channelListNoticeKinds,
               tags: {
@@ -81,10 +81,27 @@ extension _ChannelListChanges on ChannelsNotifier {
               if (generation != _listNoticesGeneration) return;
               closed = true;
               _listNoticesUnsubscribe = null;
+              _listNoticesInterrupted = false;
               debugPrint(
                 '[ChannelsNotifier] channel list notices closed: $message',
               );
-              _retryChannelListNotices(myPk);
+              if (_isRelayCapacityClose(message)) {
+                _retryChannelListNotices(myPk);
+              } else {
+                _listNoticesRefused = true;
+              }
+            },
+            // RelaySession reopens a REQ the relay closed for a transient
+            // reason itself, and reports it only here.
+            onStatusChanged: (status) {
+              if (generation != _listNoticesGeneration) return;
+              if (status == RelaySubscriptionStatus.retrying) {
+                _listNoticesInterrupted = true;
+              } else if (_listNoticesInterrupted) {
+                _listNoticesInterrupted = false;
+                _listNoticesReopened = true;
+                _scheduleListRead();
+              }
             },
           );
       if (generation != _listNoticesGeneration || closed) {
@@ -98,7 +115,8 @@ extension _ChannelListChanges on ChannelsNotifier {
         _scheduleListRead();
       }
     } catch (error) {
-      if (generation != _listNoticesGeneration) return;
+      // A refusal before readiness also throws; onClosed has handled it.
+      if (generation != _listNoticesGeneration || _listNoticesRefused) return;
       debugPrint('[ChannelsNotifier] channel list notices failed: $error');
       _retryChannelListNotices(myPk);
     }
@@ -121,11 +139,19 @@ extension _ChannelListChanges on ChannelsNotifier {
     _listNoticesGeneration++;
     _listNoticesRetry.cancel();
     _listNoticesReopened = false;
+    _listNoticesInterrupted = false;
+    _listNoticesRefused = false;
     _listNoticesUnsubscribe?.call();
     _listNoticesUnsubscribe = null;
     _listNoticesSubscribed = false;
   }
 }
+
+/// Whether the relay closed a REQ for lack of capacity, which can clear on
+/// its own. Its other terminal reasons (`restricted:`, `invalid:` and so on)
+/// cannot succeed unchanged on this connection, so those REQs are not retried.
+bool _isRelayCapacityClose(String message) =>
+    message.trim().toLowerCase().startsWith('error: too many subscriptions');
 
 String? _systemMessageType(NostrEvent event) {
   try {

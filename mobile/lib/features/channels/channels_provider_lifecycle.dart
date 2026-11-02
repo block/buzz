@@ -30,6 +30,7 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
       channelIds,
     ).map(_liveChunkKey).toSet();
     _terminallyClosedLiveChunks.retainAll(desiredKeys);
+    _refusedLiveChunks.retainAll(desiredKeys);
     _liveFence = fence;
     final subscriptionVersion = ++_subscriptionVersion;
 
@@ -87,7 +88,8 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     for (final chunk in desiredChunks) {
       final chunkKey = _liveChunkKey(chunk);
       if (_liveSubscriptionsByChunk.containsKey(chunkKey) ||
-          _terminallyClosedLiveChunks.contains(chunkKey)) {
+          _terminallyClosedLiveChunks.contains(chunkKey) ||
+          _refusedLiveChunks.contains(chunkKey)) {
         continue;
       }
       if (!await _subscribeLiveChunk(
@@ -130,7 +132,7 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     final subscription = _LiveChunkSubscription(generation);
     _liveSubscriptionsByChunk[chunkKey] = subscription;
     try {
-      final unsubscribe = await session.subscribe(
+      final unsubscribe = await session.subscribeWithStatus(
         NostrFilter(
           // Metadata edits say a listed channel was renamed or redescribed.
           kinds: [...EventKind.channelEventKinds, EventKind.nip29EditMetadata],
@@ -153,6 +155,21 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
         },
         onClosed: (message) =>
             _handleLiveChunkClosed(chunkKey, generation, message),
+        // RelaySession reopens a REQ the relay closed for a transient reason
+        // itself, and reports it only here.
+        onStatusChanged: (status) {
+          if (!_lifecycleRef.mounted ||
+              _liveSubscriptionsByChunk[chunkKey] != subscription) {
+            return;
+          }
+          if (status == RelaySubscriptionStatus.retrying) {
+            subscription.interrupted = true;
+          } else if (subscription.interrupted) {
+            subscription.interrupted = false;
+            _reopenedLiveChunks.add(chunkKey);
+            _scheduleListRead();
+          }
+        },
       );
       subscription.unsubscribe = unsubscribe;
       if (!_lifecycleRef.mounted || !fence.isCurrent) {
@@ -295,12 +312,18 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     _liveSubscriptionsByChunk.remove(chunkKey);
     // RelaySession calls onClosed only for terminal admission failures. Its
     // transient/rate-limit retries have their own backoff. Retry only this
-    // REQ, with backoff, rather than a fresh membership/history read.
+    // REQ, with backoff, rather than a fresh membership/history read, and
+    // only when the relay was short of capacity: a refusal for any other
+    // reason waits for the next connection.
     if (chunkChannelIdsForLiveSubscriptions(
       _desiredLiveChannelIds,
     ).any((chunk) => _liveChunkKey(chunk) == chunkKey)) {
-      _terminallyClosedLiveChunks.add(chunkKey);
-      _retryClosedLiveChunks();
+      if (_isRelayCapacityClose(message)) {
+        _terminallyClosedLiveChunks.add(chunkKey);
+        _retryClosedLiveChunks();
+      } else {
+        _refusedLiveChunks.add(chunkKey);
+      }
     }
     debugPrint(
       '[ChannelsNotifier] live subscription closed by relay: $message',
@@ -360,7 +383,8 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
       }
       if (_liveSubscriptionsByChunk.containsKey(chunkKey)) {
         _reopenedLiveChunks.add(chunkKey);
-      } else if (_lifecycleRef.mounted) {
+      } else if (_lifecycleRef.mounted &&
+          !_refusedLiveChunks.contains(chunkKey)) {
         _terminallyClosedLiveChunks.add(chunkKey);
       }
       if (!proceed) break;
@@ -381,11 +405,15 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
   /// reopening is checked the same way, so a relay that admits a REQ and then
   /// closes it costs no reads.
   void _noteReopenedSubscriptions() {
-    if (_listNoticesReopened && _listNoticesUnsubscribe != null) {
+    if (_listNoticesReopened &&
+        _listNoticesUnsubscribe != null &&
+        !_listNoticesInterrupted) {
       _channelListChanges++;
     }
     _listNoticesReopened = false;
-    if (_reopenedLiveChunks.any(_liveSubscriptionsByChunk.containsKey)) {
+    if (_reopenedLiveChunks.any(
+      (key) => _liveSubscriptionsByChunk[key]?.interrupted == false,
+    )) {
       _channelListChanges++;
     }
     _reopenedLiveChunks.clear();
@@ -444,6 +472,7 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     _notifyUnreadReadinessChanged();
     _desiredLiveChannelIds = const {};
     _terminallyClosedLiveChunks.clear();
+    _refusedLiveChunks.clear();
     _liveChunksRetry.cancel();
     _reopenedLiveChunks.clear();
     _liveFence = null;
@@ -479,6 +508,8 @@ class _LiveChunkSubscription {
 
   final int generation;
   void Function()? unsubscribe;
+  // Closed by the relay and being reopened by RelaySession itself.
+  bool interrupted = false;
 }
 
 /// Retries a failed subscription or read after a jittered backoff that starts

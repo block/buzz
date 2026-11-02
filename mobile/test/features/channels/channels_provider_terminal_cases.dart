@@ -33,29 +33,21 @@ void _terminalSubscriptionTests() {
           final logsAfterClose = logs.length;
 
           // Virtual time permits many immediate retries on the broken path.
-          // The refused chunk is retried alone, after a backoff, not at once.
+          // A refusal that cannot clear is never retried on this connection,
+          // and it reads nothing.
           for (var i = 0; i < 20; i++) {
             clock.elapse(const Duration(milliseconds: 10));
           }
+          clock.elapse(const Duration(minutes: 10));
           expect(session.rejectionCount, 1);
           expect(session.totalSubscribeCount, 1);
-          expect(logs.length, logsAfterClose);
-          expect(clock.periodicTimerCount, 0);
-          expect(clock.nonPeriodicTimerCount, 1);
-          clock.elapse(const Duration(seconds: 7));
-          expect(session.totalSubscribeCount, 2);
-
-          // Then ever less often (5s doubling to 5 minutes, +/-25%), and never
-          // with a list or history read.
-          clock.elapse(const Duration(minutes: 10));
-          expect(session.totalSubscribeCount, inInclusiveRange(7, 8));
-          expect(session.rejectionCount, session.totalSubscribeCount);
           expect(session.membershipRequestCount, initialMemberships);
           expect(session.historyFilters.length, historyAfterClose);
           expect(session.queryBatches.length, batchesAfterClose);
           expect(session.activeSubscriptionCount, 0);
+          expect(logs.length, logsAfterClose);
           expect(clock.periodicTimerCount, 0);
-          expect(clock.nonPeriodicTimerCount, 1);
+          expect(clock.nonPeriodicTimerCount, 0);
           expect(
             container.read(channelsProvider).requireValue.single.id,
             _channelA,
@@ -75,6 +67,7 @@ void _terminalSubscriptionTests() {
         }
         clock.elapse(const Duration(minutes: 10));
         expect(clock.pendingTimers, isEmpty);
+        expect(session.totalSubscribeCount, 1);
       },
     );
   }

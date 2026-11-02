@@ -13,6 +13,7 @@ import '../../helpers/fake_relay.dart';
 
 const _channel = '11111111-1111-4111-8111-111111111111';
 const _added = '22222222-2222-4222-8222-222222222222';
+const _third = '33333333-3333-4333-8333-333333333333';
 
 void main() {
   final binding = TestWidgetsFlutterBinding.ensureInitialized();
@@ -329,6 +330,75 @@ void main() {
         async.elapse(const Duration(seconds: 3));
         expect(membershipReads(), 4);
         expect(names(), refused == 'notices' ? ['general'] : ['live']);
+        async.elapse(const Duration(minutes: 1));
+
+        // The relay closes it for a reason that may clear, and the relay
+        // session reopens it itself a second later. What changed meanwhile
+        // is not replayed, so the list catches up once.
+        relay.closeLive(refusedReq, 'error: relay busy');
+        if (refused == 'notices') {
+          replace(roster(_added));
+          notice(EventKind.memberAddedNotification, _added);
+        } else {
+          rename('reopened');
+        }
+        async.elapse(const Duration(seconds: 2));
+        expect(reqs(refusedReq), 5);
+        expect(membershipReads(), 4);
+        async.elapse(const Duration(seconds: 2));
+        expect(membershipReads(), 5);
+        expect(
+          names(),
+          unorderedEquals(
+            refused == 'notices' ? ['general', 'added'] : ['reopened'],
+          ),
+        );
+        async.elapse(const Duration(minutes: 5));
+        expect(membershipReads(), 5);
+
+        // One reopened and then closed again before its read is due counts
+        // only once it stays up: here, after two more refusals (1s, 2s, 4s).
+        relay.closeLive(refusedReq, 'error: relay busy');
+        async.elapse(const Duration(milliseconds: 1500));
+        expect(reqs(refusedReq), 6);
+        relay
+          ..closeLive(refusedReq, 'error: relay busy')
+          ..refuseReq(refusedReq, 'error: relay busy')
+          ..refuseReq(refusedReq, 'error: relay busy');
+        async.elapse(const Duration(milliseconds: 6500));
+        expect(reqs(refusedReq), 8);
+        expect(membershipReads(), 5);
+        async.elapse(const Duration(seconds: 5));
+        expect(reqs(refusedReq), 9);
+        expect(membershipReads(), 6);
+        async.elapse(const Duration(minutes: 5));
+        expect(membershipReads(), 6);
+
+        // Dropped as over the limit, it is retried after about 5s, but the
+        // relay now refuses it for good. That can't clear on this
+        // connection, so it is left alone.
+        relay
+          ..closeLive(refusedReq, full)
+          ..refuseReq(refusedReq, 'restricted: not allowed');
+        async.elapse(const Duration(seconds: 7));
+        expect(reqs(refusedReq), 10);
+        async.elapse(const Duration(minutes: 10));
+        expect(reqs(refusedReq), 10);
+        expect(membershipReads(), 6);
+
+        // A new connection tries it again, and reads the list.
+        void lifecycle(AppLifecycleState state) =>
+            binding.handleAppLifecycleStateChanged(state);
+        lifecycle(AppLifecycleState.inactive);
+        lifecycle(AppLifecycleState.hidden);
+        lifecycle(AppLifecycleState.paused);
+        async.elapse(const Duration(minutes: 1));
+        lifecycle(AppLifecycleState.hidden);
+        lifecycle(AppLifecycleState.inactive);
+        lifecycle(AppLifecycleState.resumed);
+        async.elapse(const Duration(seconds: 1));
+        expect(reqs(refusedReq), 11);
+        expect(membershipReads(), 7);
       });
     });
   }
@@ -431,6 +501,73 @@ void main() {
         expect(membershipReads(), 3);
         expect(relay.reqsBeforeAuth, isEmpty);
         expect(channels.read().requireValue.single.name, 'general');
+
+        // A read after a reconnect or a resume that fails is retried, so
+        // what changed while away still shows up.
+        List<String> names() => [
+          for (final channel in channels.read().requireValue) channel.name,
+        ];
+        void addChannel(String id, String name) => relay.seed([
+          relay.sign(
+            kind: 39002,
+            tags: [
+              ['d', id],
+              ['p', relay.pubkey],
+            ],
+          ),
+          relay.sign(
+            kind: 39000,
+            tags: [
+              ['d', id],
+              ['name', name],
+              ['t', 'stream'],
+              ['public'],
+            ],
+          ),
+        ]);
+        void failNextMembershipRead() => relay.failQuery(
+          (f) => f.containsKey('#p') && (f['kinds'] as List).contains(39002),
+        );
+
+        lifecycle(AppLifecycleState.inactive);
+        lifecycle(AppLifecycleState.hidden);
+        lifecycle(AppLifecycleState.paused);
+        async.elapse(const Duration(minutes: 3));
+        addChannel(_added, 'added');
+        failNextMembershipRead();
+        lifecycle(AppLifecycleState.hidden);
+        lifecycle(AppLifecycleState.inactive);
+        lifecycle(AppLifecycleState.resumed);
+        settle();
+        expect(membershipReads(), 4);
+        expect(names(), ['general']);
+        async.elapse(const Duration(seconds: 7));
+        expect(membershipReads(), 5);
+        expect(names(), unorderedEquals(['general', 'added']));
+        async.elapse(const Duration(minutes: 1));
+
+        lifecycle(AppLifecycleState.inactive);
+        lifecycle(AppLifecycleState.hidden);
+        lifecycle(AppLifecycleState.paused);
+        // Back within the session's 5s grace, so it stays connected.
+        async.elapse(const Duration(seconds: 1));
+        addChannel(_third, 'third');
+        failNextMembershipRead();
+        lifecycle(AppLifecycleState.hidden);
+        lifecycle(AppLifecycleState.inactive);
+        lifecycle(AppLifecycleState.resumed);
+        settle();
+        expect(
+          container.read(relaySessionProvider).status,
+          SessionStatus.connected,
+        );
+        expect(membershipReads(), 6);
+        expect(names(), unorderedEquals(['general', 'added']));
+        async.elapse(const Duration(seconds: 7));
+        expect(membershipReads(), 7);
+        expect(names(), unorderedEquals(['general', 'added', 'third']));
+        async.elapse(const Duration(minutes: 10));
+        expect(membershipReads(), 7);
       });
     },
   );

@@ -66,7 +66,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   Set<String> _desiredLiveChannelIds = const {};
   int _subscriptionVersion = 0;
   int _nextLiveChunkGeneration = 0;
+  // Closed by the relay for capacity, so retried with backoff.
   final Set<String> _terminallyClosedLiveChunks = {};
+  // Refused for good, so left alone until the next connection.
+  final Set<String> _refusedLiveChunks = {};
   String? _subscriptionRelayBaseUrl;
   // The refresh whose channels the live chunks currently cover.
   _ChannelRefreshFence? _liveFence;
@@ -81,6 +84,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   final _listReadRetry = _Backoff();
   void Function()? _listNoticesUnsubscribe;
   bool _listNoticesSubscribed = false;
+  // Refused for good, so left alone until the next connection.
+  bool _listNoticesRefused = false;
+  // Closed by the relay and being reopened by RelaySession itself.
+  bool _listNoticesInterrupted = false;
   int _listNoticesGeneration = 0;
   final _listNoticesRetry = _Backoff();
   final _liveChunksRetry = _Backoff();
@@ -243,8 +250,16 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         // so this refresh retries anything refused at once, and any later
         // refusal backs off afresh.
         _terminallyClosedLiveChunks.clear();
+        _refusedLiveChunks.clear();
         _liveChunksRetry.cancel();
         _listNoticesRetry.cancel();
+        if (_listNoticesRefused) {
+          _listNoticesRefused = false;
+          _listNoticesSubscribed = false;
+        }
+        // Live events sent while disconnected are not replayed, so the list
+        // may have changed. Counting that lets a failed read be retried.
+        _channelListChanges++;
         unawaited(_refreshInBackground(queueIfBusy: true));
       }
     });
@@ -262,7 +277,18 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         // A fast reconnect may already have reconciled before this callback.
         if (connectionVersion == versionBeforeResume &&
             ref.read(relaySessionProvider).status == SessionStatus.connected) {
-          refresh();
+          // As for a reconnect, a failed read is retried.
+          final changes = ++_channelListChanges;
+          final generation = _buildGeneration;
+          unawaited(
+            refresh().then((_) {
+              if (ref.mounted &&
+                  generation == _buildGeneration &&
+                  _channelListChangesRead < changes) {
+                _listReadRetry.schedule(_readListIfChanged);
+              }
+            }),
+          );
         }
       });
     });
