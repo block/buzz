@@ -128,13 +128,14 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
       added |= !_wanted.containsKey(key);
       _wanted[key] ??= ++_interest;
     }
+    // A key's interest is set once, when it is inserted, so the map's
+    // insertion order is interest order and the oldest key is the first. A
+    // scan per eviction made one 4,000-member roster take ~300 ms on device.
     while (_wanted.length > _wantedLimit) {
-      final oldest = _wanted.entries.reduce(
-        (a, b) => a.value < b.value ? a : b,
-      );
-      _wanted.remove(oldest.key);
-      _heads.remove(oldest.key);
-      _checked.remove(oldest.key);
+      final oldest = _wanted.keys.first;
+      _wanted.remove(oldest);
+      _heads.remove(oldest);
+      _checked.remove(oldest);
       added = true;
     }
     if (!added) return;

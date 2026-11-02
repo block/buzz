@@ -102,6 +102,23 @@ void main() {
     expect(sizes..sort(), [2, 128]);
   });
 
+  journey('a large roster keeps the 1,024 most recently tracked subjects', (h) {
+    String key(int i) => i.toRadixString(16).padLeft(64, '0');
+    h.start([for (var i = 0; i < 10; i++) key(i)]);
+    final before = h.dFilters.length;
+    // Tracking a subject again does not refresh its age.
+    h.container.read(verifiedProfilesProvider.notifier).track([
+      key(0),
+      for (var i = 10; i < 4300; i++) key(i),
+    ]);
+    h.settle();
+    final subscribed = {
+      for (final f in h.dFilters.skip(before))
+        ...(f['#d'] as List).cast<String>(),
+    };
+    expect(subscribed, {for (var i = 4300 - 1024; i < 4300; i++) key(i)});
+  });
+
   journey('live updates, retractions and ordering apply on the subscription', (
     h,
   ) {
