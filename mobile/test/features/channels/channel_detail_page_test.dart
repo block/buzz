@@ -10648,6 +10648,64 @@ void main() {
       );
     }
 
+    for (final left in [false, true]) {
+      testWidgets('collapses mixed membership runs into one row, left=$left', (
+        tester,
+      ) async {
+        NostrEvent change(String id, String actor, String target, int at) =>
+            _systemMsg(
+              id: id,
+              payload: {
+                'type': left ? 'member_left' : 'member_joined',
+                'actor': actor,
+                'target': target,
+              },
+              createdAt: at,
+            );
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              change('sys1', 'alice', 'alice', 1000),
+              if (left)
+                change('sys2', 'bob', 'bob', 1600)
+              else
+                change('sys2', 'carol', 'bob', 1600),
+              change('sys3', 'dave', 'dave', 2200),
+              change('sys4', 'erin', 'erin', 2800),
+            ],
+            users: {
+              for (final name in ['alice', 'bob', 'carol', 'dave', 'erin'])
+                name: UserProfile(pubkey: name, displayName: name),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('system-message-row-sys1')),
+          findsOneWidget,
+        );
+        for (final id in ['sys2', 'sys3', 'sys4']) {
+          expect(find.byKey(ValueKey('system-message-row-$id')), findsNothing);
+        }
+        expect(
+          findRichText(
+            left
+                ? 'left the channel along with '
+                : 'joined the channel along with ',
+          ),
+          findsOneWidget,
+        );
+        expect(findRichText('and 2 others'), findsOneWidget);
+        await tester.tap(find.text('See all'));
+        await tester.pumpAndSettle();
+        expect(
+          find.text(left ? 'Members who left' : 'New members'),
+          findsOneWidget,
+        );
+      });
+    }
+
     testWidgets('aligns grouped reactions with the system message content', (
       tester,
     ) async {

@@ -322,18 +322,33 @@ class _SystemMessageRow extends HookConsumerWidget {
   }
 }
 
+enum _MembershipDisplayKind {
+  /// Everyone joined on their own.
+  selfJoined,
+
+  /// One person added everyone.
+  added,
+
+  /// A mix of self-joins and additions, or additions by several people.
+  arrived,
+  removed,
+  left,
+}
+
 class _MembershipDisplayEvent {
+  final _MembershipDisplayKind kind;
+
+  /// The adder or remover; null when the row leads with the first target.
   final String? actorPubkey;
   final List<String> targetPubkeys;
-  final bool isSelfJoin;
-  final bool isRemoval;
 
   const _MembershipDisplayEvent({
+    required this.kind,
     required this.actorPubkey,
     required this.targetPubkeys,
-    required this.isSelfJoin,
-    required this.isRemoval,
   });
+
+  bool get leadsWithTarget => actorPubkey == null;
 }
 
 _MembershipDisplayEvent? _membershipDisplayEvent(
@@ -341,43 +356,58 @@ _MembershipDisplayEvent? _membershipDisplayEvent(
 ) {
   if (messages.isEmpty) return null;
 
-  final first = messages.first.systemEvent;
-  final firstActor = first?.actorPubkey?.trim().toLowerCase();
-  final firstTarget = first?.targetPubkey?.trim().toLowerCase();
-  if ((first?.type != SystemEventType.memberJoined &&
-          first?.type != SystemEventType.memberRemoved) ||
-      firstActor == null ||
-      firstActor.isEmpty ||
-      firstTarget == null ||
-      firstTarget.isEmpty) {
+  final type = messages.first.systemEvent?.type;
+  if (type != SystemEventType.memberJoined &&
+      type != SystemEventType.memberRemoved &&
+      type != SystemEventType.memberLeft) {
     return null;
   }
 
-  final isRemoval = first!.type == SystemEventType.memberRemoved;
-  final isSelfJoin = !isRemoval && firstActor == firstTarget;
+  final actors = <String>{};
   final targets = <String>[];
+  var anySelf = false;
+  var anyAdded = false;
   for (final message in messages) {
     final event = message.systemEvent;
     final actor = event?.actorPubkey?.trim().toLowerCase();
     final target = event?.targetPubkey?.trim().toLowerCase();
-    if (event?.type != first.type ||
+    if (event?.type != type ||
         actor == null ||
         actor.isEmpty ||
         target == null ||
-        target.isEmpty ||
-        (isSelfJoin
-            ? actor != target
-            : actor != firstActor || (!isRemoval && actor == target))) {
+        target.isEmpty) {
       return null;
     }
+    actors.add(actor);
     targets.add(target);
+    if (actor == target) {
+      anySelf = true;
+    } else {
+      anyAdded = true;
+    }
+  }
+
+  final kind = switch (type) {
+    SystemEventType.memberLeft => _MembershipDisplayKind.left,
+    SystemEventType.memberRemoved => _MembershipDisplayKind.removed,
+    _ when !anyAdded => _MembershipDisplayKind.selfJoined,
+    _ when !anySelf && actors.length == 1 => _MembershipDisplayKind.added,
+    _ => _MembershipDisplayKind.arrived,
+  };
+  // Grouping keeps removals under one remover; a mixed group would
+  // misattribute them, so render each row on its own instead.
+  if (kind == _MembershipDisplayKind.removed && actors.length != 1) {
+    return null;
   }
 
   return _MembershipDisplayEvent(
-    actorPubkey: isSelfJoin ? null : firstActor,
+    kind: kind,
+    actorPubkey:
+        kind == _MembershipDisplayKind.added ||
+            kind == _MembershipDisplayKind.removed
+        ? actors.single
+        : null,
     targetPubkeys: targets.toSet().toList(),
-    isSelfJoin: isSelfJoin,
-    isRemoval: isRemoval,
   );
 }
 
@@ -441,19 +471,22 @@ class _MembershipSystemMessageContent extends StatelessWidget {
     final firstTarget = event.targetPubkeys.first;
     final additionalTargets = event.targetPubkeys.skip(1).take(1).toList();
     final hiddenCount = event.targetPubkeys.length - 2;
+    final leadsWithTarget = event.leadsWithTarget;
     final actionSpans = <InlineSpan>[
       TextSpan(
-        text: event.isSelfJoin
-            ? 'joined the channel'
-            : event.isRemoval
-            ? 'removed '
-            : 'added ',
+        text: switch (event.kind) {
+          _MembershipDisplayKind.selfJoined ||
+          _MembershipDisplayKind.arrived => 'joined the channel',
+          _MembershipDisplayKind.left => 'left the channel',
+          _MembershipDisplayKind.removed => 'removed ',
+          _MembershipDisplayKind.added => 'added ',
+        },
       ),
-      if (!event.isSelfJoin)
+      if (!leadsWithTarget)
         _systemNameSpan(context, firstTarget, channelId, resolveLabel),
       if (additionalTargets.isNotEmpty)
         TextSpan(
-          text: event.isSelfJoin
+          text: leadsWithTarget
               ? ' along with '
               : additionalTargets.length == 1 && hiddenCount <= 0
               ? ' and '
@@ -469,9 +502,11 @@ class _MembershipSystemMessageContent extends StatelessWidget {
         TextSpan(
           text: ' and $hiddenCount ${hiddenCount == 1 ? 'other' : 'others'}',
         ),
-      if (!event.isSelfJoin)
+      if (!leadsWithTarget)
         TextSpan(
-          text: event.isRemoval ? ' from the channel' : ' to the channel',
+          text: event.kind == _MembershipDisplayKind.removed
+              ? ' from the channel'
+              : ' to the channel',
         ),
       if (hiddenCount > 0) ...[
         const TextSpan(text: '. '),
@@ -483,7 +518,13 @@ class _MembershipSystemMessageContent extends StatelessWidget {
             child: GestureDetector(
               onTap: () => showBuzzModalBottomSheet<void>(
                 context: context,
-                title: event.isRemoval ? 'Removed members' : 'Added members',
+                title: switch (event.kind) {
+                  _MembershipDisplayKind.removed => 'Removed members',
+                  _MembershipDisplayKind.left => 'Members who left',
+                  _MembershipDisplayKind.added => 'Added members',
+                  _MembershipDisplayKind.selfJoined ||
+                  _MembershipDisplayKind.arrived => 'New members',
+                },
                 isScrollControlled: true,
                 showDragHandle: true,
                 builder: (_) => _ActivityMembersSheet(
@@ -504,7 +545,7 @@ class _MembershipSystemMessageContent extends StatelessWidget {
     ];
 
     return _MessageStyleSystemMessageContent(
-      displayPubkey: event.isSelfJoin ? firstTarget : event.actorPubkey!,
+      displayPubkey: event.actorPubkey ?? firstTarget,
       channelId: channelId,
       createdAt: createdAt,
       resolveLabel: resolveLabel,

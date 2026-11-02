@@ -257,26 +257,23 @@ class MainTimelineEntry {
   const MainTimelineEntry({required this.message, this.summary});
 }
 
-const _membershipGroupWindowSeconds = 5 * 60;
+/// Largest gap between adjacent membership changes that still groups them.
+const _membershipGroupGapSeconds = 60 * 60;
 
 @immutable
 class _MembershipChange {
-  final String? actor;
-  final bool isSelfJoin;
+  final String actor;
   final SystemEventType type;
 
-  const _MembershipChange({
-    required this.actor,
-    required this.isSelfJoin,
-    required this.type,
-  });
+  const _MembershipChange({required this.actor, required this.type});
 }
 
 _MembershipChange? _membershipChange(MainTimelineEntry entry) {
   final event = entry.message.systemEvent;
   if (!entry.message.isSystem ||
       (event?.type != SystemEventType.memberJoined &&
-          event?.type != SystemEventType.memberRemoved)) {
+          event?.type != SystemEventType.memberRemoved &&
+          event?.type != SystemEventType.memberLeft)) {
     return null;
   }
 
@@ -285,23 +282,19 @@ _MembershipChange? _membershipChange(MainTimelineEntry entry) {
   if (actor == null || actor.isEmpty || target == null || target.isEmpty) {
     return null;
   }
-
-  final isSelfJoin =
-      event!.type == SystemEventType.memberJoined && actor == target;
-  return _MembershipChange(
-    type: event.type,
-    actor: isSelfJoin ? null : actor,
-    isSelfJoin: isSelfJoin,
-  );
+  return _MembershipChange(type: event!.type, actor: actor);
 }
 
+/// Matches desktop: all arrivals group together whoever added them, all
+/// departures group together, and removals group only under one remover so
+/// the row never attributes a removal to the wrong person.
 bool _membershipChangesCanGroup(
-  _MembershipChange first,
-  _MembershipChange second,
+  _MembershipChange older,
+  _MembershipChange newest,
 ) {
-  return first.type == second.type &&
-      first.isSelfJoin == second.isSelfJoin &&
-      (first.isSelfJoin || first.actor == second.actor);
+  return older.type == newest.type &&
+      (newest.type != SystemEventType.memberRemoved ||
+          older.actor == newest.actor);
 }
 
 bool _isSameLocalDay(int firstTimestamp, int secondTimestamp) {
@@ -312,9 +305,11 @@ bool _isSameLocalDay(int firstTimestamp, int secondTimestamp) {
       first.day == second.day;
 }
 
-/// Groups consecutive matching additions, removals, or self-joins within a
-/// five-minute window into one render item. Other events and local day
-/// boundaries break the group.
+/// Groups consecutive compatible arrivals, departures, or removals into one
+/// render item while each adjacent pair is under an hour apart, matching the
+/// desktop timeline. Other events and local day boundaries break the group.
+/// Groups are anchored on the newest change so prepending older history keeps
+/// loaded groups stable.
 ///
 /// Each inner list is one renderable timeline item. Non-grouped entries are
 /// returned as single-item lists.
@@ -334,16 +329,17 @@ List<List<MainTimelineEntry>> groupMembershipTimelineEntries(
     var start = end;
     while (start > 0) {
       final candidate = entries[start - 1];
+      final next = entries[start];
       final candidateChange = _membershipChange(candidate);
       if (candidateChange == null ||
           !_membershipChangesCanGroup(candidateChange, newestChange) ||
           !_isSameLocalDay(
             candidate.message.createdAt,
-            newestEntry.message.createdAt,
+            next.message.createdAt,
           ) ||
-          newestEntry.message.createdAt < candidate.message.createdAt ||
-          newestEntry.message.createdAt - candidate.message.createdAt >
-              _membershipGroupWindowSeconds) {
+          next.message.createdAt < candidate.message.createdAt ||
+          next.message.createdAt - candidate.message.createdAt >
+              _membershipGroupGapSeconds) {
         break;
       }
       start -= 1;
