@@ -3,11 +3,12 @@ import 'dart:convert';
 
 import 'package:buzz/features/agents/agent_creation_draft.dart';
 import 'package:buzz/features/agents/agents_page.dart';
+import 'package:buzz/main.dart';
+import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'package:buzz/features/agents/create_agent_page.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/deep_link_dispatcher.dart';
-import 'package:buzz/shared/agents/agents_surface.dart';
 import 'package:buzz/shared/agents/remote_agents.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
 import 'package:buzz/shared/widgets/preset_agent_avatar.dart';
@@ -15,6 +16,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'agents_harness.dart';
 
@@ -74,7 +76,7 @@ void main() {
     'a buzz://agent/new?card= link opens an editable draft, never creates',
     (tester) async {
       final h = await AgentsHarness.create();
-      if (!supportsRemoteAgents(h.community)) return;
+      expect(supportsRemoteAgents(h.community), isTrue);
       final links = StreamController<Uri>();
       PendingDeepLinkNotifier.debugUriStreamOverride = links.stream;
       addTearDown(() async {
@@ -88,11 +90,11 @@ void main() {
         overrides: [
           channelsProvider.overrideWith(_NoChannels.new),
           agentCardClientProvider.overrideWithValue(_cdnClient),
-          // Same wiring as buildRootProviderScope.
-          agentCreationSurfaceProvider.overrideWithValue(
-            (context, link) async =>
-                unawaited(showAgents(context, draft: link)),
-          ),
+          // The production root wiring from link dispatch to showAgents.
+          ...buildRootProviderScope(
+            prefs: await SharedPreferences.getInstance(),
+            child: const SizedBox(),
+          ).overrides,
         ],
         home: const DeepLinkDispatcher(child: Scaffold(body: SizedBox())),
       );
@@ -213,5 +215,8 @@ void main() {
       await receive(_link('av_fourth'));
       expect(find.byType(AgentsPage, skipOffstage: false), findsOneWidget);
     },
+    // Remote agents exist only in Builderlab builds; CI runs this file in its
+    // configured-authentication-domains step.
+    skip: !HostedEnvironment.enabled,
   );
 }
