@@ -729,7 +729,7 @@ impl Default for DbConfig {
             read_max_connections: None,
             min_connections: 2,
             acquire_timeout_secs: 3,
-            max_lifetime_secs: 1800,
+            max_lifetime_secs: 300,
             idle_timeout_secs: 600,
             replica_read_max_age_ms: 0,
             usage_metrics_replica_max_age_ms: 30_000,
