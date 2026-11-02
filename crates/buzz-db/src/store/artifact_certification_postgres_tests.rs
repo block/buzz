@@ -150,11 +150,19 @@ async fn recovery_handles_clock_reversal_and_leaves_deleting_communities() {
     assert_eq!(db.recover_artifact_certifications().await.unwrap(), 1);
     assert!(state(&db, community).await.0 > initial.0);
 
+    let mut pending = begin(&db, community).await;
+    pending.record_artifact_change().await.unwrap();
+    pending.commit().await.unwrap();
+    let mut deletion = db.pool().begin().await.unwrap();
+    sqlx::query("SELECT set_config('buzz.deletion_executor_community',$1,true),set_config('buzz.deletion_fence_generation','0',true)")
+        .bind(community.as_uuid().to_string()).execute(&mut *deletion).await.unwrap();
     sqlx::query("UPDATE communities SET deletion_state='quiescing' WHERE id=$1")
         .bind(community.as_uuid())
-        .execute(db.pool())
+        .execute(&mut *deletion)
         .await
         .unwrap();
+    deletion.commit().await.unwrap();
     assert!(db.begin_event_write_transaction(community).await.is_err());
     assert_eq!(db.recover_artifact_certifications().await.unwrap(), 0);
+    assert_eq!(state(&db, community).await.1, 1);
 }
