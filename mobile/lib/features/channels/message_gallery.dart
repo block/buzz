@@ -43,7 +43,8 @@ TrailingImageGallery? extractTrailingImageGallery(
   while (cursor >= 0) {
     final match = imagePattern.firstMatch(lines[cursor].trim());
     if (match == null) break;
-    final url = match.group(2)!;
+    // CommonMark unescapes link destinations, as it does labels below.
+    final url = unshieldMarkdownEscapes(shieldMarkdownEscapes(match.group(2)!));
     final imeta = imetaByUrl[url];
     final mediaKind = classifyMediaUrl(url, imeta: imeta);
     if (mediaKind != MessageMediaKind.image) {
