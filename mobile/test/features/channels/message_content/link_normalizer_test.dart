@@ -187,9 +187,19 @@ void main() {
         expected: '   ~~~\n$url\n   ~~~\n[$url]($url)',
       ),
       (
-        name: 'tilde run indented four spaces is not a fence',
+        name: 'fence opens after deeper indentation',
         input: '    ~~~\n$url',
-        expected: '    ~~~\n[$url]($url)',
+        expected: '    ~~~\n$url',
+      ),
+      (
+        name: 'unclosed fence inside a quote',
+        input: '> ```sh\n> $url',
+        expected: '> ```sh\n> $url',
+      ),
+      (
+        name: 'quoted fence closes inside the quote',
+        input: '> ~~~\n> $url\n> ~~~\n$url',
+        expected: '> ~~~\n> $url\n> ~~~\n[$url]($url)',
       ),
       (
         name: 'fence closer must end its line',
@@ -209,6 +219,17 @@ void main() {
       });
     }
 
+    test('bare links leave a trailing backslash outside the destination', () {
+      expect(
+        normalizeBareLinks(r'see https://example.com/a\'),
+        r'see [https://example.com/a](https://example.com/a)\',
+      );
+      expect(
+        normalizeBareLinks(r'*https://example.com/a\**'),
+        r'*[https://example.com/a](https://example.com/a)\**',
+      );
+    });
+
     test('near-limit fence-like runs on one line complete linearly', () {
       // Each run checks only its own indentation and the rest of its line up
       // to the next character, so a long line of runs is not rescanned.
@@ -216,6 +237,8 @@ void main() {
         'x~~~' * (256 * 1024 ~/ 4),
         '~~~\n${' ~~~' * (256 * 1024 ~/ 4)}',
         '```\n${' ```' * (256 * 1024 ~/ 4)}',
+        '>' * (256 * 1024 - 3) + '~~~',
+        '> ~~~' * (256 * 1024 ~/ 5),
       ]) {
         final watch = Stopwatch()..start();
         final result = normalizeBareLinks(input);

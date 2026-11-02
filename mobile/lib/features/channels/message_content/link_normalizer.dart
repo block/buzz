@@ -101,7 +101,7 @@ bool _isEscaped(String content, int index) {
 }
 
 bool _isOpeningFence(String content, int runStart, int runLength) =>
-    runLength >= 3 && _hasFenceIndentation(content, runStart);
+    runLength >= 3 && _hasFencePrefix(content, runStart);
 
 bool _isClosingFence(
   String content,
@@ -110,7 +110,7 @@ bool _isClosingFence(
   int openerLength,
 ) {
   if (runEnd - runStart < openerLength) return false;
-  if (!_hasFenceIndentation(content, runStart)) return false;
+  if (!_hasFencePrefix(content, runStart)) return false;
   // Stops at the first non-blank character, so each run scans only up to
   // the next one and a long line of runs stays linear.
   for (var i = runEnd; i < content.length; i++) {
@@ -121,15 +121,18 @@ bool _isClosingFence(
   return true;
 }
 
-/// Whether at most three blank characters precede [runStart] on its line.
-/// Looks back at most four characters, so checking many runs on one long
-/// line stays linear.
-bool _hasFenceIndentation(String content, int runStart) {
-  for (var i = runStart - 1; i >= runStart - 4; i--) {
-    if (i < 0 || content[i] == '\n') return true;
-    if (content[i].trim().isNotEmpty) return false;
+/// Whether only blank characters and quote markers (`>`) precede [runStart]
+/// on its line, matching where the renderer opens a fence: gpt_markdown
+/// re-parses quote bodies, and list continuations are indented. The scan
+/// stops at the first other character, so it never crosses an earlier run
+/// and a long line of runs stays linear.
+bool _hasFencePrefix(String content, int runStart) {
+  for (var i = runStart - 1; i >= 0; i--) {
+    final char = content[i];
+    if (char == '\n') return true;
+    if (char != '>' && char.trim().isNotEmpty) return false;
   }
-  return false;
+  return true;
 }
 
 bool _hasInlineCloserOnLine(String content, int start, int delimiterLength) {

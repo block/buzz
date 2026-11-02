@@ -515,7 +515,12 @@ void main() {
         // Authored stand-in characters are not mistaken for escapes.
         ('\uFF0A \u2060\uFF0A \\#', '\uFF0A \u2060\uFF0A #'),
         ('~~~\nx \\# y\n~~~', r'x \# y'),
-        // gpt_markdown shows this unparsed; the stand-in still reads as #.
+        // A fence that never closes is still code inside a quote or list.
+        ('> ```sh\n> echo \\#x', r'echo \#x'),
+        ('- item\n\n      ```\n      echo \\#x', r'echo \#x'),
+        // Known limitation: gpt_markdown's raw-text fallback for this
+        // unclaimed strike skips inline components, so the stand-in shows.
+        // Its fullwidth form still reads as #.
         ('~~a\nb \\#c~~', '\uFF03c'),
         // A bare link's trailing backslash stays outside the link.
         (r'see https://example.com/a\', 'see '),
