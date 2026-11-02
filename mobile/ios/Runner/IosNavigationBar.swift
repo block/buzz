@@ -321,6 +321,8 @@ private final class NavigationContentController: UIViewController {
 }
 
 private final class IosNavigationBarView: NSObject, FlutterPlatformView {
+  /// Far beyond any title collapse range, well within the mirror's content.
+  private static let maxTrackedDepth: CGFloat = 1000
   private let container: NavigationClipView
   private let material = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterial))
   private let materialFade = CAGradientLayer()
@@ -619,7 +621,11 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
 
   private func setScrollOffset(_ value: CGFloat) {
     guard value.isFinite else { return }
-    offset = max(0, value)
+    // The mirror scroll view is finite. Past its end UIKit sees no content
+    // under the bar and drops the scroll-edge blur, so a long chat whose
+    // estimated history depth crosses that end flickers between blurred and
+    // sharp. Only the first few hundred points affect the bar's appearance.
+    offset = min(max(0, value), Self.maxTrackedDepth)
     material.alpha = alwaysFrosted ? 1 : min(1, offset / 12)
     applyScroll()
     reportAvatarBounds()
