@@ -39,7 +39,8 @@ final _resolving = <(Object?, RelayConfig, String)>{};
 /// directory. An open channel outside both is read from its own metadata, as
 /// `buzz://` links do, and remembered so the opened page can find it.
 /// Returns null without feedback for a repeated tap while the first one is
-/// resolving, or when the community or identity changed during the lookup.
+/// resolving, or when the community or identity changed or the user moved to
+/// another page during the lookup.
 Future<Channel?> resolveChannelToOpen(
   BuildContext context,
   WidgetRef ref,
@@ -70,9 +71,14 @@ Future<Channel?> _resolve(
   Object? failure;
   try {
     // A tap can arrive before the first list load finishes. A failed load
-    // still leaves the channel's own metadata, so the tap is a real retry.
+    // still leaves the channel's own metadata, so the tap is a real retry,
+    // but without the list a channel the user belongs to may be unreadable.
     if (!ref.read(channelsProvider).hasValue) {
-      await ref.read(channelsProvider.future).then((_) {}, onError: (_) {});
+      try {
+        await ref.read(channelsProvider.future);
+      } catch (error) {
+        failure = error;
+      }
     }
     channel =
         notifier.channelById(channelId) ??
@@ -80,9 +86,11 @@ Future<Channel?> _resolve(
   } catch (error) {
     failure = error;
   }
-  // The tap belongs to the connection it was made on.
+  // The tap belongs to the connection and page it was made on: once the user
+  // has switched community or moved to another page, it opens nothing.
   if (!context.mounted ||
-      !identical(ref.read(relayConfigProvider), connection)) {
+      !identical(ref.read(relayConfigProvider), connection) ||
+      !(ModalRoute.of(context)?.isCurrent ?? true)) {
     return null;
   }
   if (channel != null) {

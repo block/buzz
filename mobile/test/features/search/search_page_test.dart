@@ -897,6 +897,13 @@ void main() {
     ),
     // A failed channel list still leaves the channel's own metadata.
     ('opens its channel when the channel list failed', true, true, null),
+    // Without the list, a missing channel may be one the user belongs to.
+    (
+      'reports a failure when the channel list failed',
+      false,
+      true,
+      'Could not open the channel',
+    ),
   ]) {
     testWidgets('a message result $name', (tester) async {
       final relay = _ChannelMetadataRelaySession(
