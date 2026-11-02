@@ -1,6 +1,9 @@
 import 'package:flutter/scheduler.dart';
+
 import 'dart:async';
+
 import 'package:buzz/features/channels/composer_send_origin.dart';
+
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
@@ -1181,6 +1184,55 @@ void main() {
 
       expect(sendCount, 1);
       expect(sentContent, 'First line\nSecond line');
+    });
+
+    testWidgets('drops the space iOS dictation adds to an empty composer', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend: (content, mentionPubkeys, {mediaTags = const []}) async {},
+        ),
+      );
+      await _expandComposer(tester);
+      final controller = tester
+          .widget<TextField>(find.byType(TextField))
+          .controller!;
+
+      tester.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: ' hello there',
+          selection: TextSelection.collapsed(offset: 12),
+          composing: TextRange(start: 0, end: 12),
+        ),
+      );
+      await tester.pump();
+      expect(controller.text, 'hello there');
+      expect(controller.selection, const TextSelection.collapsed(offset: 11));
+      expect(controller.value.composing, const TextRange(start: 0, end: 11));
+
+      // Later dictation updates and mid-text spaces are untouched.
+      tester.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: 'hello there friend',
+          selection: TextSelection.collapsed(offset: 18),
+        ),
+      );
+      await tester.pump();
+      expect(controller.text, 'hello there friend');
+
+      // A space typed into an empty composer is kept.
+      controller.clear();
+      await tester.pump();
+      tester.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: ' ',
+          selection: TextSelection.collapsed(offset: 1),
+        ),
+      );
+      await tester.pump();
+      expect(controller.text, ' ');
     });
 
     testWidgets('clears text before the optimistic send completes', (

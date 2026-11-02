@@ -336,6 +336,7 @@ class _ComposeBarLayout extends HookWidget {
       readOnly: readOnly,
       keyboardType: TextInputType.multiline,
       textInputAction: TextInputAction.newline,
+      inputFormatters: [_dictationLeadingSpaceFormatter],
       contextMenuBuilder: contextMenuBuilder,
       // Flutter's Cupertino magnifier rebuilds its overlay on every
       // selection-handle update. Keep the iOS handles and native edit menu,

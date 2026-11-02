@@ -229,6 +229,45 @@ Widget _composerAttachmentPanel({
   preparePhotos: preparePhotos,
 );
 
+/// WORKAROUND for a Flutter engine bug:
+/// https://github.com/flutter/flutter/issues/176283
+///
+/// iOS dictation into an empty Flutter text field inserts a leading space
+/// before the dictated text. Native UIKit fields don't. This drops that
+/// space when a multi-character insertion fills an empty composer. A typed
+/// leading space arrives on its own, so it is kept.
+///
+/// Remove this formatter (and its use in `layout.dart` and its test) once the
+/// Flutter version pinned by Hermit (`bin/.flutter-*.pkg`) includes a fix for
+/// that issue. To check, remove it and dictate into an empty composer on an
+/// iPhone: the text should not start with a space.
+///
+/// Cost: one `isNotEmpty` check per edit when the composer has text.
+final _dictationLeadingSpaceFormatter = TextInputFormatter.withFunction((
+  oldValue,
+  newValue,
+) {
+  final text = newValue.text;
+  if (oldValue.text.isNotEmpty ||
+      text.length < 2 ||
+      text[0] != ' ' ||
+      text[1].trim().isEmpty) {
+    return newValue;
+  }
+  int shift(int offset) => offset > 0 ? offset - 1 : offset;
+  final composing = newValue.composing;
+  return TextEditingValue(
+    text: text.substring(1),
+    selection: newValue.selection.copyWith(
+      baseOffset: shift(newValue.selection.baseOffset),
+      extentOffset: shift(newValue.selection.extentOffset),
+    ),
+    composing: composing.isValid
+        ? TextRange(start: shift(composing.start), end: shift(composing.end))
+        : composing,
+  );
+});
+
 const _pastedImageMimeTypes = <String>[
   'image/jpeg',
   'image/jpg',
