@@ -2848,7 +2848,7 @@ async fn ingest_event_inner(
         // Channel-scoped tokens cannot publish global events — that would bypass
         // the token's channel restriction. This covers kind:1 (global text notes),
         // kind:3 (contact lists), kind:0 (profiles), and kind:9007 (create-group
-        // without an h-tag, which would auto-assign a server UUID).
+        // without an h-tag, which the create path also refuses).
         return Err(IngestError::AuthFailed(
             "restricted: channel-scoped tokens cannot publish global events".into(),
         ));
@@ -4282,7 +4282,8 @@ mod postgres_tests {
 
     #[test]
     fn create_group_does_not_require_h_tag() {
-        // kind:9007 creates the channel — h-tag is optional (client-chosen UUID)
+        // kind:9007 names its new channel in h, but the create path checks that
+        // itself (it refuses a create without one), not requires_h_channel_scope
         assert!(!requires_h_channel_scope(KIND_NIP29_CREATE_GROUP));
     }
 

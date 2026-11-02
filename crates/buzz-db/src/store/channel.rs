@@ -510,10 +510,10 @@ async fn ensure_listed_channel_name_unique(
 }
 
 /// The unique index on `(community_id, lower(name))` over
-/// [`LISTED_CHANNEL_SQL`] channels that migration 0079 adds. It refuses a
+/// [`LISTED_CHANNEL_SQL`] channels that migration 0081 adds. It refuses a
 /// duplicate at the write itself, before
 /// [`ensure_listed_channel_name_unique`] runs, so this release maps the
-/// refusal too: it can run beside that index during the rollout of 0079 and
+/// refusal too: it can run beside that index during the rollout of 0081 and
 /// after a rollback.
 const LISTED_NAME_INDEX: &str = "idx_channels_listed_name";
 

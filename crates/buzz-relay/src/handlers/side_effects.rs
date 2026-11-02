@@ -539,12 +539,6 @@ fn check_deletion_privacy_k_tag(event: &Event, target_kind: u32) -> anyhow::Resu
     Ok(())
 }
 
-/// Returns `true` if `actor_bytes` is the NIP-OA owner of **any** active owner-role
-/// member in `members`. Used by kind:9002 and kind:9008 to authorize the owning
-/// human of a channel's agent-owner(s) even when the human is not a channel member.
-///
-/// Checking all active owners (not just the first) is correct under co-ownership:
-/// an agent may be promoted to owner later, or multiple agents may co-own a channel.
 /// True when `actor` may change a channel's privileged metadata: a channel
 /// owner or admin, or the owning human of an active owner-role agent in the
 /// channel, even when that human is not a member (this diverges from
@@ -565,6 +559,12 @@ async fn actor_has_channel_authority(
     actor_owns_any_owner_agent(state, community_id, &members, actor_bytes).await
 }
 
+/// Returns `true` if `actor_bytes` is the NIP-OA owner of **any** active owner-role
+/// member in `members`. Used by kind:9002 and kind:9008 to authorize the owning
+/// human of a channel's agent-owner(s) even when the human is not a channel member.
+///
+/// Checking all active owners (not just the first) is correct under co-ownership:
+/// an agent may be promoted to owner later, or multiple agents may co-own a channel.
 async fn actor_owns_any_owner_agent(
     state: &Arc<AppState>,
     community_id: buzz_core::CommunityId,
