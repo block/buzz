@@ -3548,6 +3548,8 @@ async fn ingest_event_inner(
     };
 
     let workflow_deletion = crate::handlers::side_effects::is_workflow_deletion(&event);
+    let atomic_deletion =
+        crate::handlers::side_effects::is_atomic_deletion(kind_u32, &event);
     let mut message = String::new();
     let (stored_event, was_inserted) = if let Some(create) = channel_create.as_ref() {
         let creator = event.pubkey.to_bytes();
@@ -3603,6 +3605,20 @@ async fn ingest_event_inner(
         crate::handlers::side_effects::persist_workflow_deletion(tenant, &event, state)
             .await
             .map_err(|e| IngestError::Internal(format!("error: workflow deletion failed: {e}")))?
+    } else if atomic_deletion {
+        // One commit stores the deletion and soft-deletes its targets, so an
+        // accepted deletion never leaves its target live. Failure stores
+        // nothing; the client is told and can resend.
+        let thread_params = thread_meta.as_ref().map(|m| m.as_params());
+        crate::handlers::side_effects::persist_deletion(
+            tenant,
+            &event,
+            state,
+            channel_id,
+            thread_params,
+        )
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: deletion failed: {e}")))?
     } else if let Some(plan) = put_user {
         // One commit stores the event and applies its membership changes. A
         // failure stores nothing, so the client is told and can resend it.
@@ -3732,9 +3748,10 @@ async fn ingest_event_inner(
         });
     }
 
-    // Workflow deletion, kind:9000 and kind:9002 applied their changes in the
-    // insert's own transaction above.
+    // Workflow deletion, kind 5 / 9005 deletions of `e` targets, kind:9000 and
+    // kind:9002 applied their changes in the insert's own transaction above.
     let persisted_atomically = workflow_deletion
+        || atomic_deletion
         || kind_u32 == KIND_NIP29_PUT_USER
         || kind_u32 == KIND_NIP29_EDIT_METADATA;
     if !persisted_atomically && crate::handlers::side_effects::is_side_effect_kind(kind_u32) {

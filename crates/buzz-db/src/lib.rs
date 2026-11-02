@@ -81,7 +81,7 @@ pub use community::{
     UnarchivedCommunityRecord,
 };
 pub use error::{DbError, Result};
-pub use event::{ChannelHeadPrecondition, ChannelHeadWriteStatus};
+pub use event::{ChannelHeadPrecondition, ChannelHeadWriteStatus, DeletionTarget};
 pub use event::{EventQuery, DEFAULT_MAX_PAGE_LIMIT};
 pub use nip_fi_binding::{NipFiBindingRecord, NipFiUnbind, RowCapExceeded};
 pub use reaction::ReactionEventInsertOutcome;

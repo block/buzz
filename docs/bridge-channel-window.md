@@ -87,9 +87,10 @@ Clients **partition by kind before any cursor math**:
 2. **Aux closure** (`include_aux`) — live reactions (7), deletions (5,
    9005), and edits (40003) targeting the retained rows by `#e`. One round
    trip; no client `#e` fan-out. The closure is drained server-side across
-   the DB page clamp, so it is complete rather than newest-1000. An
-   accepted deletion soft-deletes its target, so a deleted reaction or edit
-   is simply absent; there is no deletion-of-aux hop.
+   the DB page clamp, so it is complete rather than newest-1000. The
+   relay soft-deletes a deletion's targets in the same commit that stores
+   the deletion, so a deleted reaction or edit is simply absent; there is
+   no deletion-of-aux hop.
 3. **Thread summaries** (`include_summaries`) — one relay-signed
    `kind:39005` per row that has replies.
 4. **Window bounds** — exactly one relay-signed `kind:39006` per window

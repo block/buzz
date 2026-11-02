@@ -660,9 +660,10 @@ const BRIDGE_WINDOW_MAX_LIMIT: u32 = 200;
 
 /// Aux closure kinds: reactions, deletions (NIP-09 + NIP-29), edits.
 ///
-/// The `/query` window and thread-reply closures read these in ONE hop. An
-/// accepted deletion soft-deletes its target, and that hop reads only live
-/// events, so a deleted reaction or edit never comes back and no
+/// The `/query` window and thread-reply closures read these in ONE hop. A
+/// kind 5 / 9005 deletion soft-deletes its targets in the transaction that
+/// stores it (`handlers::side_effects::persist_deletion`), and that hop reads
+/// only live events, so a deleted reaction or edit never comes back and no
 /// deletion-of-aux hop is needed. That hop cost one GIN probe per aux id per
 /// partition and could only match a deletion whose target was still live.
 const WINDOW_AUX_KINDS: [u32; 4] = [
