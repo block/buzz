@@ -3,7 +3,9 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+
 import '../../shared/widgets/ios_native_segmented_control.dart';
+
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -12,6 +14,7 @@ import '../../shared/emoji/emoji_avatar.dart';
 import '../../shared/emoji/emoji_data_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/avatar_shape.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/avatar_image_source_controls.dart';
 import '../../shared/widgets/image_avatar_capture.dart';
@@ -228,7 +231,10 @@ class AgentAvatarPicker extends HookConsumerWidget {
       child: SizedBox.square(
         dimension: 220,
         child: selection.bytes != null
-            ? ClipOval(child: Image.memory(selection.bytes!, fit: BoxFit.cover))
+            ? AvatarClip(
+                isAgent: true,
+                child: Image.memory(selection.bytes!, fit: BoxFit.cover),
+              )
             : PresetAgentAvatar(
                 imageUrl: selection.url!,
                 size: 220,
@@ -307,6 +313,7 @@ class AgentAvatarPicker extends HookConsumerWidget {
                     ),
                     child: AvatarImageContent(
                       imageUrl: agentAvatarCatalog[i].url,
+                      preferThumbnail: true,
                       fallback: const Icon(Icons.smart_toy_outlined),
                     ),
                   ),
@@ -356,6 +363,7 @@ class AgentAvatarPicker extends HookConsumerWidget {
                       height: imageHeight - cameraTop,
                       disposalBarrier: cameraDisposal,
                       initialPreview: preview,
+                      isAgent: true,
                       onAccepted: acceptCameraImage,
                       onClosed: () {
                         cameraActive.value = false;

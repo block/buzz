@@ -408,6 +408,7 @@ mod postgres_tests {
         catalog_snapshot, create_child, fixed_now, scratch_pool, scratch_pool_with_max_connections,
         seed_parents,
     };
+    use crate::test_support::ScratchDb;
 
     /// The repaired incident layout for both managed parents, optionally with
     /// outgoing foreign keys to a `communities` counterpart.
@@ -1395,18 +1396,10 @@ mod postgres_tests {
     /// Runs every migration in a dedicated database, then the passes a relay
     /// would run at `fixed_now()`. The database is dropped before returning.
     async fn fresh_install_passes() -> Result<FreshInstallPasses> {
-        let base_url = crate::test_support::database_url();
-        let admin = PgPool::connect(&base_url)
-            .await
-            .expect("connect admin database");
-        let database = format!("buzz_partition_fresh_{}", uuid::Uuid::new_v4().simple());
-        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {database}")))
-            .execute(&admin)
-            .await
-            .expect("create fresh-install database");
-        let (base_prefix, _) = base_url.rsplit_once('/').expect("database url has a path");
+        let database =
+            ScratchDb::create(&crate::test_support::database_url(), "buzz_partition_fresh").await;
         let passes = async {
-            let pool = PgPool::connect(&format!("{base_prefix}/{database}")).await?;
+            let pool = PgPool::connect(database.url()).await?;
             let result = async {
                 crate::migration::run_migrations(&pool).await?;
                 let now = fixed_now();
@@ -1433,12 +1426,6 @@ mod postgres_tests {
             result
         }
         .await;
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "DROP DATABASE {database} WITH (FORCE)"
-        )))
-        .execute(&admin)
-        .await
-        .expect("drop fresh-install database");
         passes
     }
 

@@ -2,6 +2,7 @@
 //! (NIP-CL). The relay must leave out a channel type that it adds later, not
 //! only `system`: a client sees a channel only if it knows the channel's type.
 
+use crate::test_support::ScratchDb;
 use crate::Db;
 use buzz_core::CommunityId;
 use nostr::Keys;
@@ -13,29 +14,18 @@ use uuid::Uuid;
 pub(super) const FUTURE_TYPE: &str = "future_type";
 
 /// A migrated scratch database with [`FUTURE_TYPE`] in `channel_type`, so the
-/// shared test database keeps its schema. Returns `(db, admin, name)`.
-pub(super) async fn scratch_db_with_future_type() -> (Db, PgPool, String) {
-    let url = crate::test_support::database_url();
-    let admin = PgPool::connect(&url).await.expect("connect admin");
-    let name = format!("legacy_types_{}", Uuid::new_v4().simple());
-    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
-        .execute(&admin)
-        .await
-        .expect("create scratch db");
-    let base = &url[..url.rfind('/').expect("db url has a path")];
-    let pool = PgPool::connect(&format!("{base}/{name}"))
-        .await
-        .expect("connect scratch db");
-    crate::migration::run_migrations(&pool)
-        .await
-        .expect("migrate scratch db");
+/// shared test database keeps its schema. Dropping the guard drops the
+/// database.
+pub(super) async fn scratch_db_with_future_type() -> (Db, ScratchDb) {
+    let (pool, scratch) =
+        ScratchDb::migrated(&crate::test_support::database_url(), "legacy_types").await;
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "ALTER TYPE channel_type ADD VALUE '{FUTURE_TYPE}'"
     )))
     .execute(&pool)
     .await
     .expect("add future channel type");
-    (Db::from_pool(pool), admin, name)
+    (Db::from_pool(pool), scratch)
 }
 
 async fn insert_channel(
@@ -80,7 +70,7 @@ async fn insert_channel(
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn reads_that_name_no_channel_leave_out_a_type_added_later() {
-    let (db, admin, name) = scratch_db_with_future_type().await;
+    let (db, _scratch) = scratch_db_with_future_type().await;
     let pool = db.pool.clone();
     let community = CommunityId::from_uuid(Uuid::new_v4());
     sqlx::query("INSERT INTO communities(id,host) VALUES($1,$2)")
@@ -148,11 +138,4 @@ async fn reads_that_name_no_channel_leave_out_a_type_added_later() {
     joined.sort();
     legacy.sort();
     assert_eq!(joined, legacy, "sidebar roster");
-
-    db.pool.close().await;
-    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
-    )))
-    .execute(&admin)
-    .await;
 }

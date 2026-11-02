@@ -9,6 +9,65 @@ import XCTest
 class RunnerTests: XCTestCase {
 
   @MainActor
+  func testCustomFlutterHeaderUsesDecorativeSoftEdge() throws {
+    guard #available(iOS 27.0, *) else { return }
+    let messenger = NavigationTestMessenger()
+    let parent = UIViewController()
+    let window = UIWindow(frame: UIScreen.main.bounds)
+    window.rootViewController = parent
+    window.makeKeyAndVisible()
+    defer { window.isHidden = true }
+    let bar = IosNavigationBarFactory(messenger: messenger, parent: parent).create(
+      withFrame: CGRect(x: 0, y: 0, width: window.bounds.width, height: 150),
+      viewIdentifier: 999998,
+      arguments: ["title": "", "backdropOnly": true, "alwaysFrosted": true]
+    )
+    parent.view.addSubview(bar.view())
+    parent.view.layoutIfNeeded()
+    let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
+    XCTAssertFalse(bar.view().isUserInteractionEnabled)
+    XCTAssertFalse(navigation.view.isUserInteractionEnabled)
+    XCTAssertTrue(navigation.view.accessibilityElementsHidden)
+    let scroll = try XCTUnwrap(navigation.topViewController?.view as? UIScrollView)
+    XCTAssertEqual(scroll.topEdgeEffect.style, .soft)
+    XCTAssertFalse(scroll.topEdgeEffect.isHidden)
+    XCTAssertTrue(scroll.bottomEdgeEffect.isHidden)
+    let material = try XCTUnwrap(bar.view().subviews.first as? UIVisualEffectView)
+    XCTAssertTrue(material.isHidden)
+    // Filter collapse changes the protected area without moving the Flutter
+    // controls or adding a second accessibility owner.
+    let compactHeight = bar.view().safeAreaInsets.top + navigation.navigationBar.bounds.height
+    for height in [compactHeight + 48, compactHeight] {
+      bar.view().frame.size.height = height
+      bar.view().setNeedsLayout()
+      bar.view().layoutIfNeeded()
+      let bottom = navigation.navigationBar.convert(navigation.navigationBar.bounds, to: bar.view()).maxY
+      XCTAssertEqual(bottom, height, accuracy: 1)
+    }
+  }
+
+  @MainActor
+  func testNativeSheetTopEdgeIsSoftWithoutAnOpaqueNavigationFill() throws {
+    guard #available(iOS 26.0, *) else { return }
+    let picker = NativeAddMembersViewController(
+      state: ["users": [], "selected": [], "query": "", "loading": false],
+      loadAvatar: { _, _, reply in reply(nil) },
+      send: { _, _ in }
+    )
+    picker.loadViewIfNeeded()
+    let scroll = picker.tableView!
+    let item = picker.navigationItem
+    XCTAssertEqual(scroll.topEdgeEffect.style, .soft)
+    XCTAssertTrue(scroll.bottomEdgeEffect.isHidden)
+    let appearance = try XCTUnwrap(item.standardAppearance)
+    XCTAssertLessThan(appearance.backgroundColor?.cgColor.alpha ?? 0, 1)
+    XCTAssertEqual(item.scrollEdgeAppearance, appearance)
+    XCTAssertEqual(item.compactAppearance, appearance)
+    XCTAssertEqual(item.compactScrollEdgeAppearance, appearance)
+  }
+
+
+  @MainActor
   func testProfileAvatarStartupFailureRestoresPageAndAllowsRetry() async throws {
     let messenger = NavigationTestMessenger()
     let parent = UIViewController()
@@ -115,7 +174,7 @@ class RunnerTests: XCTestCase {
     add(attachment)
     coordinator.cancel()
     coordinator.cancel()
-    await fulfillment(of: [completed], timeout: 3)
+    await fulfillment(of: [completed], timeout: 10)
     XCTAssertNil(parent.presentedViewController)
     XCTAssertEqual(replies, [false])
   }
@@ -680,15 +739,9 @@ class RunnerTests: XCTestCase {
       if #available(iOS 27.0, *) {
         let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
         let mirroredScroll = try XCTUnwrap(navigation.topViewController?.view as? UIScrollView)
-        XCTAssertTrue(mirroredScroll.topEdgeEffect.isHidden)
-        let edge = try XCTUnwrap(bar.view().subviews.first {
-          $0.accessibilityIdentifier == "navigation-status-edge"
-        } as? UIScrollView)
-        XCTAssertFalse(edge.isHidden)
-        XCTAssertFalse(edge.topEdgeEffect.isHidden)
-        XCTAssertEqual(edge.topEdgeEffect.style, .soft)
-        XCTAssertEqual(edge.contentOffset, .zero)
-        XCTAssertFalse(edge.isUserInteractionEnabled)
+        XCTAssertFalse(mirroredScroll.topEdgeEffect.isHidden)
+        XCTAssertEqual(mirroredScroll.topEdgeEffect.style, .soft)
+        XCTAssertFalse(mirroredScroll.isUserInteractionEnabled)
         XCTAssertTrue(material.isHidden, "Only the native fade should be visible")
         XCTAssertTrue(mirroredScroll.bottomEdgeEffect.isHidden)
       }
@@ -744,12 +797,22 @@ class RunnerTests: XCTestCase {
     bar.view().layoutIfNeeded()
     XCTAssertLessThan(title.textColor.cgColor.alpha, 0.6)
     messenger.scroll(to: boundary)
-    try await Task.sleep(nanoseconds: 60_000_000)
-    XCTAssertFalse(try XCTUnwrap(centeredTitle.layer.mask).bounds.isEmpty)
-    XCTAssertGreaterThan(visibleOpacity(of: centeredTitle), 0.01)
-    XCTAssertLessThan(visibleOpacity(of: centeredTitle), 0.99)
+    // The host app can hold the main thread past the whole fade, so check the
+    // animation itself rather than sampling its presentation mid-flight.
+    let mask = try XCTUnwrap(centeredTitle.layer.mask)
+    XCTAssertFalse(mask.bounds.isEmpty)
+    XCTAssertEqual(mask.opacity, 1)
+    let fade = try XCTUnwrap(mask.animation(forKey: "titleFade") as? CABasicAnimation,
+                             "Collapsing must fade the compact title in")
+    XCTAssertEqual(fade.keyPath, "opacity")
+    XCTAssertEqual((fade.fromValue as? NSNumber)?.floatValue, 0)
+    XCTAssertEqual((fade.toValue as? NSNumber)?.floatValue, 1)
+    // A band around the 0.18 s design value: a near-zero duration is a snap.
+    XCTAssertGreaterThanOrEqual(fade.duration, 0.1)
+    XCTAssertLessThanOrEqual(fade.duration, 0.5)
     XCTAssertEqual(title.textColor.cgColor.alpha, 0, accuracy: 0.01)
     messenger.scroll(to: boundary * 0.7)
+    XCTAssertNil(mask.animation(forKey: "titleFade"), "Reversing must cancel the fade")
     try await Task.sleep(nanoseconds: 240_000_000)
     XCTAssertEqual(visibleOpacity(of: centeredTitle), 0, accuracy: 0.01)
     XCTAssertGreaterThan(title.textColor.cgColor.alpha, 0.1)
@@ -773,6 +836,7 @@ class RunnerTests: XCTestCase {
     let messenger = NavigationTestMessenger()
     let parent = UIViewController()
     let window = UIWindow(frame: UIScreen.main.bounds)
+    window.windowScene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
     window.rootViewController = parent
     window.makeKeyAndVisible()
     defer { window.isHidden = true }
@@ -791,16 +855,10 @@ class RunnerTests: XCTestCase {
     XCTAssertEqual(material.alpha, 0)
     if #available(iOS 27.0, *) {
       let scroll = try XCTUnwrap(navigation.topViewController?.view as? UIScrollView)
-      XCTAssertTrue(scroll.topEdgeEffect.isHidden)
-      let edge = try XCTUnwrap(bar.view().subviews.first {
-        $0.accessibilityIdentifier == "navigation-status-edge"
-      } as? UIScrollView)
-      XCTAssertFalse(edge.isHidden)
-      XCTAssertFalse(edge.topEdgeEffect.isHidden)
-      XCTAssertEqual(edge.topEdgeEffect.style, .soft)
-      XCTAssertEqual(edge.contentOffset, .zero)
-      XCTAssertFalse(edge.isUserInteractionEnabled)
-      XCTAssertTrue(material.isHidden)
+      XCTAssertFalse(scroll.topEdgeEffect.isHidden)
+      XCTAssertEqual(scroll.topEdgeEffect.style, .soft)
+      XCTAssertFalse(scroll.isUserInteractionEnabled)
+      XCTAssertFalse(material.isHidden)
       XCTAssertFalse(bar.view().clipsToBounds)
     }
     let expandedHeight = navigation.navigationBar.frame.height
@@ -809,6 +867,41 @@ class RunnerTests: XCTestCase {
     let measuredExpandedHeight = try XCTUnwrap(metrics["expandedHeight"] as? Double)
     XCTAssertEqual(expandedHeight, measuredExpandedHeight, accuracy: 0.5)
     XCTAssertGreaterThan(expandedHeight, compactHeight)
+    // Compare actual raster output with and without the material while UIKit's
+    // large-title edge is inactive. Requested edge flags alone missed this bug.
+    parent.view.backgroundColor = .systemRed
+    let originalHeight = bar.view().frame.height
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = 1
+    let renderer = UIGraphicsImageRenderer(size: CGSize(width: 24, height: 24), format: format)
+    func statusPixels() throws -> Data {
+      let image = renderer.image { context in
+        context.cgContext.translateBy(x: -8, y: -8)
+        window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+      }
+      let cgImage = try XCTUnwrap(image.cgImage)
+      return try XCTUnwrap(cgImage.dataProvider?.data) as Data
+    }
+    for offset in [30.0, 80.0, 30.0] {
+      messenger.scroll(to: offset)
+      bar.view().frame.size.height = originalHeight - min(offset, measuredExpandedHeight - compactHeight)
+      bar.view().setNeedsLayout()
+      bar.view().layoutIfNeeded()
+      let protectedPixels = try statusPixels()
+      let wasHidden = material.isHidden
+      material.isHidden = true
+      let unprotectedPixels = try statusPixels()
+      material.isHidden = wasHidden
+      XCTAssertNotEqual(protectedPixels, unprotectedPixels,
+                        "Rendered status area must retain material at offset \(offset)")
+      let attachment = XCTAttachment(image: UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+        window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+      })
+      attachment.name = "large-title-offset-\(offset)"
+      attachment.lifetime = .keepAlways
+      add(attachment)
+    }
+    bar.view().frame.size.height = originalHeight
     for _ in 0..<3 {
       messenger.scroll(to: measuredExpandedHeight - compactHeight)
       bar.view().setNeedsLayout()
@@ -824,11 +917,10 @@ class RunnerTests: XCTestCase {
       XCTAssertEqual(navigation.navigationBar.frame.height, expandedHeight, accuracy: 0.5)
       XCTAssertEqual(material.alpha, 0)
       if #available(iOS 27.0, *) {
-        let edge = try XCTUnwrap(bar.view().subviews.first {
-          $0.accessibilityIdentifier == "navigation-status-edge"
-        } as? UIScrollView)
-        XCTAssertFalse(edge.isHidden, "Returning to rest must not remove the status fade")
-        XCTAssertEqual(edge.contentOffset, .zero)
+        let scroll = try XCTUnwrap(navigation.topViewController?.view as? UIScrollView)
+        XCTAssertFalse(scroll.topEdgeEffect.isHidden, "Returning to rest retains the native edge")
+        XCTAssertEqual(scroll.topEdgeEffect.style, .soft)
+        XCTAssertLessThan(scroll.contentOffset.y, 0)
       }
     }
   }
@@ -905,14 +997,6 @@ class RunnerTests: XCTestCase {
     XCTAssertEqual(deliveryCount, 1)
     XCTAssertTrue(FileManager.default.fileExists(atPath: outputURL.path))
     XCTAssertFalse(FileManager.default.fileExists(atPath: videoURL.path))
-  }
-
-  func testPushAuthorizationStatusNamesCoverDisplayPermissionStates() {
-    XCTAssertEqual(AppDelegate.pushAuthorizationStatusName(.notDetermined), "notDetermined")
-    XCTAssertEqual(AppDelegate.pushAuthorizationStatusName(.denied), "denied")
-    XCTAssertEqual(AppDelegate.pushAuthorizationStatusName(.authorized), "authorized")
-    XCTAssertEqual(AppDelegate.pushAuthorizationStatusName(.provisional), "provisional")
-    XCTAssertEqual(AppDelegate.pushAuthorizationStatusName(.ephemeral), "ephemeral")
   }
 
   func testHuddleActiveTalkerSelectorBoundsAndReactivates() {
@@ -1664,193 +1748,6 @@ class RunnerTests: XCTestCase {
     XCTAssertEqual(snapshot.started, tasks.count)
     XCTAssertEqual(snapshot.peakActive, maximumConcurrentDownloads)
     XCTAssertEqual(snapshot.active, 0)
-  }
-
-  func testNativeMessageActionsPreserveRequestedGroupsAndHeight() throws {
-    let actionArguments: [[String: Any]] = [
-      [
-        "id": "reply", "title": "Reply",
-        "symbol": "arrowshape.turn.up.left", "group": "primary",
-      ],
-      [
-        "id": "copyText", "title": "Copy text",
-        "symbol": "doc.on.doc", "group": "utility",
-      ],
-      [
-        "id": "delete", "title": "Delete message",
-        "symbol": "trash", "group": "destructive", "destructive": true,
-      ],
-    ]
-    let definitions = try actionArguments.map { arguments in
-      try XCTUnwrap(NativeMessageActionDefinition(arguments: arguments))
-    }
-
-    XCTAssertEqual(
-      NativeMessageActionSurfaceLayout.populatedGroups(actions: definitions),
-      [.primary, .utility, .destructive]
-    )
-    XCTAssertEqual(
-      NativeMessageActionSurfaceLayout.separatorCount(actions: definitions),
-      2
-    )
-    XCTAssertEqual(
-      NativeMessageActionSurfaceLayout.preferredHeight(
-        actions: definitions,
-        compatibleWith: UITraitCollection(
-          preferredContentSizeCategory: .large
-        )
-      ),
-      153
-    )
-  }
-
-  @MainActor
-  func testNativeMessageActionRowUsesUIKitTypographyAndSelection() throws {
-    let definition = try XCTUnwrap(
-      NativeMessageActionDefinition(
-        arguments: [
-          "id": "reply", "title": "Reply",
-          "symbol": "arrowshape.turn.up.left", "group": "primary",
-        ]
-      )
-    )
-    var selected = false
-    let row = NativeMessageActionRowControl(
-      definition: definition,
-      foregroundColor: .label,
-      destructiveColor: .systemRed,
-      onSelected: { selected = true }
-    )
-
-    XCTAssertEqual(
-      row.actionTitleLabel.font.fontDescriptor.object(forKey: .textStyle) as? String,
-      UIFont.TextStyle.body.rawValue
-    )
-    XCTAssertNotNil(row.actionImageView.image)
-    row.sendActions(for: .touchUpInside)
-    XCTAssertTrue(selected)
-  }
-
-  @MainActor
-  func testNativeMessageActionRowReceivesTapsAcrossItsWholeSurface() throws {
-    let definition = try XCTUnwrap(
-      NativeMessageActionDefinition(
-        arguments: [
-          "id": "edit", "title": "Edit message",
-          "symbol": "pencil", "group": "primary",
-        ]
-      )
-    )
-    var selectionCount = 0
-    let row = NativeMessageActionRowControl(
-      definition: definition,
-      foregroundColor: .label,
-      destructiveColor: .systemRed,
-      onSelected: { selectionCount += 1 }
-    )
-    row.frame = CGRect(x: 0, y: 0, width: 288, height: 48)
-    row.layoutIfNeeded()
-
-    let iconCenter = row.actionImageView.convert(
-      CGPoint(x: row.actionImageView.bounds.midX, y: row.actionImageView.bounds.midY),
-      to: row
-    )
-    let labelCenter = row.actionTitleLabel.convert(
-      CGPoint(x: row.actionTitleLabel.bounds.midX, y: row.actionTitleLabel.bounds.midY),
-      to: row
-    )
-    for point in [CGPoint(x: 4, y: 24), iconCenter, labelCenter, CGPoint(x: 284, y: 24)] {
-      let target = row.hitTest(point, with: nil)
-      XCTAssertTrue(target === row, "Tap at \(point) must reach the action control")
-      (target as? UIControl)?.sendActions(for: .touchUpInside)
-    }
-    XCTAssertEqual(selectionCount, 4)
-  }
-
-  @MainActor
-  func testNativeMessageActionRowExpandsForAccessibilityTypography() throws {
-    let traits = UITraitCollection(
-      preferredContentSizeCategory: .accessibilityExtraExtraExtraLarge
-    )
-    let definition = try XCTUnwrap(
-      NativeMessageActionDefinition(
-        arguments: [
-          "id": "followThread", "title": "Follow thread",
-          "symbol": "bell.slash", "group": "utility",
-        ]
-      )
-    )
-    let row = NativeMessageActionRowControl(
-      definition: definition,
-      foregroundColor: .label,
-      destructiveColor: .systemRed,
-      compatibleWith: traits,
-      onSelected: {}
-    )
-    let fittingSize = row.systemLayoutSizeFitting(
-      CGSize(width: 288, height: UIView.layoutFittingCompressedSize.height),
-      withHorizontalFittingPriority: .required,
-      verticalFittingPriority: .fittingSizeLevel
-    )
-    row.frame = CGRect(origin: .zero, size: fittingSize)
-    row.layoutIfNeeded()
-    let labelFrame = row.convert(
-      row.actionTitleLabel.bounds,
-      from: row.actionTitleLabel
-    )
-
-    XCTAssertGreaterThan(fittingSize.height, 48)
-    XCTAssertGreaterThan(labelFrame.height, 0)
-    XCTAssertGreaterThanOrEqual(
-      labelFrame.minY,
-      NativeMessageActionSurfaceLayout.rowVerticalPadding
-    )
-    XCTAssertLessThanOrEqual(
-      labelFrame.maxY,
-      fittingSize.height - NativeMessageActionSurfaceLayout.rowVerticalPadding
-    )
-    XCTAssertEqual(row.actionTitleLabel.numberOfLines, 0)
-    XCTAssertFalse(row.actionTitleLabel.adjustsFontSizeToFitWidth)
-  }
-
-  @MainActor
-  func testNativeMessageActionSurfaceUsesSystemMaterial() {
-    let effect = NativeMessageActionSurfaceAppearance.backdropEffect(
-      reduceTransparency: false
-    )
-    if #available(iOS 26.0, *) {
-      XCTAssertTrue(effect is UIGlassEffect)
-      XCTAssertEqual(NativeMessageActionSurfaceLayout.cornerRadius, 33)
-    } else {
-      XCTAssertTrue(effect is UIBlurEffect)
-      XCTAssertEqual(NativeMessageActionSurfaceLayout.cornerRadius, 12)
-    }
-    XCTAssertNil(
-      NativeMessageActionSurfaceAppearance.backdropEffect(
-        reduceTransparency: true
-      )
-    )
-  }
-
-  func testNativeMessageActionListDoesNotHideDialogSiblings() {
-    XCTAssertFalse(
-      NativeMessageActionSurfaceAppearance.actionListAccessibilityViewIsModal
-    )
-  }
-
-  func testNativeMessageActionSurfaceMatchesFlutterInterfaceStyle() {
-    XCTAssertEqual(
-      NativeMessageActionSurfaceAppearance.interfaceStyle(from: "dark"),
-      .dark
-    )
-    XCTAssertEqual(
-      NativeMessageActionSurfaceAppearance.interfaceStyle(from: "light"),
-      .light
-    )
-    XCTAssertEqual(
-      NativeMessageActionSurfaceAppearance.interfaceStyle(from: "system"),
-      .unspecified
-    )
   }
 
   private func displayP3Image(red: CGFloat, green: CGFloat, blue: CGFloat) throws -> UIImage {

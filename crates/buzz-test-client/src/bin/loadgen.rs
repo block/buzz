@@ -3,11 +3,12 @@
 //! Usage:
 //!   buzz-loadgen seed <scenario.toml>
 //!   buzz-loadgen run <scenario.toml> [--shard i/n] [--report <path>]
+//!   buzz-loadgen teardown <scenario.toml>
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use buzz_test_client::loadgen::{net::Net, run, scenario::Scenario, seed, stats};
+use buzz_test_client::loadgen::{net::Net, run, scenario::Scenario, seed, stats, teardown};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -34,6 +35,8 @@ enum Command {
         #[arg(long)]
         report: Option<PathBuf>,
     },
+    /// Archive the scenario's communities and request their deletion.
+    Teardown { scenario: PathBuf },
 }
 
 #[tokio::main]
@@ -48,7 +51,9 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
     let path = match &cli.command {
-        Command::Seed { scenario } | Command::Run { scenario, .. } => scenario,
+        Command::Seed { scenario }
+        | Command::Run { scenario, .. }
+        | Command::Teardown { scenario } => scenario,
     };
     let scenario = Scenario::parse(&std::fs::read_to_string(path)?)
         .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
@@ -80,6 +85,17 @@ async fn main() -> anyhow::Result<()> {
                 std::fs::write(path, text)?;
             }
             outcome
+        }
+        Command::Teardown { .. } => {
+            let report = teardown::teardown(&scenario, &net).await?;
+            println!("{}", report.to_json());
+            if !report.failures.is_empty() {
+                anyhow::bail!(
+                    "{} communities failed teardown; re-run to retry",
+                    report.failures.len()
+                );
+            }
+            Ok(())
         }
     }
 }

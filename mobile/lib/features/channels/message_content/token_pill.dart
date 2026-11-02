@@ -10,11 +10,7 @@ String? _channelNameForId(Map<String, String> channels, String channelId) {
 class _ChannelLinkMd extends InlineMd {
   final Map<String, String> channelNames;
   final void Function(String channelId)? onChannelTap;
-  late final RegExp _exp = _buildPrefixPattern(
-    prefix: '#',
-    knownNames: channelNames.keys,
-    genericTokenPattern: r'[A-Za-z0-9_][A-Za-z0-9_-]*',
-  );
+  late final RegExp _exp = channelTokenPattern(channelNames.keys);
 
   _ChannelLinkMd({required this.channelNames, this.onChannelTap});
 

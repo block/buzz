@@ -4,6 +4,7 @@ import 'package:buzz/features/agents/agent_avatar_picker.dart';
 import 'package:buzz/shared/agents/agent_avatar_catalog.dart';
 import 'package:buzz/shared/emoji/emoji_data.dart';
 import 'package:buzz/shared/emoji/emoji_data_provider.dart';
+import 'package:buzz/shared/widgets/avatar_shape.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -66,6 +67,21 @@ void main() {
     await tester.pumpAndSettle();
     expect(selection.url, isNot(agentAvatarCatalog.first.url));
     final character = selection.url;
+    // Every preview uses the same squircle the agent gets once created.
+    void expectSquirclePreview() {
+      final previewClip = tester.widget<ClipPath>(
+        find.descendant(
+          of: find.bySemanticsLabel('Selected agent avatar'),
+          matching: find.byType(ClipPath),
+        ),
+      );
+      expect(
+        (previewClip.clipper! as ShapeBorderClipper).shape,
+        avatarShape(isAgent: true),
+      );
+    }
+
+    expectSquirclePreview();
     await tester.runAsync(() async {
       rendered = Completer<void>();
       tester
@@ -76,6 +92,7 @@ void main() {
 
     await tester.pumpAndSettle();
     expect(selection.bytes, isNotNull);
+    expectSquirclePreview();
     expect(
       (tester
                   .widget<GridView>(
@@ -116,6 +133,21 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('image-source-camera')));
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('image-avatar-camera')), findsOneWidget);
+    // The camera cutout keeps the agent shape while shooting and reviewing.
+    final cameraClip = tester.widget(
+      find
+          .descendant(
+            of: find.byKey(const ValueKey('image-camera-preview-size')),
+            matching: find.byWidgetPredicate(
+              (widget) => widget is ClipPath || widget is ClipOval,
+            ),
+          )
+          .first,
+    );
+    expect(
+      ((cameraClip as ClipPath).clipper! as ShapeBorderClipper).shape,
+      avatarShape(isAgent: true),
+    );
     await tester.ensureVisible(
       find.byKey(const ValueKey('image-camera-left-action')),
     );

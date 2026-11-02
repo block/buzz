@@ -450,18 +450,3 @@ DecodedReadStateEvent? decodeReadStateEvent(
 
   return DecodedReadStateEvent(event: event, dTag: dTag, blob: blob);
 }
-
-Map<String, int> mergeReadStateContexts(
-  Iterable<Map<String, int>> contextSets,
-) {
-  final merged = <String, int>{};
-  for (final contexts in contextSets) {
-    for (final entry in contexts.entries) {
-      final current = merged[entry.key] ?? 0;
-      if (entry.value > current) {
-        merged[entry.key] = entry.value;
-      }
-    }
-  }
-  return merged;
-}

@@ -4,7 +4,8 @@
 //! and a population of simulated humans and agents with per-connection rates.
 //! `seed` creates the communities,
 //! channels, history and deep threads; `run` drives the population through a
-//! ramp of user multipliers and reports latency percentiles per operation.
+//! ramp of user multipliers and reports latency percentiles per operation;
+//! `teardown` archives the seeded communities and requests their deletion.
 //!
 //! Every identity, community host and channel id is derived from the
 //! scenario's `run_id`, so independent shards (`--shard i/n`) agree on the
@@ -16,3 +17,4 @@ pub mod run;
 pub mod scenario;
 pub mod seed;
 pub mod stats;
+pub mod teardown;

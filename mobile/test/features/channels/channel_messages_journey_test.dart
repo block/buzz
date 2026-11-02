@@ -70,7 +70,11 @@ void main() {
         admitted.complete();
         settle();
         expect(timeline(), ['committed as it opened', 'first', 'second']);
-        expect(relay.queries, hasLength(1), reason: 'read the channel window');
+        expect(
+          relay.queries,
+          hasLength(2),
+          reason: 'read the channel window, then its system notices',
+        );
         expect(
           relay.reqs.where((req) => (req[1] as String).startsWith('h-')),
           isEmpty,

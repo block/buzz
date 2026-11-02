@@ -9,6 +9,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../relay/relay.dart';
+import '../theme/mobile_appearance.dart';
 import '../theme/theme_extensions.dart';
 import '../animated_avatar.dart';
 import 'avatar_image.dart';
@@ -128,9 +129,11 @@ class IosNavigationBar extends HookConsumerWidget {
     this.ephemeralLabel,
     this.titleAvatar,
     this.titlePresenceColor,
+    this.titleRefreshing = false,
     this.onTitlePressed,
     this.largeTitle = false,
     this.alwaysFrosted = false,
+    this.backdropOnly = false,
     this.leading,
     this.actions = const [],
     this.onBack,
@@ -145,11 +148,17 @@ class IosNavigationBar extends HookConsumerWidget {
   final String? ephemeralLabel;
   final IosNavigationAction? titleAvatar;
   final Color? titlePresenceColor;
+
+  /// Shows a refresh bar along the bottom of the subtitled title capsule.
+  final bool titleRefreshing;
   final VoidCallback? onTitlePressed;
   final bool largeTitle;
 
   /// Keeps the navigation backdrop visible before the first scroll update.
   final bool alwaysFrosted;
+
+  /// Paints only the native edge beneath custom Flutter header controls.
+  final bool backdropOnly;
   final IosNavigationAction? leading;
   final List<IosNavigationAction> actions;
   final VoidCallback? onBack;
@@ -309,9 +318,12 @@ class IosNavigationBar extends HookConsumerWidget {
           ? null
           : encodeAction(titleAvatar!, 'titleAvatar'),
       'titlePresenceColor': titlePresenceColor?.toARGB32(),
+      'titleRefreshing': titleRefreshing,
+      'titleRefreshColor': ChatColors.of(context).outgoing.toARGB32(),
       'titleEnabled': onTitlePressed != null,
       'largeTitle': largeTitle,
       'alwaysFrosted': alwaysFrosted,
+      'backdropOnly': backdropOnly,
       'back': onBack != null,
       'leading': leading == null ? null : encodeAction(leading!, 'leading'),
       'actions': [

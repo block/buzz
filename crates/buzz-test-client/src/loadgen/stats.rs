@@ -19,10 +19,12 @@ pub enum Op {
     HttpEvents,
     Seed,
     Subscribe,
+    HotReply,
+    ThreadFetch,
 }
 
 impl Op {
-    pub const ALL: [Op; 9] = [
+    pub const ALL: [Op; 11] = [
         Op::WsConnect,
         Op::History,
         Op::PublishEphemeral,
@@ -32,6 +34,8 @@ impl Op {
         Op::HttpEvents,
         Op::Seed,
         Op::Subscribe,
+        Op::HotReply,
+        Op::ThreadFetch,
     ];
 
     pub fn name(self) -> &'static str {
@@ -45,6 +49,8 @@ impl Op {
             Op::HttpEvents => "http_events",
             Op::Seed => "seed",
             Op::Subscribe => "subscribe_eose",
+            Op::HotReply => "hot_reply",
+            Op::ThreadFetch => "thread_fetch",
         }
     }
 }

@@ -17,6 +17,8 @@ pub struct Scenario {
     pub human: HumanProfile,
     #[serde(default)]
     pub agent: AgentProfile,
+    #[serde(default)]
+    pub hot_thread: HotThread,
     pub ramp: Vec<RampStep>,
     #[serde(default)]
     pub abort: Abort,
@@ -154,6 +156,29 @@ impl Default for AgentProfile {
     }
 }
 
+/// One thread in community 0, channel 0 that keeps growing: seeded with
+/// many direct replies, then replied to and read throughout the run.
+/// Disabled while `seed_replies` and `authors` are both 0.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HotThread {
+    /// Direct replies seeded under the hot root.
+    pub seed_replies: usize,
+    /// Clients replying to the hot root at 1x; ramp steps multiply them.
+    pub authors: usize,
+    /// Replies each author posts per hour through HTTP `/events`.
+    pub replies_per_hour: f64,
+    /// Thread reads (the root's newest 100 replies) each author makes per
+    /// hour through HTTP `/query`.
+    pub fetches_per_hour: f64,
+}
+
+impl HotThread {
+    pub fn enabled(&self) -> bool {
+        self.seed_replies > 0 || self.authors > 0
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RampStep {
@@ -271,6 +296,14 @@ impl Scenario {
             ("human.mean_session_secs", h.mean_session_secs),
             ("agent.events_per_hour", a.events_per_hour),
             ("agent.observer_frames_per_hour", a.observer_frames_per_hour),
+            (
+                "hot_thread.replies_per_hour",
+                self.hot_thread.replies_per_hour,
+            ),
+            (
+                "hot_thread.fetches_per_hour",
+                self.hot_thread.fetches_per_hour,
+            ),
         ];
         for (name, value) in non_negative {
             if !value.is_finite() || value < 0.0 {

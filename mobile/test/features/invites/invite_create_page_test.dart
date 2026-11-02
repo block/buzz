@@ -54,18 +54,6 @@ void main() {
             ),
           ),
           myPubkeyProvider.overrideWithValue(owner),
-          communityInviteDirectoryProvider.overrideWith(
-            (ref) async => const [
-              CommunityInviteDirectoryUser(
-                pubkey: alice,
-                displayName: 'Alice',
-                nip05Handle: 'alice@example.com',
-              ),
-            ],
-          ),
-          communityInviteDirectorySearchProvider.overrideWith(
-            (ref, query) async => const [],
-          ),
           communityInviteProfileProvider.overrideWith(
             (ref, pubkey) async => CommunityInviteDirectoryUser(
               pubkey: pubkey,
@@ -199,11 +187,14 @@ void main() {
     );
     await tester.tap(find.byKey(const Key('community-invite-copy-link')));
     await tester.pumpAndSettle();
-    expect(
-      hapticCalls.map((call) => call.arguments),
-      everyElement('HapticFeedbackType.lightImpact'),
-    );
-    expect(hapticCalls, hasLength(2));
+    expect(hapticCalls.map((call) => call.arguments), [
+      'HapticFeedbackType.mediumImpact',
+      'HapticFeedbackType.lightImpact',
+      'HapticFeedbackType.lightImpact',
+      'HapticFeedbackType.mediumImpact',
+    ]);
+    // Invite confirmation, Share tap, Copy tap, and Copy confirmation.
+    expect(hapticCalls, hasLength(4));
   });
 
   testWidgets('pasted npub remains inviteable without profile metadata', (
@@ -359,9 +350,6 @@ void main() {
               snapshotFound: true,
               members: [],
             ),
-          ),
-          communityInviteDirectoryProvider.overrideWith(
-            (ref) async => const [],
           ),
           communityInviteActionsProvider.overrideWithValue(actions),
         ],

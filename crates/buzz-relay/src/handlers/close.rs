@@ -25,6 +25,36 @@ pub async fn handle_close(sub_id: String, conn: Arc<ConnectionState>, state: Arc
     debug!(conn_id = %conn.conn_id, sub_id = %sub_id, "Subscription closed");
 }
 
+/// Refuse a `REQ` or sync `REQ` with `CLOSED reason`. A `REQ` replaces
+/// whatever held its ID (NIP-01), and `CLOSED` tells the client the ID is
+/// closed, so the old holder is retired before the frame, under the lifecycle
+/// lock. Every refusal before a request claims its ID goes through here. If
+/// the frame cannot be queued, the connection is cancelled: the client would
+/// otherwise never learn that the old holder is gone.
+pub(crate) async fn refuse(sub_id: &str, reason: &str, conn: &ConnectionState, state: &AppState) {
+    let mut subs = conn.subscriptions.lock().await;
+    retire_locked(&mut subs, sub_id, conn, state).await;
+    if !conn.send(RelayMessage::closed(sub_id, reason)) {
+        conn.cancel.cancel();
+    }
+}
+
+/// Queue `frame` for `sub_id` only while the request holding `owner` still
+/// owns the ID. A request that a newer same-ID REQ replaced sends nothing:
+/// its late `EOSE` would otherwise tell a replacing sync that a set it never
+/// sent is complete. Returns whether the frame was queued.
+pub(crate) async fn send_if_owner(
+    sub_id: &str,
+    owner: u64,
+    frame: String,
+    conn: &ConnectionState,
+) -> bool {
+    #[cfg(test)]
+    test_seam::pause_at(&test_seam::SEND_PAUSE).await;
+    let subs = conn.subscriptions.lock().await;
+    subs.get(sub_id) == Some(&owner) && conn.send(frame)
+}
+
 /// Monotonic source of subscription owner tokens. Each REQ claims its sub ID
 /// with a fresh token, so a superseded request can tell it no longer owns it.
 static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
@@ -47,6 +77,7 @@ pub(crate) async fn retire_locked(
     state: &AppState,
 ) {
     subs.remove(sub_id);
+    state.artifact_syncs.remove(conn.conn_id, sub_id);
     if let Some(removed) = state.sub_registry.remove_subscription(conn.conn_id, sub_id) {
         #[cfg(test)]
         test_seam::pause_at(&test_seam::RELEASE_PAUSE).await;
@@ -93,6 +124,7 @@ pub(crate) async fn release_connection_subscriptions(conn: &ConnectionState, sta
     test_seam::pause_at(&test_seam::CLEANUP_PAUSE).await;
     let mut subs = conn.subscriptions.lock().await;
     subs.clear();
+    state.artifact_syncs.remove_connection(conn.conn_id);
     for removed in state.sub_registry.remove_connection(conn.conn_id) {
         release_scope_topics(state, &conn.tenant, &removed.scope).await;
     }
@@ -135,9 +167,10 @@ pub(crate) mod test_seam {
         pub(crate) static PAUSE: Arc<Pause>;
         pub(crate) static RELEASE_PAUSE: Arc<Pause>;
         pub(crate) static CLEANUP_PAUSE: Arc<Pause>;
+        pub(crate) static SEND_PAUSE: Arc<Pause>;
     }
 
-    pub(super) async fn pause_at(point: &'static tokio::task::LocalKey<Arc<Pause>>) {
+    pub(crate) async fn pause_at(point: &'static tokio::task::LocalKey<Arc<Pause>>) {
         if let Ok(pause) = point.try_with(Arc::clone) {
             pause.reached.notify_one();
             pause.resume.notified().await;

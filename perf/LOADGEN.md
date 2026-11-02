@@ -8,6 +8,7 @@ per operation for each step.
 ```bash
 cargo run --release -p buzz-test-client --bin buzz-loadgen -- seed perf/scenarios/local-smoke.toml
 cargo run --release -p buzz-test-client --bin buzz-loadgen -- run perf/scenarios/local-smoke.toml
+cargo run --release -p buzz-test-client --bin buzz-loadgen -- teardown perf/scenarios/<templated>.toml
 ```
 
 ## Scale vectors
@@ -18,6 +19,7 @@ cargo run --release -p buzz-test-client --bin buzz-loadgen -- run perf/scenarios
 | Channels | `shape.channels_per_community`, `population.channels_per_member` |
 | History depth | `shape.history_messages_per_channel`, `human.history_limit` |
 | Deep threads | `shape.thread_roots_per_channel`, `shape.thread_depth`, `human.thread_reply_fraction` |
+| One hot thread | `[hot_thread]`: `seed_replies`, `authors`, `replies_per_hour`, `fetches_per_hour` |
 | Humans / agents | `population.humans`, `population.agents`, multiplied by each `[[ramp]]` step's `users` |
 | Throughput per client | `[human]` and `[agent]` rates |
 | Reconnect churn | `human.mean_session_secs`, `population.connect_rate_per_sec` |
@@ -32,6 +34,14 @@ example `seed_concurrency` of 0, `human.presence_interval_secs` below 1, or a
 `community_host_template` with a port while `target.connect_addr` is set (the
 override maps hostnames, so HTTP would ignore it).
 
+`[hot_thread]` models one thread that keeps growing, such as a conversation
+between busy agents. `seed` posts its root in community 0, channel 0 and
+then `seed_replies` replies directly under it, concurrently. During `run`,
+`authors` clients (multiplied by each ramp step's `users`, like humans and
+agents) reply to that root and read its newest 100 replies over HTTP. Their
+replies are timed, so humans subscribed to that channel record delivery.
+Leave `seed_replies` and `authors` at 0 to disable it.
+
 ## What each client does
 
 - **Human**: authenticates over WebSocket and subscribes to its channels'
@@ -42,6 +52,10 @@ override maps hostnames, so HTTP would ignore it).
 - **Agent**: authenticates with a NIP-OA tag from its owner, polls HTTP
   `/query` (channel window plus mentions), posts messages through HTTP
   `/events`, and sends encrypted kind:24200 observer frames to its owner.
+- **Hot-thread author**: finds the seeded hot root, then posts replies to it
+  through HTTP `/events` (`hot_reply`) and reads the thread through HTTP
+  `/query` (`thread_fetch`). Until the root is found every attempt counts as
+  a `thread_fetch` error, so a run without the seeded thread fails.
 
 Messages carry their send time, so every subscriber records publish→delivery
 latency (`deliver`). Across machines this depends on clock sync.
@@ -125,6 +139,25 @@ owner of an existing host. A host that already exists is reused only when the
 fixture owner derived from `run_id` owns it (re-running `seed` for the same
 scenario); otherwise `seed` fails. Use a fresh `run_id` or a host template
 with `{run}` to avoid colliding with another community.
+
+## Teardown
+
+`teardown <scenario>` removes the communities `seed` provisioned from
+`target.community_host_template`, using the operator key `seed` used. For each
+host it archives the community as its fixture owner, then requests owner
+deletion with a request id derived from `run_id` and the host. The
+relay's deletion drain does the deletion asynchronously; `teardown` reports
+the requests by the stage the relay returned (`requested`), hosts this run's
+fixture owner does not own (`absent`), and failures. It never touches a host
+owned by anyone else, and refuses a scenario without a host template.
+
+Re-running `teardown` replays the same request ids, so it retries failures
+and reports progress without conflicting. It exits non-zero while any
+community failed.
+
+Deleted hosts stay reserved as tombstones, so a torn-down `run_id` cannot be
+seeded again: `seed` fails on the first host. Give each fixture a new
+`run_id`.
 
 ## Safety
 

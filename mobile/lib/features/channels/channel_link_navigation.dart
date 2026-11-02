@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -24,8 +25,9 @@ void openChannelLink({
   }
 
   if (targetChannel == null) {
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context).showFeedbackSnackBar(
       const SnackBar(content: Text('Channel could not be opened')),
+      kind: ToastKind.error,
     );
     return;
   }

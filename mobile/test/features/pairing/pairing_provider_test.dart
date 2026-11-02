@@ -1,3 +1,4 @@
+import '../../helpers/controllable_pairing_socket.dart';
 import 'package:buzz/features/pairing/pairing_page.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
@@ -9,12 +10,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:nostr/nostr.dart' as nostr;
-import 'package:buzz/features/pairing/pairing_crypto.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/features/pairing/pairing_socket.dart';
 import 'package:buzz/shared/auth/auth.dart';
-import 'package:buzz/shared/crypto/ecdh.dart';
-import 'package:buzz/shared/crypto/nip44.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/security/sensitive_action_authorizer.dart';
 
@@ -70,6 +68,45 @@ void main() {
         await pending;
         expect(auth.lastCommunity, isNull);
         expect(container.read(pairingProvider).status, PairingStatus.idle);
+      },
+    );
+
+    test(
+      'legacy validation rejects failed connection before saving, then retries',
+      () async {
+        final auth = FakeAuthNotifier();
+        var connected = false;
+        final notifier = PairingNotifier(
+          validationSocketFactory:
+              ({
+                required wsUrl,
+                required nsec,
+                required onMessage,
+                required onConnected,
+                required onDisconnected,
+              }) => _ValidationOutcomeSocket(() => connected),
+        );
+        container = ProviderContainer(
+          overrides: [
+            pairingProvider.overrideWith(() => notifier),
+            authProvider.overrideWith(() => auth),
+          ],
+        );
+        final input = base64Url.encode(
+          utf8.encode(
+            jsonEncode({
+              'relayUrl': 'https://relay.example',
+              'nsec': nostr.Keys.generate().nsec,
+            }),
+          ),
+        );
+        await container.read(pairingProvider.notifier).pair(input);
+        expect(container.read(pairingProvider).status, PairingStatus.error);
+        expect(auth.lastCommunity, isNull);
+        connected = true;
+        await notifier.pair(input);
+        expect(container.read(pairingProvider).status, PairingStatus.success);
+        expect(auth.lastCommunity, isNotNull);
       },
     );
 
@@ -222,7 +259,7 @@ void main() {
           '09b3065e3570a3a4054660dccd66e12774a99a904fdb0ca02dbc6c3136249506';
       const sessionSecretHex =
           'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';
-      late _ControllableSocket socket;
+      late ControllablePairingSocket socket;
       late PairingNotifier notifier;
       late FakeAuthNotifier importAuth;
       late _FakeSensitiveActionAuthorizer authorizer;
@@ -249,7 +286,7 @@ void main() {
                 required onMessage,
                 required onDisconnected,
               }) {
-                socket = _ControllableSocket(
+                socket = ControllablePairingSocket(
                   ephemeralPrivkey: ephemeralPrivkey,
                   onMessage: onMessage,
                   onDisconnected: onDisconnected,
@@ -699,7 +736,7 @@ void main() {
           '09b3065e3570a3a4054660dccd66e12774a99a904fdb0ca02dbc6c3136249506';
       const sessionSecretHex =
           'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';
-      late _ControllableSocket socket;
+      late ControllablePairingSocket socket;
       late PairingNotifier notifier;
       late String recoveryCode;
       late _FakeSensitiveActionAuthorizer authorizer;
@@ -721,7 +758,7 @@ void main() {
                 required onMessage,
                 required onDisconnected,
               }) {
-                socket = _ControllableSocket(
+                socket = ControllablePairingSocket(
                   ephemeralPrivkey: ephemeralPrivkey,
                   onMessage: onMessage,
                   onDisconnected: onDisconnected,
@@ -1287,17 +1324,10 @@ class FakeAuthNotifier extends AsyncNotifier<AuthState>
   Community? lastCommunity;
   Completer<void>? authentication;
   Completer<void>? entered;
-  bool signedOut = false;
 
   @override
   Future<AuthState> build() async =>
       const AuthState(status: AuthStatus.unauthenticated);
-
-  @override
-  Future<void> signOut() async {
-    signedOut = true;
-    state = const AsyncData(AuthState(status: AuthStatus.unauthenticated));
-  }
 
   @override
   Future<void> authenticateWithCommunity(
@@ -1377,86 +1407,6 @@ class _FakeSensitiveActionAuthorizer implements SensitiveActionAuthorizer {
   Future<List<BiometricType>> enrolledBiometrics() async => const [];
 }
 
-class _ControllableSocket extends PairingSocket {
-  final String ephemeralPrivkey;
-  final void Function(List<dynamic> message) relayMessageCallback;
-  final List<Map<String, dynamic>> published = [];
-  bool _connected = false;
-  int _eventSequence = 0;
-
-  _ControllableSocket({
-    required this.ephemeralPrivkey,
-    required super.onMessage,
-    required super.onDisconnected,
-  }) : relayMessageCallback = onMessage,
-       super(wsUrl: 'ws://unused', ephemeralPrivkey: ephemeralPrivkey);
-
-  @override
-  bool get isConnected => _connected;
-
-  @override
-  Future<void> connect() async => _connected = true;
-
-  @override
-  void subscribe(String subId, int kind, String pubkeyHex) {}
-
-  @override
-  void publishEvent(Map<String, dynamic> event) => published.add(event);
-
-  @override
-  void dispose() => _connected = false;
-
-  List<Map<String, dynamic>> decryptedPublishedMessages(String sourceSecret) {
-    final key = getConversationKey(
-      sourceSecret,
-      nostr.Keys(ephemeralPrivkey).public,
-    );
-    return published
-        .map(
-          (event) =>
-              jsonDecode(nip44Decrypt(key, event['content'] as String))
-                  as Map<String, dynamic>,
-        )
-        .toList();
-  }
-
-  void sendSourceMessage({
-    required String sourceSecret,
-    required String sessionSecretHex,
-    required Map<String, dynamic> message,
-    bool includeTranscriptHash = false,
-  }) {
-    final source = nostr.Keys(sourceSecret);
-    final targetPubkey = nostr.Keys(ephemeralPrivkey).public;
-    final sessionSecret = hexToBytes(sessionSecretHex);
-    final body = Map<String, dynamic>.from(message);
-    if (includeTranscriptHash) {
-      final shared = ecdhSharedSecret(sourceSecret, targetPubkey);
-      final (_, sasInput) = deriveSas(shared, sessionSecret);
-      body['transcript_hash'] = bytesToHex(
-        deriveTranscriptHash(
-          deriveSessionId(sessionSecret),
-          hexToBytes(source.public),
-          hexToBytes(targetPubkey),
-          sasInput,
-          sessionSecret,
-        ),
-      );
-    }
-    final key = getConversationKey(sourceSecret, targetPubkey);
-    final event = nostr.Event.from(
-      kind: 24134,
-      content: nip44Encrypt(key, jsonEncode(body)),
-      tags: [
-        ['p', targetPubkey],
-      ],
-      secretKey: sourceSecret,
-      createdAt: 1_700_000_000 + _eventSequence++,
-    );
-    relayMessageCallback(['EVENT', 'pair', event.toMap()]);
-  }
-}
-
 class _PendingValidationSocket extends RelaySocket {
   _PendingValidationSocket()
     : super(
@@ -1474,4 +1424,23 @@ class _PendingValidationSocket extends RelaySocket {
   void dispose() => disposed = true;
   @override
   Future<void> disconnect() async => disposed = true;
+}
+
+class _ValidationOutcomeSocket extends RelaySocket {
+  _ValidationOutcomeSocket(this.connected)
+    : super(
+        wsUrl: 'wss://relay.example',
+        nsec: null,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (_) {},
+      );
+  final bool Function() connected;
+  @override
+  SocketState get state =>
+      connected() ? SocketState.connected : SocketState.disconnected;
+  @override
+  Future<void> connect() async {}
+  @override
+  Future<void> disconnect() async {}
 }

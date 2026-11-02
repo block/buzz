@@ -22,7 +22,7 @@ use crate::connection::{AuthState, ConnectionState};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
 
-const MAX_SUBSCRIPTIONS: usize = 1024;
+pub(crate) const MAX_SUBSCRIPTIONS: usize = 1024;
 
 /// Maximum aggregate number of explicit `#h` values accepted in one REQ,
 /// COUNT, HTTP `/query`, or HTTP `/count` request.
@@ -65,10 +65,8 @@ pub async fn handle_req(
             AuthState::Authenticated(ctx) => {
                 if !ctx.scopes.is_empty() && !ctx.scopes.contains(&Scope::MessagesRead) {
                     conn.send(RelayMessage::notice("restricted: insufficient scope"));
-                    conn.send(RelayMessage::closed(
-                        &sub_id,
-                        "restricted: insufficient scope",
-                    ));
+                    super::close::refuse(&sub_id, "restricted: insufficient scope", &conn, &state)
+                        .await;
                     return;
                 }
 
@@ -76,10 +74,14 @@ pub async fn handle_req(
 
                 let subs = conn.subscriptions.lock().await;
                 if !subs.contains_key(&sub_id) && subs.len() >= MAX_SUBSCRIPTIONS {
-                    conn.send(RelayMessage::closed(
+                    // A new ID has no old holder to retire, but a lost CLOSED
+                    // would leave the client waiting on a refused request.
+                    if !conn.send(RelayMessage::closed(
                         &sub_id,
                         "error: too many subscriptions",
-                    ));
+                    )) {
+                        conn.cancel.cancel();
+                    }
                     return;
                 }
 
@@ -89,10 +91,8 @@ pub async fn handle_req(
                 conn.send(RelayMessage::notice(
                     "auth-required: authenticate before subscribing",
                 ));
-                conn.send(RelayMessage::closed(
-                    &sub_id,
-                    "auth-required: not authenticated",
-                ));
+                super::close::refuse(&sub_id, "auth-required: not authenticated", &conn, &state)
+                    .await;
                 return;
             }
         }
@@ -102,10 +102,13 @@ pub async fn handle_req(
     let requested_channel_ids = match extract_channel_ids_from_filters_limited(&filters) {
         Ok(ids) => ids,
         Err(()) => {
-            conn.send(RelayMessage::closed(
+            super::close::refuse(
                 &sub_id,
                 "restricted: too many explicit channels",
-            ));
+                &conn,
+                &state,
+            )
+            .await;
             return;
         }
     };
@@ -122,7 +125,7 @@ pub async fn handle_req(
             Ok(ids) => ids,
             Err(e) => {
                 warn!(conn_id = %conn_id, "Failed to get accessible channels: {e}");
-                conn.send(RelayMessage::closed(&sub_id, DATABASE_ERROR_CLOSED));
+                super::close::refuse(&sub_id, DATABASE_ERROR_CLOSED, &conn, &state).await;
                 return;
             }
         }
@@ -146,7 +149,7 @@ pub async fn handle_req(
         Ok(ids) => ids,
         Err(e) => {
             warn!(conn_id = %conn_id, "Failed to get readable named-only channels: {e}");
-            conn.send(RelayMessage::closed(&sub_id, DATABASE_ERROR_CLOSED));
+            super::close::refuse(&sub_id, DATABASE_ERROR_CLOSED, &conn, &state).await;
             return;
         }
     };
@@ -185,7 +188,7 @@ pub async fn handle_req(
             Ok(confirmed) => confirmed,
             Err(e) => {
                 warn!(conn_id = %conn_id, "Channel membership confirmation failed: {e}");
-                conn.send(RelayMessage::closed(&sub_id, DATABASE_ERROR_CLOSED));
+                super::close::refuse(&sub_id, DATABASE_ERROR_CLOSED, &conn, &state).await;
                 return;
             }
         };
@@ -204,7 +207,7 @@ pub async fn handle_req(
         .await
         {
             warn!(conn_id = %conn_id, "Failed to classify repaired channels: {e}");
-            conn.send(RelayMessage::closed(&sub_id, DATABASE_ERROR_CLOSED));
+            super::close::refuse(&sub_id, DATABASE_ERROR_CLOSED, &conn, &state).await;
             return;
         }
     }
@@ -229,10 +232,7 @@ pub async fn handle_req(
         .as_ref()
         .is_some_and(|authorized| authorized.is_empty())
     {
-        conn.send(RelayMessage::closed(
-            &sub_id,
-            "restricted: not a channel member",
-        ));
+        super::close::refuse(&sub_id, "restricted: not a channel member", &conn, &state).await;
         return;
     }
 
@@ -251,17 +251,20 @@ pub async fn handle_req(
             Err(crate::nip_fi_gate::SessionExpired) => {
                 // Fix 4: [FI-TRACE-DENIAL-ORACLE] gate is off_mode when no assertion
                 // exists, so SessionExpired here always implies an active FI session.
-                conn.send(RelayMessage::closed(
-                    &sub_id,
-                    "restricted: authorization denied",
-                ));
+                super::close::refuse(&sub_id, "restricted: authorization denied", &conn, &state)
+                    .await;
                 return;
             }
+        };
+        // One-shot like search: accepting it replaces the ID's old holder.
+        let Some(owner) = claim_search_subscription(&sub_id, &conn, &state).await else {
+            return;
         };
         unless_cancelled(
             &conn,
             handle_huddle_liveness_req(
                 &sub_id,
+                owner,
                 &filters,
                 authorized_requested_channels.as_deref().unwrap_or_default(),
                 &conn,
@@ -269,6 +272,7 @@ pub async fn handle_req(
             ),
         )
         .await;
+        super::close::close_if_owner(&sub_id, owner, None, &conn, &state).await;
         return;
     }
 
@@ -283,24 +287,33 @@ pub async fn handle_req(
     if channel_id.is_none() {
         let authed_pubkey_hex = hex::encode(&pubkey_bytes);
         if !p_gated_filters_authorized(&filters, &authed_pubkey_hex) {
-            conn.send(RelayMessage::closed(
+            super::close::refuse(
                 &sub_id,
                 "restricted: p-gated events require #p matching your pubkey",
-            ));
+                &conn,
+                &state,
+            )
+            .await;
             return;
         }
         if !engram_filters_authorized(&filters, &authed_pubkey_hex) {
-            conn.send(RelayMessage::closed(
+            super::close::refuse(
                 &sub_id,
                 "restricted: agent-engram reads require authors=[self] or #p=[self]",
-            ));
+                &conn,
+                &state,
+            )
+            .await;
             return;
         }
         if !author_only_filters_authorized(&filters, &authed_pubkey_hex) {
-            conn.send(RelayMessage::closed(
+            super::close::refuse(
                 &sub_id,
                 "restricted: author-only kinds require authors=[self]",
-            ));
+                &conn,
+                &state,
+            )
+            .await;
             return;
         }
     }
@@ -312,10 +325,13 @@ pub async fn handle_req(
     let has_search = filters.iter().any(|f| f.search.is_some());
     if has_search {
         if filters.iter().any(|f| f.search.is_none()) {
-            conn.send(RelayMessage::closed(
+            super::close::refuse(
                 &sub_id,
                 "error: mixed search and non-search filters not supported",
-            ));
+                &conn,
+                &state,
+            )
+            .await;
             return;
         }
         // IMPORTANT 6: acquire a REQ effect permit before the search query and
@@ -327,10 +343,8 @@ pub async fn handle_req(
             Ok(permit) => permit,
             Err(crate::nip_fi_gate::SessionExpired) => {
                 // Fix 4: [FI-TRACE-DENIAL-ORACLE]
-                conn.send(RelayMessage::closed(
-                    &sub_id,
-                    "restricted: authorization denied",
-                ));
+                super::close::refuse(&sub_id, "restricted: authorization denied", &conn, &state)
+                    .await;
                 return;
             }
         };
@@ -376,10 +390,7 @@ pub async fn handle_req(
         Ok(permit) => permit,
         Err(crate::nip_fi_gate::SessionExpired) => {
             // Fix 4: [FI-TRACE-DENIAL-ORACLE]
-            conn.send(RelayMessage::closed(
-                &sub_id,
-                "restricted: authorization denied",
-            ));
+            super::close::refuse(&sub_id, "restricted: authorization denied", &conn, &state).await;
             return;
         }
     };
@@ -568,7 +579,7 @@ pub async fn handle_req(
                 }
 
                 let msg = RelayMessage::event(&sub_id, &stored.event);
-                if !conn.send(msg) {
+                if !super::close::send_if_owner(&sub_id, owner, msg, &conn).await {
                     return None;
                 }
                 total_sent += 1;
@@ -578,7 +589,7 @@ pub async fn handle_req(
             }
         }
 
-        conn.send(RelayMessage::eose(&sub_id));
+        super::close::send_if_owner(&sub_id, owner, RelayMessage::eose(&sub_id), &conn).await;
 
         debug!(
             conn_id = %conn_id,
@@ -778,7 +789,7 @@ async fn handle_search_req(
     if build_search_channel_scope_filter(implicit_channels, include_global).is_none()
         && named_only.is_empty()
     {
-        conn.send(RelayMessage::eose(sub_id));
+        super::close::send_if_owner(sub_id, owner, RelayMessage::eose(sub_id), conn).await;
         return;
     }
 
@@ -993,7 +1004,8 @@ async fn handle_search_req(
                     if !seen_ids.insert(stored.event.id) {
                         continue;
                     }
-                    if !conn.send(RelayMessage::event(sub_id, &stored.event)) {
+                    let frame = RelayMessage::event(sub_id, &stored.event);
+                    if !super::close::send_if_owner(sub_id, owner, frame, conn).await {
                         return;
                     }
                     emitted += 1;
@@ -1006,7 +1018,7 @@ async fn handle_search_req(
         }
     }
 
-    conn.send(RelayMessage::eose(sub_id));
+    super::close::send_if_owner(sub_id, owner, RelayMessage::eose(sub_id), conn).await;
 }
 
 /// Convert a single NIP-01 filter into an [`EventQuery`] for the database.
@@ -1425,16 +1437,21 @@ fn huddle_liveness_session_ids(filters: &[Filter]) -> Vec<uuid::Uuid> {
 
 async fn handle_huddle_liveness_req(
     sub_id: &str,
+    owner: u64,
     filters: &[Filter],
     parent_channel_ids: &[uuid::Uuid],
     conn: &ConnectionState,
     state: &AppState,
 ) {
     if parent_channel_ids.is_empty() {
-        conn.send(RelayMessage::closed(
+        super::close::close_if_owner(
             sub_id,
-            "restricted: huddle liveness requires an authorized #h channel",
-        ));
+            owner,
+            Some("restricted: huddle liveness requires an authorized #h channel"),
+            conn,
+            state,
+        )
+        .await;
         return;
     }
 
@@ -1451,7 +1468,8 @@ async fn handle_huddle_liveness_req(
         Ok(links) => links,
         Err(error) => {
             warn!("Huddle liveness linkage batch failed: {error}");
-            conn.send(RelayMessage::closed(sub_id, DATABASE_ERROR_CLOSED));
+            super::close::close_if_owner(sub_id, owner, Some(DATABASE_ERROR_CLOSED), conn, state)
+                .await;
             return;
         }
     };
@@ -1469,7 +1487,14 @@ async fn handle_huddle_liveness_req(
                 Ok(_) => continue,
                 Err(error) => {
                     warn!(session_id = %session_id, "Huddle liveness lease lookup failed: {error}");
-                    conn.send(RelayMessage::closed(sub_id, "error: liveness unavailable"));
+                    super::close::close_if_owner(
+                        sub_id,
+                        owner,
+                        Some("error: liveness unavailable"),
+                        conn,
+                        state,
+                    )
+                    .await;
                     return;
                 }
             }
@@ -1507,23 +1532,31 @@ async fn handle_huddle_liveness_req(
             Ok(event) => event,
             Err(error) => {
                 warn!(session_id = %session_id, "Huddle liveness signing failed: {error}");
-                conn.send(RelayMessage::closed(sub_id, "error: signing failed"));
+                super::close::close_if_owner(
+                    sub_id,
+                    owner,
+                    Some("error: signing failed"),
+                    conn,
+                    state,
+                )
+                .await;
                 return;
             }
         };
-        if !conn.send(RelayMessage::event(sub_id, &event)) {
+        let frame = RelayMessage::event(sub_id, &event);
+        if !super::close::send_if_owner(sub_id, owner, frame, conn).await {
             return;
         }
     }
 
-    conn.send(RelayMessage::eose(sub_id));
+    super::close::send_if_owner(sub_id, owner, RelayMessage::eose(sub_id), conn).await;
 }
 
 /// Claim `sub_id` for a live REQ under the lifecycle lock: record a fresh
 /// owner token, register for fan-out (replacing any same-ID entry), retain its
 /// topics, and release the replaced scope's. Returns the owner token, or
 /// `None` once the connection is closing — the caller then exits silently.
-async fn claim_live_subscription(
+pub(crate) async fn claim_live_subscription(
     sub_id: &str,
     filters: &[Filter],
     channel_ids: Option<&[uuid::Uuid]>,
@@ -1536,6 +1569,9 @@ async fn claim_live_subscription(
     }
     let owner = super::close::next_owner();
     subs.insert(sub_id.to_string(), owner);
+    // A sync that held the ID stops; the registry entry and topics below are
+    // replaced in place.
+    state.artifact_syncs.remove(conn.conn_id, sub_id);
     let community = conn.tenant.community();
     let replaced = match channel_ids {
         Some(ids) => state.sub_registry.register_channels_scoped(
@@ -1575,10 +1611,10 @@ async fn claim_live_subscription(
     Some(owner)
 }
 
-/// Claim `sub_id` for a one-shot search REQ under the lifecycle lock.
-/// Accepting it retires whatever holds the ID (NIP-01 replacement), even
-/// though search never registers for fan-out. `None` once the connection is
-/// closing.
+/// Claim `sub_id` for a one-shot search or huddle-liveness REQ under the
+/// lifecycle lock. Accepting it retires whatever holds the ID (NIP-01
+/// replacement), even though neither registers for fan-out. `None` once the
+/// connection is closing.
 async fn claim_search_subscription(
     sub_id: &str,
     conn: &ConnectionState,
@@ -1960,6 +1996,78 @@ mod tests {
                 other => panic!("expected text frame, got {other:?}"),
             })
             .collect()
+    }
+
+    /// A live REQ that reuses a sync's ID retires the sync, so fan-out
+    /// delivers to the new subscription instead of the stale sync inbox.
+    /// Mutation: drop the `artifact_syncs.remove` in
+    /// `claim_live_subscription` → the event is diverted → RED.
+    #[tokio::test]
+    async fn live_req_replacing_a_sync_retires_it() {
+        let state = crate::state::tests::test_state().await;
+        let (conn, _send_rx) = lifecycle_conn();
+        state.artifact_syncs.insert_idle(conn.conn_id, "s");
+        claim_live_subscription(
+            "s",
+            &text_filters(),
+            Some(&[uuid::Uuid::new_v4()]),
+            &conn,
+            &state,
+        )
+        .await
+        .expect("claim");
+        assert!(!state.artifact_syncs.contains(conn.conn_id, "s"));
+        let event = nostr::EventBuilder::text_note("x")
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign");
+        let matches = vec![(conn.conn_id, "s".to_string())];
+        let delivered = state
+            .artifact_syncs
+            .divert(&buzz_core::StoredEvent::new(event, None), matches.clone());
+        assert_eq!(delivered, matches);
+    }
+
+    /// A refused sync REQ answers `CLOSED`, so whatever held its ID must stop
+    /// first (NIP-01 replacement): no later frame may arrive under a closed
+    /// ID. Covers a filter refusal and an auth refusal. Mutation: send the
+    /// refusal without `retire_locked` → the old subscription stays → RED.
+    #[tokio::test]
+    async fn refused_sync_req_retires_the_old_holder() {
+        let state = crate::state::tests::test_state().await;
+        let (conn, mut send_rx) = lifecycle_conn();
+        let conn = Arc::new(conn);
+        let channel = uuid::Uuid::new_v4();
+        let topic = EventTopic::Channel(channel);
+        let valid = buzz_core::artifact_sync::parse_sync(
+            &serde_json::json!({"artifact":"current","#h":[channel.to_string()]}),
+        );
+        for (filter, reason) in [
+            (Err("sync requires #h"), "invalid: sync requires #h"),
+            (valid, "auth-required: not authenticated"),
+        ] {
+            claim_live_subscription("s", &text_filters(), Some(&[channel]), &conn, &state)
+                .await
+                .expect("claim");
+            let permit = Arc::new(tokio::sync::Semaphore::new(1))
+                .acquire_owned()
+                .await
+                .expect("permit");
+            super::super::artifact_sync::handle_sync(
+                "s".into(),
+                filter,
+                Arc::clone(&conn),
+                Arc::clone(&state),
+                permit,
+            )
+            .await;
+            assert!(conn.subscriptions.lock().await.is_empty(), "{reason}");
+            assert!(!registered(&state, &conn, "s"), "{reason}");
+            assert_eq!(state.pubsub.topic_refcount(&conn.tenant, topic).await, 0);
+            assert_eq!(
+                closed_frames(&mut send_rx),
+                vec![serde_json::json!(["CLOSED", "s", reason]).to_string()]
+            );
+        }
     }
 
     #[tokio::test]

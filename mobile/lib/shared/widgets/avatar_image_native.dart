@@ -17,12 +17,7 @@ Future<Uint8List?> nativeAvatarImage({
   final recorder = ui.PictureRecorder();
   final canvas = Canvas(recorder);
   final bounds = const Rect.fromLTWH(0, 0, dimension, dimension);
-  canvas.clipRRect(
-    RRect.fromRectAndRadius(
-      bounds,
-      Radius.circular(dimension * (isAgent && !circular ? 0.3 : 0.5)),
-    ),
-  );
+  canvas.clipPath(avatarPath(bounds, isAgent: isAgent && !circular));
   canvas.drawColor(background, BlendMode.src);
   final imageBounds = isAgent && usesInsetAgentArtwork(url)
       ? bounds.deflate(dimension * (1 - animatedAvatarArtworkScale) / 2)
