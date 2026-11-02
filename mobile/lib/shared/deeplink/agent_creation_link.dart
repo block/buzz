@@ -11,7 +11,7 @@ class AgentCreationDeepLink extends BuzzDeepLink {
   /// Creates a link for the published card [cardId].
   const AgentCreationDeepLink(this.cardId);
 
-  /// Published card id, a plain URL-safe token such as `av_…`.
+  /// Published card id, opaque to the app (today `av_…`).
   final String cardId;
 
   @override
@@ -24,8 +24,6 @@ class AgentCreationDeepLink extends BuzzDeepLink {
   @override
   String toString() => 'AgentCreationDeepLink($cardId)';
 }
-
-final _cardId = RegExp(r'^[A-Za-z0-9_-]{1,64}$');
 
 /// Parses `buzz://agent/new?card=<id>`; anything else is not this link.
 AgentCreationDeepLink? parseAgentCreationDeepLink(Uri uri) {
@@ -40,6 +38,7 @@ AgentCreationDeepLink? parseAgentCreationDeepLink(Uri uri) {
   final params = uri.queryParametersAll;
   final card = params['card'];
   if (params.length != 1 || card == null || card.length != 1) return null;
-  if (!_cardId.hasMatch(card.single)) return null;
+  // The id is opaque, but it becomes one path segment of the card's URL.
+  if (const {'', '.', '..'}.contains(card.single)) return null;
   return AgentCreationDeepLink(card.single);
 }

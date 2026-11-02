@@ -14,9 +14,9 @@ void main() {
         'buzz://agent/new?card=av_MioTAG6dm7q3Zcm0UV2j8A',
         'av_MioTAG6dm7q3Zcm0UV2j8A',
       ),
-      'any URL-safe token': (
-        'buzz://agent/new?card=abc-DEF_123',
-        'abc-DEF_123',
+      'any opaque id': (
+        'buzz://agent/new?card=card.7~x%2Fy%20z',
+        'card.7~x/y z',
       ),
     };
     accepted.forEach((label, c) {
@@ -28,10 +28,7 @@ void main() {
     const rejected = {
       'no card': 'buzz://agent/new',
       'empty card': 'buzz://agent/new?card=',
-      'path in card': 'buzz://agent/new?card=..%2Fx',
-      'host in card': 'buzz://agent/new?card=evil.example%2Fx',
-      'card too long':
-          'buzz://agent/new?card=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      'dot segment': 'buzz://agent/new?card=..',
       'two cards': 'buzz://agent/new?card=a&card=b',
       'extra parameter': 'buzz://agent/new?card=a&auto=true',
       'inline draft (retired format)': 'buzz://agent/new#e30',
@@ -51,7 +48,6 @@ void main() {
   });
 
   group('agent.json', () {
-    final cdn = Uri.parse('https://cdn.example');
     const avatar = 'https://cdn.example/av_1/rev/avatar.png';
     // A card as kgoose publishes it today (schema v1).
     const published = <String, dynamic>{
@@ -65,8 +61,8 @@ void main() {
       'shareUrl': 'https://app.builderlab.xyz/a/av_1',
     };
 
-    test('a published v1 card opens with name and avatar only', () {
-      final draft = AgentCreationDraft.parseAgentCard(published, 'av_1', cdn);
+    test('a published card opens with name and avatar only', () {
+      final draft = AgentCreationDraft.parseAgentCard(published, 'av_1');
       expect(draft.name, 'Nitrox');
       expect(draft.instructions, '');
       expect(draft.avatar?.url, avatar);
@@ -74,75 +70,61 @@ void main() {
       expect(draft.reasoningEffort, isNull);
     });
 
-    test('a v2 card carries instructions and model defaults', () {
-      final draft = AgentCreationDraft.parseAgentCard(
-        {
-          ...published,
-          'v': 2,
-          'name': ' Scout ',
-          'instructions': 'Reply concisely.',
-          'model': 'sonnet-5-5',
-          'reasoningEffort': 'high',
-          // Other keys are ignored, including other spellings of known ones.
-          'system_prompt': 'ignored',
-          'model_id': 'ignored',
-        },
-        'av_1',
-        cdn,
-      );
+    test('a card carries instructions and model defaults', () {
+      final draft = AgentCreationDraft.parseAgentCard({
+        ...published,
+        'v': 99,
+        'name': ' Scout ',
+        'avatarUrl': 'https://images.example/scout.png',
+        'instructions': 'Reply concisely.',
+        'model': 'sonnet-5-5',
+        'reasoningEffort': 'high',
+        // Other keys are ignored, including other spellings of known ones.
+        'system_prompt': 'ignored',
+        'model_id': 'ignored',
+      }, 'av_1');
       expect(draft.name, 'Scout');
+      expect(draft.avatar?.url, 'https://images.example/scout.png');
       expect(draft.instructions, 'Reply concisely.');
       expect(draft.modelId, 'sonnet-5-5');
       expect(draft.reasoningEffort, 'high');
     });
 
     test('blank optional fields are left for the user', () {
-      final draft = AgentCreationDraft.parseAgentCard(
-        {...published, 'v': 2, 'instructions': '', 'model': ' '},
-        'av_1',
-        cdn,
-      );
+      final draft = AgentCreationDraft.parseAgentCard({
+        ...published,
+        'instructions': '',
+        'model': ' ',
+      }, 'av_1');
       expect(draft.instructions, '');
       expect(draft.modelId, isNull);
     });
 
     final invalid = <String, Map<String, dynamic>>{
-      'missing v': {...published}..remove('v'),
-      'unknown v': {...published, 'v': 3},
-      'string v': {...published, 'v': '1'},
       'missing id': {...published}..remove('id'),
       'id of another card': {...published, 'id': 'av_2'},
       'missing name': {...published}..remove('name'),
       'blank name': {...published, 'name': ' '},
       'non-string name': {...published, 'name': 7},
       'missing avatar': {...published}..remove('avatarUrl'),
-      'avatar on another host': {
-        ...published,
-        'avatarUrl': 'https://evil.example/a.png',
-      },
+      'non-string avatar': {...published, 'avatarUrl': 7},
       'http avatar': {...published, 'avatarUrl': 'http://cdn.example/a.png'},
-      'avatar with credentials': {
-        ...published,
-        'avatarUrl': 'https://u:p@cdn.example/a.png',
-      },
+      'relative avatar': {...published, 'avatarUrl': '/av_1/a.png'},
       'non-string instructions': {
         ...published,
-        'v': 2,
         'instructions': ['x'],
       },
-      'non-string model': {...published, 'v': 2, 'model': 5},
+      'non-string model': {...published, 'model': 5},
       'non-string effort': {
         ...published,
-        'v': 2,
         'model': 'sonnet-5-5',
         'reasoningEffort': true,
       },
-      'effort without model': {...published, 'v': 2, 'reasoningEffort': 'high'},
     };
     invalid.forEach((label, json) {
       test(label, () {
         expect(
-          () => AgentCreationDraft.parseAgentCard(json, 'av_1', cdn),
+          () => AgentCreationDraft.parseAgentCard(json, 'av_1'),
           throwsA(
             isA<AgentCardException>().having(
               (e) => e.message,
@@ -203,6 +185,18 @@ void main() {
         HostedEnvironment.avatarsCdnOrigin.replace(path: '/av_1/agent.json'),
       );
       expect(seen.followRedirects, isFalse);
+    });
+
+    test('percent-encodes the opaque id as one path segment', () async {
+      late Uri seen;
+      await AgentCreationDraft.fetch(
+        const AgentCreationDeepLink('a/b c'),
+        MockClient.streaming((request, _) async {
+          seen = request.url;
+          return respond(404);
+        }),
+      ).then<void>((_) {}, onError: (_) {});
+      expect(seen.path, '/a%2Fb%20c/agent.json');
     });
 
     final failures = <String, (MockClientStreamHandler, String)>{

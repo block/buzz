@@ -1,12 +1,11 @@
-import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/hosted/hosted_environment.dart';
+import '../../shared/utils/bounded_fetch.dart';
 import 'agent_avatar_picker.dart';
 
 /// Creates the HTTP client that fetches a card's `agent.json`; overridden in
@@ -16,9 +15,7 @@ final agentCardClientProvider = Provider<http.Client Function()>(
 );
 
 /// Largest `agent.json` accepted, far above any real card.
-const maxAgentCardBytes = 256 * 1024;
-
-const _fetchTimeout = Duration(seconds: 15);
+const maxAgentCardBytes = 2 * 1024 * 1024;
 
 /// Why a card's draft could not be loaded, worded for the user.
 class AgentCardException implements Exception {
@@ -61,64 +58,56 @@ class AgentCreationDraft {
     http.Client client,
   ) async {
     final cdn = HostedEnvironment.avatarsCdnOrigin;
-    final url = cdn.replace(path: '/${link.cardId}/agent.json');
-    final http.StreamedResponse response;
-    final List<int> body;
+    // The id is opaque; pathSegments percent-encodes anything path-unsafe.
+    final url = cdn.replace(pathSegments: [link.cardId, 'agent.json']);
+    final BoundedResponse response;
     try {
-      response = await client
-          .send(
-            http.Request('GET', url)
-              ..headers['accept'] = 'application/json'
-              // A redirect could lead off the CDN; treat it as unavailable.
-              ..followRedirects = false,
-          )
-          .timeout(_fetchTimeout);
-      if (response.statusCode == 403 || response.statusCode == 404) {
-        throw const AgentCardException('This agent card isn’t available.');
-      }
-      if (response.statusCode != 200) {
-        throw AgentCardException(
-          'Couldn’t load this agent card (HTTP ${response.statusCode}).',
-        );
-      }
-      if ((response.contentLength ?? 0) > maxAgentCardBytes) {
-        throw const AgentCardException('This agent card is too large.');
-      }
-      body = await _readBounded(response.stream).timeout(_fetchTimeout);
-    } on AgentCardException {
-      rethrow;
+      response = await boundedGet(
+        client,
+        url,
+        maxBytes: maxAgentCardBytes,
+        headers: const {'accept': 'application/json'},
+        // A redirect could lead off the CDN; treat it as unavailable.
+        followRedirects: false,
+      );
+    } on ResponseTooLargeException {
+      throw const AgentCardException('This agent card is too large.');
     } on Exception {
       throw const AgentCardException(
         'Couldn’t load this agent card. Check your connection and reopen the '
         'link.',
       );
     }
+    if (response.statusCode == 403 || response.statusCode == 404) {
+      throw const AgentCardException('This agent card isn’t available.');
+    }
+    if (response.statusCode != 200) {
+      throw AgentCardException(
+        'Couldn’t load this agent card (HTTP ${response.statusCode}).',
+      );
+    }
     final Object? json;
     try {
-      json = jsonDecode(utf8.decode(body));
+      json = jsonDecode(utf8.decode(response.bytes));
     } on FormatException {
       throw const AgentCardException('This agent card is invalid.');
     }
     if (json is! Map<String, dynamic>) {
       throw const AgentCardException('This agent card is invalid.');
     }
-    return parseAgentCard(json, link.cardId, cdn);
+    return parseAgentCard(json, link.cardId);
   }
 
-  /// Reads a card's draft from its `agent.json`, validated against the card
-  /// schema (v1 or v2). `v`, `id` (matching [cardId]), `name` and `avatarUrl`
-  /// are required; `instructions`, `model` and `reasoningEffort` are optional
-  /// and left for the user when absent. A required field that is missing, or
-  /// any known field of the wrong type, makes the card invalid. Other keys are
-  /// ignored. The avatar must be an https URL on [cdn], the card's own host.
+  /// Reads a card's draft from its `agent.json`. `id` (matching [cardId]),
+  /// `name` and `avatarUrl` (an https URL) are required; `instructions`,
+  /// `model` and `reasoningEffort` are optional and left for the user when
+  /// absent or blank. A missing required field, or a known field of the wrong
+  /// type, makes the card invalid. Other keys, including `v`, are ignored.
   static AgentCreationDraft parseAgentCard(
     Map<String, dynamic> json,
     String cardId,
-    Uri cdn,
   ) {
     const invalid = AgentCardException('This agent card is invalid.');
-    final version = json['v'];
-    if (version is! int || (version != 1 && version != 2)) throw invalid;
     if (json['id'] != cardId) throw invalid;
     final name = json['name'];
     final avatarUrl = json['avatarUrl'];
@@ -126,11 +115,7 @@ class AgentCreationDraft {
       throw invalid;
     }
     final avatar = Uri.tryParse(avatarUrl);
-    if (avatar == null ||
-        avatar.scheme != 'https' ||
-        avatar.host != cdn.host ||
-        avatar.hasPort ||
-        avatar.userInfo.isNotEmpty) {
+    if (avatar == null || avatar.scheme != 'https' || avatar.host.isEmpty) {
       throw invalid;
     }
     String? optional(String key) {
@@ -140,26 +125,12 @@ class AgentCreationDraft {
       return text == null || text.isEmpty ? null : text;
     }
 
-    final modelId = optional('model');
-    final reasoningEffort = optional('reasoningEffort');
-    if (reasoningEffort != null && modelId == null) throw invalid;
     return AgentCreationDraft(
       name: name.trim(),
       instructions: optional('instructions') ?? '',
       avatar: AgentAvatarSelection.url(avatarUrl),
-      modelId: modelId,
-      reasoningEffort: reasoningEffort,
+      modelId: optional('model'),
+      reasoningEffort: optional('reasoningEffort'),
     );
-  }
-
-  static Future<List<int>> _readBounded(Stream<List<int>> stream) async {
-    final bytes = BytesBuilder(copy: false);
-    await for (final chunk in stream) {
-      if (bytes.length + chunk.length > maxAgentCardBytes) {
-        throw const AgentCardException('This agent card is too large.');
-      }
-      bytes.add(chunk);
-    }
-    return bytes.takeBytes();
   }
 }

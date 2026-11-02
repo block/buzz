@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
@@ -9,6 +8,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 
 import '../hosted/hosted_relay_auth.dart';
+import '../utils/bounded_fetch.dart';
 import 'media_auth.dart';
 
 /// Shared, keep-alive HTTP client for media fetches. One client per container
@@ -71,8 +71,8 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     this.onBytesLoaded,
     this.isThumbnailFallback = false,
     this.scale = 1.0,
-    this.stallTimeout = const Duration(seconds: 20),
-    this.maxFetchDuration = const Duration(minutes: 5),
+    this.stallTimeout = defaultStallTimeout,
+    this.maxFetchDuration = defaultMaxFetchDuration,
   });
 
   /// Maximum encoded image body retained before decoding (20 MiB).
@@ -185,63 +185,19 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     }
 
     final uri = Uri.parse(url);
-    final http.Response response;
-    var wasAbandoned = false;
+    final BoundedResponse response;
     try {
-      final stop = Completer<void>();
-      Timer? stall;
-      void restartStallTimer() {
-        stall?.cancel();
-        stall = Timer(stallTimeout, () {
-          if (!stop.isCompleted) stop.complete();
-        });
-      }
-
-      restartStallTimer();
-      final deadline = Timer(maxFetchDuration, () {
-        if (!stop.isCompleted) stop.complete();
-      });
-      unawaited(
-        abort.then((_) {
-          if (stop.isCompleted) return;
-          wasAbandoned = true;
-          stop.complete();
-        }),
+      response = await boundedGet(
+        client,
+        uri,
+        maxBytes: maxResponseBytes,
+        headers: auth.headersFor(url),
+        stallTimeout: stallTimeout,
+        maxFetchDuration: maxFetchDuration,
+        cancel: abort,
       );
-      StreamIterator<List<int>>? body;
-      try {
-        final request = http.AbortableRequest(
-          'GET',
-          uri,
-          abortTrigger: stop.future,
-        )..headers.addAll(auth.headersFor(url));
-        final streamed = await client.send(request);
-        restartStallTimer();
-        final iterator = body = StreamIterator(streamed.stream);
-        final bytes = BytesBuilder(copy: false);
-        // An error body is never shown, and reading a slow one could hold
-        // this load for the whole fetch cap before the fallback or
-        // Retry-After applies. Leave it unread; finally cancels the stream.
-        while (streamed.statusCode == 200 && await iterator.moveNext()) {
-          restartStallTimer();
-          final chunk = iterator.current;
-          if (chunk.length > maxResponseBytes - bytes.length) {
-            throw const FormatException('Image response too large');
-          }
-          bytes.add(chunk);
-        }
-        response = http.Response.bytes(
-          bytes.takeBytes(),
-          streamed.statusCode,
-          headers: streamed.headers,
-        );
-      } finally {
-        stall?.cancel();
-        deadline.cancel();
-        if (!stop.isCompleted) stop.complete();
-        unawaited(body?.cancel());
-      }
-    } catch (_) {
+    } catch (error) {
+      final wasAbandoned = error is FetchCancelledException;
       // Nobody wanted the image any more; the URL itself did not fail.
       if (!wasAbandoned) {
         _cooldownUntil[url] = debugNow().add(_defaultCooldown);
@@ -263,7 +219,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
         uri: uri,
       );
     }
-    final bytes = response.bodyBytes;
+    final bytes = response.bytes;
     if (bytes.isEmpty) {
       _cooldownUntil[url] = debugNow().add(_defaultCooldown);
       throw NetworkImageLoadException(statusCode: 200, uri: uri);
@@ -271,7 +227,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     return bytes;
   }
 
-  Duration _cooldownFor(http.Response response) {
+  Duration _cooldownFor(BoundedResponse response) {
     final retryAfter = int.tryParse(response.headers['retry-after'] ?? '');
     if (retryAfter != null && retryAfter > 0) {
       final requested = Duration(seconds: retryAfter);

@@ -51,11 +51,14 @@ any length while the QR stays small.
 }
 ```
 
-- `v` (1 or 2), `id` (the link's card id), `name` and `avatarUrl` are required.
-  `instructions`, `model` and `reasoningEffort` are optional and left for the
-  user when absent; `reasoningEffort` needs `model`. A missing required field,
-  a known field of the wrong type, or an avatar that isn't an `https` URL on the
-  same CDN makes the card invalid, and no form opens. Other keys are ignored.
+- `id` (the link's card id), `name` and `avatarUrl` (an `https` URL) are
+  required. `instructions`, `model` and `reasoningEffort` are optional and left
+  for the user when absent. A missing required field or a known field of the
+  wrong type makes the card invalid, and no form opens. Other keys, including
+  `v`, are ignored. The card id is opaque to the app.
+- The fetch shares the image loader's limits (`lib/shared/utils/bounded_fetch.dart`):
+  it is aborted after 20 seconds without a byte or 5 minutes overall, and a card
+  over 2 MB is rejected.
 - `model` and `reasoningEffort` are pre-selected only if the live model catalog
   offers them (the effort only for that model).
 - The link waits for sign-in and community load. It needs Builderlab login and a
