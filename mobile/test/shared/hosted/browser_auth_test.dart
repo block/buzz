@@ -34,6 +34,20 @@ void main() {
         'code': 'exchange-code',
       },
     );
+    // A temporary backend failure must surface retry without losing the invite.
+    await restored.receive(
+      callback.replace(
+        queryParameters: {
+          'state': login.queryParameters['state']!,
+          'error': 'temporarily_unavailable',
+        },
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(codes, isEmpty);
+    expect(failures, [BrowserAuthFailure.restartLogin]);
+    expect(await restored.retainedIntent(), containsPair('code', 'invite'));
+    failures.clear();
     await restored.receive(callback);
     await restored.receive(callback);
     await Future<void>.delayed(Duration.zero);
@@ -48,6 +62,17 @@ void main() {
     );
     expect(login.queryParameters['code_challenge_method'], 'S256');
     expect(login.origin, HostedEnvironment.origin.origin);
+    expect(login.path, '/auth/native');
+    expect(
+      login.queryParametersAll.keys,
+      unorderedEquals([
+        'returnTo',
+        'state',
+        'code_challenge',
+        'code_challenge_method',
+      ]),
+    );
+    expect(login.queryParametersAll.values, everyElement(hasLength(1)));
     final stored = await const FlutterSecureStorage().readAll();
     expect(stored.keys, everyElement(contains(HostedEnvironment.origin.host)));
     expect(login.queryParameters['returnTo'], BrowserAuth.callback);
