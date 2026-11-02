@@ -509,6 +509,15 @@ async fn ensure_starter_channels_inner(
 
     if !has_all_starter_channels(&existing_channels, &skipped) {
         existing_channels = fetch_channels(state, DirectoryScope::IncludeOpenDirectory).await?;
+        // A starter id the relay holds but never serves, even from the
+        // writer, belongs to a channel this user cannot see, such as a
+        // deleted one.
+        for (spec, id) in &duplicate_starters {
+            if !existing_channels.iter().any(|channel| channel.id == *id) {
+                state.clear_pending_owned_channel(&creator_pubkey, id);
+                skipped.insert(spec.slug);
+            }
+        }
     }
 
     if !has_all_starter_channels(&existing_channels, &skipped) {

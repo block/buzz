@@ -202,6 +202,24 @@ async fn a_starter_id_held_by_a_renamed_channel_is_skipped() {
 }
 
 #[tokio::test]
+async fn a_starter_id_held_by_an_unseen_channel_is_skipped() {
+    let _serial = crate::relay_admission::TEST_SERIAL.lock().await;
+    // A deleted channel keeps its id, so the relay answers `duplicate`, but
+    // never serves its metadata.
+    let (result, accepted, still_pending) =
+        ensure_with_unusable_welcome((status_ok(), "duplicate: channel already exists"), None)
+            .await;
+
+    let channels = result.expect("a deleted starter must not fail setup");
+    assert!(joined_live_general(&channels));
+    assert_eq!(accepted, vec![9021], "only the join to general");
+    assert!(
+        !still_pending,
+        "the deleted channel must not be shown as one this user owns"
+    );
+}
+
+#[tokio::test]
 async fn other_create_refusals_still_fail_setup() {
     let _serial = crate::relay_admission::TEST_SERIAL.lock().await;
     let (result, accepted, _) = ensure_with_unusable_welcome(
