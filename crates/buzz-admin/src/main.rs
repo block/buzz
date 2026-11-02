@@ -22,6 +22,7 @@
 mod communities;
 mod deletions;
 mod nip_fi;
+mod user_deletions;
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -55,7 +56,9 @@ enum Command {
     ///
     /// Accepts a bech32 npub or 64-char hex pubkey. After inserting the DB row,
     /// publishes a kind:13534 membership roster via Redis so live clients see
-    /// the updated list immediately.
+    /// the updated list immediately. Does not join the member to the
+    /// community's default (`auto_join`) channels: the relay does that on an
+    /// invite claim or a kind:9030 add, which this command bypasses.
     AddMember {
         /// Nostr public key — bech32 npub or 64-char hex.
         #[arg(long)]
@@ -125,6 +128,11 @@ enum Command {
     Deletions {
         #[command(subcommand)]
         command: deletions::DeletionsCommand,
+    },
+    /// Preview real user memberships or manage synthetic user-deletion requests.
+    UserDeletions {
+        #[command(subcommand)]
+        command: user_deletions::UserDeletionsCommand,
     },
     /// Emit missing kind:39000/39001/39002 channel discovery events, or
     /// republish only a targeted channel's kind:39002 roster.
@@ -203,6 +211,7 @@ async fn run(cli: Cli) -> Result<i32> {
         } => cmd_list_product_feedback(limit).await,
         Command::Communities { command } => communities::run(command).await,
         Command::Deletions { command } => deletions::run(command).await,
+        Command::UserDeletions { command } => user_deletions::run(command).await,
         Command::NipFi { command } => nip_fi::run(command).await,
         Command::ReconcileChannels { channel, relay_key } => {
             reconcile_channels(channel, relay_key).await?;
@@ -716,7 +725,7 @@ async fn reconcile_channels(
     channel_arg: Option<String>,
     relay_key_arg: Option<String>,
 ) -> Result<()> {
-    use buzz_core::channel::{channel_created_at_tag, group_state_identity_tags};
+    use buzz_core::channel::group_state_identity_tags;
     use buzz_core::kind::KIND_NIP29_GROUP_ADMINS;
     use buzz_db::event::EventQuery;
 
@@ -801,31 +810,10 @@ async fn reconcile_channels(
         if target_channel.is_none() {
             // kind:39000 — channel metadata
             {
-                let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
-                tags.push(Tag::parse(["name", &channel.name])?);
-                if let Some(ref desc) = channel.description {
-                    if !desc.is_empty() {
-                        tags.push(Tag::parse(["about", desc])?);
-                    }
-                }
-                if channel.visibility == "private" {
-                    tags.push(Tag::parse(["private"])?);
-                } else {
-                    tags.push(Tag::parse(["public"])?);
-                }
-                if channel.channel_type == "dm"
-                    || (channel.channel_type == "system" && channel.visibility == "private")
-                {
-                    tags.push(Tag::parse(["hidden"])?);
-                }
-                tags.push(Tag::parse(["closed"])?);
-                tags.extend(group_state_identity_tags(
-                    &channel.channel_type,
-                    &channel.labels,
-                    &channel.created_by,
-                )?);
-                tags.push(channel_created_at_tag(channel.created_at.timestamp())?);
-
+                let tags = buzz_db::channel::group_metadata_tags(channel, &members)
+                    .into_iter()
+                    .map(Tag::parse)
+                    .collect::<Result<Vec<_>, _>>()?;
                 let event = EventBuilder::new(Kind::Custom(39000), "")
                     .tags(tags)
                     .sign_with_keys(&relay_keys)

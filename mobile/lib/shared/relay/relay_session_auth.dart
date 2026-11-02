@@ -20,7 +20,7 @@ String buildNip98AuthHeader({
       .process(Uint8List.fromList(bodyBytes))
       .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
       .join();
-  final event = nostr.Event.from(
+  final event = signNostrEvent(
     kind: 27235,
     content: '',
     tags: [
@@ -31,7 +31,6 @@ String buildNip98AuthHeader({
     ],
     secretKey: privkeyHex,
     pubkey: pubkey,
-    verify: false,
   );
   return 'Nostr ${base64.encode(utf8.encode(event.toJson()))}';
 }

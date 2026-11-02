@@ -2,6 +2,42 @@ import '../deeplink/deep_link.dart';
 import 'builderlab_account.dart';
 import 'hosted_environment.dart';
 
+/// Account-saved destinations, not evidence that this identity is a member.
+/// Keep the existing hosted environment boundary and normal relay admission.
+Future<List<AddCommunityDeepLink>> loadKnownHostedCommunities(
+  BuilderlabAccountClient account,
+) async {
+  final response = await account.post('/v1/buzz/known-communities/list', {});
+  // Protobuf JSON omits an empty repeated field.
+  final rows = response['communities'] ?? <dynamic>[];
+  if (response['error'] != null || rows is! List) {
+    throw AccountFailure.invalidResponse;
+  }
+  final communities = <String, AddCommunityDeepLink>{};
+  for (final row in rows) {
+    if (row is! Map<String, dynamic> || row['community_url'] is! String) {
+      throw AccountFailure.invalidResponse;
+    }
+    final relay = Uri.tryParse(row['community_url'] as String);
+    // The account can also save destinations this hosted build cannot enter.
+    if (relay == null ||
+        relay.scheme != 'wss' ||
+        !RegExp(r'^[a-z0-9]+(?:[.-][a-z0-9]+)*$').hasMatch(relay.host) ||
+        !HostedEnvironment.supportsRelay(relay)) {
+      continue;
+    }
+    final canonical = Uri(scheme: 'wss', host: relay.host);
+    communities.putIfAbsent(
+      canonical.host,
+      () => AddCommunityDeepLink(
+        relayUrl: canonical.toString(),
+        name: canonical.host,
+      ),
+    );
+  }
+  return List.unmodifiable(communities.values);
+}
+
 /// Validated, active communities joined by the signed-in Builderlab identity.
 /// Discovery never grants admission; each target still goes through HostedAdmission.
 Future<List<AddCommunityDeepLink>> loadHostedCommunities(

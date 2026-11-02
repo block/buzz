@@ -360,6 +360,7 @@ pub async fn ban_member(
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
+    crate::relay_invite::lock_admission(tx.conn(), community).await?;
     sqlx::query(
         r#"
         INSERT INTO community_bans (
@@ -380,8 +381,8 @@ pub async fn ban_member(
     .bind(actor)
     .execute(tx.conn())
     .await?;
+    crate::relay_invite::revoke_banned_issuer_invites(tx.conn(), community, pubkey).await?;
     tx.commit().await?;
-
     Ok(())
 }
 
@@ -548,6 +549,7 @@ pub async fn timeout_member(
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
+    crate::relay_invite::lock_admission(tx.conn(), community).await?;
     sqlx::query(
         r#"
         INSERT INTO community_bans (
@@ -567,8 +569,8 @@ pub async fn timeout_member(
     .bind(actor)
     .execute(tx.conn())
     .await?;
+    crate::relay_invite::revoke_banned_issuer_invites(tx.conn(), community, pubkey).await?;
     tx.commit().await?;
-
     Ok(())
 }
 

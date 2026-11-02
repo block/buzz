@@ -13,13 +13,18 @@ import {
   isRateLimited,
   waitForRateLimit,
 } from "@/shared/api/relayRateLimitGate";
+import {
+  computeResumeSince,
+  RELAY_INGEST_FUTURE_TOLERANCE_SECS,
+  stampLiveUntilOnClose,
+} from "@/shared/api/relayResumeCursor";
 
-const RECONNECT_REPLAY_SKEW_SECS = 5;
+export { RELAY_INGEST_FUTURE_TOLERANCE_SECS };
+
 /**
  * Legacy cursors are event-time maxima, so cover relay future tolerance (900s)
  * plus the channel-row storage fence and margin (960s + 5s).
  */
-export const RELAY_INGEST_FUTURE_TOLERANCE_SECS = 900;
 export const DB_CREATED_AT_FLOOR_SECS = 960;
 export const FENCE_CLOCK_MARGIN_SECS = 5;
 export const RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS =
@@ -61,6 +66,16 @@ export const REPLAY_BATCH_SIZE = 8;
  */
 export const REPLAY_INTER_BATCH_DELAY_MS = 50;
 
+/**
+ * Longest a paged channel's HTTP repair waits for its live-only REQ to be
+ * acknowledged (EOSE) before treating the attempt as failed.
+ *
+ * The repair must start after the relay registered the live subscription:
+ * the live REQ no longer reads history, so an event stored between the
+ * repair's upper bound and registration would be delivered by neither.
+ */
+export const LIVE_REQ_ACK_TIMEOUT_MS = 25_000;
+
 async function runWithConcurrency<T>(
   items: T[],
   concurrency: number,
@@ -77,6 +92,65 @@ async function runWithConcurrency<T>(
       }
     }),
   );
+}
+
+/**
+ * Resolves `true` once the restored live REQ reached EOSE on this replay's
+ * connection, `false` on timeout. Also resolves early (`true`) when this
+ * replay is superseded or its connection or subscription is retired; callers
+ * re-check `isActive()` and subscription identity after waking. A waiter that
+ * outlived its connection would hold `connect()` (and with it the session's
+ * `connectPromise`) for the whole timeout, stalling the scheduled reconnect.
+ */
+function awaitLiveEose(
+  replay: NonNullable<
+    Extract<RelaySubscription, { mode: "live" }>["reconnectReplay"]
+  >,
+  isActive: () => boolean,
+  setTimeoutFn: (fn: () => void, ms: number) => number,
+  clearTimeoutFn: (handle: number) => void,
+): Promise<boolean> {
+  if (replay.liveEose || !isActive()) return Promise.resolve(true);
+  // The deadline runs from the REQ's send, not from when a (concurrency
+  // limited) worker got here: a queued channel must not get a fresh wait.
+  const sentAtMs = replay.liveReqSentAtMs ?? Date.now();
+  const remainingMs = Math.max(
+    0,
+    sentAtMs + LIVE_REQ_ACK_TIMEOUT_MS - Date.now(),
+  );
+  return new Promise<boolean>((resolve) => {
+    const timer = setTimeoutFn(() => {
+      replay.liveEoseWaiter = undefined;
+      resolve(false);
+    }, remainingMs);
+    replay.liveEoseWaiter = () => {
+      replay.liveEoseWaiter = undefined;
+      clearTimeoutFn(timer);
+      resolve(true);
+    };
+  });
+}
+
+/** Wake a repair worker parked on this subscription's live EOSE, if any. */
+export function releaseLiveEoseWaiter(subscription: RelaySubscription) {
+  if (subscription.mode !== "live") return;
+  subscription.reconnectReplay?.liveEoseWaiter?.();
+}
+
+/**
+ * Per-subscription bookkeeping for a connection that is being torn down:
+ * stamp the resume cursor, then release every repair worker parked on that
+ * connection's EOSE so the stale `connect()` settles at once.
+ */
+export function retireConnectionSubscriptions(
+  subscriptions: Map<string, RelaySubscription>,
+  generation: number,
+  lastInboundMs: number,
+) {
+  stampLiveUntilOnClose(subscriptions, generation, lastInboundMs);
+  for (const subscription of subscriptions.values()) {
+    releaseLiveEoseWaiter(subscription);
+  }
 }
 
 export function buildReconnectReplayFilter(
@@ -189,6 +263,7 @@ export async function replayLiveSubscriptions({
   interBatchDelayMs = REPLAY_INTER_BATCH_DELAY_MS,
   setTimeoutFn = (fn: () => void, ms: number) =>
     window.setTimeout(fn, ms) as unknown as number,
+  clearTimeoutFn = (handle: number) => window.clearTimeout(handle),
   isActive = () => true,
 }: {
   subscriptions: Map<string, RelaySubscription>;
@@ -206,6 +281,8 @@ export async function replayLiveSubscriptions({
   interBatchDelayMs?: number;
   /** setTimeout implementation (injectable for tests). */
   setTimeoutFn?: (fn: () => void, ms: number) => number;
+  /** clearTimeout matching `setTimeoutFn` (injectable for tests). */
+  clearTimeoutFn?: (handle: number) => void;
   /**
    * Returns false when the connection that initiated this replay has been
    * superseded by a newer one. After the gate await resumes, a stale replay
@@ -233,16 +310,17 @@ export async function replayLiveSubscriptions({
       const shouldPageReplay =
         channelId !== undefined &&
         shouldPageReconnectReplay(subscription.filter);
-      const cursorSince =
-        subscription.lastSeenCreatedAt === undefined
-          ? undefined
-          : Math.max(
-              0,
-              subscription.lastSeenCreatedAt -
-                (shouldPageReplay
-                  ? RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS
-                  : RECONNECT_REPLAY_SKEW_SECS),
-            );
+      // Paged channels keep the wide event-time lookback for both terms: the
+      // relay accepts `created_at` up to 900s either side of storage time, so
+      // a narrower window could skip a backdated row stored after the close.
+      const cursorSince = computeResumeSince({
+        lastSeenCreatedAt: subscription.lastSeenCreatedAt,
+        liveUntil: subscription.liveUntil,
+        ...(shouldPageReplay && {
+          lastSeenSkewSecs: RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS,
+          liveUntilSkewSecs: RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS,
+        }),
+      });
       // A pinned floor from a previously failed backfill takes precedence
       // over the cursor: live events kept advancing `lastSeenCreatedAt`
       // while the older window stayed unresolved, and starting from the
@@ -259,9 +337,21 @@ export async function replayLiveSubscriptions({
           ? undefined
           : Math.max(replayFloor, subscription.filter.since ?? 0);
       const willRepair = shouldPageReplay && replaySince !== undefined;
+      let replay: typeof subscription.reconnectReplay;
       if (willRepair) {
+        // Pin the window's lower bound NOW, before any live-only REQ is sent
+        // or any await: every live REQ goes out before the (concurrency
+        // limited) repair workers start, so a queued channel can reach EOSE
+        // and have its socket close stamp `liveUntil` while its history was
+        // never fetched. The pin keeps the next replay's floor at or below
+        // this one until a repair pass actually completes. Events on the
+        // live REQ advance `lastSeenCreatedAt` independently of backfill
+        // success, so the cursor alone could skip the window permanently.
+        subscription.pendingReplaySince = replaySince;
+        // A superseded replay's worker is parked on its own state object.
+        subscription.reconnectReplay?.liveEoseWaiter?.();
         // Install before the restored live REQ: a live frame may beat page one.
-        subscription.reconnectReplay = {
+        replay = subscription.reconnectReplay = {
           generation,
           seenEventIds: new Set(),
           liveEose: false,
@@ -274,7 +364,14 @@ export async function replayLiveSubscriptions({
         subscription,
         channelId,
         replaySince,
+        replay,
         shouldPageReplay: willRepair,
+        // Quiet subscriptions resume from `liveUntil` alone; keep their full
+        // original limit rather than the steady-state cap.
+        resumeLimit:
+          subscription.lastSeenCreatedAt === undefined
+            ? subscription.filter.limit
+            : undefined,
       };
     });
 
@@ -305,17 +402,33 @@ export async function replayLiveSubscriptions({
     const batch = replayRequests.slice(i, i + replayBatchSize);
     await Promise.all(
       batch.map(
-        async ({ subId, subscription, replaySince, shouldPageReplay }) => {
+        async ({
+          subId,
+          subscription,
+          replaySince,
+          shouldPageReplay,
+          resumeLimit,
+          replay,
+        }) => {
           // The subscription map may change while replay is paused behind the
           // gate or an inter-batch delay. Never resurrect a disposed entry (or
           // overwrite its replacement) with a REQ from this stale snapshot.
           if (!isActive() || subscriptions.get(subId) !== subscription) return;
+          if (replay) replay.liveReqSentAtMs = Date.now();
           await sendRaw([
             "REQ",
             subId,
+            // The HTTP repair below already covers the missed window, so the
+            // live REQ reads no history (`limit: 0`); the repair starts only
+            // after this REQ's EOSE, which keeps backfill and live overlapping.
             shouldPageReplay
-              ? subscription.filter
-              : buildReconnectReplayFilter(subscription.filter, replaySince),
+              ? { ...subscription.filter, limit: 0 }
+              : buildReconnectReplayFilter(
+                  subscription.filter,
+                  replaySince,
+                  undefined,
+                  resumeLimit,
+                ),
           ]);
           // Disposal can race the asynchronous websocket invoke after the
           // identity check. If this exact entry was deleted while REQ was in
@@ -342,6 +455,7 @@ export async function replayLiveSubscriptions({
       ): request is typeof request & {
         channelId: string;
         replaySince: number;
+        replay: NonNullable<typeof request.replay>;
         shouldPageReplay: true;
       } =>
         request.shouldPageReplay &&
@@ -349,19 +463,91 @@ export async function replayLiveSubscriptions({
         request.replaySince !== undefined,
     ),
     pageReplayConcurrency,
-    async ({ subId, subscription, channelId, replaySince }) => {
+    async ({ subId, subscription, channelId, replaySince, replay }) => {
       // Backfill is best-effort: a failure here (typically a `rate-limited:`
       // CLOSED on a history REQ) must never escape to the session and tear
       // down the healthy, authenticated socket carrying the live REQs — that
       // is the connect→drop flap loop. Retry behind the gate a bounded number
-      // of times, then degrade to live-only for this connection.
+      // of times, then fall back to a bounded history REQ.
       //
-      // Pin the window's lower bound before the first attempt: events on the
-      // already-restored live REQ advance `lastSeenCreatedAt` independently
-      // of backfill success, so without the pin an exhausted backfill
-      // followed by one live event would make the next reconnect skip the
-      // unresolved window permanently. Cleared only on a completed pass.
-      subscription.pendingReplaySince = replaySince;
+      // The window's lower bound was pinned when the replay state was built;
+      // it is cleared only on a completed pass below.
+      const isCurrent = () =>
+        isActive() && subscriptions.get(subId) === subscription;
+
+      // The live REQ reads no history (`limit: 0`) and the pinned floor only
+      // helps the next reconnect, so without this the missed window stays
+      // empty for the rest of a stable connection. Fall back to the
+      // pre-repair behavior: re-issue the REQ (same ID, so the relay replaces
+      // the live subscription) with the window's bounded history. The floor
+      // stays pinned for anything the cap left out.
+      const sendHistoryFallback = async () => {
+        // That history overlaps what live (and any completed page) already
+        // dispatched, so keep the seen IDs until the fallback's own EOSE. If
+        // the original EOSE was consumed, the next one for this generation is
+        // the fallback's; if it never came, a late one could pass for the
+        // fallback's, so only the deadline below ends dedupe.
+        replay.repairDone = true;
+        if (replay.liveEose) replay.liveEose = false;
+        else replay.ignoreEose = true;
+        if (isRateLimited()) await waitForRateLimit();
+        // Dedupe ends on that EOSE, on teardown (both call the waiter), or at
+        // the deadline: the relay may drop an EOSE without closing the
+        // socket, and the set must not grow with live traffic for the rest of
+        // the connection. Identity-fenced so a stale release cannot clear a
+        // successor's state.
+        let deadline: number | undefined;
+        const endDedupe = () => {
+          if (deadline !== undefined) clearTimeoutFn(deadline);
+          replay.liveEoseWaiter = undefined;
+          if (subscription.reconnectReplay === replay) {
+            subscription.reconnectReplay = undefined;
+          }
+        };
+        if (!isCurrent()) {
+          endDedupe();
+          return;
+        }
+        replay.liveEoseWaiter = endDedupe;
+        deadline = setTimeoutFn(endDedupe, LIVE_REQ_ACK_TIMEOUT_MS);
+        try {
+          await sendRaw([
+            "REQ",
+            subId,
+            buildReconnectReplayFilter(subscription.filter, replaySince),
+          ]);
+        } catch (sendError: unknown) {
+          endDedupe();
+          console.warn(
+            `[reconnect replay] history fallback REQ failed for ${subId}:`,
+            sendError,
+          );
+          return;
+        }
+        // Same convergence as the restored live REQ: a disposal that raced
+        // this send must still end closed on the wire.
+        if (isActive() && !subscriptions.has(subId)) {
+          await sendRaw(["CLOSE", subId]).catch(() => {});
+        }
+      };
+
+      // Take the repair's upper bound only after the relay acknowledged the
+      // live-only REQ (registered it), never before. One deadline per REQ:
+      // waiting again on the same unchanged REQ cannot make it arrive.
+      const acked = await awaitLiveEose(
+        replay,
+        isCurrent,
+        setTimeoutFn,
+        clearTimeoutFn,
+      );
+      if (!isCurrent()) return;
+      if (!acked) {
+        console.warn(
+          `[reconnect replay] live REQ for ${subId} was not acknowledged; falling back to bounded history`,
+        );
+        await sendHistoryFallback();
+        return;
+      }
       for (let attempt = 1; attempt <= PAGE_REPLAY_MAX_ATTEMPTS; attempt++) {
         try {
           const completed = await replayReconnectHistoryPages({
@@ -377,8 +563,7 @@ export async function replayLiveSubscriptions({
             // SAME subscription key and object survive in the map — identity
             // alone stays true and a stale pass could complete and clear the
             // floor the superseding connection needs.
-            isActive: () =>
-              isActive() && subscriptions.get(subId) === subscription,
+            isActive: isCurrent,
             requestRepair,
           });
           // A stale-connection abort is NOT completion: the superseding
@@ -396,14 +581,14 @@ export async function replayLiveSubscriptions({
             error,
           );
           if (attempt === PAGE_REPLAY_MAX_ATTEMPTS) {
-            markReconnectRepairDone(subscription, generation);
+            await sendHistoryFallback();
             return;
           }
           // The failed REQ's CLOSED handler arms the rate-limit gate before
           // rejecting; wait for it (no-op when the failure wasn't back-pressure)
           // and re-check that this replay's connection is still current.
           if (isRateLimited()) await waitForRateLimit();
-          if (subscriptions.get(subId) !== subscription || !isActive()) return;
+          if (!isCurrent()) return;
         }
       }
     },

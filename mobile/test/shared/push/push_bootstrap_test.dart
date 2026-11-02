@@ -168,6 +168,21 @@ void main() {
     );
   });
 
+  test('relay grammar upgrade changes publication attempt identity', () {
+    String key(String grammar) => buzzPushPublicationAttemptKey(
+      communityId: 'community',
+      relayBaseUrl: 'https://relay.example',
+      token: 'token',
+      descriptor: _descriptor(
+        keyId: 'relay-v1',
+        pubkey: _hex('b'),
+        hGrammar: grammar,
+      ),
+      subscriptions: const [],
+    );
+    expect(key('uuid-lowercase'), isNot(key('uuid-v4-lowercase')));
+  });
+
   test('default push requires relay capability and respects opt-out', () {
     final enabled = Community.create(
       name: 'Team',
@@ -269,8 +284,10 @@ void main() {
 BuzzPushLeaseDescriptor _descriptor({
   required String keyId,
   required String pubkey,
+  String hGrammar = 'uuid-v4-lowercase',
 }) => BuzzPushLeaseDescriptor(
   origin: 'wss://relay.example',
+  hGrammar: hGrammar,
   executorKeyId: keyId,
   executorPubkey: pubkey,
   transport: 'apns',

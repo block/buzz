@@ -10,6 +10,7 @@ use crate::connection::{AuthState, ConnectionState};
 use crate::handlers::req::{
     event_visible_to_reader, filter_can_match_result_gated_kinds,
     filter_can_match_shared_gated_kinds, result_gated_count_safe_for_pushdown,
+    DATABASE_ERROR_CLOSED,
 };
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
@@ -88,7 +89,7 @@ pub async fn handle_count(
         Ok(ids) => ids,
         Err(e) => {
             warn!(sub_id = %sub_id, "Failed to get accessible channels: {e}");
-            conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+            conn.send(RelayMessage::closed(&sub_id, DATABASE_ERROR_CLOSED));
             return;
         }
     };
@@ -116,7 +117,7 @@ pub async fn handle_count(
         Ok(ids) => ids,
         Err(e) => {
             warn!(sub_id = %sub_id, "Failed to get readable named-only channels: {e}");
-            conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+            conn.send(RelayMessage::closed(&sub_id, DATABASE_ERROR_CLOSED));
             return;
         }
     };
@@ -178,7 +179,7 @@ pub async fn handle_count(
             .await
             {
                 warn!(sub_id = %sub_id, "Channel membership confirmation failed: {e}");
-                conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                conn.send(RelayMessage::closed(&sub_id, DATABASE_ERROR_CLOSED));
                 return;
             }
             if let Err(e) = super::system_channels::keep_repaired_named_only_channels_named(
@@ -191,7 +192,7 @@ pub async fn handle_count(
             .await
             {
                 warn!(sub_id = %sub_id, "Failed to classify repaired channels: {e}");
-                conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                conn.send(RelayMessage::closed(&sub_id, DATABASE_ERROR_CLOSED));
                 return;
             }
             let filter_scope = super::system_channels::filter_channel_scope(

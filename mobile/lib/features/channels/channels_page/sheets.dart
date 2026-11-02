@@ -2,17 +2,7 @@ part of '../channels_page.dart';
 
 const int _defaultCreateChannelTtlSeconds = 7 * 24 * 60 * 60;
 
-class _CreateChannelMenuOption<T> {
-  final Key? key;
-  final String label;
-  final T value;
-
-  const _CreateChannelMenuOption({
-    this.key,
-    required this.label,
-    required this.value,
-  });
-}
+typedef _CreateChannelMenuOption<T> = BuzzSettingMenuOption<T>;
 
 const _createChannelTtlOptions = [
   _CreateChannelMenuOption(label: '30 minutes', value: 30 * 60),
@@ -30,9 +20,7 @@ const _createChannelTtlOptions = [
 ];
 
 class _CreateChannelSheet extends HookConsumerWidget {
-  final String channelType;
-
-  const _CreateChannelSheet({required this.channelType});
+  const _CreateChannelSheet();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -45,7 +33,6 @@ class _CreateChannelSheet extends HookConsumerWidget {
     final errorMessage = useState<String?>(null);
     useListenable(nameController);
 
-    final kindLabel = channelType == 'forum' ? 'forum' : 'channel';
     final canSubmit =
         nameController.text.trim().isNotEmpty && !isSubmitting.value;
 
@@ -62,7 +49,7 @@ class _CreateChannelSheet extends HookConsumerWidget {
             .read(channelActionsProvider)
             .createChannel(
               name: name,
-              channelType: channelType,
+              channelType: 'stream',
               visibility: visibility.value,
               description: descriptionController.text.trim(),
               ttlSeconds: temporary.value ? ttlSeconds.value : null,
@@ -103,9 +90,7 @@ class _CreateChannelSheet extends HookConsumerWidget {
                   enableSuggestions: false,
                   textCapitalization: TextCapitalization.none,
                   decoration: InputDecoration(
-                    hintText: channelType == 'forum'
-                        ? 'design-discussions'
-                        : 'release-notes',
+                    hintText: 'release-notes',
                     border: InputBorder.none,
                     enabledBorder: InputBorder.none,
                     focusedBorder: InputBorder.none,
@@ -134,7 +119,7 @@ class _CreateChannelSheet extends HookConsumerWidget {
                   controller: descriptionController,
                   enabled: !isSubmitting.value,
                   decoration: InputDecoration(
-                    hintText: 'What this $kindLabel is for',
+                    hintText: 'What this channel is for',
                     border: InputBorder.none,
                     enabledBorder: InputBorder.none,
                     focusedBorder: InputBorder.none,
@@ -174,7 +159,7 @@ class _CreateChannelSheet extends HookConsumerWidget {
               ),
               if (temporary.value) ...[
                 const SizedBox(height: Grid.xs),
-                _CreateChannelSettingMenu<int>(
+                BuzzSettingMenu<int>(
                   controlKey: const Key('create-channel-ttl'),
                   enabled: !isSubmitting.value,
                   label: 'Expires after',
@@ -349,90 +334,6 @@ class _CreateChannelRadioGroup<T> extends StatelessWidget {
   }
 }
 
-class _CreateChannelSettingMenu<T> extends StatelessWidget {
-  final Key controlKey;
-  final bool enabled;
-  final String label;
-  final ValueChanged<T> onSelected;
-  final List<_CreateChannelMenuOption<T>> options;
-  final T value;
-  final IconData? valueIcon;
-  final String valueLabel;
-
-  const _CreateChannelSettingMenu({
-    required this.controlKey,
-    required this.enabled,
-    required this.label,
-    required this.onSelected,
-    required this.options,
-    required this.value,
-    this.valueIcon,
-    required this.valueLabel,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: context.colors.surface,
-        border: Border.all(color: context.colors.outlineVariant),
-        borderRadius: BorderRadius.circular(Radii.container),
-      ),
-      child: PopupMenuButton<T>(
-        enabled: enabled,
-        initialValue: value,
-        onSelected: onSelected,
-        tooltip: '$label: $valueLabel',
-        itemBuilder: (context) => [
-          for (final option in options)
-            CheckedPopupMenuItem<T>(
-              checked: option.value == value,
-              value: option.value,
-              child: Text(option.label),
-            ),
-        ],
-        child: Padding(
-          key: controlKey,
-          padding: const EdgeInsets.symmetric(
-            horizontal: Grid.twelve,
-            vertical: Grid.xs,
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  label,
-                  style: context.textTheme.labelLarge?.copyWith(
-                    color: context.colors.onSurface,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-              if (valueIcon case final icon?) ...[
-                Icon(icon, size: 16, color: context.colors.onSurfaceVariant),
-                const SizedBox(width: Grid.half),
-              ],
-              Text(
-                valueLabel,
-                style: context.textTheme.bodyMedium?.copyWith(
-                  color: context.colors.onSurface,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-              const SizedBox(width: Grid.half),
-              Icon(
-                BuzzIcons.chevronDown,
-                size: 16,
-                color: context.colors.onSurfaceVariant,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _NewDirectMessageSheet extends HookConsumerWidget {
   final String? currentPubkey;
 
@@ -515,6 +416,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
             .read(channelActionsProvider)
             .openDm(
               pubkeys: selectedUsers.value.map((user) => user.pubkey).toList(),
+              waitForChannelList: false,
             );
         if (context.mounted) {
           Navigator.of(context).pop(channel);
@@ -535,12 +437,14 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
       ),
       child: SafeArea(
         top: false,
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              GestureDetector(
+        // The sheet bounds this viewport even with the keyboard visible.
+        // Keep rows as slivers so search and chip updates do not lay out the
+        // entire directory. The field still scrolls with long chip selections.
+        child: CustomScrollView(
+          shrinkWrap: true,
+          slivers: [
+            SliverToBoxAdapter(
+              child: GestureDetector(
                 behavior: HitTestBehavior.translucent,
                 onTap: isSubmitting.value ? null : queryFocusNode.requestFocus,
                 child: SizedBox(
@@ -664,24 +568,27 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                   ),
                 ),
               ),
-              const SizedBox(height: Grid.xs),
-              Builder(
-                key: const Key('new-dm-results'),
-                builder: (context) {
-                  if (selectedUsers.value.length >= 8) {
-                    return const SizedBox(
+            ),
+            const SliverToBoxAdapter(child: SizedBox(height: Grid.xs)),
+            Builder(
+              key: const Key('new-dm-results'),
+              builder: (context) {
+                if (selectedUsers.value.length >= 8) {
+                  return const SliverToBoxAdapter(
+                    child: SizedBox(
                       height: 96,
                       child: Center(
                         child: Text(
                           'DMs support up to nine people, including you.',
                         ),
                       ),
-                    );
-                  }
-                  if (directoryAsync.isLoading &&
-                          directoryAsync.asData == null ||
-                      isSearchTransitionPending) {
-                    return const SizedBox(
+                    ),
+                  );
+                }
+                if (directoryAsync.isLoading && directoryAsync.asData == null ||
+                    isSearchTransitionPending) {
+                  return const SliverToBoxAdapter(
+                    child: SizedBox(
                       height: 280,
                       child: Center(
                         child: BuzzLoadingIndicator(
@@ -689,10 +596,12 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                           semanticLabel: 'Loading people',
                         ),
                       ),
-                    );
-                  }
-                  if (directoryAsync.hasError) {
-                    return SizedBox(
+                    ),
+                  );
+                }
+                if (directoryAsync.hasError) {
+                  return SliverToBoxAdapter(
+                    child: SizedBox(
                       height: 280,
                       child: Center(
                         child: Column(
@@ -719,10 +628,12 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                           ],
                         ),
                       ),
-                    );
-                  }
-                  if (availableResults.isEmpty) {
-                    return SizedBox(
+                    ),
+                  );
+                }
+                if (availableResults.isEmpty) {
+                  return SliverToBoxAdapter(
+                    child: SizedBox(
                       height: 280,
                       child: Center(
                         child: Text(
@@ -731,78 +642,78 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                               : 'No matching users.',
                         ),
                       ),
-                    );
-                  }
-                  return ListView.builder(
-                    physics: const NeverScrollableScrollPhysics(),
-                    shrinkWrap: true,
-                    itemCount: availableResults.length,
-                    itemBuilder: (context, index) {
-                      final user = availableResults[index];
-                      return AppListCardItem(
-                        index: index,
-                        itemCount: availableResults.length,
-                        dividerIndent: Grid.xs + 40 + Grid.xs,
-                        child: ListTile(
-                          key: Key('new-dm-person-${user.pubkey}'),
-                          leading: AvatarImage(
-                            imageUrl: user.avatarUrl,
-                            radius: 20,
-                            backgroundColor: context.controlSurface,
-                            fallback: Text(
-                              user.initial,
-                              style: context.textTheme.labelLarge?.copyWith(
-                                color: context.colors.onPrimaryContainer,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                            isAgent: user.isAgent,
-                          ),
-                          title: Text(
-                            names.labelFor(user.pubkey),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          subtitle: Text(
-                            user.secondaryLabel,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          trailing: Icon(
-                            BuzzIcons.plus,
-                            size: 18,
-                            color: context.colors.onSurfaceVariant,
-                          ),
-                          onTap: isSubmitting.value
-                              ? null
-                              : () {
-                                  selectedUsers.value = [
-                                    ...selectedUsers.value,
-                                    user,
-                                  ];
-                                  queryController.clear();
-                                  query.value = '';
-                                  debouncedQuery.value = '';
-                                  submitError.value = null;
-                                  queryFocusNode.requestFocus();
-                                },
-                        ),
-                      );
-                    },
+                    ),
                   );
-                },
-              ),
-              if (submitError.value case final error?) ...[
-                const SizedBox(height: Grid.xxs),
-                Text(
+                }
+                return SliverList.builder(
+                  itemCount: availableResults.length,
+                  itemBuilder: (context, index) {
+                    final user = availableResults[index];
+                    return AppListCardItem(
+                      index: index,
+                      itemCount: availableResults.length,
+                      dividerIndent: Grid.xs + 40 + Grid.xs,
+                      child: ListTile(
+                        key: Key('new-dm-person-${user.pubkey}'),
+                        leading: AvatarImage(
+                          imageUrl: user.avatarUrl,
+                          radius: 20,
+                          backgroundColor: context.controlSurface,
+                          fallback: Text(
+                            user.initial,
+                            style: context.textTheme.labelLarge?.copyWith(
+                              color: context.colors.onPrimaryContainer,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          isAgent: user.isAgent,
+                        ),
+                        title: Text(
+                          names.labelFor(user.pubkey),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        subtitle: Text(
+                          user.secondaryLabel,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        trailing: Icon(
+                          BuzzIcons.plus,
+                          size: 18,
+                          color: context.colors.onSurfaceVariant,
+                        ),
+                        onTap: isSubmitting.value
+                            ? null
+                            : () {
+                                selectedUsers.value = [
+                                  ...selectedUsers.value,
+                                  user,
+                                ];
+                                queryController.clear();
+                                query.value = '';
+                                debouncedQuery.value = '';
+                                submitError.value = null;
+                                queryFocusNode.requestFocus();
+                              },
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+            if (submitError.value case final error?) ...[
+              const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
+              SliverToBoxAdapter(
+                child: Text(
                   error,
                   style: context.textTheme.bodySmall?.copyWith(
                     color: context.colors.error,
                   ),
                 ),
-              ],
+              ),
             ],
-          ),
+          ],
         ),
       ),
     );

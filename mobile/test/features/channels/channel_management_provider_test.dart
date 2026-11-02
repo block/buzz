@@ -14,6 +14,64 @@ import 'package:buzz/shared/relay/relay.dart';
 /// also exposed on `ChannelDetails` MUST be propagated here — otherwise
 /// `mergeDetails` silently clears that state on the merged Channel.
 void main() {
+  test('shortcut selects only an active exact DM using current membership', () {
+    final dm = Channel(
+      id: 'dm',
+      name: '',
+      channelType: 'dm',
+      visibility: 'private',
+      description: '',
+      createdBy: 'owner',
+      createdAt: DateTime(2026),
+      memberCount: 2,
+      isMember: true,
+      participantPubkeys: const ['owner', 'agent'],
+    );
+    expect(isActiveDirectConversation(dm, null, 'owner', 'agent'), isTrue);
+    for (final candidate in [
+      dm.copyWith(isMember: false),
+      dm.copyWith(archivedAt: DateTime(2026)),
+      Channel.fromJson({...dm.toJson(), 'channel_type': 'stream'}),
+      Channel.fromJson({
+        ...dm.toJson(),
+        'participant_pubkeys': ['owner', 'agent', 'other'],
+      }),
+      Channel.fromJson({
+        ...dm.toJson(),
+        'participant_pubkeys': ['owner', 'other'],
+      }),
+    ]) {
+      expect(
+        isActiveDirectConversation(candidate, null, 'owner', 'agent'),
+        isFalse,
+      );
+    }
+    expect(isActiveDirectConversation(dm, null, null, 'agent'), isFalse);
+    expect(
+      isActiveDirectConversation(dm, null, 'other-account', 'agent'),
+      isFalse,
+    );
+    final members = ['owner', 'agent', 'other']
+        .map(
+          (key) => ChannelMember(
+            pubkey: key,
+            role: 'member',
+            joinedAt: DateTime(2026),
+          ),
+        )
+        .toList();
+    expect(isActiveDirectConversation(dm, members, 'owner', 'agent'), isFalse);
+    expect(
+      isActiveDirectConversation(
+        dm,
+        members.take(2).toList(),
+        'owner',
+        'agent',
+      ),
+      isTrue,
+    );
+  });
+
   test(
     'Solo metadata survives details merges and classifies only own private streams',
     () {

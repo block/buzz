@@ -355,6 +355,7 @@ pub(crate) fn compute_session_deadline(
 
 /// Acquires a connection semaphore permit, sends the NIP-42 AUTH challenge,
 /// then drives the send, heartbeat, and receive loops until the connection closes.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_connection(
     socket: WebSocket,
     state: Arc<AppState>,
@@ -362,6 +363,7 @@ pub(crate) async fn handle_connection(
     tenant: TenantContext,
     nip_fi_assertion: Option<buzz_auth::VerifiedAssertion>,
     nip_fi_shadow: Option<Arc<crate::nip_fi_shadow_session::ShadowSession>>,
+    shadow_line: Option<crate::nip_fi_shadow::PendingLine>,
     connection_time: chrono::DateTime<chrono::Utc>,
 ) {
     // Held through bootstrap, the active handler and any refusal drain, so a
@@ -393,6 +395,9 @@ pub(crate) async fn handle_connection(
     let (pre_terminal_ctrl_tx, pre_terminal_ctrl_rx) = mpsc::channel::<WsMessage>(1);
     let control = CommunityConnectionControl::new(cancel);
     control.attach_nip_fi_shadow(nip_fi_shadow);
+    // Its first verified AUTH writes it; else the read loop's end does.
+    let shadow_line = shadow_line.map(Arc::new);
+    control.attach_nip_fi_line(shadow_line.as_ref());
     let drain_reason = control.disconnect_reason();
     let pre_expiry_task = pre_session_deadline.map(|deadline| {
         crate::nip_fi_session::spawn_nip_fi_expiry_task(
@@ -724,6 +729,8 @@ async fn handle_active_connection(
     .await;
 
     cancel.cancel();
+    // The socket can no longer AUTH; cleanup below may block.
+    conn.community_control.finish_nip_fi_line();
     let close_outcome = if state.shutting_down.load(Ordering::Acquire) {
         AuthOutcome::Shutdown
     } else {
@@ -1378,10 +1385,14 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
             let permit = match state.handler_semaphore.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
-                    conn.send(request_rejection_message(
-                        RejectionTarget::Subscription(&sub_id),
+                    // Retires whatever held the ID before `CLOSED`.
+                    handlers::close::refuse(
+                        &sub_id,
                         "rate-limited: too many concurrent requests",
-                    ));
+                        &conn,
+                        &state,
+                    )
+                    .await;
                     return;
                 }
             };
@@ -1390,6 +1401,32 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
                 async move {
                     handlers::req::handle_req(sub_id, filters, before_ids, conn, state).await;
                     drop(permit);
+                }
+                .instrument(span),
+            );
+        }
+        ClientMessage::ArtifactSync { sub_id, filter } => {
+            let conn = Arc::clone(&conn);
+            let state = Arc::clone(&state);
+            let permit = match state.handler_semaphore.clone().try_acquire_owned() {
+                Ok(p) => p,
+                Err(_) => {
+                    // Retires whatever held the ID before `CLOSED`.
+                    handlers::close::refuse(
+                        &sub_id,
+                        "rate-limited: too many concurrent requests",
+                        &conn,
+                        &state,
+                    )
+                    .await;
+                    return;
+                }
+            };
+            let span =
+                tracing::info_span!("ws.artifact_sync", conn_id = %conn.conn_id, sub_id = %sub_id);
+            tokio::spawn(
+                async move {
+                    handlers::artifact_sync::handle_sync(sub_id, filter, conn, state, permit).await;
                 }
                 .instrument(span),
             );
@@ -1480,16 +1517,26 @@ pub(crate) mod tests {
         auth: AuthState,
         nip_fi_assertion: Option<buzz_auth::VerifiedAssertion>,
     ) -> TestConn {
+        test_conn_in(
+            auth,
+            nip_fi_assertion,
+            buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+        )
+    }
+
+    /// [`test_conn`] whose tenant is `community`.
+    pub(crate) fn test_conn_in(
+        auth: AuthState,
+        nip_fi_assertion: Option<buzz_auth::VerifiedAssertion>,
+        community: buzz_core::tenant::CommunityId,
+    ) -> TestConn {
         let (send_tx, send_rx) = mpsc::channel(4);
         let (ctrl_tx, ctrl_rx) = mpsc::channel(8);
         let (terminal_ctrl_tx, terminal_rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         let conn = ConnectionState {
             conn_id: Uuid::new_v4(),
-            tenant: TenantContext::resolved(
-                buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
-                "test.local".to_string(),
-            ),
+            tenant: TenantContext::resolved(community, "test.local".to_string()),
             remote_addr: "127.0.0.1:1234".parse().expect("socket addr"),
             auth_state: StdMutex::new(auth),
             subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -2100,6 +2147,258 @@ pub(crate) mod tests {
         assert_eq!(frame[0], "CLOSED");
         assert_eq!(frame[1], "count-abc");
         assert_eq!(frame[2], "rate-limited: too many concurrent requests");
+    }
+
+    /// A sync or ordinary REQ refused before its handler runs still replaces
+    /// the old holder of its ID (NIP-01), whether that is a sync or a live
+    /// subscription: the `CLOSED` must not leave either one fanning out under
+    /// a closed ID. Covers handler saturation and WS admission, both through
+    /// production dispatch. Mutation: send any refusal without
+    /// `retire_locked` → RED.
+    #[tokio::test]
+    async fn pre_handler_req_refusal_retires_the_old_holder() {
+        use buzz_pubsub::EventTopic;
+        let cases = [
+            (
+                AuthState::Failed,
+                true,
+                "rate-limited: too many concurrent requests",
+            ),
+            (
+                authenticated_state(),
+                false,
+                "rate-limited: shared admission unavailable",
+            ),
+        ];
+        let shapes = [(true, true), (true, false), (false, true), (false, false)];
+        for ((sync, sync_holder), (auth, saturate, reason)) in shapes
+            .into_iter()
+            .flat_map(|shape| cases.clone().map(|case| (shape, case)))
+        {
+            let case = format!("{reason}, sync REQ: {sync}, sync holder: {sync_holder}");
+            // Redis is unreachable here, so authenticated admission is
+            // `Unavailable`; an unauthenticated connection skips admission.
+            let state = crate::state::tests::test_state().await;
+            let (conn, mut rx) = test_conn_with_auth(auth);
+            let channel = uuid::Uuid::new_v4();
+            let topic = EventTopic::Channel(channel);
+            handlers::req::claim_live_subscription(
+                "s",
+                &[nostr::Filter::new().kind(Kind::TextNote)],
+                Some(&[channel]),
+                &conn,
+                &state,
+            )
+            .await
+            .expect("claim the old holder");
+            if sync_holder {
+                state.artifact_syncs.insert_idle(conn.conn_id, "s");
+            }
+            let _held = if saturate {
+                let permits = state.handler_semaphore.available_permits();
+                Some(
+                    Arc::clone(&state.handler_semaphore)
+                        .acquire_many_owned(permits as u32)
+                        .await
+                        .expect("hold every handler permit"),
+                )
+            } else {
+                None
+            };
+
+            let filter = if sync {
+                serde_json::json!({"artifact": "current", "#h": [channel.to_string()]})
+            } else {
+                serde_json::json!({"kinds": [1], "#h": [channel.to_string()]})
+            };
+            let raw = serde_json::json!(["REQ", "s", filter]).to_string();
+            handle_text_message(raw, Arc::clone(&conn), Arc::clone(&state)).await;
+
+            assert!(conn.subscriptions.lock().await.is_empty(), "{case}");
+            assert!(
+                state.sub_registry.get_filters(conn.conn_id, "s").is_none(),
+                "{case}"
+            );
+            assert!(!state.artifact_syncs.contains(conn.conn_id, "s"), "{case}");
+            assert_eq!(
+                state.pubsub.topic_refcount(&conn.tenant, topic).await,
+                0,
+                "{case}"
+            );
+            let frame = read_frame(&mut rx);
+            assert_eq!(frame, serde_json::json!(["CLOSED", "s", reason]), "{case}");
+            assert!(rx.try_recv().is_err(), "{case}: only CLOSED is sent");
+        }
+    }
+
+    /// An ordinary REQ that `handle_req` itself refuses, before it claims its
+    /// ID, still replaces the old holder (NIP-01): a live subscription or an
+    /// artifact sync must not keep using an ID the client was told is closed.
+    /// Covers the auth, scope, channel-count and database-error refusals.
+    /// Mutation: send any of them as a bare `CLOSED` → RED.
+    #[tokio::test]
+    async fn in_handler_req_refusal_retires_the_old_holder() {
+        use buzz_pubsub::EventTopic;
+        let mut scoped = auth_context();
+        scoped.scopes = vec![buzz_auth::Scope::ChannelsRead];
+        let channel = uuid::Uuid::new_v4();
+        let too_many: Vec<String> = (0..=handlers::req::MAX_EXPLICIT_CHANNEL_VALUES)
+            .map(|_| uuid::Uuid::new_v4().to_string())
+            .collect();
+        let cases = [
+            (
+                AuthState::Failed,
+                serde_json::json!({"kinds": [1]}),
+                "auth-required: not authenticated",
+            ),
+            (
+                AuthState::Authenticated(scoped),
+                serde_json::json!({"kinds": [1]}),
+                "restricted: insufficient scope",
+            ),
+            (
+                authenticated_state(),
+                serde_json::json!({"kinds": [1], "#h": too_many}),
+                "restricted: too many explicit channels",
+            ),
+            (
+                authenticated_state(),
+                serde_json::json!({"search": "x"}),
+                "error: database error",
+            ),
+        ];
+        for ((auth, filter, reason), sync_holder) in cases
+            .into_iter()
+            .flat_map(|case| [(case.clone(), false), (case, true)])
+        {
+            let case = format!("{reason}, sync holder: {sync_holder}");
+            let state = crate::state::tests::test_state_with_unreachable_database_url(
+                "postgres://127.0.0.1:1/none",
+            )
+            .await;
+            let (conn, mut rx) = test_conn_with_auth(auth);
+            let topic = EventTopic::Channel(channel);
+            handlers::req::claim_live_subscription(
+                "s",
+                &[nostr::Filter::new().kind(Kind::TextNote)],
+                Some(&[channel]),
+                &conn,
+                &state,
+            )
+            .await
+            .expect("claim the old holder");
+            if sync_holder {
+                state.artifact_syncs.insert_idle(conn.conn_id, "s");
+            }
+
+            let filter = serde_json::from_value(filter).expect("filter");
+            handlers::req::handle_req(
+                "s".into(),
+                vec![filter],
+                vec![None],
+                Arc::clone(&conn),
+                Arc::clone(&state),
+            )
+            .await;
+
+            assert!(conn.subscriptions.lock().await.is_empty(), "{case}");
+            assert!(
+                state.sub_registry.get_filters(conn.conn_id, "s").is_none(),
+                "{case}"
+            );
+            assert!(!state.artifact_syncs.contains(conn.conn_id, "s"), "{case}");
+            assert_eq!(
+                state.pubsub.topic_refcount(&conn.tenant, topic).await,
+                0,
+                "{case}"
+            );
+            let mut frame = read_frame(&mut rx);
+            if frame[0] == "NOTICE" {
+                frame = read_frame(&mut rx);
+            }
+            assert_eq!(frame, serde_json::json!(["CLOSED", "s", reason]), "{case}");
+            assert!(rx.try_recv().is_err(), "{case}: nothing follows CLOSED");
+        }
+    }
+
+    /// A REQ for a new ID refused at the subscription limit cancels the
+    /// connection when its `CLOSED` cannot be queued: the client would
+    /// otherwise wait on a request the relay refused.
+    /// Mutation: ignore the `send` result on that refusal → RED.
+    #[tokio::test]
+    async fn subscription_limit_refusal_with_a_full_queue_cancels_the_connection() {
+        let state = crate::state::tests::test_state().await;
+        let (conn, _rx) = test_conn_with_auth(authenticated_state());
+        {
+            let mut subs = conn.subscriptions.lock().await;
+            for index in 0..handlers::req::MAX_SUBSCRIPTIONS {
+                subs.insert(format!("held-{index}"), 0);
+            }
+        }
+        while conn
+            .send_tx
+            .try_send(WsMessage::Text("filler".into()))
+            .is_ok()
+        {}
+
+        handlers::req::handle_req(
+            "s".into(),
+            vec![nostr::Filter::new().kind(Kind::TextNote)],
+            vec![None],
+            Arc::clone(&conn),
+            Arc::clone(&state),
+        )
+        .await;
+
+        assert!(conn.cancel.is_cancelled());
+        assert!(!conn.subscriptions.lock().await.contains_key("s"));
+    }
+
+    /// A pre-handler refusal whose `CLOSED` cannot be queued has already
+    /// retired the old holder, so it cancels the connection: the client
+    /// learns the ID is gone from the disconnect. The queue is full but
+    /// below the slow-client grace limit, which would not cancel by itself.
+    /// Covers a sync and an ordinary REQ through production dispatch.
+    /// Mutation: ignore the `send` result in `close::refuse` → RED.
+    #[tokio::test]
+    async fn pre_handler_refusal_with_a_full_queue_cancels_the_connection() {
+        for filter in [
+            serde_json::json!({"artifact": "current", "#h": [uuid::Uuid::new_v4().to_string()]}),
+            serde_json::json!({"kinds": [1]}),
+        ] {
+            let state = crate::state::tests::test_state().await;
+            let (conn, _rx) = test_conn_with_auth(AuthState::Failed);
+            handlers::req::claim_live_subscription(
+                "s",
+                &[nostr::Filter::new().kind(Kind::TextNote)],
+                None,
+                &conn,
+                &state,
+            )
+            .await
+            .expect("claim the old holder");
+            state.artifact_syncs.insert_idle(conn.conn_id, "s");
+            while conn
+                .send_tx
+                .try_send(WsMessage::Text("filler".into()))
+                .is_ok()
+            {}
+            let permits = state.handler_semaphore.available_permits();
+            let _held = Arc::clone(&state.handler_semaphore)
+                .acquire_many_owned(permits as u32)
+                .await
+                .expect("hold every handler permit");
+
+            let raw = serde_json::json!(["REQ", "s", filter]).to_string();
+            handle_text_message(raw, Arc::clone(&conn), Arc::clone(&state)).await;
+
+            assert!(conn.subscriptions.lock().await.is_empty(), "{filter}");
+            assert!(
+                !state.artifact_syncs.contains(conn.conn_id, "s"),
+                "{filter}"
+            );
+            assert!(conn.cancel.is_cancelled(), "{filter}");
+        }
     }
 
     #[derive(Debug, Default)]
@@ -3285,6 +3584,7 @@ pub(crate) mod tests {
                                     tenant_i,
                                     Some(assertion_i),
                                     None,
+                                    None,
                                     conn_time,
                                 )
                                 .await
@@ -3384,6 +3684,11 @@ pub(crate) mod terminal_close_delivery_tests {
         /// reader starts, so a frame handler that needs it blocks until the
         /// test drops it.
         subscriptions_hold: Option<super::test_seam::Hold>,
+        /// Attached to the connection's control and owned by the handler
+        /// task, as the outer handler would own it, until the handler ends.
+        shadow_line: Option<Arc<crate::nip_fi_shadow::PendingLine>>,
+        /// Notified once the handler has ended and released `shadow_line`.
+        ended: Option<Arc<tokio::sync::Notify>>,
     }
 
     /// Like `serve`, with the test hooks in `seams`.
@@ -3394,10 +3699,13 @@ pub(crate) mod terminal_close_delivery_tests {
             cleanup_pause,
             effect_hold,
             subscriptions_hold,
+            shadow_line,
+            ended,
         }: Seams,
     ) -> (std::net::SocketAddr, RelayUrl, Arc<AppState>, Uuid) {
         let effect_hold = Arc::new(std::sync::Mutex::new(effect_hold));
         let subscriptions_hold = Arc::new(std::sync::Mutex::new(subscriptions_hold));
+        let shadow_line = Arc::new(std::sync::Mutex::new(shadow_line));
         let state = crate::state::tests::test_state().await;
         let served_state = Arc::clone(&state);
         let conn_id = Uuid::new_v4();
@@ -3412,18 +3720,21 @@ pub(crate) mod terminal_close_delivery_tests {
         let app = Router::new().route(
             "/",
             get(move |ws: WebSocketUpgrade| {
-                let (state, tenant, assertion, cleanup_pause) = (
+                let (state, tenant, assertion, cleanup_pause, ended) = (
                     Arc::clone(&state),
                     tenant.clone(),
                     assertion.clone(),
                     cleanup_pause.clone(),
+                    ended.clone(),
                 );
+                let shadow_line = shadow_line.lock().expect("shadow line").take();
                 let effect_hold = effect_hold.lock().expect("effect hold").take();
                 let subscriptions_hold = subscriptions_hold.lock().expect("subs hold").take();
                 async move {
                     ws.on_upgrade(move |socket| async move {
                         let cancel = CancellationToken::new();
                         let control = CommunityConnectionControl::new(cancel.clone());
+                        control.attach_nip_fi_line(shadow_line.as_ref());
                         let offset = if effect_hold.is_some() {
                             EFFECT_HOLD_EXPIRY
                         } else {
@@ -3467,6 +3778,10 @@ pub(crate) mod terminal_close_delivery_tests {
                                     .await;
                             }
                             None => handler.await,
+                        }
+                        drop(shadow_line);
+                        if let Some(ended) = ended {
+                            ended.notify_one();
                         }
                     })
                 }
@@ -3708,15 +4023,24 @@ pub(crate) mod terminal_close_delivery_tests {
 
     /// Final cleanup can block on Redis with no deadline (the pool has no
     /// wait timeout). The peer wait runs alongside it, so a stalled cleanup
-    /// still lets the socket end once the bounded wait expires.
+    /// still lets the socket end once the bounded wait expires, and an
+    /// unproven shadow line is written as `absent` before that cleanup.
+    /// Mutation: dropping `finish_nip_fi_line` leaves no line while the
+    /// cleanup is held.
     #[tokio::test]
     async fn stalled_cleanup_does_not_hold_socket_open() {
+        let log = crate::nip_fi_shadow::tests::WouldDenyLog::capture();
         let pause = Arc::new(crate::handlers::close::test_seam::Pause::default());
+        let line = crate::nip_fi_shadow::tests::upgrade_line("ws");
+        let destroyed = Arc::downgrade(&line);
+        let ended = Arc::new(tokio::sync::Notify::new());
         let (address, _, _, _) = serve_with_seams(
             expired_assertion(),
             true,
             Seams {
                 cleanup_pause: Some(Arc::clone(&pause)),
+                shadow_line: Some(line),
+                ended: Some(Arc::clone(&ended)),
                 ..Seams::default()
             },
         )
@@ -3727,8 +4051,112 @@ pub(crate) mod terminal_close_delivery_tests {
         tokio::time::timeout(EOF_WATCHDOG, pause.reached.notified())
             .await
             .expect("cleanup never reached the pause point");
+        let lines = log.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("pubkey=\"absent\""), "{lines:?}");
         let elapsed = time_to_eof(&mut socket, started).await;
         assert!(elapsed >= WS_TERMINAL_FLUSH_TIMEOUT);
+
+        pause.resume.notify_one();
+        tokio::time::timeout(EOF_WATCHDOG, ended.notified())
+            .await
+            .expect("the handler finishes once cleanup resumes");
+        assert!(
+            destroyed.upgrade().is_none(),
+            "the line outlived its handler"
+        );
+        assert_eq!(log.lines().len(), 1, "{:?}", log.lines());
+    }
+
+    mod postgres_tests {
+        use super::*;
+
+        /// Through the real outer `handle_connection`, an upgrade would-deny's
+        /// line is written at the first verified AUTH, with that key, while the
+        /// socket stays open, and is not written again at close. Mutation:
+        /// deleting the outer `attach_nip_fi_line`, or AUTH's
+        /// `prove_nip_fi_line`, leaves no line while the socket is open.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn upgrade_would_deny_line_is_written_at_auth_while_open() {
+            let log = crate::nip_fi_shadow::tests::WouldDenyLog::capture();
+            // sqlx's default acquire timeout: a first connect to a busy CI
+            // database can outlast the unreachable-target helper's 100 ms.
+            let state = crate::state::tests::test_state_with_database_url_and_pool_options(
+                &crate::test_support::database_url(),
+                sqlx::postgres::PgPoolOptions::new(),
+            )
+            .await;
+            let community = Uuid::new_v4();
+            let host = format!("shadow-line-{}.example", community.simple());
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community)
+                .bind(&host)
+                .execute(state.db.pool())
+                .await
+                .expect("seed community");
+            let tenant =
+                TenantContext::resolved(buzz_core::tenant::CommunityId::from_uuid(community), host);
+            let relay_url: RelayUrl =
+                crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &tenant)
+                    .parse()
+                    .expect("expected NIP-42 relay URL");
+            let line = crate::nip_fi_shadow::tests::upgrade_line("ws");
+            let line = Arc::new(Mutex::new(Arc::into_inner(line)));
+            let ended = Arc::new(tokio::sync::Notify::new());
+            let notify = Arc::clone(&ended);
+            let app = Router::new().route(
+                "/",
+                get(move |ws: WebSocketUpgrade| async move {
+                    let line = line.lock().await.take();
+                    ws.on_upgrade(move |socket| async move {
+                        let addr = "127.0.0.1:1234".parse().expect("client address");
+                        let now = chrono::Utc::now();
+                        handle_connection(socket, state, addr, tenant, None, None, line, now).await;
+                        notify.notify_one();
+                    })
+                }),
+            );
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let address = listener.local_addr().expect("listener address");
+            tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+            let mut client = connect(address).await;
+
+            let Some(Ok(Message::Text(challenge))) = client.next().await else {
+                panic!("expected AUTH challenge")
+            };
+            let challenge: serde_json::Value =
+                serde_json::from_str(&challenge).expect("challenge json");
+            let key = Keys::generate();
+            let auth = EventBuilder::auth(challenge[1].as_str().expect("challenge"), relay_url)
+                .sign_with_keys(&key)
+                .expect("sign AUTH");
+            client
+                .send(Message::Text(
+                    serde_json::json!(["AUTH", auth]).to_string().into(),
+                ))
+                .await
+                .expect("send AUTH");
+            let ok = loop {
+                match client.next().await {
+                    Some(Ok(Message::Text(ok))) => break ok,
+                    Some(Ok(Message::Ping(_))) => {}
+                    other => panic!("expected AUTH OK, got {other:?}"),
+                }
+            };
+            assert!(ok.contains("true"), "AUTH must succeed: {ok}");
+
+            let lines = log.lines();
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            let proven = format!("pubkey=\"{}\"", key.public_key().to_hex());
+            assert!(lines[0].contains(&proven), "{lines:?}");
+
+            client.close(None).await.expect("send Close");
+            tokio::time::timeout(EOF_WATCHDOG, ended.notified())
+                .await
+                .expect("the connection ends after Close");
+            assert_eq!(log.lines().len(), 1, "{:?}", log.lines());
+        }
     }
 
     /// An established session's expiry task stalls at its quiescence barrier
@@ -3784,6 +4212,7 @@ pub(crate) mod terminal_close_delivery_tests {
                 cleanup_pause: Some(Arc::clone(&pause)),
                 effect_hold: Some(effect_tx),
                 subscriptions_hold: Some(subs_tx),
+                ..Seams::default()
             },
         )
         .await;
@@ -3898,6 +4327,7 @@ pub(crate) mod terminal_close_delivery_tests {
                             tenant,
                             assertion,
                             None,
+                            None,
                             chrono::Utc::now(),
                         )
                     })
@@ -3999,5 +4429,62 @@ pub(crate) mod terminal_close_delivery_tests {
                 .is_err(),
             "the active handler must not have started"
         );
+    }
+
+    // An upgrade would-deny's line is held by the real `handle_connection`
+    // and written once the socket ends; one that never proves a key by AUTH
+    // logs `absent`. The state's database is unreachable, so bootstrap
+    // refuses the socket before any AUTH.
+    #[test]
+    fn upgrade_would_deny_line_without_auth_logs_absent_at_close() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let ((), lines) = crate::nip_fi_shadow::tests::would_deny_lines(|| {
+            rt.block_on(async {
+                let state = crate::state::tests::test_state_with_unreachable_database_url(
+                    "postgres://127.0.0.1:1/none",
+                )
+                .await;
+                let line = crate::nip_fi_shadow::tests::upgrade_line("ws");
+                let line = Arc::into_inner(line).expect("sole owner");
+                let line = Arc::new(Mutex::new(Some(line)));
+                let ended = Arc::new(tokio::sync::Notify::new());
+                let tenant = TenantContext::resolved(
+                    buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+                    "test.local".to_owned(),
+                );
+                let notify = Arc::clone(&ended);
+                let app = Router::new().route(
+                    "/",
+                    get(move |ws: WebSocketUpgrade| async move {
+                        let line = line.lock().await.take();
+                        ws.on_upgrade(move |socket| async move {
+                            let addr = "127.0.0.1:1234".parse().expect("client address");
+                            let now = chrono::Utc::now();
+                            handle_connection(socket, state, addr, tenant, None, None, line, now)
+                                .await;
+                            notify.notify_one();
+                        })
+                    }),
+                );
+                let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+                let address = listener.local_addr().expect("listener address");
+                let server = tokio::spawn(async move { axum::serve(listener, app).await });
+                let client = connect(address).await;
+                tokio::time::timeout(Duration::from_secs(10), ended.notified())
+                    .await
+                    .expect("the connection ends without AUTH");
+                drop(client);
+                server.abort();
+            })
+        });
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("reason=\"missing_assertion\""),
+            "{lines:?}"
+        );
+        assert!(lines[0].contains("pubkey=\"absent\""), "{lines:?}");
     }
 }

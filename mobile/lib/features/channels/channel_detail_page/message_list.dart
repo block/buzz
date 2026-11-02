@@ -4,6 +4,9 @@ class _MessageList extends HookConsumerWidget {
   final ValueNotifier<StickyDateHeaderState> stickyDateHeaderState;
   final List<MainTimelineEntry> entries;
   final List<TypingEntry> inlineTyping;
+
+  /// Agents typing in each thread, by lowercase root message ID.
+  final Map<String, List<String>> threadWorking;
   final List<TimelineMessage> allMessages;
   final String? initialMessageId;
   final String? initialThreadRootId;
@@ -15,6 +18,7 @@ class _MessageList extends HookConsumerWidget {
   final String channelId;
   final ChannelMessagesNotifier notifier;
   final bool isDm;
+  final bool allowThreads;
   final String? currentPubkey;
   final bool isMember;
   final bool isArchived;
@@ -26,6 +30,7 @@ class _MessageList extends HookConsumerWidget {
   const _MessageList({
     required this.entries,
     this.inlineTyping = const [],
+    this.threadWorking = const {},
     required this.stickyDateHeaderState,
     required this.allMessages,
     required this.initialMessageId,
@@ -38,6 +43,7 @@ class _MessageList extends HookConsumerWidget {
     required this.channelId,
     required this.notifier,
     required this.isDm,
+    this.allowThreads = true,
     required this.currentPubkey,
     required this.isMember,
     required this.isArchived,
@@ -51,6 +57,9 @@ class _MessageList extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final handoff = useAgentReplyHandoffs(channelId, inlineTyping, allMessages);
     final displayedTyping = handoff.typing;
+    final workingAgents = {
+      for (final agents in threadWorking.values) ...agents,
+    };
     final appView = View.of(context);
     final localSendAnimations = ref.watch(
       localMessageSendAnimationProvider(channelId),
@@ -798,7 +807,8 @@ class _MessageList extends HookConsumerWidget {
       },
     );
 
-    if (entries.isEmpty && displayedTyping.isNotEmpty) {
+    if (entries.isEmpty &&
+        (displayedTyping.isNotEmpty || TypingMotionPreview.enabled)) {
       return Align(
         alignment: Alignment.bottomCenter,
         child: Padding(
@@ -808,10 +818,13 @@ class _MessageList extends HookConsumerWidget {
             Grid.gutter,
             composerBottomInset,
           ),
-          child: InlineAgentTyping(
-            channelId: channelId,
-            entries: displayedTyping,
-          ),
+          child: TypingMotionPreview.enabled
+              ? TypingMotionPreview(channelId: channelId)
+              : InlineAgentTyping(
+                  channelId: channelId,
+                  entries: displayedTyping,
+                  knownAgents: workingAgents,
+                ),
         ),
       );
     }
@@ -1003,10 +1016,18 @@ class _MessageList extends HookConsumerWidget {
                             ),
                             showAvatar: showAvatar,
                             hasReplies: entry.summary != null,
-                            replyFooter: entry.summary == null
+                            replyFooter:
+                                entry.summary == null &&
+                                    !threadWorking.containsKey(
+                                      message.id.toLowerCase(),
+                                    )
                                 ? null
                                 : _ThreadSummaryRow(
-                                    summary: entry.summary!,
+                                    summary: entry.summary,
+                                    working:
+                                        threadWorking[message.id
+                                            .toLowerCase()] ??
+                                        const [],
                                     message: message,
                                     allMessages: allMessages,
                                     channelId: channelId,
@@ -1017,18 +1038,24 @@ class _MessageList extends HookConsumerWidget {
                             channelNames: channelNamesMap,
                             currentChannelId: channelId,
                             currentPubkey: currentPubkey,
-                            allMessages: allMessages,
+                            allMessages: allowThreads ? allMessages : null,
                             isMember: isMember,
                             isArchived: isArchived,
                             composerFocusNode: composerFocusNode,
                             restoreComposerFocus: restoreComposerFocus,
                           ),
                         ],
-                        if (index == 0 && displayedTyping.isNotEmpty)
-                          InlineAgentTyping(
-                            channelId: channelId,
-                            entries: displayedTyping,
-                          ),
+                        if (index == 0 &&
+                            (displayedTyping.isNotEmpty ||
+                                TypingMotionPreview.enabled))
+                          if (TypingMotionPreview.enabled)
+                            TypingMotionPreview(channelId: channelId)
+                          else
+                            InlineAgentTyping(
+                              channelId: channelId,
+                              entries: displayedTyping,
+                              knownAgents: workingAgents,
+                            ),
                       ],
                     ),
                   ),

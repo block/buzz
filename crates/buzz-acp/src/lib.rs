@@ -6465,6 +6465,10 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
         env: {
             let mut env = vec![
                 EnvVar {
+                    name: "BUZZ_OUTPUT_FORMAT".into(),
+                    value: config::agent_output_format(&config.persona_env_vars),
+                },
+                EnvVar {
                     name: "BUZZ_RELAY_URL".into(),
                     value: config.relay_url.clone(),
                 },
@@ -10370,6 +10374,46 @@ mod build_mcp_servers_tests {
             names.contains(&"BUZZ_PRIVATE_KEY"),
             "missing BUZZ_PRIVATE_KEY; got {names:?}"
         );
+    }
+
+    #[test]
+    fn session_new_mcp_server_uses_effective_output_format() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let inherited = std::env::var_os("BUZZ_OUTPUT_FORMAT");
+        for (operator, persona, expected) in [
+            (None, vec![], "agent"),
+            (None, vec!["json"], "json"),
+            (None, vec!["json", "compact"], "compact"),
+            (Some("compact"), vec![], "compact"),
+            (Some("json"), vec!["compact"], "json"),
+            (Some(""), vec!["json"], ""),
+        ] {
+            match operator {
+                Some(value) => std::env::set_var("BUZZ_OUTPUT_FORMAT", value),
+                None => std::env::remove_var("BUZZ_OUTPUT_FORMAT"),
+            }
+            let mut config = test_config();
+            config.persona_env_vars = persona
+                .iter()
+                .map(|value| ("BUZZ_OUTPUT_FORMAT".into(), (*value).into()))
+                .collect();
+            let servers = build_mcp_servers(&config);
+            match &inherited {
+                Some(value) => std::env::set_var("BUZZ_OUTPUT_FORMAT", value),
+                None => std::env::remove_var("BUZZ_OUTPUT_FORMAT"),
+            }
+            let formats: Vec<_> = servers[0]
+                .env
+                .iter()
+                .filter(|entry| entry.name == "BUZZ_OUTPUT_FORMAT")
+                .map(|entry| entry.value.as_str())
+                .collect();
+            assert_eq!(
+                formats,
+                vec![expected],
+                "operator={operator:?}, persona={persona:?}"
+            );
+        }
     }
 
     #[test]

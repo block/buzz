@@ -304,6 +304,34 @@ just ci
 This is the same check that runs in CI. PRs that fail `just ci` will not be
 merged. If `just ci` fails on formatting, `just fix-all` fixes it in one shot (`rustfmt` + Tauri fmt + desktop, web, and mobile formatters).
 
+Pull requests also get an advisory **flake check**. `scripts/flake-check.mjs
+select` maps the diff against the base branch to the Rust tests (in the root
+and desktop Tauri workspaces), desktop `node --test` files, Playwright smoke
+journeys and Flutter test files it changed: a hunk inside a test body selects
+that test; a change anywhere else in a test file (imports, helpers, hooks,
+the code under test beside Rust tests) or a new file selects the whole file.
+An integration test binary's tests include those of the file modules its
+root declares (`mod x;`, `#[path = "…"] mod x;`), and a change to a helper
+module under a crate's `tests/` selects every integration test binary that
+includes it. The `Flake check (…)` lanes then
+run that selection ten times with retries off; a repetition that fails is
+usually a race in the test or the code under it, worth fixing before it
+lands, though a test that needs infrastructure or the regular lane's
+cross-file concurrency can fail every repetition instead. Some changed tests
+are deliberately not repeated: `#[ignore]`d and Postgres-backed Rust tests,
+Playwright specs outside the `smoke` project, `*.perf.ts` measurements, and a
+selection too large for its lane (over 64 KiB of entries, or more Playwright
+journeys than ten repetitions can finish within the lane's timeout).
+A Rust test repeats in every feature graph the regular lanes test its
+package in that lists it (LaunchDarkly, the App Attest development feature,
+the desktop crate's lib under `mesh-llm`), since a `#[cfg(feature = …)]` arm
+compiles only in its own graph; the step summary marks a row from a feature
+graph with that feature. A selected test that no such graph lists on the
+Linux runner, such as a macOS-only one, fails its lane by name rather than
+passing unrepeated.
+The lanes skip when no test changed and are not required to merge; their
+step summaries show the selection and the test × iteration table.
+
 ---
 
 ## Code Style

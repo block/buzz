@@ -23,8 +23,9 @@ class FakeAccount extends BuilderlabAccountClient {
   @override
   Future<Map<String, dynamic>> post(
     String path,
-    Map<String, dynamic> body,
-  ) async {
+    Map<String, dynamic> body, {
+    String? expectedSubject,
+  }) async {
     if (path.endsWith('/enrollment')) {
       enrollments++;
       if (rejectEnrollment) throw AccountFailure.rejected;

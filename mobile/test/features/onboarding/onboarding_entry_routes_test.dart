@@ -1,3 +1,5 @@
+import '../../helpers/two_finger_double_tap.dart';
+import 'package:buzz/shared/community/community_grid_option.dart';
 import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -10,6 +12,7 @@ import 'package:buzz/hosted_app_gate.dart';
 import 'package:buzz/shared/hosted/hosted_flow_provider.dart';
 import 'package:buzz/onboarding_app_entry.dart';
 import 'package:buzz/shared/auth/auth.dart';
+import 'package:buzz/shared/identity_transfer/nsec_import_sheet.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_flow.dart';
@@ -18,6 +21,7 @@ import 'package:buzz/shared/hosted/self_hosted_entry.dart';
 import 'package:buzz/shared/hosted/account_identity_store.dart';
 import 'package:buzz/shared/widgets/buzz_sheet_header.dart';
 import 'package:flutter/material.dart';
+import 'package:buzz/shared/widgets/bee_loading_mark.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -46,6 +50,7 @@ void main() {
     });
     var probes = 0;
     final inventoryStorage = _EnumerationStorage();
+    Completer<void>? pendingProbe;
     await tester.pumpWidget(
       WidgetHelpers.testable(
         disableAnimations: true,
@@ -57,6 +62,7 @@ void main() {
               accountStore: AccountIdentityStore(storage: inventoryStorage),
               probe: (_) async {
                 probes++;
+                await pendingProbe?.future;
               },
             ),
           ),
@@ -92,7 +98,9 @@ void main() {
     }
 
     Future<void> pair() async {
-      await tester.tap(find.text('Use pairing code').hitTestable());
+      final trigger = find.byKey(const Key('developer-pairing-trigger'));
+      await twoFingerDoubleTap(tester, tester.getCenter(trigger));
+      await tester.tap(find.text('Use a pairing code').hitTestable());
       await tester.pumpAndSettle();
       await tester.enterText(
         find.byType(TextField).hitTestable(),
@@ -108,19 +116,31 @@ void main() {
       );
       await tester.tap(find.text('Connect').hitTestable());
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
+      // Finish the standard page push before checking the loading surface.
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
     }
 
     if (HostedEnvironment.authDomains.isNotEmpty) {
       // A root-navigator choice modal must remain actionable above pushed Add.
       f.rows = [f.row('one'), f.row('two')];
       f.beforeAdmission = (name) async {
-        if (name == 'two') throw const SavedCommunityIdentityConflict();
+        if (name == 'two.communities.buzz.xyz') {
+          throw const SavedCommunityIdentityConflict();
+        }
       };
       await openEntry();
-      await tester.tap(find.text('Continue with Builderlab').hitTestable());
+      expect(find.text('Create a community'), findsNothing);
+      expect(find.text('Continue with Builderlab'), findsNothing);
+      expect(find.text('Use a pairing code'), findsNothing);
+      // An independently resumed account restore still owns a root modal
+      // above Add; Add itself no longer offers account sign-in or creation.
+      await f.flow.signInAccount();
       await tester.pumpAndSettle();
-      expect(f.admitted, ['one']);
+      expect(f.admitted, isEmpty);
+      await tester.tap(find.byType(CommunityGridOption).first);
+      await tester.pumpAndSettle();
+      expect(f.admitted, ['one.communities.buzz.xyz']);
       expect(f.flow.stage, HostedFlowStage.communityConflict);
       expect(
         find.text('Keep saved identity and skip').hitTestable(),
@@ -129,12 +149,22 @@ void main() {
       expect(find.text('Back to choices').hitTestable(), findsOneWidget);
       await tester.tap(find.text('Back to choices').hitTestable());
       await tester.pumpAndSettle();
-      expect(find.byType(CheckboxListTile).hitTestable(), findsOneWidget);
-      expect(find.text('two').hitTestable(), findsOneWidget);
+      expect(find.byType(CommunityGridOption).hitTestable(), findsNWidgets(2));
+      expect(
+        tester
+            .widget<CommunityGridOption>(
+              find.byType(CommunityGridOption).hitTestable().last,
+            )
+            .name,
+        'two',
+      );
       f.beforeAdmission = null;
-      await tester.tap(find.text('Continue').hitTestable());
+      await tester.tap(find.byType(CommunityGridOption).first);
       await tester.pumpAndSettle();
-      expect(f.admitted, ['one', 'two']);
+      expect(f.admitted, [
+        'one.communities.buzz.xyz',
+        'two.communities.buzz.xyz',
+      ]);
       expect(find.byType(OnboardingAppEntry), findsNothing);
       expect(find.text('Add community').hitTestable(), findsOneWidget);
       f.admitted.clear();
@@ -148,13 +178,13 @@ void main() {
       await pair();
       expect(f.flow.accountOnly, isFalse);
       expect(f.flow.stage, HostedFlowStage.working);
-      expect(find.text('Leave setup').hitTestable(), findsOneWidget);
+      expect(find.byTooltip('Back').hitTestable(), findsNothing);
+      expect(find.byType(BeeLoadingMark).hitTestable(), findsOneWidget);
+      expect(find.byType(BuzzSheetHeader), findsNothing);
       expect(
-        find.byType(CircularProgressIndicator).hitTestable(),
+        find.byType(HostedConnectPage, skipOffstage: false),
         findsOneWidget,
       );
-      expect(find.byType(BuzzSheetHeader), findsNothing);
-      expect(find.byType(HostedConnectPage), findsNothing);
       admission.completeError(AccountFailure.unavailable);
       await tester.pumpAndSettle();
       expect(f.flow.stage, HostedFlowStage.blocked);
@@ -165,12 +195,13 @@ void main() {
         findsOneWidget,
       );
       expect(find.text('Try again').hitTestable(), findsOneWidget);
-      expect(find.text('Leave setup').hitTestable(), findsOneWidget);
+      expect(find.byTooltip('Back').hitTestable(), findsOneWidget);
       expect(find.byType(BuzzSheetHeader), findsNothing);
       f.beforeAdmission = null;
       await tester.tap(find.text('Try again').hitTestable());
       await tester.pumpAndSettle();
-      expect(f.admitted, ['paired']);
+      expect(f.admitted, ['paired.communities.buzz.xyz']);
+      expect(f.remembered, contains('wss://paired.communities.buzz.xyz'));
       expect(find.byType(OnboardingAppEntry), findsNothing);
       expect(find.text('Add community').hitTestable(), findsOneWidget);
 
@@ -186,7 +217,7 @@ void main() {
       await f.flow.leave();
       await tester.pumpAndSettle();
       expect(f.flow.stage, HostedFlowStage.idle);
-      await tester.tap(find.text('Back').hitTestable());
+      await tester.tap(find.byTooltip('Back').hitTestable());
       await tester.pumpAndSettle();
       expect(find.text('Enter a community link').hitTestable(), findsOneWidget);
       expect(container.read(hostedInlineEntryProvider), isTrue);
@@ -195,9 +226,28 @@ void main() {
       await openEntry();
     }
 
-    // Drive the real deep-link dispatcher, sheet, service and auth persistence.
+    // The selected button becomes Continue without replacing its element.
+    final linkAction = find.byKey(const Key('add-community-link-action'));
+    final originalAction = tester.element(linkAction);
     await tester.tap(find.text('Enter a community link').hitTestable());
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(tester.element(linkAction), same(originalAction));
     await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<Transform>(find.byKey(const Key('add-community-link-rise')))
+          .transform
+          .storage[13],
+      0,
+    );
+    await tester.tap(find.text('Continue').hitTestable());
+    await tester.pumpAndSettle();
+    expect(
+      find.text('Enter a valid community address or invite link.'),
+      findsOneWidget,
+    );
+    // Drive the real deep-link dispatcher, sheet, service and auth persistence.
     await tester.enterText(
       find.byKey(const Key('community-link-input')).hitTestable(),
       'new-community.example',
@@ -225,9 +275,65 @@ void main() {
     await tester.tap(find.text('Continue').hitTestable());
     await tester.pumpAndSettle();
     expect(find.text('Import a Nostr key').hitTestable(), findsOneWidget);
-    await tester.tap(find.text('Previous device identity').hitTestable());
+    final joinRoute = ModalRoute.of(
+      tester.element(find.byType(SelfHostedEntrySheet)),
+    );
+    final joinHeight = tester.getSize(find.byType(SelfHostedEntrySheet)).height;
+    await tester.tap(find.text('Import a Nostr key').hitTestable());
+    await tester.pumpAndSettle();
+    expect(find.byType(BuzzSheetHeader), findsNothing);
+    expect(find.text('Import identity'), findsOneWidget);
+    expect(
+      ModalRoute.of(tester.element(find.byType(NsecImportSheet))),
+      isNot(same(joinRoute)),
+    );
+    expect(find.byType(SelfHostedEntrySheet), findsNothing);
+    await tester.tap(find.byTooltip('Back'));
+    await tester.pumpAndSettle();
+    expect(find.byType(SelfHostedEntrySheet), findsOneWidget);
+    expect(find.byType(NsecImportSheet), findsNothing);
+    expect(find.text('You already have a saved identity'), findsOneWidget);
+    expect(
+      tester.getSize(find.byType(SelfHostedEntrySheet)).height,
+      joinHeight,
+    );
+    await tester.tap(find.text('Import a Nostr key').hitTestable());
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(NsecImportSheet),
+        matching: find.byType(TextField),
+      ),
+      f.keys.nsec,
+    );
+    await tester.tap(find.text('Preview identity'));
+    await tester.pumpAndSettle();
+    expect(probes, 0);
+    pendingProbe = Completer<void>();
+    await tester.tap(find.text('Import this identity'));
     await tester.pumpAndSettle();
     expect(probes, 1);
+    await tester.tap(find.byTooltip('Back'));
+    // Completion races the outgoing route animation.
+    pendingProbe.complete();
+    await tester.pumpAndSettle();
+    expect(find.text('You already have a saved identity'), findsOneWidget);
+    expect(await container.read(communityStorageProvider).loadAll(), isEmpty);
+    pendingProbe = null;
+    await tester.tap(find.text('Import a Nostr key').hitTestable());
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(NsecImportSheet),
+        matching: find.byType(TextField),
+      ),
+      f.keys.nsec,
+    );
+    await tester.tap(find.text('Preview identity'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Import this identity'));
+    await tester.pumpAndSettle();
+    expect(probes, 2);
     expect(find.byType(SelfHostedEntrySheet), findsNothing);
     expect(find.byType(OnboardingAppEntry), findsNothing);
     expect(find.text('Add community').hitTestable(), findsOneWidget);
@@ -251,7 +357,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byType(OnboardingAppEntry), findsNothing);
     expect(find.text('Add community').hitTestable(), findsOneWidget);
-    expect(probes, 1);
+    expect(probes, 2);
     expect(
       await container.read(communityStorageProvider).loadActiveId(),
       saved.single.id,
@@ -261,7 +367,7 @@ void main() {
     await openEntry();
     await tester.tap(find.text('Enter a community link').hitTestable());
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Back').hitTestable());
+    await tester.tap(find.byTooltip('Back').hitTestable());
     await tester.pumpAndSettle();
     expect(container.read(hostedInlineEntryProvider), isTrue);
     await tester.pageBack();

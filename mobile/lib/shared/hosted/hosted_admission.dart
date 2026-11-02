@@ -107,7 +107,11 @@ class HostedAdmission {
         await readJoinResponse(_http, request);
         checkCurrent();
       } on HostedInviteFailure catch (failure) {
-        if (failure == HostedInviteFailure.policyRequired) rethrow;
+        if (failure == HostedInviteFailure.policyRequired ||
+            failure == HostedInviteFailure.restricted ||
+            failure == HostedInviteFailure.ownerMismatch) {
+          rethrow;
+        }
         checkCurrent();
         // A lost claim response may outlive its code. AUTH alone also admits
         // non-members on open relays; reconcile explicit membership first.

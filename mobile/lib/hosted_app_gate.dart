@@ -5,17 +5,22 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import 'features/channels/deep_link_dispatcher.dart';
+import 'features/profile/profile_setup_page.dart';
 import 'features/onboarding/hosted_connect_page.dart';
 import 'features/onboarding/self_hosted_entry_sheet.dart';
 import 'shared/auth/auth.dart';
 import 'shared/theme/grid.dart';
+import 'shared/theme/theme_extensions.dart';
+import 'shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'shared/deeplink/deep_link.dart';
 import 'shared/hosted/hosted_community_connection.dart';
 import 'shared/hosted/hosted_flow.dart';
 import 'shared/hosted/hosted_environment.dart';
 import 'features/onboarding/hosted_reconnect_banner.dart';
+import 'features/onboarding/organization_sign_in_banner.dart';
 
 import 'shared/hosted/hosted_flow_provider.dart';
+import 'shared/hosted/organization_sign_in.dart';
 
 /// Composition seam shared by signed-in and signed-out application states.
 class HostedAppGate extends HookConsumerWidget {
@@ -46,6 +51,8 @@ class HostedAppGate extends HookConsumerWidget {
       return () => flow.removeListener(onFlowChanged);
     }, [flow]);
     final inlineEntry = ref.watch(hostedInlineEntryProvider);
+    // Create the organization's browser owner before any callback is handled.
+    ref.watch(organizationSignInProvider);
     final visible =
         flow != null &&
         flow.stage != HostedFlowStage.idle &&
@@ -58,13 +65,7 @@ class HostedAppGate extends HookConsumerWidget {
             (flow.accountOnly &&
                 flow.stage == HostedFlowStage.working &&
                 flow.account.account == null));
-    final inlineAccountStatus =
-        flow != null &&
-        (!authenticated || inlineEntry) &&
-        flow.accountOnly &&
-        (flow.stage == HostedFlowStage.working ||
-            (flow.stage == HostedFlowStage.blocked &&
-                !flow.canChangeCommunities));
+    final fullScreenSetup = visible && !openingSignIn;
     return DeepLinkDispatcher(
       dispatchMessageLinks: authenticated && !visible,
       onboardingHandler: (routeContext, link) async {
@@ -97,6 +98,7 @@ class HostedAppGate extends HookConsumerWidget {
                 routeContext,
                 relay: link.relayUrl,
                 name: link.name,
+                fullScreen: inlineEntry,
               );
               if (joined && context.mounted) {
                 ref.read(communityEntryCompletionProvider.notifier).complete();
@@ -133,52 +135,73 @@ class HostedAppGate extends HookConsumerWidget {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          child,
-          if (flow != null) ...[
-            if (authenticated && !visible) HostedReconnectBanner(flow: flow),
-            if (flow.stage == HostedFlowStage.signIn &&
-                authenticated &&
-                !inlineEntry)
-              Positioned(
-                left: Grid.sm,
-                right: Grid.sm,
-                bottom: 0,
-                child: SafeArea(
-                  child: Material(
-                    color: Colors.transparent,
-                    child: Wrap(
-                      alignment: WrapAlignment.center,
-                      children: [
-                        TextButton(
-                          onPressed: flow.retry,
-                          child: const Text('Start login again'),
-                        ),
-                        TextButton(
-                          onPressed: flow.leave,
-                          child: Text(
-                            flow.reconnecting
-                                ? 'Cancel sign-in'
-                                : 'Leave setup',
+          ExcludeFocus(
+            excluding: fullScreenSetup,
+            child: ExcludeSemantics(
+              excluding: fullScreenSetup,
+              child: Offstage(offstage: fullScreenSetup, child: child),
+            ),
+          ),
+          if (fullScreenSetup) ColoredBox(color: context.colors.surface),
+          // These overlays only show over Home, so keep them above its
+          // floating tab bar.
+          Positioned.fill(
+            child: MediaQuery(
+              data: MediaQuery.of(context).copyWith(
+                padding: MediaQuery.paddingOf(
+                  context,
+                ).copyWith(bottom: mobileTabBarTop(context) + Grid.xxs),
+              ),
+              child: Stack(
+                // Banners with their own Stack need the full layer to place
+                // bottom-anchored content inside hit-testable bounds.
+                fit: StackFit.expand,
+                children: [
+                  if (authenticated && !visible)
+                    const OrganizationSignInBanner(),
+                  if (flow != null && authenticated && !visible)
+                    HostedReconnectBanner(flow: flow),
+                  if (flow != null &&
+                      flow.stage == HostedFlowStage.signIn &&
+                      authenticated &&
+                      !inlineEntry)
+                    Positioned(
+                      left: Grid.sm,
+                      right: Grid.sm,
+                      bottom: 0,
+                      child: SafeArea(
+                        child: Material(
+                          color: Colors.transparent,
+                          child: Wrap(
+                            alignment: WrapAlignment.center,
+                            children: [
+                              TextButton(
+                                onPressed: flow.retry,
+                                child: const Text('Start login again'),
+                              ),
+                              TextButton(
+                                onPressed: flow.leave,
+                                child: Text(
+                                  flow.reconnecting
+                                      ? 'Cancel sign-in'
+                                      : 'Leave setup',
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                      ],
+                      ),
                     ),
-                  ),
-                ),
+                ],
               ),
-            if (visible &&
-                !openingSignIn &&
-                !inlineAccountStatus &&
-                (!inlineEntry ||
-                    (flow.accountOnly &&
-                        flow.stage == HostedFlowStage.profile) ||
-                    flow.stage == HostedFlowStage.chooseIdentity ||
-                    flow.stage == HostedFlowStage.chooseCommunities ||
-                    flow.stage == HostedFlowStage.communityConflict ||
-                    flow.canChangeCommunities))
+            ),
+          ),
+          if (flow != null) ...[
+            if (fullScreenSetup)
               HostedConnectPage(
                 flow: flow,
                 onClose: () => unawaited(flow.leave()),
+                profileBuilder: (_) => ProfileSetupPage(flow: flow),
               ),
           ],
         ],

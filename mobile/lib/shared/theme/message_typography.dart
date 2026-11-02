@@ -52,15 +52,6 @@ const messageTimestampTextStyle = TextStyle(
   letterSpacing: 0,
 );
 
-/// Compact reply previews: 13.1sp regular on a 17sp line height.
-const replyPreviewTextStyle = TextStyle(
-  fontFamily: _fontFamily,
-  fontSize: 13.1,
-  fontWeight: FontWeight.w400,
-  height: 17 / 13.1,
-  letterSpacing: 0,
-);
-
 /// Reaction counts: 13.1sp medium on a 17sp line height.
 const reactionCountTextStyle = TextStyle(
   fontFamily: _fontFamily,
@@ -82,6 +73,15 @@ const channelTitleTextStyle = TextStyle(
 /// Primary labels in compact content lists.
 const contentListTitleTextStyle = messageUsernameTextStyle;
 
+/// Titles shared by Home channel rows and Solo chat rows.
+const navigationChatTitleTextStyle = TextStyle(
+  fontFamily: _fontFamily,
+  fontSize: 17,
+  fontWeight: FontWeight.w400,
+  height: 22 / 17,
+  letterSpacing: 0,
+);
+
 /// Secondary copy in compact content lists.
 const contentListBodyTextStyle = TextStyle(
   fontFamily: _fontFamily,
@@ -90,9 +90,6 @@ const contentListBodyTextStyle = TextStyle(
   height: 17 / 13.1,
   letterSpacing: 0,
 );
-
-/// Timestamps in compact content lists.
-const contentListTimestampTextStyle = messageMetadataTextStyle;
 
 /// Filter chip labels use a tighter 15sp Inter treatment.
 const filterChipTextStyle = TextStyle(
@@ -105,24 +102,6 @@ const filterChipTextStyle = TextStyle(
 
 /// Search fields use the primary 15sp body treatment.
 const searchInputTextStyle = messageBodyTextStyle;
-
-/// System message actor names: 15sp semibold on a 17sp line height.
-const systemMessageHeadingTextStyle = TextStyle(
-  fontFamily: _fontFamily,
-  fontSize: 15,
-  fontWeight: FontWeight.w600,
-  height: 17 / 15,
-  letterSpacing: 0,
-);
-
-/// System message copy: 15sp regular on a 20sp line height.
-const systemMessageBodyTextStyle = TextStyle(
-  fontFamily: _fontFamily,
-  fontSize: 15,
-  fontWeight: FontWeight.w400,
-  height: 20 / 15,
-  letterSpacing: 0,
-);
 
 /// Activity sender names share the primary author style.
 const activityUsernameTextStyle = messageUsernameTextStyle;
@@ -141,3 +120,11 @@ const activityContextTextStyle = TextStyle(
 
 /// Activity message previews use the primary message copy style.
 const activityPreviewTextStyle = messageBodyTextStyle;
+
+/// Inventory labels shared by Solo and Team navigation sections.
+const navigationSectionTextStyle = TextStyle(
+  fontFamily: _fontFamily,
+  fontSize: 15,
+  height: 20 / 15,
+  fontWeight: FontWeight.w500,
+);

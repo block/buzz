@@ -4,6 +4,7 @@ import { QueryClient, QueryObserver } from "@tanstack/react-query";
 
 import { reconcileFetchedChannelWindow } from "../hooks.ts";
 import { channelMessagesKey, channelWindowKey } from "./messageQueryKeys.ts";
+import { mergeTimelineCacheMessages } from "./messageMerge.ts";
 import {
   appendOlderChannelWindow,
   emptyChannelWindowStore,
@@ -208,6 +209,37 @@ test("test_reconciliation_preserves_dense_second_window_order", () => {
     reconcileChannelWindowMessages(store, []).map((item) => item.id),
     flattenChannelWindowEvents(store).map((item) => item.id),
   );
+});
+
+test("test_live_cache_merge_and_window_projection_agree_on_same_second_order", () => {
+  // useLiveChannelUpdates merges each live event straight into the rendered
+  // cache, and the subscription projects the same event through the window.
+  // If the two disagree on same-second order, the rows swap on every write.
+  for (const arrivals of [
+    ["a", "b"],
+    ["b", "a"],
+  ]) {
+    const harness = createHarness();
+    const rendered = [];
+    for (const content of arrivals) {
+      const live = event(content, 200);
+      harness.client.setQueryData(harness.messagesKey, (current) =>
+        mergeTimelineCacheMessages(current, live),
+      );
+      rendered.push(
+        harness.client.getQueryData(harness.messagesKey).map((m) => m.content),
+      );
+      appendLiveEvent(harness, live);
+      rendered.push(
+        harness.client.getQueryData(harness.messagesKey).map((m) => m.content),
+      );
+    }
+
+    assert.deepEqual(rendered.slice(2), [
+      ["initial", "b", "a"],
+      ["initial", "b", "a"],
+    ]);
+  }
 });
 
 test("test_reconciliation_retains_identical_pending_sends", () => {

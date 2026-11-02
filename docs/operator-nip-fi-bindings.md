@@ -150,6 +150,8 @@ without refusing anything. Shadow labels database-source records
   - `buzz_nip_fi_resolver_miss_rejections_total` is flat.
   - The non-`admit` share of `buzz_nip_fi_shadow_total` is only what you expect
     to deny; `community="unmapped"` comes only from hosts you do not serve.
+  - `stage="owner"` counts as would-deny: each is an agent enforce will refuse
+    for its token owner.
 - No-go: any of these fails. Return to `off` and investigate.
 
 ### Enforce

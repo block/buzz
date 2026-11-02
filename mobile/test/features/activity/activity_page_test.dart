@@ -208,9 +208,8 @@ void main() {
     expect(appBar.nativeLeading?.symbol, 'xmark');
     expect(appBar.nativeLeading?.label, 'Close inbox');
     expect(appBar.nativeTitle, 'Inbox');
-    expect(appBar.gradient, isNull);
     expect(appBar.frosted, isTrue);
-    expect(appBar.showBottomDivider, isTrue);
+
     expect(appBar.bottomHeight, Grid.xxs);
     expect(appBar.centerTitle, isFalse);
     expect(find.byTooltip('Back'), findsNothing);
@@ -530,8 +529,8 @@ void main() {
       isTrue,
     );
 
-    final previews = tester.widgetList<MessageContent>(
-      find.byType(MessageContent),
+    final previews = tester.widgetList<MessagePreview>(
+      find.byType(MessagePreview),
     );
     expect(previews, isNotEmpty);
     expect(

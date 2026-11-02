@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -12,10 +14,15 @@ import 'timeline_message.dart';
 
 part 'channel_messages_provider/thread_summaries.dart';
 part 'channel_messages_provider/pagination.dart';
+part 'channel_messages_provider/notices.dart';
 
 // Channel history keeps partial reply evidence; full threads stay route-scoped.
 const _maxCachedRepliesPerRoot = 256;
 const _maxCachedReplies = 2048;
+
+/// How long a chat nobody shows keeps its live subscription. A brief cover,
+/// such as a profile pushed over the chat, returns without a catch-up fetch.
+const _liveDetachDelay = Duration(seconds: 30);
 
 const _channelLiveEventKinds = [
   ...EventKind.channelEventKinds,
@@ -37,6 +44,22 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   bool _initialWindowQueryInFlight = false;
   int _initVersion = 0;
   ChannelWindowStore _windowStore = const ChannelWindowStore.empty();
+
+  /// System notices read apart from the window pages (see `_fillNotices`).
+  final Map<String, NostrEvent> _notices = {};
+
+  /// Reactions to [_notices] and deletions of those reactions.
+  final Map<String, NostrEvent> _noticeAux = {};
+
+  /// Where the next older notice read starts: null before the first read.
+  ChannelPageCursor? _noticeCursor;
+  bool _noticesReachedStart = false;
+
+  /// The init a notice read is running for, so only one runs per window.
+  int? _noticeFillVersion;
+
+  /// Whether a page loaded while a notice read ran, so the read runs again.
+  bool _noticeFillAgain = false;
   final Set<String> _liveSummaryRootsDuringInitialWindowQuery = {};
   final Map<String, NostrEvent> _deepLinkEvents = {};
   final Set<String> _retainedDeepLinkEventIds = {};
@@ -59,6 +82,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         ref.read(relaySessionProvider).status == SessionStatus.connected,
   );
   bool _hasListeners = true;
+  Timer? _liveDetachTimer;
+  bool _liveDetached = false;
   late final _summaryRefreshes = ThreadSummaryRefreshQueue(
     refresh: _refreshOverflowSummary,
     canRun: () =>
@@ -86,6 +111,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   /// This distinguishes a genuinely loaded empty channel from the synthetic
   /// empty value returned while the relay is not yet connected.
   bool get hasLoadedMessages => _lastKnownMessages != null;
+
+  /// Whether a loaded timeline is resubscribing and fetching its newest
+  /// history, as after a reconnect, to become current again.
+  bool get isCatchingUp => _initInFlight && hasLoadedMessages;
 
   Map<String, ChannelWindowThreadSummary> get threadSummaries => {
     for (final entry in _baseThreadSummaries.entries)
@@ -115,18 +144,38 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   @override
   AsyncValue<List<NostrEvent>> build() {
     final sessionState = ref.watch(relaySessionProvider);
+    // Riverpod defers rebuilding a provider nobody is listening to until it
+    // is listened to or read again, and then skips onResume. So a build
+    // always means the chat is wanted.
+    _hasListeners = true;
+    _liveDetached = false;
     ref.onCancel(() {
       _hasListeners = false;
       _deletionOwnerQueue.pause();
       _summaryRefreshes.pause();
+      _liveDetachTimer?.cancel();
+      _liveDetachTimer = Timer(_liveDetachDelay, _detachLive);
     });
     ref.onResume(() {
       _hasListeners = true;
+      _liveDetachTimer?.cancel();
+      _liveDetachTimer = null;
+      if (_liveDetached) {
+        // Keep the cached timeline on screen while a rebuild resubscribes
+        // and catches up, as it does after a reconnect. Life-cycle callbacks
+        // can't use ref, so rebuild just after.
+        _liveDetached = false;
+        Future.microtask(() {
+          if (ref.mounted) ref.invalidateSelf();
+        });
+      }
       Future.microtask(_summaryRefreshes.resume);
       Future.microtask(_deletionOwnerQueue.resume);
     });
     ref.onDispose(() {
       _initVersion++;
+      _liveDetachTimer?.cancel();
+      _liveDetachTimer = null;
       _deletionOwnerQueue.pause();
       _summaryRefreshes.pause();
       _clearSubscription();
@@ -142,6 +191,11 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
 
     _reachedOldest = false;
     _windowStore = const ChannelWindowStore.empty();
+    _notices.clear();
+    _noticeAux.clear();
+    _noticeCursor = null;
+    _noticesReachedStart = false;
+    _noticeFillAgain = false;
     // A reconnect window can lag a confirmed thread query and contains only
     // top-level rows. Keep known replies as summary evidence, including their
     // deletion markers so a reset cannot resurrect a deleted reply.
@@ -208,8 +262,12 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       _lastKnownMessages = merged;
       _reconcileRetainedSummaryPayloads(merged);
       _reconcileRetainedAggregates(historyVersion);
+      // Clear before publishing so the rebuild it triggers is no longer
+      // catching up.
+      _initInFlight = false;
       state = AsyncData(merged);
       _summaryRefreshes.resume();
+      unawaited(_fillNotices());
     } catch (e, st) {
       if (!_isCurrentInit(initVersion)) return;
       final fallbackMessages = state.value ?? _lastKnownMessages;
@@ -217,9 +275,14 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         debugPrint(
           '[ChannelMessagesNotifier] history sync failed for $channelId: $e',
         );
+        _initInFlight = false;
         state = AsyncData(fallbackMessages);
+        // The fallback is usually the list already on screen, which Riverpod
+        // treats as unchanged. Notify anyway so the page sees catch-up end.
+        ref.notifyListeners();
         return;
       }
+      _initInFlight = false;
       state = AsyncError(e, st);
     } finally {
       if (_isCurrentInit(initVersion)) {
@@ -255,7 +318,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       _usingChannelWindow = true;
       _reconcilePageSummaries(page, pageVersion);
       _reachedOldest = !channelWindowHasMore(_windowStore);
-      return flattenChannelWindowEvents(_windowStore);
+      return _windowEvents();
     } catch (error) {
       _initialWindowQueryInFlight = false;
       _liveSummaryRootsDuringInitialWindowQuery.clear();
@@ -282,7 +345,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   }
 
   NostrFilter _channelWindowFilter(ChannelPageCursor? cursor) => NostrFilter(
-    kinds: EventKind.channelTimelineContentKinds,
+    kinds: EventKind.channelWindowPageKinds,
     tags: {
       '#h': [channelId],
     },
@@ -376,7 +439,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     if (!_mergeWindowEventIntoStore(event, summaryVersion: summaryVersion)) {
       return;
     }
-    final windowEvents = flattenChannelWindowEvents(_windowStore);
+    final windowEvents = _windowEvents();
     // Flattening already orders the window. Only merge and sort again when
     // there are retained deep-link events to include.
     final flattened = _deepLinkEvents.isEmpty
@@ -755,7 +818,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       }
     }
     if (_usingChannelWindow) {
-      events = _withDeepLinkEvents(flattenChannelWindowEvents(_windowStore));
+      events = _withDeepLinkEvents(_windowEvents());
     }
     events = _boundEventReplies(events);
     _lastKnownMessages = events;
@@ -867,6 +930,24 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   }
 
   bool _isCurrentInit(int initVersion) => initVersion == _initVersion;
+
+  List<NostrEvent> _windowEvents() => flattenChannelWindowEvents(
+    _windowStore,
+    notices: _notices.values,
+    noticeAux: _noticeAux.values,
+  );
+
+  /// Stops live work for a chat that stayed hidden; resume catches it up.
+  void _detachLive() {
+    _liveDetachTimer = null;
+    _liveDetached = true;
+    // Retire an unfinished init so its subscription can't install later.
+    _initVersion++;
+    _initInFlight = false;
+    _initialWindowQueryInFlight = false;
+    _liveSummaryRootsDuringInitialWindowQuery.clear();
+    _clearSubscription();
+  }
 
   void _clearSubscription() {
     _unsubscribe?.call();

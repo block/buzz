@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -89,16 +90,20 @@ useMeChatAssistant(
       ? ref.watch(userCacheProvider)[selected] ??
             ref.read(userCacheProvider.notifier).get(selected)
       : null;
+  // The owner's inventory name outranks the agent's self-published profile.
   final name =
-      profile?.displayName ??
       agents
           .where((agent) => agent.pubkey == selected)
           .firstOrNull
-          ?.displayName;
+          ?.displayName ??
+      profile?.displayName;
+  final avatarInitial = name?.trim().isNotEmpty == true
+      ? name!.trim()[0].toUpperCase()
+      : profile?.initial ?? '?';
   String agentName(String pubkey) {
     final names = [
-      ref.read(userCacheProvider)[pubkey]?.displayName,
       agents.where((a) => a.pubkey == pubkey).firstOrNull?.displayName,
+      ref.read(userCacheProvider)[pubkey]?.displayName,
     ];
     return names
             .whereType<String>()
@@ -197,10 +202,11 @@ useMeChatAssistant(
       if (context.mounted) selection.value = (key, picked);
     } catch (error) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showFeedbackSnackBar(
           SnackBar(
             content: Text(error.toString().replaceFirst('Bad state: ', '')),
           ),
+          kind: ToastKind.error,
         );
       }
     } finally {
@@ -223,11 +229,11 @@ useMeChatAssistant(
     nativeAction: IosNavigationAction(
       label: label,
       symbol: 'person.crop.circle',
+      sharesBackground: false,
       avatarIdentity: selected,
       avatarIsAgent: selected != null,
       imageUrl: profile?.avatarUrl,
-      avatarInitial:
-          profile?.initial ?? (name?.isNotEmpty == true ? name![0] : '?'),
+      avatarInitial: avatarInitial,
       onPressed: busy.value ? null : choose,
     ),
     action: IconButton(
@@ -241,9 +247,7 @@ useMeChatAssistant(
         backgroundColor: context.controlSurface,
         fallback: selected == null
             ? const Icon(BuzzIcons.plus, size: 20)
-            : Text(
-                profile?.initial ?? (name?.isNotEmpty == true ? name![0] : '?'),
-              ),
+            : Text(avatarInitial),
       ),
     ),
   );

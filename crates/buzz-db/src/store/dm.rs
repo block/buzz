@@ -76,7 +76,7 @@ pub async fn find_dm_by_participants(
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
-               purpose, purpose_set_by, purpose_set_at, labels
+               purpose, purpose_set_by, purpose_set_at, labels, join_role, unlisted, auto_join
         FROM channels
         WHERE community_id = $1
           AND participant_hash = $2
@@ -142,7 +142,7 @@ pub async fn create_dm(
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
-               purpose, purpose_set_by, purpose_set_at, labels
+               purpose, purpose_set_by, purpose_set_at, labels, join_role, unlisted, auto_join
         FROM channels
         WHERE community_id = $1
           AND participant_hash = $2
@@ -192,6 +192,7 @@ pub async fn create_dm(
             INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
             VALUES ($1, $2, $3, 'member', $4)
             ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
+                sync_modified_at = CASE WHEN channel_members.removed_at IS NOT NULL THEN clock_timestamp() ELSE channel_members.sync_modified_at END,
                 removed_at = NULL,
                 removed_by = NULL,
                 role = EXCLUDED.role
@@ -212,7 +213,7 @@ pub async fn create_dm(
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
-               purpose, purpose_set_by, purpose_set_at, labels
+               purpose, purpose_set_by, purpose_set_at, labels, join_role, unlisted, auto_join
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -533,6 +534,9 @@ fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<ChannelRecord> {
         ttl_seconds: row.try_get("ttl_seconds").unwrap_or(None),
         ttl_deadline: row.try_get("ttl_deadline").unwrap_or(None),
         labels: row.try_get("labels")?,
+        join_role: row.try_get("join_role")?,
+        unlisted: row.try_get("unlisted")?,
+        auto_join: row.try_get("auto_join")?,
     })
 }
 

@@ -3,6 +3,7 @@
 
 //! Minimal NIP-01 WebSocket test client for the Buzz relay.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use nostr::{Event, EventBuilder, Filter, Keys, Kind, Tag};
@@ -12,6 +13,11 @@ use tracing::debug;
 
 use buzz_ws_client::NostrWsConnection;
 pub use buzz_ws_client::{parse_relay_message, OkResponse, RelayMessage, WsClientError};
+
+/// Scenario-driven load generator behind the `buzz-loadgen` binary.
+/// The scenario schema is documented in `perf/LOADGEN.md`.
+#[allow(missing_docs)]
+pub mod loadgen;
 
 /// Errors returned by [`BuzzTestClient`] operations.
 #[derive(Debug, Error)]
@@ -175,7 +181,14 @@ impl BuzzTestClient {
         Ok(self.inner.next_event(timeout_dur).await?)
     }
 
-    /// Collects all events for `sub_id` until EOSE is received, waiting up to `timeout_dur`.
+    /// Collects the events for `sub_id` until EOSE is received, waiting up to
+    /// `timeout_dur`, keeping the first copy of each event id.
+    ///
+    /// The relay registers a REQ's live subscription before it queries
+    /// history, so an event whose live fan-out runs late can arrive twice
+    /// before EOSE. Production clients drop the repeat, and so does this
+    /// helper. A test of the relay's own per-subscription dedup must read
+    /// frames with [`Self::recv_event`] instead.
     pub async fn collect_until_eose(
         &mut self,
         sub_id: &str,
@@ -183,6 +196,7 @@ impl BuzzTestClient {
     ) -> Result<Vec<Event>, TestClientError> {
         let deadline = tokio::time::Instant::now() + timeout_dur;
         let mut events = Vec::new();
+        let mut seen = HashSet::new();
 
         loop {
             let remaining = deadline
@@ -198,7 +212,9 @@ impl BuzzTestClient {
                     subscription_id,
                     event,
                 } if subscription_id == sub_id => {
-                    events.push(*event);
+                    if seen.insert(event.id) {
+                        events.push(*event);
+                    }
                 }
                 RelayMessage::Eose { subscription_id } if subscription_id == sub_id => {
                     return Ok(events);
@@ -347,5 +363,57 @@ mod tests {
                 .any(|t| t.len() >= 2 && t[0] == "h" && t[1] == channel_id),
             "missing h tag"
         );
+    }
+
+    /// The relay registers a REQ's live subscription before its history
+    /// query, so an event whose fan-out task runs late arrives once live and
+    /// once from history, both before EOSE.
+    #[tokio::test]
+    async fn collect_until_eose_keeps_one_copy_of_each_event_id() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let keys = Keys::generate();
+        let raced = EventBuilder::new(Kind::TextNote, "raced")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let other = EventBuilder::new(Kind::TextNote, "other")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let frames = [
+            json!(["EVENT", "sub", raced]),
+            json!(["EVENT", "elsewhere", other]),
+            json!(["EVENT", "sub", other]),
+            json!(["EVENT", "sub", raced]),
+            json!(["EOSE", "sub"]),
+        ];
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake relay");
+        let address = listener.local_addr().expect("fake relay address");
+        let relay = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept client");
+            let mut ws = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("fake relay handshake");
+            for frame in frames {
+                ws.send(Message::Text(frame.to_string().into()))
+                    .await
+                    .expect("send frame");
+            }
+            ws
+        });
+
+        let mut client = BuzzTestClient::connect_unauthenticated(&format!("ws://{address}"))
+            .await
+            .expect("connect to fake relay");
+        let events = client
+            .collect_until_eose("sub", Duration::from_secs(5))
+            .await
+            .expect("collect until EOSE");
+        let ids: Vec<_> = events.iter().map(|event| event.id).collect();
+        assert_eq!(ids, [raced.id, other.id]);
+        drop(relay.await.expect("join fake relay"));
     }
 }

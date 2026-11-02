@@ -18,6 +18,7 @@ pub mod deny_map;
 pub mod discovery;
 pub mod jwks;
 pub mod provision;
+pub mod public_profile;
 pub mod startup;
 pub mod verifier;
 
@@ -39,7 +40,7 @@ pub use community::{CommunityBinding, CommunityBindingError};
 pub use config::{
     AssertionPolicyId, ClientSubjectPosture, FreshnessClass, IssuerPolicy, IssuerPolicyError,
     IssuerRegistry, SubjectClass, SubjectClassContract, TokenClass, TransportContractId,
-    NOSTR_PUBKEY_CLAIM, OAUTH_CLIENT_ID_CLAIM,
+    NOSTR_OWNER_PUBKEY_CLAIM, NOSTR_PUBKEY_CLAIM, OAUTH_CLIENT_ID_CLAIM,
 };
 pub use denial::DenialClass;
 pub use deny_map::{CrossPodMergeResult, DenySetFull, IssuerCapacity, NipFiDenyMap};

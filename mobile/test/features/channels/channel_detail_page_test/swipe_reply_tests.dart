@@ -16,6 +16,7 @@ void swipeReplyTests() {
       await tester.pumpWidget(
         _buildTestable(
           messages: events,
+          chatColor: 'magenta',
           home: thread
               ? ThreadDetailPage(
                   threadHead: messages.first,
@@ -86,7 +87,8 @@ void swipeReplyTests() {
       expect(tester.getRect(circle).left, initial.dx);
       final fill =
           tester.widget<DecoratedBox>(circle).decoration as BoxDecoration;
-      expect(fill.color, tester.element(circle).appColors.accent);
+      // The armed circle uses the chosen message color, not the app accent.
+      expect(fill.color, const Color(0xFFCC1F7A));
       expect(find.text('Reply'), findsOneWidget);
       final centerBeforePulse = tester.getCenter(
         find.byKey(const ValueKey('swipe-reply-feedback')),

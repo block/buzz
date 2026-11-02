@@ -33,6 +33,7 @@ use deadpool_redis;
 use crate::audio::AudioRoomManager;
 use crate::config::Config;
 use crate::connection::{ConnectionSubscriptions, RestartClose};
+use crate::nip_fi_core::NipFiSession;
 use crate::subscription::SubscriptionRegistry;
 
 pub(crate) type ScopedPubkeyKey = (CommunityId, [u8; 32]);
@@ -74,16 +75,18 @@ impl CommunityDisconnectReason {
     }
 }
 
-/// NIP-42-proven key and the NIP-FI issuer a socket was admitted under.
+/// NIP-42-proven key and the NIP-FI session a socket was admitted under.
 #[derive(Clone)]
 struct ProvenIdentity {
     pubkey: Vec<u8>,
-    nip_fi_issuer: Option<String>,
+    nip_fi: Option<NipFiSession>,
 }
 
 impl ProvenIdentity {
     fn matches(&self, issuer: &str, pubkey: &[u8]) -> bool {
-        self.pubkey == pubkey && self.nip_fi_issuer.as_deref() == Some(issuer)
+        self.nip_fi
+            .as_ref()
+            .is_some_and(|session| session.matches(issuer, &self.pubkey, pubkey))
     }
 }
 
@@ -92,7 +95,7 @@ impl ProvenIdentity {
 pub(crate) struct CommunityConnectionControl {
     cancel: CancellationToken,
     reason_tx: watch::Sender<Option<CommunityDisconnectReason>>,
-    /// NIP-42-proven pubkey plus the NIP-FI issuer the session was admitted
+    /// NIP-42-proven pubkey plus the NIP-FI session it was admitted
     /// under; matched by the registry's `disconnect_nip_fi` scan.  [FI-TRACE-DENY-SET]
     proven_identity: Arc<std::sync::RwLock<Option<ProvenIdentity>>>,
     /// Serializes NIP-FI denial writers across reason-win + terminal enqueue,
@@ -105,6 +108,8 @@ pub(crate) struct CommunityConnectionControl {
     owner: Arc<std::sync::OnceLock<[u8; 32]>>,
     /// Shadow-mode observation of this socket; no enforce path reads it.
     nip_fi_shadow: Arc<std::sync::OnceLock<Arc<crate::nip_fi_shadow_session::ShadowSession>>>,
+    /// A shadow upgrade would-deny's line, owned by the connection task.
+    nip_fi_line: Arc<std::sync::OnceLock<std::sync::Weak<crate::nip_fi_shadow::PendingLine>>>,
 }
 
 impl CommunityConnectionControl {
@@ -118,6 +123,7 @@ impl CommunityConnectionControl {
             pubkey: Arc::default(),
             owner: Arc::default(),
             nip_fi_shadow: Arc::default(),
+            nip_fi_line: Arc::default(),
         }
     }
 
@@ -130,6 +136,30 @@ impl CommunityConnectionControl {
         if let Some(session) = session {
             session.fence(self.cancel.clone());
             let _ = self.nip_fi_shadow.set(session);
+        }
+    }
+
+    /// Lets the socket's AUTH write its shadow upgrade would-deny line, which
+    /// the connection task owns.
+    pub(crate) fn attach_nip_fi_line(&self, line: Option<&Arc<crate::nip_fi_shadow::PendingLine>>) {
+        if let Some(line) = line {
+            let _ = self.nip_fi_line.set(Arc::downgrade(line));
+        }
+    }
+
+    /// Writes the socket's shadow upgrade would-deny line, if any, for
+    /// `pubkey`, which a NIP-42 AUTH just verified.
+    pub(crate) fn prove_nip_fi_line(&self, pubkey: nostr::PublicKey) {
+        if let Some(line) = self.nip_fi_line.get().and_then(std::sync::Weak::upgrade) {
+            line.prove(pubkey);
+        }
+    }
+
+    /// Writes the socket's still-unproven shadow upgrade would-deny line as
+    /// `absent`; called as the socket's read loop ends, before cleanup.
+    pub(crate) fn finish_nip_fi_line(&self) {
+        if let Some(line) = self.nip_fi_line.get().and_then(std::sync::Weak::upgrade) {
+            line.finish();
         }
     }
 
@@ -167,14 +197,11 @@ impl CommunityConnectionControl {
         self.reason_tx.subscribe()
     }
 
-    /// Records the NIP-42-proven pubkey and admitting NIP-FI issuer for this
+    /// Records the NIP-42-proven pubkey and admitting NIP-FI session for this
     /// connection so the registry can close it via `disconnect_nip_fi`.
-    pub(crate) fn set_proven_identity(&self, pubkey: Vec<u8>, nip_fi_issuer: Option<String>) {
+    pub(crate) fn set_proven_identity(&self, pubkey: Vec<u8>, nip_fi: Option<NipFiSession>) {
         if let Ok(mut slot) = self.proven_identity.write() {
-            *slot = Some(ProvenIdentity {
-                pubkey,
-                nip_fi_issuer,
-            });
+            *slot = Some(ProvenIdentity { pubkey, nip_fi });
         }
     }
 
@@ -271,7 +298,7 @@ impl CommunityConnectionControl {
         let nip_fi = self
             .proven_identity
             .read()
-            .is_ok_and(|id| id.as_ref().is_some_and(|id| id.nip_fi_issuer.is_some()));
+            .is_ok_and(|id| id.as_ref().is_some_and(|id| id.nip_fi.is_some()));
         if nip_fi {
             self.publish_authorization_denied(crate::nip_fi_session::NipFiWsRoute::Audio, None);
         } else {
@@ -311,10 +338,11 @@ struct ConnEntry {
     backpressure_count: Arc<AtomicU8>,
     subscriptions: ConnectionSubscriptions,
     authenticated_pubkey: Arc<std::sync::RwLock<Option<Vec<u8>>>>,
-    /// NIP-FI issuer the session was admitted under.  Written while holding
-    /// the `authenticated_pubkey` write lock and read under its read lock, so
-    /// `disconnect_nip_fi` never sees the pubkey without its issuer.
-    nip_fi_issuer: std::sync::RwLock<Option<String>>,
+    /// NIP-FI session (issuer and agent owner) the connection was admitted
+    /// under.  Written while holding the `authenticated_pubkey` write lock and
+    /// read under its read lock, so `disconnect_nip_fi` never sees the pubkey
+    /// without its session.
+    nip_fi: std::sync::RwLock<Option<NipFiSession>>,
     /// Owner of an admitted agent; revoking the owner closes this socket.
     admitted_owner: std::sync::OnceLock<[u8; 32]>,
     /// Set once AUTH succeeds. The pubkey is bound earlier so revocation can
@@ -714,7 +742,7 @@ impl ConnectionManager {
                 backpressure_count,
                 subscriptions,
                 authenticated_pubkey: Arc::new(std::sync::RwLock::new(None)),
-                nip_fi_issuer: std::sync::RwLock::new(None),
+                nip_fi: std::sync::RwLock::new(None),
                 admitted_owner: std::sync::OnceLock::new(),
                 admitted: AtomicBool::new(false),
                 grace_limit,
@@ -745,20 +773,20 @@ impl ConnectionManager {
         self.set_authenticated_identity(conn_id, pubkey_bytes, None);
     }
 
-    /// Record the authenticated pubkey and the NIP-FI issuer it was admitted
-    /// under as one unit: the issuer is written while the pubkey write lock is
-    /// held, so a concurrent `disconnect_nip_fi` scan that sees the pubkey also
-    /// sees its issuer.  [FI-TRACE-DENY-SET]
+    /// Record the authenticated pubkey and the NIP-FI session it was admitted
+    /// under as one unit: the session is written while the pubkey write lock
+    /// is held, so a concurrent `disconnect_nip_fi` scan that sees the pubkey
+    /// also sees its issuer and owner.  [FI-TRACE-DENY-SET]
     pub(crate) fn set_authenticated_identity(
         &self,
         conn_id: Uuid,
         pubkey_bytes: Vec<u8>,
-        nip_fi_issuer: Option<String>,
+        nip_fi: Option<NipFiSession>,
     ) {
         if let Some(entry) = self.connections.get(&conn_id) {
             if let Ok(mut slot) = entry.authenticated_pubkey.write() {
-                if let Ok(mut issuer_slot) = entry.nip_fi_issuer.write() {
-                    *issuer_slot = nip_fi_issuer;
+                if let Ok(mut session_slot) = entry.nip_fi.write() {
+                    *session_slot = nip_fi;
                 }
                 *slot = Some(pubkey_bytes);
             }
@@ -894,7 +922,8 @@ impl ConnectionManager {
     }
 
     /// Close all live connections admitted under NIP-FI `issuer` whose proven
-    /// pubkey equals `pubkey`, **across all communities**.
+    /// pubkey or recorded agent owner equals `pubkey`, **across all
+    /// communities**.
     ///
     /// Used by the NIP-FI admin disconnect API: the deny entry is keyed by
     /// `(issuer, pubkey)` and spans every community this relay serves under
@@ -916,11 +945,13 @@ impl ConnectionManager {
                 .read()
                 .ok()
                 .map(|stored| {
-                    stored.as_deref() == Some(pubkey)
-                        && entry
-                            .nip_fi_issuer
-                            .read()
-                            .is_ok_and(|iss| iss.as_deref() == Some(issuer))
+                    stored.as_deref().is_some_and(|proven| {
+                        entry.nip_fi.read().is_ok_and(|session| {
+                            session
+                                .as_ref()
+                                .is_some_and(|s| s.matches(issuer, proven, pubkey))
+                        })
+                    })
                 })
                 .unwrap_or(false);
             if matches {
@@ -1168,6 +1199,30 @@ impl Default for ConnectionManager {
     }
 }
 
+/// How long a pod uses a community's cached open set after the database read
+/// that produced it began. Cross-pod invalidation is best-effort, so this
+/// bounds how long a channel that left the open set elsewhere stays granted
+/// here.
+pub const OPEN_CHANNELS_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// A community's listed open channel IDs and when the read that listed them
+/// began.
+#[derive(Debug)]
+pub struct OpenChannels {
+    /// The community's listed open channel IDs.
+    pub ids: Vec<Uuid>,
+    /// When the database read that listed them began.
+    pub read_at: Instant,
+}
+
+/// Minimum spacing between live thread-summary emits for one thread root on
+/// one relay pod. See [`AppState::thread_summary_refresh`].
+pub const THREAD_SUMMARY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Upper bound on one live thread-summary refresh (DB read, Redis publish,
+/// local fan-out). A hung refresh is abandoned so its root keeps emitting.
+pub const THREAD_SUMMARY_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Shared application state, cloned cheaply via inner `Arc` fields.
 #[derive(Clone)]
 pub struct AppState {
@@ -1187,6 +1242,8 @@ pub struct AppState {
     pub search: Arc<SearchService>,
     /// Registry of active client subscriptions.
     pub sub_registry: Arc<SubscriptionRegistry>,
+    /// Live NIP-AR syncs this node serves.
+    pub artifact_syncs: Arc<crate::handlers::artifact_sync::ArtifactSyncs>,
     /// Registry of active WebSocket connections.
     pub conn_manager: Arc<ConnectionManager>,
     /// Lifecycle cancellation for every long-lived socket, including huddle audio.
@@ -1236,10 +1293,16 @@ pub struct AppState {
     /// Short TTL (10s) — membership changes are rare but must propagate.
     #[allow(clippy::type_complexity)]
     pub membership_cache: Arc<moka::sync::Cache<(CommunityId, Uuid, Vec<u8>), bool>>,
-    /// Accessible channel IDs cache: (community_id, pubkey_bytes) → channel UUIDs.
-    /// Short TTL (10s) — invalidated on membership or channel visibility changes.
+    /// Member channel IDs cache: (community_id, pubkey_bytes) → the legacy-type
+    /// channels the pubkey is an active member of. Short TTL (10s) —
+    /// invalidated on membership changes and community-wide channel changes.
     #[allow(clippy::type_complexity)]
-    pub accessible_channels_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), Vec<Uuid>>>,
+    pub member_channels_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), Vec<Uuid>>>,
+    /// Listed open channel IDs per community, the half of every reader's
+    /// accessible set that does not depend on the reader. Invalidated with
+    /// the community's accessible channels, and used only for
+    /// [`OPEN_CHANNELS_MAX_AGE`] after its database read began.
+    pub open_channels_cache: Arc<moka::sync::Cache<CommunityId, Arc<OpenChannels>>>,
     /// Per-community channel visibility string, used to gate the private-channel fan-out
     /// access check so open channels stay zero-cost. Invalidated on a flip.
     pub channel_visibility_cache: Arc<moka::sync::Cache<(CommunityId, Uuid), String>>,
@@ -1304,6 +1367,11 @@ pub struct AppState {
         Arc<moka::sync::Cache<ScopedPubkeyKey, Arc<std::sync::atomic::AtomicU32>>>,
     /// Current in-flight media uploads per (community, uploader pubkey).
     pub media_uploads_in_flight: Arc<DashMap<ScopedPubkeyKey, u32>>,
+    /// Per-(community, thread root) coalescing for live `kind:39005` thread
+    /// summaries, so a busy thread recomputes its summary at most once per
+    /// [`THREAD_SUMMARY_REFRESH_INTERVAL`] instead of once per reply.
+    pub thread_summary_refresh:
+        Arc<crate::handlers::coalesced_refresh::CoalescedRefresh<(CommunityId, Vec<u8>)>>,
     /// Cache for observer agent-owner authorization (kind 24200).
     /// Key: (community_id, agent_pubkey_bytes, owner_pubkey_bytes). Value: is_owner.
     /// `agent_owner_pubkey` is immutable inside one community, so a long TTL
@@ -1512,6 +1580,7 @@ impl AppState {
             auth: Arc::new(auth),
             search: search_arc,
             sub_registry: Arc::new(SubscriptionRegistry::new()),
+            artifact_syncs: Arc::default(),
             conn_manager: Arc::new(ConnectionManager::new()),
             community_connections: Arc::new(CommunityConnectionRegistry::new()),
             community_revalidator_cancel: CancellationToken::new(),
@@ -1538,11 +1607,20 @@ impl AppState {
                     .support_invalidation_closures()
                     .build(),
             ),
-            accessible_channels_cache: Arc::new(
+            member_channels_cache: Arc::new(
                 moka::sync::Cache::builder()
                     .max_capacity(10_000)
                     .time_to_live(std::time::Duration::from_secs(10))
                     .support_invalidation_closures()
+                    .build(),
+            ),
+            // Readers use an entry only for `OPEN_CHANNELS_MAX_AGE`; the TTL
+            // just reclaims memory and keeps expired entries around long
+            // enough to count their misses as `expired` rather than `absent`.
+            open_channels_cache: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(10_000)
+                    .time_to_live(std::time::Duration::from_secs(10))
                     .build(),
             ),
             channel_visibility_cache: Arc::new(
@@ -1578,6 +1656,12 @@ impl AppState {
                     .build(),
             ),
             media_uploads_in_flight: Arc::new(DashMap::new()),
+            thread_summary_refresh: Arc::new(
+                crate::handlers::coalesced_refresh::CoalescedRefresh::new(
+                    THREAD_SUMMARY_REFRESH_INTERVAL,
+                    THREAD_SUMMARY_REFRESH_TIMEOUT,
+                ),
+            ),
             observer_owner_cache: Arc::new(
                 moka::sync::Cache::builder()
                     .max_capacity(100_000)
@@ -1780,7 +1864,7 @@ impl AppState {
     ) {
         self.membership_cache
             .invalidate(&(community_id, channel_id, pubkey.to_vec()));
-        self.accessible_channels_cache
+        self.member_channels_cache
             .invalidate(&(community_id, pubkey.to_vec()));
     }
 
@@ -1792,8 +1876,9 @@ impl AppState {
 
     /// Local-only accessible-channels drop. See [`invalidate_membership_local`].
     pub(crate) fn invalidate_all_accessible_channels_local(&self, community_id: CommunityId) {
+        self.open_channels_cache.invalidate(&community_id);
         if let Err(error) = self
-            .accessible_channels_cache
+            .member_channels_cache
             .invalidate_entries_if(move |(entry_community, _), _| *entry_community == community_id)
         {
             // AppState enables invalidation closures at construction time. If
@@ -1803,7 +1888,7 @@ impl AppState {
                 ?error,
                 "community-scoped accessible-channel invalidation unavailable; falling back to full invalidation"
             );
-            self.accessible_channels_cache.invalidate_all();
+            self.member_channels_cache.invalidate_all();
         }
     }
 
@@ -1849,16 +1934,7 @@ impl AppState {
             );
             self.membership_cache.invalidate_all();
         }
-        if let Err(error) = self
-            .accessible_channels_cache
-            .invalidate_entries_if(move |(entry_community, _), _| *entry_community == community_id)
-        {
-            tracing::error!(
-                ?error,
-                "community-scoped accessible-channel invalidation unavailable; falling back to full invalidation"
-            );
-            self.accessible_channels_cache.invalidate_all();
-        }
+        self.invalidate_all_accessible_channels_local(community_id);
         if let Err(error) = self
             .channel_visibility_cache
             .invalidate_entries_if(move |(entry_community, _), _| *entry_community == community_id)
@@ -2255,23 +2331,73 @@ impl AppState {
     }
 
     /// Get accessible channel IDs with a 10-second cache. Falls back to DB on miss.
+    ///
+    /// The open half is shared by every reader in the community and its
+    /// cross-pod invalidation is best-effort, so a cached set is served only
+    /// for [`OPEN_CHANNELS_MAX_AGE`] after its read began: a channel that left
+    /// the open set on another pod is granted from the cache for at most that
+    /// long. A caller whose own read straddles a revocation gets what that
+    /// read saw, as with any uncached read.
     pub async fn get_accessible_channel_ids_cached(
         &self,
         community_id: CommunityId,
         pubkey: &[u8],
     ) -> Result<Vec<Uuid>, buzz_db::DbError> {
         let key = (community_id, pubkey.to_vec());
-        if let Some(cached) = self.accessible_channels_cache.get(&key) {
-            metrics::counter!("buzz_accessible_channels_cache_hits_total").increment(1);
-            return Ok(cached);
-        }
-        metrics::counter!("buzz_accessible_channels_cache_misses_total").increment(1);
-        let result = self
-            .db
-            .get_accessible_channel_ids(community_id, pubkey)
-            .await?;
-        self.accessible_channels_cache.insert(key, result.clone());
-        Ok(result)
+        let mut ids = match self.member_channels_cache.get(&key) {
+            Some(cached) => {
+                metrics::counter!("buzz_accessible_channels_cache_hits_total").increment(1);
+                cached
+            }
+            None => {
+                metrics::counter!("buzz_accessible_channels_cache_misses_total").increment(1);
+                let ids = self.db.get_member_channel_ids(community_id, pubkey).await?;
+                self.member_channels_cache.insert(key, ids.clone());
+                ids
+            }
+        };
+        let open = match self.open_channels_cache.get(&community_id) {
+            Some(open) if open.read_at.elapsed() < OPEN_CHANNELS_MAX_AGE => {
+                metrics::counter!("buzz_open_channels_cache_hits_total").increment(1);
+                open
+            }
+            cached => {
+                let reason = if cached.is_some() {
+                    "expired"
+                } else {
+                    "absent"
+                };
+                metrics::counter!("buzz_open_channels_cache_misses_total", "reason" => reason)
+                    .increment(1);
+                let read_at = Instant::now();
+                let ids = self.db.get_listed_open_channel_ids(community_id).await?;
+                let open = Arc::new(OpenChannels { ids, read_at });
+                self.open_channels_cache.insert(community_id, open.clone());
+                open
+            }
+        };
+        buzz_db::channel_members::merge_channel_ids(&mut ids, &open.ids);
+        Ok(ids)
+    }
+
+    /// Seeds both accessible-channel caches so `pubkey` reads exactly
+    /// `channels`, with no open channels, without touching the database.
+    #[cfg(test)]
+    pub(crate) fn seed_accessible_channels(
+        &self,
+        community_id: CommunityId,
+        pubkey: Vec<u8>,
+        channels: Vec<Uuid>,
+    ) {
+        self.member_channels_cache
+            .insert((community_id, pubkey), channels);
+        self.open_channels_cache.insert(
+            community_id,
+            Arc::new(OpenChannels {
+                ids: Vec::new(),
+                read_at: Instant::now(),
+            }),
+        );
     }
 
     /// Channel visibility string. Caches only `private` (10s); never caches a
@@ -2417,13 +2543,13 @@ async fn log_audit_entry(audit: &buzz_audit::AuditService, entry: buzz_audit::Ne
                 metrics::histogram!("buzz_audit_log_seconds").record(t.elapsed().as_secs_f64());
                 return;
             }
-            Err(error) if is_lock_timeout(&error) => {
+            Err(error) if is_retryable_append_failure(&error) => {
                 retries += 1;
                 metrics::counter!("buzz_audit_log_lock_retries_total").increment(1);
                 tracing::warn!(
                     retries,
                     retry_delay_ms,
-                    "Audit advisory lock timed out; preserving entry for retry"
+                    "Audit append timed out; preserving entry for retry: {error}"
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
                 retry_delay_ms = (retry_delay_ms * 2).min(1_000);
@@ -2437,18 +2563,23 @@ async fn log_audit_entry(audit: &buzz_audit::AuditService, entry: buzz_audit::Ne
     }
 }
 
-/// Whether an audit append failed on `lock_timeout` (`55P03`), either on the
-/// audit-chain lock or on the community admission lock taken before it. Both
-/// are transient; the entry is kept and retried. Admission refusal
-/// (`AccessDenied`) is terminal: a quiescing or fenced community refuses for
-/// good.
-fn is_lock_timeout(error: &buzz_audit::AuditError) -> bool {
+/// Whether an audit append was rolled back by a timeout: `lock_timeout`
+/// (`55P03`) while waiting on the audit-chain lock or the community admission
+/// lock taken before it, or `statement_timeout` (`57014`) on any statement of
+/// the append transaction — a lock wait when the lock timeout is disabled or
+/// longer than the writer cap, or a slow head read or insert. The whole
+/// append is one transaction, so either code means nothing was written; the
+/// entry is kept and retried. `buzz_audit_log_lock_retries_total` keeps its
+/// name for dashboard continuity and counts both codes.
+/// Admission refusal (`AccessDenied`) is terminal: a quiescing or fenced
+/// community refuses for good.
+fn is_retryable_append_failure(error: &buzz_audit::AuditError) -> bool {
     let database_error = match error {
         buzz_audit::AuditError::Database(sqlx::Error::Database(e))
         | buzz_audit::AuditError::Admission(buzz_db::DbError::Sqlx(sqlx::Error::Database(e))) => e,
         _ => return false,
     };
-    database_error.code().as_deref() == Some("55P03")
+    matches!(database_error.code().as_deref(), Some("55P03" | "57014"))
 }
 
 impl std::fmt::Debug for AppState {
@@ -2567,7 +2698,11 @@ pub(crate) mod tests {
                 3,
                 CommunityConnectionControl::new(cancel.clone()),
             );
-            mgr.set_authenticated_identity(conn_id, key.clone(), issuer.map(str::to_owned));
+            mgr.set_authenticated_identity(
+                conn_id,
+                key.clone(),
+                issuer.map(|issuer| NipFiSession::new(issuer, None)),
+            );
             (cancel, terminal_ctrl_rx)
         };
         let (cancel_a, mut frames_a) = register(Some("https://issuer-a.example"));
@@ -2630,7 +2765,11 @@ pub(crate) mod tests {
             3,
             control,
         );
-        mgr.set_authenticated_identity(conn_id, pubkey.clone(), Some("test-issuer".to_owned()));
+        mgr.set_authenticated_identity(
+            conn_id,
+            pubkey.clone(),
+            Some(NipFiSession::new("test-issuer", None)),
+        );
 
         let closed = mgr.disconnect_nip_fi("test-issuer", &pubkey);
 
@@ -2663,7 +2802,10 @@ pub(crate) mod tests {
             let cancel = CancellationToken::new();
             let (terminal_tx, terminal_rx) = mpsc::channel::<WsMessage>(1);
             let control = CommunityConnectionControl::new(cancel.clone());
-            control.set_proven_identity(key.clone(), issuer.map(str::to_owned));
+            control.set_proven_identity(
+                key.clone(),
+                issuer.map(|issuer| NipFiSession::new(issuer, None)),
+            );
             control.set_terminal_frame_sender(terminal_tx);
             let guard = registry.register(Uuid::new_v4(), community, control);
             (cancel, terminal_rx, guard)
@@ -2709,7 +2851,10 @@ pub(crate) mod tests {
         let cancel = CancellationToken::new();
         let control = CommunityConnectionControl::new(cancel.clone());
         let reason_rx = control.disconnect_reason();
-        control.set_proven_identity(target_pubkey.clone(), Some("test-issuer".to_owned()));
+        control.set_proven_identity(
+            target_pubkey.clone(),
+            Some(NipFiSession::new("test-issuer", None)),
+        );
         let _guard = registry.register(Uuid::new_v4(), community, control);
 
         assert_eq!(registry.disconnect_nip_fi("test-issuer", &target_pubkey), 1);
@@ -2719,6 +2864,52 @@ pub(crate) mod tests {
             Some(CommunityDisconnectReason::AuthorizationDenied),
             "close reason must be AuthorizationDenied so send_loop sends 1008"
         );
+    }
+
+    /// A disconnect of an owner reaches its agents' sockets on both the root
+    /// manager and the audio registry, and leaves the owner's other issuer and
+    /// ownerless sockets of the same key alone.
+    #[test]
+    fn nip_fi_owner_disconnect_closes_owned_agent_sockets_on_root_and_audio() {
+        let (agent, owner) = (vec![0x51u8; 32], [0x52u8; 32]);
+        let community = CommunityId::from_uuid(Uuid::from_u128(0xcb));
+        let owned = Some(NipFiSession::new("test-issuer", Some(owner)));
+
+        let mgr = ConnectionManager::new();
+        let root_conn = |session: Option<NipFiSession>| {
+            let conn_id = Uuid::new_v4();
+            let cancel = CancellationToken::new();
+            mgr.register(
+                conn_id,
+                mpsc::channel(8).0,
+                mpsc::channel(8).0,
+                mpsc::channel(1).0,
+                None,
+                cancel.clone(),
+                community,
+                Arc::new(AtomicU8::new(0)),
+                Arc::new(Mutex::new(HashMap::new())),
+                3,
+                CommunityConnectionControl::new(cancel.clone()),
+            );
+            mgr.set_authenticated_identity(conn_id, agent.clone(), session);
+            cancel
+        };
+        let root_owned = root_conn(owned.clone());
+        let root_other_issuer = root_conn(Some(NipFiSession::new("other-issuer", Some(owner))));
+        let root_ownerless = root_conn(Some(NipFiSession::new("test-issuer", None)));
+
+        let registry = CommunityConnectionRegistry::new();
+        let audio_cancel = CancellationToken::new();
+        let audio = CommunityConnectionControl::new(audio_cancel.clone());
+        audio.set_proven_identity(agent.clone(), owned);
+        let _guard = registry.register(Uuid::new_v4(), community, audio);
+
+        assert_eq!(mgr.disconnect_nip_fi("test-issuer", &owner), 1);
+        assert_eq!(registry.disconnect_nip_fi("test-issuer", &owner), 1);
+        assert!(root_owned.is_cancelled() && audio_cancel.is_cancelled());
+        assert!(!root_other_issuer.is_cancelled());
+        assert!(!root_ownerless.is_cancelled());
     }
 
     #[test]
@@ -2731,12 +2922,15 @@ pub(crate) mod tests {
 
         let target_cancel = CancellationToken::new();
         let target_control = CommunityConnectionControl::new(target_cancel.clone());
-        target_control.set_proven_identity(target_pubkey.clone(), Some("test-issuer".to_owned()));
+        target_control.set_proven_identity(
+            target_pubkey.clone(),
+            Some(NipFiSession::new("test-issuer", None)),
+        );
         let _target_guard = registry.register(Uuid::new_v4(), community, target_control);
 
         let peer_cancel = CancellationToken::new();
         let peer_control = CommunityConnectionControl::new(peer_cancel.clone());
-        peer_control.set_proven_identity(peer_pubkey, Some("test-issuer".to_owned()));
+        peer_control.set_proven_identity(peer_pubkey, Some(NipFiSession::new("test-issuer", None)));
         let _peer_guard = registry.register(Uuid::new_v4(), community, peer_control);
 
         assert_eq!(registry.disconnect_nip_fi("test-issuer", &target_pubkey), 1);
@@ -2761,7 +2955,7 @@ pub(crate) mod tests {
 
         let cancel = CancellationToken::new();
         let control = CommunityConnectionControl::new(cancel.clone());
-        control.set_proven_identity(other_pubkey, Some("test-issuer".to_owned()));
+        control.set_proven_identity(other_pubkey, Some(NipFiSession::new("test-issuer", None)));
         let _guard = registry.register(Uuid::new_v4(), community, control);
 
         assert_eq!(registry.disconnect_nip_fi("test-issuer", &target_pubkey), 0);
@@ -2895,18 +3089,36 @@ pub(crate) mod tests {
         build_test_state(config, pool).await
     }
 
-    /// The same test state with an explicit database target. This lets handler
-    /// tests deterministically exercise fail-closed database seams without
-    /// depending on whether a developer has the normal test database running.
-    pub(crate) async fn test_state_with_database_url(database_url: &str) -> Arc<AppState> {
+    /// The same test state with an unreachable database target. This lets
+    /// handler tests deterministically exercise fail-closed database seams
+    /// without depending on whether a developer has the normal test database
+    /// running. Its pool waits only 100 ms for a connection, so closed-port
+    /// targets fail fast; a real database can miss that budget, so tests that
+    /// need one use [`test_state_with_database_url_and_pool_options`].
+    pub(crate) async fn test_state_with_unreachable_database_url(
+        database_url: &str,
+    ) -> Arc<AppState> {
+        test_state_with_database_url_and_pool_options(
+            database_url,
+            sqlx::postgres::PgPoolOptions::new()
+                .acquire_timeout(std::time::Duration::from_millis(100)),
+        )
+        .await
+    }
+
+    /// Test state whose config and writer pool both target `database_url`,
+    /// with the caller's pool options.
+    pub(crate) async fn test_state_with_database_url_and_pool_options(
+        database_url: &str,
+        options: sqlx::postgres::PgPoolOptions,
+    ) -> Arc<AppState> {
         // Fix 5: use Config::for_test() which holds NIP_FI_ENV_LOCK internally. [FI-TRACE-ENV-RACE]
         let mut config = crate::config::Config::for_test();
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         config.database_url = database_url.to_owned();
         config.read_database_url = None;
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .acquire_timeout(std::time::Duration::from_millis(100))
+        let pool = options
             .connect_lazy(&config.database_url)
             .expect("lazy pg pool");
         build_test_state(config, pool).await
@@ -2967,15 +3179,41 @@ pub(crate) mod tests {
         CommunityDeletion,
     }
 
+    /// Which timeout cancels the audit append while it waits on the lock.
+    #[derive(Clone, Copy)]
+    enum AuditWaitTimeout {
+        /// `lock_timeout` (55P03).
+        Lock,
+        /// `statement_timeout` with `lock_timeout` disabled (57014), as under
+        /// `BUZZ_DB_LOCK_TIMEOUT_MS=0` with the writer statement cap.
+        Statement,
+    }
+
     async fn audit_worker_retries_lock_timeout_until_original_entry_is_appended_once() {
-        assert_audit_worker_retries_lock_timeout(HeldAuditLock::AuditChain).await;
+        assert_audit_worker_retries_lock_timeout(HeldAuditLock::AuditChain, AuditWaitTimeout::Lock)
+            .await;
     }
 
     async fn audit_worker_retries_admission_lock_timeout_until_original_entry_is_appended_once() {
-        assert_audit_worker_retries_lock_timeout(HeldAuditLock::CommunityDeletion).await;
+        assert_audit_worker_retries_lock_timeout(
+            HeldAuditLock::CommunityDeletion,
+            AuditWaitTimeout::Lock,
+        )
+        .await;
     }
 
-    async fn assert_audit_worker_retries_lock_timeout(held: HeldAuditLock) {
+    async fn audit_worker_retries_statement_timeout_until_original_entry_is_appended_once() {
+        assert_audit_worker_retries_lock_timeout(
+            HeldAuditLock::AuditChain,
+            AuditWaitTimeout::Statement,
+        )
+        .await;
+    }
+
+    async fn assert_audit_worker_retries_lock_timeout(
+        held: HeldAuditLock,
+        timeout: AuditWaitTimeout,
+    ) {
         let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let observer = sqlx::PgPool::connect(&database_url)
             .await
@@ -2987,11 +3225,18 @@ pub(crate) mod tests {
             .after_connect(move |conn, _meta| {
                 let application_name = hook_application_name.clone();
                 Box::pin(async move {
+                    let (lock_timeout, statement_timeout) = match timeout {
+                        AuditWaitTimeout::Lock => ("100", "0"),
+                        AuditWaitTimeout::Statement => ("0", "100"),
+                    };
                     sqlx::query(
                         "SELECT set_config('application_name', $1, false), \
-                                set_config('lock_timeout', '100', false)",
+                                set_config('lock_timeout', $2, false), \
+                                set_config('statement_timeout', $3, false)",
                     )
                     .bind(application_name)
+                    .bind(lock_timeout)
+                    .bind(statement_timeout)
                     .execute(&mut *conn)
                     .await?;
                     Ok(())
@@ -3119,6 +3364,116 @@ pub(crate) mod tests {
     }
 
     mod postgres_tests {
+        use super::*;
+        use buzz_core::channel::{ChannelType, ChannelVisibility};
+
+        /// Cross-pod invalidation is best-effort. With it withheld, a pod may
+        /// grant a channel that left the open set on another pod only until
+        /// its cached open set is [`OPEN_CHANNELS_MAX_AGE`] old; after that,
+        /// neither a new reader nor one whose member half is cached gets it.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn a_lost_open_set_invalidation_grants_a_revoked_channel_only_until_max_age() {
+            let database_url = crate::test_support::database_url();
+            let writer_pod = test_state_with_database_url_and_pool_options(
+                &database_url,
+                sqlx::postgres::PgPoolOptions::new(),
+            )
+            .await;
+            let reader_pod = test_state_with_database_url_and_pool_options(
+                &database_url,
+                sqlx::postgres::PgPoolOptions::new(),
+            )
+            .await;
+            let pool = sqlx::PgPool::connect(&database_url).await.unwrap();
+            let community = writer_pod
+                .db
+                .ensure_configured_community(&format!("open-set-{}.local", Uuid::new_v4()))
+                .await
+                .unwrap()
+                .id;
+            let owner = nostr::Keys::generate().public_key().to_bytes();
+            let reader = || nostr::Keys::generate().public_key().to_bytes().to_vec();
+            let grants = |pubkey: Vec<u8>, channel: Uuid| {
+                let reader_pod = &reader_pod;
+                async move {
+                    reader_pod
+                        .get_accessible_channel_ids_cached(community, &pubkey)
+                        .await
+                        .unwrap()
+                        .contains(&channel)
+                }
+            };
+
+            for revoke in [
+                "UPDATE channels SET visibility = 'private' WHERE id = $1",
+                "UPDATE channels SET deleted_at = now() WHERE id = $1",
+                "UPDATE channels SET unlisted = true WHERE id = $1",
+            ] {
+                let channel = Uuid::new_v4();
+                writer_pod
+                    .db
+                    .create_channel_with_id(
+                        community,
+                        channel,
+                        &format!("open-set-{channel}"),
+                        ChannelType::Stream,
+                        ChannelVisibility::Open,
+                        None,
+                        &owner,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                reader_pod.invalidate_all_accessible_channels_local(community);
+                let early = reader();
+                assert!(
+                    grants(early.clone(), channel).await,
+                    "control: the open channel is readable"
+                );
+
+                sqlx::query(revoke)
+                    .bind(channel)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                // Only the writer pod drops its caches; the reader pod never
+                // hears of it.
+                writer_pod.invalidate_all_accessible_channels_local(community);
+                let stale = reader_pod.open_channels_cache.get(&community).unwrap();
+                let restamp = |read_at: Instant| {
+                    reader_pod.open_channels_cache.insert(
+                        community,
+                        Arc::new(OpenChannels {
+                            ids: stale.ids.clone(),
+                            read_at,
+                        }),
+                    );
+                };
+                // A cached reader and a fresh stamp keep the control off the
+                // database and the clock, however slowly the steps above ran.
+                let control = reader();
+                reader_pod
+                    .member_channels_cache
+                    .insert((community, control.clone()), Vec::new());
+                restamp(Instant::now());
+                assert!(
+                    grants(control, channel).await,
+                    "control: within the max age the reader pod still uses its old open set"
+                );
+
+                restamp(Instant::now() - OPEN_CHANNELS_MAX_AGE);
+                assert!(
+                    !grants(reader(), channel).await,
+                    "{revoke}: a new reader was granted a revoked channel past the max age"
+                );
+                assert!(
+                    !grants(early.clone(), channel).await,
+                    "{revoke}: a cached reader was granted a revoked channel past the max age"
+                );
+            }
+        }
+
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn audit_worker_retries_lock_timeout_until_original_entry_is_appended_once() {
@@ -3130,6 +3485,13 @@ pub(crate) mod tests {
         async fn audit_worker_retries_admission_lock_timeout_until_original_entry_is_appended_once()
         {
             super::audit_worker_retries_admission_lock_timeout_until_original_entry_is_appended_once()
+                .await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn audit_worker_retries_statement_timeout_until_original_entry_is_appended_once() {
+            super::audit_worker_retries_statement_timeout_until_original_entry_is_appended_once()
                 .await;
         }
     }
@@ -3350,28 +3712,59 @@ pub(crate) mod tests {
         let channels_a = vec![Uuid::from_u128(1)];
         let channels_b = vec![Uuid::from_u128(2)];
 
-        state
-            .accessible_channels_cache
-            .insert((community_a, pubkey.clone()), channels_a);
-        state
-            .accessible_channels_cache
-            .insert((community_b, pubkey.clone()), channels_b.clone());
+        state.seed_accessible_channels(community_a, pubkey.clone(), channels_a);
+        state.seed_accessible_channels(community_b, pubkey.clone(), channels_b.clone());
 
         state.invalidate_all_accessible_channels_local(community_a);
 
         assert_eq!(
             state
-                .accessible_channels_cache
+                .member_channels_cache
                 .get(&(community_a, pubkey.clone())),
             None
         );
+        assert!(state.open_channels_cache.get(&community_a).is_none());
         assert_eq!(
             state
-                .accessible_channels_cache
+                .member_channels_cache
                 .get(&(community_b, pubkey.clone())),
             Some(channels_b),
             "A's cache drop must not evict B's accessible-channel entry"
         );
+        assert!(state.open_channels_cache.get(&community_b).is_some());
+    }
+
+    #[tokio::test]
+    async fn accessible_channels_join_member_and_open_halves() {
+        let state = test_state().await;
+        let community = CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
+        let [member, both, open] = [1, 2, 3].map(Uuid::from_u128);
+        let reader = vec![7u8; 32];
+        state.seed_accessible_channels(community, reader.clone(), vec![member, both]);
+        state.open_channels_cache.insert(
+            community,
+            Arc::new(OpenChannels {
+                ids: vec![both, open],
+                read_at: Instant::now(),
+            }),
+        );
+
+        let ids = state
+            .get_accessible_channel_ids_cached(community, &reader)
+            .await
+            .expect("both halves are cached");
+        assert_eq!(ids, vec![member, both, open]);
+
+        // Another reader shares the community's open half.
+        let other = vec![8u8; 32];
+        state
+            .member_channels_cache
+            .insert((community, other.clone()), vec![]);
+        let ids = state
+            .get_accessible_channel_ids_cached(community, &other)
+            .await
+            .expect("both halves are cached");
+        assert_eq!(ids, vec![both, open]);
     }
 
     #[tokio::test]
@@ -3386,9 +3779,7 @@ pub(crate) mod tests {
             state
                 .membership_cache
                 .insert((community, channel_id, pubkey.clone()), true);
-            state
-                .accessible_channels_cache
-                .insert((community, pubkey.clone()), vec![channel_id]);
+            state.seed_accessible_channels(community, pubkey.clone(), vec![channel_id]);
             state
                 .channel_visibility_cache
                 .insert((community, channel_id), "private".to_string());
@@ -3404,10 +3795,11 @@ pub(crate) mod tests {
         );
         assert_eq!(
             state
-                .accessible_channels_cache
+                .member_channels_cache
                 .get(&(community_a, pubkey.clone())),
             None
         );
+        assert!(state.open_channels_cache.get(&community_a).is_none());
         assert_eq!(
             state
                 .channel_visibility_cache
@@ -3422,10 +3814,11 @@ pub(crate) mod tests {
         );
         assert_eq!(
             state
-                .accessible_channels_cache
+                .member_channels_cache
                 .get(&(community_b, pubkey.clone())),
             Some(vec![channel_id])
         );
+        assert!(state.open_channels_cache.get(&community_b).is_some());
         assert_eq!(
             state
                 .channel_visibility_cache
@@ -3912,7 +4305,7 @@ pub(crate) mod tests {
     /// archive, so it retains sockets for lifecycle revalidation instead.
     #[tokio::test]
     async fn bare_community_disconnect_fails_closed_when_the_fence_is_unavailable() {
-        let state = test_state_with_database_url(
+        let state = test_state_with_unreachable_database_url(
             "postgres://unused:unused@127.0.0.1:1/unused", // sadscan:disable np.postgres.1
         )
         .await;

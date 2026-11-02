@@ -16,6 +16,7 @@ enum NativeTabler {
   }()
 
   static func image(_ symbol: String, size: CGFloat = 20) -> UIImage? {
+    if symbol == "agent" { return agentImage(size: size) }
     guard let code = glyphs[symbol], let scalar = UnicodeScalar(code),
       let name = fontName, let font = UIFont(name: name, size: size) else {
       assertionFailure("Missing Tabler icon: \(symbol)")
@@ -29,6 +30,33 @@ enum NativeTabler {
     }.withRenderingMode(.alwaysTemplate)
   }
 
+  /// Matches Flutter's AgentNavigationIcon and the desktop agent mark.
+  private static func agentImage(size: CGFloat) -> UIImage {
+    UIGraphicsImageRenderer(size: CGSize(width: size, height: size)).image { renderer in
+      renderer.cgContext.scaleBy(x: size / 24, y: size / 24)
+      UIColor.black.setStroke()
+      UIColor.black.setFill()
+      let head = UIBezierPath(roundedRect: CGRect(x: 4.75, y: 7, width: 14.5, height: 13.25), cornerRadius: 4.5)
+      head.lineWidth = 2
+      head.stroke()
+      let lines = UIBezierPath()
+      lines.lineWidth = 2
+      lines.lineCapStyle = .round
+      for (start, end) in [
+        (CGPoint(x: 12, y: 7), CGPoint(x: 12, y: 2.5)),
+        (CGPoint(x: 3.25, y: 11.5), CGPoint(x: 3.25, y: 15.75)),
+        (CGPoint(x: 20.75, y: 11.5), CGPoint(x: 20.75, y: 15.75))
+      ] {
+        lines.move(to: start)
+        lines.addLine(to: end)
+      }
+      lines.stroke()
+      for x in [9.0, 15.0] {
+        UIBezierPath(ovalIn: CGRect(x: x - 1.4, y: 11.85, width: 2.8, height: 2.8)).fill()
+      }
+    }.withRenderingMode(.alwaysTemplate)
+  }
+
   private static let glyphs: [String: UInt32] = [
     "arrow.down": 0xea16, // arrow-down
     "xmark": 0xeb55, // x
@@ -37,14 +65,17 @@ enum NativeTabler {
     "chevron.left": 0xea60, // chevron-left
     "chevron.right": 0xea61, // chevron-right
     "camera": 0xea54, // camera
-    "photo.on.rectangle": 0xeb0a, // photo
-    "photo.on.rectangle.angled": 0xeb0a, // photo
+    "photo.on.rectangle": 0xfd4a, // images — matches BuzzIcons.images
+    "photo.on.rectangle.angled": 0xfd4a, // images — matches BuzzIcons.images
     "paintpalette": 0xeb01, // palette
     "drop": 0xea97, // droplet
     "drop.fill": 0xea97, // droplet
     "face.smiling": 0xeaf7, // mood-smile
     "person": 0xeb4d, // user
     "person.crop.circle": 0xeb4d, // user
+    "arrow.left.arrow.right": 0xf1f4, // arrows-left-right
+    "person.badge.plus": 0xeb4b, // user-plus
+    "gearshape": 0xeb20, // settings
     "person.2": 0xebf2, // users
     "rectangle.stack": 0xeb0a, // photo
     "crop": 0xea85, // crop
@@ -72,6 +103,7 @@ enum NativeTabler {
     "doc": 0xeaa4, // file
     "plus": 0xeb0b, // plus
     "building.2.crop.circle": 0xebf6, // building-community
+    "workspace": 0xecd7, // cube-3d-sphere
     "folder.badge.plus": 0xeaab, // folder-plus
     "headphones": 0xeabd, // headphones
     "line.3.horizontal.decrease": 0xeaa5, // filter
@@ -86,6 +118,7 @@ enum NativeTabler {
     "checkmark": 0xea5e, // check
     "checkmark.circle": 0xea67, // circle-check
     "bell.slash": 0xece9, // bell-off
+    "number": 0xeabc, // hash — matches BuzzIcons.hash
     "bubble.left": 0xeaef, // message
     "bubble.left.and.bubble.right": 0xeb6c, // messages
     "arrow.uturn.backward": 0xeb77, // arrow-back-up

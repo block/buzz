@@ -25,8 +25,9 @@ class InventoryAccount extends BuilderlabAccountClient {
   @override
   Future<Map<String, dynamic>> post(
     String path,
-    Map<String, dynamic> body,
-  ) async {
+    Map<String, dynamic> body, {
+    String? expectedSubject,
+  }) async {
     calls.add(path);
     if (path.endsWith('/status')) {
       return {'current_nostr_pubkey': bound, 'backup_nostr_pubkeys': backups};

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
+import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
@@ -72,7 +73,7 @@ class BuzzPushLeaseRevocationRecord {
     final decoded = nostr.Nip19.decode(payload: nsec);
     if (decoded.prefix != nostr.Nip19Prefix.nsec ||
         decoded.data.length != 64 ||
-        nostr.Keys(decoded.data).public != memberPubkey) {
+        derivePublicKeyHex(decoded.data) != memberPubkey) {
       throw const FormatException(
         'Push revocation signing key does not match its member pubkey.',
       );
@@ -290,7 +291,7 @@ class BuzzPushLeaseRevocationOutbox {
       );
     }
     final decoded = nostr.Nip19.decode(payload: nsec);
-    final memberPubkey = community.pubkey ?? nostr.Keys(decoded.data).public;
+    final memberPubkey = community.pubkey ?? derivePublicKeyHex(decoded.data);
     final relayUrl = canonicalBuzzPushRelayHttpUrl(community.relayUrl);
     final relayOrigin = canonicalBuzzPushRelayOrigin(relayUrl);
     final grants = await (readGrants ?? readBuzzPushEndpointGrants)();

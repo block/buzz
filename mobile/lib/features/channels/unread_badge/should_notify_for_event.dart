@@ -1,3 +1,4 @@
+import '../../../shared/mentions/mention_tags.dart';
 import '../../../shared/relay/nostr_models.dart';
 
 bool shouldNotifyForEvent(
@@ -22,14 +23,7 @@ bool shouldNotifyForEvent(
     }
   }
 
-  final normalizedPk = myPubkey.toLowerCase();
-  for (final tag in event.tags) {
-    if (tag.length >= 2 &&
-        tag[0] == 'p' &&
-        tag[1].toLowerCase() == normalizedPk) {
-      return true;
-    }
-  }
+  if (tagsAddress(event.tags, myPubkey)) return true;
 
   final eventChannelId = channelId ?? event.channelId;
   if (eventChannelId != null && mutedChannelIds.contains(eventChannelId)) {

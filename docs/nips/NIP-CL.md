@@ -64,6 +64,7 @@ Example kind:39000 (signing fields and unrelated tags omitted):
 | later `t` | 39000–39002 | Channel labels. |
 | `P` | 39000–39002 | Public key that signed the kind:9007 that created the channel. |
 | `created_at` | 39000 | Time the channel was created, in unix seconds, as a decimal string. |
+| `auto_join` | 39000 | Present (bare, no value) while the relay joins new community members into this channel: the channel's `auto_join` setting is on and it is open and unarchived. |
 
 **Channel type.** Clients MUST read the channel type from the first `t` tag.
 Later `t` tags are labels.
@@ -198,7 +199,16 @@ a system channel stays an ordinary NIP-29 group.
 The relay decides this for each filter. A filter that names a channel does
 not add it to another filter in the same request.
 
-The relay MUST NOT send push notifications for system channels.
+An **unlisted** open channel (Buzz's `unlisted` setting, see NOSTR.md) is
+named-only in the same way for readers who are not members, whatever its
+type. Its members read it like any other channel. The system-channel opt-in
+never adds it.
+
+Push notifications (NIP-PL) use the same rule. A lease filter wakes its
+author for an event in a system channel or a channel of a type added later
+only when the filter names that channel. A lease filter cannot have `#t` or
+`#P`, so here "names" means `#h`. The relay still checks that the author can
+read the event, as for every other channel.
 
 ### Membership notices carry the channel type
 

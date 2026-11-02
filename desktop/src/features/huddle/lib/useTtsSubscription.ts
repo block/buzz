@@ -48,8 +48,9 @@ export function useTtsSubscription(
 
     // ── Agent identity (authoritative, fail-closed) ───────────────────────
     //
-    // Fetch the ephemeral channel's member list from the relay REST API and
-    // identify agents by their "bot" role. This is authoritative — it works
+    // Fetch the ephemeral channel's agents from the backend. It counts a
+    // member as an agent by its "bot" role or by a trusted kind:30177
+    // managed-agent record (see huddle/roster.rs). This works
     // for both creators and joiners, and reflects mid-huddle agent additions.
     //
     // FAIL-CLOSED: agentsLoaded starts false. Until the fetch succeeds and

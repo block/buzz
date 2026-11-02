@@ -70,8 +70,10 @@ The assertion is a compact JWS carrying the following claims.
 
 Policy selects exactly one token class before parsing claims:
 
-- **`nip-fi+jwt`**: a dedicated assertion whose protected `typ` is exactly
-  `nip-fi+jwt`.
+- **Dedicated NIP-FI assertion**: a dedicated assertion whose protected `typ`
+  is exactly `nip-fi+jwt` (a human assertion) or exactly `nip-fi-agent+jwt`
+  (an agent assertion; see "Agent keys").  The `typ` value, not any claim,
+  determines which of the two an assertion is.
 - **`at+jwt` access token**: a resource access token whose protected `typ` is
   exactly `at+jwt`.  When this class is selected:
   - The assertion MUST contain a non-empty `client_id` claim.
@@ -84,10 +86,13 @@ Policy selects exactly one token class before parsing claims:
     client-subject `(iss, sub)` coordinates are disjoint.
   - Absent, unknown, or ambiguous classification always denies; no fallback to
     the other class is attempted.
+  - The access token MUST NOT carry `nostr_owner_pubkey`; its presence, with
+    any value, denies.
 
 OIDC ID tokens always deny, even when `iss`, `aud`, and `sub` match.  A
-generic or absent `typ` has no accepted class.  Failure under one class never
-triggers validation under another.  [FI-TRACE-TOKEN-CLASS]
+generic or absent `typ` has no accepted class.  `nip-fi-agent+jwt` is accepted
+only under the dedicated NIP-FI class.  Failure under one class never triggers
+validation under another.  [FI-TRACE-TOKEN-CLASS]
 
 ### Time bounds
 
@@ -129,16 +134,19 @@ audience; issuer policy selection by `iss` MUST NOT broaden either binding.
 
 ### Agent keys
 
-An issuer MAY issue an assertion whose `nostr_pubkey` names an agent key
-acting for an owner key.  Such an assertion MUST carry `nostr_owner_pubkey`:
-the lowercase hexadecimal encoding of one 32-byte public key, distinct from
-`nostr_pubkey`.  An issuer MUST NOT issue an assertion without
-`nostr_owner_pubkey` for a key it has issued an agent assertion for, and MUST
-NOT issue an agent assertion while the owner is not authorized by the issuer.
+An issuer MAY issue an agent assertion: an assertion whose `nostr_pubkey`
+names an agent key acting for an owner key.  An agent assertion MUST use the
+protected `typ` `nip-fi-agent+jwt` and MUST carry `nostr_owner_pubkey`: the
+lowercase hexadecimal encoding of one 32-byte public key, distinct from
+`nostr_pubkey`.  An issuer MUST NOT issue an assertion of any other type for a
+key it has issued an agent assertion for, and MUST NOT issue an agent assertion
+while the owner is not authorized by the issuer.
 
-A relay advertising `agent_assertions: true` MUST verify `nostr_owner_pubkey`
-as part of the assertion.  A malformed value, or one equal to `nostr_pubkey`,
-MUST deny `evidence_rejected`.  The relay MUST record the value as the
+A relay MUST verify `nostr_owner_pubkey` as part of every `nip-fi-agent+jwt`
+assertion.  An absent or malformed value, or one equal to `nostr_pubkey`, MUST
+deny `evidence_rejected`.  A `nip-fi+jwt` assertion carrying
+`nostr_owner_pubkey`, with any value, MUST deny `evidence_rejected`.  The relay
+MUST record the value as the
 owner of the session or request the assertion admits.  If the relay already
 associates a different owner with the asserted key in the resolved community,
 it MUST deny `authorization_denied`.
@@ -147,9 +155,8 @@ authorized in the community, the relay MUST deny when the community bans the
 asserted key or the owner, or when the issuer has denied either key.  Only
 then, when the asserted key is not itself authorized in the community, the
 relay MUST authorize it if and only if the issuer is trusted for the community
-and the owner is authorized in the community when access is decided.  A relay
-not advertising `agent_assertions: true` MUST deny an assertion carrying
-`nostr_owner_pubkey` `evidence_rejected`.
+and the owner is authorized in the community when access is decided.
+[FI-TRACE-AGENT-OWNER]
 
 ### Unverified claims
 
@@ -295,10 +302,11 @@ VerifyAssertion(token, community, D, R_t):
   AssertTimeBounds(claims, policy) or DENY(evidence_rejected)  // [FI-TRACE-ASSERTION-VALIDATION]
   k_claimed := ParseHexKey(claims.nostr_pubkey) or DENY(evidence_rejected)
   owner := absent
-  if claims.nostr_owner_pubkey is present:
-    AssertAgentAssertionsAdvertised(relay) or DENY(evidence_rejected)
+  if header.typ == "nip-fi-agent+jwt":
     owner := ParseHexKey(claims.nostr_owner_pubkey) or DENY(evidence_rejected)
     AssertNotEqual(owner, k_claimed) or DENY(evidence_rejected)
+  else:
+    AssertAbsent(claims.nostr_owner_pubkey) or DENY(evidence_rejected)
 
   return VerifiedAssertion(identity=(claims.iss, claims.sub), asserted_key=k_claimed,
                            owner=owner,
@@ -871,8 +879,7 @@ normative behavior for them:
   primitive is pubkey-scoped and community-wide, keyed `(iss, target_pubkey)`
   (see Admin disconnect API).  If an issuer revokes an entire identity, it
   disconnects each key it has asserted for that identity.  A disconnect of an
-  owner key also covers that owner's agent keys at relays advertising
-  `agent_assertions: true`.
+  owner key also covers that owner's agent keys.
   Individual session/device logout is handled by assertion expiry within the
   configured TTL window.
 - Revocation signaling to the issuer/IdP: issuer-side; the issuer stops
@@ -911,11 +918,6 @@ issuer stops issuance after a successful deny, the residual ceiling is
 issuer-operational property, not a protocol invariant this field can
 advertise unconditionally.
 
-`agent_assertions` (boolean, optional).  `true` means the relay admits agent
-assertions as defined in "Agent keys".  Absent or `false` means it does not.
-An issuer MUST NOT issue an agent assertion for a community whose relay does
-not advertise `agent_assertions: true`.
-
 Discovery MUST NOT state issuer URLs, audiences, claim names, tenant IDs, or
 deployment-local identifiers.  [FI-TRACE-DISCOVERY-PRIVATE]
 
@@ -925,7 +927,8 @@ deployment-local identifiers.  [FI-TRACE-DISCOVERY-PRIVATE]
 |---|---|
 | `FI-TRACE-TRANSPORT-CLOSED` | Exact one-header input succeeds; missing, repeated, combined, malformed, and fallback variants deny. |
 | `FI-TRACE-ASSERTION-VALIDATION` | Valid boundary input passes; each signature, key-selection, issuer, audience, time, size, and missing-configuration negative denies; a missing or unavailable community configuration denies `authorization_unavailable`; a known-but-community-unauthorized issuer denies `evidence_rejected` without touching its key source, indistinguishably from an unknown issuer, including when that issuer's snapshot is unavailable; an issuer authorized only for community A cannot authorize community B merely by signing an assertion with community B's audience; an assertion for community A presented on a `Host` resolved to community B denies on the community binding; an unknown, ambiguous, or unresolvable `Host` denies `authorization_unavailable`. |
-| `FI-TRACE-TOKEN-CLASS` | `at+jwt` and `nip-fi+jwt` pass only their selected class; ID tokens, wrong or generic types, and cross-class fallback deny. |
+| `FI-TRACE-TOKEN-CLASS` | `at+jwt`, `nip-fi+jwt`, and `nip-fi-agent+jwt` pass only their selected class; ID tokens, wrong or generic types, `nip-fi-agent+jwt` under an `at+jwt` policy, and cross-class fallback deny. |
+| `FI-TRACE-AGENT-OWNER` | A `nip-fi-agent+jwt` with a valid `nostr_owner_pubkey` distinct from `nostr_pubkey` passes verification and records that owner; a `nip-fi-agent+jwt` whose `nostr_owner_pubkey` is absent, malformed, or equal to `nostr_pubkey` denies `evidence_rejected`; a `nip-fi+jwt` or `at+jwt` carrying `nostr_owner_pubkey` with any value denies `evidence_rejected`; an agent assertion denies when the community bans the asserted key or the owner, or the issuer has denied either key, even when the asserted key is itself authorized; an asserted key already associated with a different owner in the community denies `authorization_denied`; an agent whose key is not itself authorized is admitted only while its owner is authorized in the community. |
 | `FI-TRACE-ASSERTION-KEY-MISMATCH` | Mismatch between `nostr_pubkey` and the NIP-42 proven key denies with the private-state response. |
 | `FI-TRACE-JWKS-ADD` | A key added to the JWKS is accepted after the next snapshot refresh. |
 | `FI-TRACE-JWKS-REMOVE` | Connections verified under a removed key deny on next revalidation or reconnect. |

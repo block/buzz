@@ -153,7 +153,7 @@ class _ConversationAppBarTitle extends StatelessWidget {
     ),
   );
   final presence = ref.watch(
-    presenceCacheProvider.select(
+    presentedPresenceProvider.select(
       (presenceMap) => otherPubkey == null ? null : presenceMap[otherPubkey],
     ),
   );

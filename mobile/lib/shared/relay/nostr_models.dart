@@ -6,7 +6,7 @@ import 'thread_reference.dart';
 
 /// Nostr event kind constants.
 ///
-/// Keep in sync with `desktop/src/shared/constants/kinds.ts`.
+/// Keep in sync with `crates/buzz-core/src/kind.rs`.
 abstract final class EventKind {
   /// Kind:0 user profile metadata.
   static const profile = 0;
@@ -83,12 +83,14 @@ abstract final class EventKind {
     streamMessageEdit,
   ];
 
-  /// Visible content kinds requested by the NIP-CW channel-window path.
-  static const channelTimelineContentKinds = [
+  /// Row kinds a NIP-CW channel-window page reads. System notices (40099)
+  /// are read apart by [NostrFilters.channelNotices]: a page counts every row
+  /// kind against its limit, so a burst of joins would otherwise fill the
+  /// first page and hold the messages back.
+  static const channelWindowPageKinds = [
     streamMessage,
     streamMessageV2,
     streamMessageDiff,
-    systemMessage,
     jobRequest,
     jobAccepted,
     jobProgress,
@@ -97,6 +99,12 @@ abstract final class EventKind {
     jobError,
     huddleStarted,
     huddleEnded,
+  ];
+
+  /// Visible content kinds of the channel timeline.
+  static const channelTimelineContentKinds = [
+    ...channelWindowPageKinds,
+    systemMessage,
   ];
 }
 

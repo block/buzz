@@ -8,7 +8,7 @@ extension _OnboardingColors on BuildContext {
   Color get _onboardingMutedInk =>
       _onboardingIsDark ? const Color(0xFFAAB8C0) : const Color(0xB3111111);
   Color get _onboardingCtaLabel =>
-      _onboardingIsDark ? const Color(0xFF172229) : const Color(0xFFD7E6F0);
+      _onboardingIsDark ? const Color(0xFF172229) : Colors.white;
   Color get _onboardingErrorInk => colors.error;
   Color get _onboardingInputSurface => _onboardingIsDark
       ? const Color(0xFF233039)
@@ -20,7 +20,7 @@ extension _OnboardingColors on BuildContext {
   );
 
   ButtonStyle get _onboardingButtonStyle => FilledButton.styleFrom(
-    minimumSize: const Size(0, 48),
+    minimumSize: const Size(0, 52),
     padding: const EdgeInsets.symmetric(
       horizontal: Grid.lg,
       vertical: Grid.twelve,
@@ -33,7 +33,7 @@ extension _OnboardingColors on BuildContext {
   );
 
   ButtonStyle get _onboardingSecondaryButtonStyle => TextButton.styleFrom(
-    minimumSize: const Size(0, 44),
+    minimumSize: const Size(0, 52),
     padding: const EdgeInsets.symmetric(
       horizontal: Grid.md,
       vertical: Grid.xxs,

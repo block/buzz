@@ -17,12 +17,11 @@ extension _ChannelHistoryPagination on ChannelMessagesNotifier {
         _windowStore = appendOlderChannelWindow(_windowStore, page);
         _reconcilePageSummaries(page, pageVersion);
         _reachedOldest = !channelWindowHasMore(_windowStore);
-        final flattened = _withDeepLinkEvents(
-          flattenChannelWindowEvents(_windowStore),
-        );
+        final flattened = _withDeepLinkEvents(_windowEvents());
         _lastKnownMessages = flattened;
         _reconcileRetainedSummaryPayloads(page.rows.map((row) => row.event));
         _historyState = AsyncData(flattened);
+        unawaited(_fillNotices());
         return page.rows.isNotEmpty || page.aux.isNotEmpty;
       } catch (error) {
         debugPrint(

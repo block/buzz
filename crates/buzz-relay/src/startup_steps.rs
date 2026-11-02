@@ -13,6 +13,10 @@
 //!
 //! The `phase` label values are a closed vocabulary ([`StartupStep::ALL`]).
 //! They never overlap the early lifecycle phase names.
+//!
+//! A step may contain sub-steps: `mesh_boot` runs `mesh_bind`,
+//! `mesh_publish`, then `mesh_initial_reconcile`, so a pod stuck in mesh boot
+//! shows both `mesh_boot` and the sub-step it is on as current.
 
 use std::time::Instant;
 
@@ -55,18 +59,20 @@ pub enum StartupStep {
     AuditConnect,
     /// Connect Redis commands and pub/sub.
     RedisConnect,
-    /// Connect the search database pool.
-    SearchConnect,
     /// Warm NIP-FI JWKS snapshots (only when NIP-FI is configured).
     NipFiJwksWarm,
     /// Load the first NIP-FI binding snapshot (only for the `database` source).
     NipFiSnapshotLoad,
     /// Start the inter-relay mesh (no-op when the mesh is off).
     MeshBoot,
+    /// Inside `MeshBoot`: bind the mesh UDP endpoint.
+    MeshBind,
+    /// Inside `MeshBoot`: publish this runtime's ready record to Redis.
+    MeshPublish,
+    /// Inside `MeshBoot`: the first registry scan and peer-dial pass.
+    MeshInitialReconcile,
     /// Run the git object-store conformance probe (when enabled).
     GitConformanceProbe,
-    /// Verify the channel roster fence.
-    ChannelRosterFence,
     /// Repair large NIP-29 channel roster snapshots.
     LargeRosterReconcile,
     /// Bind the private health listener.
@@ -86,12 +92,13 @@ impl StartupStep {
         Self::MembershipBootstrap,
         Self::AuditConnect,
         Self::RedisConnect,
-        Self::SearchConnect,
         Self::NipFiJwksWarm,
         Self::NipFiSnapshotLoad,
         Self::MeshBoot,
+        Self::MeshBind,
+        Self::MeshPublish,
+        Self::MeshInitialReconcile,
         Self::GitConformanceProbe,
-        Self::ChannelRosterFence,
         Self::LargeRosterReconcile,
         Self::HealthBind,
         Self::ListenerBind,
@@ -108,12 +115,13 @@ impl StartupStep {
             Self::MembershipBootstrap => "membership_bootstrap",
             Self::AuditConnect => "audit_connect",
             Self::RedisConnect => "redis_connect",
-            Self::SearchConnect => "search_connect",
             Self::NipFiJwksWarm => "nip_fi_jwks_warm",
             Self::NipFiSnapshotLoad => "nip_fi_snapshot_load",
             Self::MeshBoot => "mesh_boot",
+            Self::MeshBind => "mesh_bind",
+            Self::MeshPublish => "mesh_publish",
+            Self::MeshInitialReconcile => "mesh_initial_reconcile",
             Self::GitConformanceProbe => "git_conformance_probe",
-            Self::ChannelRosterFence => "channel_roster_fence",
             Self::LargeRosterReconcile => "large_roster_reconcile",
             Self::HealthBind => "health_bind",
             Self::ListenerBind => "listener_bind",

@@ -17,17 +17,25 @@ class HostedJoinPolicy {
   final String? privacy;
 }
 
-enum HostedInviteFailure { policyRequired, expired, exhausted, invalid }
+enum HostedInviteFailure {
+  policyRequired,
+  expired,
+  exhausted,
+  invalid,
+  restricted,
+  ownerMismatch,
+}
 
 /// Reads only a bounded JSON document, never follows redirects or logs bodies.
 Future<Map<String, dynamic>> readJoinResponse(
   http.Client client,
-  http.Request request,
-) async {
+  http.Request request, {
+  int maxBytes = 65536,
+}) async {
   final http.Response response;
   final Map<String, dynamic> data;
   try {
-    response = await boundedHttpResponse(client, request);
+    response = await boundedHttpResponse(client, request, maxBytes: maxBytes);
     if (response.statusCode == 429 ||
         (response.statusCode >= 500 && response.statusCode < 600)) {
       throw AccountFailure.unavailable;
@@ -45,6 +53,8 @@ Future<Map<String, dynamic>> readJoinResponse(
       'invite_expired' => HostedInviteFailure.expired,
       'invite_exhausted' => HostedInviteFailure.exhausted,
       'invite_invalid' => HostedInviteFailure.invalid,
+      'invite_restricted' => HostedInviteFailure.restricted,
+      'invite_owner_mismatch' => HostedInviteFailure.ownerMismatch,
       _ => AccountFailure.denied,
     };
   }
@@ -72,7 +82,14 @@ Future<String?> freshJoinPolicyReceipt({
       request.headers['Content-Type'] = 'application/json';
       request.body = jsonEncode(body);
     }
-    final data = await readJoinResponse(client, request);
+    // The relay permits two 256 KiB Markdown documents. Allow their JSON
+    // escaping (up to six bytes per input byte), plus the policy envelope.
+    // Receipt and claim responses retain the ordinary 64 KiB bound.
+    final data = await readJoinResponse(
+      client,
+      request,
+      maxBytes: path == '/api/join-policy' ? 4 * 1024 * 1024 : 65536,
+    );
     checkCurrent();
     return data;
   }

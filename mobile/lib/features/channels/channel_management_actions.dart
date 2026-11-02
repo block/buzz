@@ -41,6 +41,7 @@ class ChannelActions {
     List<String> labels = const [],
     String? description,
     int? ttlSeconds,
+    bool waitForChannelList = true,
   }) async {
     final resolvedChannelId = channelId ?? _newUuidV4();
     final tags = buildCreateChannelTags(
@@ -55,15 +56,81 @@ class ChannelActions {
     _ensureCommunityValid();
     await _signedEventRelay.submit(kind: 9007, content: '', tags: tags);
     _ensureCommunityValid();
+    if (!waitForChannelList) {
+      // Solo can open from its own confirmed metadata and roster. Reconcile
+      // the sidebar independently of unrelated channels' message history.
+      _ref.invalidate(channelsProvider);
+      return await findJoinedChannel(resolvedChannelId) ??
+          (throw StateError('Channel was created but is not visible yet'));
+    }
     return _refreshChannelsAndRead(resolvedChannelId);
+  }
+
+  /// Read one channel for creation recovery without reloading every membership
+  /// and every channel's recent messages. Missing membership fails closed.
+  Future<Channel?> findJoinedChannel(String channelId) async {
+    _ensureCommunityValid();
+    // One query per kind: stale kind:39000 revisions from before the relay's
+    // d_tag backfill can linger and would crowd the roster out of a shared
+    // limit.
+    Future<NostrEvent?> latest(int kind) async {
+      final events = await _session.fetchHistory(
+        NostrFilter(
+          kinds: [kind],
+          tags: {
+            '#d': [channelId],
+          },
+          limit: 1,
+        ),
+      );
+      return events
+          .where((e) => e.kind == kind && e.getTagValue('d') == channelId)
+          .firstOrNull;
+    }
+
+    final metadataRequest = latest(39000);
+    final rosterRequest = latest(39002);
+    // Future.wait rethrows the first failure unchanged.
+    await Future.wait(eagerError: true, [metadataRequest, rosterRequest]);
+    final metadata = await metadataRequest;
+    final roster = await rosterRequest;
+    _ensureCommunityValid();
+    if (metadata == null || roster == null) return null;
+    final members = membersFromEvent(roster);
+    if (!members.any((m) => m.pubkey == _currentPubkey)) return null;
+    final details = channelDetailsFromEvent(metadata);
+    return Channel(
+      id: channelId,
+      name: details.name,
+      participantPubkeys: ChannelData.fromEvent(metadata).participantPubkeys,
+      channelType: details.channelType,
+      labels: details.labels,
+      visibility: details.visibility,
+      description: details.description,
+      topic: details.topic,
+      createdBy: details.createdBy,
+      createdAt: details.createdAt,
+      memberCount: members.length,
+      isMember: true,
+      archivedAt: details.archivedAt,
+      ttlSeconds: details.ttlSeconds,
+      ttlDeadline: details.ttlDeadline,
+    );
   }
 
   /// Open (or create) a DM channel with the given pubkeys.
   ///
   /// This submits a kind:41010 command event; the relay responds with an OK
   /// message whose content carries `response:{...}` containing the new
-  /// `channel_id`.
-  Future<Channel> openDm({required List<String> pubkeys}) async {
+  /// `channel_id`. With [waitForChannelList] false, the DM opens from its own
+  /// metadata and roster while the channel list reconciles in the background,
+  /// since a full reload can take many seconds on a large account or slow
+  /// connection. Callers that depend on fresh list state, such as hidden-DM
+  /// resurfacing, keep the default.
+  Future<Channel> openDm({
+    required List<String> pubkeys,
+    bool waitForChannelList = true,
+  }) async {
     _ensureCommunityValid();
     final result = await _signedEventRelay.submit(
       kind: 41010,
@@ -76,7 +143,27 @@ class ChannelActions {
     if (channelId == null || channelId.isEmpty) {
       throw Exception('Relay did not return a DM channel id');
     }
-    return _refreshChannelsAndRead(channelId);
+    if (waitForChannelList) return _refreshChannelsAndRead(channelId);
+    unawaited(_ref.read(channelsProvider.notifier).refresh());
+    // Reopening a hidden DM unhides it, but the relay still accepts the open
+    // when that visibility snapshot fails. Check it here so the failure shows
+    // and Done can retry, rather than leaving the DM hidden from the sidebar.
+    // A newly created DM cannot be in an older snapshot.
+    final pk = _currentPubkey;
+    final hiddenRequest = pk == null || response?['created'] == true
+        ? Future.value(const <NostrEvent>[])
+        : _session.fetchHistory(NostrFilters.hiddenDms(pk));
+    final channelRequest = findJoinedChannel(channelId);
+    await Future.wait(eagerError: true, [hiddenRequest, channelRequest]);
+    _ensureCommunityValid();
+    if (hiddenDmIdsFromEvents(await hiddenRequest).contains(channelId)) {
+      throw StateError('DM was opened but is still hidden');
+    }
+    final channel =
+        await channelRequest ??
+        (throw StateError('DM was opened but is not visible yet'));
+    _ref.read(channelsProvider.notifier).rememberOpened(channel);
+    return channel;
   }
 
   Future<void> addMembers({

@@ -125,6 +125,7 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
     final communities = await ref.read(communityListProvider.future);
     final existing = _existingCommunity(communities, invite.relayUrl);
     if (existing != null) {
+      await _retirePendingInvite(invite, existing);
       await ref
           .read(communityListProvider.notifier)
           .switchCommunity(existing.id);
@@ -177,6 +178,7 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
       final communities = await ref.read(communityListProvider.future);
       final existing = _existingCommunity(communities, invite.relayUrl);
       if (existing != null) {
+        await _retirePendingInvite(invite, existing);
         await ref
             .read(communityListProvider.notifier)
             .switchCommunity(existing.id);
@@ -202,7 +204,17 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
         return;
       }
 
-      final keys = ref.read(inviteKeyGeneratorProvider)();
+      final storage = ref.read(communityStorageProvider);
+      final nsec = await storage.pendingInviteIdentity(
+        invite.relayUrl,
+        invite.code,
+        () => ref.read(inviteKeyGeneratorProvider)().nsec,
+      );
+      final decodedKey = nostr.Nip19.decode(payload: nsec);
+      if (decodedKey.prefix != nostr.Nip19Prefix.nsec) {
+        throw const FormatException('Pending invite identity is unreadable');
+      }
+      final keys = nostr.Keys(decodedKey.data);
       final body = jsonEncode({
         'code': invite.code,
         if (invite.policyReceipt != null)
@@ -250,6 +262,7 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
       await ref
           .read(authProvider.notifier)
           .authenticateWithCommunity(community);
+      await _retirePendingInvite(invite, community);
       _pendingStarterSetupCommunity = community;
       state = state.copyWith(isStarterSetupRecovery: true);
       await startStarterSetupRecovery();
@@ -260,6 +273,20 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
         errorMessage: _friendlyInviteError(error),
         requiresFreshInvite: requiresFreshInvite,
       );
+    }
+  }
+
+  Future<void> _retirePendingInvite(
+    InviteDeepLink invite,
+    Community community,
+  ) async {
+    try {
+      await ref
+          .read(communityStorageProvider)
+          .completePendingInvite(invite.relayUrl, invite.code, community);
+    } catch (_) {
+      // The saved destination is authoritative. Reopening retries cleanup;
+      // community removal must erase every journal copy before it succeeds.
     }
   }
 
@@ -437,6 +464,12 @@ bool _requiresFreshInvite(Object error) {
 
 String _friendlyInviteError(Object error) {
   final message = error.toString();
+  if (message.contains('invite_restricted')) {
+    return 'This account, or the account that owns it, is restricted in this community. Contact a community administrator. If the restriction is temporary, try again after it ends.';
+  }
+  if (message.contains('invite_owner_mismatch')) {
+    return 'This account does not match its recorded owner. Use the correct account or owner identity to join this community.';
+  }
   if (message.contains('invite_expired')) return 'This invite has expired.';
   if (message.contains('invite_exhausted')) {
     return 'This invite has reached its use limit. Ask for a new invite.';

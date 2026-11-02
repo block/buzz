@@ -1,6 +1,14 @@
+import 'package:buzz/app.dart';
+import 'package:buzz/features/activity/activity_page.dart';
+import 'package:buzz/features/age_gate/age_signal_provider.dart';
+import 'package:buzz/shared/auth/auth.dart';
+import 'package:buzz/shared/theme/theme_provider.dart';
+import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:async';
 
 import 'package:buzz/features/activity/activity_provider.dart';
+import 'package:buzz/features/activity/feed_item.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
@@ -58,7 +66,7 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
         activeMentionFetches -= 1;
       }
     }
-    return _history.where((event) => _matches(filter, event)).toList();
+    return _window(filter);
   }
 
   @override
@@ -95,9 +103,8 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
         activeMentionFetches -= 1;
       }
     }
-    return _history
-        .where((event) => filters.any((filter) => _matches(filter, event)))
-        .toList();
+    // Like the production bridge: each filter's results, concatenated.
+    return [for (final filter in filters) ..._window(filter)];
   }
 
   @override
@@ -161,8 +168,26 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
 
   void seed(NostrEvent event) => _history.add(event);
 
+  /// The newest [NostrFilter.limit] matches, as a relay returns them.
+  List<NostrEvent> _window(NostrFilter filter) =>
+      (_history.where((event) => _matches(filter, event)).toList()
+            ..sort((a, b) {
+              final time = b.createdAt.compareTo(a.createdAt);
+              return time != 0 ? time : a.id.compareTo(b.id);
+            }))
+          .take(filter.limit)
+          .toList();
+
   bool _matches(NostrFilter filter, NostrEvent event) {
     if (!filter.kinds.contains(event.kind)) return false;
+    final until = filter.until;
+    if (until != null && event.createdAt > until) return false;
+    final beforeId = filter.extensions['before_id'] as String?;
+    if (beforeId != null &&
+        event.createdAt == until &&
+        event.id.compareTo(beforeId) <= 0) {
+      return false;
+    }
     for (final entry in filter.tags.entries) {
       final tagName = entry.key.startsWith('#')
           ? entry.key.substring(1)
@@ -304,6 +329,277 @@ void main() {
     expect(feed.mentions.map((item) => item.id), ['fallback-mention']);
   });
 
+  test('a workflow owner attribution is not a mention of the owner', () async {
+    NostrEvent workflowMessage(String id, List<List<String>> mentions) =>
+        NostrEvent(
+          id: id,
+          pubkey: 'relay_pk',
+          createdAt: 1_700_000_001,
+          kind: 9,
+          tags: [
+            ['p', 'me_pk', '', 'owner'],
+            ['h', 'channel-1'],
+            ['buzz:workflow', 'true'],
+            ['buzz:workflow-owner', 'me_pk'],
+            ...mentions,
+          ],
+          content: 'workflow output',
+          sig: '',
+        );
+    final session = _RecordingSessionNotifier()
+      ..seed(
+        workflowMessage('mentions-agent', [
+          ['p', 'agent_pk'],
+        ]),
+      )
+      ..seed(
+        workflowMessage('mentions-owner', [
+          ['p', 'me_pk'],
+        ]),
+      );
+    final container = ProviderContainer(
+      overrides: [
+        relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+        myPubkeyProvider.overrideWithValue('me_pk'),
+        relaySessionProvider.overrideWith(() => session),
+        channelsProvider.overrideWith(
+          () => _FixedChannelsNotifier(const <Channel>[]),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(channelsProvider.future);
+    final feed = await container.read(activityProvider.future);
+
+    expect(feed.mentions.map((item) => item.id), ['mentions-owner']);
+  });
+
+  test('quiet agent messages never become Activity items', () async {
+    NostrEvent mention(String id, {bool quiet = false, int at = 0}) =>
+        NostrEvent(
+          id: id,
+          pubkey: 'agent_pk',
+          createdAt: 1_700_000_001 + at,
+          kind: 9,
+          tags: [
+            ['p', 'me_pk'],
+            ['h', 'channel-1'],
+            if (quiet) ['audience', 'agents'],
+          ],
+          content: 'progress',
+          sig: '',
+        );
+    // A full mention window of quiet messages hides the older real one.
+    // The real mention shares the boundary second with quiet ones that sort
+    // before it, so a one-second-back cursor would skip it.
+    final session = _RecordingSessionNotifier()..seed(mention('z-mention'));
+    for (var i = 0; i < 50; i++) {
+      session.seed(
+        mention(
+          'quiet-${i.toString().padLeft(2, '0')}',
+          quiet: true,
+          at: i < 5 ? 0 : i,
+        ),
+      );
+    }
+    final container = ProviderContainer(
+      overrides: [
+        relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+        myPubkeyProvider.overrideWithValue('me_pk'),
+        relaySessionProvider.overrideWith(() => session),
+        channelsProvider.overrideWith(
+          () => _FixedChannelsNotifier(const <Channel>[]),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(channelsProvider.future);
+    final feed = await container.read(activityProvider.future);
+
+    expect(feed.all.map((item) => item.id), ['z-mention']);
+    expect(container.read(inboxItemsProvider).map((item) => item.id), [
+      'z-mention',
+    ]);
+  });
+
+  test('paging past quiet mentions refills only up to the limit', () async {
+    NostrEvent mention(String id, int at, {bool quiet = false}) => NostrEvent(
+      id: id,
+      pubkey: 'agent_pk',
+      createdAt: 1_700_000_000 + at,
+      kind: 9,
+      tags: [
+        ['p', 'me_pk'],
+        ['h', 'channel-1'],
+        if (quiet) ['audience', 'agents'],
+      ],
+      content: 'hi',
+      sig: '',
+    );
+    // The newest window holds one quiet mention and 49 real ones; a full
+    // window of older real mentions sits behind it.
+    final session = _RecordingSessionNotifier()
+      ..seed(mention('quiet', 1000, quiet: true));
+    for (var i = 0; i < 49; i++) {
+      session.seed(mention('new-$i', 900 + i));
+    }
+    for (var i = 0; i < 50; i++) {
+      session.seed(mention('old-$i', 100 + i));
+    }
+    final container = ProviderContainer(
+      overrides: [
+        relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+        myPubkeyProvider.overrideWithValue('me_pk'),
+        relaySessionProvider.overrideWith(() => session),
+        channelsProvider.overrideWith(
+          () => _FixedChannelsNotifier(const <Channel>[]),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(channelsProvider.future);
+    final feed = await container.read(activityProvider.future);
+
+    expect(feed.mentions, hasLength(50));
+    expect(feed.mentions.map((item) => item.id), contains('old-49'));
+    expect(feed.mentions.map((item) => item.id), isNot(contains('old-48')));
+  });
+
+  test(
+    'an addressed DM mention counts once toward the mention window',
+    () async {
+      NostrEvent mention(String id, int at, {bool quiet = false}) => NostrEvent(
+        id: id,
+        pubkey: 'agent_pk',
+        createdAt: 1_700_000_000 + at,
+        kind: 9,
+        tags: [
+          ['p', 'me_pk'],
+          ['h', 'dm-1'],
+          if (quiet) ['audience', 'agents'],
+        ],
+        content: 'hi',
+        sig: '',
+      );
+      // The DM filter returns the newest DM mentions a second time.
+      final session = _RecordingSessionNotifier()
+        ..seed(mention('quiet', 1000, quiet: true))
+        ..seed(mention('older', 1));
+      for (var i = 0; i < 49; i++) {
+        session.seed(mention('new-$i', 900 + i));
+      }
+      final container = ProviderContainer(
+        overrides: [
+          relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+          myPubkeyProvider.overrideWithValue('me_pk'),
+          relaySessionProvider.overrideWith(() => session),
+          channelsProvider.overrideWith(
+            () => _FixedChannelsNotifier([_dmChannel('dm-1')]),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(channelsProvider.future);
+      final feed = await container.read(activityProvider.future);
+
+      expect(feed.mentions, hasLength(50));
+      expect(feed.mentions.map((item) => item.id), contains('older'));
+    },
+  );
+
+  group('paging past quiet messages per source', () {
+    NostrEvent message(
+      String id,
+      int at, {
+      required String channel,
+      bool mention = true,
+      bool quiet = false,
+    }) => NostrEvent(
+      id: id,
+      pubkey: 'agent_pk',
+      createdAt: 1_700_000_000 + at,
+      kind: 9,
+      tags: [
+        if (mention) ['p', 'me_pk'],
+        ['h', channel],
+        if (quiet) ['audience', 'agents'],
+      ],
+      content: 'hi',
+      sig: '',
+    );
+    Future<HomeFeedResponse> load(_RecordingSessionNotifier session) async {
+      final container = ProviderContainer(
+        overrides: [
+          relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+          myPubkeyProvider.overrideWithValue('me_pk'),
+          relaySessionProvider.overrideWith(() => session),
+          channelsProvider.overrideWith(
+            () => _FixedChannelsNotifier([_dmChannel('dm-1')]),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      return container.read(activityProvider.future);
+    }
+
+    test('a DM window full of quiet messages is refilled', () async {
+      final session = _RecordingSessionNotifier()
+        ..seed(message('dm-older', 1, channel: 'dm-1', mention: false));
+      for (var i = 0; i < 30; i++) {
+        session.seed(
+          message('dm-quiet-$i', 100 + i, channel: 'dm-1', quiet: true),
+        );
+      }
+      final feed = await load(session);
+      expect(feed.activity.map((item) => item.id), ['dm-older']);
+    });
+
+    test('overlapping matches past a window stay on later pages', () async {
+      // 50 quiet channel mentions fill the mention window. 30 older quiet DM
+      // mentions match it too, through the DM filter, and fill its next page
+      // with 20 more quiet channel mentions, so the real one is a page later.
+      final session = _RecordingSessionNotifier()
+        ..seed(message('real', 1, channel: 'channel-1'));
+      for (var i = 0; i < 20; i++) {
+        session.seed(
+          message('older-quiet-$i', 20 + i, channel: 'channel-1', quiet: true),
+        );
+      }
+      for (var i = 0; i < 50; i++) {
+        session.seed(
+          message('quiet-$i', 500 + i, channel: 'channel-1', quiet: true),
+        );
+      }
+      for (var i = 0; i < 30; i++) {
+        session.seed(
+          message('dm-quiet-$i', 100 + i, channel: 'dm-1', quiet: true),
+        );
+      }
+      final feed = await load(session);
+      expect(feed.mentions.map((item) => item.id), ['real']);
+    });
+
+    test('a DM-only event never moves the mention cursor', () async {
+      // The mention window: one quiet and 49 real channel mentions. An
+      // older addressed DM comes back only through the DM filter, and a
+      // real channel mention sits between it and the window.
+      final session = _RecordingSessionNotifier()
+        ..seed(message('quiet', 1000, channel: 'channel-1', quiet: true))
+        ..seed(message('gap', 500, channel: 'channel-1'))
+        ..seed(message('dm-old', 100, channel: 'dm-1'));
+      for (var i = 0; i < 49; i++) {
+        session.seed(message('new-$i', 900 + i, channel: 'channel-1'));
+      }
+      final feed = await load(session);
+      expect(feed.mentions.map((item) => item.id), contains('gap'));
+    });
+  });
+
   test(
     'refreshes the inbox projection when addressed activity arrives',
     () async {
@@ -345,9 +641,9 @@ void main() {
     },
   );
 
-  test(
-    'live activity resurfaces a hidden DM through the existing open action',
-    () async {
+  testWidgets(
+    'authenticated shell resurfaces hidden DMs without opening Inbox',
+    (tester) async {
       const self =
           '1111111111111111111111111111111111111111111111111111111111111111';
       const alice =
@@ -356,8 +652,13 @@ void main() {
           '3333333333333333333333333333333333333333333333333333333333333333';
       final session = _RecordingSessionNotifier();
       final reopened = <List<String>>[];
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
       final container = ProviderContainer(
         overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          authProvider.overrideWith(_ShellAuth.new),
+          ageSignalProvider.overrideWith(_ShellAge.new),
           relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
           myPubkeyProvider.overrideWithValue(self),
           relaySessionProvider.overrideWith(() => session),
@@ -395,8 +696,16 @@ void main() {
       addTearDown(container.dispose);
 
       await container.read(channelsProvider.future);
-      await container.read(activityProvider.future);
-      await Future<void>.delayed(const Duration(milliseconds: 10));
+      await tester.pumpWidget(
+        UncontrolledProviderScope(container: container, child: const App()),
+      );
+      for (var i = 0; i < 20; i++) {
+        await tester.pump();
+      }
+      expect(find.byType(ActivityPage), findsNothing);
+      expect(session.hiddenDmSubscriptionBatches, [
+        ['hidden-dm'],
+      ]);
 
       session.emit(
         const NostrEvent(
@@ -413,10 +722,14 @@ void main() {
         ),
       );
 
-      await _waitFor(() => reopened.isNotEmpty);
+      for (var i = 0; i < 20 && reopened.isEmpty; i++) {
+        await tester.pump();
+      }
       expect(reopened, [
         [alice, bob],
       ]);
+      await tester.pumpWidget(const SizedBox.shrink());
+      container.dispose();
     },
   );
 
@@ -1154,4 +1467,17 @@ class _DeferredChannelsNotifier extends ChannelsNotifier {
     _hasLoaded = true;
     _gate.complete(channels);
   }
+}
+
+class _ShellAuth extends AuthNotifier {
+  @override
+  Future<AuthState> build() async =>
+      const AuthState(status: AuthStatus.authenticated);
+}
+
+class _ShellAge extends AgeSignalNotifier {
+  @override
+  AgeSignalState build() => AgeSignalState.allowed;
+  @override
+  Future<void> request() async {}
 }

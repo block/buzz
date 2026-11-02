@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
@@ -26,9 +27,9 @@ import '../../shared/reminders/remind_me_later_sheet.dart';
 import '../../shared/reminders/reminder_service.dart';
 import 'channel_management_provider.dart';
 import 'channels_provider.dart';
-import 'emoji_picker.dart';
+import '../../shared/emoji/emoji_picker.dart';
 import 'reaction_row.dart';
-import 'recent_emoji_provider.dart';
+import '../../shared/emoji/recent_emoji_provider.dart';
 import '../../shared/read_state/message_read_state.dart';
 import '../../shared/read_state/read_state_format.dart';
 import '../../shared/read_state/read_state_provider.dart';
@@ -408,12 +409,14 @@ Future<void> _saveImage(
     }
     final image = await _downloadImage(ref, imageUrl);
     await PhotoManager.editor.saveImage(image.bytes, filename: image.filename);
-    messenger?.showSnackBar(
-      const SnackBar(content: Text('Image saved to Photos')),
+    messenger?.showFeedbackSnackBar(
+      const SnackBar(content: Text('Saved to Photos')),
+      kind: ToastKind.success,
     );
   } catch (_) {
-    messenger?.showSnackBar(
+    messenger?.showFeedbackSnackBar(
       const SnackBar(content: Text('Could not save image')),
+      kind: ToastKind.error,
     );
   }
 }
@@ -436,8 +439,9 @@ Future<void> _shareImage(
       ShareParams(files: [XFile(file.path)], sharePositionOrigin: shareOrigin),
     );
   } catch (_) {
-    messenger?.showSnackBar(
+    messenger?.showFeedbackSnackBar(
       const SnackBar(content: Text('Could not share image')),
+      kind: ToastKind.error,
     );
   }
 }
@@ -457,8 +461,7 @@ bool messageActionShowsUnread(
   required TimelineMessage message,
 }) {
   final readerPubkey = ref.read(myPubkeyProvider);
-  final channels = ref.read(channelsProvider).asData?.value;
-  final channel = channels?.where((c) => c.id == channelId).firstOrNull;
+  final channel = ref.read(channelsProvider.notifier).channelById(channelId);
   final channelCatchUp =
       readerPubkey != null &&
       channel != null &&
@@ -894,8 +897,9 @@ void _confirmDelete({
                   .deleteMessage(channelId: channelId, eventId: messageId);
               onDeleted?.call();
             } catch (error) {
-              messenger.showSnackBar(
+              messenger.showFeedbackSnackBar(
                 SnackBar(content: Text('Failed to delete message: $error')),
+                kind: ToastKind.error,
               );
             }
           },

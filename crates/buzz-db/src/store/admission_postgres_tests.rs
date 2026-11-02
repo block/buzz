@@ -435,6 +435,7 @@ async fn channel_and_membership_writers_require_application_admission() {
                 &creator,
                 None,
                 &[],
+                false,
             )
             .await
             .expect_err("channel create must reject"),
@@ -467,6 +468,7 @@ async fn channel_and_membership_writers_require_application_admission() {
         &creator,
         None,
         &[],
+        false,
     )
     .await
     .expect("active channel create succeeds");
@@ -538,6 +540,7 @@ async fn thread_metadata_writer_requires_application_admission() {
         &[1; 32],
         None,
         &[],
+        false,
     )
     .await
     .expect("active channel");
@@ -585,6 +588,7 @@ async fn relay_admin_domain_writer_requires_application_admission() {
         &[1; 32],
         None,
         &[],
+        false,
     )
     .await
     .expect("active channel");
@@ -633,6 +637,7 @@ async fn personal_read_writer_requires_application_admission() {
         &actor.public_key().to_bytes(),
         None,
         &[],
+        false,
     )
     .await
     .expect("active channel");

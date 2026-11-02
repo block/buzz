@@ -84,6 +84,8 @@ const PASSTHROUGH_ENV: &[&str] = &[
     "BUZZ_PRIVATE_KEY",
     "BUZZ_RELAY_URL",
     "BUZZ_AUTH_TAG",
+    // Harness-chosen `buzz` CLI read format (token-lean event reads).
+    "BUZZ_OUTPUT_FORMAT",
     // Agent display name for tools. On the
     // Desktop path this arrives via the wire `mcpServers[].env` declaration
     // (which wins here anyway); the allowlist entry covers ACP clients that

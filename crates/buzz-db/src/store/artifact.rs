@@ -185,14 +185,15 @@ impl Db {
             }
         }
         sqlx::query(
-            "INSERT INTO artifact_revisions (community_id,event_id,artifact_id) VALUES ($1,$2,$3)",
+            "INSERT INTO artifact_revisions (community_id,event_id,artifact_id,source_channel_id,modified_at) VALUES ($1,$2,$3,$4,clock_timestamp())",
         )
         .bind(community.as_uuid())
         .bind(event.id.as_bytes().as_slice())
         .bind(env.id)
+        .bind(if env.op == ArtifactOp::Move { source } else { None })
         .execute(tx.conn())
         .await?;
-        sqlx::query("INSERT INTO artifact_heads (community_id,artifact_id,event_id,channel_id,artifact_type,root,deleted) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (community_id,artifact_id) DO UPDATE SET event_id=EXCLUDED.event_id,channel_id=EXCLUDED.channel_id,root=EXCLUDED.root,deleted=EXCLUDED.deleted")
+        sqlx::query("INSERT INTO artifact_heads (community_id,artifact_id,event_id,channel_id,artifact_type,root,deleted,modified_at) VALUES ($1,$2,$3,$4,$5,$6,$7,clock_timestamp()) ON CONFLICT (community_id,artifact_id) DO UPDATE SET event_id=EXCLUDED.event_id,channel_id=EXCLUDED.channel_id,root=EXCLUDED.root,deleted=EXCLUDED.deleted,modified_at=clock_timestamp()")
             .bind(community.as_uuid()).bind(env.id).bind(event.id.as_bytes().as_slice()).bind(env.home).bind(&env.artifact_type).bind(&env.root).bind(env.op == ArtifactOp::Delete).execute(tx.conn()).await?;
         let (stored, _) =
             crate::event::insert_event_in_transaction(&mut tx, event, Some(env.home)).await?;

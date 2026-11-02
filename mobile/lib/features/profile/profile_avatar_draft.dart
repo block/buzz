@@ -130,3 +130,30 @@ final class ProfileAnimatedAvatarDraft extends ProfileAvatarDraft {
     }
   }
 }
+
+/// Transfers only local draft data between the app and its native sheet engine.
+Map<String, Object?>? encodeProfileAvatarDraft(ProfileAvatarDraft? draft) =>
+    switch (draft) {
+      ProfileImageAvatarDraft(:final bytes) => {
+        'type': 'image',
+        'bytes': bytes,
+      },
+      ProfileAnimatedAvatarDraft(:final animation, :final poster) => {
+        'type': 'animated',
+        'animation': animation,
+        'poster': poster,
+      },
+      ProfileUrlAvatarDraft(:final url) => {'type': 'url', 'url': url},
+      null => null,
+    };
+
+ProfileAvatarDraft? decodeProfileAvatarDraft(Map<dynamic, dynamic>? value) =>
+    switch (value?['type']) {
+      'image' => ProfileImageAvatarDraft(value!['bytes'] as Uint8List),
+      'animated' => ProfileAnimatedAvatarDraft(
+        animation: value!['animation'] as Uint8List,
+        poster: value['poster'] as Uint8List,
+      ),
+      'url' => ProfileUrlAvatarDraft(value!['url'] as String),
+      _ => null,
+    };

@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'dart:async';
 
@@ -113,10 +114,9 @@ Future<bool?> showManageChannelSheet({
       } catch (_) {
         if (!context.mounted || !canPresent()) return false;
         retry = true;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text("We couldn't save this change. Try again."),
-          ),
+        ScaffoldMessenger.of(context).showFeedbackSnackBar(
+          const SnackBar(content: Text('Couldn’t save changes')),
+          kind: ToastKind.error,
         );
       }
     }
@@ -257,7 +257,7 @@ class ManageChannelSheet extends HookConsumerWidget {
         Navigator.of(context).pop(false);
       } catch (_) {
         if (context.mounted) {
-          error.value = "We couldn't save this change. Try again.";
+          error.value = 'Couldn’t save changes';
         }
       } finally {
         if (context.mounted) saving.value = false;

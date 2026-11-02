@@ -82,6 +82,11 @@ impl RelayProcess {
             }
             thread::sleep(Duration::from_millis(10));
         };
+        self.collect(status)
+    }
+
+    /// The captured output of a child that has already exited as `status`.
+    fn collect(&mut self, status: ExitStatus) -> Output {
         self.child.take();
         let output = Output {
             status,
@@ -166,22 +171,44 @@ fn wait_for_relay_metrics(process: &mut RelayProcess, port: u16) -> String {
 
 /// Polls the relay's own `/metrics` until `needle` appears, bounded by
 /// [`METRICS_SCRAPE_DEADLINE`]. A relay that exits first is a failure, not a
-/// timeout, so the panic names the real cause.
+/// timeout, so the panic names the real cause and carries the relay's output.
 fn wait_for_scraped_metric(process: &mut RelayProcess, port: u16, needle: &str) -> String {
+    wait_for_scraped_metrics(process, port, &[needle])
+}
+
+/// Waits for one scrape to contain every requested sample, bounded by
+/// [`METRICS_SCRAPE_DEADLINE`]. A scrape can overlap the sampler's sequential
+/// metric writes, so related series may appear in different responses.
+fn wait_for_scraped_metrics(process: &mut RelayProcess, port: u16, needles: &[&str]) -> String {
+    let requested = needles.join(", ");
+    let mut last_scrape = String::new();
+    let mut last_error: Option<String>;
     let deadline = Instant::now() + METRICS_SCRAPE_DEADLINE;
     loop {
-        assert!(
-            process.try_wait().is_none(),
-            "relay exited before exporting {needle}"
-        );
-        if let Ok(response) = scrape_metrics(port) {
-            if response.contains(needle) {
-                return response;
+        if let Some(status) = process.try_wait() {
+            let output = process.collect(status);
+            panic!(
+                "relay exited ({status}) before exporting {requested}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        match scrape_metrics(port) {
+            Ok(response) => {
+                if needles
+                    .iter()
+                    .all(|needle| response.lines().any(|line| line.starts_with(needle)))
+                {
+                    return response;
+                }
+                last_scrape = response;
+                last_error = None;
             }
+            Err(error) => last_error = Some(error.to_string()),
         }
         assert!(
             Instant::now() < deadline,
-            "relay did not export {needle} within {METRICS_SCRAPE_DEADLINE:?}"
+            "relay did not export {requested} within {METRICS_SCRAPE_DEADLINE:?}; last error: {last_error:?}; last scrape: {last_scrape}"
         );
         thread::sleep(Duration::from_millis(20));
     }
@@ -817,10 +844,10 @@ mod postgres_tests {
     /// fires immediately, so the wait is bounded by
     /// [`METRICS_SCRAPE_DEADLINE`] and never a fixed sleep.
     ///
-    /// The completion-timestamp gauge is the needle because `sample` writes it
-    /// last, after the cache already serves the report: observing it proves the
-    /// whole cycle ran, with no window where the counters have landed but the
-    /// timestamp has not.
+    /// The sampler writes counters and histograms before the completion gauge,
+    /// but a concurrent `/metrics` scrape is not an atomic snapshot. Wait for
+    /// the actual timestamp, counter, and duration samples together so a scrape
+    /// that overlaps those sequential writes cannot report a false failure.
     #[test]
     #[ignore = "requires PostgreSQL"]
     fn startup_owns_the_dependency_sampler() {
@@ -842,10 +869,14 @@ mod postgres_tests {
             ("REDIS_URL", &redis_url),
             ("BUZZ_GIT_CONFORMANCE_PROBE", "false"),
         ]);
-        let scrape = wait_for_scraped_metric(
+        let scrape = wait_for_scraped_metrics(
             &mut process,
             metrics_port,
-            "buzz_readiness_dependency_sample_completed_timestamp_seconds",
+            &[
+                "buzz_readiness_dependency_sample_completed_timestamp_seconds ",
+                "buzz_readiness_dependency_checks_total{",
+                "buzz_readiness_check_duration_seconds_count{check=\"overall\"}",
+            ],
         );
         let output = process.terminate();
         let logs = format!(
@@ -855,14 +886,6 @@ mod postgres_tests {
         );
 
         assert!(
-            scrape.contains("buzz_readiness_dependency_checks_total{"),
-            "the same cycle must publish its per-dependency outcomes: {scrape}"
-        );
-        assert!(
-            scrape.contains("buzz_readiness_check_duration_seconds"),
-            "a completed evaluation must publish its latency too: {scrape}"
-        );
-        assert!(
             !scrape.contains("buzz_readiness_checks_total{"),
             "no readiness probe was sent, so the sampler alone produced this: {scrape}"
         );
@@ -870,6 +893,80 @@ mod postgres_tests {
             logs.contains("Health probe listener started"),
             "the sampler must be owned by a relay that finished booting: {logs}"
         );
+    }
+
+    /// A read replica that is down at boot must not block startup: the main
+    /// read pool is lazy and degrades to the writer, and the search pool must
+    /// be lazy too. An eager search-pool connect waits out sqlx's 30s acquire
+    /// timeout and then fails boot, so this relay would never turn ready
+    /// inside `CHILD_TIMEOUT`.
+    #[test]
+    #[ignore = "requires PostgreSQL"]
+    fn unreachable_read_replica_does_not_block_boot() {
+        let database_url = std::env::var("DATABASE_URL")
+            .expect("postgres lane provides DATABASE_URL for each test process");
+        let redis_url = std::env::var("REDIS_URL")
+            .expect("the postgres lane runs alongside Redis and exports REDIS_URL");
+        let read_database_url = format!(
+            "postgres://buzz:buzz@127.0.0.1:{}/buzz", // sadscan:disable np.postgres.1
+            reserve_closed_port()
+        );
+        let metrics_port_value = reserve_closed_port().to_string();
+        let health_port = reserve_closed_port();
+        let health_port_value = health_port.to_string();
+        let bind_addr = format!("127.0.0.1:{}", reserve_closed_port());
+
+        let mut process = RelayProcess::spawn(&[
+            ("BUZZ_RELAY_PRIVATE_KEY", VALID_RELAY_PRIVATE_KEY),
+            ("BUZZ_METRICS_PORT", &metrics_port_value),
+            ("BUZZ_HEALTH_PORT", &health_port_value),
+            ("BUZZ_BIND_ADDR", &bind_addr),
+            ("DATABASE_URL", &database_url),
+            ("READ_DATABASE_URL", &read_database_url),
+            ("REDIS_URL", &redis_url),
+            ("BUZZ_GIT_CONFORMANCE_PROBE", "false"),
+        ]);
+        let ready = wait_for_readiness(&mut process, health_port);
+        let output = process.terminate();
+        let logs = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            ready.starts_with("HTTP/1.1 200"),
+            "a dead read replica must not block boot: {ready}: {logs}"
+        );
+        assert!(
+            logs.contains("Search service ready"),
+            "boot must have passed the search pool: {logs}"
+        );
+    }
+
+    /// Polls `/_readiness` until it answers 200, the relay exits, or
+    /// `CHILD_TIMEOUT` passes, and returns the last response.
+    fn wait_for_readiness(process: &mut RelayProcess, health_port: u16) -> String {
+        let deadline = Instant::now() + CHILD_TIMEOUT;
+        loop {
+            if process.try_wait().is_some() {
+                return "relay exited before turning ready".to_string();
+            }
+            let response = TcpStream::connect(("127.0.0.1", health_port))
+                .and_then(|mut stream| {
+                    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+                    stream.write_all(
+                        b"GET /_readiness HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                    )?;
+                    let mut response = String::new();
+                    stream.read_to_string(&mut response)?;
+                    Ok(response)
+                })
+                .unwrap_or_default();
+            if response.starts_with("HTTP/1.1 200") || Instant::now() >= deadline {
+                return response;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
     }
 
     const NIP_FI_ISSUERS: &str = r#"[{
@@ -1016,29 +1113,7 @@ mod postgres_tests {
     fn database_source_snapshot_load_lets_readiness_turn_ready() {
         seed_bindings(1);
         let (mut process, health_port) = spawn_database_source(&[]);
-        let deadline = Instant::now() + CHILD_TIMEOUT;
-        let ready = loop {
-            assert!(
-                process.try_wait().is_none(),
-                "relay exited: {}",
-                String::from_utf8_lossy(&process.terminate().stdout)
-            );
-            let response = TcpStream::connect(("127.0.0.1", health_port))
-                .and_then(|mut stream| {
-                    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
-                    stream.write_all(
-                        b"GET /_readiness HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-                    )?;
-                    let mut response = String::new();
-                    stream.read_to_string(&mut response)?;
-                    Ok(response)
-                })
-                .unwrap_or_default();
-            if response.starts_with("HTTP/1.1 200") || Instant::now() >= deadline {
-                break response;
-            }
-            thread::sleep(Duration::from_millis(50));
-        };
+        let ready = wait_for_readiness(&mut process, health_port);
         let output = process.terminate();
         let logs = format!(
             "{}{}",

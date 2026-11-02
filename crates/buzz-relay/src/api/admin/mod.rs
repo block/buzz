@@ -40,6 +40,7 @@ pub(crate) fn is_admin_host(state: &crate::state::AppState, headers: &HeaderMap)
 /// [`auth::admin_api_origin`]). Re-exported so the NIP-11 builder can derive
 /// the advertised origin without reaching into the private `auth` module.
 pub(crate) use auth::admin_api_origin;
+pub(crate) use auth::is_relay_operator;
 
 /// Build the deployment-admin routes.
 ///
@@ -11684,6 +11685,43 @@ mod postgres_tests {
         .await
         .unwrap();
         assert_eq!(live, 0);
+    }
+
+    /// An artifact revision is not admin-deletable: open NIP-AR syncs would
+    /// get no live signal (they see `op=delete` and kind 9005). The action
+    /// fails terminally and the head stays. Mutation: drop the kind check in
+    /// `execute_delete_with_marker` → 200 and the head is gone → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn direct_delete_refuses_artifact_revisions() {
+        let (pool, community, host, state) = direct_fixture().await;
+        let id = seed_signed_event(&pool, community, &test_operator_keys()).await;
+        sqlx::query("UPDATE events SET kind = 45010 WHERE community_id = $1")
+            .bind(community.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let path = format!("/events/{id}/delete?communityHost={host}");
+        let (status, body) = direct_post(
+            &state,
+            &path,
+            serde_json::json!({ "requestId": Uuid::new_v4() }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(
+            body.to_string()
+                .contains("artifact revisions cannot be deleted"),
+            "{body}"
+        );
+        let live: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events WHERE community_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(live, 1);
     }
 
     /// F1: attempt B passes the stored-action lookup, attempt A (same request)

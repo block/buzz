@@ -22,8 +22,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 class _Profiles extends UserCacheNotifier {
   @override
   Map<String, UserProfile> build() => {
-    'a': const UserProfile(pubkey: 'a', displayName: 'Alpha'),
-    'b': const UserProfile(pubkey: 'b', displayName: 'Beta'),
+    // Self-published names differ so tests prove the owner's name wins.
+    'a': const UserProfile(pubkey: 'a', displayName: 'Confusable Alpha'),
+    'b': const UserProfile(pubkey: 'b', displayName: 'Confusable Beta'),
   };
 }
 
@@ -383,6 +384,11 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byTooltip('Change agent: Alpha'), findsOneWidget);
       expect(find.byType(AvatarImage), findsOneWidget);
+      // Without artwork, the fallback initial follows the owner's label.
+      expect(
+        find.descendant(of: find.byType(AvatarImage), matching: find.text('A')),
+        findsOneWidget,
+      );
       expect(find.text('Choose follow-up assistant'), findsNothing);
       final readsBeforeSend = directoryReads;
       await tester.tap(find.text('Send'));
