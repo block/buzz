@@ -9,23 +9,6 @@ use crate::observability::{self, LockType, TransactionOperation};
 use crate::AdmittedTx;
 use crate::{Db, DbError, Result};
 
-/// Wrap `$retire`, an `UPDATE`/`DELETE` on `events` that retires a
-/// coordinate's previous head, so the same statement drops those rows' mention
-/// index entries. Reads never return a retired row, so its mention rows are
-/// dead weight that a `#p` read must walk and discard: one per member for
-/// every kind:39002 roster republish. `$1` must bind the community.
-macro_rules! superseded_with_mentions_sql {
-    ($retire:literal) => {
-        concat!(
-            "WITH superseded AS (",
-            $retire,
-            " RETURNING id) \
-             DELETE FROM event_mentions mention USING superseded \
-             WHERE mention.community_id = $1 AND mention.event_id = superseded.id"
-        )
-    };
-}
-
 /// Result category for a parameterized-replaceable event write.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ParameterizedReplaceStatus {
@@ -830,18 +813,48 @@ mod postgres_tests {
         };
         let base = Timestamp::now().as_secs();
 
-        // Roster republish (kind:39002 through the addressable path; its p tags
-        // must match the channel's members) and a generic NIP-33 replacement
-        // both retire the old head with a soft delete.
+        // Every supersede path retires the old head with a soft delete. The relay
+        // roster writer is the production kind:39002 path; its p tags must match
+        // the channel's members. The relay-signed kind:13535 list goes through
+        // the addressable path.
+        enum Path {
+            MemberSnapshot,
+            Addressable,
+            Parameterized,
+        }
         let roster_p = vec![vec![owner.as_str(), "", "owner"]];
-        let people_p: Vec<Vec<&str>> = mentioned.iter().map(|pk| vec![pk.as_str()]).collect();
-        for (case, kind, d_tag, p_tags) in [
-            ("roster", 39002_u16, channel.to_string(), roster_p),
-            ("parameterized", 30000_u16, "people".to_owned(), people_p),
+        let people_p =
+            || -> Vec<Vec<&str>> { mentioned.iter().map(|pk| vec![pk.as_str()]).collect() };
+        let relay_pubkey = keys.public_key().to_bytes();
+        for (case, path, kind, d_tag, p_tags) in [
+            (
+                "member snapshot",
+                Path::MemberSnapshot,
+                39002_u16,
+                Some(channel.to_string()),
+                roster_p,
+            ),
+            (
+                "addressable",
+                Path::Addressable,
+                13535_u16,
+                None,
+                people_p(),
+            ),
+            (
+                "parameterized",
+                Path::Parameterized,
+                30000_u16,
+                Some("people".to_owned()),
+                people_p(),
+            ),
         ] {
             let indexed = p_tags.len() as i64;
             let version = |offset: u64, content: &str| {
-                let mut tags = vec![Tag::parse(["d", d_tag.as_str()]).expect("d tag")];
+                let mut tags: Vec<Tag> = d_tag
+                    .iter()
+                    .map(|d| Tag::parse(["d", d.as_str()]).expect("d tag"))
+                    .collect();
                 tags.extend(p_tags.iter().map(|p| {
                     let mut parts = vec!["p"];
                     parts.extend(p.iter().copied());
@@ -856,17 +869,36 @@ mod postgres_tests {
             let replace = |event: nostr::Event| {
                 let db = &db;
                 let d_tag = d_tag.clone();
+                let relay_pubkey = relay_pubkey.clone();
+                let path = &path;
                 async move {
-                    let inserted = if kind == 39002 {
-                        db.replace_addressable_event(community, &event, Some(channel))
-                            .await
-                            .expect("replace roster")
-                            .1
-                    } else {
-                        db.replace_parameterized_event(community, &event, &d_tag, None)
-                            .await
-                            .expect("replace parameterized")
-                            .1
+                    let inserted = match path {
+                        Path::MemberSnapshot => {
+                            let mut snapshot = db
+                                .lock_member_snapshot(community, channel, &relay_pubkey)
+                                .await
+                                .expect("lock member snapshot");
+                            let inserted = snapshot
+                                .replace_member_event(&event)
+                                .await
+                                .expect("replace roster")
+                                .1;
+                            snapshot.release().await.expect("commit roster");
+                            inserted
+                        }
+                        Path::Addressable => {
+                            db.replace_addressable_event(community, &event, None)
+                                .await
+                                .expect("replace addressable")
+                                .1
+                        }
+                        Path::Parameterized => {
+                            let d_tag = d_tag.expect("parameterized d tag");
+                            db.replace_parameterized_event(community, &event, &d_tag, None)
+                                .await
+                                .expect("replace parameterized")
+                                .1
+                        }
                     };
                     assert!(inserted, "{case}: newer version must be inserted");
                 }
