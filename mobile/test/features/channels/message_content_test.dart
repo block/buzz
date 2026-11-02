@@ -517,6 +517,8 @@ void main() {
         // A bare link's trailing backslash stays outside the link.
         (r'see https://example.com/a\', 'see '),
         (r'in buzz://channel/9f18f3c6-b5e5-453d-b36d-65487913be0b.\', r'.\'),
+        (r'*https://example.com/a\**', '*'),
+        (r'see \<https://example.com/b>', 'see <'),
         (
           '![shot \\#1](https://example.com/a.png)\n'
               '![shot \\#2](https://example.com/b.png)',

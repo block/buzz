@@ -273,9 +273,12 @@ String _normalizeLinkSegment(String segment) {
 }
 
 String _normalizeProseLinks(String segment) {
+  // An escaped `\<` is literal, not an autolink; its URL stays a bare link.
   var normalized = segment.replaceAllMapped(
     _autolinkPattern,
-    (match) => '[${match[1]}](${match[1]})',
+    (match) => _isEscaped(segment, match.start)
+        ? match[0]!
+        : '[${match[1]}](${match[1]})',
   );
   normalized = normalized.replaceAllMapped(
     _bareLinkPattern,
@@ -293,14 +296,18 @@ String _normalizeBareLink(String segment, Match match) {
 
   // A trailing backslash escapes what follows or breaks the line; it is never
   // part of the destination, and the renderer would read it as an escape.
+  // Peel it again whenever stripping punctuation or a delimiter exposes one.
   // Scan back rather than match `\\+$`, which retries from every offset.
-  var urlEnd = url.length;
-  while (urlEnd > 0 && url.codeUnitAt(urlEnd - 1) == _backslashUnit) {
-    urlEnd--;
+  void peelBackslashes() {
+    var urlEnd = url.length;
+    while (urlEnd > 0 && url.codeUnitAt(urlEnd - 1) == _backslashUnit) {
+      urlEnd--;
+    }
+    trailing = '${url.substring(urlEnd)}$trailing';
+    url = url.substring(0, urlEnd);
   }
-  trailing = url.substring(urlEnd);
-  url = url.substring(0, urlEnd);
 
+  peelBackslashes();
   if (isBuzzUrl) {
     final outsidePunctuation = _trailingPunctuationPattern.firstMatch(url);
     if (outsidePunctuation != null) {
@@ -312,6 +319,7 @@ String _normalizeBareLink(String segment, Match match) {
   var strippedDelimiter = true;
   while (strippedDelimiter) {
     strippedDelimiter = false;
+    peelBackslashes();
     for (final delimiter in _markdownDelimiters) {
       if (url.endsWith(delimiter) &&
           _hasUnclosedMarkdownDelimiter(
@@ -331,6 +339,7 @@ String _normalizeBareLink(String segment, Match match) {
     if (punctuation != null) {
       url = url.substring(0, punctuation.start);
       trailing = '${punctuation[0]}$trailing';
+      peelBackslashes();
     }
   }
 
