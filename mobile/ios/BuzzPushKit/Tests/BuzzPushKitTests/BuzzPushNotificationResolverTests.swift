@@ -386,6 +386,60 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     )
   }
 
+  /// A push carries no event reference. Each push must show a message not shown before,
+  /// including after the extension process restarts, instead of the newest match again.
+  func testEachPushShowsANewMessageAndNeverRepeatsOne() throws {
+    let snapshot = try snapshotData([community()])
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+    let scope = try XCTUnwrap(BuzzNotificationCacheScope(community: community()))
+    let now = Date(timeIntervalSince1970: TimeInterval(Self.now))
+    // A fresh cache instance per push models a fresh extension process.
+    func push() -> String? {
+      resolve(makeResolver(communitiesData: snapshot,
+        cacheOverride: BuzzNotificationCache(directory: root, now: { now }, isCurrent: { $0 == scope }),
+        now: now))?.body
+    }
+    var relayEvents: [VerifiedNostrEvent] = []
+    URLProtocolStub.handler = { request in
+      Self.response(request, status: 200, data: try JSONEncoder().encode(relayEvents))
+    }
+    func message(_ content: String, secondsAgo: Int) throws -> VerifiedNostrEvent {
+      try Self.signedEvent(privateKey: Self.profilePrivateKey, createdAt: Self.now - secondsAgo,
+        kind: 9, tags: [["h", Self.channelID]], content: content)
+    }
+    let window = BuzzNotificationCache.presentationReorderWindow
+
+    let history = try message("Last week", secondsAgo: 7 * 24 * 3600)
+    let first = try message("First", secondsAgo: 3600)
+    relayEvents = [history, first]
+    XCTAssertEqual(push(), "First", "with nothing shown yet, the newest message")
+    XCTAssertNil(push(), "a push for a non-message event must not repeat it")
+
+    // Two messages whose pushes resolve out of order: the later push wins the first
+    // resolution, so the earlier push must still find its own message.
+    let early = try message("Early", secondsAgo: 60)
+    let late = try message("Late", secondsAgo: 59)
+    relayEvents = [late, early, first, history]
+    XCTAssertEqual(push(), "Late")
+    XCTAssertEqual(push(), "Early")
+    XCTAssertNil(push())
+
+    // Older history is never surfaced by a later push.
+    let stale = try message("Stale", secondsAgo: 59 + window + 1)
+    relayEvents = [late, early, stale, first, history]
+    XCTAssertNil(push(), "a message older than the reorder window is history")
+
+    // A future-dated message is shown once and doesn't hide messages that follow it.
+    let future = try message("Future", secondsAgo: -3600)
+    relayEvents = [future, late]
+    XCTAssertEqual(push(), "Future")
+    let next = try message("Next", secondsAgo: 0)
+    relayEvents = [future, next, late]
+    XCTAssertEqual(push(), "Next")
+    XCTAssertNil(push())
+  }
+
   func testFreshVerifiedCacheResolvesSenderAvatarAndChannelWithoutRefresh() throws {
     let message = try Self.signedEvent(
       privateKey: Self.profilePrivateKey,

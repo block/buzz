@@ -81,7 +81,21 @@ public final class BuzzNotificationCache: @unchecked Sendable {
     var metadata: [BuzzNotificationMetadata] = []
     var avatars: [BuzzNotificationAvatar] = []
     var avatarRequests: [String: String]?
+    /// Messages already shown in a notification, newest first. Optional so stores
+    /// written before it existed still decode.
+    var presented: [PresentedMessage]?
   }
+
+  private struct PresentedMessage: Codable {
+    let id: String
+    let createdAt: Int
+  }
+
+  /// How far before the newest shown message a message may be and still be shown.
+  /// Pushes can resolve out of order, so the message for an earlier push may be found
+  /// after a later one. Anything older is history, not the message a push is for.
+  public static let presentationReorderWindow = 5 * 60
+  static let maximumPresentedMessages = 64
 
   public init(
     directory: URL,
@@ -253,6 +267,28 @@ public final class BuzzNotificationCache: @unchecked Sendable {
     }
   }
 
+  /// Records `event` as shown unless it already was or is older than the newest shown
+  /// message by more than ``presentationReorderWindow``. Returns whether the caller may
+  /// show it. A push carries no event reference, so without this every push whose own
+  /// event isn't the newest match would repeat the same message.
+  public func claimPresentation(
+    of event: VerifiedNostrEvent, scope: BuzzNotificationCacheScope
+  ) throws -> Bool {
+    try access(scope, write: true) { state in
+      let presented = state.presented ?? []
+      guard !presented.contains(where: { $0.id == event.id }) else { return false }
+      // A future-dated created_at must not hold back later messages.
+      let createdAt = min(event.createdAt, Int(now().timeIntervalSince1970))
+      if let newest = presented.map(\.createdAt).max(),
+        createdAt < newest - Self.presentationReorderWindow
+      {
+        return false
+      }
+      state.presented = [PresentedMessage(id: event.id, createdAt: createdAt)] + presented
+      return true
+    }
+  }
+
   /// Deletes abandoned sign-ins on the extension's next execution.
   public func removeRevokedScopes(keeping scopes: [BuzzNotificationCacheScope]) throws {
     try locked {
@@ -321,6 +357,9 @@ public final class BuzzNotificationCache: @unchecked Sendable {
         let profileAuthors = Set(
           state.metadata.filter { $0.event.kind == 0 }.map { $0.event.pubkey })
         state.avatarRequests = state.avatarRequests?.filter { profileAuthors.contains($0.key) }
+        state.presented = state.presented.map {
+          Array($0.sorted { $0.createdAt > $1.createdAt }.prefix(Self.maximumPresentedMessages))
+        }
         let encoder = JSONEncoder()
         var data = try encoder.encode(state)
         while data.count > Self.maximumBytes {
