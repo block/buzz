@@ -2364,6 +2364,38 @@ void main() {
             expect(event.highPriority, isFalse);
             expect(event.channelCatchUp, isTrue);
           }
+          if (expected.isEmpty) return;
+
+          // Deleting the marker reopens the whole window, which still hides
+          // an older unread event, so the next quiet message stands in.
+          session.emit(
+            NostrEvent(
+              id: 'marker-deletion',
+              pubkey: 'alice',
+              createdAt: 3000,
+              kind: EventKind.deletion,
+              tags: [
+                const ['h', _channelA],
+                ['e', expected.single],
+              ],
+              content: '',
+              sig: 'sig',
+            ),
+          );
+          await _settle();
+          final before = session.queryBatches.where(isUnread).length;
+          await notifier.refresh();
+          await _waitUntil(
+            () => session.queryBatches.where(isUnread).length > before,
+          );
+          await _settle();
+          expect(
+            session.queryBatches.lastWhere(isUnread).map((f) => f.since),
+            everyElement(0),
+          );
+          expect(notifier.observedUnreadEventsByChannel[_channelA]?.keys, [
+            deleted ? 'quiet-2' : 'quiet-1',
+          ]);
         },
       );
     }
