@@ -869,7 +869,6 @@ mod postgres_tests {
             let replace = |event: nostr::Event| {
                 let db = &db;
                 let d_tag = d_tag.clone();
-                let relay_pubkey = relay_pubkey.clone();
                 let path = &path;
                 async move {
                     let inserted = match path {
