@@ -3,6 +3,7 @@ import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
+
 import '../../helpers/remote_agents_fixture.dart';
 
 NostrEvent registration(
@@ -135,6 +136,40 @@ void main() {
       desktop.public,
       imported.public,
     ]);
+  });
+
+  test('a registration whose signature fails keeps the agent without its '
+      'model', () async {
+    final signed = registration(
+      fakeAgent,
+      content: '{"name":"Remote","model":"Claude Sonnet"}',
+    );
+    // Same id and content, but another key's signature over the id.
+    final forged = NostrEvent.fromJson({
+      ...signed.toJson(),
+      'sig': nostr.Event.from(
+        kind: 1,
+        content: 'other',
+        secretKey: fakeAgentKeys.secret,
+      ).sig,
+    });
+    final profiles = [
+      signedAgentProfile(
+        fakeAgentKeys,
+        fakeOwner,
+        content: '{"name":"Remote"}',
+      ),
+    ];
+    Future<List<OwnedAgentDirectoryEntry>> load(NostrEvent event) =>
+        loadOwnedAgentDirectory(
+          fakeOwner.public,
+          (filter) async => filter.kinds.contains(30177) ? [event] : profiles,
+        );
+
+    expect((await load(signed)).single.model, 'Claude Sonnet');
+    final found = (await load(forged)).single;
+    expect(found.pubkey, fakeAgent);
+    expect(found.model, isNull);
   });
 
   test('a registration is listed only with a type runtime and a name', () {
