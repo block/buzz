@@ -211,6 +211,11 @@ make_hook!(auto_join_channel_hook, before_auto_join_channel);
 // `after_auto_join`: fires when an admission auto-join task has finished, so
 // a test can assert what it did (or did not) write.
 make_hook!(auto_join_done_hook, after_auto_join);
+// `after_group_state_capture`: fires in `emit_group_discovery_events` once the
+// channel row and roster are captured behind the group-state locks, before
+// the events are built and replaced. Holding it lets a test commit a channel
+// edit and start that edit's own emission while this one holds older state.
+make_hook!(group_state_capture_hook, after_group_state_capture);
 // `before_http_ban_recheck`: fires in `buzz_v1` and Git settings after the
 // shared membership check passes, immediately before the fresh ban reread.
 // A ban or closed pool here makes only the reread refuse.

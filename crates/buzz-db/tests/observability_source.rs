@@ -886,7 +886,7 @@ const ADMITTED_TX_SIGNATURE_MARKERS: [&str; 2] = ["&mut AdmittedTx", "&mut crate
 const GUARDED_WRITE_FUNCTION_EXCEPTIONS: [&str; 1] = ["pub async fn verify_floor_guard_behavior("];
 
 const GUARDED_TX_ADAPTER_METHOD_PINS: [(&str, &str); 1] = [(
-    "pub async fn replace_member_event(",
+    "pub async fn replace_group_state_event(",
     "pub async fn lock_member_snapshot(",
 )];
 
