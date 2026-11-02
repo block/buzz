@@ -32,6 +32,23 @@ bool supportsRemoteAgents(Community? community) =>
     community.pubkey != null &&
     HostedEnvironment.supportsRelay(Uri.parse(community.relayUrl));
 
+/// Whether a signed-out Builderlab account hides where this community's agents
+/// run: remote agents are unlistable until the user signs in, so an agent that
+/// is not in the registry is not necessarily desktop-managed.
+bool agentLocationUnknown(
+  Community? community,
+  RemoteAgentController controller,
+) => supportsRemoteAgents(community) && controller.account.account == null;
+
+/// Whether to ask the user to sign in to Builderlab: the agent location is
+/// unknown and no load is in flight. A cold start's saved-session restore
+/// runs inside the controller's refresh, so prompting then would start a
+/// needless browser sign-in for a session that is about to be adopted.
+bool builderlabSignInNeeded(
+  Community? community,
+  RemoteAgentController controller,
+) => agentLocationUnknown(community, controller) && !controller.busy;
+
 /// Restores a saved Builderlab session once, so a cold start with a stored
 /// session shows remote agents without waiting for another sign-in path.
 final builderlabRestoreProvider = FutureProvider<void>((ref) async {
