@@ -535,3 +535,106 @@ async fn incremental_unlisted_channels_require_membership_or_named_scope() {
         .await;
     assert_eq!(listed["changes"][0]["event"]["id"], event.id.to_hex());
 }
+
+/// An incremental poll's access line counts its changes, removals included:
+/// an empty poll is DEBUG, a poll with changes is INFO, and a failed poll is
+/// WARN. Mutation: count only array responses in `query_events` → the
+/// empty poll has no `result_count` and logs INFO → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn incremental_poll_access_level_follows_its_change_count() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    accept(&f, &f.revision(Uuid::new_v4(), "create", None)).await;
+    let poll = |types: &str| json!([{"artifact":"incremental","query":{"artifact":"current","#type":[types]}}]);
+    let line = |out: &crate::access::tests::Captured| {
+        let lines = out.lines();
+        assert_eq!(lines.len(), 1, "one access line: {lines:?}");
+        lines[0].clone()
+    };
+
+    let (_capture, out) = crate::access::tests::capture_scoped();
+    let (status, body) = f.request("/query", poll("buzz.none")).await;
+    assert!(status.is_success(), "{status}: {body}");
+    let empty = line(&out);
+    assert_eq!(
+        (&empty["level"], &empty["result_count"]),
+        (&"DEBUG".into(), &0.into()),
+        "{empty}"
+    );
+
+    let (_capture, out) = crate::access::tests::capture_scoped();
+    let (status, body) = f.request("/query", poll("buzz.task")).await;
+    assert!(status.is_success(), "{status}: {body}");
+    let served = line(&out);
+    assert_eq!(
+        (&served["level"], &served["result_count"]),
+        (&"INFO".into(), &1.into()),
+        "{served}"
+    );
+
+    let mut off = (*f.state).clone();
+    Arc::make_mut(&mut off.config).artifact_incremental_enabled = false;
+    let f = Fixture {
+        state: Arc::new(off),
+        ..f
+    };
+    let (_capture, out) = crate::access::tests::capture_scoped();
+    let (status, _) = f.request("/query", poll("buzz.none")).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let failed = line(&out);
+    assert_eq!(failed["level"], "WARN", "{failed}");
+    assert!(failed.get("result_count").is_none(), "{failed}");
+}
+
+/// A wrapped incremental read dropped during its database work still
+/// writes its one WARN aborted line with the standard filter summary, and
+/// without its artifact predicates. Mutation: record the artifact summary
+/// after `artifact::query` returns → the line has no `kinds` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn dropped_incremental_read_keeps_its_filter_summary() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let marker = "private-predicate-marker";
+    let body = json!([{"artifact":"incremental","query":{
+        "artifact":"current","kinds":[45010],"#h":[f.home],"#project":[marker]}}]);
+    let mut lock = f.pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE artifact_heads IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let (capture, out) = crate::access::tests::capture_access_only(tracing::Level::WARN);
+    let mut request = Box::pin(f.request("/query", body));
+    // Poll the request until its candidate read waits on the lock.
+    loop {
+        tokio::select! {
+            _ = &mut request => panic!("the read must wait on the locked table"),
+            () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+        }
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE '%artifact_heads%'",
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        if waiting > 0 {
+            break;
+        }
+    }
+    drop(request);
+    drop(capture);
+    lock.rollback().await.unwrap();
+    let lines = out.lines();
+    assert_eq!(lines.len(), 1, "exactly one access line: {lines:?}");
+    let line = &lines[0];
+    assert_eq!(
+        (&line["request"], &line["level"]),
+        (&"aborted".into(), &"WARN".into()),
+        "{line}"
+    );
+    assert_eq!(line["route"], "/query", "{line}");
+    assert_eq!(line["kinds"], "45010", "{line}");
+    assert_eq!(line["channel_ids"], f.home.to_string(), "{line}");
+    assert!(!out.raw().contains(marker), "{}", out.raw());
+}

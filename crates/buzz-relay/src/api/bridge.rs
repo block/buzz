@@ -1638,9 +1638,16 @@ pub async fn query_events(
     // helper; the caller's access line is the request's one line, covering
     // every outcome including a refused login.
     let result = query_events_authed(&state, &tenant, &headers, &body, &mut caller).await;
-    if let Ok(Json(Value::Array(events))) = &result {
+    // A generic or artifact read returns its events; an incremental read
+    // returns `{changes: [...]}`, removals included.
+    let returned = match &result {
+        Ok(Json(Value::Array(events))) => Some(events.len()),
+        Ok(Json(value)) => value.get("changes").and_then(Value::as_array).map(Vec::len),
+        Err(_) => None,
+    };
+    if let Some(n) = returned {
         caller.complete(crate::access::Detail {
-            result_count: Some(events.len() as u64),
+            result_count: Some(n as u64),
             ..Default::default()
         });
     }
@@ -1698,9 +1705,10 @@ async fn query_member_events(
     // depth_limit, feed_types) that nostr::Filter silently drops.
     let raw_filters: Vec<Value> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
-    if let Some(result) = super::artifact::query(state, tenant, &pubkey, &raw_filters, false).await
+    let routed = || caller.read_artifact(&raw_filters);
+    if let Some(result) =
+        super::artifact::query(state, tenant, &pubkey, &raw_filters, false, routed).await
     {
-        caller.read_artifact(&raw_filters);
         return result;
     }
     let thread_windows = thread_window::parse(&raw_filters)?;
@@ -2377,8 +2385,8 @@ async fn count_member_events(
     let pubkey_bytes = pubkey.to_bytes().to_vec();
     let raw: Vec<Value> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
-    if let Some(result) = super::artifact::query(state, tenant, &pubkey, &raw, true).await {
-        caller.read_artifact(&raw);
+    let routed = || caller.read_artifact(&raw);
+    if let Some(result) = super::artifact::query(state, tenant, &pubkey, &raw, true, routed).await {
         return result;
     }
     let filters: Vec<nostr::Filter> = serde_json::from_slice(body)
