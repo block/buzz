@@ -120,7 +120,6 @@ class IosGlassNavigationButton extends HookWidget {
     assert(defaultTargetPlatform == TargetPlatform.iOS);
     final nativeChannel = useState<MethodChannel?>(null);
     final highlighted = useState(false);
-    final artworkChannel = useState<MethodChannel?>(null);
     final onPressedRef = useRef(onPressed)..value = onPressed;
     final brightness = context.theme.brightness.name;
     final effectiveForeground = foregroundColor ?? context.colors.primary;
@@ -142,25 +141,9 @@ class IosGlassNavigationButton extends HookWidget {
       return () => channel.setMethodCallHandler(null);
     }, [nativeChannel.value]);
 
-    useEffect(() {
-      final channel = artworkChannel.value;
-      if (channel == null) return null;
-      channel.setMethodCallHandler((call) async {
-        if (call.method == 'pressed') onPressedRef.value?.call();
-        if (call.method == 'highlighted') {
-          highlighted.value = call.arguments == true;
-          await nativeChannel.value?.invokeMethod<void>(
-            'setArtworkPressed',
-            call.arguments == true,
-          );
-        }
-      });
-      return () => channel.setMethodCallHandler(null);
-    }, [artworkChannel.value]);
-
     useEffect(
       () {
-        for (final channel in [nativeChannel.value, artworkChannel.value]) {
+        for (final channel in [nativeChannel.value]) {
           if (channel == null) continue;
           unawaited(
             channel.invokeMethod<void>('setAppearance', <String, Object>{
@@ -178,7 +161,6 @@ class IosGlassNavigationButton extends HookWidget {
       },
       [
         nativeChannel.value,
-        artworkChannel.value,
         brightness,
         foregroundValue,
         enabled,
@@ -307,7 +289,7 @@ class IosGlassNavigationButton extends HookWidget {
       final creationParams = <String, Object>{
         'icon': icon.name,
         'accessibilityLabel': semanticLabel,
-        'accessibilityHidden': artwork != null,
+        'accessibilityHidden': false,
         'brightness': brightness,
         'foregroundColor': foregroundValue,
         'enabled': enabled,
@@ -349,24 +331,6 @@ class IosGlassNavigationButton extends HookWidget {
                   child: artwork,
                 ),
               ),
-            ),
-          ),
-          // A transparent UIKit control above the native video receives
-          // touches that cannot pass through AVPlayerLayer platform views.
-          Positioned.fill(
-            child: UiKitView(
-              viewType: viewType,
-              hitTestBehavior: PlatformViewHitTestBehavior.opaque,
-              creationParams: {
-                ...creationParams,
-                'plain': true,
-                'label': '',
-                'accessibilityHidden': false,
-              },
-              creationParamsCodec: const StandardMessageCodec(),
-              onPlatformViewCreated: (viewId) {
-                artworkChannel.value = MethodChannel('$viewType/$viewId');
-              },
             ),
           ),
         ],

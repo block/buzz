@@ -7,17 +7,17 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
-import '../../shared/custom_emoji/custom_emoji.dart';
-import '../../shared/custom_emoji/custom_emoji_provider.dart';
-import '../../shared/custom_emoji/custom_emoji_render.dart';
-import '../../shared/emoji/emoji_data.dart';
-import '../../shared/emoji/emoji_data_provider.dart';
-import '../../shared/emoji/emoji_search.dart';
-import '../../shared/emoji/native_emoji_glyph.dart';
-import '../../shared/relay/relay.dart';
-import '../../shared/theme/theme.dart';
-import '../../shared/widgets/buzz_sheet_header.dart';
-import '../../shared/widgets/modal_presentation.dart';
+import '../custom_emoji/custom_emoji.dart';
+import '../custom_emoji/custom_emoji_provider.dart';
+import '../custom_emoji/custom_emoji_render.dart';
+import '../emoji/emoji_data.dart';
+import '../emoji/emoji_data_provider.dart';
+import '../emoji/emoji_search.dart';
+import '../emoji/native_emoji_glyph.dart';
+import '../relay/relay.dart';
+import '../theme/theme.dart';
+import '../widgets/buzz_sheet_header.dart';
+import '../widgets/modal_presentation.dart';
 import 'recent_emoji_provider.dart';
 
 part 'emoji_picker/search_field.dart';

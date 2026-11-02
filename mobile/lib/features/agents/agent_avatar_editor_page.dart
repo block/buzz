@@ -4,8 +4,9 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
-import 'agent_avatar_picker.dart';
 import 'agent_avatar_choices.dart';
+import 'agent_avatar_geometry.dart';
+import 'agent_avatar_picker.dart';
 
 /// Edits an avatar locally; Cancel leaves the creation draft unchanged.
 class AgentAvatarEditorPage extends HookWidget {
@@ -74,7 +75,7 @@ class AgentAvatarEditorPage extends HookWidget {
                       (constraints.maxHeight -
                               agentAvatarChoicesHeight -
                               Grid.sm -
-                              228)
+                              agentAvatarPreviewSpace)
                           .clamp(180, double.infinity),
                   selection: selection.value,
                   heroTag: heroTag,

@@ -1,13 +1,12 @@
-import 'agent_category_transition.dart';
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
-import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../../shared/emoji/emoji_avatar.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/navigation_button_surface.dart';
+import 'agent_avatar_geometry.dart';
+import 'agent_category_motion.dart';
 
 /// Emoji preview opens the system picker; background colors stay in the tray.
 class AgentEmojiStage extends HookWidget {
@@ -56,7 +55,7 @@ class AgentEmojiStage extends HookWidget {
       child: Stack(
         children: [
           Positioned.fill(
-            bottom: 115,
+            bottom: agentAvatarTraySpace,
             child: AgentCategoryMotion(
               child: Center(
                 child: Semantics(
@@ -184,48 +183,14 @@ class AgentEmojiStage extends HookWidget {
                             child: AnimatedBuilder(
                               animation: scroll,
                               builder: (context, child) {
-                                final center =
-                                    Grid.xxs +
-                                    index * 64 +
-                                    32 -
-                                    (scroll.hasClients ? scroll.offset : 0);
-                                final distance = math.min(
-                                  center +
-                                      math.max(
-                                        0.0,
-                                        72 -
-                                            (scroll.hasClients
-                                                ? scroll.offset
-                                                : 0),
-                                      ),
-                                  constraints.maxWidth -
-                                      center +
-                                      math.max(
-                                        0.0,
-                                        72 -
-                                            (math.max(
-                                                  0.0,
-                                                  emojiAvatarColors.length *
-                                                          64 +
-                                                      Grid.xxs * 2 -
-                                                      constraints.maxWidth,
-                                                ) -
-                                                (scroll.hasClients
-                                                    ? scroll.offset
-                                                    : 0)),
-                                      ),
+                                final scale = agentFilmstripScale(
+                                  index: index,
+                                  count: emojiAvatarColors.length,
+                                  extent: 64,
+                                  width: constraints.maxWidth,
+                                  offset: scroll.hasClients ? scroll.offset : 0,
+                                  reduceMotion: reduceMotion,
                                 );
-                                final progress = (distance / 72).clamp(
-                                  0.0,
-                                  1.0,
-                                );
-                                final scale = reduceMotion
-                                    ? 1.0
-                                    : 0.65 +
-                                          0.35 *
-                                              Curves.easeInOut.transform(
-                                                progress,
-                                              );
                                 return Transform.scale(
                                   scale: scale,
                                   child: child,

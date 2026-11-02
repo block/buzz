@@ -1,25 +1,28 @@
-import 'agent_avatar_hero.dart';
-import 'agent_category_transition.dart';
-import 'agent_character_artwork.dart';
-import 'dart:ui' as ui;
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
-import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
-import 'agent_avatar_choices.dart';
-import 'agent_character_stage.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/agents/agent_avatar_catalog.dart';
 import '../../shared/emoji/emoji_avatar.dart';
-import '../channels/emoji_picker.dart';
-import 'agent_emoji_stage.dart';
+import '../../shared/emoji/emoji_picker.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_shape.dart';
 import '../../shared/widgets/preset_agent_avatar.dart';
 import '../../shared/widgets/profile_avatar_crop_page.dart';
+import 'agent_avatar_category.dart';
+import 'agent_avatar_choices.dart';
+import 'agent_avatar_geometry.dart';
+import 'agent_avatar_hero.dart';
+import 'agent_category_motion.dart';
+import 'agent_category_transition.dart';
+import 'agent_character_artwork.dart';
+import 'agent_character_stage.dart';
+import 'agent_emoji_stage.dart';
 
 /// An avatar kept locally until creation uploads it to the selected community.
 class AgentAvatarSelection {
@@ -76,13 +79,6 @@ class AgentAvatarPicker extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final mode = useState(
-      selection.url != null
-          ? 0
-          : selection.emoji != null
-          ? 1
-          : 2,
-    );
     final initialIndex = useMemoized(() {
       final found = agentAvatarCatalog.indexWhere(
         (item) => item.url == selection.url,
@@ -94,6 +90,13 @@ class AgentAvatarPicker extends HookConsumerWidget {
       AgentAvatarPack.values.firstWhere(
         (pack) => pack.indices.contains(initialIndex),
       ),
+    );
+    final category = useState(
+      selection.url != null
+          ? AgentAvatarCategory.pack(pack.value)
+          : selection.emoji != null
+          ? AgentAvatarCategory.emoji
+          : AgentAvatarCategory.image,
     );
     final packSelections = useRef(<AgentAvatarPack, int>{
       pack.value: initialIndex,
@@ -176,7 +179,7 @@ class AgentAvatarPicker extends HookConsumerWidget {
       codec.dispose();
       if (!context.mounted || data == null) return;
       image.value = AgentAvatarSelection.image(data.buffer.asUint8List());
-      mode.value = 2;
+      category.value = AgentAvatarCategory.image;
       onChanged(image.value!);
     }
 
@@ -211,34 +214,21 @@ class AgentAvatarPicker extends HookConsumerWidget {
       }
     }
 
-    Future<void> selectMode(int next) async {
-      if (locked) return;
-      mode.value = next;
-      error.value = null;
-      if (next == 0) {
-        onChanged(
-          AgentAvatarSelection.url(agentAvatarCatalog[index.value].url),
-        );
-      }
-      if (next == 1) await renderEmoji();
-      if (next == 2 && image.value != null) onChanged(image.value!);
-    }
-
-    final imageHeight = controlsHeight + 228;
+    final imageHeight = controlsHeight + agentAvatarPreviewSpace;
     Widget buildPreview(
       AgentAvatarSelection selection,
-      int previewMode,
-      bool active,
+      AgentAvatarCategory previewCategory,
     ) {
-      final previewSize = previewMode == 0
-          ? math.min(440.0, imageHeight - 115)
+      final previewSize = previewCategory.pack != null
+          ? math.min(
+              agentAvatarMaxPreviewSize,
+              imageHeight - agentAvatarTraySpace,
+            )
           : 220.0;
       return AgentAvatarHero(
-        tag: active ? heroTag : null,
+        tag: heroTag,
         selection: selection,
-        verticalOffset: selection.url?.contains('/buzzies/') == true
-            ? -0.084 * 0.85
-            : 0,
+        verticalOffset: agentCharacterOffset(selection.url, scale: 0.85),
         child: Semantics(
           label: 'Selected agent avatar',
           image: true,
@@ -262,7 +252,7 @@ class AgentAvatarPicker extends HookConsumerWidget {
                       ),
                       duration:
                           MediaQuery.disableAnimationsOf(context) ||
-                              previewMode != 1
+                              previewCategory != AgentAvatarCategory.emoji
                           ? Duration.zero
                           : const Duration(milliseconds: 180),
                       child: Image.memory(
@@ -277,7 +267,7 @@ class AgentAvatarPicker extends HookConsumerWidget {
                     scale: 0.85,
                     child: PresetAgentAvatar(
                       imageUrl: selection.url!,
-                      posterPlaceholder: previewMode == 0
+                      posterPlaceholder: previewCategory.pack != null
                           ? characterPoster(selection.url!)
                           : null,
                       size: previewSize,
@@ -289,12 +279,13 @@ class AgentAvatarPicker extends HookConsumerWidget {
       );
     }
 
-    final category = mode.value == 0 ? pack.value.index : mode.value + 3;
-    final previousCategory = useRef(category);
+    final selectedCategory = category.value;
+    final position = selectedCategory.position;
+    final previousCategory = useRef(position);
     final slideDirection = useRef(1.0);
-    if (previousCategory.value != category) {
-      slideDirection.value = category > previousCategory.value ? 1 : -1;
-      previousCategory.value = category;
+    if (previousCategory.value != position) {
+      slideDirection.value = position > previousCategory.value ? 1 : -1;
+      previousCategory.value = position;
     }
     final direction = slideDirection.value;
 
@@ -324,14 +315,13 @@ class AgentAvatarPicker extends HookConsumerWidget {
               },
             ),
             child: SizedBox(
-              key: ValueKey(category),
+              key: ValueKey(selectedCategory),
               height: imageHeight,
               child: Builder(
                 builder: (context) {
-                  final page = category;
-                  const active = true;
-                  if (page < 4) {
-                    final pagePack = AgentAvatarPack.values[page];
+                  final page = selectedCategory;
+                  final pagePack = page.pack;
+                  if (pagePack != null) {
                     final selected = pagePack == pack.value
                         ? index.value
                         : packSelections.value[pagePack] ?? examples[pagePack]!;
@@ -343,10 +333,8 @@ class AgentAvatarPicker extends HookConsumerWidget {
                       pack: pagePack,
                       selected: selected,
                       height: imageHeight,
-                      preview: IgnorePointer(
-                        child: buildPreview(draft, 0, active),
-                      ),
-                      disabled: locked || !active,
+                      preview: IgnorePointer(child: buildPreview(draft, page)),
+                      disabled: locked,
                       onSelected: (value) {
                         index.value = value;
                         packSelections.value[pagePack] = value;
@@ -358,13 +346,13 @@ class AgentAvatarPicker extends HookConsumerWidget {
                       },
                     );
                   }
-                  if (page == 4) {
+                  if (page == AgentAvatarCategory.emoji) {
                     final draft = emojiSelection.value;
                     return AgentEmojiStage(
                       emoji: draft?.emoji,
                       height: imageHeight,
                       preview: draft != null
-                          ? buildPreview(draft, 1, active)
+                          ? buildPreview(draft, page)
                           : SizedBox.square(
                               dimension: 220,
                               child: AvatarClip(
@@ -381,7 +369,7 @@ class AgentAvatarPicker extends HookConsumerWidget {
                               ),
                             ),
                       selectedColor: color.value,
-                      disabled: locked || !active,
+                      disabled: locked,
                       onChooseEmoji: () => showEmojiPicker(
                         context: context,
                         nativeEmojiOnly: true,
@@ -398,7 +386,7 @@ class AgentAvatarPicker extends HookConsumerWidget {
                     );
                   }
                   final preview = image.value != null
-                      ? buildPreview(image.value!, 2, active)
+                      ? buildPreview(image.value!, page)
                       : const SizedBox.square(
                           dimension: 220,
                           child: Center(
@@ -408,7 +396,7 @@ class AgentAvatarPicker extends HookConsumerWidget {
                   return Stack(
                     children: [
                       Positioned.fill(
-                        bottom: 115,
+                        bottom: agentAvatarTraySpace,
                         child: AgentCategoryMotion(
                           child: Center(child: preview),
                         ),
@@ -422,8 +410,7 @@ class AgentAvatarPicker extends HookConsumerWidget {
         ),
         const SizedBox(height: Grid.sm),
         AgentAvatarChoices(
-          mode: mode.value,
-          pack: pack.value,
+          category: category.value,
           examples: examples,
           emoji: emoji.value,
           disabled: locked,
@@ -431,12 +418,21 @@ class AgentAvatarPicker extends HookConsumerWidget {
             packSelections.value[pack.value] = index.value;
             pack.value = next;
             index.value = packSelections.value[next] ?? examples[next]!;
-            selectMode(0);
+            category.value = AgentAvatarCategory.pack(next);
+            error.value = null;
+            onChanged(
+              AgentAvatarSelection.url(agentAvatarCatalog[index.value].url),
+            );
           },
-          onEmoji: () => selectMode(1),
+          onEmoji: () {
+            category.value = AgentAvatarCategory.emoji;
+            error.value = null;
+            renderEmoji();
+          },
           onImage: pickImage,
         ),
-        if (busy.value && mode.value != 1) const LinearProgressIndicator(),
+        if (busy.value && category.value != AgentAvatarCategory.emoji)
+          const LinearProgressIndicator(),
         if (error.value != null)
           Text(error.value!, style: TextStyle(color: context.colors.error)),
       ],

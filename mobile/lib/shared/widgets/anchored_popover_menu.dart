@@ -54,7 +54,6 @@ Future<T?> showAnchoredPopover<T>({
   EdgeInsetsGeometry menuPadding = EdgeInsets.zero,
   Clip clipBehavior = Clip.antiAlias,
   Key? surfaceKey,
-  bool waitForDismissal = false,
 }) async {
   final navigator = Navigator.of(context);
   final overlay = navigator.overlay;
@@ -94,7 +93,6 @@ Future<T?> showAnchoredPopover<T>({
     barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
   );
   final result = await navigator.push<T>(route);
-  if (waitForDismissal) await route.completed;
   return result;
 }
 

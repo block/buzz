@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'agent_avatar_geometry.dart';
+
 /// Compensates for the shared transparent padding in the Buzzy assets.
 class AgentCharacterAlignment extends StatelessWidget {
   const AgentCharacterAlignment({
@@ -13,7 +15,7 @@ class AgentCharacterAlignment extends StatelessWidget {
   final double scale;
   @override
   Widget build(BuildContext context) => FractionalTranslation(
-    translation: Offset(0, url.contains('/buzzies/') ? -0.084 * scale : 0),
+    translation: Offset(0, agentCharacterOffset(url, scale: scale)),
     child: child,
   );
 }

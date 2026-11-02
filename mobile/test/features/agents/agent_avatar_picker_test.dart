@@ -1,3 +1,4 @@
+import 'package:buzz/features/agents/agent_avatar_category.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:buzz/features/agents/agent_avatar_choices.dart';
@@ -19,8 +20,12 @@ void main() {
       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
     );
     final cases = [
-      (AgentAvatarSelection.image(png), 2, 'Image'),
-      (AgentAvatarSelection.emoji(png, '😊', 0xFFFFCC00), 1, 'Emoji'),
+      (AgentAvatarSelection.image(png), AgentAvatarCategory.image, 'Image'),
+      (
+        AgentAvatarSelection.emoji(png, '😊', 0xFFFFCC00),
+        AgentAvatarCategory.emoji,
+        'Emoji',
+      ),
     ];
     for (final (selection, mode, label) in cases) {
       await tester.pumpWidget(const SizedBox.shrink());
@@ -58,7 +63,9 @@ void main() {
       await tester.ensureVisible(find.byType(AgentAvatarChoices));
       await tester.pump();
       expect(
-        tester.widget<AgentAvatarChoices>(find.byType(AgentAvatarChoices)).mode,
+        tester
+            .widget<AgentAvatarChoices>(find.byType(AgentAvatarChoices))
+            .category,
         mode,
       );
       expect(
@@ -157,10 +164,28 @@ void main() {
           pack.indices.length - 1,
         );
       }
+      final rememberedPack = AgentAvatarPack.values.last;
+      final alternate = rememberedPack.indices.firstWhere(
+        (i) => agentAvatarCatalog[i].url != selection.url,
+      );
+      await tester.ensureVisible(
+        find.byKey(ValueKey('agent-avatar-$alternate')),
+      );
+      await tester.tap(find.byKey(ValueKey('agent-avatar-$alternate')));
+      await tester.pumpAndSettle();
       await tester.ensureVisible(find.text('Buzzies'));
       await tester.tap(find.text('Buzzies'));
       await tester.pumpAndSettle();
       expect(selection.url, character);
+      await tester.ensureVisible(find.text(rememberedPack.label));
+      await tester.tap(find.text(rememberedPack.label));
+      await tester.pumpAndSettle();
+      expect(selection.url, agentAvatarCatalog[alternate].url);
+      await tester.ensureVisible(find.text('Buzzies'));
+      await tester.tap(find.text('Buzzies'));
+      await tester.pumpAndSettle();
+      expect(selection.url, character);
+
       expect(
         tester
             .widget<AgentAvatarChoices>(find.byType(AgentAvatarChoices))
@@ -235,8 +260,8 @@ void main() {
       final restoredChoices = tester.widget<AgentAvatarChoices>(
         find.byType(AgentAvatarChoices),
       );
-      expect(restoredChoices.mode, 0);
-      expect(restoredChoices.pack, AgentAvatarPack.buzzies);
+
+      expect(restoredChoices.category.pack, AgentAvatarPack.buzzies);
       expect(find.byKey(const ValueKey('image-avatar-camera')), findsNothing);
       expect(find.text('Animation'), findsNothing);
       expect(tester.takeException(), isNull);

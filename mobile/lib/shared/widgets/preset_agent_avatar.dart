@@ -40,8 +40,8 @@ class PresetAgentAvatar extends HookWidget {
     final isIos = defaultTargetPlatform == TargetPlatform.iOS;
     final isAndroid = defaultTargetPlatform == TargetPlatform.android;
     final route = ModalRoute.of(context);
-    useListenable(route?.animation);
-    useListenable(route?.secondaryAnimation);
+    useListenable(isIos ? route?.animation : null);
+    useListenable(isIos ? route?.secondaryAnimation : null);
     // UIKit video layers cannot reliably follow Flutter's Hero clipping and
     // route opacity. Keep them out of the composition until navigation settles.
     final routeSettled =
@@ -75,10 +75,16 @@ class PresetAgentAvatar extends HookWidget {
       [videoUrl, isAndroid],
     );
     final ready = useState<VideoPlayerController?>(null);
-    useListenable(controller);
     final presented = useState<VideoPlayerController?>(null);
+    useListenable(
+      isIos && posterPlaceholder != null && presented.value != controller
+          ? controller
+          : null,
+    );
     useEffect(() {
-      if (controller != null &&
+      if (isIos &&
+          posterPlaceholder != null &&
+          controller != null &&
           ready.value == controller &&
           controller.value.position > Duration.zero) {
         presented.value = controller;

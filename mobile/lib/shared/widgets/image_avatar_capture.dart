@@ -55,7 +55,6 @@ class ImageAvatarCapture extends HookConsumerWidget {
     required this.onClosed,
     this.initialPreview,
     this.isAgent = false,
-    this.collapseToSourceOptions = true,
     this.initialCapturedBytes,
     this.loadCameras = availableCameras,
     this.disposalBarrier,
@@ -75,9 +74,6 @@ class ImageAvatarCapture extends HookConsumerWidget {
 
   /// Whether the cutout uses the agent avatar shape instead of a circle.
   final bool isAgent;
-
-  /// Morphs back to Camera/Photo Library controls when the host shows them.
-  final bool collapseToSourceOptions;
 
   /// Seeds the captured-photo review state in focused widget tests.
   @visibleForTesting
@@ -352,14 +348,6 @@ class ImageAvatarCapture extends HookConsumerWidget {
             ? HapticFeedback.selectionClick()
             : HapticFeedback.mediumImpact(),
       );
-      if (!collapseToSourceOptions) {
-        if (acceptedBytes == null) {
-          onClosed();
-        } else {
-          onAccepted(acceptedBytes);
-        }
-        return;
-      }
       isClosing.value = true;
       controlsExpanded.value = false;
       if (!reduceMotion) await Future<void>.delayed(_captureMotionDuration);

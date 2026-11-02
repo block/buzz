@@ -1,14 +1,14 @@
-import 'agent_character_artwork.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../../shared/agents/agent_avatar_catalog.dart';
+import '../../shared/animated_avatar.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
-
-import '../../shared/widgets/preset_agent_avatar.dart';
+import 'agent_avatar_category.dart';
+import 'agent_character_artwork.dart';
 
 /// Fixed category rail height used to anchor the editor tray.
 const agentAvatarChoicesHeight = 92.0;
@@ -17,8 +17,7 @@ const agentAvatarChoicesHeight = 92.0;
 class AgentAvatarChoices extends HookWidget {
   const AgentAvatarChoices({
     super.key,
-    required this.mode,
-    required this.pack,
+    required this.category,
     required this.examples,
     required this.emoji,
     required this.disabled,
@@ -27,8 +26,7 @@ class AgentAvatarChoices extends HookWidget {
     required this.onImage,
   });
 
-  final int mode;
-  final AgentAvatarPack pack;
+  final AgentAvatarCategory category;
   final Map<AgentAvatarPack, int> examples;
   final String emoji;
   final bool disabled;
@@ -42,7 +40,7 @@ class AgentAvatarChoices extends HookWidget {
     useEffect(() {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!controller.hasClients) return;
-        final position = mode == 0 ? pack.index : mode + 3;
+        final position = category.position;
         controller.jumpTo(
           (position * 84.0 - 84).clamp(
             0.0,
@@ -64,24 +62,22 @@ class AgentAvatarChoices extends HookWidget {
             for (final item in AgentAvatarPack.values)
               _Choice(
                 label: item.label,
-                selected: mode == 0 && pack == item,
+                selected: category.pack == item,
                 onTap: disabled ? null : () => onPack(item),
                 child: AgentCharacterAlignment(
                   url: agentAvatarCatalog[examples[item]!].url,
                   scale: 0.85,
-                  child: PresetAgentAvatar(
-                    imageUrl: agentAvatarCatalog[examples[item]!].url,
-                    size: 60,
-                    posterPlaceholder: characterPoster(
+                  child: Transform.scale(
+                    scale: animatedAvatarArtworkScale,
+                    child: characterPoster(
                       agentAvatarCatalog[examples[item]!].url,
                     ),
-                    fallback: const Icon(Icons.smart_toy_outlined),
                   ),
                 ),
               ),
             _Choice(
               label: 'Emoji',
-              selected: mode == 1,
+              selected: category == AgentAvatarCategory.emoji,
               onTap: disabled ? null : onEmoji,
               child: Center(
                 child: Text(emoji, style: const TextStyle(fontSize: 32)),
@@ -89,7 +85,7 @@ class AgentAvatarChoices extends HookWidget {
             ),
             _Choice(
               label: 'Image',
-              selected: mode == 2,
+              selected: category == AgentAvatarCategory.image,
               onTap: disabled ? null : onImage,
               child: const Icon(Icons.image_outlined, size: 28),
             ),
