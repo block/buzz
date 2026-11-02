@@ -242,6 +242,66 @@ void main() {
       final readsAfterRebuild = membershipReads();
       minutes(10);
       expect(membershipReads(), readsAfterRebuild);
+
+      // On a cold load with no saved list, as after a fresh sign-in, the
+      // read doesn't get the hidden DMs. It keeps the DM shown and is
+      // retried.
+      final fresh = FakeRelay();
+      fresh
+        ..seed([
+          fresh.sign(
+            kind: 39002,
+            tags: [
+              ['d', _dm],
+              ['p', fresh.pubkey],
+            ],
+          ),
+          fresh.sign(
+            kind: 39000,
+            tags: [
+              ['d', _dm],
+              ['name', 'dm'],
+              ['t', 'dm'],
+              ['private'],
+              ['p', fresh.pubkey],
+            ],
+          ),
+          fresh.sign(
+            kind: EventKind.dmVisibility,
+            tags: [
+              ['p', fresh.pubkey],
+              ['h', _dm],
+            ],
+          ),
+        ])
+        ..refuseReq(
+          (f) =>
+              (f['kinds'] as List).length == 1 &&
+              (f['kinds'] as List).single == EventKind.dmVisibility,
+          'error: unavailable',
+        );
+      final cold = ProviderContainer(
+        overrides: [
+          ...fresh.overrides,
+          savedPrefsProvider.overrideWithValue(prefs),
+        ],
+      );
+      addTearDown(cold.dispose);
+      final coldChannels = cold.listen(channelsProvider, (_, _) {});
+      List<String> coldNames() => [
+        for (final channel in coldChannels.read().requireValue) channel.name,
+      ];
+      int coldReads() => fresh.queries
+          .expand((filters) => filters)
+          .where((f) => f.containsKey('#p') && f['kinds'].contains(39002))
+          .length;
+      seconds(1);
+      expect(coldNames(), ['dm']);
+      seconds(10);
+      expect(coldNames(), isEmpty);
+      final coldReadsAfterRetry = coldReads();
+      minutes(10);
+      expect(coldReads(), coldReadsAfterRetry);
     });
   });
 

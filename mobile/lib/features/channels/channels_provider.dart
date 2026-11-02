@@ -327,7 +327,15 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       throw const _StaleChannelRefresh();
     }
 
-    return _fetch(subscribeLive: true);
+    final channels = await _fetch(subscribeLive: true);
+    // As on resume, a failed part of the cold read (such as hidden DMs) is
+    // retried.
+    if (ref.mounted &&
+        buildGeneration == _buildGeneration &&
+        _channelListChangesRead < _channelListChanges) {
+      _listReadRetry.schedule(_readListIfChanged);
+    }
+    return channels;
   }
 
   Future<List<Channel>> _fetch({
