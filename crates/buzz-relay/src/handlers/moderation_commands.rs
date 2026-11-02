@@ -199,7 +199,6 @@ async fn handle_ban(
         )
         .await
         .map_err(|e| error(format!("database error: {e}")))?;
-    state.invalidate_restriction_cache(tenant.community(), &target);
 
     // Live enforcement: close open sessions for the banned principal now —
     // this pod's sockets synchronously (fenced to this community) and every

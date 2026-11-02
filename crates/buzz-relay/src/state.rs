@@ -1921,9 +1921,10 @@ impl AppState {
         Ok(state)
     }
 
-    /// Best-effort drop of a pubkey's cached restriction row after a signed
-    /// ban, unban, timeout or untimeout. This pod and this key only;
-    /// [`RESTRICTION_CACHE_MAX_AGE`] is the actual bound everywhere else.
+    /// Best-effort drop of a pubkey's cached restriction row on this pod.
+    /// A ban drops it on every pod, for the target and its agents, through
+    /// [`Self::disconnect_pubkey_local`]; an unban, timeout or untimeout only
+    /// on the pod that handles it. [`RESTRICTION_CACHE_MAX_AGE`] bounds the rest.
     pub fn invalidate_restriction_cache(&self, community_id: CommunityId, pubkey: &[u8]) {
         self.restriction_cache
             .invalidate(&(community_id, pubkey.to_vec()));
@@ -2093,6 +2094,10 @@ impl AppState {
         reason: &str,
         unowned_only: bool,
     ) -> usize {
+        // Every ban reaches every pod through here, for the target and each
+        // agent it owns, so the next HTTP request or write rereads the ban
+        // instead of serving a cached row for up to `RESTRICTION_CACHE_MAX_AGE`.
+        self.invalidate_restriction_cache(community, pubkey);
         self.conn_manager
             .disconnect_pubkey(community, pubkey, event_id, reason, unowned_only)
             + self
@@ -2459,8 +2464,10 @@ impl AppState {
     /// Concurrent misses share one read: the first takes the community's
     /// gate in [`Self::open_channels_reads`] and reads; the rest wait for it
     /// to finish and use its set. A waiter whose leader failed or was
-    /// cancelled reads on its own rather than queueing behind another leader,
-    /// so a failing database costs each caller at most two reads' time.
+    /// cancelled reads on its own rather than queueing behind another leader.
+    /// A waiter also stops waiting after [`OPEN_CHANNELS_MAX_AGE`] and reads
+    /// on its own: the leader's set would be stale on arrival by then, so a
+    /// leader whose read hangs stalls only its own request.
     async fn open_channels(
         &self,
         community_id: CommunityId,
@@ -2480,7 +2487,7 @@ impl AppState {
         let _leader = match gate.try_lock() {
             Ok(guard) => Some(guard),
             Err(_) => {
-                drop(gate.lock().await);
+                drop(tokio::time::timeout(OPEN_CHANNELS_MAX_AGE, gate.lock()).await);
                 if let Some(open) = fresh() {
                     metrics::counter!("buzz_open_channels_cache_hits_total").increment(1);
                     return Ok(open);
@@ -3508,10 +3515,13 @@ pub(crate) mod tests {
         /// Open-set reads park on a lock on `channels`, where the test counts
         /// them. Nine concurrent misses make one read and share its set. When
         /// the read in flight is cancelled, its eight waiters each read at
-        /// once rather than one at a time behind the gate.
+        /// once rather than one at a time behind the gate. When the read in
+        /// flight hangs, its waiters stop waiting after
+        /// [`OPEN_CHANNELS_MAX_AGE`] and each read on their own.
         /// Mutations: drop the waiter path (nine reads park in the first
-        /// half), or hold the gate across a waiter's own read (one parks at a
-        /// time in the second) → RED.
+        /// half), hold the gate across a waiter's own read (the second's
+        /// orphans park only once their wait runs out), or wait on the gate
+        /// with no limit (the third never gets past one) → RED.
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn open_set_misses_share_one_read_and_orphans_read_concurrently() {
@@ -3538,15 +3548,20 @@ pub(crate) mod tests {
                 .await
                 .unwrap()
             };
-            let parks = |want: i64| async move {
-                for _ in 0..500 {
+            let parks = |want: i64, within: std::time::Duration| async move {
+                let start = Instant::now();
+                while start.elapsed() < within {
                     if parked().await >= want {
                         return;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
-                panic!("{} open-set reads parked, want {want}", parked().await);
+                panic!(
+                    "{} open-set reads parked after {within:?}, want {want}",
+                    parked().await
+                );
             };
+            let soon = std::time::Duration::from_secs(5);
             let misses = |n: usize| {
                 (0..n)
                     .map(|_| {
@@ -3566,8 +3581,8 @@ pub(crate) mod tests {
 
             let locker = lock().await;
             let cohort = misses(9);
-            parks(1).await;
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            parks(1, soon).await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             assert_eq!(parked().await, 1, "concurrent misses share one read");
             locker.commit().await.unwrap();
             let mut sets = Vec::new();
@@ -3582,19 +3597,38 @@ pub(crate) mod tests {
             state.open_channels_cache.invalidate(&community);
             let locker = lock().await;
             let leader = misses(1).remove(0);
-            parks(1).await;
+            parks(1, soon).await;
             let orphans = misses(8);
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             assert_eq!(parked().await, 1, "waiters queue behind the leader");
             leader.abort();
-            // The cancelled leader's backend stays parked, plus one per orphan.
-            parks(9).await;
+            // The cancelled leader's backend stays parked, plus one per orphan,
+            // well before an orphan's wait on the gate would run out.
+            parks(9, OPEN_CHANNELS_MAX_AGE / 2).await;
             locker.commit().await.unwrap();
             for orphan in orphans {
                 orphan
                     .await
                     .expect("join")
                     .expect("an orphan reads on its own");
+            }
+
+            state.open_channels_cache.invalidate(&community);
+            let locker = lock().await;
+            let hung = misses(1).remove(0);
+            parks(1, soon).await;
+            let waiters = misses(8);
+            // The leader's read never returns while the lock is held; each
+            // waiter gives up on it and its own read parks too.
+            parks(9, soon).await;
+            assert!(!hung.is_finished(), "the leader's read is still in flight");
+            locker.commit().await.unwrap();
+            hung.await.expect("join").expect("the leader reads");
+            for waiter in waiters {
+                waiter
+                    .await
+                    .expect("join")
+                    .expect("a waiter reads on its own");
             }
         }
 
@@ -4690,6 +4724,48 @@ pub(crate) mod tests {
             !mgr.has_admitted_connection(community, &pubkey),
             "a pending sibling does not keep presence"
         );
+    }
+
+    /// A ban's disconnect, local or from another pod's conn-control
+    /// publish, drops that pubkey's cached restriction row in that
+    /// community, so the pod's next HTTP request or write rereads the ban.
+    /// Mutation: drop the invalidation from `disconnect_pubkey_local` → RED.
+    #[tokio::test]
+    async fn disconnect_drops_the_cached_restriction_row() {
+        let state =
+            test_state_with_unreachable_database_url("postgres://buzz@127.0.0.1:1/buzz").await;
+        let (community, elsewhere) = (
+            CommunityId::from_uuid(Uuid::from_u128(0xb1)),
+            CommunityId::from_uuid(Uuid::from_u128(0xb2)),
+        );
+        let (target, bystander) = (vec![1u8; 32], vec![2u8; 32]);
+        let unrestricted = || buzz_db::moderation::RestrictionState {
+            banned: false,
+            muted_until: None,
+        };
+        for key in [
+            (community, target.clone()),
+            (community, bystander.clone()),
+            (elsewhere, target.clone()),
+        ] {
+            state.seed_restriction(key, unrestricted());
+        }
+
+        state.disconnect_pubkey_local(
+            community,
+            &target,
+            &"0".repeat(64),
+            "blocked: banned",
+            false,
+        );
+
+        let cached = |key| state.restriction_cache.get(&key).is_some();
+        assert!(
+            !cached((community, target.clone())),
+            "the ban's row is dropped"
+        );
+        assert!(cached((community, bystander)), "another pubkey's row stays");
+        assert!(cached((elsewhere, target)), "another community's row stays");
     }
 
     /// `has_admitted_connection` follows every path that changes an admitted
