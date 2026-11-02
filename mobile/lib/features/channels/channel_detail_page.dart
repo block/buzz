@@ -675,12 +675,16 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
         ? dmHeader?.presenceLabel
         : headerMemberLabel;
 
-    final timelineMessages = resolvedChannel.isForum
-        ? <TimelineMessage>[]
-        : formatTimeline(
-            messagesState.value ?? const [],
-            currentPubkey: currentPubkey,
-          );
+    // The page also rebuilds for read state, presence, roster and layout
+    // changes. Format only when the events themselves change: the notifier
+    // publishes a new list for every event change.
+    final events = messagesState.value ?? const <NostrEvent>[];
+    final timelineMessages = useMemoized(
+      () => resolvedChannel.isForum
+          ? <TimelineMessage>[]
+          : formatTimeline(events, currentPubkey: currentPubkey),
+      [events, currentPubkey, resolvedChannel.isForum],
+    );
     final timelineEntries = buildMainTimelineEntries(
       // End events still update the original card through allMessages.
       timelineMessages
