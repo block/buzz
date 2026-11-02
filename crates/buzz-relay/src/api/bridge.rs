@@ -9350,7 +9350,7 @@ pub(crate) mod postgres_tests {
 
         // The search statement itself outlives the search pool's deadline:
         // message and profile search answer 503 `query timed out` over HTTP,
-        // and a WS search ends CLOSED rather than an empty EOSE.
+        // and a WS search ends with the same timeout CLOSED, not an empty EOSE.
         let mut locker = fx.writer.begin().await.expect("begin locker");
         sqlx::query("LOCK TABLE events IN ACCESS EXCLUSIVE MODE")
             .execute(&mut *locker)
@@ -9375,14 +9375,10 @@ pub(crate) mod postgres_tests {
                 "HTTP {uri} search statement"
             );
         }
-        assert_eq!(
-            fx.ws_search().await,
-            format!(
-                r#"["CLOSED","s","{}"]"#,
-                crate::handlers::req::SEARCH_FAILED_CLOSED
-            ),
-            "WS search statement"
-        );
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(10), fx.ws_search())
+            .await
+            .expect("WS search must be cancelled, not wait on the lock");
+        assert_eq!(frame, closed("s"), "WS search statement");
         locker.rollback().await.expect("unlock");
         let (status, body) = fx.http("/query", &fx.search_filter()).await;
         assert_eq!(status, StatusCode::OK, "search pool recovers: {body}");

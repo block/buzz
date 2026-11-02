@@ -890,15 +890,15 @@ async fn handle_search_req(
                     // CLOSED, not EOSE: an empty EOSE would read as "no
                     // matches". Stop the whole REQ so later filters do not
                     // each wait out the search pool's acquire timeout too.
+                    // A deadline cancel gets the stable timeout reason, as a
+                    // cancelled hydrate does, so clients do not retry it.
                     warn!(sub_id = %sub_id, "NIP-50 search failed: {e}");
-                    super::close::close_if_owner(
-                        sub_id,
-                        owner,
-                        Some(SEARCH_FAILED_CLOSED),
-                        conn,
-                        state,
-                    )
-                    .await;
+                    let reason = if e.is_statement_cancelled() {
+                        QUERY_TIMED_OUT_CLOSED
+                    } else {
+                        SEARCH_FAILED_CLOSED
+                    };
+                    super::close::close_if_owner(sub_id, owner, Some(reason), conn, state).await;
                     return;
                 }
             };
