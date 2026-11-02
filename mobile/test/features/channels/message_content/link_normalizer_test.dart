@@ -182,6 +182,21 @@ void main() {
         expected: '```\n$url ``` still code\n```\n[$url]($url)',
       ),
       (
+        name: 'tilde fence indented three spaces',
+        input: '   ~~~\n$url\n   ~~~\n$url',
+        expected: '   ~~~\n$url\n   ~~~\n[$url]($url)',
+      ),
+      (
+        name: 'tilde run indented four spaces is not a fence',
+        input: '    ~~~\n$url',
+        expected: '    ~~~\n[$url]($url)',
+      ),
+      (
+        name: 'fence closer must end its line',
+        input: '~~~\n$url\n~~~ x\n~~~\n$url',
+        expected: '~~~\n$url\n~~~ x\n~~~\n[$url]($url)',
+      ),
+      (
         name: 'unclosed backticks remain prose',
         input: '$url then `$url',
         expected: '[$url]($url) then `[$url]($url)',
@@ -193,6 +208,22 @@ void main() {
         expect(normalizeBareLinks(testCase.input), testCase.expected);
       });
     }
+
+    test('near-limit fence-like runs on one line complete linearly', () {
+      // Each run checks only its own indentation and the rest of its line up
+      // to the next character, so a long line of runs is not rescanned.
+      for (final input in [
+        'x~~~' * (256 * 1024 ~/ 4),
+        '~~~\n${' ~~~' * (256 * 1024 ~/ 4)}',
+        '```\n${' ```' * (256 * 1024 ~/ 4)}',
+      ]) {
+        final watch = Stopwatch()..start();
+        final result = normalizeBareLinks(input);
+        watch.stop();
+        expect(result == input, isTrue);
+        expect(watch.elapsed, lessThan(const Duration(seconds: 2)));
+      }
+    });
   });
 
   test(

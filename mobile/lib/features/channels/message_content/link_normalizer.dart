@@ -100,14 +100,8 @@ bool _isEscaped(String content, int index) {
   return backslashes.isOdd;
 }
 
-bool _isOpeningFence(String content, int runStart, int runLength) {
-  if (runLength < 3) return false;
-  final lineStart = runStart == 0
-      ? 0
-      : content.lastIndexOf('\n', runStart - 1) + 1;
-  final indentation = content.substring(lineStart, runStart);
-  return indentation.length <= 3 && indentation.trim().isEmpty;
-}
+bool _isOpeningFence(String content, int runStart, int runLength) =>
+    runLength >= 3 && _hasFenceIndentation(content, runStart);
 
 bool _isClosingFence(
   String content,
@@ -116,14 +110,26 @@ bool _isClosingFence(
   int openerLength,
 ) {
   if (runEnd - runStart < openerLength) return false;
-  final lineStart = runStart == 0
-      ? 0
-      : content.lastIndexOf('\n', runStart - 1) + 1;
-  final indentation = content.substring(lineStart, runStart);
-  if (indentation.length > 3 || indentation.trim().isNotEmpty) return false;
-  final newline = content.indexOf('\n', runEnd);
-  final lineEnd = newline < 0 ? content.length : newline;
-  return content.substring(runEnd, lineEnd).trim().isEmpty;
+  if (!_hasFenceIndentation(content, runStart)) return false;
+  // Stops at the first non-blank character, so each run scans only up to
+  // the next one and a long line of runs stays linear.
+  for (var i = runEnd; i < content.length; i++) {
+    final char = content[i];
+    if (char == '\n') return true;
+    if (char.trim().isNotEmpty) return false;
+  }
+  return true;
+}
+
+/// Whether at most three blank characters precede [runStart] on its line.
+/// Looks back at most four characters, so checking many runs on one long
+/// line stays linear.
+bool _hasFenceIndentation(String content, int runStart) {
+  for (var i = runStart - 1; i >= runStart - 4; i--) {
+    if (i < 0 || content[i] == '\n') return true;
+    if (content[i].trim().isNotEmpty) return false;
+  }
+  return false;
 }
 
 bool _hasInlineCloserOnLine(String content, int start, int delimiterLength) {
