@@ -102,6 +102,13 @@ void main() {
         clock.flushMicrotasks();
         final latestReads = session.latestReads;
         final gate = session.gate = Completer<void>();
+        // A live notice marks the list changed, so the next tick reads it.
+        session.emit(
+          session.event(EventKind.memberAddedNotification, [
+            ['p', 'me'],
+            ['h', 'alpha'],
+          ]),
+        );
         clock.elapse(const Duration(minutes: 1));
         clock.flushMicrotasks();
         final parkedRequests = session.membershipRequests;
@@ -414,6 +421,12 @@ class _SnapshotSession extends RelaySessionNotifier {
   int membershipRequests = 0;
   int latestReads = 0;
   final listeners = <void Function(NostrEvent)>[];
+  void emit(NostrEvent event) {
+    for (final listener in List.of(listeners)) {
+      listener(event);
+    }
+  }
+
   @override
   SessionState build() => SessionState(
     status: connected ? SessionStatus.connected : SessionStatus.disconnected,

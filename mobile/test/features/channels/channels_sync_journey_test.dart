@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme_provider.dart';
@@ -10,9 +12,130 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../helpers/fake_relay.dart';
 
 const _channel = '11111111-1111-4111-8111-111111111111';
+const _added = '22222222-2222-4222-8222-222222222222';
 
 void main() {
   final binding = TestWidgetsFlutterBinding.ensureInitialized();
+
+  test('while open, the channel list is read again only after a live event '
+      'says it changed', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    fakeAsync((async) {
+      final relay = FakeRelay();
+      var version = 0;
+      NostrEvent roster(String channel, {bool withMe = true}) => relay.sign(
+        kind: 39002,
+        createdAt: 1700000000 + ++version,
+        tags: [
+          ['d', channel],
+          if (withMe) ['p', relay.pubkey],
+        ],
+      );
+      NostrEvent meta(String channel, String name, {bool archived = false}) =>
+          relay.sign(
+            kind: 39000,
+            createdAt: 1700000000 + ++version,
+            tags: [
+              ['d', channel],
+              ['name', name],
+              ['t', 'stream'],
+              ['public'],
+              if (archived) ['archived'],
+            ],
+          );
+      NostrEvent notice(int kind, String channel) => relay.sign(
+        kind: kind,
+        tags: [
+          ['p', relay.pubkey],
+          ['h', channel],
+        ],
+      );
+      NostrEvent system(String type) => relay.sign(
+        kind: EventKind.systemMessage,
+        content: jsonEncode({'type': type}),
+        tags: [
+          ['h', _channel],
+        ],
+      );
+      relay.seed([roster(_channel), meta(_channel, 'general')]);
+      final container = ProviderContainer(
+        overrides: [
+          ...relay.overrides,
+          savedPrefsProvider.overrideWithValue(prefs),
+        ],
+      );
+      addTearDown(container.dispose);
+      final channels = container.listen(channelsProvider, (_, _) {});
+      int membershipReads() => relay.queries
+          .expand((filters) => filters)
+          .where(
+            (f) =>
+                f.containsKey('#p') &&
+                f['kinds'].contains(39002) &&
+                f['until'] == null,
+          )
+          .length;
+      List<String> names() => [
+        for (final channel in channels.read().requireValue) channel.name,
+      ];
+      void minutes(int n) => async.elapse(Duration(minutes: n));
+
+      async.elapse(const Duration(milliseconds: 50));
+      expect(names(), ['general']);
+      expect(membershipReads(), 1);
+
+      // Nothing changed: the backstop ticks send nothing.
+      minutes(5);
+      expect(membershipReads(), 1);
+
+      // Someone adds the reader to a channel.
+      relay.seed([roster(_added), meta(_added, 'added')]);
+      relay.deliver(notice(EventKind.memberAddedNotification, _added));
+      minutes(1);
+      expect(membershipReads(), 2);
+      expect(names(), unorderedEquals(['general', 'added']));
+      minutes(3);
+      expect(membershipReads(), 2);
+
+      // A listed channel is renamed.
+      relay.seed([meta(_channel, 'renamed')]);
+      relay.deliver(
+        relay.sign(
+          kind: EventKind.nip29EditMetadata,
+          tags: [
+            ['h', _channel],
+            ['name', 'renamed'],
+          ],
+        ),
+      );
+      minutes(1);
+      expect(membershipReads(), 3);
+      expect(names(), unorderedEquals(['renamed', 'added']));
+
+      // A member joining doesn't change the list; archiving it does.
+      relay.deliver(system('member_joined'));
+      minutes(2);
+      expect(membershipReads(), 3);
+      relay.deliver(system('channel_archived'));
+      minutes(1);
+      expect(membershipReads(), 4);
+
+      // Several changes within a minute cost one read.
+      // The relay replaces the channel's roster with one without the reader.
+      relay.stored.removeWhere(
+        (e) => e.kind == 39002 && e.getTagValue('d') == _added,
+      );
+      relay.seed([roster(_added, withMe: false)]);
+      relay.deliver(notice(EventKind.memberRemovedNotification, _added));
+      relay.deliver(system('topic_changed'));
+      minutes(1);
+      expect(membershipReads(), 5);
+      expect(names(), ['renamed']);
+      minutes(3);
+      expect(membershipReads(), 5);
+    });
+  });
 
   test(
     'the channel list reconciles once per resume and stays quiet while away',

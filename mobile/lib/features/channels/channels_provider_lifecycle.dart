@@ -11,8 +11,9 @@ const _maxLiveChannelsPerSubscription = 128;
 /// file-size ratchet.
 extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
   /// Subscribe to live events in deterministic chunks that stay within the
-  /// relay's aggregate explicit-`#h` limit. Also starts a 60s WS backstop poll
-  /// to reconcile membership changes without downloading the global directory.
+  /// relay's aggregate explicit-`#h` limit, plus the channel list notices in
+  /// [_ChannelListChanges]. Also starts the 60s backstop, which reads the list
+  /// again only after a live event says it changed.
   Future<void> _subscribeLive(
     List<Channel> channels,
     _ChannelRefreshFence fence,
@@ -100,7 +101,11 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
       try {
         final unsubscribe = await session.subscribe(
           NostrFilter(
-            kinds: EventKind.channelEventKinds,
+            // Metadata edits say a listed channel was renamed or redescribed.
+            kinds: [
+              ...EventKind.channelEventKinds,
+              EventKind.nip29EditMetadata,
+            ],
             tags: {'#h': chunk},
             limit: 0,
           ),
@@ -163,6 +168,9 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
       return;
     }
 
+    final myPk = _lifecycleRef.read(myPubkeyProvider);
+    if (myPk != null) unawaited(_subscribeChannelListNotices(myPk));
+
     fence.ensureCurrent();
     _unreadCatchUp = _catchUpUnreadEvents(channels, fence, subscriptionVersion);
     _notifyUnreadReadinessChanged();
@@ -172,13 +180,18 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
   }
 
   // Arm recovery before the first network load succeeds. A restored snapshot
-  // needs one full load; subsequent reconnects keep the metadata-only backstop.
+  // needs one full load. Otherwise launch, resume, reconnect and pull to
+  // refresh read the list, and live subscriptions keep it current between
+  // them, so a tick reads it again only after a live event says it changed.
+  // That also limits those reads to one a minute however busy the relay is.
   void _startBackstopTimer() {
     _backstopTimer ??= Timer.periodic(ChannelsNotifier._backstopInterval, (_) {
       // After suspension, a missed tick can precede the resumed lifecycle
       // event. Keep recovery armed, but never poll while backgrounded.
       if (_lifecycleRef.read(appLifecycleProvider) ==
-          AppLifecycleState.resumed) {
+              AppLifecycleState.resumed &&
+          (_needsSnapshotRevalidation ||
+              _channelListChanges != _channelListChangesRead)) {
         unawaited(_refreshInBackground());
       }
     });
@@ -276,6 +289,7 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
       subscription.unsubscribe?.call();
     }
     _liveSubscriptionsByChunk.clear();
+    _clearChannelListNotices();
   }
 
   void _clearLiveSubscriptions() {

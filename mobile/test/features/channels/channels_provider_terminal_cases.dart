@@ -45,8 +45,8 @@ void _terminalSubscriptionTests() {
           expect(clock.periodicTimerCount, 1);
           expect(clock.nonPeriodicTimerCount, 0);
 
-          // Ordinary polling may refresh memberships, but never re-admits an
-          // unchanged terminal filter, creates retry timers, or repeats logs.
+          // Quiet backstop ticks read nothing, never re-admit an unchanged
+          // terminal filter, create retry timers, or repeat logs.
           final pollStart = session.membershipRequestCount;
           for (var i = 0; i < 3; i++) {
             clock.elapse(const Duration(seconds: 60));
@@ -60,7 +60,7 @@ void _terminalSubscriptionTests() {
               _channelA,
             );
           }
-          expect(session.membershipRequestCount - pollStart, 6);
+          expect(session.membershipRequestCount - pollStart, 0);
 
           // A pull-to-refresh still isn't evidence that admission changed.
           unawaited(container.read(channelsProvider.notifier).refresh());
@@ -228,7 +228,7 @@ class _TerminalRelaySession extends _FakeRelaySession {
       onEvent,
       onClosed: onClosed,
     );
-    if (!reject) return unsubscribe;
+    if (!reject || listNoticeFilters.contains(filter)) return unsubscribe;
     final key = _subscriptions.keys.last;
     final closed = Completer<void>();
     final timer = Timer(const Duration(milliseconds: 1), () {

@@ -29,6 +29,7 @@ part 'channel_unread_catch_up.dart';
 part 'channel_snapshot.dart';
 part 'channel_member_snapshots.dart';
 part 'channels_provider_lifecycle.dart';
+part 'channel_list_changes.dart';
 
 const _channelTypeOrder = {'stream': 0, 'forum': 1, 'dm': 2};
 const _unreadCatchUpLimit = 1000;
@@ -62,6 +63,14 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   final Set<String> _terminallyClosedLiveChunks = {};
   String? _subscriptionRelayBaseUrl;
   Timer? _backstopTimer;
+  // Live events that may have changed the channel list, and how many of them
+  // the last completed read covered. See [_ChannelListChanges].
+  int _channelListChanges = 0;
+  int _channelListChangesRead = 0;
+  void Function()? _listNoticesUnsubscribe;
+  bool _listNoticesSubscribed = false;
+  bool _listNoticesRefused = false;
+  int _listNoticesGeneration = 0;
   final Map<String, int> _latestObservedByChannel = {};
   final Map<String, Map<String, ObservedUnreadEvent>>
   _observedUnreadEventsByChannel = {};
@@ -213,6 +222,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         // A new authenticated connection can change relay admission policy.
         // Ordinary refreshes must not retry an unchanged terminal rejection.
         _terminallyClosedLiveChunks.clear();
+        _listNoticesRefused = false;
         unawaited(_refreshInBackground(queueIfBusy: true));
       }
     });
@@ -302,6 +312,9 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     final fence = await _refreshCoordinator.beginRefresh(
       fetchesDirectory: fetchDirectory,
     );
+
+    // Live changes from here on may not be in this read.
+    final listChanges = _channelListChanges;
 
     // Step 1: find the channels I'm a member of via kind:39002.
     final memberships = _latestChannelEvents(
@@ -554,6 +567,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       }
     }
     if (fetchLastMessage) _needsSnapshotRevalidation = latestEvents == null;
+    _channelListChangesRead = max(_channelListChangesRead, listChanges);
     saveSnapshot?.call(channels, _hiddenDmIds);
     return channels;
   }
@@ -763,6 +777,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   }
 
   void _handleLiveEvent(NostrEvent event) {
+    if (_noteChannelChange(event) &&
+        event.kind == EventKind.nip29EditMetadata) {
+      return;
+    }
     if (_applyUnreadDeletion(event)) {
       state = state.whenData((channels) => List<Channel>.of(channels));
       return;
