@@ -14,19 +14,22 @@ void main() {
       h.registry.signedIn = false;
       final restore = Completer<void>();
       h.registry.restoreGate = restore;
-      await h.open(tester, directory: [existingDesktopKeys.public]);
+      await h.open(tester, directory: []);
 
       const prompt = 'Sign in to Builderlab to manage remote agents';
       expect(h.controller.busy, isTrue);
       expect(find.text(prompt), findsNothing);
       expect(find.widgetWithText(TextButton, 'Sign in'), findsNothing);
-      expect(find.text('Manage on desktop'), findsNothing);
+      expect(find.text('You haven’t added any agents yet.'), findsNothing);
 
       // No saved session after all: now the prompt is the way forward.
       restore.complete();
       await tester.pumpAndSettle();
       expect(h.controller.busy, isFalse);
       expect(find.text(prompt), findsOneWidget);
+      // Remote agents may exist but are unlistable until sign-in, so an
+      // empty listing must not claim there are none.
+      expect(find.text('You haven’t added any agents yet.'), findsNothing);
     },
     skip: !HostedEnvironment.enabled,
   );

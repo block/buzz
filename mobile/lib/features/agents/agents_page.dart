@@ -340,7 +340,7 @@ class AgentsPage extends HookConsumerWidget {
                             child: const Text('Sign in'),
                           ),
                         ),
-                      if (!loading && !failed && keys.isEmpty)
+                      if (!loading && !failed && !needsSignIn && keys.isEmpty)
                         const Padding(
                           padding: EdgeInsets.all(Grid.sm),
                           child: Text(
