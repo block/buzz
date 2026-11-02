@@ -19,12 +19,14 @@ import 'relay_closed_policy.dart';
 import 'relay_http_query_client.dart';
 import 'relay_provider.dart';
 import 'relay_rate_limit_gate.dart';
+import 'read_state_snapshot.dart';
 import 'relay_session_types.dart';
 import 'relay_socket.dart';
 
 export 'relay_session_types.dart';
 
 part 'relay_session_auth.dart';
+part 'relay_session_snapshot.dart';
 
 class _HistorySubscription {
   final List<NostrEvent> events = [];
@@ -163,6 +165,14 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     filters.map((filter) => filter.toJson()).toList(),
     timeout: timeout,
   );
+
+  RelayConfig get _snapshotConfig => ref.read(relayConfigProvider);
+
+  /// Fetches a complete, validated own-author kind-30078 snapshot.
+  /// Throws if discovery, completeness, scope or event validation fails.
+  Future<List<NostrEvent>> fetchReadStateSnapshot({
+    Duration timeout = const Duration(seconds: 8),
+  }) => _fetchReadStateSnapshot(timeout: timeout);
 
   /// Finds people by profile name, for typeahead surfaces.
   ///

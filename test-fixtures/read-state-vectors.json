@@ -1,0 +1,417 @@
+{
+  "schemaVersion": 1,
+  "now": 1800000000,
+  "retentionSeconds": 2592000,
+  "floor": 1797408000,
+  "notes": [
+    "Evaluation uses messageAt > max(floor, merged key and named parent frontiers).",
+    "Packing inputs are already retention-filtered, locally-owned frontier maps; overrides stay on the primary. Neither client writes msg: keys; legacy msg: keys remain readable.",
+    "Initial allocation packs keys in ascending order into empty slots. Subsequent edits preserve persisted key-to-slot placement; keys are sorted only within each slot. Envelope uses compact JSON and raw UTF-8.",
+    "Overrides remain outside the age floor; full-state snapshot retrieval must not use since.",
+    "Lifecycle traces are obligations for suite-local persistence/relay tests, not a substitute implementation."
+  ],
+  "evaluation": [
+    {
+      "id": "missing-at-floor",
+      "states": [],
+      "key": "room",
+      "parents": [],
+      "messageAt": 1797408000,
+      "expectedEffective": 1797408000,
+      "expectedUnread": false
+    },
+    {
+      "id": "missing-one-second-newer",
+      "states": [],
+      "key": "room",
+      "parents": [],
+      "messageAt": 1797408001,
+      "expectedEffective": 1797408000,
+      "expectedUnread": true
+    },
+    {
+      "id": "old-frontier-below-floor",
+      "states": [
+        {
+          "room": 1797407999
+        }
+      ],
+      "key": "room",
+      "parents": [],
+      "messageAt": 1797408000,
+      "expectedEffective": 1797408000,
+      "expectedUnread": false
+    },
+    {
+      "id": "merged-max-across-slots",
+      "states": [
+        {
+          "room": 1797408020
+        },
+        {
+          "room": 1797408010
+        },
+        {
+          "room": 1797408020
+        }
+      ],
+      "key": "room",
+      "parents": [],
+      "messageAt": 1797408021,
+      "expectedEffective": 1797408020,
+      "expectedUnread": true
+    },
+    {
+      "id": "channel-covers-thread",
+      "states": [
+        {
+          "room": 1797408030
+        },
+        {
+          "thread:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": 1797408010
+        }
+      ],
+      "key": "thread:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "parents": [
+        "room"
+      ],
+      "messageAt": 1797408030,
+      "expectedEffective": 1797408030,
+      "expectedUnread": false
+    },
+    {
+      "id": "legacy-msg-still-read",
+      "states": [
+        {
+          "msg:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": 1797408050
+        }
+      ],
+      "key": "msg:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "parents": [
+        "room",
+        "thread:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ],
+      "messageAt": 1797408050,
+      "expectedEffective": 1797408050,
+      "expectedUnread": false
+    },
+    {
+      "id": "old-carrier-high-frontier",
+      "carrierCreatedAt": 1797407999,
+      "states": [
+        {
+          "room": 1800000050
+        }
+      ],
+      "key": "room",
+      "parents": [],
+      "messageAt": 1800000040,
+      "expectedEffective": 1800000050,
+      "expectedUnread": false
+    }
+  ],
+  "packing": [
+    {
+      "id": "utf8-and-escaped-json",
+      "clientId": "fixture",
+      "maxPlaintextBytes": 110,
+      "frontiers": {
+        "room-a": 1797408000,
+        "room-b": 1797408001,
+        "room-c": 1797408002,
+        "quote\"slash\\": 1797408003,
+        "雪": 1797408004,
+        "é": 1797408005
+      },
+      "expectedBlobKeys": [
+        [
+          "quote\"slash\\",
+          "room-a",
+          "room-b"
+        ],
+        [
+          "room-c",
+          "é",
+          "雪"
+        ]
+      ],
+      "expectedPlaintextBytes": [
+        110,
+        95
+      ]
+    },
+    {
+      "id": "more-than-twelve-blobs",
+      "clientId": "fixture",
+      "maxPlaintextBytes": 40960,
+      "expectedPlaintextBytes": [
+        40927,
+        40927,
+        40927,
+        40927,
+        40927,
+        40927,
+        40927,
+        40927,
+        40927,
+        40927,
+        40927,
+        40927,
+        40927,
+        40927,
+        22652
+      ],
+      "generate": {
+        "count": 7000,
+        "keyPrefix": "thread:",
+        "indexFormat": "lowercase hex padded to 64 characters",
+        "valueStart": 1797408001,
+        "valueStep": 1
+      },
+      "expectedBlobRanges": [
+        {
+          "firstIndex": 0,
+          "lastIndex": 480,
+          "count": 481
+        },
+        {
+          "firstIndex": 481,
+          "lastIndex": 961,
+          "count": 481
+        },
+        {
+          "firstIndex": 962,
+          "lastIndex": 1442,
+          "count": 481
+        },
+        {
+          "firstIndex": 1443,
+          "lastIndex": 1923,
+          "count": 481
+        },
+        {
+          "firstIndex": 1924,
+          "lastIndex": 2404,
+          "count": 481
+        },
+        {
+          "firstIndex": 2405,
+          "lastIndex": 2885,
+          "count": 481
+        },
+        {
+          "firstIndex": 2886,
+          "lastIndex": 3366,
+          "count": 481
+        },
+        {
+          "firstIndex": 3367,
+          "lastIndex": 3847,
+          "count": 481
+        },
+        {
+          "firstIndex": 3848,
+          "lastIndex": 4328,
+          "count": 481
+        },
+        {
+          "firstIndex": 4329,
+          "lastIndex": 4809,
+          "count": 481
+        },
+        {
+          "firstIndex": 4810,
+          "lastIndex": 5290,
+          "count": 481
+        },
+        {
+          "firstIndex": 5291,
+          "lastIndex": 5771,
+          "count": 481
+        },
+        {
+          "firstIndex": 5772,
+          "lastIndex": 6252,
+          "count": 481
+        },
+        {
+          "firstIndex": 6253,
+          "lastIndex": 6733,
+          "count": 481
+        },
+        {
+          "firstIndex": 6734,
+          "lastIndex": 6999,
+          "count": 266
+        }
+      ]
+    }
+  ],
+  "ownership": [
+    {
+      "id": "peer-merge-does-not-become-local-write",
+      "local": {
+        "room": 1797408005
+      },
+      "remote": [
+        {
+          "room": 1797408050,
+          "peer-only": 1797408070
+        }
+      ],
+      "expectedMerged": {
+        "room": 1797408050,
+        "peer-only": 1797408070
+      },
+      "expectedPublished": {
+        "room": 1797408005
+      }
+    },
+    {
+      "id": "advance-below-observed-peer-max",
+      "local": {
+        "room": 1797408005
+      },
+      "remote": [
+        {
+          "room": 1797408050
+        }
+      ],
+      "localAdvance": {
+        "room": 1797408010
+      },
+      "expectedMerged": {
+        "room": 1797408050
+      },
+      "expectedPublished": {
+        "room": 1797408010
+      }
+    }
+  ],
+  "pruning": [
+    {
+      "id": "floor-boundary-frontiers",
+      "frontiers": {
+        "old": 1797407999,
+        "equal": 1797408000,
+        "new": 1797408001
+      },
+      "expectedRequiredKeys": [
+        "new"
+      ],
+      "expectedOptionalInertKeys": [
+        "equal"
+      ],
+      "expectedAbsentKeys": [
+        "old"
+      ]
+    }
+  ],
+  "lifecycle": [
+    {
+      "id": "unchanged-blob-not-republished",
+      "steps": [
+        "publish initial packed state",
+        "advance one key without changing earlier blob boundaries",
+        "flush"
+      ],
+      "expect": [
+        "publish only changed coordinates",
+        "keep unchanged blob IDs and content"
+      ]
+    },
+    {
+      "id": "partial-publish-restart",
+      "steps": [
+        "persist slot list and signed pending batch",
+        "accept first coordinate",
+        "second coordinate fails with unknown outcome",
+        "restart then retry"
+      ],
+      "expect": [
+        "retry unknown signed event unchanged until observed",
+        "do not acknowledge full local revision while any required blob remains unsynced",
+        "no frontier lost from persisted local state"
+      ]
+    },
+    {
+      "id": "shrink-and-slot-reuse",
+      "steps": [
+        "publish two frontier-only coordinates",
+        "advance clock so second coordinate contents fall below floor",
+        "pack fewer blobs",
+        "later require second blob again"
+      ],
+      "expect": [
+        "persist stable primary slot",
+        "unused old blob cannot lose required frontier on another device",
+        "reuse owned persisted additional slot or safely retire it; never overwrite foreign slot"
+      ]
+    },
+    {
+      "id": "old-event-new-frontier",
+      "eventCreatedAt": 1797407999,
+      "frontiers": {
+        "room": 1797408100
+      },
+      "messageAt": 1797408080,
+      "expect": [
+        "if full snapshot delivered event, do not discard its newer frontier merely because event is old",
+        "floor never prunes override tombstones"
+      ]
+    }
+  ],
+  "placement": [
+    {
+      "id": "early-key-does-not-move-carriers",
+      "clientId": "fixture",
+      "maxPlaintextBytes": 110,
+      "slots": [
+        {
+          "slot": "00000000000000000000000000000000",
+          "frontiers": {
+            "room-b": 1797408001,
+            "room-c": 1797408002
+          }
+        },
+        {
+          "slot": "11111111111111111111111111111111",
+          "frontiers": {
+            "room-z": 1797408003
+          }
+        }
+      ],
+      "advance": {
+        "room-a": 1797408004
+      },
+      "expectedPreservedAssignments": {
+        "room-b": "00000000000000000000000000000000",
+        "room-c": "00000000000000000000000000000000",
+        "room-z": "11111111111111111111111111111111"
+      },
+      "expect": [
+        "persist assignment before publishing any new coordinate",
+        "failure publishing new key must not erase existing sole frontier carriers",
+        "do not republish untouched slot merely because new key sorts earlier"
+      ]
+    }
+  ],
+  "writePolicy": [
+    {
+      "id": "frontier-only-even-for-mentions",
+      "localObserved": {
+        "room": 1797408010,
+        "thread:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": 1797408020,
+        "msg:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": 1797408030
+      },
+      "messageIsDirectMention": true,
+      "expectedPublished": {
+        "room": 1797408010,
+        "thread:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": 1797408020
+      },
+      "expectedAbsentKeys": [
+        "msg:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      ]
+    }
+  ]
+}
