@@ -50,6 +50,9 @@ void main() {
       'invalid: an open channel named "Launch" already exists':
           'An open channel named "Launch" already exists',
       'blocked: community policy': 'Community policy',
+      'error: internal failure': 'Internal failure',
+      'rate-limited: slow down, retry in 3s': 'Slow down, retry in 3s',
+      'auth-required: sign in first': 'Sign in first',
       'relay unavailable': 'Relay unavailable',
       'Event rejected': 'Event rejected',
     };

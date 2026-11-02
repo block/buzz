@@ -83,6 +83,7 @@ Future<void> _waitForInviteRelay(Ref ref, bool Function() isScopeCurrent) {
 /// App-level bridge from invite joining to the channels feature.
 class MobileInviteJoinRecovery implements InviteJoinRecovery {
   final Future<List<Channel>> Function() _loadChannels;
+  final Future<Channel?> Function(String channelId) _fetchChannel;
   final Future<Channel> Function({
     required String channelId,
     required String name,
@@ -96,9 +97,11 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
   final String _relayHttpOrigin;
   final bool Function() _isScopeCurrent;
 
-  /// Creates recovery from channel-loading, creation, and join operations.
+  /// Creates recovery from channel-loading, single-channel lookup, creation,
+  /// and join operations.
   MobileInviteJoinRecovery({
     required Future<List<Channel>> Function() loadChannels,
+    required Future<Channel?> Function(String channelId) fetchChannel,
     required Future<Channel> Function({
       required String channelId,
       required String name,
@@ -112,6 +115,7 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
     required String relayHttpOrigin,
     bool Function()? isScopeCurrent,
   }) : _loadChannels = loadChannels,
+       _fetchChannel = fetchChannel,
        _createChannel = createChannel,
        _joinChannel = joinChannel,
        _relayHttpOrigin = relayHttpOrigin,
@@ -123,8 +127,9 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
   /// A partial setup remains recoverable, so a failed operation deliberately
   /// propagates to the invite flow instead of being reported as success. The
   /// one exception is a starter whose name or id the relay reports as taken
-  /// by a channel the directory shows cannot serve as the starter: that is
-  /// permanent, so the starter is skipped instead of blocking the join.
+  /// by a channel the directory shows cannot serve as the starter, or an
+  /// archived channel at the starter's own id that the directory omits: both
+  /// are permanent, so the starter is skipped instead of blocking the join.
   @override
   Future<String?> ensureStarterChannels() async {
     _ensureScopeCurrent();
@@ -161,9 +166,19 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
                   .where((candidate) => candidate.id == channelId)
                   .firstOrNull ??
               (nameTaken ? _findListedNamesake(channels, starter.slug) : null);
-          // A holder the directory does not show yet may still be usable, so
-          // keep the setup recoverable.
-          if (holder == null) rethrow;
+          if (holder == null) {
+            // The directory omits archived channels, yet the relay still
+            // keeps the id (desktop uses the same one), so a duplicate with
+            // no match may be an archived starter. Read that id directly.
+            if (!nameTaken && _isDuplicateChannelError(error)) {
+              final atId = await _fetchChannel(channelId);
+              _ensureScopeCurrent();
+              if (atId != null && atId.isArchived) continue;
+            }
+            // A holder not visible yet may still be usable, so keep the setup
+            // recoverable.
+            rethrow;
+          }
           // The relay keeps a channel's id and a listed channel's name, archived
           // ones included, so an unusable holder never frees the starter. Skip
           // it rather than strand the invite in permanent recovery.
@@ -270,6 +285,14 @@ InviteJoinRecovery buildMobileInviteJoinRecovery(
           .fetchFresh(fetchDirectory: true);
       ensureScopeCurrent();
       return channels;
+    },
+    fetchChannel: (channelId) async {
+      ensureScopeCurrent();
+      final channel = await ref
+          .read(channelsProvider.notifier)
+          .fetchOpenChannel(channelId);
+      ensureScopeCurrent();
+      return channel;
     },
     createChannel:
         ({

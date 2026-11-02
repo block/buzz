@@ -81,14 +81,14 @@ RelayClosedClass classifyRelayClosed(String message) {
 }
 
 final _relayErrorPrefixPattern = RegExp(
-  r'^(?:exception:\s*)?(?:(?:invalid|blocked|restricted|duplicate|pow|unsupported):\s*)?',
+  r'^(?:exception:\s*)?(?:(?:invalid|blocked|restricted|duplicate|pow|unsupported|error|rate-limited|auth-required):\s*)?',
   caseSensitive: false,
 );
 
 /// User-facing text for a failed relay publish or request.
 ///
 /// Drops the Dart `Exception: ` wrapper and a leading NIP-01 machine prefix
-/// (`invalid: `, `blocked: `, ...) so a relay refusal such as
+/// (`invalid: `, `blocked: `, `error: `, ...) so a relay refusal such as
 /// `invalid: an open channel named "Launch" already exists` reads as
 /// `An open channel named "Launch" already exists`.
 String relayErrorMessage(Object error) {
