@@ -35,6 +35,15 @@ String mapMarkdownProse(String content, String Function(String) transform) {
   var fenceQuoteDepth = 0;
 
   while (offset < content.length) {
+    // A fence opened inside a quote ends with that quote, closed or not.
+    if (fenceDelimiterLength > 0 &&
+        fenceQuoteDepth > 0 &&
+        content[offset] == '\n' &&
+        _lineQuoteDepth(content, offset + 1) < fenceQuoteDepth) {
+      buffer.write(content.substring(codeStart, offset));
+      fenceDelimiterLength = 0;
+      proseStart = offset;
+    }
     final run = _codeRunPattern.matchAsPrefix(content, offset);
     if (run == null) {
       offset++;
@@ -147,6 +156,21 @@ int _fenceQuoteDepth(String content, int runStart) {
       depth++;
     } else if (char.trim().isNotEmpty) {
       return -1;
+    }
+  }
+  return depth;
+}
+
+/// The number of quote markers (`>`) in the blank-and-marker prefix of the
+/// line starting at [lineStart].
+int _lineQuoteDepth(String content, int lineStart) {
+  var depth = 0;
+  for (var i = lineStart; i < content.length; i++) {
+    final char = content[i];
+    if (char == '>') {
+      depth++;
+    } else if (char == '\n' || char.trim().isNotEmpty) {
+      break;
     }
   }
   return depth;

@@ -521,6 +521,8 @@ void main() {
         // A fence closes only at the quote depth it opened at.
         ('```md\n> ```\necho \\#g\n```', r'echo \#g'),
         ('> ```sh\n> x\n\n```\necho \\#g\n```', r'echo \#g'),
+        // A quoted fence ends with its quote, so later prose is parsed.
+        ('> ```sh\n> echo x\n\nplain \\#text', 'plain #text'),
         // Known limitation: gpt_markdown's raw-text fallback for this
         // unclaimed strike skips inline components, so the stand-in shows.
         // Its fullwidth form still reads as #.

@@ -197,6 +197,16 @@ void main() {
         expected: '> ```sh\n> $url',
       ),
       (
+        name: 'unclosed quoted fence ends with its quote',
+        input: '> ```sh\n> $url\n\n$url',
+        expected: '> ```sh\n> $url\n\n[$url]($url)',
+      ),
+      (
+        name: 'quoted fence ends at a lazy line',
+        input: '> ```sh\n> $url\n$url',
+        expected: '> ```sh\n> $url\n[$url]($url)',
+      ),
+      (
         name: 'top-level fence does not close on a quoted fence',
         input: '```md\n> ```\n$url\n```\n$url',
         expected: '```md\n> ```\n$url\n```\n[$url]($url)',
