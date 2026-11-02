@@ -599,7 +599,9 @@ async fn migration_schema_listed_name_index_validates_a_prebuild() {
             .unwrap();
         let error = migration::run_migrations(&pool).await.unwrap_err();
         assert!(
-            error.to_string().contains("invalid or wrong definition"),
+            error
+                .to_string()
+                .contains("is invalid or has a different definition"),
             "must reject the catalog shape: {error}"
         );
         assert_eq!(ledger_version(&pool).await, BEFORE_INDEX);
