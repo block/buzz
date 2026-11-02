@@ -97,6 +97,11 @@ class _AgentsNavigation extends HookConsumerWidget {
                           (agent) => agent['agent_pubkey'] == pubkey,
                         )
                         ? 'Builderbot agent'
+                        : agentLocationUnknown(
+                            ref.read(activeCommunityProvider).asData?.value,
+                            controller,
+                          )
+                        ? null
                         : 'Manage on desktop',
                     primaryActionsSpacing: Grid.md,
                     contextualActions: (_) =>
@@ -205,6 +210,8 @@ class AgentsPage extends HookConsumerWidget {
     });
     final profiles = ref.watch(userCacheProvider);
     final creating = useState(false);
+    final needsSignIn = agentLocationUnknown(community, controller);
+    final signInNeeded = builderlabSignInNeeded(community, controller);
     final failed =
         registered.hasError ||
         ownedDirectory.hasError ||
@@ -323,7 +330,19 @@ class AgentsPage extends HookConsumerWidget {
                             child: const Text('Retry'),
                           ),
                         ),
-                      if (!loading && !failed && keys.isEmpty)
+                      if (signInNeeded)
+                        ListTile(
+                          title: const Text(
+                            'Sign in to Builderlab to manage remote agents',
+                          ),
+                          trailing: TextButton(
+                            onPressed: signingIn
+                                ? null
+                                : () => flow.reconnectAccount(),
+                            child: const Text('Sign in'),
+                          ),
+                        ),
+                      if (!loading && !failed && !needsSignIn && keys.isEmpty)
                         const Padding(
                           padding: EdgeInsets.all(Grid.sm),
                           child: Text(
@@ -379,6 +398,8 @@ class AgentsPage extends HookConsumerWidget {
                           ? null
                           : remote != null
                           ? 'Builderbot agent'
+                          : needsSignIn
+                          ? null
                           : 'Manage on desktop',
                     );
                   },
