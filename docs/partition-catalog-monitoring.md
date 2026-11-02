@@ -41,7 +41,9 @@ back that table's entire maintenance transaction.
 
 Existing children and manually created or attached partitions still need their
 own grants. Maintenance does not reconcile grants on existing tables or revoke
-old grants when the parent ACL changes. Keep those permissions aligned through
+old grants when the parent ACL changes. Replacing the catch-all drops and
+recreates it, so grants added directly to the old catch-all are lost; only the
+parent's `SELECT` grants carry over. Keep those permissions aligned through
 the database's provisioning process. Initial schema bootstrap runs before
 deployment-specific reader grants are provisioned.
 

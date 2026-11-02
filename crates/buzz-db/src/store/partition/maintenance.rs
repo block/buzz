@@ -733,18 +733,12 @@ async fn apply_change(
         .await?;
     }
 
-    grant_parent_readers(
-        &mut transaction,
-        parent.oid,
-        &parent.schema,
-        &expected.target_names(table),
-    )
-    .await?;
+    let new_children = expected.target_names(table);
+    grant_parent_readers(&mut transaction, parent.oid, &parent.schema, &new_children).await?;
 
     let after = audit_table_on(&mut transaction, table, months_ahead, now).await?;
-    let verified = verify_applied(&locked, &after, &expected).and(
-        verify_inheritance(&mut transaction, parent.oid, &expected.target_names(table)).await?,
-    );
+    let verified = verify_applied(&locked, &after, &expected)
+        .and(verify_inheritance(&mut transaction, parent.oid, &new_children).await?);
     if let Err(reason) = verified {
         transaction.rollback().await?;
         return Err(DbError::InvalidData(format!(
@@ -756,7 +750,7 @@ async fn apply_change(
 }
 
 /// The parent ACL is the reader policy; never copy writes or grant options.
-/// PostgreSQL quotes catalog role names, including names containing quotes.
+/// `quote_ident` handles role names containing quotes.
 /// PUBLIC is an ACL grantee too, but must remain an unquoted SQL keyword.
 async fn grant_parent_readers(
     connection: &mut PgConnection,
