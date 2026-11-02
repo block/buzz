@@ -12,6 +12,8 @@ class _ThreadMessage extends HookConsumerWidget {
   final bool isHighlighted;
   final List<TimelineMessage>? allMessages;
   final bool isMember;
+  final bool? canContribute;
+  bool get mayContribute => canContribute ?? isMember;
   final bool isArchived;
   final FocusNode? composerFocusNode;
   final VoidCallback? restoreComposerFocus;
@@ -32,6 +34,7 @@ class _ThreadMessage extends HookConsumerWidget {
     this.isHighlighted = false,
     this.allMessages,
     this.isMember = false,
+    this.canContribute,
     this.isArchived = false,
     this.isThreadHead = false,
     this.composerFocusNode,
@@ -53,9 +56,11 @@ class _ThreadMessage extends HookConsumerWidget {
         ref.watch(agentMentionPubkeysProvider(channelId)).contains(pk) ||
         profile?.ownerPubkey != null;
     final canManageMessage =
-        currentPubkey?.toLowerCase() == pk ||
-        (profile?.ownerPubkey != null &&
-            profile?.ownerPubkey == currentPubkey?.toLowerCase());
+        !isArchived &&
+        ((mayContribute && currentPubkey?.toLowerCase() == pk) ||
+            (isMember &&
+                profile?.ownerPubkey != null &&
+                profile?.ownerPubkey == currentPubkey?.toLowerCase()));
 
     final userCache = ref.watch(userCacheProvider);
     final knownAgentPubkeys = agentPubkeysWithProfileOwners(
@@ -99,6 +104,7 @@ class _ThreadMessage extends HookConsumerWidget {
         allMessages: allMessages,
         currentPubkey: currentPubkey,
         isMember: isMember,
+        canContribute: mayContribute,
         isArchived: isArchived,
         anchorRect: details.anchorRect,
         captureAnchorSnapshot: details.captureSnapshot,
@@ -190,7 +196,8 @@ class _ThreadMessage extends HookConsumerWidget {
                               reactions: message.reactions,
                               onToggle: (emoji) =>
                                   toggleReaction(ref, message, emoji),
-                              showAddButton: isMember && !isArchived,
+                              showAddButton: mayContribute && !isArchived,
+                              canReact: mayContribute && !isArchived,
                               onAddReaction: () => showAddReactionPicker(
                                 context: context,
                                 ref: ref,
@@ -359,6 +366,8 @@ class _ThreadMessage extends HookConsumerWidget {
                                                         currentPubkey:
                                                             currentPubkey,
                                                         isMember: isMember,
+                                                        initialCanContribute:
+                                                            mayContribute,
                                                         isArchived: isArchived,
                                                       ),
                                                 ),
@@ -458,6 +467,7 @@ class _ThreadMessage extends HookConsumerWidget {
       channelId: channelId,
       currentPubkey: currentPubkey,
       isMember: isMember,
+      canContribute: mayContribute,
       isArchived: isArchived,
       child: content,
     );

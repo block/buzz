@@ -70,6 +70,7 @@ Widget _buildPostCard({
 }) {
   return ProviderScope(
     overrides: [
+      relaySessionProvider.overrideWith(_OfflineSession.new),
       userCacheProvider.overrideWith(() => _FakeUserCacheNotifier(users)),
       knownAgentPubkeysProvider.overrideWithValue(knownAgentPubkeys),
     ],
@@ -100,6 +101,7 @@ Widget _buildPostsView({
   final ch = channel ?? _forumChannel;
   return ProviderScope(
     overrides: [
+      relaySessionProvider.overrideWith(_OfflineSession.new),
       userCacheProvider.overrideWith(() => _FakeUserCacheNotifier(users)),
       profileProvider.overrideWith(() => _FakeProfileNotifier()),
       forumPostsProvider(ch.id).overrideWith((ref) async => postsResponse),
@@ -125,6 +127,7 @@ Widget _buildThreadPage({
   String postEventId = 'post1',
   String? currentPubkey = 'self',
   bool isMember = true,
+  bool? initialCanContribute,
   bool isArchived = false,
   Map<String, UserProfile> users = const {},
   Set<String> knownAgentPubkeys = const {},
@@ -133,6 +136,7 @@ Widget _buildThreadPage({
 }) {
   return ProviderScope(
     overrides: [
+      relaySessionProvider.overrideWith(_OfflineSession.new),
       userCacheProvider.overrideWith(() => _FakeUserCacheNotifier(users)),
       knownAgentPubkeysProvider.overrideWithValue(knownAgentPubkeys),
       channelBotPubkeysProvider(
@@ -158,6 +162,7 @@ Widget _buildThreadPage({
             postEventId: postEventId,
             currentPubkey: currentPubkey,
             isMember: isMember,
+            initialCanContribute: initialCanContribute,
             isArchived: isArchived,
           ),
         ),
@@ -179,6 +184,17 @@ class _CountingForumSession extends RelaySessionNotifier {
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
+  }) async {
+    onStatusChanged(RelaySubscriptionStatus.ready);
+    return () {};
+  }
 
   @override
   Future<List<NostrEvent>> fetchHistory(
@@ -997,6 +1013,27 @@ void main() {
       expect(find.text('Reply to this post\u2026'), findsOneWidget);
     });
 
+    testWidgets(
+      'joined Guest keeps the thread readable without contribution controls offline',
+      (tester) async {
+        await tester.pumpWidget(
+          _buildThreadPage(
+            threadResponse: ForumThreadResponse(
+              post: _makePost(pubkey: 'self', content: 'Existing history'),
+              replies: const [],
+              totalReplies: 0,
+            ),
+            isMember: true,
+            initialCanContribute: false,
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Existing history'), findsOneWidget);
+        expect(find.text('Reply to this post\u2026'), findsNothing);
+        expect(find.byTooltip('Post actions'), findsNothing);
+      },
+    );
+
     testWidgets('renders media previews for forum posts', (tester) async {
       const imageUrl = 'https://example.com/media/forum.png';
 
@@ -1142,4 +1179,16 @@ class _FakeProfileNotifier extends ProfileNotifier {
   @override
   Future<UserProfile?> build() async =>
       const UserProfile(pubkey: 'self', displayName: 'Self');
+}
+
+class _OfflineSession extends RelaySessionNotifier {
+  @override
+  SessionState build() =>
+      const SessionState(status: SessionStatus.disconnected);
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => const [];
 }

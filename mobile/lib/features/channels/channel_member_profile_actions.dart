@@ -8,6 +8,9 @@ import '../../shared/widgets/app_list.dart';
 import '../../shared/widgets/app_list_card.dart';
 import '../../shared/widgets/confirmation_dialog.dart';
 import 'channel.dart';
+import '../../shared/mentions/agent_identity_provider.dart';
+import 'channel_access_provider.dart';
+import 'member_access_controls.dart';
 import 'channel_identity_names_provider.dart';
 import 'channel_management_provider.dart';
 import 'channels_provider.dart';
@@ -26,10 +29,24 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final busy = useState(false);
+    final accessController = ref.watch(channelAccessProvider.notifier);
+    final pendingAccess = ref.watch(channelAccessProvider)[channel.id];
     final error = useState<String?>(null);
     final actor = ref.watch(currentPubkeyProvider)?.toLowerCase();
     final roster = ref.watch(channelMembersProvider(channel.id));
     final channels = ref.watch(channelsProvider).asData?.value;
+    final viewer = roster.asData?.value
+        .where((member) => member.pubkey.toLowerCase() == actor)
+        .firstOrNull;
+    final owners =
+        viewer != null &&
+            !viewer.isElevated &&
+            !channel.isSolo &&
+            !channel.isDm &&
+            !channel.isArchived
+        ? ref.watch(agentOwnersProvider).asData?.value ??
+              const <String, String>{}
+        : const <String, String>{};
     final currentChannel =
         channels
             ?.where((candidate) => candidate.id == channel.id)
@@ -57,7 +74,11 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
       final member = members
           .where((m) => m.pubkey.toLowerCase() == target)
           .firstOrNull;
-      if (viewer?.isElevated != true || member == null || member.isOwner) {
+      final ownsAgent =
+          !current.isSolo && viewer != null && owners[target] == currentActor;
+      if ((viewer?.isElevated != true && !ownsAgent) ||
+          member == null ||
+          !const {'admin', 'member', 'guest', 'bot'}.contains(member.role)) {
         return null;
       }
       return member;
@@ -65,6 +86,12 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
 
     final member = manageableMember(roster, actor, currentChannel);
     if (member == null) return const SizedBox.shrink();
+    final canChangeRoles =
+        roster.asData?.value
+            .where((m) => m.pubkey.toLowerCase() == actor)
+            .firstOrNull
+            ?.isElevated ==
+        true;
 
     bool stillAllowed() {
       final latest =
@@ -85,7 +112,7 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
     }
 
     Future<void> perform({String? role}) async {
-      if (busy.value || !stillAllowed()) return;
+      if (busy.value || pendingAccess != null || !stillAllowed()) return;
       busy.value = true;
       error.value = null;
       try {
@@ -105,6 +132,27 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
               .removeMember(channelId: channel.id, pubkey: target);
           if (context.mounted) Navigator.of(context).pop();
         } else {
+          final confirmed = await showDialog<bool>(
+            context: context,
+            builder: (dialogContext) => AlertDialog(
+              title: const Text('Change access?'),
+              content: Text(
+                'Set this person to ${memberAccessLabel(role).toLowerCase()}?',
+              ),
+              actions: [
+                TextButton(
+                  autofocus: true,
+                  onPressed: () => Navigator.pop(dialogContext, false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(dialogContext, true),
+                  child: const Text('Change access'),
+                ),
+              ],
+            ),
+          );
+          if (!context.mounted || confirmed != true || !stillAllowed()) return;
           await ref
               .read(channelActionsProvider)
               .changeMemberRole(
@@ -130,30 +178,84 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
         AppListCard(
           horizontalPadding: 0,
           children: [
-            if (!member.isBot) ...[
+            if (canChangeRoles && !currentChannel.isSolo) ...[
               if (member.role != 'admin')
                 AppListRow(
                   icon: BuzzIcons.shieldCheck,
                   title: 'Make channel admin',
-                  onTap: busy.value ? null : () => perform(role: 'admin'),
+                  onTap: busy.value || pendingAccess != null
+                      ? null
+                      : () => perform(role: 'admin'),
                 ),
               if (member.role == 'admin' || member.role == 'guest')
                 AppListRow(
                   icon: BuzzIcons.user,
-                  title: member.role == 'guest'
-                      ? 'Make member'
-                      : 'Change to member',
-                  onTap: busy.value ? null : () => perform(role: 'member'),
+                  title: 'Participating',
+                  onTap: busy.value || pendingAccess != null
+                      ? null
+                      : () => perform(role: 'member'),
                 ),
             ],
+            if (canChangeRoles &&
+                !currentChannel.isSolo &&
+                member.role != 'guest')
+              AppListRow(
+                icon: BuzzIcons.shield,
+                title: 'Viewing only',
+                onTap: busy.value || pendingAccess != null
+                    ? null
+                    : () => perform(role: 'guest'),
+              ),
             AppListRow(
               icon: BuzzIcons.userMinus,
               title: 'Remove from channel',
               titleColor: context.colors.error,
-              onTap: busy.value ? null : () => perform(),
+              onTap: busy.value || pendingAccess != null
+                  ? null
+                  : () => perform(),
             ),
           ],
         ),
+        if (pendingAccess != null) ...[
+          TextButton(
+            onPressed: busy.value
+                ? null
+                : () async {
+                    busy.value = true;
+                    try {
+                      await accessController.checkSave(channel.id);
+                    } catch (reason) {
+                      if (context.mounted) error.value = reason.toString();
+                    } finally {
+                      if (context.mounted) busy.value = false;
+                    }
+                  },
+            child: const Text('Check save status'),
+          ),
+          TextButton(
+            onPressed: busy.value
+                ? null
+                : () async {
+                    if (await confirmDiscardAccessSave(context) != true ||
+                        !context.mounted) {
+                      return;
+                    }
+                    busy.value = true;
+                    try {
+                      await accessController.discardSave(
+                        channel.id,
+                        pendingAccess,
+                      );
+                      if (context.mounted) error.value = null;
+                    } catch (reason) {
+                      if (context.mounted) error.value = reason.toString();
+                    } finally {
+                      if (context.mounted) busy.value = false;
+                    }
+                  },
+            child: const Text('Discard and reload'),
+          ),
+        ],
         if (busy.value)
           Semantics(
             liveRegion: true,

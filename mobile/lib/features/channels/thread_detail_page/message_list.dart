@@ -26,6 +26,8 @@ class _ThreadMessageList extends HookWidget {
   final String? highlightedMessageId;
   final List<TimelineMessage> allMessages;
   final bool isMember;
+  final bool? canContribute;
+  bool get mayContribute => canContribute ?? isMember;
   final bool isArchived;
   final FocusNode composerFocusNode;
   final VoidCallback restoreComposerFocus;
@@ -57,6 +59,7 @@ class _ThreadMessageList extends HookWidget {
     required this.highlightedMessageId,
     required this.allMessages,
     required this.isMember,
+    this.canContribute,
     required this.isArchived,
     required this.composerFocusNode,
     required this.restoreComposerFocus,
@@ -109,6 +112,7 @@ class _ThreadMessageList extends HookWidget {
             isHighlighted: head.id == highlightedMessageId,
             allMessages: allMessages,
             isMember: isMember,
+            canContribute: mayContribute,
             isArchived: isArchived,
             isThreadHead: true,
             composerFocusNode: composerFocusNode,
@@ -327,6 +331,7 @@ class _ThreadMessageList extends HookWidget {
                                         reply.id == highlightedMessageId,
                                     allMessages: allMessages,
                                     isMember: isMember,
+                                    canContribute: mayContribute,
                                     isArchived: isArchived,
                                     composerFocusNode: composerFocusNode,
                                     restoreComposerFocus: restoreComposerFocus,
@@ -339,6 +344,7 @@ class _ThreadMessageList extends HookWidget {
                                       channelId: channelId,
                                       currentPubkey: currentPubkey,
                                       isMember: isMember,
+                                      canContribute: mayContribute,
                                       isArchived: isArchived,
                                     ),
                                   if (nextReply == null &&

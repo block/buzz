@@ -57,6 +57,7 @@ import '../forum/forum_posts_view.dart';
 import '../forum/forum_provider.dart';
 import 'android_ime_lift.dart';
 import 'channel.dart';
+import 'channel_contribution_provider.dart';
 import 'channel_actions_sheet.dart';
 import 'channel_identity_names_provider.dart';
 import 'channel_member_profile_actions.dart';
@@ -405,9 +406,13 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       ],
     );
     final memberProfilesPreloadState = useFuture(memberProfilesPreload);
+    final canContribute =
+        resolvedChannel.isMember &&
+        (ref.watch(channelContributionProvider(resolvedChannel.id)) ??
+            resolvedChannel.canContribute);
     final showsComposer =
         !resolvedChannel.isForum &&
-        resolvedChannel.isMember &&
+        canContribute &&
         !resolvedChannel.isArchived;
     final profileOwnedAgentPubkeys = <String>[];
     for (final participantPubkey in resolvedChannel.participantPubkeys) {
@@ -907,6 +912,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                               isDm: resolvedChannel.isDm,
                               currentPubkey: currentPubkey,
                               isMember: resolvedChannel.isMember,
+                              canContribute: canContribute,
                               isArchived: resolvedChannel.isArchived,
                               appBarTitleContentHeight:
                                   appBarTitleContentHeight,
@@ -925,8 +931,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                       ),
               ),
               if (!resolvedChannel.isForum &&
-                  (!resolvedChannel.isMember ||
-                      resolvedChannel.isArchived)) ...[
+                  (!canContribute || resolvedChannel.isArchived)) ...[
                 if (!resolvedChannel.isDm)
                   _ReadOnlyNotice(channel: resolvedChannel),
               ],

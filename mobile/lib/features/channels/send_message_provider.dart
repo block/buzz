@@ -6,6 +6,9 @@ import '../channels/channel_management_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import 'channel.dart';
+import 'channel_access_provider.dart';
+import 'channel_contribution_provider.dart';
+import 'channels_provider.dart';
 import 'me/me_messages_provider.dart';
 import 'channel_messages_provider.dart';
 import 'message_mention_pubkeys.dart';
@@ -23,6 +26,7 @@ class SendMessage {
   final void Function(String channelId, String eventId) _completeLocalMessage;
   final void Function(String channelId, String eventId) _removeLocalMessage;
   final bool Function()? _isDeliveryValid;
+  final Future<void> Function(String)? _requireContribution;
 
   SendMessage({
     required SignedEventRelay signedEventRelay,
@@ -36,6 +40,7 @@ class SendMessage {
     completeLocalMessage,
     required void Function(String channelId, String eventId) removeLocalMessage,
     bool Function()? isDeliveryValid,
+    Future<void> Function(String)? requireContribution,
   }) : _signedEventRelay = signedEventRelay,
        _fetchMembers = fetchMembers,
        _readUserCache = readUserCache,
@@ -44,7 +49,8 @@ class SendMessage {
            markLocalMessageForAnimation ?? ((_, _) {}),
        _completeLocalMessage = completeLocalMessage,
        _removeLocalMessage = removeLocalMessage,
-       _isDeliveryValid = isDeliveryValid;
+       _isDeliveryValid = isDeliveryValid,
+       _requireContribution = requireContribution;
 
   /// Send a text message to a channel.
   ///
@@ -113,6 +119,7 @@ class SendMessage {
         if (!isReference(tag)) tag,
     ];
 
+    await _requireContribution?.call(channelId);
     _ensureDeliveryValid();
     NostrEvent? localMessage;
     try {
@@ -268,6 +275,30 @@ SendMessage _sender(Ref ref, {bool personal = false}) {
   final messages = personal ? meMessagesProvider : channelMessagesProvider;
   final config = ref.watch(relayConfigProvider);
   return SendMessage(
+    requireContribution: (id) async {
+      // Read an existing list snapshot without starting channel discovery as a
+      // side effect of sending from a directly opened conversation.
+      final cached = ref.exists(channelsProvider)
+          ? ref
+                .read(channelsProvider)
+                .asData
+                ?.value
+                .where((channel) => channel.id == id)
+                .firstOrNull
+          : null;
+      final allowed =
+          ref.read(channelContributionProvider(id)) ??
+          (cached?.viewerRole == null ? null : cached!.canContribute);
+      if (cached?.isArchived == true || allowed == false) {
+        throw StateError(
+          'Read-only access. Ask an owner or admin to participate.',
+        );
+      }
+      // Known local roles keep optimistic sends independent of discovery and
+      // fresh access reads. The relay remains authoritative on publication.
+      if (allowed == true) return;
+      await ref.read(channelAccessProvider.notifier).requireContribution(id);
+    },
     signedEventRelay: SignedEventRelay(
       session: ref.read(relaySessionProvider.notifier),
       nsec: config.nsec,

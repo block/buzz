@@ -41,6 +41,7 @@ import 'thread_replies_provider.dart';
 import 'channel_ids_by_name_provider.dart';
 import 'channels_provider.dart';
 import 'compose_bar.dart';
+import 'channel_contribution_provider.dart';
 import 'composer_dock_size_reporter.dart';
 import 'date_formatters.dart';
 import 'dm_channel_labels.dart';
@@ -90,6 +91,7 @@ class ThreadDetailPage extends HookConsumerWidget {
   final String channelId;
   final String? currentPubkey;
   final bool isMember;
+  final bool? initialCanContribute;
   final bool isArchived;
   final String? initialMessageId;
 
@@ -104,6 +106,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     required this.channelId,
     required this.currentPubkey,
     required this.isMember,
+    this.initialCanContribute,
     required this.isArchived,
     this.initialMessageId,
     this.jumpThreadTailForTesting,
@@ -116,6 +119,11 @@ class ThreadDetailPage extends HookConsumerWidget {
     final currentPubkey =
         ref.watch(currentPubkeyProvider) ?? this.currentPubkey;
     final appView = View.of(context);
+    final canContribute =
+        isMember &&
+        (ref.watch(channelContributionProvider(channelId)) ??
+            initialCanContribute ??
+            isMember);
     final composerDockHeight = useState(0.0);
     final composerFocusNode = useFocusNode();
     final restoreComposerFocus = useRef<VoidCallback?>(null);
@@ -345,7 +353,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     );
 
     bool threadTailIsVisible() {
-      if (isMember &&
+      if (canContribute &&
           !isArchived &&
           (!viewportHeight.isFinite ||
               viewportHeight <= 0 ||
@@ -648,7 +656,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         previousReplyCount.value = replies.length;
         return null;
       }
-      if (isMember && !isArchived && composerDockHeight.value <= 0) {
+      if (canContribute && !isArchived && composerDockHeight.value <= 0) {
         return null;
       }
       if (!initialTailSettle.isComplete) {
@@ -997,7 +1005,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                   knownAgents: threadTyping.isEmpty
                       ? const {}
                       : ref.watch(meAgentInventoryProvider).value ?? const {},
-                  inlineTyping: isMember && !isArchived
+                  inlineTyping: canContribute && !isArchived
                       ? threadTyping
                       : const [],
                   relayReplyState: relayReplyState,
@@ -1014,6 +1022,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                   highlightedMessageId: highlightedMessageId.value,
                   allMessages: allMsgs,
                   isMember: isMember,
+                  canContribute: canContribute,
                   isArchived: isArchived,
                   composerFocusNode: composerFocusNode,
                   restoreComposerFocus: () =>
@@ -1023,7 +1032,7 @@ class ThreadDetailPage extends HookConsumerWidget {
               ),
             ],
           ),
-          if (isMember && !isArchived)
+          if (canContribute && !isArchived)
             AndroidImeLift(
               child: Align(
                 alignment: Alignment.bottomCenter,

@@ -9,6 +9,7 @@ import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import '../../helpers/fake_relay.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -35,6 +36,27 @@ Future<void> _pump(
   List<ChannelMember> members, {
   ValueChanged<String>? onTap,
 }) async {
+  final relay = FakeRelay();
+  relay.seed([
+    relay.sign(
+      kind: 39000,
+      author: relay.relayKeys,
+      tags: [
+        ['d', 'channel'],
+        ['name', 'Test'],
+        ['t', 'stream'],
+        ['public'],
+      ],
+    ),
+    relay.sign(
+      kind: 39002,
+      author: relay.relayKeys,
+      tags: [
+        ['d', 'channel'],
+        for (final member in members) ['p', member.pubkey, '', member.role],
+      ],
+    ),
+  ]);
   final names = IdentityNameSources.empty.scope(
     members.map((m) => m.pubkey),
     fallbackNames: {for (final m in members) m.pubkey: m.displayName!},
@@ -42,6 +64,8 @@ Future<void> _pump(
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
+        ...relay.overrides,
+        currentPubkeyProvider.overrideWithValue(_key(0)),
         channelMembersProvider('channel').overrideWith((ref) async => members),
         channelIdentityNamesProvider('channel').overrideWith((ref) => names),
         userCacheProvider.overrideWith(_Cache.new),
@@ -182,10 +206,10 @@ void main() {
       find.descendant(of: row, matching: find.byIcon(BuzzIcons.ellipsis)),
     );
     await tester.pumpAndSettle();
-    expect(find.text('Role'), findsOneWidget);
+    expect(find.text('Participating'), findsOneWidget);
     expect(find.text('Remove from channel'), findsOneWidget);
     // Inspect only: do not invoke a membership mutation.
-    Navigator.of(tester.element(find.text('Role'))).pop();
+    Navigator.of(tester.element(find.text('Participating'))).pop();
     await tester.pumpAndSettle();
     await tester.scrollUntilVisible(
       find.text('Agent 40'),
@@ -201,7 +225,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('View activity'), findsOneWidget);
-    expect(find.text('Role'), findsNothing);
+    expect(find.text('Participating'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

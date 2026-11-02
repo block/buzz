@@ -3,6 +3,7 @@ import 'dart:ui' as ui;
 
 import 'package:buzz/features/channels/add_members_sheet.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -42,6 +43,7 @@ class _Actions extends Fake implements ChannelActions {
     required String channelId,
     required List<String> pubkeys,
     String role = 'member',
+    Map<String, String> roles = const {},
   }) async {
     calls.add(pubkeys);
     if (failBob) throw AddMembersException({_bob: 'Try again'});
@@ -57,6 +59,7 @@ Future<void> _pump(
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
+        agentOwnersProvider.overrideWith((ref) async => const {}),
         userCacheProvider.overrideWith(_Cache.new),
         channelActionsProvider.overrideWithValue(actions),
         channelMembersProvider('channel').overrideWith((ref) async => []),

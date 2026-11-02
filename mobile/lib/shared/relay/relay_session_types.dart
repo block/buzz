@@ -23,3 +23,11 @@ class SessionState {
 
 /// Recovery lifecycle for a live relay subscription.
 enum RelaySubscriptionStatus { ready, retrying }
+
+/// A definitive negative OK acknowledgement for a submitted event.
+class RelayEventRejected implements Exception {
+  final String message;
+  const RelayEventRejected(this.message);
+  @override
+  String toString() => 'Exception: $message';
+}

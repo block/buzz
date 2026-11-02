@@ -31,6 +31,7 @@ import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import '../../helpers/fake_relay.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -184,6 +185,7 @@ Future<void> _sendNativeAttachmentPopoverCall(
 late SharedPreferences _testPrefs;
 
 Widget _buildComposeBar({
+  FakeRelay? accessRelay,
   required MediaUploadService uploadService,
   required ComposeBarOnSend onSend,
   List<ChannelMember>? draftMembers,
@@ -233,6 +235,7 @@ Widget _buildComposeBar({
           ref.read(mentionSearchCacheProvider).put(query.trim(), people);
           return people;
         }),
+      if (accessRelay != null) ...accessRelay.transportOverrides,
       customEmojiListProvider.overrideWithValue(customEmoji),
       mediaUploadServiceProvider.overrideWithValue(uploadService),
       if (voiceNoteRecorderFactory != null)
@@ -245,9 +248,11 @@ Widget _buildComposeBar({
         ),
       photoLibraryProvider.overrideWithValue(photoLibrary),
       currentPubkeyProvider.overrideWith((ref) => currentPubkey),
-      channelMembersProvider('channel-1').overrideWith(
-        (ref) => loadMembers?.call() ?? membersFuture ?? Future.value(members),
-      ),
+      if (accessRelay == null)
+        channelMembersProvider('channel-1').overrideWith(
+          (ref) =>
+              loadMembers?.call() ?? membersFuture ?? Future.value(members),
+        ),
       agentDirectoryProvider.overrideWith((ref) async => relayAgents),
       agentOwnersProvider.overrideWith((ref) async => const <String, String>{}),
       relayClientProvider.overrideWithValue(
@@ -607,6 +612,7 @@ class _SwitchableRelayConfigNotifier extends RelayConfigNotifier {
 class _RecordingRelaySocket extends RelaySocket {
   final List<Map<String, dynamic>> events;
   final void Function(List<dynamic> message) handleMessage;
+  final FakeRelay? accessRelay;
 
   /// Invoked after an event is handed to the socket but before its relay
   /// acknowledgement is delivered. Tests may defer that acknowledgement.
@@ -622,6 +628,7 @@ class _RecordingRelaySocket extends RelaySocket {
     this.handleMessage, {
     this.beforeAcknowledged,
     this.onEventAcknowledged,
+    this.accessRelay,
   }) : super(
          wsUrl: 'ws://localhost',
          nsec: null,
@@ -635,16 +642,29 @@ class _RecordingRelaySocket extends RelaySocket {
 
   @override
   void send(List<dynamic> payload) {
+    if (accessRelay != null && payload.isNotEmpty && payload.first == 'REQ') {
+      final subId = payload[1];
+      final filters = payload.skip(2).cast<Map<String, dynamic>>().toList();
+      final responses = accessRelay!.answer(filters);
+      scheduleMicrotask(() {
+        for (final event in responses) {
+          handleMessage(['EVENT', subId, event.toJson()]);
+        }
+        handleMessage(['EOSE', subId]);
+      });
+    }
     if (payload case ['EVENT', final Map<String, dynamic> event]) {
       events.add(event);
       final id = event['id'] as String;
       final pending = beforeAcknowledged?.call(event);
       if (pending == null) {
+        accessRelay?.acceptMembership(event);
         super.debugHandleOkForTest(['OK', id, true, '']);
         onEventAcknowledged?.call(event);
       } else {
         unawaited(
           pending.then((_) {
+            accessRelay?.acceptMembership(event);
             super.debugHandleOkForTest(['OK', id, true, '']);
             onEventAcknowledged?.call(event);
           }),
@@ -3587,11 +3607,14 @@ void main() {
         'cancels a text-only send', (tester) async {
       final agentPubkey = 'c' * 64;
       final signer = nostr.Keys.generate();
+      final accessRelay = FakeRelay(identity: signer)
+        ..seedChannelAccess('channel-1');
       final publishedEvents = <Map<String, dynamic>>[];
       var sendCount = 0;
 
       await tester.pumpWidget(
         _buildComposeBar(
+          accessRelay: accessRelay,
           uploadService: _testUploadService(signer.nsec),
           currentPubkey: signer.public,
           relayAgents: [_testAgent(agentPubkey)],
@@ -3617,6 +3640,7 @@ void main() {
         _RecordingRelaySocket(
           publishedEvents,
           session.debugHandleSocketMessageForTest,
+          accessRelay: accessRelay,
           onEventAcknowledged: (event) {
             if (event['kind'] != 9000) return;
             container
@@ -4710,6 +4734,8 @@ void main() {
     ) async {
       final agentPubkey = 'c' * 64;
       final signer = nostr.Keys.generate();
+      final accessRelay = FakeRelay(identity: signer)
+        ..seedChannelAccess('channel-1');
       final publishedEvents = <Map<String, dynamic>>[];
       final uploadService = MediaUploadService(
         baseUrl: 'https://relay.example',
@@ -4722,8 +4748,12 @@ void main() {
 
       await tester.pumpWidget(
         _buildComposeBar(
+          accessRelay: accessRelay,
           uploadService: uploadService,
           currentPubkey: signer.public,
+          relayConfig: () => _SwitchableRelayConfigNotifier(
+            RelayConfig(baseUrl: 'https://relay.example', nsec: signer.nsec),
+          ),
           relayAgents: [
             AgentDirectoryEntry(
               pubkey: agentPubkey,
@@ -4752,6 +4782,7 @@ void main() {
       final socket = _RecordingRelaySocket(
         publishedEvents,
         session.debugHandleSocketMessageForTest,
+        accessRelay: accessRelay,
       );
       session.debugAttachSocketForTest(socket);
 
@@ -4787,14 +4818,20 @@ void main() {
     ) async {
       final agentPubkey = 'c' * 64;
       final signer = nostr.Keys.generate();
+      final accessRelay = FakeRelay(identity: signer)
+        ..seedChannelAccess('channel-1');
       final publishedEvents = <Map<String, dynamic>>[];
       final addMemberAcknowledgement = Completer<void>();
       String? sentContent;
 
       await tester.pumpWidget(
         _buildComposeBar(
+          accessRelay: accessRelay,
           uploadService: _testUploadService(signer.nsec),
           currentPubkey: signer.public,
+          relayConfig: () => _SwitchableRelayConfigNotifier(
+            RelayConfig(baseUrl: 'https://relay.example', nsec: signer.nsec),
+          ),
           relayAgents: [
             AgentDirectoryEntry(
               pubkey: agentPubkey,
@@ -4823,6 +4860,7 @@ void main() {
         _RecordingRelaySocket(
           publishedEvents,
           session.debugHandleSocketMessageForTest,
+          accessRelay: accessRelay,
           beforeAcknowledged: (event) async {
             if (event['kind'] == 9000) await addMemberAcknowledgement.future;
           },
@@ -5305,6 +5343,8 @@ void main() {
       (tester) async {
         final agentPubkey = 'a' * 64;
         final signer = nostr.Keys.generate();
+        final accessRelay = FakeRelay(identity: signer)
+          ..seedChannelAccess('channel-1', visibility: 'private');
         final publishedEvents = <Map<String, dynamic>>[];
         var didSend = false;
         List<String> sentMentionPubkeys = const <String>[];
@@ -5312,8 +5352,12 @@ void main() {
 
         await tester.pumpWidget(
           _buildComposeBar(
+            accessRelay: accessRelay,
             uploadService: _testUploadService(signer.nsec),
             currentPubkey: signer.public,
+            relayConfig: () => _SwitchableRelayConfigNotifier(
+              RelayConfig(baseUrl: 'https://relay.example', nsec: signer.nsec),
+            ),
             // Plain member of a private channel: ordinary member and bot
             // additions are permitted; elevated-role grants still are not.
             members: [
@@ -5348,6 +5392,7 @@ void main() {
         final socket = _RecordingRelaySocket(
           publishedEvents,
           session.debugHandleSocketMessageForTest,
+          accessRelay: accessRelay,
         );
         session.debugAttachSocketForTest(socket);
 

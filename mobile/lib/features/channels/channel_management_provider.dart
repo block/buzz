@@ -9,11 +9,13 @@ import '../../shared/auth/auth.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/crypto/nip_oa.dart';
+import '../../shared/crypto/event_signing.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/utils/string_utils.dart';
 import '../profile/profile_provider.dart';
 import 'channel.dart';
+import 'channel_access_provider.dart';
 import 'channel_metadata_updates.dart';
 import 'channels_provider.dart';
 
@@ -323,7 +325,6 @@ List<DirectoryUser> directoryUsersFromProfileEvents(
 /// Riverpod / WebSocket scaffolding. Make sure all fields parsed by
 /// [ChannelData.fromEvent] that exist on [ChannelDetails] are propagated —
 /// any omission silently drops state when [Channel.mergeDetails] is called.
-@visibleForTesting
 ChannelDetails channelDetailsFromEvent(NostrEvent event) {
   final data = ChannelData.fromEvent(event);
   final eventTime = DateTime.fromMillisecondsSinceEpoch(
@@ -336,6 +337,7 @@ ChannelDetails channelDetailsFromEvent(NostrEvent event) {
     channelType: data.channelType,
     labels: data.labels,
     visibility: data.visibility,
+    joinRole: data.joinRole,
     description: data.description,
     topic: data.topic,
     createdBy: data.creator ?? event.pubkey,

@@ -236,13 +236,13 @@ void main() {
       actions: actions,
       load: () async => [_member('self', 'owner'), _member('alice', role)],
     );
-    await tester.tap(find.text('Make channel admin'));
+    await _chooseRole(tester, 'Make channel admin');
     await tester.pumpAndSettle();
     role = 'admin';
     container.invalidate(channelMembersProvider('test'));
     await tester.pumpAndSettle();
     expect(find.text('Make channel admin'), findsNothing);
-    await tester.tap(find.text('Change to member'));
+    await _chooseRole(tester, 'Participating');
     await tester.pumpAndSettle();
     expect(actions.calls, ['test:alice:admin', 'test:alice:member']);
   });
@@ -251,15 +251,13 @@ void main() {
       await _pump(tester, targetRole: role);
       expect(
         find.text('Make channel admin'),
-        role == 'member' || role == 'guest' ? findsOneWidget : findsNothing,
+        role == 'member' || role == 'guest' || role == 'bot'
+            ? findsOneWidget
+            : findsNothing,
       );
       expect(
-        find.text('Change to member'),
-        role == 'admin' ? findsOneWidget : findsNothing,
-      );
-      expect(
-        find.text('Make member'),
-        role == 'guest' ? findsOneWidget : findsNothing,
+        find.text('Participating'),
+        role == 'admin' || role == 'guest' ? findsOneWidget : findsNothing,
       );
       expect(find.text('Remove from channel'), findsOneWidget);
     });
@@ -296,6 +294,21 @@ void main() {
       expect(find.text('Remove from channel'), findsNothing);
     });
   }
+  testWidgets('cancelling individual access leaves the member unchanged', (
+    tester,
+  ) async {
+    final actions = _Actions();
+    await _pump(tester, actions: actions);
+    await tester.tap(find.text('Viewing only'));
+    await tester.pumpAndSettle();
+    expect(find.text('Change access?'), findsOneWidget);
+    expect(actions.calls, isEmpty);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(actions.calls, isEmpty);
+    expect(find.text('Viewing only'), findsOneWidget);
+  });
+
   testWidgets('role updates block duplicates and show rejection', (
     tester,
   ) async {
@@ -305,7 +318,7 @@ void main() {
         ..pending = Completer<void>()
         ..fail = true;
       await _pump(tester, actions: actions);
-      await tester.tap(find.text('Make channel admin'));
+      await _chooseRole(tester, 'Make channel admin');
       await tester.pump();
       final pending = find.bySemanticsLabel('Updating channel member');
       expect(pending, findsOneWidget);
@@ -327,7 +340,7 @@ void main() {
           isFalse,
         );
       }
-      await tester.tap(find.text('Make channel admin'));
+      await _chooseRole(tester, 'Make channel admin');
       expect(actions.calls, ['test:alice:admin']);
       actions.pending!.complete();
       await tester.pumpAndSettle();
@@ -399,4 +412,15 @@ void main() {
     await tester.pumpAndSettle();
     expect(actions.calls, isEmpty);
   });
+}
+
+Future<void> _chooseRole(WidgetTester tester, String label) async {
+  await tester.tap(find.text(label));
+  await tester.pumpAndSettle();
+  final confirm = find.widgetWithText(FilledButton, 'Change access');
+  if (confirm.evaluate().isNotEmpty) {
+    await tester.tap(confirm);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+  }
 }

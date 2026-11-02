@@ -8,7 +8,6 @@ import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/modal_presentation.dart';
-import '../../shared/widgets/confirmation_dialog.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import '../profile/user_status.dart';
@@ -16,6 +15,9 @@ import '../profile/user_status_cache_provider.dart';
 import 'agent_activity/agent_activity_sheet.dart';
 import 'agent_activity/working_bots_provider.dart';
 import 'channel.dart';
+import '../../shared/mentions/agent_identity_provider.dart'
+    show agentOwnersProvider;
+import 'member_access_controls.dart';
 import 'channel_identity_names_provider.dart';
 import 'channel_management_provider.dart';
 
@@ -37,9 +39,11 @@ class MembersSheet extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final membersAsync = ref.watch(channelMembersProvider(channel.id));
     final allMembers = membersAsync.asData?.value ?? const <ChannelMember>[];
-    final people = allMembers.where((member) => !member.isBot).toList();
-    final bots = allMembers.where((member) => member.isBot).toList();
     final userCache = ref.watch(userCacheProvider);
+    bool isAgent(ChannelMember member) =>
+        member.isBot || userCache[member.pubkey.toLowerCase()]?.isAgent == true;
+    final people = allMembers.where((member) => !isAgent(member)).toList();
+    final bots = allMembers.where(isAgent).toList();
     final typingBotPubkeys = ref.watch(workingBotPubkeysProvider(channel.id));
     final statusCache = ref.watch(userStatusCacheProvider);
     final bottomClearance = Grid.md + MediaQuery.viewPaddingOf(context).bottom;
@@ -53,6 +57,11 @@ class MembersSheet extends HookConsumerWidget {
         currentMember != null &&
         currentMember.isElevated &&
         !channel.isArchived;
+
+    final owners = !canManage && currentMember != null && !channel.isSolo
+        ? ref.watch(agentOwnersProvider).asData?.value ??
+              const <String, String>{}
+        : const <String, String>{};
 
     void openActivity(ChannelMember bot) {
       final navigator = Navigator.of(context);
@@ -113,6 +122,11 @@ class MembersSheet extends HookConsumerWidget {
                       currentPubkey: currentPubkey,
                       profile: userCache[member.pubkey.toLowerCase()],
                       canManage: canManage,
+                      canRemoveOwn:
+                          !channel.isSolo &&
+                          currentMember != null &&
+                          owners[member.pubkey.toLowerCase()] ==
+                              currentPubkey?.toLowerCase(),
                       isSelf:
                           member.pubkey.toLowerCase() ==
                           currentPubkey?.toLowerCase(),
@@ -136,6 +150,11 @@ class MembersSheet extends HookConsumerWidget {
                       currentPubkey: currentPubkey,
                       profile: userCache[bot.pubkey.toLowerCase()],
                       canManage: canManage,
+                      canRemoveOwn:
+                          !channel.isSolo &&
+                          currentMember != null &&
+                          owners[bot.pubkey.toLowerCase()] ==
+                              currentPubkey?.toLowerCase(),
                       isSelf: false,
                       channelId: channel.id,
                       isWorking: typingBotPubkeys.contains(
@@ -183,12 +202,8 @@ class MembersSheet extends HookConsumerWidget {
   }
 }
 
-const _changeableRoles = ['admin', 'member', 'guest'];
-
 String _roleLabel(String role) {
-  if (role == 'bot') return 'Agent';
-  if (role.isEmpty) return 'Member';
-  return '${role[0].toUpperCase()}${role.substring(1)}';
+  return memberAccessLabel(role);
 }
 
 class _MemberTile extends ConsumerWidget {
@@ -196,6 +211,7 @@ class _MemberTile extends ConsumerWidget {
   final String? currentPubkey;
   final UserProfile? profile;
   final bool canManage;
+  final bool canRemoveOwn;
   final bool isSelf;
   final String channelId;
   final bool isWorking;
@@ -208,6 +224,7 @@ class _MemberTile extends ConsumerWidget {
     required this.currentPubkey,
     required this.profile,
     required this.canManage,
+    this.canRemoveOwn = false,
     required this.isSelf,
     required this.channelId,
     this.isWorking = false,
@@ -230,7 +247,8 @@ class _MemberTile extends ConsumerWidget {
     final initial = isSelf || hasName
         ? name[0].toUpperCase()
         : (member.pubkey.isNotEmpty ? member.pubkey[0].toUpperCase() : '?');
-    final showManagementActions = canManage && !isSelf && !member.isOwner;
+    final showManagementActions =
+        (canManage || canRemoveOwn) && !isSelf && !member.isOwner;
     final showMenu = showManagementActions || onViewActivity != null;
 
     return ListTile(
@@ -268,6 +286,8 @@ class _MemberTile extends ConsumerWidget {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             )
+          : !const {'owner', 'admin', 'guest'}.contains(member.role)
+          ? null
           : Text(
               _roleLabel(member.role),
               style: context.textTheme.bodySmall?.copyWith(
@@ -303,145 +323,47 @@ class _MemberTile extends ConsumerWidget {
         : ref
               .read(channelIdentityNamesProvider(channelId))
               .labelFor(member.pubkey);
-    final canChangeRole = showManagementActions && !member.isBot;
     showBuzzModalBottomSheet<void>(
       context: context,
       title: label,
       showDragHandle: true,
+      isScrollControlled: true,
       builder: (sheetContext) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (onViewActivity != null)
-              SheetActionSection(
-                horizontalPadding: Grid.gutter,
-                children: [
-                  ListTile(
-                    leading: Icon(
-                      BuzzIcons.activity,
-                      size: 18,
-                      color: context.colors.primary,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (onViewActivity != null)
+                SheetActionSection(
+                  horizontalPadding: Grid.gutter,
+                  children: [
+                    ListTile(
+                      leading: Icon(
+                        BuzzIcons.activity,
+                        size: 18,
+                        color: context.colors.primary,
+                      ),
+                      title: const Text('View activity'),
+                      onTap: () {
+                        Navigator.of(sheetContext).pop();
+                        WidgetsBinding.instance.addPostFrameCallback((_) {
+                          onViewActivity?.call();
+                        });
+                      },
                     ),
-                    title: const Text('View activity'),
-                    onTap: () {
-                      Navigator.of(sheetContext).pop();
-                      WidgetsBinding.instance.addPostFrameCallback((_) {
-                        onViewActivity?.call();
-                      });
-                    },
-                  ),
-                ],
-              ),
-            if (showManagementActions) ...[
-              if (canChangeRole) ...[
-                const SizedBox(height: Grid.xxs),
-                _RoleSelector(
-                  selectedRole: member.role,
-                  onChanged: (role) async {
-                    Navigator.of(sheetContext).pop();
-                    await ref
-                        .read(channelActionsProvider)
-                        .changeMemberRole(
-                          channelId: channelId,
-                          pubkey: member.pubkey,
-                          role: role,
-                        );
-                  },
+                  ],
                 ),
-                const SizedBox(height: Grid.xs),
-              ],
-              SheetActionSection(
-                horizontalPadding: Grid.gutter,
-                children: [
-                  ListTile(
-                    leading: Icon(
-                      BuzzIcons.userMinus,
-                      size: 18,
-                      color: context.colors.error,
-                    ),
-                    title: Text(
-                      'Remove from channel',
-                      style: TextStyle(color: context.colors.error),
-                    ),
-                    onTap: () async {
-                      Navigator.of(context).pop();
-                      final confirmed = await showDestructiveConfirmation(
-                        context: context,
-                        title: 'Remove member',
-                        message: 'Remove $label from this channel?',
-                        confirmLabel: 'Remove',
-                      );
-                      if (confirmed == true) {
-                        await ref
-                            .read(channelActionsProvider)
-                            .removeMember(
-                              channelId: channelId,
-                              pubkey: member.pubkey,
-                            );
-                      }
-                    },
-                  ),
-                ],
-              ),
+              if (showManagementActions)
+                MemberAccessControls(
+                  channelId: channelId,
+                  target: member.pubkey.toLowerCase(),
+                  label: label,
+                ),
+              const SizedBox(height: Grid.xxs),
             ],
-            const SizedBox(height: Grid.xxs),
-          ],
+          ),
         ),
-      ),
-    );
-  }
-}
-
-class _RoleSelector extends StatelessWidget {
-  final String selectedRole;
-  final ValueChanged<String> onChanged;
-
-  const _RoleSelector({required this.selectedRole, required this.onChanged});
-
-  @override
-  Widget build(BuildContext context) {
-    final hasKnownRole = _changeableRoles.contains(selectedRole);
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'Role',
-            style: context.textTheme.labelMedium?.copyWith(
-              color: context.colors.onSurfaceVariant,
-            ),
-          ),
-          const SizedBox(height: Grid.xxs),
-          SizedBox(
-            width: double.infinity,
-            child: SegmentedButton<String>(
-              segments: [
-                for (final role in _changeableRoles)
-                  ButtonSegment<String>(
-                    value: role,
-                    label: Text(_roleLabel(role)),
-                  ),
-              ],
-              selected: hasKnownRole ? {selectedRole} : const <String>{},
-              emptySelectionAllowed: !hasKnownRole,
-              showSelectedIcon: false,
-              style: ButtonStyle(
-                visualDensity: VisualDensity.compact,
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                textStyle: WidgetStatePropertyAll(context.textTheme.labelSmall),
-              ),
-              onSelectionChanged: (roles) {
-                if (roles.isEmpty) return;
-                final role = roles.single;
-                if (role == selectedRole) return;
-                onChanged(role);
-              },
-            ),
-          ),
-        ],
       ),
     );
   }

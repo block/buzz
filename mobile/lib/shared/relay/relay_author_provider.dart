@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 
+/// HTTP boundary for NIP-11 discovery.
 final relayInformationClientProvider = Provider<http.Client>((ref) {
   final client = http.Client();
   ref.onDispose(client.close);
@@ -29,26 +30,39 @@ final relayAuthorProvider = FutureProvider.autoDispose.family<String?, String>((
         http.Request('GET', uri)..headers['Accept'] = 'application/nostr+json',
       )
       .timeout(const Duration(seconds: 3));
-  final chunks = StreamIterator(
-    response.stream.timeout(const Duration(seconds: 3)),
-  );
   final bytes = <int>[];
-  try {
-    if (response.statusCode != 200) return null;
-    await (() async {
-      while (await chunks.moveNext()) {
-        if (bytes.length + chunks.current.length > 256 * 1024) {
-          throw const FormatException('Relay information exceeds size limit');
-        }
-        bytes.addAll(chunks.current);
+  final done = Completer<void>();
+  var ended = false;
+  final subscription = response.stream.listen(
+    (chunk) {
+      if (done.isCompleted) return;
+      if (bytes.length + chunk.length > 256 * 1024) {
+        done.completeError(
+          const FormatException('Relay information exceeds size limit'),
+        );
+      } else {
+        bytes.addAll(chunk);
       }
-    })().timeout(const Duration(seconds: 3));
+    },
+    onDone: () {
+      ended = true;
+      if (!done.isCompleted) done.complete();
+    },
+    onError: (Object error, StackTrace stack) {
+      if (!done.isCompleted) done.completeError(error, stack);
+    },
+  );
+  try {
+    await done.future.timeout(const Duration(seconds: 3));
   } finally {
-    await chunks.cancel();
+    if (!ended) {
+      await subscription.cancel().timeout(const Duration(seconds: 1));
+    }
   }
+  if (response.statusCode != 200) return null;
   final info = jsonDecode(utf8.decode(bytes));
   final author = info is Map ? info['self'] : null;
   return author is String && RegExp(r'^[0-9a-f]{64}$').hasMatch(author)
       ? author
       : null;
-});
+}, retry: (_, _) => null);

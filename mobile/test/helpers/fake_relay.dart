@@ -5,7 +5,9 @@ import 'dart:math';
 import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/relay/read_state_snapshot.dart';
+import 'package:buzz/shared/relay/relay_author_provider.dart';
 import 'package:buzz/shared/relay/relay_query_response.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/misc.dart';
 import 'package:http/http.dart' as http;
@@ -27,13 +29,16 @@ import 'package:nostr/nostr.dart' as nostr;
 class FakeRelay {
   /// [now] is the session's wall clock, so a test can model OS suspension:
   /// time passes while no timer runs.
-  FakeRelay({DateTime Function()? now}) : _now = now {
+  FakeRelay({DateTime Function()? now, nostr.Keys? identity})
+    : keys = identity ?? nostr.Keys.generate(),
+      _now = now {
     addTearDown(() {
       expect(unanswerable, isEmpty, reason: 'requests FakeRelay cannot answer');
     });
   }
 
-  final keys = nostr.Keys.generate();
+  final nostr.Keys keys;
+  final relayKeys = nostr.Keys.generate();
   final stored = <NostrEvent>[];
   final published = <NostrEvent>[];
   final reqs = <List<dynamic>>[];
@@ -69,9 +74,20 @@ class FakeRelay {
   );
 
   List<Override> get overrides => [
-    relaySessionProvider.overrideWith(() => session),
+    ...transportOverrides,
     relayConfigProvider.overrideWith(() => _FixedRelayConfig(keys.nsec)),
+  ];
+
+  /// Authenticated transport boundaries, with configuration owned by the caller.
+  List<Override> get transportOverrides => [
+    relaySessionProvider.overrideWith(() => session),
     authProvider.overrideWith(_SignedInAuth.new),
+    relayInformationClientProvider.overrideWith(
+      (ref) => MockClient(
+        (request) async =>
+            http.Response(jsonEncode({'self': relayKeys.public}), 200),
+      ),
+    ),
   ];
 
   /// Answers the next REQ with a filter [match] accepts with CLOSED [message]
@@ -80,6 +96,73 @@ class FakeRelay {
     bool Function(Map<String, dynamic> filter) match,
     String message,
   ) => _refusals.add((match: match, message: message));
+
+  /// Signed channel access state for journeys that publish through production
+  /// authorization. The relay and the user have distinct signing identities.
+  void seedChannelAccess(
+    String id, {
+    String role = 'member',
+    String name = 'general',
+    String visibility = 'open',
+  }) {
+    seed([
+      sign(
+        kind: 39000,
+        author: relayKeys,
+        tags: [
+          ['d', id],
+          ['name', name],
+          ['t', 'stream'],
+          [visibility == 'private' ? 'private' : 'public'],
+          ['join_role', 'member'],
+          ['P', pubkey],
+        ],
+      ),
+      sign(
+        kind: 39002,
+        author: relayKeys,
+        tags: [
+          ['d', id],
+          ['p', pubkey, '', role],
+        ],
+      ),
+    ]);
+  }
+
+  /// Mirrors an accepted role command at the external relay boundary.
+  void acceptMembership(Map<String, dynamic> raw) {
+    final event = NostrEvent.fromJson(raw);
+    if (event.kind != 9000 || event.channelId == null) return;
+    final target = event.getTagValue('p');
+    final role = event.getTagValue('role');
+    if (target == null || role == null) return;
+    final rosters =
+        stored
+            .where(
+              (value) =>
+                  value.kind == 39002 &&
+                  value.getTagValue('d') == event.channelId,
+            )
+            .toList()
+          ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    if (rosters.isEmpty) {
+      throw StateError('Seed access before accepting a membership command.');
+    }
+    final old = rosters.first;
+    seed([
+      sign(
+        kind: 39002,
+        author: relayKeys,
+        createdAt: old.createdAt + 1,
+        tags: [
+          ...old.tags.where(
+            (tag) => !(tag.length >= 2 && tag[0] == 'p' && tag[1] == target),
+          ),
+          ['p', target, '', role],
+        ],
+      ),
+    ]);
+  }
 
   /// Stores history without notifying live subscriptions.
   /// Closes the live subscriptions a filter [match] accepts with CLOSED
@@ -268,6 +351,10 @@ class FakeRelay {
     }
   }
 
+  /// Answers REQ frames forwarded by a socket fixture attached to this relay.
+  List<NostrEvent> answer(List<Map<String, dynamic>> filters) =>
+      _query(filters) ?? const [];
+
   /// Stored events for [filters], or null after recording why it cannot
   /// answer. Each filter applies its own limit before the union, as the
   /// relay does.
@@ -349,6 +436,27 @@ class FakeRelay {
         jsonEncode({
           'read_state_snapshot': {'version': 1, 'community_id': community},
         }),
+        200,
+      );
+    }
+    if (request.method == 'POST' &&
+        request.url.path == '/profiles/search' &&
+        request.headers['Authorization'] != null) {
+      final body = jsonDecode(request.body) as Map<String, dynamic>;
+      final query = (body['query'] as String).toLowerCase();
+      final matches = stored
+          .where((event) {
+            if (event.kind != 0) return false;
+            final profile = jsonDecode(event.content) as Map<String, dynamic>;
+            return ['name', 'display_name'].any(
+              (key) => (profile[key] as String? ?? '').toLowerCase().startsWith(
+                query,
+              ),
+            );
+          })
+          .take(body['limit'] as int);
+      return http.Response(
+        jsonEncode([for (final e in matches) e.toJson()]),
         200,
       );
     }
@@ -563,7 +671,10 @@ class _FixedRelayConfig extends RelayConfigNotifier {
 }
 
 class _SignedInAuth extends AuthNotifier {
+  // This transport fixture starts already authenticated. Resolve that external
+  // boundary synchronously so fakeAsync journeys do not begin in auth loading;
+  // authentication transitions are exercised by the auth provider's own tests.
   @override
-  Future<AuthState> build() async =>
-      const AuthState(status: AuthStatus.authenticated);
+  Future<AuthState> build() =>
+      SynchronousFuture(const AuthState(status: AuthStatus.authenticated));
 }

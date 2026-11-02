@@ -114,6 +114,7 @@ class ReactionRow extends HookWidget {
   /// `InlineReactionPicker`. Thread messages set this so reacting is always one
   /// tap away; the channel timeline leaves it off to keep the list dense.
   final bool showAddButton;
+  final bool canReact;
 
   /// Invoked by the `+` pill. Required when [showAddButton] is set.
   final VoidCallback? onAddReaction;
@@ -124,6 +125,7 @@ class ReactionRow extends HookWidget {
     required this.channelId,
     required this.reactions,
     required this.onToggle,
+    this.canReact = true,
     this.showAddButton = false,
     this.combined = false,
     this.onAddReaction,
@@ -164,10 +166,11 @@ class ReactionRow extends HookWidget {
         context: context,
         channelId: channelId,
         reactions: liveReactions,
+        canReact: canReact,
         onToggle: (emoji) {
-          if (context.mounted) latestToggle.value(emoji);
+          if (context.mounted) if (canReact) latestToggle.value(emoji);
         },
-        onAddReaction: showAddButton ? onAddReaction : null,
+        onAddReaction: showAddButton && canReact ? onAddReaction : null,
       );
       return Padding(
         padding: const EdgeInsets.only(bottom: Grid.xxs),
@@ -234,17 +237,18 @@ class ReactionRow extends HookWidget {
             _ReactionPill(
               messageId: messageId,
               reaction: reaction,
-              onTap: () => onToggle(reaction.emoji),
+              onTap: canReact ? () => onToggle(reaction.emoji) : () {},
               onLongPress: () => showReactionDetailSheet(
                 context: context,
                 channelId: channelId,
                 reactions: liveReactions,
+                canReact: canReact,
                 onToggle: (emoji) {
-                  if (context.mounted) latestToggle.value(emoji);
+                  if (context.mounted) if (canReact) latestToggle.value(emoji);
                 },
               ),
             ),
-          if (showAddButton && onAddReaction != null)
+          if (canReact && showAddButton && onAddReaction != null)
             _AddReactionPill(onTap: onAddReaction!),
         ],
       ),
@@ -457,16 +461,18 @@ Future<void> showReactionDetailSheet({
   required String channelId,
   required ValueListenable<List<TimelineReaction>> reactions,
   required ValueChanged<String> onToggle,
+  bool canReact = true,
   VoidCallback? onAddReaction,
 }) async {
   if (reactions.value.isEmpty) return;
-  if (await _showNativeReactionDetails(
-    context,
-    channelId,
-    reactions,
-    onToggle,
-    onAddReaction,
-  )) {
+  if (canReact &&
+      await _showNativeReactionDetails(
+        context,
+        channelId,
+        reactions,
+        onToggle,
+        onAddReaction,
+      )) {
     return;
   }
   if (!context.mounted) return;
@@ -491,6 +497,7 @@ Future<void> showReactionDetailSheet({
           channelId: channelId,
           reactions: value,
           onToggle: onToggle,
+          canReact: canReact,
           onAddReaction: onAddReaction,
         );
       },
@@ -502,12 +509,14 @@ class _ReactionDetailSheet extends HookConsumerWidget {
   final String channelId;
   final List<TimelineReaction> reactions;
   final ValueChanged<String> onToggle;
+  final bool canReact;
   final VoidCallback? onAddReaction;
 
   const _ReactionDetailSheet({
     required this.channelId,
     required this.reactions,
     required this.onToggle,
+    this.canReact = true,
     this.onAddReaction,
   });
 
@@ -575,16 +584,18 @@ class _ReactionDetailSheet extends HookConsumerWidget {
                             ],
                           ),
                           selected: reaction.reactedByCurrentUser,
-                          onSelected: (_) {
-                            if (!reaction.reactedByCurrentUser) {
-                              burstEmojiFromContext(
-                                ref,
-                                chipContext,
-                                reaction.emoji,
-                              );
-                            }
-                            onToggle(reaction.emoji);
-                          },
+                          onSelected: canReact
+                              ? (_) {
+                                  if (!reaction.reactedByCurrentUser) {
+                                    burstEmojiFromContext(
+                                      ref,
+                                      chipContext,
+                                      reaction.emoji,
+                                    );
+                                  }
+                                  onToggle(reaction.emoji);
+                                }
+                              : null,
                         ),
                       ),
                     ),

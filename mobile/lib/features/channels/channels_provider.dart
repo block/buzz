@@ -605,6 +605,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
           prev.isArchived != channel.isArchived ||
           prev.channelType != channel.channelType ||
           prev.visibility != channel.visibility ||
+          prev.joinRole != channel.joinRole ||
+          prev.viewerRole != channel.viewerRole ||
           prev.createdBy != channel.createdBy ||
           !listEquals(prev.labels, channel.labels)) {
         ref.invalidate(channelDetailsProvider(channel.id));
@@ -806,6 +808,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       channelType: data.channelType,
       labels: data.labels,
       visibility: data.visibility,
+      joinRole: data.joinRole,
       description: data.description,
       topic: data.topic,
       createdBy: data.creator ?? event.pubkey,
@@ -828,6 +831,14 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       participants: participants,
       participantPubkeys: data.participantPubkeys,
       isMember: isMember,
+      viewerRole: cachedMembersForChannel(data.id)
+          .where(
+            (member) =>
+                member.pubkey.toLowerCase() ==
+                ref.read(myPubkeyProvider)?.toLowerCase(),
+          )
+          .firstOrNull
+          ?.role,
       ttlSeconds: data.ttlSeconds,
       ttlDeadline: data.ttlDeadline,
       isUnlisted: data.isUnlisted,

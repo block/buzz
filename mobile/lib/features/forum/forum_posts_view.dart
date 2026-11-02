@@ -12,6 +12,7 @@ import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/load_error_view.dart';
 import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../channels/channel.dart';
+import '../channels/channel_contribution_provider.dart';
 import '../channels/compose_bar.dart';
 import 'forum_models.dart';
 import 'forum_post_card.dart';
@@ -61,7 +62,11 @@ class ForumPostsView extends HookConsumerWidget {
       return timer.cancel;
     }, [channel.id]);
 
-    final canPost = channel.isMember && !channel.isArchived;
+    final canPost =
+        channel.isMember &&
+        (ref.watch(channelContributionProvider(channel.id)) ??
+            channel.canContribute) &&
+        !channel.isArchived;
 
     return Column(
       children: [
@@ -141,7 +146,7 @@ class ForumPostsView extends HookConsumerWidget {
             ),
           ),
         ),
-        if (isComposing.value) ...[
+        if (canPost && isComposing.value) ...[
           Align(
             alignment: Alignment.centerRight,
             child: Padding(
@@ -185,6 +190,7 @@ class ForumPostsView extends HookConsumerWidget {
           postEventId: post.eventId,
           currentPubkey: currentPubkey,
           isMember: channel.isMember,
+          initialCanContribute: channel.canContribute,
           isArchived: channel.isArchived,
         ),
       ),

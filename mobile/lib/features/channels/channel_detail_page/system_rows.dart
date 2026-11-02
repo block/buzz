@@ -7,6 +7,8 @@ class _SystemMessageRow extends HookConsumerWidget {
   final String? currentPubkey;
   final List<TimelineMessage>? allMessages;
   final bool isMember;
+  final bool? canContribute;
+  bool get mayContribute => canContribute ?? isMember;
   final bool isArchived;
   final bool startsDay;
   final bool endsDay;
@@ -18,6 +20,7 @@ class _SystemMessageRow extends HookConsumerWidget {
     this.currentPubkey,
     this.allMessages,
     this.isMember = false,
+    this.canContribute,
     this.isArchived = false,
     this.startsDay = false,
     this.endsDay = false,
@@ -124,6 +127,7 @@ class _SystemMessageRow extends HookConsumerWidget {
         allMessages: null,
         currentPubkey: currentPubkey,
         isMember: isMember,
+        canContribute: mayContribute,
         isArchived: isArchived,
         anchorRect: details.anchorRect,
         captureAnchorSnapshot: details.captureSnapshot,
@@ -279,7 +283,8 @@ class _SystemMessageRow extends HookConsumerWidget {
                               reactions: reactions,
                               onToggle: (emoji) =>
                                   toggleReaction(ref, message, emoji),
-                              showAddButton: isMember && !isArchived,
+                              showAddButton: mayContribute && !isArchived,
+                              canReact: mayContribute && !isArchived,
                               onAddReaction: () => showAddReactionPicker(
                                 context: context,
                                 ref: ref,
@@ -296,6 +301,7 @@ class _SystemMessageRow extends HookConsumerWidget {
                         allMessages: allMessages ?? const [],
                         parentChannelId: channelId,
                         isMember: isMember,
+                        canContribute: mayContribute,
                         isArchived: isArchived,
                       ),
                     ),
@@ -684,6 +690,8 @@ class _ThreadSummaryRow extends ConsumerWidget {
   final String channelId;
   final String? currentPubkey;
   final bool isMember;
+  final bool? canContribute;
+  bool get mayContribute => canContribute ?? isMember;
   final bool isArchived;
 
   const _ThreadSummaryRow({
@@ -694,6 +702,7 @@ class _ThreadSummaryRow extends ConsumerWidget {
     required this.channelId,
     required this.currentPubkey,
     required this.isMember,
+    this.canContribute,
     required this.isArchived,
   });
 
@@ -719,6 +728,7 @@ class _ThreadSummaryRow extends ConsumerWidget {
               channelId: channelId,
               currentPubkey: currentPubkey,
               isMember: isMember,
+              initialCanContribute: mayContribute,
               isArchived: isArchived,
             ),
           ),
