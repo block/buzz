@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 
 import 'app_theme.dart';
@@ -15,19 +16,10 @@ import 'code_style.dart';
 /// ambient headings carry the localized text geometry, which exists only once
 /// `Theme.of` has run and a `ThemeData` factory cannot see. Overriding the one
 /// field on the ambient theme is what leaves non-code Markdown untouched.
-class AppMarkdownTheme extends StatefulWidget {
+class AppMarkdownTheme extends HookWidget {
   const AppMarkdownTheme({super.key, required this.child});
 
   final Widget child;
-
-  @override
-  State<AppMarkdownTheme> createState() => _AppMarkdownThemeState();
-}
-
-class _AppMarkdownThemeState extends State<AppMarkdownTheme> {
-  ThemeData? _theme;
-  GptMarkdownThemeData? _outer;
-  GptMarkdownThemeData? _data;
 
   @override
   Widget build(BuildContext context) {
@@ -38,11 +30,9 @@ class _AppMarkdownThemeState extends State<AppMarkdownTheme> {
     // GptMarkdownTheme notifies by data identity, and every notification makes
     // each GptMarkdown in the app re-parse its text. Derive new data only when
     // what it is derived from changes.
-    if (_data == null || theme != _theme || !identical(outer, _outer)) {
-      _theme = theme;
-      _outer = outer;
+    final data = useMemoized(() {
       final scheme = theme.colorScheme;
-      _data = GptMarkdownTheme.of(context).copyWith(
+      return GptMarkdownTheme.of(context).copyWith(
         // Inline code is otherwise drawn in gpt_markdown's own bundled face, at
         // its own size, tinted from `onSurface`. Stating the app's code style
         // gives every Markdown surface the face, size and chip colours a fenced
@@ -58,7 +48,7 @@ class _AppMarkdownThemeState extends State<AppMarkdownTheme> {
           borderRadius: const Radius.circular(Radii.xs),
         ).resolve(scheme),
       );
-    }
-    return GptMarkdownTheme(gptThemeData: _data!, child: widget.child);
+    }, [theme, outer]);
+    return GptMarkdownTheme(gptThemeData: data, child: child);
   }
 }
