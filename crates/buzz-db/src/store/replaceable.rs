@@ -804,10 +804,13 @@ mod postgres_tests {
         let db = Db::from_pool(pool.clone());
         let community_uuid = Uuid::new_v4();
         let channel = Uuid::new_v4();
+        // The signer must differ from every p-tagged key: the builder drops
+        // self-references.
         let keys = Keys::generate();
-        seed_community_channel(&pool, community_uuid, channel, &keys).await;
+        let owner_keys = Keys::generate();
+        seed_community_channel(&pool, community_uuid, channel, &owner_keys).await;
         let community = CommunityId::from_uuid(community_uuid);
-        let owner = keys.public_key().to_hex();
+        let owner = owner_keys.public_key().to_hex();
         let mentioned: Vec<String> = (0..3)
             .map(|_| Keys::generate().public_key().to_hex())
             .collect();
