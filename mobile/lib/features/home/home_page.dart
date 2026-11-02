@@ -18,6 +18,7 @@ import '../channels/channels_page.dart';
 import '../search/search_page.dart';
 import 'messages_filters.dart';
 import 'messages_navigation_bar.dart';
+import '../../shared/widgets/covered_route_keyboard_insets.dart';
 
 class HomePage extends HookConsumerWidget {
   const HomePage({
@@ -67,7 +68,7 @@ class HomePage extends HookConsumerWidget {
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     void openSearch() => Navigator.of(context).push(
       BottomUpPageRoute<void>(
-        builder: (_) => const SearchPage(),
+        builder: (_) => const CoveredRouteKeyboardInsets(child: SearchPage()),
         reducedMotion: reducedMotion,
       ),
     );
