@@ -238,8 +238,9 @@ enum ReadOutcome {
     Error(&'static str),
 }
 
-/// One access line per WebSocket REQ or COUNT, written when the handler
-/// finishes, including when its future is dropped mid-read.
+/// One access line per WebSocket REQ, COUNT or sync, written when the handler
+/// finishes (a sync's initial set completes), including when its future is
+/// dropped mid-read.
 pub(crate) struct ReadLog {
     event: &'static str,
     conn_id: Uuid,
