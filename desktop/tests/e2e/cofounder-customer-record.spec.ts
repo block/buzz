@@ -33,6 +33,7 @@ function customerFixture({
   companyFunctionHeads,
   managedAgents,
   customerActionErrors,
+  manualMelville = false,
 }: {
   enabled?: boolean;
   role?: "owner" | "admin" | "member";
@@ -40,6 +41,7 @@ function customerFixture({
   companyFunctionHeads?: MockCompanyFunctionHead[];
   managedAgents?: MockManagedAgentSeed[];
   customerActionErrors?: string[];
+  manualMelville?: boolean;
 } = {}) {
   const relaySecret = generateSecretKey();
   const input = {
@@ -60,6 +62,12 @@ function customerFixture({
     byPubkey: input.ayaPubkey,
     search: "guesthouses in Melville",
   };
+  if (manualMelville) {
+    melville.found = null;
+    melville.timeline = (melville.timeline as Array<{ kind: string }>).filter(
+      (entry) => entry.kind !== "found",
+    );
+  }
 
   const olive = structuredClone(planeTree);
   olive.partyId = OLIVE_PARTY_ID;
@@ -96,8 +104,36 @@ async function openCustomerRecord(
   page: import("@playwright/test").Page,
   partyId: string,
   fixture = customerFixture(),
+  theme?: "light" | "dark",
 ) {
   await installMockBridge(page, fixture);
+  if (theme) {
+    await page.emulateMedia({ colorScheme: theme });
+    await page.addInitScript(
+      ({ selectedTheme, ownerPubkey }) => {
+        const themeName = selectedTheme === "dark" ? "buzz-dark" : "buzz";
+        for (const key of Object.keys(window.localStorage)) {
+          if (key.startsWith("colony.appearance.v1:")) {
+            window.localStorage.removeItem(key);
+          }
+        }
+        window.localStorage.removeItem("buzz-theme-cache");
+        window.localStorage.setItem("buzz-theme", themeName);
+        window.localStorage.setItem("buzz-follow-system", "false");
+        window.localStorage.setItem("buzz-accent-color", "#5B45BE");
+        window.localStorage.setItem(
+          `buzz-community-theme.v1:${ownerPubkey}:${encodeURIComponent("ws://localhost:3000")}`,
+          JSON.stringify({
+            version: 1,
+            theme: themeName,
+            accent: "#5B45BE",
+            followSystem: false,
+          }),
+        );
+      },
+      { selectedTheme: theme, ownerPubkey: OWNER_PUBKEY },
+    );
+  }
   await page.addInitScript((outreachChannelId) => {
     const testWindow = window as Window & {
       __BUZZ_E2E_WHATSAPP__?: (request: {
@@ -193,6 +229,82 @@ test.describe("co-founder customer records", () => {
     await expect(timeline.nth(0)).toContainText("Found in Discovery");
     await expect(timeline.nth(1)).toContainText("WhatsApp opener approved");
     await expect(timeline.nth(2)).toContainText("Became a client");
+  });
+
+  test("a manually added lead keeps truthful history and appears as one client after conversion", async ({
+    page,
+  }) => {
+    await installMockBridge(page, customerFixture({ manualMelville: true }));
+    await page.goto("/#/leads");
+
+    const leads = page.getByRole("table", { name: "Leads" });
+    const lead = leads.getByRole("row").filter({
+      hasText: "Melville Manor Guesthouse",
+    });
+    const reviewLeadLink = lead.getByRole("link", {
+      name: "Review lead",
+    });
+    await expect(reviewLeadLink).toBeVisible();
+    await reviewLeadLink.click();
+    await expect(page).toHaveURL(
+      new RegExp(`/sales/lead/${MELVILLE_PARTY_ID}$`),
+    );
+
+    const customerRecordLink = page
+      .getByTestId("w10-prospect-page")
+      .getByRole("link", {
+        name: "Customer record",
+      });
+    await expect(customerRecordLink).toBeVisible();
+    await customerRecordLink.click();
+    await expect(page).toHaveURL(
+      new RegExp(`/clients/record/${MELVILLE_PARTY_ID}$`),
+    );
+    const timeline = page
+      .getByTestId("customer-record-screen")
+      .locator("ol li");
+    await expect(timeline).not.toContainText("Found in Discovery");
+
+    await page.goto("/#/leads");
+    const leadToConvert = page
+      .getByRole("table", { name: "Leads" })
+      .getByRole("row")
+      .filter({ hasText: "Melville Manor Guesthouse" });
+    await leadToConvert.getByRole("link", { name: "Review lead" }).click();
+    const leadDetail = page.getByTestId("w10-prospect-page");
+    const convert = leadDetail.getByTestId(
+      `lead-make-client-${MELVILLE_PARTY_ID}`,
+    );
+    await convert.click();
+    await expect(convert).toHaveCount(0);
+
+    await page.goto("/#/leads");
+    const convertedLead = page
+      .getByRole("table", { name: "Leads" })
+      .getByRole("row")
+      .filter({ hasText: "Melville Manor Guesthouse" });
+    await expect.soft(convertedLead).toContainText("Client");
+
+    await page.goto("/#/clients");
+    const client = page.getByTestId(`client-row-${MELVILLE_PARTY_ID}`);
+    await expect.soft(client).toContainText("Melville Manor Guesthouse");
+    await expect
+      .soft(page.getByRole("table", { name: "Clients" }).locator("tbody tr"))
+      .toHaveCount(3);
+    if ((await client.count()) > 0) {
+      await client
+        .getByRole("link", { name: "Melville Manor Guesthouse" })
+        .click();
+      await expect(page).toHaveURL(
+        new RegExp(`/clients/record/${MELVILLE_PARTY_ID}$`),
+      );
+      await expect(
+        page
+          .getByTestId("customer-record-screen")
+          .locator("ol li")
+          .filter({ hasText: "Became a client" }),
+      ).toContainText("Became a client");
+    }
   });
 
   test("a Sales lead can convert a lead while still a plain member", async ({
@@ -435,23 +547,96 @@ test.describe("co-founder customer records", () => {
       "capture is requested for proof delivery",
     );
     const theme = process.env.COLONY3_PROOF_THEME === "dark" ? "dark" : "light";
-    const output = resolve(process.cwd(), "test-results/cof4-screenshots");
+    const output = resolve("/private/tmp/cof-ui-defects-proof/screenshots");
     mkdirSync(output, { recursive: true });
     await page.setViewportSize({ width: 1440, height: 960 });
-    await openCustomerRecord(page, PLANE_TREE_PARTY_ID);
+    await openCustomerRecord(
+      page,
+      MELVILLE_PARTY_ID,
+      customerFixture({ manualMelville: true }),
+      theme,
+    );
     await expect(
-      page.getByRole("heading", { name: "Plane Tree Guesthouse" }),
+      page.getByRole("heading", { name: "Melville Manor Guesthouse" }),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("customer-record-screen").locator("ol li"),
+    ).not.toContainText("Found in Discovery");
+    await waitForAnimations(page);
+    await page.screenshot({
+      path: resolve(output, `c9-manual-record-1440-${theme}.png`),
+      fullPage: true,
+    });
+
+    await page.goto("/#/leads");
+    const lead = page
+      .getByRole("table", { name: "Leads" })
+      .getByRole("row")
+      .filter({ hasText: "Melville Manor Guesthouse" });
+    await lead.getByTestId(`lead-make-client-${MELVILLE_PARTY_ID}`).click();
+    await expect(lead).toContainText("Client");
+    await page.getByRole("combobox", { name: "Stage" }).selectOption("client");
+    await expect(lead).toBeVisible();
+    await lead.scrollIntoViewIfNeeded();
+    await waitForAnimations(page);
+    await page.screenshot({
+      path: resolve(output, `c9-leads-client-1440-${theme}.png`),
+      fullPage: true,
+    });
+
+    await page.goto("/#/clients");
+    const client = page.getByTestId(`client-row-${MELVILLE_PARTY_ID}`);
+    await expect(client).toContainText("Melville Manor Guesthouse");
+    await client.scrollIntoViewIfNeeded();
+    await waitForAnimations(page);
+    await page.screenshot({
+      path: resolve(output, `c9-clients-row-1440-${theme}.png`),
+      fullPage: true,
+    });
+    await client
+      .getByRole("link", { name: "Melville Manor Guesthouse" })
+      .click();
+    await expect(page).toHaveURL(
+      new RegExp(`/clients/record/${MELVILLE_PARTY_ID}$`),
+    );
+    await expect(
+      page
+        .getByTestId("customer-record-screen")
+        .locator("ol li")
+        .filter({ hasText: "Became a client" }),
     ).toBeVisible();
     await waitForAnimations(page);
     await page.screenshot({
-      path: resolve(output, `customer-record-1440-${theme}.png`),
+      path: resolve(output, `c9-converted-record-1440-${theme}.png`),
       fullPage: true,
     });
 
     await page.setViewportSize({ width: 390, height: 844 });
     await waitForAnimations(page);
     await page.screenshot({
-      path: resolve(output, `customer-record-390-${theme}.png`),
+      path: resolve(output, `c9-converted-record-390-${theme}.png`),
+      fullPage: true,
+    });
+    await page.goto("/#/leads");
+    await page.getByRole("combobox", { name: "Stage" }).selectOption("client");
+    await expect(
+      page
+        .getByRole("table", { name: "Leads" })
+        .getByRole("row")
+        .filter({ hasText: "Melville Manor Guesthouse" }),
+    ).toContainText("Client");
+    await waitForAnimations(page);
+    await page.screenshot({
+      path: resolve(output, `c9-leads-client-390-${theme}.png`),
+      fullPage: true,
+    });
+    await page.goto("/#/clients");
+    await expect(
+      page.getByTestId(`client-row-${MELVILLE_PARTY_ID}`),
+    ).toContainText("Melville Manor Guesthouse");
+    await waitForAnimations(page);
+    await page.screenshot({
+      path: resolve(output, `c9-clients-row-390-${theme}.png`),
       fullPage: true,
     });
   });

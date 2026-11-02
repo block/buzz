@@ -69,7 +69,7 @@ export function formatThreadWhen(createdAtSeconds: number, now = new Date()) {
   return `${WEEKDAYS[created.getDay()]} ${created.getDate()} ${MONTHS[created.getMonth()]}`;
 }
 
-/** First word of a display name: "Started by Mina", "Started by Lerato". */
+/** First word of a display name, for example "Started by Alex". */
 export function firstName(name: string) {
   return name.trim().split(/\s+/)[0] ?? name;
 }

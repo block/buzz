@@ -1,9 +1,14 @@
-import { expect, test, type Page } from "@playwright/test";
+import { bytesToHex } from "@noble/hashes/utils.js";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 
 import { waitForAnimations } from "../helpers/animations";
-import { installMockBridge } from "../helpers/bridge";
+import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import { seedActiveIdentity } from "../helpers/onboarding";
+import { openSettings } from "../helpers/settings";
+import { makeCofounderNumbersFixture } from "../../src/testing/cofounderNumbersFixtures";
 
 const MOCK_PUBKEY = "deadbeef".repeat(8);
 const RELAY_URL = (
@@ -11,6 +16,7 @@ const RELAY_URL = (
 ).replace(/^http/u, "ws");
 const COMMUNITY_ICON =
   "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='12' fill='%23f5a4d5'/%3E%3Cg fill='%2325222c'%3E%3Ccircle cx='12' cy='20' r='4'/%3E%3Ccircle cx='20' cy='20' r='5'/%3E%3Ccircle cx='29' cy='20' r='4'/%3E%3C/g%3E%3C/svg%3E";
+const HOLD_COMMUNITY_ICON_FETCH_MS = 30_000;
 const CAPTURE_DIR = process.env.WS_HEADER_CAPTURE_DIR;
 const CAPTURE_PHASE = process.env.WS_HEADER_CAPTURE_PHASE ?? "capture";
 const COMMUNITY_THEME_KEY =
@@ -24,12 +30,22 @@ async function seedWorkspace(
   options: {
     icon?: string;
     logoUrl?: string;
+    website?: string;
     theme?: "light" | "dark";
+    mock?: NonNullable<Parameters<typeof installMockBridge>[1]>;
   } = {},
 ) {
   const theme = options.theme === "dark" ? "buzz-dark" : "buzz";
   await page.addInitScript(
-    ({ communityThemeKey, icon, logoUrl, relayUrl, theme, pubkey }) => {
+    ({
+      communityThemeKey,
+      icon,
+      logoUrl,
+      relayUrl,
+      theme,
+      pubkey,
+      website,
+    }) => {
       window.localStorage.setItem(
         "buzz-communities",
         JSON.stringify([
@@ -55,7 +71,7 @@ async function seedWorkspace(
           `colony-business-profile.v1:${"workspace-header-icon"}`,
           JSON.stringify({
             name: "Colony",
-            website: "",
+            website,
             description: "",
             logoDataUrl: null,
             logoUrl,
@@ -81,9 +97,181 @@ async function seedWorkspace(
       relayUrl: RELAY_URL,
       theme,
       pubkey: MOCK_PUBKEY,
+      website:
+        options.website ?? (options.logoUrl ? "https://colony.example" : ""),
     },
   );
-  await installMockBridge(page, undefined, { skipCommunitySeed: true });
+  await installMockBridge(
+    page,
+    {
+      ...options.mock,
+      commandDelaysMs: {
+        ...options.mock?.commandDelaysMs,
+        fetch_workspace_icon: HOLD_COMMUNITY_ICON_FETCH_MS,
+      },
+    },
+    { skipCommunitySeed: true },
+  );
+}
+
+const MOCK_AYA_PUBKEY = TEST_IDENTITIES.alice.pubkey;
+const MOCK_SCOUT_PUBKEY = TEST_IDENTITIES.bob.pubkey;
+
+function companyMapMock(): NonNullable<
+  Parameters<typeof installMockBridge>[1]
+> {
+  const relaySecret = generateSecretKey();
+  return {
+    relaySelf: getPublicKey(relaySecret),
+    relayRequiresMembership: true,
+    relayRole: "owner",
+    relayMembers: [
+      { pubkey: MOCK_PUBKEY, role: "owner" },
+      { pubkey: MOCK_AYA_PUBKEY, role: "member" },
+    ],
+    companyMemberRelayPrivateKeyHex: bytesToHex(relaySecret),
+    cofounderSettings: {
+      enabled: true,
+      moneyPreference: "cheapest_first",
+      approvalSwitches: {
+        approveEveryHire: false,
+        approvePlaybookChanges: false,
+        approveEveryDiscoveryCampaign: false,
+      },
+    },
+    companyNumbers: makeCofounderNumbersFixture({
+      ownerPubkey: MOCK_PUBKEY,
+      scoutPubkey: MOCK_SCOUT_PUBKEY,
+      salesLeadPubkey: MOCK_AYA_PUBKEY,
+    }),
+    companyFunctionHeads: [
+      { function: "sales", state: "filled", leadPubkey: MOCK_AYA_PUBKEY },
+      { function: "operations", state: "covered_by_scout", leadPubkey: null },
+    ],
+    searchProfiles: [
+      { pubkey: MOCK_AYA_PUBKEY, displayName: "Aya", isAgent: true },
+      { pubkey: MOCK_SCOUT_PUBKEY, displayName: "Scout", isAgent: true },
+    ],
+    relayAgents: [
+      {
+        pubkey: MOCK_AYA_PUBKEY,
+        ownerPubkey: MOCK_PUBKEY,
+        name: "Aya",
+        agentType: "agent",
+        status: "online",
+      },
+      {
+        pubkey: MOCK_SCOUT_PUBKEY,
+        ownerPubkey: MOCK_PUBKEY,
+        name: "Scout",
+        agentType: "agent",
+        status: "online",
+      },
+    ],
+    managedAgents: [
+      {
+        pubkey: MOCK_AYA_PUBKEY,
+        name: "Aya",
+        status: "running",
+        channelNames: ["general"],
+      },
+      {
+        pubkey: MOCK_SCOUT_PUBKEY,
+        name: "Scout",
+        status: "running",
+        channelNames: ["general"],
+      },
+    ],
+  };
+}
+
+const OWNED_BUSINESS = {
+  id: "owned-business",
+  name: "Owned Business",
+  slug: "owned-business",
+  normalized_host: "owned-business.example.test",
+  owner_pubkey: TEST_IDENTITIES.tyler.pubkey,
+};
+const OWNED_BUSINESS_RELAY_URL = `wss://${OWNED_BUSINESS.normalized_host}`;
+
+async function openWelcomeOwnedBusinessList(
+  page: Page,
+  options: {
+    theme?: "light" | "dark";
+    viewport?: { width: number; height: number };
+  } = {},
+) {
+  const theme = options.theme === "dark" ? "buzz-dark" : "buzz";
+  await page.setViewportSize(options.viewport ?? { width: 1440, height: 960 });
+  await page.addInitScript(
+    ({ icon, theme, pubkey, ownedBusinessRelayUrl }) => {
+      localStorage.setItem("buzz-theme", theme);
+      localStorage.setItem("buzz-follow-system", "false");
+      localStorage.setItem("buzz-active-community-id", "");
+      localStorage.setItem("buzz-communities", "[]");
+      localStorage.setItem(
+        "buzz-community-icons",
+        JSON.stringify(icon ? { [ownedBusinessRelayUrl]: icon } : {}),
+      );
+      localStorage.setItem(
+        `buzz-community-theme.v1:${pubkey}:${encodeURIComponent("ws://localhost:3000")}`,
+        JSON.stringify({
+          version: 1,
+          theme,
+          accent: "#5B45BE",
+          followSystem: false,
+        }),
+      );
+      localStorage.setItem(
+        `buzz-machine-onboarding-complete.v2:${pubkey}`,
+        "true",
+      );
+    },
+    {
+      icon: COMMUNITY_ICON,
+      theme,
+      pubkey: TEST_IDENTITIES.tyler.pubkey,
+      ownedBusinessRelayUrl: OWNED_BUSINESS_RELAY_URL,
+    },
+  );
+  await seedActiveIdentity(page, { ...TEST_IDENTITIES.tyler, username: "" });
+  await installMockBridge(
+    page,
+    {
+      accountLinked: true,
+      commandDelaysMs: {
+        fetch_workspace_icon: HOLD_COMMUNITY_ICON_FETCH_MS,
+      },
+    },
+    {
+      relayWsUrl: "ws://localhost:3000",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  await page.route("**/api/communities/config", (route) =>
+    route.fulfill({
+      json: {
+        self_serve: true,
+        domain: "example.test",
+        public: true,
+        max_per_owner: 3,
+      },
+    }),
+  );
+  await page.route("**/api/communities/mine", (route) =>
+    route.fulfill({
+      json: {
+        owner_pubkey: TEST_IDENTITIES.tyler.pubkey,
+        communities: [OWNED_BUSINESS],
+      },
+    }),
+  );
+  await page.goto("/");
+  await expect(page.getByTestId("welcome-setup")).toBeVisible();
+  await expect(
+    page.getByTestId(`welcome-owned-business-${OWNED_BUSINESS.id}`),
+  ).toBeVisible();
 }
 
 const SIGN_IN_BUSINESS_ID = "signed-in-business";
@@ -389,6 +577,196 @@ test("returning-user business list shows the initial when no icon or logo exists
   await expect(mark.locator("img")).toHaveCount(0);
   await expect(mark).toHaveText("L");
 });
+
+test("Account settings shows the uploaded workspace icon", async ({ page }) => {
+  await seedWorkspace(page, { icon: COMMUNITY_ICON });
+  await page.setViewportSize({ width: 1440, height: 960 });
+  await page.goto("/");
+  await openSettings(page, "profile");
+
+  const businessCard = page.getByTestId("settings-account-business-card");
+  const mark = businessCard.locator(".cs-business-mark");
+  const image = mark.locator("img");
+  await expect(image).toHaveAttribute("src", COMMUNITY_ICON);
+  await expect(image).toBeVisible();
+  await expect(mark).toHaveAttribute("data-source", "community");
+  await expect(mark).toHaveText("");
+});
+
+test("Business Profile shows the uploaded workspace icon", async ({ page }) => {
+  await seedWorkspace(page, { icon: COMMUNITY_ICON });
+  await page.setViewportSize({ width: 1440, height: 960 });
+  await page.goto("/");
+  await openSettings(page, "business-profile");
+
+  const mark = page.getByTestId("business-profile-workspace-mark");
+  const image = mark.locator("img");
+  await expect(image).toHaveAttribute("src", COMMUNITY_ICON);
+  await expect(image).toBeVisible();
+  await expect(mark).toHaveAttribute("data-source", "community");
+  await expect(mark).toHaveText("");
+});
+
+test("Company Map shows the uploaded workspace icon", async ({ page }) => {
+  await seedWorkspace(page, {
+    icon: COMMUNITY_ICON,
+    mock: companyMapMock(),
+  });
+  await page.setViewportSize({ width: 1440, height: 960 });
+  await page.goto("/#/company/map");
+
+  const mark = page.getByTestId("cofounder-map-company-logo");
+  const image = mark.locator("img");
+  await expect(page.getByTestId("cofounder-map-stage")).toBeVisible();
+  await expect(image).toHaveAttribute("src", COMMUNITY_ICON);
+  await expect(image).toBeVisible();
+  await expect(mark).toHaveAttribute("data-source", "community");
+  await expect(mark).toHaveText("");
+});
+
+test("Welcome Setup owned-business list shows the uploaded workspace icon", async ({
+  page,
+}) => {
+  await openWelcomeOwnedBusinessList(page);
+
+  const row = page
+    .getByTestId(`welcome-owned-business-${OWNED_BUSINESS.id}`)
+    .locator("xpath=..");
+  const mark = row.locator(".c3fr-mark");
+  const image = mark.locator("img");
+  await expect(image).toHaveAttribute("src", COMMUNITY_ICON);
+  await expect(image).toBeVisible();
+  await expect(mark).toHaveAttribute("data-source", "community");
+  await expect(mark).toHaveText("");
+});
+
+const LOGO_DEV_URL = "https://img.logo.dev/colony.example?token=e2e-test-token";
+const LOGO_DEV_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40"><rect width="40" height="40" rx="12" fill="#68c8bf"/></svg>';
+
+test("Account settings falls back to its saved website Logo.dev URL", async ({
+  page,
+}) => {
+  await page.route("https://img.logo.dev/**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "image/svg+xml",
+      body: LOGO_DEV_SVG,
+    }),
+  );
+  await seedWorkspace(page, {
+    icon: null,
+    logoUrl: LOGO_DEV_URL,
+    website: "https://colony.example",
+  });
+  await page.goto("/");
+  await openSettings(page, "profile");
+
+  const mark = page
+    .getByTestId("settings-account-business-card")
+    .locator(".cs-business-mark");
+  await expect(mark).toHaveAttribute("data-source", "profile");
+  await expect(mark.locator("img")).toHaveAttribute("src", LOGO_DEV_URL);
+  await expect(mark.locator("img")).toBeVisible();
+});
+
+test("Business Profile shows a letter only when no workspace icon or logo exists", async ({
+  page,
+}) => {
+  await seedWorkspace(page);
+  await page.goto("/");
+  await openSettings(page, "business-profile");
+
+  const mark = page.getByTestId("business-profile-workspace-mark");
+  await expect(mark).toHaveAttribute("data-source", "initial");
+  await expect(mark.locator("img")).toHaveCount(0);
+  await expect(mark).toHaveText("C");
+});
+
+type MarkCaptureSurface =
+  | "account"
+  | "business-profile"
+  | "company-map"
+  | "welcome-owned-business";
+
+const MARK_CAPTURE_VIEWS = [
+  { key: "1440-light", width: 1440, height: 960, theme: "light" },
+  { key: "1440-dark", width: 1440, height: 960, theme: "dark" },
+  { key: "390-light", width: 390, height: 844, theme: "light" },
+  { key: "390-dark", width: 390, height: 844, theme: "dark" },
+] as const;
+
+async function openMarkCaptureSurface(
+  page: Page,
+  surface: MarkCaptureSurface,
+  view: (typeof MARK_CAPTURE_VIEWS)[number],
+): Promise<Locator> {
+  const viewport = { width: view.width, height: view.height };
+  if (surface === "welcome-owned-business") {
+    await openWelcomeOwnedBusinessList(page, {
+      theme: view.theme,
+      viewport,
+    });
+    return page
+      .getByTestId(`welcome-owned-business-${OWNED_BUSINESS.id}`)
+      .locator("xpath=..")
+      .locator(".c3fr-mark");
+  }
+
+  await page.setViewportSize(viewport);
+  await seedWorkspace(page, {
+    icon: COMMUNITY_ICON,
+    theme: view.theme,
+    ...(surface === "company-map" ? { mock: companyMapMock() } : {}),
+  });
+  if (surface === "company-map") {
+    await page.goto("/#/company/map");
+    return page.getByTestId("cofounder-map-company-logo");
+  }
+  await page.goto(
+    surface === "account"
+      ? "/#/settings?section=profile"
+      : "/#/settings?section=business-profile",
+  );
+  await expect(page.getByTestId("settings-view")).toBeVisible();
+  return surface === "account"
+    ? page
+        .getByTestId("settings-account-business-card")
+        .locator(".cs-business-mark")
+    : page.getByTestId("business-profile-workspace-mark");
+}
+
+for (const surface of [
+  "account",
+  "business-profile",
+  "company-map",
+  "welcome-owned-business",
+] as const) {
+  for (const view of MARK_CAPTURE_VIEWS) {
+    test(`captures fixed workspace mark: ${surface} ${view.key}`, async ({
+      page,
+    }) => {
+      test.skip(
+        !CAPTURE_DIR,
+        "Set WS_HEADER_CAPTURE_DIR to write review captures.",
+      );
+      mkdirSync(CAPTURE_DIR as string, { recursive: true });
+      const mark = await openMarkCaptureSurface(page, surface, view);
+      await expect(mark.getByRole("img")).toHaveCount(0);
+      await expect(mark.locator("img")).toHaveAttribute("src", COMMUNITY_ICON);
+      await expect(mark.locator("img")).toBeVisible();
+      await mark.scrollIntoViewIfNeeded();
+      await waitForAnimations(page);
+      await page.screenshot({
+        fullPage: false,
+        path: join(
+          CAPTURE_DIR as string,
+          `${CAPTURE_PHASE}-mark-${surface}-${view.key}.png`,
+        ),
+      });
+    });
+  }
+}
 
 const captureViews = [
   { key: "expanded-1440-light", width: 1440, height: 900, theme: "light" },

@@ -1215,6 +1215,19 @@ fn detect_conversion(source: &CustomerSource) -> Option<Conversion> {
     })
 }
 
+fn prospect_was_found_in_discovery(prospect: &SourceProspect) -> bool {
+    match prospect.head.prospect.origin {
+        Some(crate::business_records::ProspectOrigin::Manual) => false,
+        Some(crate::business_records::ProspectOrigin::Discovery) => true,
+        None => {
+            let input = &prospect.head.prospect;
+            input.fit_score.is_some()
+                || !input.discovery_tags.is_empty()
+                || !input.evidence.is_empty()
+        }
+    }
+}
+
 /// Build the customer record head from the company's own records and what the
 /// record already carries. The relay's `updated_by` and `action_event_id` stamp
 /// the write; every other field comes from the records.
@@ -1240,23 +1253,27 @@ pub fn compute_customer_record(
         })
         .unwrap_or_default();
 
-    let found = source.prospect.as_ref().map(|prospect| {
-        let search = search_label(prospect);
-        entries.push(entry(
-            TimelineKind::Found,
-            "Found in Discovery",
-            search.clone(),
-            prospect.created_at,
-            prospect.created_by_pubkey.clone(),
-            "prospect",
-            &prospect.head.prospect_id.hyphenated().to_string(),
-        ));
-        Found {
-            at: prospect.created_at,
-            by_pubkey: prospect.created_by_pubkey.clone(),
-            search,
-        }
-    });
+    let found = source
+        .prospect
+        .as_ref()
+        .filter(|prospect| prospect_was_found_in_discovery(prospect))
+        .map(|prospect| {
+            let search = search_label(prospect);
+            entries.push(entry(
+                TimelineKind::Found,
+                "Found in Discovery",
+                search.clone(),
+                prospect.created_at,
+                prospect.created_by_pubkey.clone(),
+                "prospect",
+                &prospect.head.prospect_id.hyphenated().to_string(),
+            ));
+            Found {
+                at: prospect.created_at,
+                by_pubkey: prospect.created_by_pubkey.clone(),
+                search,
+            }
+        });
 
     let whatsapp = source
         .whatsapp
@@ -1903,6 +1920,7 @@ mod tests {
                 },
                 "industry": "Hospitality",
                 "vertical": "guesthouses",
+                "fitScore": 87,
                 "discoveryTags": [],
                 "website": null,
                 "location": "Parkhurst",
@@ -2243,6 +2261,24 @@ mod tests {
         let again =
             compute_customer_record(&source, &ManualState::from_head(&head), 10_000, SCOUT, None);
         assert_eq!(head, again);
+    }
+
+    #[test]
+    fn a_manually_added_prospect_has_no_discovery_history() {
+        let mut source = plane_tree_source();
+        let prospect = source.prospect.as_mut().expect("prospect");
+        prospect.head.prospect.origin = Some(crate::business_records::ProspectOrigin::Manual);
+        prospect.head.prospect.fit_score = None;
+        prospect.head.prospect.discovery_tags.clear();
+        prospect.head.prospect.evidence.clear();
+
+        let head = compute_customer_record(&source, &ManualState::default(), 10_000, SCOUT, None);
+
+        assert_eq!(head.found, None);
+        assert!(!head
+            .timeline
+            .iter()
+            .any(|entry| entry.kind == TimelineKind::Found));
     }
 
     #[test]

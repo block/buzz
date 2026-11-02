@@ -9,6 +9,7 @@ import {
 import { useCustomerRecordCapabilities } from "@/features/cofounder/customerRecordAccess";
 import { useCustomerRecords } from "@/features/cofounder/customerHooks";
 import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
+import { useCommunities } from "@/features/communities/useCommunities";
 import { useBusinessRecords } from "@/features/discovery/useBusinessRecords";
 import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
@@ -117,6 +118,8 @@ export function WhatsAppOutreachScreen({
   channelIsMember = false,
 }: WhatsAppOutreachScreenProps) {
   const navigate = useNavigate();
+  const { activeCommunity } = useCommunities();
+  const businessName = activeCommunity?.name.trim() || "This business";
   const isMobile = useIsMobile();
   const statusQuery = useWhatsAppStatusQuery();
   const contactsQuery = useWhatsAppContactsQuery();
@@ -585,7 +588,7 @@ export function WhatsAppOutreachScreen({
     return (
       <main className="c3wa-root c3wa-outreach-empty">
         <h1>WhatsApp is not connected</h1>
-        <p>Connect your Horizon Labs number in Settings to open Outreach.</p>
+        <p>Connect your {businessName} number in Settings to open Outreach.</p>
         <Button onClick={openSettings} type="button">
           Open WhatsApp settings
         </Button>
@@ -870,7 +873,9 @@ export function WhatsAppOutreachScreen({
                       )}
                 </strong>
                 <small>
-                  {openerLabel ? `Opener: ${openerLabel}` : "Horizon Labs lead"}
+                  {openerLabel
+                    ? `Opener: ${openerLabel}`
+                    : `${businessName} lead`}
                 </small>
               </span>
               <button onClick={openLead} type="button">
@@ -918,6 +923,7 @@ export function WhatsAppOutreachScreen({
                     contactName={
                       selectedIdentity?.personName ?? "WhatsApp contact"
                     }
+                    businessName={businessName}
                     anonymousContact={selectedContactIsAnonymous}
                     currentPubkey={currentPubkey}
                     currentUserName={currentUserName}
@@ -1094,7 +1100,7 @@ export function WhatsAppOutreachScreen({
                     : selectedContact.windowOpen
                       ? isMobile
                         ? "Reply on WhatsApp…"
-                        : "Reply on WhatsApp as Horizon Labs"
+                        : `Reply on WhatsApp as ${businessName}`
                       : "Choose a template to send a message"
                 }
                 rows={2}

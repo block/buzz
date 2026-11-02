@@ -19,6 +19,7 @@ import {
   KIND_COMPANY_FUNCTION_HEAD,
   KIND_WORKER_RUN_HEAD,
 } from "@/features/cofounder/cofounderRecords";
+import { KIND_COFOUNDER_LEAD_HEAD } from "@/shared/constants/kinds";
 import {
   KIND_COMPANY_ACCESS_ACTION,
   KIND_COMPANY_ACCESS_HEAD,
@@ -407,6 +408,16 @@ export type MockCofounderSettings = {
     approvePlaybookChanges: boolean;
     approveEveryDiscoveryCampaign: boolean;
   };
+};
+
+export type MockCofounderLeadStatus = {
+  schemaVersion: 1;
+  state: "reached" | "unreachable";
+  problem: "no_scout" | "several_scouts" | "delivery_failed" | null;
+  detail: string;
+  attempts: number;
+  since: number;
+  updatedAt: number;
 };
 
 export type MockCompanyFunctionHead = {
@@ -1134,6 +1145,8 @@ type E2eConfig = {
     }>;
     /** Relay-signed co-founder heads used by the co-founder UI E2E fixture. */
     cofounderSettings?: MockCofounderSettings;
+    /** Relay-signed kind 30680 wake status used by Scout setup E2E coverage. */
+    companyLeadStatus?: MockCofounderLeadStatus | null;
     companyFunctionHeads?: MockCompanyFunctionHead[];
     /** Reject function slot writes in order, then accept them. */
     companyFunctionActionErrors?: string[];
@@ -7015,6 +7028,27 @@ function filterMockCofounderHeads(filter: MockFilter): RelayEvent[] {
         event.tags.some((tag) => tag[0] === "d" && dTags.includes(tag[1])),
     )
     .slice(0, filter.limit ?? 20);
+}
+
+function filterMockCompanyLeadStatus(filter: MockFilter): RelayEvent[] {
+  const status = getConfig()?.mock?.companyLeadStatus;
+  if (!status) return [];
+  const head = createSignedMockCompanyHead(
+    KIND_COFOUNDER_LEAD_HEAD,
+    status,
+    "company:cofounder-lead",
+    status.updatedAt,
+  );
+  const authors = filter.authors?.map((author) => author.toLowerCase());
+  const dTags = filter["#d"];
+  return [head]
+    .filter((event) => !authors || authors.includes(event.pubkey.toLowerCase()))
+    .filter(
+      (event) =>
+        !dTags ||
+        event.tags.some((tag) => tag[0] === "d" && dTags.includes(tag[1])),
+    )
+    .slice(0, filter.limit ?? 1);
 }
 
 function filterMockInitiativeHead(
@@ -19697,6 +19731,14 @@ function sendToMockSocket(args: {
 
     if (filter.kinds?.includes(KIND_COFOUNDER_HEAD)) {
       for (const event of filterMockCofounderHeads(filter)) {
+        sendWsText(socket.handler, ["EVENT", subId, event]);
+      }
+      sendWsText(socket.handler, ["EOSE", subId]);
+      return;
+    }
+
+    if (filter.kinds?.includes(KIND_COFOUNDER_LEAD_HEAD)) {
+      for (const event of filterMockCompanyLeadStatus(filter)) {
         sendWsText(socket.handler, ["EVENT", subId, event]);
       }
       sendWsText(socket.handler, ["EOSE", subId]);

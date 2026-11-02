@@ -328,7 +328,7 @@ function EmailCodeBody(props: PresentationProps) {
     props.authCode?.attemptsLeft ??
     (props.data.visualOnly && view === "wrong" ? 2 : undefined);
   const emailValue = props.data.visualOnly
-    ? props.data.email || "lerato@example.com"
+    ? props.data.email || "you@example.com"
     : props.data.email;
   const [localEmail, setLocalEmail] = React.useState(emailValue);
   const [password, setPassword] = React.useState("");

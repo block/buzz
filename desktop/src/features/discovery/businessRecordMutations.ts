@@ -128,6 +128,8 @@ export async function publishProspectAction(input: {
     industry: input.changes.industry.trim(),
     vertical: input.changes.vertical.trim(),
     fitScore: input.changes.fitScore ?? null,
+    origin:
+      input.changes.origin ?? input.current?.record.prospect.origin ?? null,
     ...discoveryTagsField(discoveryTags),
     potentialMonthlyValueMinor:
       input.changes.potentialMonthlyValueMinor ?? null,

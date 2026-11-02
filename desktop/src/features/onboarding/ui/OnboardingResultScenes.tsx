@@ -157,7 +157,7 @@ export function ConnectedScene({
     data.connectionReply ??
     data.firstReply ??
     (data.visualOnly
-      ? `Hi ${data.name.trim().split(" ")[0] || "Lerato"}! I’m here and ready when you are.`
+      ? `Hi ${data.name.trim().split(" ")[0] || "there"}! I’m here and ready when you are.`
       : "");
   const where = data.connectionLabel
     ? data.connectionLabel

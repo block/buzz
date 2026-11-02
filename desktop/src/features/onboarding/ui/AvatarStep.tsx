@@ -46,7 +46,7 @@ export const AVATAR_SWATCHES = [
 
 const DEFAULT_SWATCH = "#EFEAFB";
 
-/** "LM" for Lerato Molefe: the first letters of the first and last word. */
+/** The first letters of the first and last word in a display name. */
 export function initialsOf(name: string): string {
   const words = name.trim().split(/\s+/).filter(Boolean);
   if (words.length === 0) return "?";

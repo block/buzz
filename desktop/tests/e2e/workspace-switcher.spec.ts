@@ -150,14 +150,13 @@ test("header menu lists workspaces, switches by click and shortcut, profile stay
   await expect(secondWorkspace).toContainText("Horizon Labs");
   await expect(secondWorkspace).toContainText("⌘2");
   await expect(secondWorkspace).not.toHaveAttribute("aria-current", "true");
-  await expect(menu.getByTestId("workspace-leave-action")).toHaveCount(0);
+  await expect(menu.getByTestId("workspace-leave-action")).toBeVisible();
   await capture(page, "WSMenuTwo");
 
   await page.keyboard.press("Escape");
   await page.getByTestId("sidebar-business-switcher").focus();
   await page.keyboard.press("Enter");
   await expect(menu).toBeVisible();
-  await page.keyboard.press("ArrowDown");
   await expect(firstWorkspace).toBeFocused();
   await page.keyboard.press("ArrowDown");
   await expect(secondWorkspace).toBeFocused();

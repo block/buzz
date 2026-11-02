@@ -15,7 +15,7 @@ export type ScoutGuidance = {
 
 /** Who and what Scout can name in the copy, when the runtime knows. */
 export type ScoutContext = {
-  /** First name of the person, for "Nice to meet you, Lerato." */
+  /** First name of the person, for a personalized greeting. */
   firstName?: string;
   /** The AI app in use, for "I'm starting up on Claude Code". */
   appLabel?: string;

@@ -899,6 +899,18 @@ test.describe("community rail", () => {
     await expect(page).not.toHaveURL(/#\/channels\//);
   });
 
+  test("pointer opening the workspace menu keeps the leave action available", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page.getByTestId("sidebar-business-switcher").click();
+    await expect(page.getByTestId("workspace-switcher-menu")).toBeVisible();
+    await expect(page.getByTestId("workspace-leave-action")).toBeVisible();
+  });
+
   test("removing the active community restores the fallback destination", async ({
     page,
   }) => {

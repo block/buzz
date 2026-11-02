@@ -1,3 +1,5 @@
+import { mkdirSync } from "node:fs";
+import { resolve } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import {
@@ -9,6 +11,7 @@ import {
 import { KIND_HIRE_HEAD } from "../../src/shared/constants/kinds";
 import type { RelayEvent } from "../../src/shared/api/types";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import { waitForAnimations } from "../helpers/animations";
 
 const PERSONA_ID = "company-role-hospitality-research";
 const HIRE_ASK_ID = "7245ba1a-e078-42ef-b896-00be34a94f11";
@@ -57,7 +60,7 @@ test("owner hires from a role and the configured draft survives reload", async (
   });
 
   await page.goto("/#/team");
-  await page.getByRole("button", { name: "Hire employee" }).click();
+  await page.getByRole("button", { name: "Hire an agent" }).click();
   await expect(page.getByTestId(`hire-role-${PERSONA_ID}`)).toBeVisible();
   await expect(page.getByRole("button", { name: "Edit pack" })).toHaveCount(0);
   await expect(
@@ -65,22 +68,32 @@ test("owner hires from a role and the configured draft survives reload", async (
   ).toHaveCount(0);
   await page
     .getByTestId(`hire-role-${PERSONA_ID}`)
-    .getByRole("button", { name: "Configure this role" })
+    .getByRole("button", { name: "Configure" })
     .click();
 
   const name = page.getByTestId("hire-employee-name");
-  const allowance = page.getByTestId("hire-weekly-allowance");
-  const workerModel = page.getByTestId("hire-worker-model");
+  const title = page.getByTestId("hire-title");
+  const instructionScope = page.getByTestId("hire-respond-to");
+  const workerModel = page.locator(
+    '[data-testid="hire-ai-model-option"]:checked',
+  );
   await expect(name).toBeVisible();
   await name.fill("Mina");
-  await allowance.fill("8");
+  await title.fill("Hospitality research lead");
+  await instructionScope.selectOption("anyone");
   await expect(workerModel).toHaveValue(
     JSON.stringify(["buzz-agent", "openai", "gpt-5.5"]),
   );
 
   await page.reload();
   await expect(page.getByTestId("hire-employee-name")).toHaveValue("Mina");
-  await expect(page.getByTestId("hire-weekly-allowance")).toHaveValue("8");
+  await expect(page.getByTestId("hire-title")).toHaveValue(
+    "Hospitality research lead",
+  );
+  await expect(page.getByTestId("hire-respond-to")).toHaveValue("anyone");
+  await expect(
+    page.locator('[data-testid="hire-ai-model-option"]:checked'),
+  ).toHaveValue(JSON.stringify(["buzz-agent", "openai", "gpt-5.5"]));
   await page.getByTestId("hire-review").click();
 
   await expect(page.getByTestId("hire-review-form")).toBeVisible();
@@ -121,14 +134,13 @@ test("a business with no role personas is offered the built-in roles", async ({
     "Hospitality researcher",
     "Social media manager",
     "Bookkeeper",
-    "Chief of Staff",
     "Business development",
     "Writer",
   ];
   for (const name of names) {
     await expect(
       page
-        .getByRole("region", { name: "Role packs" })
+        .getByRole("region", { name: "Role catalog" })
         .getByRole("heading", { name }),
     ).toBeVisible();
   }
@@ -141,9 +153,9 @@ test("a business with no role personas is offered the built-in roles", async ({
   const socialCard = page.getByTestId(
     "hire-role-built-in-role-social-media-manager",
   );
-  await expect(socialCard).toContainText("Client social content");
-  await expect(socialCard).toContainText("Social publishing");
-  await expect(socialCard).toContainText("External action");
+  await expect(socialCard).toContainText(
+    "Plans, writes and schedules social content for the company's clients.",
+  );
 
   const rolePersonas = () =>
     page.evaluate(async () => {
@@ -161,24 +173,38 @@ test("a business with no role personas is offered the built-in roles", async ({
       }>;
       return personas
         .filter((persona) => persona.company_role)
-        .map((persona) => persona.display_name);
+        .map((persona) => ({
+          display_name: persona.display_name,
+          company_role: persona.company_role,
+        }));
     });
   expect(await rolePersonas()).toEqual([]);
 
   // A double click on a built-in role creates its persona once and reaches Configure.
-  await socialCard
-    .getByRole("button", { name: "Configure this role" })
-    .dblclick();
+  await socialCard.getByRole("button", { name: "Configure" }).dblclick();
   await expect(page.getByTestId("hire-employee-name")).toBeVisible();
   await expect(page).toHaveURL(/#\/hire\/configure\?.*personaId=/);
-  expect(await rolePersonas()).toEqual(["Social media manager"]);
+  const configuredRoles = await rolePersonas();
+  expect(configuredRoles.map((persona) => persona.display_name)).toEqual([
+    "Social media manager",
+  ]);
+  expect(configuredRoles[0]?.company_role).toEqual(
+    expect.objectContaining({
+      job: "Client social content",
+      skills: ["Content planning", "Captions", "Scheduling"],
+      tools: [
+        { name: "Web search", risk: "low" },
+        { name: "Social publishing", risk: "high" },
+      ],
+    }),
+  );
 
   // The role is now the business's own: it is listed once, and a second hire
   // reuses the persona instead of adding another.
   await page.goto("/#/hire/roles");
   await expect(
     page
-      .getByRole("region", { name: "Role packs" })
+      .getByRole("region", { name: "Role catalog" })
       .getByRole("heading", { name: "Social media manager" }),
   ).toHaveCount(1);
   await expect(
@@ -188,10 +214,13 @@ test("a business with no role personas is offered the built-in roles", async ({
     .locator('[data-testid^="hire-role-"]', {
       hasText: "Social media manager",
     })
-    .getByRole("button", { name: "Configure this role" })
+    .getByRole("button", { name: "Configure" })
     .click();
   await expect(page.getByTestId("hire-employee-name")).toBeVisible();
-  expect(await rolePersonas()).toEqual(["Social media manager"]);
+  const reusedRoles = await rolePersonas();
+  expect(reusedRoles.map((persona) => persona.display_name)).toEqual([
+    "Social media manager",
+  ]);
 });
 
 test("a member cannot open the role catalog", async ({ page }) => {
@@ -207,16 +236,13 @@ test("a member cannot open the role catalog", async ({ page }) => {
       name: "You do not have permission for this action",
     }),
   ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Configure this role" }),
-  ).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Configure" })).toHaveCount(0);
 });
 
 const BUILT_IN_ROLE_NAMES = [
   "Hospitality researcher",
   "Social media manager",
   "Bookkeeper",
-  "Chief of Staff",
   "Business development",
   "Writer",
 ];
@@ -248,14 +274,117 @@ for (const roleName of BUILT_IN_ROLE_NAMES) {
     await installBlankConfigureMock(page);
     await page.goto("/#/hire/roles");
     await page
-      .getByRole("region", { name: "Role packs" })
+      .getByRole("region", { name: "Role catalog" })
       .locator('[data-testid^="hire-role-"]', { hasText: roleName })
-      .getByRole("button", { name: "Configure this role" })
+      .getByRole("button", { name: "Configure" })
       .click();
     await expect(page.getByTestId("hire-employee-name")).toBeVisible();
     await expect(page.getByTestId("hire-configure-state")).toHaveCount(0);
   });
 }
+
+test("Business development configures twice through its single materialized persona", async ({
+  page,
+}) => {
+  await installBlankConfigureMock(page);
+  await page.goto("/#/hire/roles");
+  const builtInRole = page.getByTestId(
+    "hire-role-built-in-role-business-development",
+  );
+  await expect(builtInRole).toBeVisible();
+  await builtInRole.getByRole("button", { name: "Configure" }).dblclick();
+  await expect(page.getByTestId("hire-employee-name")).toBeVisible();
+  await expect(page.getByTestId("hire-configure-state")).toHaveCount(0);
+
+  const rolePersonas = await page.evaluate(async () => {
+    const invoke = (
+      window as Window & {
+        __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+          command: string,
+          payload?: unknown,
+        ) => Promise<unknown>;
+      }
+    ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+    return (await invoke?.("list_personas", {})) as Array<{
+      id: string;
+      display_name: string;
+      company_role: unknown;
+    }>;
+  });
+  const businessDevelopment = rolePersonas.filter(
+    (persona) =>
+      persona.display_name === "Business development" && persona.company_role,
+  );
+  expect(businessDevelopment).toHaveLength(1);
+
+  await page.goto("/#/hire/roles");
+  await page
+    .getByTestId(`hire-role-${businessDevelopment[0].id}`)
+    .getByRole("button", { name: "Configure" })
+    .click();
+  await expect(page.getByTestId("hire-employee-name")).toBeVisible();
+  await expect(page.getByTestId("hire-configure-state")).toHaveCount(0);
+});
+
+test("captures the Business development role flow at both widths and themes", async ({
+  browser,
+}) => {
+  test.skip(
+    process.env.COF_UI_DEFECT_CAPTURE !== "1",
+    "capture is requested for proof delivery",
+  );
+  test.setTimeout(120_000);
+  const output = resolve("/private/tmp/cof-ui-defects-proof/screenshots");
+  mkdirSync(output, { recursive: true });
+
+  for (const theme of ["light", "dark"] as const) {
+    for (const viewport of [
+      { name: "1440", width: 1440, height: 900 },
+      { name: "390", width: 390, height: 844 },
+    ]) {
+      const context = await browser.newContext();
+      try {
+        const page = await context.newPage();
+        await page.setViewportSize(viewport);
+        await page.emulateMedia({ colorScheme: theme });
+        await installBlankConfigureMock(page);
+        await page.addInitScript((selectedTheme) => {
+          const themeName = selectedTheme === "dark" ? "buzz-dark" : "buzz";
+          window.localStorage.removeItem("buzz-theme-cache");
+          window.localStorage.setItem("buzz-theme", themeName);
+          window.localStorage.setItem("buzz-follow-system", "false");
+          window.localStorage.setItem("buzz-accent-color", "#5B45BE");
+        }, theme);
+        await page.goto("/#/hire/roles");
+        const role = page.getByTestId(
+          "hire-role-built-in-role-business-development",
+        );
+        await expect(role).toBeVisible();
+        await waitForAnimations(page);
+        await page.screenshot({
+          path: resolve(
+            output,
+            `c4-business-development-catalog-${viewport.name}-${theme}.png`,
+          ),
+          fullPage: true,
+        });
+        await role.getByRole("button", { name: "Configure" }).click();
+        await expect(page.getByTestId("hire-employee-name")).toBeVisible();
+        await expect(page.getByTestId("hire-configure-state")).toHaveCount(0);
+        await waitForAnimations(page);
+        await page.screenshot({
+          path: resolve(
+            output,
+            `c4-business-development-configure-${viewport.name}-${theme}.png`,
+          ),
+          fullPage: true,
+        });
+      } finally {
+        await context.close();
+      }
+    }
+  }
+});
 
 test("Configure says the role could not be loaded and goes back to roles", async ({
   page,

@@ -4,6 +4,7 @@ import { useIsFullscreen } from "@/shared/lib/useIsFullscreen";
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import type { Channel, SearchHit } from "@/shared/api/types";
 import type { Community } from "@/features/communities/types";
+import type { LeaveCommunityResult } from "@/features/communities/leaveCommunity";
 import {
   SidebarHeader,
   SidebarMenu,
@@ -50,6 +51,7 @@ type AppSidebarPinnedHeaderProps = {
   onInvitePeople: () => void;
   onJoinWorkspace: () => void;
   onOpenWorkspaceSettings: () => void;
+  onRemoveWorkspace: (id: string) => Promise<LeaveCommunityResult | undefined>;
   onSelectChannel: (channelId: string) => void;
   onSwitchWorkspace: (id: string) => void;
   searchChannels: Channel[];
@@ -84,6 +86,7 @@ export function AppSidebarPinnedHeader({
   onInvitePeople,
   onJoinWorkspace,
   onOpenWorkspaceSettings,
+  onRemoveWorkspace,
   onSelectChannel,
   onSwitchWorkspace,
   searchChannels,
@@ -113,6 +116,7 @@ export function AppSidebarPinnedHeader({
           onInvitePeople={onInvitePeople}
           onJoinWorkspace={onJoinWorkspace}
           onOpenWorkspaceSettings={onOpenWorkspaceSettings}
+          onRemoveWorkspace={onRemoveWorkspace}
           onSwitchWorkspace={onSwitchWorkspace}
           renderWorkspaceMark={(workspace) => (
             <WorkspaceMark

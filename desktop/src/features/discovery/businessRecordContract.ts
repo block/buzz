@@ -39,6 +39,7 @@ export type ProspectStage =
   | "lost";
 export type ProspectQualification = "unreviewed" | "qualified" | "not_fit";
 export type ProspectActivityKind = "note" | "contact";
+export type ProspectOrigin = "manual" | "discovery";
 
 export type ServiceRecord = {
   serviceId: string;
@@ -94,6 +95,8 @@ export type ProspectRecord = {
   industry: string;
   vertical: string;
   fitScore?: number | null;
+  /** Explicit source for new records. Missing on older prospects. */
+  origin?: ProspectOrigin | null;
   /** Tag evidence matched from the provider's returned listing fields. */
   discoveryTags?: ProspectDiscoveryTag[];
   potentialMonthlyValueMinor?: number | null;
