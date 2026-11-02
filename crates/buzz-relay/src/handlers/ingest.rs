@@ -3548,8 +3548,7 @@ async fn ingest_event_inner(
     };
 
     let workflow_deletion = crate::handlers::side_effects::is_workflow_deletion(&event);
-    let atomic_deletion =
-        crate::handlers::side_effects::is_atomic_deletion(kind_u32, &event);
+    let atomic_deletion = crate::handlers::side_effects::is_atomic_deletion(kind_u32, &event);
     let mut message = String::new();
     let (stored_event, was_inserted) = if let Some(create) = channel_create.as_ref() {
         let creator = event.pubkey.to_bytes();

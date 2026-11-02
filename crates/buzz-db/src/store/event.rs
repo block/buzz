@@ -5631,9 +5631,11 @@ mod postgres_tests {
             .expect("resend after the failure clears");
         assert!(inserted, "the resend stores the deletion");
         assert_eq!(deleted, vec![true]);
-        assert!(target_deleted_at(&pool, community_uuid, reaction.id.as_bytes())
-            .await
-            .is_some());
+        assert!(
+            target_deleted_at(&pool, community_uuid, reaction.id.as_bytes())
+                .await
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -5665,10 +5667,16 @@ mod postgres_tests {
             .await
             .expect("resend the deletion");
         assert!(!inserted, "the deletion was already stored");
-        assert_eq!(deleted, vec![true], "the resend soft-deletes the live target");
-        assert!(target_deleted_at(&pool, community_uuid, reaction.id.as_bytes())
-            .await
-            .is_some());
+        assert_eq!(
+            deleted,
+            vec![true],
+            "the resend soft-deletes the live target"
+        );
+        assert!(
+            target_deleted_at(&pool, community_uuid, reaction.id.as_bytes())
+                .await
+                .is_some()
+        );
 
         let (_, inserted, deleted) = db
             .insert_deletion_event(community, &deletion, Some(channel), None, &targets)

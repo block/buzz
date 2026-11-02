@@ -3375,8 +3375,10 @@ async fn remove_deleted_reaction(
     // Derive (target, actor, emoji) from the reaction event itself.
     // Use effective_message_author to handle legacy relay-signed
     // reactions where event.pubkey is the relay key, not the user.
-    let actor =
-        super::ingest::effective_message_author(&target_event.event, &state.relay_keypair.public_key());
+    let actor = super::ingest::effective_message_author(
+        &target_event.event,
+        &state.relay_keypair.public_key(),
+    );
     let emoji = if target_event.event.content.is_empty() {
         "+"
     } else {
@@ -3405,9 +3407,11 @@ async fn remove_deleted_reaction(
         .get_event_by_id_for_event_write(tenant.community(), &react_target_id)
         .await
     {
-        let react_target_ts =
-            chrono::DateTime::from_timestamp(react_target_event.event.created_at.as_secs() as i64, 0)
-                .unwrap_or_else(chrono::Utc::now);
+        let react_target_ts = chrono::DateTime::from_timestamp(
+            react_target_event.event.created_at.as_secs() as i64,
+            0,
+        )
+        .unwrap_or_else(chrono::Utc::now);
         if let Err(e) = state
             .db
             .remove_reaction(
