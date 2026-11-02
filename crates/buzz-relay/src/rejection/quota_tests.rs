@@ -42,8 +42,20 @@ async fn state_with_limits(limits: Limits) -> AppState {
 }
 
 /// `state` counting against the isolated test Redis under `limits`.
-fn with_limits(mut state: AppState, limits: Limits) -> AppState {
+fn with_limits(state: AppState, limits: Limits) -> AppState {
     let url = std::env::var("BUZZ_TEST_REDIS_URL").expect("explicit isolated BUZZ_TEST_REDIS_URL");
+    let redis_pool = deadpool_redis::Config::from_url(url)
+        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+        .unwrap();
+    with_limits_on(state, limits, redis_pool)
+}
+
+/// `state` counting against `redis_pool` under `limits`.
+fn with_limits_on(
+    mut state: AppState,
+    limits: Limits,
+    redis_pool: deadpool_redis::Pool,
+) -> AppState {
     let mut auth = state.auth.config().clone();
     auth.rate_limits = RateLimitConfig {
         human_messages_per_min: limits.messages,
@@ -54,9 +66,7 @@ fn with_limits(mut state: AppState, limits: Limits) -> AppState {
         ..RateLimitConfig::default()
     };
     state.auth = Arc::new(AuthService::new(auth));
-    state.redis_pool = deadpool_redis::Config::from_url(url)
-        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-        .unwrap();
+    state.redis_pool = redis_pool;
     state.admission_rate_limiter = Arc::new(RedisRateLimiter::new(state.redis_pool.clone()));
     state
 }
@@ -696,30 +706,6 @@ async fn post_event(
     .await
 }
 
-/// `POST /events` signed with NIP-98 by `agent`, presenting `owner`'s NIP-OA
-/// attestation for it in `x-auth-tag`.
-async fn post_attested_event(
-    state: &Arc<AppState>,
-    tenant: &buzz_core::TenantContext,
-    agent: &Keys,
-    owner: &Keys,
-    msg: &ClientMessage,
-) -> (axum::http::StatusCode, serde_json::Value) {
-    let ClientMessage::Event(event) = msg else {
-        unreachable!()
-    };
-    let url = crate::api::bridge::nip98_expected_url(&state.config.relay_url, tenant, "/events");
-    let authorization =
-        crate::nip98::nip98_header(agent, &url, &serde_json::to_vec(event).unwrap()).unwrap();
-    let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(owner, &agent.public_key(), "").unwrap();
-    send_event(state, tenant.host(), msg, |request| {
-        request
-            .header(axum::http::header::AUTHORIZATION, authorization)
-            .header("x-auth-tag", auth_tag)
-    })
-    .await
-}
-
 async fn send_event(
     state: &Arc<AppState>,
     host: &str,
@@ -750,176 +736,213 @@ async fn send_event(
     (status, serde_json::from_slice(&body).unwrap_or_default())
 }
 
-/// HTTP and WebSocket events of one owner's agents spend the same budgets,
-/// and an agent key is charged to its stored owner even when it publishes
-/// without its auth tag. Keys with no owner keep the human HTTP behavior.
-#[tokio::test]
-#[ignore = "requires Postgres and explicit isolated BUZZ_TEST_REDIS_URL"]
-async fn http_agent_events_share_owner_budgets_with_websocket() {
-    let state = crate::api::bridge::postgres_tests::bridge_handler_test_state()
+/// Tests that also need PostgreSQL. They run in the PostgreSQL lane, which
+/// gives each test its own database and provides Redis at `REDIS_URL`.
+mod postgres_tests {
+    use super::*;
+
+    /// `POST /events` signed with NIP-98 by `agent`, presenting `owner`'s NIP-OA
+    /// attestation for it in `x-auth-tag`.
+    async fn post_attested_event(
+        state: &Arc<AppState>,
+        tenant: &buzz_core::TenantContext,
+        agent: &Keys,
+        owner: &Keys,
+        msg: &ClientMessage,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        let ClientMessage::Event(event) = msg else {
+            unreachable!()
+        };
+        let url =
+            crate::api::bridge::nip98_expected_url(&state.config.relay_url, tenant, "/events");
+        let authorization =
+            crate::nip98::nip98_header(agent, &url, &serde_json::to_vec(event).unwrap()).unwrap();
+        let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(owner, &agent.public_key(), "").unwrap();
+        send_event(state, tenant.host(), msg, |request| {
+            request
+                .header(axum::http::header::AUTHORIZATION, authorization)
+                .header("x-auth-tag", auth_tag)
+        })
         .await
-        .expect("local Postgres and Redis");
-    let state = Arc::new(with_limits(
-        (*state).clone(),
-        Limits {
-            agent_channel: 2,
-            agent_owner: 3,
-            ..Limits::default()
-        },
-    ));
-    let recorder = DebuggingRecorder::new();
-    let _guard = metrics::set_default_local_recorder(&recorder);
-    let host = format!("agent-budget-{}.local", Uuid::new_v4().simple());
-    let community = state
-        .db
-        .ensure_configured_community(&host)
-        .await
-        .expect("ensure community")
-        .id;
-    let tenant = buzz_core::TenantContext::resolved(community, &host);
-    let owner = Keys::generate().public_key();
-    let http_agent = Keys::generate().public_key();
-    let (ws, mut ws_rx) = agent_socket(&state, community, Keys::generate().public_key(), owner);
-    let channel = Some(Uuid::new_v4());
-
-    // Before it has an owner, the key is not charged to any agent budget.
-    let (status, _) = post_event(&state, &host, &http_agent, &channel_event(9, channel)).await;
-    assert_ne!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(owner_spent(&state, &ws, &owner).await, None);
-    // Another relay instance records the owner. This instance learns of it
-    // on the next event, with no cache invalidation.
-    link_in_database(&state, community, &http_agent, &owner).await;
-
-    assert!(admit(&channel_event(9, channel), &ws, &mut ws_rx, &state).await);
-    // Admitted by the budget; ingest then refuses the unknown channel.
-    let (status, _) = post_event(&state, &host, &http_agent, &channel_event(9, channel)).await;
-    assert_ne!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
-    let (status, body) = post_event(&state, &host, &http_agent, &channel_event(9, channel)).await;
-    assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
-    assert!((1..=60).contains(&retry_seconds(body["error"].as_str().unwrap())));
-    assert!(!admit(&channel_event(9, channel), &ws, &mut ws_rx, &state).await);
-
-    // An ephemeral event over HTTP is not charged.
-    let (status, _) = post_event(&state, &host, &http_agent, &channel_event(20002, channel)).await;
-    assert_ne!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
-    // The third event fills the owner budget from another channel.
-    let (status, _) = post_event(&state, &host, &http_agent, &event(9)).await;
-    assert_ne!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
-    let (status, _) = post_event(
-        &state,
-        &host,
-        &http_agent,
-        &channel_event(9, Some(Uuid::new_v4())),
-    )
-    .await;
-    assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(channel_spent(&state, &ws, &owner, channel).await, Some(2));
-    assert_eq!(owner_spent(&state, &ws, &owner).await, Some(3));
-    assert_metrics(
-        &recorder,
-        &[
-            ("http", "quota", "agent_channel_events", 1),
-            ("http", "quota", "agent_owner_events", 1),
-        ],
-    );
-
-    // A key with no owner is not charged to any agent budget over HTTP.
-    let human = Keys::generate().public_key();
-    for _ in 0..2 {
-        let (status, _) = post_event(&state, &host, &human, &channel_event(9, channel)).await;
-        assert_ne!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
     }
-    let human_key = |bucket| buzz_auth::rate_limit::rate_limit_key(&tenant, &human, &bucket);
-    assert_eq!(get(&state, human_key(LimitType::Messages)).await, None);
-    assert_eq!(get(&state, human_key(LimitType::ApiCalls)).await, Some(2));
-}
 
-/// Records `owner` for `agent` directly in the database, as another relay
-/// instance does, without touching this instance's caches.
-async fn link_in_database(
-    state: &AppState,
-    community: CommunityId,
-    agent: &nostr::PublicKey,
-    owner: &nostr::PublicKey,
-) {
-    for key in [agent, owner] {
-        state
-            .db
-            .ensure_user_for_authorization(community, key.as_bytes())
+    /// HTTP and WebSocket events of one owner's agents spend the same budgets,
+    /// and an agent key is charged to its stored owner even when it publishes
+    /// without its auth tag. Keys with no owner keep the human HTTP behavior.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL and Redis"]
+    async fn http_agent_events_share_owner_budgets_with_websocket() {
+        let state = crate::api::bridge::postgres_tests::bridge_handler_test_state()
             .await
-            .unwrap();
-    }
-    assert!(state
-        .db
-        .set_agent_owner_for_authorization(community, agent.as_bytes(), owner.as_bytes())
-        .await
-        .unwrap());
-}
+            .expect("local Postgres and Redis");
+        let redis_pool = state.redis_pool.clone();
+        let state = Arc::new(with_limits_on(
+            (*state).clone(),
+            Limits {
+                agent_channel: 2,
+                agent_owner: 3,
+                ..Limits::default()
+            },
+            redis_pool,
+        ));
+        let recorder = DebuggingRecorder::new();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let host = format!("agent-budget-{}.local", Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community")
+            .id;
+        let tenant = buzz_core::TenantContext::resolved(community, &host);
+        let owner = Keys::generate().public_key();
+        let http_agent = Keys::generate().public_key();
+        let (ws, mut ws_rx) = agent_socket(&state, community, Keys::generate().public_key(), owner);
+        let channel = Some(Uuid::new_v4());
 
-/// An HTTP agent proving its owner with a NIP-OA tag is charged to that owner
-/// once the link is recorded. A key that already has a stored owner stays
-/// charged to it when it presents another owner's tag.
-#[tokio::test]
-#[ignore = "requires Postgres and explicit isolated BUZZ_TEST_REDIS_URL"]
-async fn http_nip_oa_agents_are_charged_to_their_stored_owner() {
-    let state = crate::api::bridge::postgres_tests::bridge_handler_test_state()
-        .await
-        .expect("local Postgres and Redis");
-    let state = Arc::new(with_limits(
-        (*state).clone(),
-        Limits {
-            agent_channel: 100,
-            agent_owner: 100,
-            ..Limits::default()
-        },
-    ));
-    let host = format!("agent-budget-{}.local", Uuid::new_v4().simple());
-    let community = state
-        .db
-        .ensure_configured_community(&host)
-        .await
-        .expect("ensure community")
-        .id;
-    let tenant = buzz_core::TenantContext::resolved(community, &host);
-    let (owner, other_owner) = (Keys::generate(), Keys::generate());
-    let (ws, _ws_rx) = agent_socket(
-        &state,
-        community,
-        Keys::generate().public_key(),
-        owner.public_key(),
-    );
+        // Before it has an owner, the key is not charged to any agent budget.
+        let (status, _) = post_event(&state, &host, &http_agent, &channel_event(9, channel)).await;
+        assert_ne!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(owner_spent(&state, &ws, &owner).await, None);
+        // Another relay instance records the owner. This instance learns of it
+        // on the next event, with no cache invalidation.
+        link_in_database(&state, community, &http_agent, &owner).await;
 
-    // A new agent: its first attested event records the owner and is charged.
-    let agent = Keys::generate();
-    let (status, _) =
-        post_attested_event(&state, &tenant, &agent, &owner, &channel_event(9, None)).await;
-    assert_ne!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
-    assert!(state
-        .db
-        .is_agent_owner(
-            community,
-            agent.public_key().as_bytes(),
-            owner.public_key().as_bytes()
+        assert!(admit(&channel_event(9, channel), &ws, &mut ws_rx, &state).await);
+        // Admitted by the budget; ingest then refuses the unknown channel.
+        let (status, _) = post_event(&state, &host, &http_agent, &channel_event(9, channel)).await;
+        assert_ne!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        let (status, body) =
+            post_event(&state, &host, &http_agent, &channel_event(9, channel)).await;
+        assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert!((1..=60).contains(&retry_seconds(body["error"].as_str().unwrap())));
+        assert!(!admit(&channel_event(9, channel), &ws, &mut ws_rx, &state).await);
+
+        // An ephemeral event over HTTP is not charged.
+        let (status, _) =
+            post_event(&state, &host, &http_agent, &channel_event(20002, channel)).await;
+        assert_ne!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        // The third event fills the owner budget from another channel.
+        let (status, _) = post_event(&state, &host, &http_agent, &event(9)).await;
+        assert_ne!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        let (status, _) = post_event(
+            &state,
+            &host,
+            &http_agent,
+            &channel_event(9, Some(Uuid::new_v4())),
         )
-        .await
-        .unwrap());
-    assert_eq!(owner_spent(&state, &ws, &owner.public_key()).await, Some(1));
+        .await;
+        assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(channel_spent(&state, &ws, &owner, channel).await, Some(2));
+        assert_eq!(owner_spent(&state, &ws, &owner).await, Some(3));
+        assert_metrics(
+            &recorder,
+            &[
+                ("http", "quota", "agent_channel_events", 1),
+                ("http", "quota", "agent_owner_events", 1),
+            ],
+        );
 
-    // The same agent presenting another owner's tag still spends the first.
-    let (status, _) = post_attested_event(
-        &state,
-        &tenant,
-        &agent,
-        &other_owner,
-        &channel_event(9, None),
-    )
-    .await;
-    assert_ne!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(owner_spent(&state, &ws, &owner.public_key()).await, Some(2));
-    assert_eq!(
-        owner_spent(&state, &ws, &other_owner.public_key()).await,
-        None
-    );
+        // A key with no owner is not charged to any agent budget over HTTP.
+        let human = Keys::generate().public_key();
+        for _ in 0..2 {
+            let (status, _) = post_event(&state, &host, &human, &channel_event(9, channel)).await;
+            assert_ne!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        }
+        let human_key = |bucket| buzz_auth::rate_limit::rate_limit_key(&tenant, &human, &bucket);
+        assert_eq!(get(&state, human_key(LimitType::Messages)).await, None);
+        assert_eq!(get(&state, human_key(LimitType::ApiCalls)).await, Some(2));
+    }
+
+    /// Records `owner` for `agent` directly in the database, as another relay
+    /// instance does, without touching this instance's caches.
+    async fn link_in_database(
+        state: &AppState,
+        community: CommunityId,
+        agent: &nostr::PublicKey,
+        owner: &nostr::PublicKey,
+    ) {
+        for key in [agent, owner] {
+            state
+                .db
+                .ensure_user_for_authorization(community, key.as_bytes())
+                .await
+                .unwrap();
+        }
+        assert!(state
+            .db
+            .set_agent_owner_for_authorization(community, agent.as_bytes(), owner.as_bytes())
+            .await
+            .unwrap());
+    }
+
+    /// An HTTP agent proving its owner with a NIP-OA tag is charged to that owner
+    /// once the link is recorded. A key that already has a stored owner stays
+    /// charged to it when it presents another owner's tag.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL and Redis"]
+    async fn http_nip_oa_agents_are_charged_to_their_stored_owner() {
+        let state = crate::api::bridge::postgres_tests::bridge_handler_test_state()
+            .await
+            .expect("local Postgres and Redis");
+        let redis_pool = state.redis_pool.clone();
+        let state = Arc::new(with_limits_on(
+            (*state).clone(),
+            Limits {
+                agent_channel: 100,
+                agent_owner: 100,
+                ..Limits::default()
+            },
+            redis_pool,
+        ));
+        let host = format!("agent-budget-{}.local", Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community")
+            .id;
+        let tenant = buzz_core::TenantContext::resolved(community, &host);
+        let (owner, other_owner) = (Keys::generate(), Keys::generate());
+        let (ws, _ws_rx) = agent_socket(
+            &state,
+            community,
+            Keys::generate().public_key(),
+            owner.public_key(),
+        );
+
+        // A new agent: its first attested event records the owner and is charged.
+        let agent = Keys::generate();
+        let (status, _) =
+            post_attested_event(&state, &tenant, &agent, &owner, &channel_event(9, None)).await;
+        assert_ne!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert!(state
+            .db
+            .is_agent_owner(
+                community,
+                agent.public_key().as_bytes(),
+                owner.public_key().as_bytes()
+            )
+            .await
+            .unwrap());
+        assert_eq!(owner_spent(&state, &ws, &owner.public_key()).await, Some(1));
+
+        // The same agent presenting another owner's tag still spends the first.
+        let (status, _) = post_attested_event(
+            &state,
+            &tenant,
+            &agent,
+            &other_owner,
+            &channel_event(9, None),
+        )
+        .await;
+        assert_ne!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(owner_spent(&state, &ws, &owner.public_key()).await, Some(2));
+        assert_eq!(
+            owner_spent(&state, &ws, &other_owner.public_key()).await,
+            None
+        );
+    }
 }
 
 #[tokio::test]
