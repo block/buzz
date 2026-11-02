@@ -445,6 +445,10 @@ test-unit:
         # #[ignore]d, so --lib runs only the infra-free set. Without this gate a
         # stray file in migrations/ or a broken lint ships green.
         cargo nextest run -p buzz-db --lib
+        # buzz-search unit tests: pure query-builder and cancel-outcome checks
+        # (no infra). Its Postgres suite runs in the PostgreSQL lane. Keep
+        # scripts/run-tests.sh in step.
+        cargo nextest run -p buzz-search --lib
         # buzz-db source-policy tests: infra-free scans of the crate sources
         # that enforce the event-write admission chokepoint, metric/provenance
         # contracts, and their fixtures. They live in an integration-test
