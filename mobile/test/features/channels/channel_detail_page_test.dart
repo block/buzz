@@ -14030,37 +14030,79 @@ void main() {
       expect(observer.pushCount, initialPushCount + 1);
     });
 
-    testWidgets('missing channel link shows an error', (tester) async {
-      final randomChannel = _channel(id: 'random-channel', name: 'random');
-      final channelsNotifier = _FakeChannelsNotifier([
-        _testChannel,
-        randomChannel,
-      ]);
-
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: [
-            _textMsg(
-              id: 'msg1',
-              pubkey: 'alice',
-              content: 'Take this to #random',
-              createdAt: 1000,
-            ),
+    // A link can name a channel the loaded list lacks, such as an open
+    // channel the user hasn't joined. It opens from the channel's own
+    // metadata when the relay shares it, and otherwise says why it can't.
+    for (final (name, metaVisibility, fail, toast) in [
+      ('unjoined open channel opens', 'public', false, null),
+      ('channel the relay withholds', null, false, 'Channel not found here'),
+      (
+        'private channel stays closed',
+        'private',
+        false,
+        'Channel not found here',
+      ),
+      ('failed lookup', 'public', true, 'Could not open the channel'),
+    ]) {
+      testWidgets('unlisted channel link: $name', (tester) async {
+        final relay = _ChannelMetadataRelaySession(
+          metas: [
+            if (metaVisibility != null)
+              _channelMetadataEvent(
+                '8c1d2e3f-0000-4000-8000-00000000000a',
+                'random',
+                private: metaVisibility == 'private',
+              ),
           ],
-          users: {
-            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
-          },
-          channelsNotifier: channelsNotifier,
-        ),
-      );
-      await tester.pumpAndSettle();
+          fail: fail,
+        );
+        final observer = _TestNavigatorObserver();
 
-      channelsNotifier.setChannels([_testChannel]);
-      await tester.tap(find.text('random'));
-      await tester.pump();
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _textMsg(
+                id: 'msg1',
+                pubkey: 'alice',
+                content:
+                    '[#random](buzz://channel/8c1d2e3f-0000-4000-8000-00000000000a)',
+                createdAt: 1000,
+              ),
+            ],
+            users: {
+              'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+            relaySessionNotifier: relay,
+            navigatorObservers: [observer],
+          ),
+        );
+        await tester.pumpAndSettle();
 
-      expect(find.text('Channel could not be opened'), findsOneWidget);
-    });
+        final initialPushCount = observer.pushCount;
+        await tester.tap(find.text('#random', findRichText: true));
+        await tester.pump();
+        // A second tap while the first is still resolving is ignored.
+        await tester.tap(find.text('#random', findRichText: true));
+        await tester.pump();
+        expect(relay.metadataLookups, ['8c1d2e3f-0000-4000-8000-00000000000a']);
+
+        relay.gate.complete();
+        await tester.pump();
+        await tester.pump();
+        if (toast == null) {
+          await tester.pumpAndSettle();
+          expect(observer.pushCount, initialPushCount + 1);
+          final opened = tester.widget<ChannelDetailPage>(
+            find.byType(ChannelDetailPage).last,
+          );
+          expect(opened.channel.id, '8c1d2e3f-0000-4000-8000-00000000000a');
+          expect(opened.channel.isMember, isFalse);
+        } else {
+          expect(find.text(toast), findsOneWidget);
+          expect(observer.pushCount, initialPushCount);
+        }
+      });
+    }
 
     testWidgets('tapping a channel link inside a thread opens that channel', (
       tester,
@@ -18149,6 +18191,61 @@ class _MutableHuddleMembersNotifier extends Notifier<List<ChannelMember>> {
 
   void replace(List<ChannelMember> members) => state = members;
 }
+
+/// Answers kind:39000 lookups for channels outside the loaded list.
+class _ChannelMetadataRelaySession extends _IdentityUpdateRelaySession {
+  _ChannelMetadataRelaySession({required this.metas, this.fail = false});
+
+  final List<NostrEvent> metas;
+  final bool fail;
+  final metadataLookups = <String>[];
+
+  /// Holds each lookup until completed, so a test can tap again mid-lookup.
+  final gate = Completer<void>();
+
+  static const unlistedId = '8c1d2e3f-0000-4000-8000-00000000000a';
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    if (!(filter.kinds.length == 1 && filter.kinds.single == 39000)) {
+      return super.fetchHistory(filter, timeout: timeout);
+    }
+    final ids = filter.tags['#d'] ?? const <String>[];
+    // The open page's own metadata reads pass through.
+    if (!ids.contains(unlistedId)) {
+      return super.fetchHistory(filter, timeout: timeout);
+    }
+    metadataLookups.addAll(ids);
+    await gate.future;
+    if (fail) throw StateError('relay unavailable');
+    return [
+      for (final event in metas)
+        if (ids.contains(event.getTagValue('d'))) event,
+    ];
+  }
+}
+
+NostrEvent _channelMetadataEvent(
+  String id,
+  String name, {
+  bool private = false,
+}) => NostrEvent(
+  id: 'meta-$id',
+  pubkey: 'relay',
+  createdAt: 2,
+  kind: 39000,
+  tags: [
+    ['d', id],
+    ['name', name],
+    ['t', 'stream'],
+    [private ? 'private' : 'public'],
+  ],
+  content: '',
+  sig: 'sig',
+);
 
 class _FakeChannelsNotifier extends ChannelsNotifier {
   List<Channel> _channels;

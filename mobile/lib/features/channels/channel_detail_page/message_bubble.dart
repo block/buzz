@@ -404,11 +404,13 @@ class _MessageBubble extends HookConsumerWidget {
                                             },
                                           ),
                                       onChannelTap: (channelId) {
-                                        openChannelLink(
-                                          context: context,
-                                          ref: ref,
-                                          channelId: channelId,
-                                          currentChannelId: currentChannelId,
+                                        unawaited(
+                                          openChannelLink(
+                                            context: context,
+                                            ref: ref,
+                                            channelId: channelId,
+                                            currentChannelId: currentChannelId,
+                                          ),
                                         );
                                       },
                                       onMentionTap: (pubkey) =>
