@@ -63,7 +63,8 @@ pub enum SearchMode {
     ///
     /// Intended for bounded typeahead surfaces such as the desktop topbar. The
     /// relay still refetches and re-authorizes every hit; this mode changes only
-    /// the candidate tsquery, not the access boundary.
+    /// the candidate tsquery, not the access boundary. Text shorter than three
+    /// characters returns no hits unless the query is kind:0-only.
     Prefix,
 }
 
@@ -149,6 +150,14 @@ const SEARCH_TEXT_MAX_CHARS: usize = 4096;
 /// bridge uses page 1), but clamp here too so a future caller cannot accidentally
 /// wire untrusted input into a multi-trillion-row OFFSET.
 const PAGE_MAX: u32 = 1000;
+/// Shortest search text [`SearchMode::Prefix`] runs for anything but a
+/// kind:0-only (profile) query; shorter text returns no hits without SQL.
+/// The GIN index cannot stop early or return rows in rank order, so a one- or
+/// two-character `:*` prefix makes Postgres fetch, recheck and rank a large
+/// share of every indexed message before it can apply `LIMIT`, and typeahead
+/// sends one on every typing pause. Profiles are few enough to stay
+/// one-character typeahead.
+const PREFIX_MIN_CHARS: usize = 3;
 
 fn push_tsquery(qb: &mut QueryBuilder<sqlx::Postgres>, mode: SearchMode, search_text: &str) {
     match mode {
@@ -228,7 +237,10 @@ fn normalized_search_text(q: &str) -> Option<String> {
 /// is no code path through this function that omits it.
 #[datastore_span(name = "search", system = "postgresql")]
 pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, SearchError> {
-    let Some(search_text) = normalized_search_text(&query.q) else {
+    let profile_only = query.kinds.as_deref() == Some(&[0][..]);
+    let Some(search_text) = normalized_search_text(&query.q).filter(|text| {
+        query.mode != SearchMode::Prefix || profile_only || text.chars().count() >= PREFIX_MIN_CHARS
+    }) else {
         return Ok(SearchResult {
             hits: Vec::new(),
             page: query.page.clamp(1, PAGE_MAX),
@@ -250,7 +262,7 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
     // first for this one narrow caller shape.
     let prioritize_exact_profile_lexeme = query.sort == SearchSort::Relevance
         && query.mode == SearchMode::Prefix
-        && query.kinds.as_deref() == Some(&[0][..])
+        && profile_only
         && search_text.chars().count() <= 2;
 
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(

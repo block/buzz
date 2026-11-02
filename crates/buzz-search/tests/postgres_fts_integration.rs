@@ -397,6 +397,38 @@ async fn prefix_mode_matches_final_token_prefix_without_changing_full_text() {
     assert!(prefix_ids.contains(&project_plan));
     assert!(prefix_ids.contains(&project_archive));
 
+    // Below three characters, non-profile prefix search returns no hits in
+    // either sort, whatever the kinds; `pro` above proves the rows exist.
+    // kind:0-only stays one-character typeahead (see the `jm` test above).
+    for (q, kinds, sort) in [
+        ("pr", Some(vec![9]), buzz_search::SearchSort::Relevance),
+        (" p ", Some(vec![9]), buzz_search::SearchSort::Relevance),
+        ("pr", None, buzz_search::SearchSort::Relevance),
+        ("pr", Some(vec![0, 9]), buzz_search::SearchSort::Relevance),
+        ("pr", Some(vec![9]), buzz_search::SearchSort::Newest),
+    ] {
+        let short = svc
+            .search(&SearchQuery {
+                community: c,
+                q: q.into(),
+                channel_scope: ChannelScope::Any,
+                kinds: kinds.clone(),
+                authors: None,
+                since: None,
+                until: None,
+                page: 1,
+                per_page: 10,
+                mode: buzz_search::SearchMode::Prefix,
+                sort,
+            })
+            .await
+            .expect("short prefix search ok");
+        assert!(
+            short.hits.is_empty(),
+            "{q:?} {kinds:?} {sort:?} must not run a short prefix search"
+        );
+    }
+
     let multi_token_prefix = svc
         .search(&SearchQuery {
             community: c,
