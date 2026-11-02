@@ -79,17 +79,17 @@ class AgentAvatarHero extends HookWidget {
       ),
       flightShuttleBuilder: (_, animation, direction, from, to) {
         final source = (from.widget as Hero).child as _AvatarEndpoint;
-        final target = (to.widget as Hero).child as _AvatarEndpoint;
         return AnimatedBuilder(
           animation: animation,
           builder: (_, _) {
+            // The destination rebuilds with the saved selection after pop.
+            // Cancel retains its original selection throughout the flight.
+            final target = (to.widget as Hero).child as _AvatarEndpoint;
             final t = direction == HeroFlightDirection.push
                 ? animation.value
                 : 1 - animation.value;
             return _poster(
-              direction == HeroFlightDirection.push
-                  ? target.selection
-                  : source.selection,
+              target.selection,
               source.verticalOffset +
                   (target.verticalOffset - source.verticalOffset) * t,
             );

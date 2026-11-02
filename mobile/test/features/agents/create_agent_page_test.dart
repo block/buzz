@@ -124,9 +124,8 @@ void main() {
       expect(find.text('Instructions'), findsNothing);
       await tester.tap(find.byKey(ValueKey('agent-avatar-$targetIndex')));
       await tester.pumpAndSettle();
-      await tester.tap(find.byTooltip('Cancel'));
-      await tester.pump();
-      // The source control remains disabled until the reverse Hero finishes.
+      // This harness disables motion, so the return transition completes
+      // immediately. Check suppression while editing, then restoration on exit.
       final chooseButton = find.widgetWithText(
         FilledButton,
         'Choose avatar',
@@ -147,6 +146,7 @@ void main() {
         tester.widget<FrostedAppBar>(sourceBar).nativeViewSuppressed?.value,
         isTrue,
       );
+      await tester.tap(find.byTooltip('Cancel'));
       await tester.pumpAndSettle();
       expect(tester.widget<FilledButton>(chooseButton).onPressed, isNotNull);
       expect(tester.widget<TickerMode>(playback).enabled, isTrue);

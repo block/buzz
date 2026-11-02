@@ -248,6 +248,7 @@ class CreateAgentPage extends HookConsumerWidget {
                                       await precacheImage(
                                         NetworkImage(avatar.value.url!),
                                         context,
+                                        onError: (_, _) {},
                                       );
                                       if (!context.mounted) return;
                                     }

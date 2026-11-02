@@ -210,6 +210,10 @@ void main() {
     expect(find.byType(AndroidView), findsOneWidget);
     // The poster stays until Chromium has actually presented a video frame.
     expect(find.byType(AvatarImageContent), findsOneWidget);
+    // A slow download must still become visible after the old ten-second cap.
+    for (var i = 0; i < 220; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+    }
     frameReady = true;
     await tester.pump(const Duration(milliseconds: 50));
     await tester.pump();
