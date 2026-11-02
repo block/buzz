@@ -2199,17 +2199,21 @@ void main() {
         // Never read: the first catch-up asks for the whole window.
         expect(lastUnreadSince(), [0, 0]);
 
-        // While the app is away, a message composed offline reaches the relay
-        // with a created_at well before the newest one the app has seen.
+        // While the app is away, a message from a phone whose clock is slow
+        // reaches the relay with a created_at well before the newest one the
+        // app has seen.
         session.recentMessages.add(
-          message('late', firstFrom - 600, mention: true),
+          message('late', firstFrom - 1500, mention: true),
         );
         final (secondFrom, secondTo) = await refreshed();
         for (final since in lastUnreadSince()) {
           expect(
             since,
-            inInclusiveRange(firstFrom - 960, firstTo - 960),
-            reason: 'starts 960s before the previous catch-up was sent',
+            inInclusiveRange(
+              firstFrom - relayCrossDeviceSkewSeconds,
+              firstTo - relayCrossDeviceSkewSeconds,
+            ),
+            reason: 'starts 1860s before the previous catch-up was sent',
           );
         }
         expect(
@@ -2220,7 +2224,13 @@ void main() {
         // Each catch-up moves the start forward.
         await refreshed();
         for (final since in lastUnreadSince()) {
-          expect(since, inInclusiveRange(secondFrom - 960, secondTo - 960));
+          expect(
+            since,
+            inInclusiveRange(
+              secondFrom - relayCrossDeviceSkewSeconds,
+              secondTo - relayCrossDeviceSkewSeconds,
+            ),
+          );
         }
       },
     );

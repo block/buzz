@@ -205,11 +205,11 @@ extension _UnreadCatchUp on ChannelsNotifier {
   /// refresh path catches up again (resume, reconnect, join), and on a slow
   /// link re-downloading up to [_unreadCatchUpLimit] messages per channel each
   /// time keeps the batch from ever finishing. A later catch-up therefore
-  /// starts [relayLiveWindowSkewSeconds] before an earlier one was sent. The
+  /// starts [relayCrossDeviceSkewSeconds] before an earlier one was sent. The
   /// earlier one returned every message stored before it was sent, and the
-  /// relay stores no event with a `created_at` more than 900s behind its own
+  /// relay stores no event with a `created_at` more than 900s from its own
   /// clock, so anything stored since then is newer than that start, however
-  /// late it arrived. A read timestamp that moved back since then, or a mute
+  /// late it arrived and however far this phone's clock is from the sender's. A read timestamp that moved back since then, or a mute
   /// change (which changes what counts as unread), makes the full window apply
   /// again.
   int _unreadCatchUpSince(
@@ -224,7 +224,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
         (readAt ?? -1) < (caughtUp.readAt ?? -1)) {
       return afterRead;
     }
-    return max(afterRead, caughtUp.sentAt - relayLiveWindowSkewSeconds);
+    return max(afterRead, caughtUp.sentAt - relayCrossDeviceSkewSeconds);
   }
 
   /// Remembers when a catch-up over [readAtByChannel] was sent, and the read
