@@ -124,21 +124,9 @@ class EditedMarkerBelow extends StatelessWidget {
   );
 }
 
-/// Draws [editedSlot] inside Markdown as the edited marker.
-class EditedMarkerMd extends InlineMd {
-  /// The marker's text style.
-  final TextStyle style;
-
-  /// Creates the component with its resolved [style].
-  EditedMarkerMd(this.style);
-
-  @override
-  RegExp get exp => RegExp(editedSlot);
-
-  @override
-  InlineSpan span(
-    BuildContext context,
-    String text,
-    GptMarkdownConfig config,
-  ) => TextSpan(text: editedMarkerText, style: style);
-}
+/// Draws [editedSlot] inside Markdown as the edited marker, in [style].
+InlinePattern editedMarkerPattern(TextStyle style) => InlinePattern(
+  pattern: RegExp(editedSlot),
+  builder: (context, match, _) =>
+      TextSpan(text: editedMarkerText, style: style),
+);

@@ -566,10 +566,8 @@ void main() {
         ('> ```sh\n> x\n\n```\necho \\#g\n```', r'echo \#g'),
         // A quoted fence ends with its quote, so later prose is parsed.
         ('> ```sh\n> echo x\n\nplain \\#text', 'plain #text'),
-        // Known limitation: gpt_markdown's raw-text fallback for this
-        // unclaimed strike skips inline components, so the stand-in shows.
-        // Its fullwidth form still reads as #.
-        ('~~a\nb \\#c~~', '\uFF03c'),
+        // A strike that spans a line break still decodes its escapes.
+        ('~~a\nb \\#c~~', 'b #c'),
         // A bare link's trailing backslash stays outside the link.
         (r'see https://example.com/a\', 'see '),
         (r'in buzz://channel/9f18f3c6-b5e5-453d-b36d-65487913be0b.\', r'.\'),
@@ -596,7 +594,7 @@ void main() {
             );
           }
           // No stand-in or leaked link syntax reaches text or semantics.
-          if (content.contains('\u2060') || shown == '\uFF03c') continue;
+          if (content.contains('\u2060')) continue;
           expect(
             find.textContaining(
               RegExp('\u2060|\\]\\(http'),
@@ -3226,6 +3224,29 @@ Photos
         expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
         expect(find.text('general'), findsOneWidget);
         expect(find.text('#general'), findsNothing);
+      });
+
+      testWidgets('a channel that opens the message is a link, not a heading', (
+        tester,
+      ) async {
+        String? tappedId;
+        await tester.pumpWidget(
+          _testable(
+            MessageContent(
+              content: '#general is busy',
+              channelNames: const {'general': 'ch-id-1'},
+              onChannelTap: (id) => tappedId = id,
+            ),
+          ),
+        );
+
+        expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
+        expect(
+          find.textContaining('is busy', findRichText: true),
+          findsWidgets,
+        );
+        await tester.tap(find.text('general'));
+        expect(tappedId, 'ch-id-1');
       });
 
       testWidgets('channel tap callback fires', (tester) async {
