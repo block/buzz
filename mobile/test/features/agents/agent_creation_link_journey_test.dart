@@ -114,7 +114,7 @@ void main() {
       }
 
       // A malformed link, or the retired inline form, opens nothing.
-      await receive('buzz://agent/new?card=../x');
+      await receive('buzz://agent/new?card=..');
       await receive('buzz://agent/new#e30');
       expect(find.byType(AgentsPage), findsNothing);
       expect(_cdnRequests, isEmpty);
