@@ -28,8 +28,8 @@ final mediaHttpClientProvider = Provider<http.Client>((ref) {
 ///    headers map in its `==`/`hashCode`, so a freshly signed Authorization
 ///    header on every widget build made the *same URL* a new cache key and
 ///    bypassed the in-memory [ImageCache] entirely. This provider keys on
-///    (url, scale, auth scope) and injects auth headers at *fetch* time, so
-///    header refreshes never invalidate cached images.
+///    (url, scale, auth scope, isThumbnailFallback) and injects auth headers
+///    at *fetch* time, so header refreshes never invalidate cached images.
 /// 2. **Failure cooldown.** A URL that fails to load is not retried until a
 ///    cooldown elapses (honoring `Retry-After` on 429), so error retries on
 ///    rebuild cannot amplify into a request storm against the rate limiter.
@@ -83,8 +83,9 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   static const _defaultCooldown = Duration(seconds: 30);
   static const _maxRetryAfter = Duration(minutes: 5);
 
-  /// Keyed like [_inFlight]: a direct load's failure must not stop a
-  /// fallback to the same URL from recording a missing thumbnail.
+  /// Keyed by (url, isThumbnailFallback), like [_inFlight] minus auth: a
+  /// direct load's failure must not stop a fallback to the same URL from
+  /// recording a missing thumbnail.
   static final Map<(String, bool), DateTime> _cooldownUntil = {};
   static final Map<(String, MediaGetAuthService, bool), _SharedFetch>
   _inFlight = {};
@@ -362,9 +363,10 @@ class _MediaImageStreamCompleter extends MultiFrameImageStreamCompleter {
   }
 }
 
-/// One download shared by every load of the same URL and auth scope. It is
-/// aborted once every load waiting for it has been abandoned, and a load that
-/// arrives after that starts a new download.
+/// One download shared by every load of the same URL, auth scope and role
+/// (direct or thumbnail fallback). It is aborted once every load waiting for
+/// it has been abandoned, and a load that arrives after that starts a new
+/// download.
 class _SharedFetch {
   _SharedFetch(
     Future<Uint8List> Function(Future<void> abort) fetch, {
