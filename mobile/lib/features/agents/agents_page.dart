@@ -344,6 +344,8 @@ class AgentsPage extends HookConsumerWidget {
           return null;
         }
         draftStep.value = _DraftStep.done;
+        // The checks above hold for this account; the fetch can take minutes.
+        final subject = controller.account.account?.subject;
         final client = ref.read(agentCardClientProvider)();
         unawaited(() async {
           // Hold Create (+) off while the card loads, like an open form does.
@@ -370,7 +372,18 @@ class AgentsPage extends HookConsumerWidget {
           } finally {
             client.close();
           }
-          if (context.mounted) await openCreate(resolved);
+          if (!context.mounted) return;
+          if (controller.account.account?.subject != subject) {
+            creating.value = false;
+            drop('Your Builderlab account changed. Reopen the link.');
+          } else if (controller.pending != null) {
+            creating.value = false;
+            drop(
+              'Finish your unfinished agent setup first, then reopen the link.',
+            );
+          } else {
+            await openCreate(resolved);
+          }
         }());
         return null;
       },

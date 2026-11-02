@@ -18,6 +18,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../helpers/remote_agents_fixture.dart';
 import 'agents_harness.dart';
 
 class _NoChannels extends ChannelsNotifier {
@@ -63,10 +64,12 @@ final _cards = <String, Map<String, Object?>>{
   },
 };
 
-/// Fakes only the CDN: unknown ids get S3's 403.
+/// Fakes only the CDN: unknown ids get S3's 403. [_cdnGate] holds responses.
 final _cdnRequests = <Uri>[];
+Completer<void>? _cdnGate;
 http.Client _cdnClient() => MockClient((request) async {
   _cdnRequests.add(request.url);
+  await _cdnGate?.future;
   final match = RegExp(r'^/([^/]+)/agent\.json$').firstMatch(request.url.path);
   final card = request.url.origin == _cdn ? _cards[match?.group(1)] : null;
   return card == null
@@ -167,6 +170,50 @@ void main() {
       await receive(_link('av_missing'));
       expect(find.byType(CreateAgentPage), findsNothing);
       expect(find.text('This agent card isn’t available.'), findsOneWidget);
+      await tester.tap(find.byTooltip('Close agents'));
+      await tester.pumpAndSettle();
+
+      // If the model catalog fails to load, the card's model applies once
+      // Retry loads it.
+      h.registry.failCatalog = true;
+      await receive(_link('av_full'));
+      expect(find.byType(CreateAgentPage), findsOneWidget);
+      expect(find.text('Test model'), findsNothing);
+      h.registry.failCatalog = false;
+      await tester.ensureVisible(find.text('Retry models'));
+      await tester.tap(find.text('Retry models'));
+      await tester.pumpAndSettle();
+      expect(find.text('Test model'), findsOneWidget);
+      expect(find.text('high'), findsOneWidget);
+      await tester.tap(find.byTooltip('Cancel'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Close agents'));
+      await tester.pumpAndSettle();
+
+      // If the Builderlab account changes while the card loads, the draft is
+      // dropped rather than opened for an account that wasn't checked.
+      for (final messenger in tester.stateList<ScaffoldMessengerState>(
+        find.byType(ScaffoldMessenger),
+      )) {
+        messenger.clearSnackBars();
+      }
+      final gate = _cdnGate = Completer<void>();
+      links.add(Uri.parse(_link('av_third')));
+      for (var i = 0; i < 5; i++) {
+        await tester.pump(const Duration(milliseconds: 50));
+      }
+      expect(find.byType(AgentsPage), findsOneWidget);
+      h.registry.subject = 'another-owner';
+      _cdnGate = null;
+      gate.complete();
+      await tester.pumpAndSettle();
+      expect(find.byType(CreateAgentPage), findsNothing);
+      expect(
+        find.text('Your Builderlab account changed. Reopen the link.'),
+        findsOneWidget,
+      );
+      h.registry.subject = fakeSubject;
+      await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('Close agents'));
       await tester.pumpAndSettle();
 

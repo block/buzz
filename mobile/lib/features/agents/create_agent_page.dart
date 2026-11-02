@@ -57,17 +57,20 @@ class CreateAgentPage extends HookConsumerWidget {
     final draft = controller.pending == null ? initialDraft : null;
     final model = useState(controller.pending?['model_id'] as String?);
     final effort = useState(controller.pending?['reasoning_effort'] as String?);
-    // Draft model hints apply once, and only if the live catalog offers them.
+    // Draft model hints apply to the first catalog that loads (after a failed
+    // load, the one Retry fetches), and only if it offers them.
     final hintsApplied = useRef(false);
     useEffect(() {
+      final entries = catalog.data;
       if (draft == null ||
           hintsApplied.value ||
-          catalog.connectionState != ConnectionState.done) {
+          catalog.connectionState != ConnectionState.done ||
+          entries == null) {
         return null;
       }
       hintsApplied.value = true;
-      final match = catalog.data
-          ?.where((entry) => entry.id == draft.modelId)
+      final match = entries
+          .where((entry) => entry.id == draft.modelId)
           .firstOrNull;
       if (match == null) return null;
       model.value = match.id;
