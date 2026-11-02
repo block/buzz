@@ -1,5 +1,6 @@
 import type { AddCommunityPrefillRequest } from "@/features/communities/addCommunityPrefill";
 import type { Community } from "@/features/communities/types";
+import type { LeaveCommunityResult } from "@/features/communities/leaveCommunity";
 import type { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import type { SettingsSection } from "@/features/settings/ui/SettingsPanels";
 import type { UserStatusInput } from "@/features/user-status/types";
@@ -89,6 +90,7 @@ export type AppSidebarProps = {
   onSetUserStatus: (status: UserStatusInput) => void;
   onClearUserStatus: () => void;
   onSwitchCommunity: (id: string) => void;
+  onRemoveWorkspace: (id: string) => Promise<LeaveCommunityResult | undefined>;
   selfUserStatus?: UserStatus;
   isPresencePending?: boolean;
   onNewMessage: () => void;

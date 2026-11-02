@@ -177,13 +177,15 @@ export function AppShell() {
   );
   const { canGoBack, canGoForward, goBack, goForward } =
     useBackForwardControls();
-  const { switchCommunity: handleSwitchCommunity } =
-    useCommunityNavigationTransitions({
-      communities: communitiesHook,
-      goHome,
-      selectedChannelId,
-      selectedView,
-    });
+  const {
+    removeCommunity: handleRemoveCommunity,
+    switchCommunity: handleSwitchCommunity,
+  } = useCommunityNavigationTransitions({
+    communities: communitiesHook,
+    goHome,
+    selectedChannelId,
+    selectedView,
+  });
   useWorkspaceSwitchShortcuts(
     communitiesHook.communities,
     communitiesHook.activeCommunity?.id ?? null,
@@ -820,6 +822,7 @@ export function AppShell() {
                       onOpenWorkspaceSettings={openWorkspaceSettings}
                       onSendFeedback={() => setIsSendFeedbackOpen(true)}
                       onSwitchCommunity={handleSwitchCommunity}
+                      onRemoveWorkspace={handleRemoveCommunity}
                       onCreateAgent={() => requestOpenCreateAgent()}
                       selfPresenceStatus={presenceSession.currentStatus}
                       communities={communitiesHook.communities}

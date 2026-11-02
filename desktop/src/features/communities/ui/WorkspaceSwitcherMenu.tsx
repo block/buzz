@@ -4,11 +4,14 @@ import {
   ChevronRight,
   Copy,
   Link2,
+  LogOut,
   Plus,
   Settings2,
   UserRoundPlus,
 } from "lucide-react";
+import { toast } from "sonner";
 
+import type { LeaveCommunityResult } from "@/features/communities/leaveCommunity";
 import type { Community } from "@/features/communities/types";
 import { useIsMobile } from "@/shared/hooks/use-mobile";
 import { isMacPlatform } from "@/shared/lib/platform";
@@ -43,6 +46,7 @@ type WorkspaceSwitcherMenuProps = {
   onOpenWorkspaceSettings: () => void;
   onInvitePeople: () => void;
   onCopyWorkspaceLink: () => void;
+  onRemoveWorkspace?: (id: string) => Promise<LeaveCommunityResult | undefined>;
 };
 
 function workspaceAddress(relayUrl: string): string {
@@ -153,11 +157,17 @@ function WorkspaceActions({
   onOpenWorkspaceSettings,
   onInvitePeople,
   onCopyWorkspaceLink,
+  onLeaveWorkspace,
+  leaveError,
+  isLeaving,
   mobile = false,
 }: {
   onOpenWorkspaceSettings: () => void;
   onInvitePeople: () => void;
   onCopyWorkspaceLink: () => void;
+  onLeaveWorkspace?: () => void;
+  leaveError: string | null;
+  isLeaving: boolean;
   mobile?: boolean;
 }) {
   if (mobile) {
@@ -218,6 +228,33 @@ function WorkspaceActions({
           <span>Copy workspace link</span>
         </button>
       </DropdownMenuItem>
+      {onLeaveWorkspace ? (
+        <>
+          <DropdownMenuSeparator className="my-1.5" />
+          <DropdownMenuItem
+            aria-label="Leave workspace"
+            className="text-destructive focus:text-destructive"
+            data-testid="workspace-leave-action"
+            disabled={isLeaving}
+            onSelect={(event) => {
+              event.preventDefault();
+              onLeaveWorkspace();
+            }}
+          >
+            <LogOut aria-hidden="true" className="h-4 w-4" />
+            <span>{isLeaving ? "Leaving workspace…" : "Leave workspace"}</span>
+          </DropdownMenuItem>
+          {leaveError ? (
+            <p
+              className="px-2 py-2 text-xs text-destructive"
+              data-testid="workspace-leave-error"
+              role="alert"
+            >
+              {leaveError}
+            </p>
+          ) : null}
+        </>
+      ) : null}
     </>
   );
 }
@@ -233,16 +270,24 @@ export function WorkspaceSwitcherMenu({
   onOpenWorkspaceSettings,
   onInvitePeople,
   onCopyWorkspaceLink,
+  onRemoveWorkspace,
 }: WorkspaceSwitcherMenuProps) {
   const isMobile = useIsMobile();
   const [open, setOpen] = React.useState(false);
+  const [leaveError, setLeaveError] = React.useState<string | null>(null);
+  const [isLeaving, setIsLeaving] = React.useState(false);
+  const openedWithKeyboardRef = React.useRef(false);
+  const preventRadixOpenFocusRef = React.useRef(false);
   const menuContentRef = React.useRef<HTMLDivElement>(null);
 
-  React.useEffect(() => {
-    if (!open || isMobile) return;
+  // Radix autofocus runs on mount, but Presence can retain the menu through its exit
+  // animation.
+  React.useLayoutEffect(() => {
+    if (!open || isMobile || !openedWithKeyboardRef.current) return;
     menuContentRef.current
       ?.querySelector<HTMLElement>("[role='menuitem']")
-      ?.focus();
+      ?.focus({ preventScroll: true });
+    openedWithKeyboardRef.current = false;
   }, [isMobile, open]);
 
   const chooseWorkspace = React.useCallback(
@@ -252,6 +297,31 @@ export function WorkspaceSwitcherMenu({
     },
     [onSwitchWorkspace],
   );
+
+  const leaveWorkspace = React.useCallback(async () => {
+    if (!activeWorkspace || !onRemoveWorkspace || isLeaving) return;
+    setIsLeaving(true);
+    setLeaveError(null);
+    try {
+      const result = await onRemoveWorkspace(activeWorkspace.id);
+      setOpen(false);
+      if (result?.status === "already-absent") {
+        toast("Workspace removed", {
+          description:
+            "You were no longer a member, so Colony removed the workspace from this device.",
+        });
+      }
+    } catch (error) {
+      setLeaveError(
+        error instanceof Error
+          ? error.message
+          : "Couldn't leave the workspace. Try again.",
+      );
+      setOpen(true);
+    } finally {
+      setIsLeaving(false);
+    }
+  }, [activeWorkspace, isLeaving, onRemoveWorkspace]);
 
   const renderActions = (mobile = false) => (
     <WorkspaceActions
@@ -268,6 +338,11 @@ export function WorkspaceSwitcherMenu({
         setOpen(false);
         onOpenWorkspaceSettings();
       }}
+      onLeaveWorkspace={
+        onRemoveWorkspace ? () => void leaveWorkspace() : undefined
+      }
+      leaveError={leaveError}
+      isLeaving={isLeaving}
     />
   );
 
@@ -334,7 +409,19 @@ export function WorkspaceSwitcherMenu({
 
   return (
     <DropdownMenu onOpenChange={setOpen} open={open}>
-      <DropdownMenuTrigger asChild>
+      <DropdownMenuTrigger
+        asChild
+        onKeyDown={(event) => {
+          if (["Enter", " ", "ArrowDown"].includes(event.key)) {
+            openedWithKeyboardRef.current = true;
+            preventRadixOpenFocusRef.current = true;
+          }
+        }}
+        onPointerDown={() => {
+          openedWithKeyboardRef.current = false;
+          preventRadixOpenFocusRef.current = false;
+        }}
+      >
         {renderTrigger({ mobile: false, open })}
       </DropdownMenuTrigger>
       <DropdownMenuContent
@@ -342,6 +429,11 @@ export function WorkspaceSwitcherMenu({
         aria-label="Workspace menu"
         className="w-[360px] rounded-2xl p-2"
         data-testid="workspace-switcher-menu"
+        onOpenAutoFocus={(event) => {
+          if (!preventRadixOpenFocusRef.current) return;
+          event.preventDefault();
+          preventRadixOpenFocusRef.current = false;
+        }}
         onCloseAutoFocus={(event) => event.preventDefault()}
         ref={menuContentRef}
         side="bottom"
