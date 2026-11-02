@@ -140,8 +140,8 @@ async fn failed_target_soft_delete_stores_nothing() {
 
 /// A resend of a deletion stored without its target's soft-delete (a row an
 /// earlier, non-atomic write left torn) applies it and is not answered as a
-/// bare duplicate; a further resend is. Mutation: skip the target soft-delete
-/// for a duplicate deletion → RED.
+/// bare duplicate; a further resend changes nothing. Mutation: skip the
+/// target soft-delete for a duplicate deletion → RED.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn resent_deletion_repairs_a_live_target() {
@@ -174,14 +174,24 @@ async fn resent_deletion_repairs_a_live_target() {
             "kind {kind}: the resend soft-deletes the live target"
         );
 
-        let again = ingest_event(&state, &tenant, deletion, http_auth(&owner))
-            .await
-            .unwrap_or_else(|error| panic!("kind {kind} resend: {error:?}"));
-        assert!(again.accepted, "kind {kind}: {:?}", again.message);
-        assert!(
-            again.message.starts_with("duplicate:"),
-            "kind {kind}: an applied deletion is a duplicate: {:?}",
-            again.message
-        );
+        // Once applied, a kind 5 resend is a duplicate. Kind 9005 validation
+        // reads a tombstoned target as missing, so its resend is refused
+        // before storage, as it was before deletions became atomic.
+        let again = ingest_event(&state, &tenant, deletion.clone(), http_auth(&owner)).await;
+        match (kind, again) {
+            (5, Ok(result)) => assert!(
+                result.accepted && result.message.starts_with("duplicate:"),
+                "an applied kind 5 deletion is a duplicate: {:?}",
+                result.message
+            ),
+            (9005, Err(error)) => assert!(
+                format!("{error:?}").contains("deletion target not found"),
+                "{error:?}"
+            ),
+            (kind, Ok(result)) => panic!("kind {kind} resend: {:?}", result.message),
+            (kind, Err(error)) => panic!("kind {kind} resend: {error:?}"),
+        }
+        assert_eq!(row_state(&state, &tenant, &deletion).await, (true, false));
+        assert_eq!(row_state(&state, &tenant, &target).await, (true, true));
     }
 }
