@@ -404,6 +404,46 @@ void main() {
         expect(find.text('F'), findsNothing);
       },
     );
+
+    testWidgets(
+      'a fallback after a direct thumbnail 404 still loads the original',
+      (tester) async {
+        final original = '$relay/media/${'9b' * 32}.png';
+        final thumbnail = '$relay/media/${'9b' * 32}.thumb.jpg';
+        respond = (url) async => url == thumbnail
+            ? http.Response('', 404)
+            : http.Response.bytes(_pngBytes, 200);
+        await mount(tester);
+
+        // A profile that stores the thumbnail URL itself fails first and
+        // puts that URL on cooldown.
+        await show(
+          tester,
+          AvatarImage(
+            imageUrl: thumbnail,
+            radius: 20,
+            fallback: const Text('D'),
+          ),
+        );
+        await show(tester, const SizedBox());
+        expect(MediaImageProvider.debugCooldownUrls, [thumbnail]);
+
+        // During that cooldown, an avatar for the original falls back to the
+        // same thumbnail. Its own request records the thumbnail as missing,
+        // so the avatar ends up on the original rather than initials.
+        await show(
+          tester,
+          AvatarImage(
+            imageUrl: original,
+            radius: 20,
+            fallback: const Text('F'),
+          ),
+        );
+        expect(requested.where((url) => url == thumbnail), hasLength(2));
+        expect(requested, contains(original));
+        expect(find.text('F'), findsNothing);
+      },
+    );
   });
 
   testWidgets('clips agents to the desktop squircle', (tester) async {

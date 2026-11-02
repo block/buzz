@@ -49,8 +49,9 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   /// original: its 404 then records a missing thumbnail, so later builds load
   /// the original, rather than a failure cooldown. Any other 404, including a
   /// profile URL that is itself a thumbnail, keeps the cooldown. Part of
-  /// equality and the shared download's key, so a fallback and a direct load
-  /// of the same URL each keep their own failure handling.
+  /// equality, the shared download's key and the cooldown's key, so a
+  /// fallback and a direct load of the same URL each keep their own failure
+  /// handling.
   final bool isThumbnailFallback;
 
   /// Excluded from equality: transport, not identity.
@@ -81,7 +82,10 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
 
   static const _defaultCooldown = Duration(seconds: 30);
   static const _maxRetryAfter = Duration(minutes: 5);
-  static final Map<String, DateTime> _cooldownUntil = {};
+
+  /// Keyed like [_inFlight]: a direct load's failure must not stop a
+  /// fallback to the same URL from recording a missing thumbnail.
+  static final Map<(String, bool), DateTime> _cooldownUntil = {};
   static final Map<(String, MediaGetAuthService, bool), _SharedFetch>
   _inFlight = {};
 
@@ -93,7 +97,10 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   static void debugResetCooldowns() => _cooldownUntil.clear();
 
   @visibleForTesting
-  static Iterable<String> get debugCooldownUrls => _cooldownUntil.keys;
+  static Iterable<String> get debugCooldownUrls =>
+      _cooldownUntil.keys.map((key) => key.$1);
+
+  (String, bool) get _cooldownKey => (url, isThumbnailFallback);
 
   @override
   Future<MediaImageProvider> obtainKey(ImageConfiguration configuration) {
@@ -178,12 +185,12 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   /// Downloads [url]. Completing [abort] means every load waiting for this
   /// download was abandoned, so the URL is not put on cooldown.
   Future<Uint8List> _fetchBytes(Future<void> abort) async {
-    final until = _cooldownUntil[url];
+    final until = _cooldownUntil[_cooldownKey];
     if (until != null) {
       if (debugNow().isBefore(until)) {
         throw MediaImageCooldownException(url: url, until: until);
       }
-      _cooldownUntil.remove(url);
+      _cooldownUntil.remove(_cooldownKey);
     }
 
     final uri = Uri.parse(url);
@@ -246,7 +253,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     } catch (_) {
       // Nobody wanted the image any more; the URL itself did not fail.
       if (!wasAbandoned) {
-        _cooldownUntil[url] = debugNow().add(_defaultCooldown);
+        _cooldownUntil[_cooldownKey] = debugNow().add(_defaultCooldown);
       }
       rethrow;
     }
@@ -259,7 +266,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       throw NetworkImageLoadException(statusCode: 404, uri: uri);
     }
     if (response.statusCode != 200) {
-      _cooldownUntil[url] = debugNow().add(_cooldownFor(response));
+      _cooldownUntil[_cooldownKey] = debugNow().add(_cooldownFor(response));
       throw NetworkImageLoadException(
         statusCode: response.statusCode,
         uri: uri,
@@ -267,7 +274,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     }
     final bytes = response.bodyBytes;
     if (bytes.isEmpty) {
-      _cooldownUntil[url] = debugNow().add(_defaultCooldown);
+      _cooldownUntil[_cooldownKey] = debugNow().add(_defaultCooldown);
       throw NetworkImageLoadException(statusCode: 200, uri: uri);
     }
     return bytes;
