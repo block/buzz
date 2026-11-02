@@ -290,7 +290,9 @@ class RemoteAgentController extends ChangeNotifier {
       return;
     }
     await ensureBinding();
-    final result = await account.post('/v3/beekeeper/list-agents', {});
+    final result = await account.post('/v3/beekeeper/list-agents', {
+      'include_instructions': true,
+    });
     requireStatus(result, 'SUCCESS', 1);
     final rows = result['agents'] ?? [];
     if (rows is! List) throw StateError('Invalid agent listing.');
@@ -443,11 +445,9 @@ class RemoteAgentController extends ChangeNotifier {
     }, expectedSubject: subject);
     check();
     if (result['error'] != null) throw AccountFailure.rejected;
-    final readback = await account.post(
-      '/v3/beekeeper/list-agents',
-      {},
-      expectedSubject: subject,
-    );
+    final readback = await account.post('/v3/beekeeper/list-agents', {
+      'include_instructions': true,
+    }, expectedSubject: subject);
     check();
     requireStatus(readback, 'SUCCESS', 1);
     final rows = readback['agents'];
@@ -777,7 +777,10 @@ class RemoteAgentController extends ChangeNotifier {
     final retries = Map<String, dynamic>.from(
       jsonDecode(prefs.getString('$scope:delete-retries') ?? '{}') as Map,
     );
-    retries[pubkey] = agent;
+    // Instructions are private, and this retry journal is plain preferences;
+    // a retry needs only the row's identity.
+    retries[pubkey] = Map<String, dynamic>.from(agent)
+      ..remove('agent_instructions');
     if (!await prefs.setString('$scope:delete-retries', jsonEncode(retries))) {
       throw StateError('Could not save deletion retry. Retry Delete.');
     }

@@ -16,6 +16,7 @@ import 'channel_management_provider.dart'
 import 'channel_mutes/channel_mutes_provider.dart';
 import 'huddle_channel_filter.dart';
 import '../../shared/read_state/read_state_provider.dart';
+import '../../shared/read_state/read_state_time.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import 'thread_follows/thread_follows_provider.dart';
 import 'unread_badge/is_high_priority_event.dart';
@@ -78,6 +79,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   bool _listNoticesReopened = false;
   final Set<String> _reopenedLiveChunks = {};
   final Map<String, int> _latestObservedByChannel = {};
+  // Per channel, when an earlier unread catch-up in this session was sent, and
+  // the read timestamp and mute state it used. See [_UnreadCatchUp].
+  final Map<String, ({int sentAt, int? readAt, bool muted})>
+  _unreadCaughtUpByChannel = {};
   final Map<String, Map<String, ObservedUnreadEvent>>
   _observedUnreadEventsByChannel = {};
   final Map<String, Set<String>> _unreadDeletedIdsByChannel = {};
@@ -259,6 +264,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _clearLiveSubscriptions();
       _latestObservedByChannel.clear();
       _observedUnreadEventsByChannel.clear();
+      _unreadCaughtUpByChannel.clear();
       _unreadDeletedIdsByChannel.clear();
       _unscopedUnreadDeletedIds.clear();
       _backstopTimer?.cancel();
@@ -611,6 +617,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   }
 
   /// Returns null when the batch is unavailable: it hit a relay deadline.
+  /// Adds to [failedChannelIds] the channels whose fallback filter failed
+  /// another way; the result has none of their events.
   ///
   /// The relay rejects a request whose filters name more than
   /// [kMaxExplicitChannelValues] channels in aggregate, so larger batches are
@@ -619,6 +627,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     RelaySessionNotifier session,
     List<NostrFilter> filters, {
     required String operation,
+    Set<String>? failedChannelIds,
   }) async {
     final requests = <List<NostrFilter>>[];
     var channelValues = 0;
@@ -678,6 +687,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     final fallbackEvents = await _fetchChannelHistoryFallback(
       session,
       fallback,
+      failedChannelIds,
     );
     return fallbackEvents == null ? null : [...events, ...fallbackEvents];
   }
@@ -685,6 +695,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   Future<List<NostrEvent>?> _fetchChannelHistoryFallback(
     RelaySessionNotifier session,
     List<NostrFilter> filters,
+    Set<String>? failedChannelIds,
   ) async {
     final events = <NostrEvent>[];
     var deadline = false;
@@ -703,7 +714,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
             return await session.fetchHistory(filter);
           } catch (error) {
             // A timed-out filter makes the batch unavailable, not empty.
-            if (isRelayDeadlineError(error)) deadline = true;
+            if (isRelayDeadlineError(error)) {
+              deadline = true;
+            } else {
+              failedChannelIds?.addAll(filter.tags['#h'] ?? const []);
+            }
             return const <NostrEvent>[];
           }
         }),

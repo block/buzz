@@ -30,7 +30,12 @@ extension _UnreadDeletions on ChannelsNotifier {
         : [channelId];
     for (final id in channels) {
       final observed = _observedUnreadEventsByChannel[id];
+      final before = observed?.length;
       observed?.removeWhere((key, _) => targets.contains(key));
+      // The deleted event may have been the marker standing in for a full
+      // window of quiet messages, which can hide older unread ones. Read the
+      // channel's whole window again rather than only since the last read.
+      if (observed?.length != before) _unreadCaughtUpByChannel.remove(id);
       if (observed == null || observed.isEmpty) {
         _observedUnreadEventsByChannel.remove(id);
         _latestObservedByChannel.remove(id);

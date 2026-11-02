@@ -27,6 +27,13 @@ const relayReplaySkewSeconds = 5;
 /// narrower window would miss it for a quiet subscription.
 const relayLiveWindowSkewSeconds = 960;
 
+/// Seconds a repeated read of events other devices wrote reaches behind the
+/// moment the previous read was sent. The relay accepts a `created_at` up to
+/// 900s either side of its own clock, so a writer 900s slow and a reader 900s
+/// fast are 1800s apart, plus 60s of margin. [relayLiveWindowSkewSeconds]
+/// covers only the reader's own skew.
+const relayCrossDeviceSkewSeconds = 1860;
+
 /// Whether [closeCode] says the relay is restarting or going away.
 bool isRelayServiceRestartClose(int? closeCode) =>
     closeCode == 1012 || closeCode == 1001;
