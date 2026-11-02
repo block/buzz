@@ -4,6 +4,7 @@
 //! authenticated via NIP-98 signed events.
 
 mod read_state_snapshot;
+pub(crate) mod search_slots;
 
 use std::sync::Arc;
 
@@ -1604,7 +1605,7 @@ async fn query_member_events(
                 "mixed search and non-search filters not supported",
             ));
         }
-        return handle_bridge_search(
+        let search = handle_bridge_search(
             state,
             &raw_filters,
             &filters,
@@ -1613,8 +1614,17 @@ async fn query_member_events(
             tenant,
             &authed_pubkey_hex,
             &pubkey_bytes,
-        )
-        .await;
+        );
+        return state
+            .search_slots
+            .run(tenant.community(), pubkey.to_bytes(), search)
+            .await
+            .unwrap_or_else(|search_slots::Superseded| {
+                Err(api_error(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "rate-limited: superseded by a newer search",
+                ))
+            });
     }
 
     if let Some(presence_result) =

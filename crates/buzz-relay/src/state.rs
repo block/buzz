@@ -1240,6 +1240,8 @@ pub struct AppState {
     pub auth: Arc<AuthService>,
     /// Full-text search service.
     pub search: Arc<SearchService>,
+    /// Bridge searches in flight per user (see `api::bridge::search_slots`).
+    pub(crate) search_slots: Arc<crate::api::bridge::search_slots::SearchSlots>,
     /// Registry of active client subscriptions.
     pub sub_registry: Arc<SubscriptionRegistry>,
     /// Live NIP-AR syncs this node serves.
@@ -1579,6 +1581,7 @@ impl AppState {
             pubsub,
             auth: Arc::new(auth),
             search: search_arc,
+            search_slots: Arc::default(),
             sub_registry: Arc::new(SubscriptionRegistry::new()),
             artifact_syncs: Arc::default(),
             conn_manager: Arc::new(ConnectionManager::new()),
