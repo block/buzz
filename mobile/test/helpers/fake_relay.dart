@@ -42,7 +42,8 @@ class FakeRelay {
   final _rejections = <({bool Function(NostrEvent) match, String message})>[];
   final _refusals =
       <({bool Function(Map<String, dynamic>) match, String message})>[];
-  final _queryFailures = <bool Function(Map<String, dynamic>)>[];
+  final _queryFailures =
+      <({bool Function(Map<String, dynamic>) match, String body})>[];
   Completer<void>? _okHold;
   Completer<void>? _echoHold;
   Completer<void>? _reqHold;
@@ -93,9 +94,12 @@ class FakeRelay {
     }
   }
 
-  /// Fails the next HTTP query with a filter [match] accepts.
-  void failQuery(bool Function(Map<String, dynamic> filter) match) =>
-      _queryFailures.add(match);
+  /// Fails the next HTTP query with a filter [match] accepts, answering 503
+  /// with [body].
+  void failQuery(
+    bool Function(Map<String, dynamic> filter) match, {
+    String body = 'unavailable',
+  }) => _queryFailures.add((match: match, body: body));
 
   void seed(Iterable<NostrEvent> events) => stored.addAll(events);
 
@@ -342,10 +346,9 @@ class FakeRelay {
     final filters = (jsonDecode(request.body) as List)
         .cast<Map<String, dynamic>>();
     queries.add(filters);
-    final failure = _queryFailures.indexWhere(filters.any);
+    final failure = _queryFailures.indexWhere((f) => filters.any(f.match));
     if (failure >= 0) {
-      _queryFailures.removeAt(failure);
-      return http.Response('unavailable', 503);
+      return http.Response(_queryFailures.removeAt(failure).body, 503);
     }
     final events = filters.length == 1 && filters.single['top_level'] == true
         ? _channelWindow(filters.single)

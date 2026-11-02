@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/features/channels/unread_badge/unread_badge_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme_provider.dart';
 import 'package:fake_async/fake_async.dart';
@@ -14,6 +15,7 @@ import '../../helpers/fake_relay.dart';
 const _channel = '11111111-1111-4111-8111-111111111111';
 const _added = '22222222-2222-4222-8222-222222222222';
 const _third = '33333333-3333-4333-8333-333333333333';
+const _dm = '44444444-4444-4444-8444-444444444444';
 
 void main() {
   final binding = TestWidgetsFlutterBinding.ensureInitialized();
@@ -147,7 +149,8 @@ void main() {
       expect(membershipReads(), 7);
       minutes(1);
 
-      // A read that fails is retried with backoff.
+      // A read that fails is retried with backoff, but still no sooner than
+      // ten seconds after it.
       expect(names(), unorderedEquals(['renamed', 'added']));
       relay.failQuery(
         (f) => f.containsKey('#p') && (f['kinds'] as List).contains(39002),
@@ -161,6 +164,8 @@ void main() {
       seconds(3);
       expect(names(), unorderedEquals(['renamed', 'added']));
       seconds(7);
+      expect(names(), unorderedEquals(['renamed', 'added']));
+      seconds(3);
       expect(names(), unorderedEquals(['retried', 'added']));
       final readsAfterRetry = membershipReads();
       minutes(10);
@@ -179,6 +184,64 @@ void main() {
       expect(names(), ['retried']);
       minutes(3);
       expect(membershipReads(), readsAfterRetry + 1);
+
+      // Another device hides a DM. The read that follows doesn't get the
+      // hidden DMs, so it keeps the DM shown and is retried.
+      relay.seed([
+        roster(_dm),
+        relay.sign(
+          kind: 39000,
+          createdAt: 1700000000 + ++version,
+          tags: [
+            ['d', _dm],
+            ['name', 'dm'],
+            ['t', 'dm'],
+            ['private'],
+            ['p', relay.pubkey],
+          ],
+        ),
+      ]);
+      relay.deliver(notice(EventKind.memberAddedNotification, _dm));
+      seconds(3);
+      expect(names(), unorderedEquals(['retried', 'dm']));
+      minutes(1);
+      relay.refuseReq(
+        (f) =>
+            (f['kinds'] as List).length == 1 &&
+            (f['kinds'] as List).single == EventKind.dmVisibility,
+        'error: unavailable',
+      );
+      relay.deliver(
+        relay.sign(
+          kind: EventKind.dmVisibility,
+          tags: [
+            ['p', relay.pubkey],
+            ['h', _dm],
+          ],
+        ),
+      );
+      seconds(3);
+      expect(names(), unorderedEquals(['retried', 'dm']));
+      seconds(10);
+      expect(names(), ['retried']);
+      final readsAfterHide = membershipReads();
+      minutes(10);
+      expect(membershipReads(), readsAfterHide);
+
+      // The list is rebuilt in place, as creating a Solo channel does, and
+      // the read that follows fails. It is retried.
+      relay.seed([roster(_third), meta(_third, 'third')]);
+      relay.failQuery(
+        (f) => f.containsKey('#p') && (f['kinds'] as List).contains(39002),
+      );
+      container.invalidate(channelsProvider);
+      seconds(1);
+      expect(names(), ['retried']);
+      seconds(10);
+      expect(names(), unorderedEquals(['retried', 'third']));
+      final readsAfterRebuild = membershipReads();
+      minutes(10);
+      expect(membershipReads(), readsAfterRebuild);
     });
   });
 
@@ -568,6 +631,38 @@ void main() {
         expect(names(), unorderedEquals(['general', 'added', 'third']));
         async.elapse(const Duration(minutes: 10));
         expect(membershipReads(), 7);
+
+        // The connection drops and a message lands in a quiet channel. The
+        // unread catch-up after the reconnect fails, and is retried until the
+        // channel shows as unread.
+        int unread() => container.read(unreadBadgeProvider).generalUnreadCount;
+        bool isCatchUp(Map<String, dynamic> f) =>
+            f['since'] != null &&
+            (f['kinds'] as List).contains(EventKind.streamMessage);
+        int catchUps() =>
+            relay.queries.where((filters) => filters.any(isCatchUp)).length;
+        expect(unread(), 0);
+        final catchUpsBefore = catchUps();
+        relay.failQuery(isCatchUp, body: '{"error":"query timed out"}');
+        relay.drop();
+        relay.seed([
+          relay.sign(
+            kind: EventKind.streamMessage,
+            content: 'while down',
+            createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+            tags: [
+              ['h', _added],
+            ],
+          ),
+        ]);
+        async.elapse(const Duration(seconds: 2));
+        expect(catchUps(), catchUpsBefore + 1);
+        expect(unread(), 0);
+        async.elapse(const Duration(seconds: 15));
+        expect(catchUps(), catchUpsBefore + 2);
+        expect(unread(), 1);
+        async.elapse(const Duration(minutes: 10));
+        expect(catchUps(), catchUpsBefore + 2);
       });
     },
   );

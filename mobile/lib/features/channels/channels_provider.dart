@@ -82,6 +82,9 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   Timer? _listReadGap;
   bool _listReadDueAfterGap = false;
   final _listReadRetry = _Backoff();
+  // Its own backoff: the list read that retries a catch-up can succeed and
+  // restart [_listReadRetry] while the catch-up keeps failing.
+  final _unreadCatchUpRetry = _Backoff();
   void Function()? _listNoticesUnsubscribe;
   bool _listNoticesSubscribed = false;
   // Refused for good, so left alone until the next connection.
@@ -431,6 +434,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // Membership discovery already returned the full authoritative rosters.
     // Their owner roles validate Huddle links without downloading them again.
     final huddleBackingIds = huddleBackingChannelIds(huddleStarts, memberships);
+    final hiddenDms = hiddenDmIds ?? _hiddenDmIds;
     final visibleMetas = parsedMetas.entries.where((entry) {
       final data = entry.value;
       final isMember = memberChannelIds.contains(data.id);
@@ -438,7 +442,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
           (data.visibility == 'private' || data.channelType == 'dm')) {
         return false;
       }
-      if (data.channelType == 'dm' && hiddenDmIds.contains(data.id)) {
+      if (data.channelType == 'dm' && hiddenDms.contains(data.id)) {
         return false;
       }
       return !(huddleBackingIds.contains(data.id) &&
@@ -476,7 +480,9 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // Name resolution may return without a fenced read; check before writing.
     fence.ensureCurrent();
     _cacheMemberSnapshots(memberships, replaceAll: true);
-    _hiddenDmIds = Set.unmodifiable(hiddenDmIds);
+    // Without the hidden-DM response, keep the DMs hidden before. The read is
+    // then incomplete, so it stays counted as unread and is retried.
+    if (hiddenDmIds != null) _hiddenDmIds = Set.unmodifiable(hiddenDmIds);
 
     final channels = <Channel>[];
     for (final entry in visibleMetas) {
@@ -617,7 +623,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       }
     }
     if (fetchLastMessage) _needsSnapshotRevalidation = latestEvents == null;
-    _channelListChangesRead = max(_channelListChangesRead, listChanges);
+    if (hiddenDmIds != null) {
+      _channelListChangesRead = max(_channelListChangesRead, listChanges);
+    } else {
+      _channelListChanges++;
+    }
     saveSnapshot?.call(channels, _hiddenDmIds);
     return channels;
   }
@@ -966,6 +976,9 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       return;
     } catch (error) {
       debugPrint('[ChannelsNotifier] background list read failed: $error');
+      // The list may have changed since the last good read, so count this one
+      // as unread to have it retried.
+      _channelListChanges++;
     }
   }
 

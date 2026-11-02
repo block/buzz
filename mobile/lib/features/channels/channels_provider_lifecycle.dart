@@ -217,6 +217,13 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     _scheduleListRead();
   }
 
+  /// Retries a failed or partial unread catch-up. The list read reinstalls
+  /// live coverage, and the catch-up runs again after it.
+  void _retryUnreadCatchUp() {
+    _channelListChanges++;
+    _readListIfChanged();
+  }
+
   void _scheduleListRead() {
     if (_listReadGap != null) {
       _listReadDueAfterGap = true;
@@ -245,6 +252,11 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     if (_lifecycleRef.read(appLifecycleProvider) != AppLifecycleState.resumed) {
       return;
     }
+    // A retry can come due inside the gap after the read it retries.
+    if (_listReadGap != null) {
+      _listReadDueAfterGap = true;
+      return;
+    }
     if (_needsSnapshotRevalidation ||
         _channelListChanges != _channelListChangesRead) {
       _listReadGap?.cancel();
@@ -267,6 +279,7 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     _listReadGap = null;
     _listReadDueAfterGap = false;
     _listReadRetry.cancel();
+    _unreadCatchUpRetry.cancel();
   }
 
   Future<void> _refreshInBackground({bool queueIfBusy = false}) async {
@@ -279,7 +292,6 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
       return;
     }
     final generation = _buildGeneration;
-    final changes = _channelListChanges;
     _backgroundRefreshInFlight = true;
     try {
       if (_needsSnapshotRevalidation) {
@@ -294,9 +306,9 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
           _backgroundRefreshQueued = false;
           unawaited(_refreshInBackground());
         } else if (_needsSnapshotRevalidation ||
-            _channelListChangesRead < changes) {
-          // The read failed. Nothing else would retry it before the next
-          // change, resume or reconnect.
+            _channelListChangesRead < _channelListChanges) {
+          // The read failed or was incomplete. Nothing else would retry it
+          // before the next change, resume or reconnect.
           _listReadRetry.schedule(_readListIfChanged);
         } else {
           _listReadRetry.cancel();
