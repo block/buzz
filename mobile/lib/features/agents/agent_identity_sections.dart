@@ -55,7 +55,9 @@ class AgentIdentitySections extends HookConsumerWidget {
               child: SizedBox(
                 width: double.infinity,
                 child: Text(
-                  unknown && !remote
+                  unknown && !remote && controller.busy
+                      ? 'Checking whether this agent runs on Builderbot…'
+                      : unknown && !remote
                       ? 'Sign in to Builderlab to see whether this agent runs on Builderbot or your desktop.'
                       : remote
                       ? 'This agent runs on Builderbot. Your desktop doesn’t need to be online for it to work.'

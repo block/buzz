@@ -40,6 +40,15 @@ bool agentLocationUnknown(
   RemoteAgentController controller,
 ) => supportsRemoteAgents(community) && controller.account.account == null;
 
+/// Whether to ask the user to sign in to Builderlab: the agent location is
+/// unknown and no load is in flight. A cold start's saved-session restore
+/// runs inside the controller's refresh, so prompting then would start a
+/// needless browser sign-in for a session that is about to be adopted.
+bool builderlabSignInNeeded(
+  Community? community,
+  RemoteAgentController controller,
+) => agentLocationUnknown(community, controller) && !controller.busy;
+
 /// Restores a saved Builderlab session once, so a cold start with a stored
 /// session shows remote agents without waiting for another sign-in path.
 final builderlabRestoreProvider = FutureProvider<void>((ref) async {
