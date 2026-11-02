@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { mock } from "node:test";
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 import React from "react";
 import { createRoot } from "react-dom/client";
@@ -200,32 +200,38 @@ test("policy lookup failure never claims and can be retried", async () => {
   }
 });
 
-test("cancelled policy discovery cannot claim after its response arrives", async () => {
+test("suspended policy discovery times out retryably without claiming", async () => {
   localStorage.clear();
   const original = globalThis.fetch;
-  let resolvePolicy;
+  let lookups = 0;
   let started;
   const lookupStarted = new Promise((resolve) => {
     started = resolve;
   });
-  const response = new Promise((resolve) => {
-    resolvePolicy = resolve;
-  });
-  let claims = 0;
-  globalThis.fetch = async (url) => {
+  const claimReceipts = [];
+  globalThis.fetch = async (url, options) => {
     if (String(url).endsWith("/api/join-policy")) {
+      lookups++;
+      if (lookups > 1) return Response.json({});
       started();
-      return response;
+      // A blackholed relay: nothing settles until the request is aborted.
+      return new Promise((_, reject) =>
+        options.signal.addEventListener("abort", () =>
+          reject(new DOMException("aborted", "AbortError")),
+        ),
+      );
     }
-    claims++;
-    throw new Error("unexpected claim");
-  };
-  try {
-    startCommunityOnboarding({
-      source: "deep-link-join",
-      relayUrl: "wss://relay.example",
-      inviteCode: "code",
+    claimReceipts.push(JSON.parse(options.body).policy_receipt);
+    return Response.json({
+      status: "joined",
+      community_id: "id",
+      host: "relay.example",
+      role: "member",
     });
+  };
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    startCommunityOnboarding(linkJoin);
     render(
       React.createElement(
         CommunityOnboardingProvider,
@@ -234,15 +240,87 @@ test("cancelled policy discovery cannot claim after its response arrives", async
       ),
     );
     await lookupStarted;
-    await act(async () => controls.clear());
-    await act(async () => resolvePolicy(Response.json({})));
-    assert.equal(controls.transaction, null);
-    assert.equal(claims, 0);
+    await act(async () => mock.timers.tick(14_999));
+    assert.equal(controls.transaction.error, undefined);
+    await act(async () => mock.timers.tick(1));
+    mock.timers.reset();
+    await waitFor(() =>
+      assert.equal(
+        controls.transaction.error,
+        "The community's join policy took too long to load.",
+      ),
+    );
+    assert.equal(controls.transaction.stage, "claiming");
+    assert.deepEqual(claimReceipts, []);
+    // Retry, as the claiming stage's button does; this relay has no policy.
+    await act(async () => controls.update({ error: undefined }));
+    await waitFor(() => assert.equal(controls.transaction.stage, "connecting"));
+    assert.equal(lookups, 2);
+    assert.deepEqual(claimReceipts, [undefined]);
   } finally {
+    mock.timers.reset();
     cleanup();
     globalThis.fetch = original;
   }
 });
+
+// Cancelling, or reopening the link mid-lookup, aborts the pending discovery.
+// Its late settlement (here a response that ignores the abort) must not move
+// the cleared or replacement transaction.
+for (const [name, interrupt] of [
+  ["cancelled", () => controls.clear()],
+  ["reopened", () => controls.start(linkJoin)],
+]) {
+  test(`${name} policy discovery is aborted and cannot settle afterwards`, async () => {
+    localStorage.clear();
+    const original = globalThis.fetch;
+    const signals = [];
+    let resolvePolicy;
+    let started;
+    const lookupStarted = new Promise((resolve) => {
+      started = resolve;
+    });
+    let claims = 0;
+    globalThis.fetch = async (url, options) => {
+      if (String(url).endsWith("/api/join-policy")) {
+        signals.push(options.signal);
+        if (signals.length > 1) return new Promise(() => {});
+        started();
+        return new Promise((resolve) => {
+          resolvePolicy = resolve;
+        });
+      }
+      claims++;
+      throw new Error("unexpected claim");
+    };
+    try {
+      startCommunityOnboarding(linkJoin);
+      render(
+        React.createElement(
+          CommunityOnboardingProvider,
+          null,
+          React.createElement(Claim),
+        ),
+      );
+      await lookupStarted;
+      await act(async () => interrupt());
+      assert.equal(signals[0].aborted, true);
+      await act(async () => resolvePolicy(Response.json({ policy })));
+      if (name === "cancelled") {
+        assert.equal(controls.transaction, null);
+      } else {
+        await waitFor(() => assert.equal(signals.length, 2));
+        assert.equal(signals[1].aborted, false);
+        assert.equal(controls.transaction.stage, "claiming");
+        assert.equal(controls.transaction.error, undefined);
+      }
+      assert.equal(claims, 0);
+    } finally {
+      cleanup();
+      globalThis.fetch = original;
+    }
+  });
+}
 
 for (const [sentinel, guidance] of [
   [

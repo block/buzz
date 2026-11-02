@@ -11,7 +11,8 @@ import { claimInvite, getJoinPolicy } from "@/shared/api/invites";
  * Drive the `claiming` stage after machine onboarding completes: claim the
  * invite with the user's final identity, then advance to `connecting`.
  * Completion is fenced by transaction ID so cancelling or replacing the
- * transaction while the request is pending cannot mutate the replacement.
+ * transaction while the request is pending cannot mutate the replacement;
+ * the same change aborts a pending policy lookup.
  *
  * The error guard keeps a failed claim parked on the caller's Retry
  * affordance — without it the effect refires on the error-bearing transaction
@@ -21,10 +22,12 @@ export function useClaimInvite() {
   const { transaction, update } = useCommunityOnboarding();
   const [isPending, setIsPending] = React.useState(false);
   const currentTransaction = React.useRef(transaction);
+  const policyLookup = React.useRef<AbortController | null>(null);
   React.useEffect(() => {
     currentTransaction.current = transaction;
     return () => {
       currentTransaction.current = null;
+      policyLookup.current?.abort();
     };
   }, [transaction]);
 
@@ -33,9 +36,11 @@ export function useClaimInvite() {
       return;
     }
     setIsPending(true);
+    const lookup = new AbortController();
+    policyLookup.current = lookup;
     void (async () => {
       const policy = !transaction.policyReceipt
-        ? await getJoinPolicy(transaction.relayUrl, "webview")
+        ? await getJoinPolicy(transaction.relayUrl, "webview", lookup.signal)
         : null;
       if (currentTransaction.current !== transaction) return;
       if (policy) {

@@ -21,6 +21,11 @@ const NIP98_KIND = 27235;
 // connect timeout (a minute or more on macOS).
 const INVITE_REQUEST_TIMEOUT_MS = 15_000;
 
+// Matches the native fetch_join_policy cap: each relay policy document is at
+// most 256 KiB, and four MiB covers two maximally escaped documents plus the
+// response envelope.
+const MAX_JOIN_POLICY_RESPONSE_BYTES = 4 * 1024 * 1024;
+
 export type MintedInvite = {
   code: string;
   expiresAt: number;
@@ -127,10 +132,42 @@ export function isJoinPolicyDiscoveryCandidate(relayWsUrl: string): boolean {
   }
 }
 
-/** Fetch relay-hosted policy content for any join surface. */
+/** Read a JSON body, refusing it once it streams past `maxBytes`. */
+async function readBoundedJson(
+  response: Response,
+  maxBytes: number,
+): Promise<unknown> {
+  if (Number(response.headers.get("content-length")) > maxBytes) {
+    throw new Error("relay returned oversized join policy");
+  }
+  const reader = response.body?.getReader();
+  const decoder = new TextDecoder();
+  let size = 0;
+  let text = "";
+  while (reader) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maxBytes) {
+      void reader.cancel();
+      throw new Error("relay returned oversized join policy");
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  return JSON.parse(text + decoder.decode());
+}
+
+/**
+ * Fetch relay-hosted policy content for any join surface.
+ *
+ * The webview transport mirrors the native command's bounds: one deadline
+ * covers the headers and the whole body, and the body is capped while it
+ * streams. `signal` lets the caller abandon the request early.
+ */
 export async function getJoinPolicy(
   relayWsUrl: string,
   transport: "native" | "webview",
+  signal?: AbortSignal,
 ): Promise<JoinPolicy | null> {
   type RawJoinPolicy = {
     terms_markdown?: string;
@@ -145,16 +182,38 @@ export async function getJoinPolicy(
     });
   } else {
     const base = relayHttpFromWs(relayWsUrl);
-    const response = await fetch(`${base.replace(/\/+$/, "")}/api/join-policy`);
-    // Relays predating join-policy support have no configured policy.
-    if (response.status === 404) return null;
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    raw =
-      (
-        (await response.json()) as {
-          policy?: RawJoinPolicy;
-        }
-      ).policy ?? null;
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, INVITE_REQUEST_TIMEOUT_MS);
+    try {
+      if (signal?.aborted) abort();
+      const response = await fetch(
+        `${base.replace(/\/+$/, "")}/api/join-policy`,
+        { signal: controller.signal },
+      );
+      // Relays predating join-policy support have no configured policy.
+      if (response.status === 404) return null;
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      raw =
+        (
+          (await readBoundedJson(response, MAX_JOIN_POLICY_RESPONSE_BYTES)) as {
+            policy?: RawJoinPolicy;
+          }
+        ).policy ?? null;
+    } catch (error) {
+      if (timedOut) {
+        throw new Error("The community's join policy took too long to load.");
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+    }
   }
   return raw
     ? {

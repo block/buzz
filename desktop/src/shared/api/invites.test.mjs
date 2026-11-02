@@ -53,6 +53,33 @@ test("getJoinPolicy fails closed on a policy endpoint error", async () => {
   );
 });
 
+test("getJoinPolicy refuses a webview response past the 4 MiB native cap", async () => {
+  const oversized = 4 * 1024 * 1024 + 1;
+  // Streamed without a length, then declared up front.
+  const streamed = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('{"policy":null,"pad":"'));
+      controller.enqueue(new Uint8Array(oversized).fill(0x61));
+      controller.enqueue(new TextEncoder().encode('"}'));
+      controller.close();
+    },
+  });
+  for (const response of [
+    new Response(streamed, { status: 200 }),
+    new Response("{}", {
+      status: 200,
+      headers: { "content-length": String(oversized) },
+    }),
+  ]) {
+    await withFetch(response, () =>
+      assert.rejects(
+        getJoinPolicy("wss://relay.example", "webview"),
+        /oversized join policy/,
+      ),
+    );
+  }
+});
+
 test("getJoinPolicy maps the native command response", async () => {
   const previousWindow = globalThis.window;
   globalThis.window = {
