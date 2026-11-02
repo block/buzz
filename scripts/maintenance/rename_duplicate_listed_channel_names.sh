@@ -37,8 +37,9 @@
 # (add-member also finds only an unarchived community), run this script, and
 # archive it again. For one being deleted, it stops: no rename can land there,
 # and its duplicates go when its deletion completes.
-# BUZZ_RELAY_URL defaults to wss://<community host>. BUZZ_CLI defaults to
-# `buzz`.
+# BUZZ_RELAY_URL defaults to wss://<community host>; it must be the URL
+# clients use, because it also gives the clients' starter channel ids.
+# BUZZ_CLI defaults to `buzz`. The script needs psql and python3.
 set -euo pipefail
 
 usage() {
@@ -61,6 +62,24 @@ relay_url=${BUZZ_RELAY_URL:-wss://$host}
 buzz=${BUZZ_CLI:-buzz}
 plan_sql="$(cd "$(dirname "$0")" && pwd)/plan_duplicate_listed_channel_renames.sql"
 
+# The ids released desktop and mobile apps create their starter channels at:
+# UUIDv5 of "starter-channel:v1:<relay HTTP origin>:<slug>", where the origin
+# is the relay URL with wss:// as https:// and ws:// as http://
+# (starter_channel_uuid in desktop/src-tauri/src/commands/channels.rs). The
+# plan keeps the name on an archived starter at one of these ids.
+starter_scope=${relay_url%/}
+case $starter_scope in
+wss://*) starter_scope=https://${starter_scope#wss://} ;;
+ws://*) starter_scope=http://${starter_scope#ws://} ;;
+esac
+starter_ids=$(python3 -I -c '
+import sys, uuid
+ns = uuid.UUID("3ce33bea-8f09-5f1b-9c85-8a7d2659e6b0")
+ids = (uuid.uuid5(ns, "starter-channel:v1:%s:%s" % (sys.argv[1], slug))
+       for slug in ("general", "welcome-everyone"))
+print("{" + ",".join(map(str, ids)) + "}")
+' "$starter_scope")
+
 plan=$(mktemp)
 trap 'rm -f "$plan"' EXIT
 
@@ -68,7 +87,7 @@ trap 'rm -f "$plan"' EXIT
 # name, with any control character in it, stays one field.
 read_plan() {
     psql "$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 -v host="$host" \
-        -A -t -z -0 -f "$plan_sql" >"$plan"
+        -v starter_ids="$starter_ids" -A -t -z -0 -f "$plan_sql" >"$plan"
 }
 
 community_state=$(psql "$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 -v host="$host" \

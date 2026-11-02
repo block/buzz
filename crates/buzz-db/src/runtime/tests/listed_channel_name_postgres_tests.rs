@@ -65,6 +65,15 @@ fn renamed(id: Uuid, name: &str) -> (Uuid, String) {
 /// The plan for `host`: (channel, current name, new name), as the rename
 /// script reads it.
 pub(super) async fn rename_plan(pool: &PgPool, host: &str) -> Vec<(Uuid, String, String)> {
+    rename_plan_with_starters(pool, host, &[]).await
+}
+
+/// The plan for `host` when the clients' starter channels have `starter_ids`.
+async fn rename_plan_with_starters(
+    pool: &PgPool,
+    host: &str,
+    starter_ids: &[Uuid],
+) -> Vec<(Uuid, String, String)> {
     let (_, query) = PLAN_SQL.split_once("\nWITH").expect("plan query");
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "WITH{}",
@@ -72,8 +81,10 @@ pub(super) async fn rename_plan(pool: &PgPool, host: &str) -> Vec<(Uuid, String,
             .trim_end()
             .trim_end_matches(';')
             .replace(":'host'", "$1")
+            .replace(":'starter_ids'::uuid[]", "$2::uuid[]")
     )))
     .bind(host)
+    .bind(starter_ids)
     .fetch_all(pool)
     .await
     .expect("run the rename plan")
@@ -168,8 +179,10 @@ async fn plan_keeps_each_listed_name_on_its_oldest_unarchived_channel() {
 /// Released desktop and mobile apps create `general` and `welcome-everyone`
 /// when no open, unarchived stream has the name, and the relay refuses that
 /// create while an archived channel holds it. The plan renames every holder of
-/// a starter name when all of them are archived, and no other archived name.
-/// Mutation: drop the `all_archived` condition in the plan → RED.
+/// a starter name when all of them are archived, and no other archived name,
+/// unless one of them is at the clients' starter id.
+/// Mutation: drop the `all_archived` or `NOT starter_held` condition in the
+/// plan, or the `at_starter_id` sort key → RED.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn plan_frees_a_starter_name_that_only_archived_channels_hold() {
@@ -235,6 +248,23 @@ async fn plan_frees_a_starter_name_that_only_archived_channels_hold() {
     ];
     names.sort();
     assert_eq!(seed.names(&pool).await, names);
+
+    // An archived `general` at the clients' starter id keeps the name, even
+    // when an older archived namesake exists: the relay refuses a create at
+    // that id whatever the name. Only the namesake is renamed.
+    let fixed = Seed::new(&pool).await;
+    let [starter, older] = [(); 2].map(|_| Uuid::new_v4());
+    fixed.open(&pool, starter, "general", 10).await;
+    fixed.open(&pool, older, "general", 60).await;
+    sqlx::query("UPDATE channels SET archived_at = now() WHERE id = ANY($1)")
+        .bind(vec![starter, older])
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        rename_plan_with_starters(&pool, &fixed.host, &[starter, Uuid::new_v4()]).await,
+        vec![(older, "general".to_owned(), renamed(older, "general").1)]
+    );
 }
 
 #[tokio::test]
