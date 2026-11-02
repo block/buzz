@@ -1,3 +1,5 @@
+import 'agent_avatar_hero.dart';
+import 'agent_character_artwork.dart';
 import 'dart:math';
 import 'agent_model_picker.dart';
 import 'package:flutter/foundation.dart';
@@ -56,6 +58,8 @@ class CreateAgentPage extends HookConsumerWidget {
     );
     useListenable(name);
     final error = useState<String?>(null);
+    final avatarHeroTag = useMemoized(Object.new);
+    final editingAvatar = useState(false);
     final avatar = useState(
       AgentAvatarSelection.url(
         controller.pending?['picture'] as String? ??
@@ -149,6 +153,9 @@ class CreateAgentPage extends HookConsumerWidget {
       canPop: !busy,
       child: FrostedScaffold(
         appBar: FrostedAppBar(
+          // Keep the full-screen UIKit navigation layer out of the Hero's
+          // overlay until the editor's reverse transition has completed.
+          nativeViewSuppressed: editingAvatar,
           nativeTitle: 'Create agent',
           title: const Text('Create agent'),
           automaticallyImplyLeading: false,
@@ -195,43 +202,116 @@ class CreateAgentPage extends HookConsumerWidget {
                       Semantics(
                         label: 'Agent avatar',
                         image: true,
-                        child: SizedBox.square(
-                          dimension: 160,
-                          child: avatar.value.bytes != null
-                              ? AvatarClip(
-                                  isAgent: true,
-                                  child: Image.memory(
-                                    avatar.value.bytes!,
-                                    fit: BoxFit.cover,
-                                  ),
-                                )
-                              : PresetAgentAvatar(
-                                  imageUrl: avatar.value.url!,
-                                  size: 160,
-                                  fallback: const Icon(
-                                    Icons.smart_toy_outlined,
-                                    size: 80,
-                                  ),
-                                ),
+                        child: AgentAvatarHero(
+                          tag: avatarHeroTag,
+                          selection: avatar.value,
+                          child: TickerMode(
+                            key: const ValueKey('create-agent-avatar-playback'),
+                            enabled: !editingAvatar.value,
+                            child: SizedBox.square(
+                              dimension: 160,
+                              child: avatar.value.bytes != null
+                                  ? AvatarClip(
+                                      isAgent: true,
+                                      child: Image.memory(
+                                        avatar.value.bytes!,
+                                        fit: BoxFit.cover,
+                                      ),
+                                    )
+                                  : PresetAgentAvatar(
+                                      imageUrl: avatar.value.url!,
+                                      posterPlaceholder: characterPoster(
+                                        avatar.value.url!,
+                                      ),
+                                      size: 160,
+                                      fallback: const Icon(
+                                        Icons.smart_toy_outlined,
+                                        size: 80,
+                                      ),
+                                    ),
+                            ),
+                          ),
                         ),
                       ),
                       if (!pending) ...[
                         const SizedBox(height: Grid.xxs),
                         _ChooseAvatarButton(
-                          onPressed: busy
+                          transitioning: editingAvatar.value,
+                          onPressed: busy || editingAvatar.value
                               ? null
                               : () async {
-                                  FocusScope.of(context).unfocus();
-                                  final result = await Navigator.of(context)
-                                      .push<AgentAvatarSelection>(
-                                        MaterialPageRoute(
-                                          builder: (_) => AgentAvatarEditorPage(
-                                            initialSelection: avatar.value,
-                                          ),
-                                        ),
+                                  if (editingAvatar.value) return;
+                                  editingAvatar.value = true;
+                                  try {
+                                    FocusScope.of(context).unfocus();
+                                    if (avatar.value.url != null) {
+                                      await precacheImage(
+                                        NetworkImage(avatar.value.url!),
+                                        context,
+                                        onError: (_, _) {},
+                                      ).timeout(
+                                        const Duration(milliseconds: 300),
+                                        onTimeout: () {},
                                       );
-                                  if (context.mounted && result != null) {
-                                    avatar.value = result;
+                                      if (!context.mounted) return;
+                                    }
+                                    // Remove the UIKit control before the Hero
+                                    // crosses its bounds. Keep it absent until the
+                                    // reverse flight's overlay has been removed.
+                                    await WidgetsBinding.instance.endOfFrame;
+                                    if (!context.mounted) return;
+                                    final route =
+                                        PageRouteBuilder<AgentAvatarSelection>(
+                                          transitionDuration:
+                                              MediaQuery.disableAnimationsOf(
+                                                context,
+                                              )
+                                              ? Duration.zero
+                                              : const Duration(
+                                                  milliseconds: 240,
+                                                ),
+                                          reverseTransitionDuration:
+                                              MediaQuery.disableAnimationsOf(
+                                                context,
+                                              )
+                                              ? Duration.zero
+                                              : const Duration(
+                                                  milliseconds: 240,
+                                                ),
+                                          pageBuilder: (_, _, _) =>
+                                              AgentAvatarEditorPage(
+                                                initialSelection: avatar.value,
+                                                heroTag: avatarHeroTag,
+                                              ),
+                                          transitionsBuilder:
+                                              (_, animation, _, child) {
+                                                final progress =
+                                                    CurvedAnimation(
+                                                      parent: animation,
+                                                      curve:
+                                                          Curves.fastOutSlowIn,
+                                                      reverseCurve: Curves
+                                                          .fastOutSlowIn
+                                                          .flipped,
+                                                    );
+                                                return FadeTransition(
+                                                  opacity: progress,
+                                                  child: child,
+                                                );
+                                              },
+                                        );
+                                    final result = await Navigator.of(
+                                      context,
+                                    ).push<AgentAvatarSelection>(route);
+
+                                    if (context.mounted && result != null) {
+                                      avatar.value = result;
+                                    }
+                                    await route.completed;
+                                  } finally {
+                                    if (context.mounted) {
+                                      editingAvatar.value = false;
+                                    }
                                   }
                                 },
                         ),
@@ -325,12 +405,28 @@ class CreateAgentPage extends HookConsumerWidget {
 
 /// Platform capsule action for entering the dedicated avatar editor.
 class _ChooseAvatarButton extends StatelessWidget {
-  const _ChooseAvatarButton({required this.onPressed});
+  const _ChooseAvatarButton({
+    required this.onPressed,
+    required this.transitioning,
+  });
+  final bool transitioning;
   final VoidCallback? onPressed;
 
   @override
   Widget build(BuildContext context) {
     if (defaultTargetPlatform == TargetPlatform.iOS) {
+      if (transitioning) {
+        return SizedBox(
+          width: 160,
+          height: 48,
+          child: Center(
+            child: TextButton(
+              onPressed: null,
+              child: const Text('Choose avatar'),
+            ),
+          ),
+        );
+      }
       return IosGlassNavigationAction(
         label: 'Choose avatar',
         width: 160,

@@ -27,8 +27,9 @@ ignore = [
     # remove this exception when NetEQ removes/updates the unused dependency.
     { id = "RUSTSEC-2026-0293", reason = "unused dependency of audited, exactly pinned neteq 0.8.3; no Rust references to ringbuf; other consumers forbidden by bans.deny" },
     # zip 8.6.0 < 9: extraction keeps setuid/setgid bits (0367), creates
-    # symlinks that escape the destination (0368) and applies permissions through
-    # symlinks (0369). Only path: buzz-mesh-smoke → mesh-llm v0.76.2 →
+    # symlinks that escape the destination (0368), applies permissions through
+    # symlinks (0369), and aborts the process when sizing a symlink target from
+    # an attacker-declared length (0429). Only path: buzz-mesh-smoke → mesh-llm v0.76.2 →
     # mesh-llm-host-runtime / mesh-llm-plugin-manager / mesh-llm-system → zip 8.
     # mesh-llm's zip readers copy entries manually and never call
     # ZipArchive::extract; recheck if that changes. Remove on the mesh-llm bump
@@ -36,6 +37,7 @@ ignore = [
     { id = "RUSTSEC-2026-0367", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; manual entry copy, never extracts; fix in unreleased mesh-llm#2471" },
     { id = "RUSTSEC-2026-0368", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; manual entry copy, never extracts; fix in unreleased mesh-llm#2471" },
     { id = "RUSTSEC-2026-0369", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; manual entry copy, never extracts; fix in unreleased mesh-llm#2471" },
+    { id = "RUSTSEC-2026-0429", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; manual entry copy, never extracts; fix in unreleased mesh-llm#2471" },
     # zbus 5 D-Bus crates (zvariant, zbus_names, zvariant_derive) — unmaintained,
     # not vulnerable. Only path: buzz-mesh-smoke → mesh-llm → keyring 4 →
     # zbus-secret-service-keyring-store / secret-service 5 → zbus 5.

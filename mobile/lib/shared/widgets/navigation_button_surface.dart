@@ -6,9 +6,16 @@ import 'concentric_sheet_surface.dart';
 
 /// Native iOS glass with an opaque Material capsule on other platforms.
 class NavigationButtonSurface extends StatelessWidget {
-  const NavigationButtonSurface({required this.child, super.key});
+  const NavigationButtonSurface({
+    required this.child,
+    this.capsule = false,
+    super.key,
+  });
 
   final Widget child;
+
+  /// Uses fully rounded ends instead of device-concentric corners.
+  final bool capsule;
 
   @override
   Widget build(BuildContext context) {
@@ -24,10 +31,11 @@ class NavigationButtonSurface extends StatelessWidget {
     return ConcentricSheetSurface(
       enabled: true,
       usesGlass: true,
+      capsule: capsule,
       providesSheetSurface: false,
       padding: EdgeInsets.zero,
       minimumRadius: Radii.navigationCapsule,
-      contentClipRadius: Radii.navigationCapsule,
+      contentClipRadius: capsule ? 9999 : Radii.navigationCapsule,
       child: child,
     );
   }

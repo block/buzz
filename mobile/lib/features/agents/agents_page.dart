@@ -57,6 +57,7 @@ class _AgentsNavigation extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final communityId = ref.watch(activeCommunityProvider).asData?.value?.id;
+    final heroController = useMemoized(HeroController.new);
     final navigator = useMemoized(() => GlobalKey<NavigatorState>(), [
       communityId,
     ]);
@@ -68,6 +69,7 @@ class _AgentsNavigation extends HookConsumerWidget {
       },
       child: Navigator(
         key: navigator,
+        observers: [heroController],
         onGenerateRoute: (_) => MaterialPageRoute<void>(
           builder: (listContext) => Material(
             color: context.colors.surface,
@@ -95,6 +97,11 @@ class _AgentsNavigation extends HookConsumerWidget {
                           (agent) => agent['agent_pubkey'] == pubkey,
                         )
                         ? 'Builderbot agent'
+                        : agentLocationUnknown(
+                            ref.read(activeCommunityProvider).asData?.value,
+                            controller,
+                          )
+                        ? null
                         : 'Manage on desktop',
                     primaryActionsSpacing: Grid.md,
                     contextualActions: (_) =>
@@ -203,6 +210,8 @@ class AgentsPage extends HookConsumerWidget {
     });
     final profiles = ref.watch(userCacheProvider);
     final creating = useState(false);
+    final needsSignIn = agentLocationUnknown(community, controller);
+    final signInNeeded = builderlabSignInNeeded(community, controller);
     final failed =
         registered.hasError ||
         ownedDirectory.hasError ||
@@ -321,7 +330,19 @@ class AgentsPage extends HookConsumerWidget {
                             child: const Text('Retry'),
                           ),
                         ),
-                      if (!loading && !failed && keys.isEmpty)
+                      if (signInNeeded)
+                        ListTile(
+                          title: const Text(
+                            'Sign in to Builderlab to manage remote agents',
+                          ),
+                          trailing: TextButton(
+                            onPressed: signingIn
+                                ? null
+                                : () => flow.reconnectAccount(),
+                            child: const Text('Sign in'),
+                          ),
+                        ),
+                      if (!loading && !failed && !needsSignIn && keys.isEmpty)
                         const Padding(
                           padding: EdgeInsets.all(Grid.sm),
                           child: Text(
@@ -377,6 +398,8 @@ class AgentsPage extends HookConsumerWidget {
                           ? null
                           : remote != null
                           ? 'Builderbot agent'
+                          : needsSignIn
+                          ? null
                           : 'Manage on desktop',
                     );
                   },
