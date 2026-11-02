@@ -14,8 +14,8 @@ fn request(channel: Uuid, root: &nostr::Event, upper: u64) -> Request {
 #[ignore = "requires Postgres"]
 async fn thread_window_upper_fence_terminal_snapshot_and_fallback() {
     let admin = PgPool::connect(&admin_url().await).await.unwrap();
-    let (writer, wname) = create_scratch_db(&admin, "tw_writer").await;
-    let (replica, rname) = create_scratch_db(&admin, "tw_replica").await;
+    let (writer, _writer_db) = ScratchDb::migrated(&admin_url().await, "tw_writer").await;
+    let (replica, replica_db) = ScratchDb::migrated(&admin_url().await, "tw_replica").await;
     let keys = nostr::Keys::generate();
     let cid = Uuid::new_v4();
     let channel = Uuid::new_v4();
@@ -127,7 +127,7 @@ async fn thread_window_upper_fence_terminal_snapshot_and_fallback() {
     );
     drop(fresh);
     sqlx::query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=$1 AND pid<>pg_backend_pid()")
-        .bind(&rname).execute(&admin).await.unwrap();
+        .bind(replica_db.name()).execute(&admin).await.unwrap();
     let degraded = session
         .thread_window_aux(&query, &mut budget)
         .await
@@ -149,15 +149,12 @@ async fn thread_window_upper_fence_terminal_snapshot_and_fallback() {
     assert_eq!(page.rows.len(), 2);
     assert!(!page.has_more);
     drop(session);
-    drop_scratch_db(&admin, replica, &rname).await;
-    drop_scratch_db(&admin, writer, &wname).await;
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn migration_schema_thread_window_prebuild_validation_and_old_ledger() {
-    let admin = PgPool::connect(&admin_url().await).await.unwrap();
-    let (pool, name) = create_scratch_db_through(&admin, "tw_prebuild", Some(48)).await;
+    let (pool, _scratch) = ScratchDb::migrated_through(&admin_url().await, "tw_prebuild", 48).await;
     for setup in [
         "CREATE INDEX idx_thread_metadata_window ON thread_metadata (community_id,root_event_id,event_created_at ASC,event_id ASC)",
         // Simulate an invalid concurrent-build remnant only in this disposable superuser DB.
@@ -205,14 +202,13 @@ async fn migration_schema_thread_window_prebuild_validation_and_old_ledger() {
         old.run(&pool).await,
         Err(sqlx::migrate::MigrateError::VersionMissing(49))
     ));
-    drop_scratch_db(&admin, pool, &name).await;
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn migration_schema_thread_window_prebuild_does_not_queue_behind_writer() {
-    let admin = PgPool::connect(&admin_url().await).await.unwrap();
-    let (pool, name) = create_scratch_db_through(&admin, "tw_prebuild_writer", Some(48)).await;
+    let (pool, _scratch) =
+        ScratchDb::migrated_through(&admin_url().await, "tw_prebuild_writer", 48).await;
     let community = Uuid::new_v4();
     let channel = Uuid::new_v4();
     // Plain SQL: the schema stops at 0048, so the current channel store's
@@ -316,7 +312,6 @@ async fn migration_schema_thread_window_prebuild_does_not_queue_behind_writer() 
             .unwrap();
     drop(witness);
     writer.rollback().await.unwrap();
-    drop_scratch_db(&admin, pool, &name).await;
 
     assert!(
         result.is_ok(),

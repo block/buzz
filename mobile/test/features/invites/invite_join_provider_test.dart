@@ -820,12 +820,16 @@ void main() {
       );
       secure.failPendingInviteDeletes = true;
       await expectLater(
-        container.read(authProvider.notifier).signOut(),
+        container
+            .read(communityListProvider.notifier)
+            .removeCommunity(saved.id),
         throwsStateError,
       );
       expect((await storage.loadAll()).single.nsec, saved.nsec);
       secure.failPendingInviteDeletes = false;
-      await container.read(authProvider.notifier).signOut();
+      await container
+          .read(communityListProvider.notifier)
+          .removeCommunity(saved.id);
       expect(await storage.loadAll(), isEmpty);
       expect((await secure.readAll()).values, isNot(contains(saved.nsec)));
       expect((await secure.readAll()).values, contains(unrelated));

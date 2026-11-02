@@ -20,9 +20,7 @@ const _createChannelTtlOptions = [
 ];
 
 class _CreateChannelSheet extends HookConsumerWidget {
-  final String channelType;
-
-  const _CreateChannelSheet({required this.channelType});
+  const _CreateChannelSheet();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -35,7 +33,6 @@ class _CreateChannelSheet extends HookConsumerWidget {
     final errorMessage = useState<String?>(null);
     useListenable(nameController);
 
-    final kindLabel = channelType == 'forum' ? 'forum' : 'channel';
     final canSubmit =
         nameController.text.trim().isNotEmpty && !isSubmitting.value;
 
@@ -52,7 +49,7 @@ class _CreateChannelSheet extends HookConsumerWidget {
             .read(channelActionsProvider)
             .createChannel(
               name: name,
-              channelType: channelType,
+              channelType: 'stream',
               visibility: visibility.value,
               description: descriptionController.text.trim(),
               ttlSeconds: temporary.value ? ttlSeconds.value : null,
@@ -93,9 +90,7 @@ class _CreateChannelSheet extends HookConsumerWidget {
                   enableSuggestions: false,
                   textCapitalization: TextCapitalization.none,
                   decoration: InputDecoration(
-                    hintText: channelType == 'forum'
-                        ? 'design-discussions'
-                        : 'release-notes',
+                    hintText: 'release-notes',
                     border: InputBorder.none,
                     enabledBorder: InputBorder.none,
                     focusedBorder: InputBorder.none,
@@ -124,7 +119,7 @@ class _CreateChannelSheet extends HookConsumerWidget {
                   controller: descriptionController,
                   enabled: !isSubmitting.value,
                   decoration: InputDecoration(
-                    hintText: 'What this $kindLabel is for',
+                    hintText: 'What this channel is for',
                     border: InputBorder.none,
                     enabledBorder: InputBorder.none,
                     focusedBorder: InputBorder.none,

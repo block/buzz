@@ -45,6 +45,7 @@ import 'shared/emoji/emoji_burst.dart';
 import 'shared/relay/relay.dart';
 import 'shared/theme/theme.dart';
 import 'shared/widgets/buzz_loading_indicator.dart';
+import 'shared/widgets/buzz_toast_host.dart';
 
 const _starterChannelNamespace = '3ce33bea-8f09-5f1b-9c85-8a7d2659e6b0';
 
@@ -354,29 +355,31 @@ class App extends HookConsumerWidget {
       // route that was pushed while the store signal request was in flight.
       builder: (context, child) => switch (ageSignalState) {
         AgeSignalState.restricted => const AgeRestrictionPage(),
-        _ => IosNavigationMetricsHost(
-          child: AppMarkdownTheme(
-            child: MobileHuddleShell(
-              navigatorKey: _mobileRootNavigatorKey,
-              child: EmojiBurstOverlay(
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    ExcludeSemantics(
-                      excluding: pairedCommunity != null,
-                      child: AbsorbPointer(
-                        absorbing: pairedCommunity != null,
-                        child: child ?? const SizedBox.shrink(),
+        _ => BuzzToastHost(
+          child: IosNavigationMetricsHost(
+            child: AppMarkdownTheme(
+              child: MobileHuddleShell(
+                navigatorKey: _mobileRootNavigatorKey,
+                child: EmojiBurstOverlay(
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      ExcludeSemantics(
+                        excluding: pairedCommunity != null,
+                        child: AbsorbPointer(
+                          absorbing: pairedCommunity != null,
+                          child: child ?? const SizedBox.shrink(),
+                        ),
                       ),
-                    ),
-                    // Cover the navigator while onboarding is removed and the
-                    // destination installs the matching avatar-flight route.
-                    if (pairedCommunity != null)
-                      CommunityLoadingSurface(
-                        name: pairedCommunity.name,
-                        relayUrl: pairedCommunity.relayUrl,
-                      ),
-                  ],
+                      // Cover the navigator while onboarding is removed and the
+                      // destination installs the matching avatar-flight route.
+                      if (pairedCommunity != null)
+                        CommunityLoadingSurface(
+                          name: pairedCommunity.name,
+                          relayUrl: pairedCommunity.relayUrl,
+                        ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -400,8 +403,6 @@ class App extends HookConsumerWidget {
                 newWorkspaceAction: workspace,
               ),
               settingsPageBuilder: _buildSettingsPage,
-              profilePageBuilder: (_) =>
-                  const _SettingsPageContent(embedded: true),
               communityInvitePageBuilder: (_) => const CommunityInvitePage(),
               communityAppearancePageBuilder: (_) => const ThemePickerPage(),
             ),
@@ -419,13 +420,11 @@ class App extends HookConsumerWidget {
 Widget _buildSettingsPage(BuildContext context) => const _SettingsPageContent();
 
 class _SettingsPageContent extends ConsumerWidget {
-  const _SettingsPageContent({this.embedded = false});
-  final bool embedded;
+  const _SettingsPageContent();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return SettingsPage(
-      embedded: embedded,
       profileHeader: const SettingsProfileHeader(),
       profileEditPageBuilder: (_) =>
           const ProfileEditPage(startInPhotoEditor: true),

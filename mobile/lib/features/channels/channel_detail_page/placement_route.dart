@@ -8,6 +8,9 @@ class ChannelDetailPage extends ConsumerWidget {
   final Channel channel;
   final bool personalChat;
 
+  /// Present a DM as one conversation without changing its membership or type.
+  final bool continuousConversation;
+
   /// Caller identity; known Solo organization always takes precedence.
   final ChannelRoutePlacement placement;
   final String? initialAssistant;
@@ -19,6 +22,7 @@ class ChannelDetailPage extends ConsumerWidget {
     super.key,
     required this.channel,
     this.personalChat = false,
+    this.continuousConversation = false,
     this.placement = ChannelRoutePlacement.lookup,
     this.initialAssistant,
     this.initialMessageId,
@@ -41,8 +45,8 @@ class ChannelDetailPage extends ConsumerWidget {
         placement != ChannelRoutePlacement.ordinary &&
         groups == null &&
         lookup.isLoading) {
-      return Scaffold(
-        appBar: AppBar(title: Text(channel.name)),
+      return FrostedScaffold(
+        appBar: FrostedAppBar(title: Text(channel.name)),
         body: const Center(child: BuzzLoadingIndicator()),
       );
     }
@@ -50,6 +54,7 @@ class ChannelDetailPage extends ConsumerWidget {
       key: ValueKey((channel.id, placed)),
       channel: current,
       personalChat: placed,
+      continuousConversation: continuousConversation && current.isDm,
       placementKnown:
           placed ||
           groups != null ||

@@ -215,6 +215,56 @@ void main() {
       );
     });
 
+    test('only known channels become chips', () {
+      expect(
+        _pieces(
+          'took over #8700, see #general and #8774\'s #gen',
+          channelNames: {'general': 'c1'},
+        ),
+        [
+          const PreviewText('took over #8700, see '),
+          const PreviewChannel('general'),
+          const PreviewText(" and #8774's #gen"),
+        ],
+      );
+      // A known prefix doesn't claim a longer unknown name; the longest known
+      // name wins when both are known.
+      expect(_pieces('#eng-ios', channelNames: {'eng': 'c1'}), [
+        const PreviewText('#eng-ios'),
+      ]);
+      expect(
+        _pieces('#eng-ios', channelNames: {'eng': 'c1', 'eng-ios': 'c2'}),
+        [const PreviewChannel('eng-ios')],
+      );
+      expect(_pieces('see #8700 in #general'), [
+        const PreviewText('see #8700 in #general'),
+      ]);
+    });
+
+    test('channel tokens end at punctuation that follows a word', () {
+      for (final (before, after) in [
+        ('', "'s plan"),
+        ('', '\u2019s plan'),
+        ('"', '"'),
+        ('\u201C', '\u201D'),
+        ('\u2018', '\u2019'),
+        ('\u00AB', '\u00BB'),
+        ('', '\u2026'),
+        ('', '\u2014next'),
+        ('', '\u2013next'),
+      ]) {
+        expect(
+          _pieces('see $before#general$after', channelNames: {'general': 'c1'}),
+          [
+            PreviewText('see $before'),
+            const PreviewChannel('general'),
+            PreviewText(after),
+          ],
+          reason: '$before#general$after',
+        );
+      }
+    });
+
     test('a buzz channel link becomes a chip with the channel name', () {
       expect(
         _pieces(

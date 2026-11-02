@@ -1,3 +1,5 @@
+import 'package:buzz/shared/widgets/buzz_toast.dart';
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'composer_send_origin.dart';
 import 'dart:async';
 import 'dart:collection';
@@ -11,6 +13,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
@@ -18,6 +21,7 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import 'package:nostr/nostr.dart' as nostr;
 
+import '../../shared/agents/owned_agent_directory.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/mentions/mention_bindings.dart';
 import '../../shared/mentions/mention_rules.dart';
@@ -25,6 +29,7 @@ import '../../shared/huddle/huddle_session.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/verified_mark.dart';
 import '../../shared/widgets/anchored_popover_menu.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/concentric_sheet_surface.dart';

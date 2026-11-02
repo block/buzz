@@ -846,42 +846,15 @@ mod tests {
 #[cfg(test)]
 mod postgres_tests {
     use super::*;
+    use crate::test_support::ScratchDb;
     use buzz_core::CommunityId;
     use nostr::Keys;
-    use sqlx::postgres::PgPoolOptions;
     use sqlx::PgPool;
 
     async fn get_pool() -> PgPool {
         PgPool::connect(&crate::test_support::database_url())
             .await
             .expect("connect to test DB")
-    }
-
-    async fn create_scratch_db(admin: &PgPool, prefix: &str) -> (PgPool, String) {
-        let name = format!("{}_{}", prefix, Uuid::new_v4().simple());
-        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
-            .execute(admin)
-            .await
-            .expect("create scratch db");
-        let base = crate::test_support::database_url();
-        let idx = base.rfind('/').expect("db url has a path segment");
-        let scratch_url = format!("{}/{}", &base[..idx], name);
-        let pool = PgPool::connect(&scratch_url)
-            .await
-            .expect("connect scratch db");
-        crate::migration::run_migrations(&pool)
-            .await
-            .expect("migrate scratch db");
-        (pool, name)
-    }
-
-    async fn drop_scratch_db(admin: &PgPool, pool: PgPool, name: &str) {
-        pool.close().await;
-        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
-        )))
-        .execute(admin)
-        .await;
     }
 
     #[tokio::test]
@@ -892,12 +865,7 @@ mod postgres_tests {
         // USAGE_METRICS_LOCK_KEY (0x4255_5A5A_4D45_5452) on the shared test DB
         // races any live buzz-relay on the same database (see #3619).
         let admin_url = crate::test_support::database_url();
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&admin_url)
-            .await
-            .expect("connect admin to create scratch db");
-        let (pool, scratch_name) = create_scratch_db(&admin, "usage_metrics_lock").await;
+        let (pool, _scratch) = ScratchDb::migrated(&admin_url, "usage_metrics_lock").await;
         let first = Db::from_pool(pool.clone());
         let second = Db::from_pool(pool.clone());
         // Same key as production (`buzz-relay` USAGE_METRICS_LOCK_KEY) — safe here
@@ -938,11 +906,6 @@ mod postgres_tests {
             "dropping the detached session releases its advisory lock"
         );
         drop(successor);
-
-        // Release any remaining session state before DROP DATABASE.
-        drop(first);
-        drop(second);
-        drop_scratch_db(&admin, pool, &scratch_name).await;
     }
 
     fn random_pubkey() -> Vec<u8> {
@@ -1427,12 +1390,7 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn fleet_snapshots_match_seeded_stock_and_activity_exactly() {
         let admin_url = crate::test_support::database_url();
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&admin_url)
-            .await
-            .expect("connect admin to create scratch db");
-        let (pool, scratch_name) = create_scratch_db(&admin, "usage_snapshot").await;
+        let (pool, _scratch) = ScratchDb::migrated(&admin_url, "usage_snapshot").await;
         let (community_id, _, _) = make_community(&pool).await;
 
         let human = random_pubkey();
@@ -1629,8 +1587,6 @@ mod postgres_tests {
             (activity.human_30d, activity.agent_30d, activity.unknown_30d,),
             (1, 1, 1)
         );
-
-        drop_scratch_db(&admin, pool, &scratch_name).await;
     }
 
     /// Fleet collection must read a proved replica and skip instead of
@@ -1639,13 +1595,8 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn fleet_collection_is_replica_only_and_skips_without_reader() {
         let admin_url = crate::test_support::database_url();
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&admin_url)
-            .await
-            .expect("connect admin to create scratch db");
-        let (writer, writer_name) = create_scratch_db(&admin, "usage_writer").await;
-        let (reader, reader_name) = create_scratch_db(&admin, "usage_reader").await;
+        let (writer, _writer_db) = ScratchDb::migrated(&admin_url, "usage_writer").await;
+        let (reader, _reader_db) = ScratchDb::migrated(&admin_url, "usage_reader").await;
         let (writer_community, _, _) = make_community(&writer).await;
         let (reader_community, _, _) = make_community(&reader).await;
         insert_user(&writer, writer_community, &random_pubkey(), false).await;
@@ -1673,10 +1624,6 @@ mod postgres_tests {
             snapshot.users_human, 2,
             "fixture proves the reader served the query"
         );
-
-        drop(db);
-        drop_scratch_db(&admin, reader, &reader_name).await;
-        drop_scratch_db(&admin, writer, &writer_name).await;
     }
 
     /// A fleet collection abandoned at its relay-side deadline on a reader
@@ -1691,13 +1638,8 @@ mod postgres_tests {
         use std::time::{Duration, Instant};
 
         let admin_url = crate::test_support::database_url();
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&admin_url)
-            .await
-            .expect("connect admin to create scratch db");
-        let (writer, writer_name) = create_scratch_db(&admin, "usage_writer").await;
-        let (reader, reader_name) = create_scratch_db(&admin, "usage_reader").await;
+        let (writer, _writer_db) = ScratchDb::migrated(&admin_url, "usage_writer").await;
+        let (reader, _reader_db) = ScratchDb::migrated(&admin_url, "usage_reader").await;
         let (reader_community, _, _) = make_community(&reader).await;
         insert_user(&reader, reader_community, &random_pubkey(), false).await;
 
@@ -1776,11 +1718,5 @@ mod postgres_tests {
             .expect("replacement reader is usable");
         assert_eq!(one, 1);
         drop(replacement);
-
-        drop(cold);
-        drop(db);
-        read_pool.close().await;
-        drop_scratch_db(&admin, reader, &reader_name).await;
-        drop_scratch_db(&admin, writer, &writer_name).await;
     }
 }

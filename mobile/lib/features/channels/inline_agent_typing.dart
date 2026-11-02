@@ -17,10 +17,14 @@ class InlineAgentTyping extends ConsumerWidget {
     required this.channelId,
     required this.entries,
     this.previewAvatars = const {},
+    this.knownAgents = const {},
   });
   final String channelId;
   final List<TypingEntry> entries;
   final Map<String, Widget> previewAvatars;
+
+  /// Lowercase pubkeys known to be agents, such as the user's own.
+  final Set<String> knownAgents;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -66,6 +70,7 @@ class InlineAgentTyping extends ConsumerWidget {
                                   ?.avatarUrl,
                           radius: messageAvatarSize / 2,
                           isAgent:
+                              knownAgents.contains(key) ||
                               bots.contains(key) ||
                               (profiles[key]?.isAgent ?? false),
                           backgroundColor: context.controlSurface,

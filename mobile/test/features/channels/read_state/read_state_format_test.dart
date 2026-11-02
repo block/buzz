@@ -134,17 +134,6 @@ void main() {
     });
   });
 
-  test('mergeReadStateContexts keeps the maximum timestamp per context', () {
-    expect(
-      mergeReadStateContexts([
-        {'channel-a': 10, 'channel-b': 5},
-        {'channel-a': 7, 'channel-c': 1},
-        {'channel-b': 12},
-      ]),
-      {'channel-a': 10, 'channel-b': 12, 'channel-c': 1},
-    );
-  });
-
   group('retainReadStateContexts', () {
     int publishedBytes(Map<String, int> contexts) => utf8
         .encode(

@@ -4,11 +4,11 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:http/http.dart' as http;
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/auth/auth.dart';
 import '../../shared/hosted/hosted_flow_provider.dart';
+import '../../shared/hosted/account_identity_store.dart';
 import '../../shared/hosted/hosted_environment.dart';
 import '../../shared/community/paired_community_landing.dart';
 import '../../shared/crypto/ecdh.dart';
@@ -21,13 +21,6 @@ import 'package:buzz/shared/crypto/event_signing.dart';
 
 part 'pairing_provider_helpers.dart';
 part 'pairing_state.dart';
-
-/// HTTP client used by [PairingNotifier] for the validation request.
-final pairingHttpClientProvider = Provider<http.Client>((ref) {
-  final client = http.Client();
-  ref.onDispose(client.close);
-  return client;
-});
 
 typedef PairingSocketFactory =
     PairingSocket Function({
@@ -789,7 +782,9 @@ class PairingNotifier extends Notifier<PairingState> {
       _cleanup();
       state = PairingState(
         status: PairingStatus.error,
-        errorMessage: 'Failed to import credentials: $e',
+        errorMessage: e == AccountIdentityFailure.mismatch
+            ? 'This device uses a different identity. Your saved identity has been kept.'
+            : 'Could not import the identity. Try pairing again.',
       );
     }
   }

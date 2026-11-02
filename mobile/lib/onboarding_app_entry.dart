@@ -7,6 +7,8 @@ import 'features/pairing/pairing_page.dart';
 import 'features/pairing/pairing_provider.dart';
 import 'shared/hosted/hosted_flow_provider.dart';
 import 'shared/hosted/hosted_flow.dart';
+import 'shared/hosted/hosted_communities.dart';
+import 'shared/hosted/use_known_communities.dart';
 import 'shared/hosted/hosted_environment.dart';
 import 'shared/hosted/hosted_community_creation.dart';
 import 'shared/hosted/hosted_flow_problem_message.dart';
@@ -18,10 +20,14 @@ class OnboardingAppEntry extends HookConsumerWidget {
     this.addingCommunity = false,
     this.restoreAccount = true,
     this.onExit,
+    this.onComplete,
   });
   final bool addingCommunity;
   final bool restoreAccount;
   final VoidCallback? onExit;
+
+  /// Continues picker restoration before the completed Add route is removed.
+  final VoidCallback? onComplete;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -32,6 +38,7 @@ class OnboardingAppEntry extends HookConsumerWidget {
         ? ref.watch(hostedFlowProvider)
         : null;
     useListenable(flow);
+    useListenable(flow?.account.subjectChanges);
     useEffect(() {
       if (flow == null || !restoreAccount) return null;
       Future<void> restore() async {
@@ -42,8 +49,11 @@ class OnboardingAppEntry extends HookConsumerWidget {
       unawaited(restore());
       return null;
     }, [flow]);
+    final finishing = useRef(false);
     void finishEntry() {
-      if (!addingCommunity) return;
+      if (!addingCommunity || finishing.value) return;
+      finishing.value = true;
+      onComplete?.call();
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!context.mounted) return;
         final route = ModalRoute.of(context);
@@ -84,6 +94,18 @@ class OnboardingAppEntry extends HookConsumerWidget {
         (flow.stage == HostedFlowStage.working ||
             flow.stage == HostedFlowStage.signIn);
     final connected = flow?.account.account != null;
+    final hasKnownCommunities = useKnownCommunities(
+      accountKey: flow?.account.account?.subject,
+      active:
+          !addingCommunity &&
+          !existingUser.value &&
+          !enteringCommunityLink.value &&
+          !creating.value &&
+          flow?.stage == HostedFlowStage.idle &&
+          (ModalRoute.of(context)?.isCurrent ?? true),
+      load: () async =>
+          (await loadKnownHostedCommunities(flow!.account)).isNotEmpty,
+    );
     final problem = flow != null && flow.accountOnly ? flow.problem : null;
     final status = flow == null
         ? null
@@ -150,6 +172,8 @@ class OnboardingAppEntry extends HookConsumerWidget {
         showConnectionOptions:
             !HostedEnvironment.enabled || addingCommunity || connected,
         addingCommunity: addingCommunity,
+        signedInOnboarding: connected && !addingCommunity && !signingIn,
+        hasKnownCommunities: hasKnownCommunities,
         existingUser: existingUser.value,
         enteringCommunityLink: enteringCommunityLink.value,
         creatingCommunity: creating.value,
@@ -171,7 +195,7 @@ class OnboardingAppEntry extends HookConsumerWidget {
             ? null
             : () => unawaited(flow.signInAccount()),
         accountStatus: status,
-        builderlabBusy: busy,
+        builderlabBusy: busy && !signingIn,
         signInPending: signingIn || busy,
         builderlabLabel: signingIn
             ? 'Cancel sign-in'

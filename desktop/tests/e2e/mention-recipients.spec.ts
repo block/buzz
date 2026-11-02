@@ -112,7 +112,7 @@ test("ambiguous added mention blocks editing before clearing the draft", async (
   await page.getByRole("menuitem", { name: "Edit message" }).click();
   await expect(page.getByTestId("edit-target")).toBeVisible();
   await expect(input).toHaveText("original message for ambiguity edit");
-  await input.fill("edited @Scout hello");
+  await replaceComposerText(input, "edited @Scout hello");
   await page.getByTestId("send-message").click();
   await expect(page.getByText(AMBIGUOUS, { exact: false })).toBeVisible();
   await expect(input).toHaveText("edited @Scout hello");
@@ -400,7 +400,7 @@ test("editing to a longer typed member drops the original shorter reference", as
   await row.getByRole("button", { name: "More actions" }).click();
   await page.getByRole("menuitem", { name: "Edit message" }).click();
   await expect(input).toHaveText("@Scout hello");
-  await input.fill("@Scout Jones hello");
+  await replaceComposerText(input, "@Scout Jones hello");
   await page.getByTestId("send-message").click();
   await expect
     .poll(() =>

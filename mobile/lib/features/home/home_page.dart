@@ -26,7 +26,6 @@ class HomePage extends HookConsumerWidget {
     required this.defaultAgentBuilder,
     this.communityInvitePageBuilder,
     this.mePageBuilder,
-    this.profilePageBuilder,
     this.communityAppearancePageBuilder,
     super.key,
   });
@@ -34,7 +33,6 @@ class HomePage extends HookConsumerWidget {
   final WidgetBuilder settingsPageBuilder;
   final ValueChanged<BuildContext> onAgents;
   final WidgetBuilder defaultAgentBuilder;
-  final WidgetBuilder? profilePageBuilder;
 
   /// Builds a sliver inventory and publishes its two creation actions.
   final Widget Function(
@@ -177,12 +175,49 @@ class HomePage extends HookConsumerWidget {
         communitySurfaceProgress.value = progress;
       },
     );
-    final bottom =
-        MediaQuery.viewPaddingOf(context).bottom > mobileTabBarBottomGap
-        ? MediaQuery.viewPaddingOf(context).bottom
-        : mobileTabBarBottomGap;
+    final bottom = mobileTabBarBottom(context);
     return Scaffold(
       resizeToAvoidBottomInset: false,
+      // Register the floating controls with Scaffold so snackbars clear them.
+      extendBody: true,
+      bottomNavigationBar: Padding(
+        padding: EdgeInsets.only(bottom: bottom),
+        child: SizedBox(
+          height: mobileTabBarHeight,
+          child:
+              defaultTargetPlatform != TargetPlatform.iOS ||
+                  nativeControlsVisible
+              ? Center(
+                  child: MessagesNavigationBar(
+                    onSearch: openSearch,
+                    agent: defaultAgentBuilder(context),
+                    creationActions: [
+                      (
+                        label: 'New chat',
+                        symbol: 'square.and.pencil',
+                        onPressed: newChat.value,
+                      ),
+                      (
+                        label: 'New workspace',
+                        symbol: 'workspace',
+                        onPressed: newWorkspace.value,
+                      ),
+                      (
+                        label: 'New DM',
+                        symbol: 'bubble.left',
+                        onPressed: newDm.value,
+                      ),
+                      (
+                        label: 'New channel',
+                        symbol: 'number',
+                        onPressed: newChannel.value,
+                      ),
+                    ],
+                  ),
+                )
+              : null,
+        ),
+      ),
       body: Stack(
         children: [
           MediaQuery(
@@ -219,41 +254,6 @@ class HomePage extends HookConsumerWidget {
               ),
             ),
           ),
-          if (defaultTargetPlatform != TargetPlatform.iOS ||
-              nativeControlsVisible)
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: bottom,
-              child: Center(
-                child: MessagesNavigationBar(
-                  onSearch: openSearch,
-                  agent: defaultAgentBuilder(context),
-                  creationActions: [
-                    (
-                      label: 'New chat',
-                      symbol: 'square.and.pencil',
-                      onPressed: newChat.value,
-                    ),
-                    (
-                      label: 'New workspace',
-                      symbol: 'folder.badge.plus',
-                      onPressed: newWorkspace.value,
-                    ),
-                    (
-                      label: 'New DM',
-                      symbol: 'bubble.left',
-                      onPressed: newDm.value,
-                    ),
-                    (
-                      label: 'New channel',
-                      symbol: 'number',
-                      onPressed: newChannel.value,
-                    ),
-                  ],
-                ),
-              ),
-            ),
         ],
       ),
     );

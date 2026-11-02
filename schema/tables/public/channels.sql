@@ -41,6 +41,7 @@ CREATE TABLE channels (
     -- An unlisted open channel is readable and joinable by id but left out of
     -- channel listings for non-members. Matters only while the channel is open.
     unlisted        BOOLEAN NOT NULL DEFAULT FALSE,
+    auto_join       BOOLEAN NOT NULL DEFAULT false,
     PRIMARY KEY (community_id, id),
     CONSTRAINT chk_channels_id_not_nil CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid)
 );

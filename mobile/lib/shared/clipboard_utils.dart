@@ -1,14 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'widgets/buzz_toast.dart';
+
 Future<void> copyToClipboard(
   BuildContext context,
   String text, {
-  String message = 'Copied to clipboard',
+  String message = 'Copied',
 }) async {
   await Clipboard.setData(ClipboardData(text: text));
   if (!context.mounted) return;
-  ScaffoldMessenger.of(context).showSnackBar(
-    SnackBar(content: Text(message), duration: const Duration(seconds: 2)),
-  );
+  showBuzzToast(context, message, kind: ToastKind.success);
 }

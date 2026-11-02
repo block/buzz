@@ -118,15 +118,17 @@ private final class NativeCommunityEntryController: UIViewController, UITextFiel
     navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .close,
       primaryAction: UIAction { [weak self] _ in self?.close() })
     if #available(iOS 17.0, *) { view.keyboardLayoutGuide.usesBottomSafeArea = false }
-    scroll.contentInsetAdjustmentBehavior = .never
+    scroll.contentInsetAdjustmentBehavior = .always
     scroll.translatesAutoresizingMaskIntoConstraints = false
     stack.translatesAutoresizingMaskIntoConstraints = false
     stack.axis = .vertical
     stack.spacing = 12
+    NavigationTopEdge.configure(scroll, item: navigationItem)
+    if #available(iOS 15.0, *) { setContentScrollView(scroll) }
     view.addSubview(scroll)
     scroll.addSubview(stack)
     NSLayoutConstraint.activate([
-      scroll.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+      scroll.topAnchor.constraint(equalTo: view.topAnchor),
       scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
       scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
       scroll.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),

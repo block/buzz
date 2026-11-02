@@ -66,6 +66,45 @@ void main() {
     );
   }
 
+  testWidgets('feedback clears floating navigation and wraps large text', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    tester.view.viewPadding = const FakeViewPadding(bottom: 34);
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(await buildHome());
+    await tester.pumpAndSettle();
+    final navigation = find.byType(MessagesNavigationBar);
+    final originalTop = tester.getTopLeft(navigation).dy;
+    final context = tester.element(find.text('General'));
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(const SnackBar(content: Text('Copied')));
+    await tester.pumpAndSettle();
+    expect(
+      tester.getBottomLeft(find.byType(SnackBar)).dy,
+      lessThanOrEqualTo(originalTop),
+    );
+    expect(tester.getTopLeft(navigation).dy, originalTop);
+    messenger.removeCurrentSnackBar();
+    messenger.showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Could not share this image. Please try again in a moment.',
+          textScaler: TextScaler.linear(2),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      tester.getBottomLeft(find.byType(SnackBar)).dy,
+      lessThanOrEqualTo(tester.getTopLeft(navigation).dy),
+    );
+    expect(tester.takeException(), isNull);
+    messenger.removeCurrentSnackBar();
+    await tester.pumpAndSettle();
+  });
+
   testWidgets(
     'Messages filters its inventory and opens Search and Settings above it',
     (tester) async {
@@ -155,6 +194,41 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+      final title = find.text('Messages');
+      final titleTop = tester.getTopLeft(title).dy;
+      final scroll = tester
+          .widget<CustomScrollView>(find.byType(CustomScrollView).first)
+          .controller!;
+      final expandedHeader = tester.widget<FrostedAppBar>(
+        find.byType(FrostedAppBar),
+      );
+      scroll.jumpTo(expandedHeader.bottomHeight / 4);
+      await tester.pump();
+      expect(
+        tester.getTopLeft(title).dy,
+        titleTop - expandedHeader.bottomHeight / 4,
+      );
+      expect(
+        tester
+            .widget<Opacity>(
+              find.ancestor(of: title, matching: find.byType(Opacity)).first,
+            )
+            .opacity,
+        closeTo(0.75, 0.01),
+      );
+      scroll.jumpTo(expandedHeader.bottomHeight);
+      await tester.pump();
+      expect(
+        tester
+            .widget<Opacity>(
+              find.ancestor(of: title, matching: find.byType(Opacity)).first,
+            )
+            .opacity,
+        0,
+      );
+      scroll.jumpTo(0);
+      await tester.pump();
+      expect(tester.getTopLeft(title).dy, titleTop);
       await tester.drag(
         find.byType(CustomScrollView).first,
         const Offset(0, -2000),
@@ -184,9 +258,33 @@ void main() {
       await tester.pumpAndSettle();
       chat!.value = () => created++;
       await tester.pumpAndSettle();
+      final controlsBounds = tester.getRect(find.byType(MessagesNavigationBar));
       await tester.tap(find.byTooltip('New'));
       await tester.pumpAndSettle();
       expect(find.text('New workspace'), findsOneWidget);
+      final menuBounds = tester.getRect(
+        find
+            .ancestor(
+              of: find.text('New workspace'),
+              matching: find.byType(Material),
+            )
+            .first,
+      );
+      expect(menuBounds.left, closeTo(controlsBounds.left, .01));
+      expect(menuBounds.right, closeTo(controlsBounds.right, .01));
+      expect(menuBounds.bottom, closeTo(controlsBounds.bottom, .01));
+      expect(
+        tester.getTopLeft(find.text('Solo').last).dy,
+        lessThan(tester.getTopLeft(find.text('New chat')).dy),
+      );
+      expect(
+        tester.getTopLeft(find.text('Team').last).dy,
+        greaterThan(tester.getBottomLeft(find.text('New workspace')).dy),
+      );
+      expect(
+        tester.getTopLeft(find.text('Team').last).dy,
+        lessThan(tester.getTopLeft(find.text('New DM')).dy),
+      );
       expect(find.text('New DM'), findsOneWidget);
       expect(find.text('New channel'), findsOneWidget);
       await tester.tap(find.text('New chat'));
@@ -220,6 +318,36 @@ void main() {
             .map((a) => a.label),
         ['New chat', 'New workspace', 'New DM', 'New channel'],
       );
+      final creationMenu = tester.widget<IosMessageCreateButton>(
+        find.byWidgetPredicate(
+          (w) => w is IosMessageCreateButton && w.label == 'New',
+        ),
+      );
+      final search = find.byTooltip('Search');
+      final initialX = tester.getCenter(search).dx;
+      final initialWidth =
+          (tester.getTopRight(search).dx - tester.getTopLeft(search).dx);
+      creationMenu.onMenuVisibilityChanged!(true);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 90));
+      final midwayX = tester.getCenter(search).dx;
+      expect(midwayX, greaterThan(initialX + 50));
+      expect(midwayX, lessThan(initialX + 100));
+      await tester.pumpAndSettle();
+      expect(tester.getCenter(search).dx, closeTo(initialX + 100, .01));
+      expect(
+        (tester.getTopRight(search).dx - tester.getTopLeft(search).dx),
+        closeTo(initialWidth * .9, .01),
+      );
+      expect(search.hitTestable(), findsNothing);
+      creationMenu.onMenuVisibilityChanged!(false);
+      await tester.pumpAndSettle();
+      expect(tester.getCenter(search).dx, closeTo(initialX, .01));
+      expect(
+        (tester.getTopRight(search).dx - tester.getTopLeft(search).dx),
+        closeTo(initialWidth, .01),
+      );
+      expect(search.hitTestable(), findsOneWidget);
       final communityMenu = tester.widget<IosMessageCreateButton>(
         find.byWidgetPredicate(
           (w) =>
