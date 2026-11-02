@@ -16,7 +16,7 @@ fn admin_binary() -> std::ffi::OsString {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn cluster_global_inventory_cli_uses_only_existing_membership_tables() {
+async fn cluster_global_inventory_cli_reads_memberships_and_agents_without_workflow_tables() {
     let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
         .unwrap();
@@ -46,6 +46,8 @@ async fn cluster_global_inventory_cli_uses_only_existing_membership_tables() {
     for schema in [
         include_str!("../../../schema/tables/public/channels.sql"),
         include_str!("../../../schema/tables/public/channel_members.sql"),
+        include_str!("../../../schema/types/channel_add_policy.sql"),
+        include_str!("../../../schema/tables/public/users.sql"),
     ] {
         sqlx::raw_sql(schema).execute(&mut *tx).await.unwrap();
     }
@@ -62,6 +64,15 @@ async fn cluster_global_inventory_cli_uses_only_existing_membership_tables() {
         .execute(&mut *tx)
         .await
         .unwrap();
+    let agent = "ab".repeat(32);
+    sqlx::query("INSERT INTO users (community_id, pubkey) VALUES ($1, decode($2, 'hex'))")
+        .bind(community)
+        .bind(pubkey)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO users (community_id, pubkey, agent_owner_pubkey) VALUES ($1, decode($2, 'hex'), decode($3, 'hex'))")
+        .bind(community).bind(&agent).bind(pubkey).execute(&mut *tx).await.unwrap();
     let participant_community = Uuid::new_v4();
     sqlx::query("INSERT INTO communities (id, host) VALUES ($1, 'channel-only-cli.example')")
         .bind(participant_community)
@@ -167,16 +178,22 @@ async fn cluster_global_inventory_cli_uses_only_existing_membership_tables() {
         .unwrap();
     assert_eq!(explicit_member["label"], "inventory-cli.example");
     assert_eq!(explicit_member["relationship"], "participant");
+    assert_eq!(
+        explicit_member["agents"],
+        serde_json::json!([{ "pubkey": agent }])
+    );
     let participant = communities
         .iter()
         .find(|item| item["community_id"] == participant_community.to_string())
         .unwrap();
     assert_eq!(participant["label"], "channel-only-cli.example");
     assert_eq!(participant["relationship"], "participant");
-    for output in [&demo, inventory] {
-        for row in output["communities"].as_array().unwrap() {
-            assert_eq!(row.as_object().unwrap().len(), 3);
-        }
+    assert_eq!(participant["agents"], serde_json::json!([]));
+    for row in communities {
+        assert_eq!(row.as_object().unwrap().len(), 4);
+    }
+    for row in demo["communities"].as_array().unwrap() {
+        assert_eq!(row.as_object().unwrap().len(), 3);
     }
 }
 
