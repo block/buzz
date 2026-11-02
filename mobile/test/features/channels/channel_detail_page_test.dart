@@ -14104,9 +14104,13 @@ void main() {
       });
     }
 
-    testWidgets(
-      'a channel link tap after a community switch is not blocked by the old lookup',
-      (tester) async {
+    // A tap whose lookup will be discarded must not block the next tap: one
+    // made after a community switch away and back, or from another page after
+    // the first page closed.
+    for (final interruption in ['community switch', 'closed page']) {
+      testWidgets('a channel link tap after a $interruption opens once', (
+        tester,
+      ) async {
         final relay = _ChannelMetadataRelaySession(
           metas: [
             _channelMetadataEvent(
@@ -14117,6 +14121,7 @@ void main() {
         );
         final relayConfig = _SwitchableRelayConfigNotifier();
         final observer = _TestNavigatorObserver();
+        final link = find.text('#random', findRichText: true);
 
         await tester.pumpWidget(
           _buildTestable(
@@ -14140,14 +14145,32 @@ void main() {
         await tester.pumpAndSettle();
 
         final initialPushCount = observer.pushCount;
-        await tester.tap(find.text('#random', findRichText: true));
-        await tester.pump();
-        // Away and back again before the first lookup settles.
-        relayConfig.switchTo('https://other.example');
-        await tester.pump();
-        relayConfig.switchTo('https://relay.example');
-        await tester.pump();
-        await tester.tap(find.text('#random', findRichText: true));
+        var extraPushes = 0;
+        if (interruption == 'community switch') {
+          await tester.tap(link);
+          await tester.pump();
+          relayConfig.switchTo('https://other.example');
+          await tester.pump();
+          relayConfig.switchTo('https://relay.example');
+          await tester.pump();
+        } else {
+          final page = find.byType(ChannelDetailPage);
+          final channel = tester.widget<ChannelDetailPage>(page).channel;
+          Navigator.of(tester.element(page)).push(
+            MaterialPageRoute<void>(
+              builder: (_) => ChannelDetailPage(channel: channel),
+            ),
+          );
+          extraPushes = 1;
+          await tester.pumpAndSettle();
+          await tester.tap(link.last);
+          await tester.pump();
+          Navigator.of(
+            tester.element(find.byType(ChannelDetailPage).last),
+          ).pop();
+          await tester.pumpAndSettle();
+        }
+        await tester.tap(link);
         await tester.pump();
         expect(relay.metadataLookups, [
           _ChannelMetadataRelaySession.unlistedId,
@@ -14156,10 +14179,10 @@ void main() {
 
         relay.gate.complete();
         await tester.pumpAndSettle();
-        // The lookup from before the switch is dropped; the new tap opens once.
-        expect(observer.pushCount, initialPushCount + 1);
-      },
-    );
+        // The discarded lookup opens nothing; the new tap opens once.
+        expect(observer.pushCount, initialPushCount + extraPushes + 1);
+      });
+    }
 
     testWidgets('tapping a channel link inside a thread opens that channel', (
       tester,

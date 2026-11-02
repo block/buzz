@@ -26,10 +26,11 @@ Future<void> openChannelLink({
 }
 
 /// Taps still resolving, so a repeated tap during a slow lookup doesn't open
-/// the channel twice. Each is keyed by the connection it was made on: the
-/// relay config is replaced on every community or identity switch, even back
-/// to an earlier one, so a lookup that will be discarded blocks no new tap.
-final _resolving = <(RelayConfig, String)>{};
+/// the channel twice. Each is keyed by the page and connection it was made
+/// on, so a lookup that will be discarded blocks no new tap: the relay config
+/// is replaced on every community or identity switch, even back to an earlier
+/// one, and a closed page's lookup is dropped.
+final _resolving = <(Object?, RelayConfig, String)>{};
 
 /// Resolves [channelId] for a tap that opens it, or shows why it can't be
 /// opened and returns null.
@@ -44,7 +45,11 @@ Future<Channel?> resolveChannelToOpen(
   WidgetRef ref,
   String channelId,
 ) async {
-  final key = (ref.read(relayConfigProvider), channelId);
+  final key = (
+    ModalRoute.of(context),
+    ref.read(relayConfigProvider),
+    channelId,
+  );
   if (!_resolving.add(key)) return null;
   try {
     return await _resolve(context, ref, channelId);
