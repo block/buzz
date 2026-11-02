@@ -47,6 +47,8 @@ public struct BuzzPushCachedChannel: Codable, Equatable, Sendable {
   public let channelType: String?
   /// Whether relay metadata marks this as a private Solo stream (`buzz.solo` label).
   public let isSolo: Bool?
+  /// Relay-authored creator (`P`), lowercased, when it is a valid pubkey.
+  public let creatorPubkey: String?
   /// Exact unique-member count when bounded, or a value above the bound when oversized.
   public let memberCount: Int?
   /// Complete community-and-channel-scoped member digests, when within bounds.
@@ -69,6 +71,7 @@ public struct BuzzPushCachedChannel: Codable, Equatable, Sendable {
     displayName: String?,
     channelType: String? = nil,
     isSolo: Bool? = nil,
+    creatorPubkey: String? = nil,
     memberCount: Int? = nil,
     memberDigests: [String]? = nil,
     membershipEventID: String? = nil,
@@ -85,6 +88,7 @@ public struct BuzzPushCachedChannel: Codable, Equatable, Sendable {
     self.displayName = displayName
     self.channelType = channelType
     self.isSolo = isSolo
+    self.creatorPubkey = creatorPubkey
     self.memberCount = memberCount
     self.memberDigests = memberDigests
     self.membershipEventID = membershipEventID
@@ -332,6 +336,7 @@ public final class BuzzPushPresentationCacheStore: @unchecked Sendable {
         displayName: Self.normalizedDisplayName(Self.tagValue("name", in: event)),
         channelType: Self.normalizedChannelType(Self.tagValue("t", in: event)),
         isSolo: Self.isSoloChannel(event),
+        creatorPubkey: Self.normalizedCreator(event),
         memberCount: hasCurrentAuthority ? existing?.memberCount : nil,
         memberDigests: hasCurrentAuthority ? existing?.memberDigests : nil,
         membershipEventID: hasCurrentAuthority ? existing?.membershipEventID : nil,
@@ -384,6 +389,7 @@ public final class BuzzPushPresentationCacheStore: @unchecked Sendable {
         displayName: existing.displayName,
         channelType: existing.channelType,
         isSolo: existing.isSolo,
+        creatorPubkey: existing.creatorPubkey,
         memberCount: membership.count,
         memberDigests: membership.digests,
         membershipEventID: event.id,
@@ -546,6 +552,13 @@ public final class BuzzPushPresentationCacheStore: @unchecked Sendable {
       !event.tags.contains { $0.first == "public" }
       && event.tags.contains { $0.first == "private" }
     return types.first == "stream" && isPrivate && types.dropFirst().contains("buzz.solo")
+  }
+
+  /// The relay-authored creator `P` tag, lowercased, when it is a valid pubkey.
+  static func normalizedCreator(_ event: VerifiedNostrEvent) -> String? {
+    guard let creator = tagValue("P", in: event)?.lowercased(), isHexPubkey(creator)
+    else { return nil }
+    return creator
   }
 
   static func normalizedChannelType(_ value: String?) -> String? {
@@ -731,6 +744,7 @@ public final class BuzzPushPresentationCacheStore: @unchecked Sendable {
       displayName: channel.displayName,
       channelType: channel.channelType,
       isSolo: channel.isSolo,
+      creatorPubkey: channel.creatorPubkey,
       memberCount: channel.memberCount,
       memberDigests: nil,
       membershipEventID: channel.membershipEventID,

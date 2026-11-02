@@ -259,8 +259,9 @@ struct BuzzPushPresentationCacheTests {
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = BuzzPushPresentationCacheStore(containerURL: directory)
     let relayPubkey = try pubkey(for: relayKey)
+    let creator = try pubkey(for: profileKey)
     let cases: [(String, [[String]], Bool)] = [
-      ("solo", [["t", "stream"], ["t", "buzz.solo"], ["private"]], true),
+      ("solo", [["t", "stream"], ["t", "buzz.solo"], ["private"], ["P", creator.uppercased()]], true),
       ("open-solo", [["t", "stream"], ["t", "buzz.solo"], ["public"]], false),
       ("forum-solo", [["t", "forum"], ["t", "buzz.solo"], ["private"]], false),
       ("type-only", [["t", "buzz.solo"], ["private"]], false),
@@ -286,6 +287,7 @@ struct BuzzPushPresentationCacheTests {
         snapshot.channel(
           communityID: "community-a", relayOrigin: "https://relay.example", channelID: id))
       #expect(cached.isSolo == expected, "\(id)")
+      #expect(cached.creatorPubkey == (id == "solo" ? creator : nil), "\(id)")
     }
   }
 
