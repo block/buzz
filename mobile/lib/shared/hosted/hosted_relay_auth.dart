@@ -235,7 +235,8 @@ class HostedRelayAuth extends ChangeNotifier {
       } on ArgumentError {
         throw AccountFailure.invalidResponse;
       }
-      if (expires.millisecondsSinceEpoch ~/ 1000 != expiry) {
+      if (expires.millisecondsSinceEpoch ~/ 1000 != expiry ||
+          expires.isAfter(session.expiresAt)) {
         throw AccountFailure.invalidResponse;
       }
       if (_disposed) throw AccountFailure.unavailable;

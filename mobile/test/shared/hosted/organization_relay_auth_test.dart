@@ -88,6 +88,7 @@ void main() {
     late List<http.Request> requests;
     late Object? boundIdentity;
     late int assertionLifetimeSeconds;
+    late DateTime sessionExpiry;
     final now = DateTime.now().toUtc();
 
     BuilderlabAccountClient organizationClient() => BuilderlabAccountClient(
@@ -100,7 +101,7 @@ void main() {
           '/api/goose/v1/auth/me' => http.Response(
             jsonEncode({
               'subject': 'member',
-              'expires_at': expiry.toIso8601String(),
+              'expires_at': sessionExpiry.toIso8601String(),
             }),
             200,
           ),
@@ -128,7 +129,7 @@ void main() {
         'origin': organization.toString(),
         'credential': 'org-secret',
         'subject': 'member',
-        'expires_at': expiry.toIso8601String(),
+        'expires_at': sessionExpiry.toIso8601String(),
       }),
     );
 
@@ -150,6 +151,7 @@ void main() {
       requests = [];
       boundIdentity = null;
       assertionLifetimeSeconds = 120;
+      sessionExpiry = now.add(const Duration(days: 8));
     });
 
     test(
@@ -170,6 +172,32 @@ void main() {
           assertionLifetimeSeconds = lifetime;
           final auth = relayAuth(organizationClient());
           if (lifetime > 0 && lifetime < 8640000000001) {
+            expect(
+              await auth.headers(relay),
+              contains('Nostr-Federated-Identity'),
+            );
+          } else {
+            await expectLater(
+              auth.headers(relay),
+              throwsA(AccountFailure.invalidResponse),
+            );
+          }
+          auth.dispose();
+        }
+      },
+    );
+
+    test(
+      'assertion expiry can equal but cannot exceed the account session expiry',
+      () async {
+        for (final sessionLifetime in [120, 119]) {
+          sessionExpiry = DateTime.fromMillisecondsSinceEpoch(
+            (now.millisecondsSinceEpoch ~/ 1000 + sessionLifetime) * 1000,
+            isUtc: true,
+          );
+          await saveSession();
+          final auth = relayAuth(organizationClient());
+          if (sessionLifetime == 120) {
             expect(
               await auth.headers(relay),
               contains('Nostr-Federated-Identity'),
