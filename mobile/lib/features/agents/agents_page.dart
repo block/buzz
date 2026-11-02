@@ -209,6 +209,7 @@ class AgentsPage extends HookConsumerWidget {
     final profiles = ref.watch(userCacheProvider);
     final creating = useState(false);
     final needsSignIn = agentLocationUnknown(community, controller);
+    final signInNeeded = builderlabSignInNeeded(community, controller);
     final failed =
         registered.hasError ||
         ownedDirectory.hasError ||
@@ -327,7 +328,7 @@ class AgentsPage extends HookConsumerWidget {
                             child: const Text('Retry'),
                           ),
                         ),
-                      if (needsSignIn)
+                      if (signInNeeded)
                         ListTile(
                           title: const Text(
                             'Sign in to Builderlab to manage remote agents',

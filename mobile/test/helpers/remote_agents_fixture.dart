@@ -68,8 +68,16 @@ class FakeRegistry extends BuilderlabAccountClient {
   BuilderlabAccount? get account => signedIn
       ? BuilderlabAccount(subject: subject, expiresAt: DateTime.utc(2030))
       : null;
+
+  /// Holds [restore] open so a test can observe a cold-start restoration.
+  Completer<void>? restoreGate;
+
   @override
-  Future<BuilderlabAccount?> restore() async => account;
+  Future<BuilderlabAccount?> restore() async {
+    await restoreGate?.future;
+    return account;
+  }
+
   @override
   Future<Map<String, dynamic>> currentIdentity() async => {
     'identity': {'pubkey_hex': bound},
