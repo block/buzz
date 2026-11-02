@@ -672,31 +672,7 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
         qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
     }
 
-    // Multi-channel IN pushdown. Access-scope queries retain global events;
-    // explicit multi-value #h filters do not.
-    //
-    // SECURITY: Some(empty vec) means "match no channels". Access-scope
-    // queries still retain globals; explicit #h queries match nothing.
-    if let Some(ref ch_ids) = q.channel_ids {
-        if ch_ids.is_empty() {
-            if q.channel_ids_include_global {
-                qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
-            } else {
-                qb.push(" AND FALSE");
-            }
-        } else {
-            qb.push(" AND (");
-            if q.channel_ids_include_global {
-                qb.push(format!("{col_prefix}channel_id IS NULL OR "));
-            }
-            qb.push(format!("{col_prefix}channel_id IN ("));
-            let mut sep = qb.separated(", ");
-            for ch in ch_ids {
-                sep.push_bind(*ch);
-            }
-            qb.push("))");
-        }
-    }
+    push_channel_scope(&mut qb, col_prefix, q);
 
     if let Some(ks) = q.kinds.as_deref().filter(|k| !k.is_empty()) {
         qb.push(format!(" AND {col_prefix}kind IN ("));
@@ -1038,6 +1014,38 @@ fn push_tag_value_filters(
     }
 }
 
+/// AND the [`EventQuery::channel_ids`] scope, before `LIMIT`. Access-scope
+/// queries retain channel-less global events; explicit multi-value `#h`
+/// filters do not.
+///
+/// SECURITY: `Some(empty vec)` means "match no channels": access-scope queries
+/// still retain globals, explicit `#h` queries match nothing.
+///
+/// The set is one array bind, so a viewer's channel count does not change the
+/// SQL text. One `IN ($n, …)` bind per channel made a new statement for every
+/// arity, so a read rarely reused its cached plan and was planned again on
+/// each call, over every `events` partition when it has no `since`.
+fn push_channel_scope(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q: &EventQuery) {
+    let Some(ref ch_ids) = q.channel_ids else {
+        return;
+    };
+    if ch_ids.is_empty() {
+        if q.channel_ids_include_global {
+            qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
+        } else {
+            qb.push(" AND FALSE");
+        }
+        return;
+    }
+    qb.push(" AND (");
+    if q.channel_ids_include_global {
+        qb.push(format!("{col_prefix}channel_id IS NULL OR "));
+    }
+    qb.push(format!("{col_prefix}channel_id = ANY("))
+        .push_bind(ch_ids.clone())
+        .push("))");
+}
+
 /// Return only membership notices whose channel type the query may see
 /// (NIP-CL), as [`buzz_core::filter::notice_visible`] does in `filters_match`:
 /// `AND (kind NOT IN (44100, 44101) OR <type tag in visible types>
@@ -1226,28 +1234,7 @@ fn count_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
         qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
     }
 
-    // Multi-channel IN pushdown for COUNT. Access-scope queries retain global
-    // events; explicit multi-value #h filters do not.
-    if let Some(ref ch_ids) = q.channel_ids {
-        if ch_ids.is_empty() {
-            if q.channel_ids_include_global {
-                qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
-            } else {
-                qb.push(" AND FALSE");
-            }
-        } else {
-            qb.push(" AND (");
-            if q.channel_ids_include_global {
-                qb.push(format!("{col_prefix}channel_id IS NULL OR "));
-            }
-            qb.push(format!("{col_prefix}channel_id IN ("));
-            let mut sep = qb.separated(", ");
-            for ch in ch_ids {
-                sep.push_bind(*ch);
-            }
-            qb.push("))");
-        }
-    }
+    push_channel_scope(&mut qb, col_prefix, q);
 
     if let Some(ks) = q.kinds.as_deref().filter(|k| !k.is_empty()) {
         qb.push(format!(" AND {col_prefix}kind IN ("));
@@ -3024,6 +3011,40 @@ mod e_tag_filter_shape_tests {
         assert!(!unbounded.contains("m.event_created_at <="));
         assert!(!unbounded.contains("m.event_kind"));
     }
+
+    /// The channel scope is one array bind: a viewer's channel count must not
+    /// change the SQL text, or each count is its own statement that is planned
+    /// again on every call. Holds for the `#p` join and plain reads, for
+    /// access scope and explicit `#h`, in both the page SELECT and the COUNT.
+    #[test]
+    fn channel_scope_sql_does_not_depend_on_channel_count() {
+        let sql = |p_tag: bool, include_global: bool, n: usize| {
+            let mut q = EventQuery::for_community(CommunityId::from_uuid(uuid::Uuid::nil()));
+            q.p_tag_hex = p_tag.then(|| "ab".repeat(32));
+            q.kinds = Some(vec![9]);
+            q.channel_ids = Some((0..n).map(|_| uuid::Uuid::new_v4()).collect());
+            q.channel_ids_include_global = include_global;
+            (
+                build_query_events_sql(&q).sql().as_str().to_owned(),
+                count_events_sql(&q).sql().as_str().to_owned(),
+            )
+        };
+        for p_tag in [true, false] {
+            for include_global in [true, false] {
+                let one = sql(p_tag, include_global, 1);
+                assert_eq!(one, sql(p_tag, include_global, 40));
+                for text in [&one.0, &one.1] {
+                    assert!(text.contains("channel_id = ANY($"), "{text}");
+                    assert!(!text.contains("channel_id IN ("), "{text}");
+                    assert_eq!(
+                        text.contains("channel_id IS NULL OR "),
+                        include_global,
+                        "{text}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3122,6 +3143,40 @@ mod postgres_tests {
             .await
             .expect("plain query");
         assert!(prepared_like(&mut conn, "%FROM events%").await > 0);
+    }
+
+    /// Access-scoped `#p` reads for viewers with different channel counts
+    /// share one cached statement on a connection, so Postgres can keep its
+    /// plan instead of planning every read again.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_scoped_mention_reads_share_one_prepared_statement() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let mut channels = Vec::new();
+        for _ in 0..3 {
+            channels.push(make_test_channel(&pool, community_uuid, None).await);
+        }
+        let mut conn = pool.acquire().await.expect("acquire");
+        sqlx::query("DEALLOCATE ALL")
+            .execute(&mut *conn)
+            .await
+            .expect("clear prepared statements");
+        for n in 1..=channels.len() {
+            let q = EventQuery {
+                kinds: Some(vec![9]),
+                p_tag_hex: Some("ab".repeat(32)),
+                channel_ids: Some(channels[..n].to_vec()),
+                ..EventQuery::for_community(community)
+            };
+            query_events_on(&mut conn, &q).await.expect("mention read");
+        }
+        assert_eq!(
+            prepared_like(&mut conn, "%JOIN event_mentions%").await,
+            1,
+            "one statement for every channel count"
+        );
     }
 
     /// Effective `statement_timeout` observed *inside* the read deadline, and
