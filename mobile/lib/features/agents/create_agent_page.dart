@@ -11,6 +11,7 @@ import '../../shared/agents/remote_agents.dart';
 import '../../shared/agents/agent_avatar_catalog.dart';
 import '../../shared/relay/relay.dart';
 import 'agent_avatar_picker.dart';
+import 'agent_creation_draft.dart';
 import '../../shared/community/community.dart';
 import '../../shared/community/community_provider.dart';
 import '../../shared/theme/theme.dart';
@@ -28,8 +29,13 @@ class CreateAgentPage extends HookConsumerWidget {
     required this.controller,
     required this.community,
     required this.onCreated,
+    this.initialDraft,
     super.key,
   });
+
+  /// Pre-fills a fresh setup (for example from a link). Ignored when an
+  /// unfinished setup is pending: that must be resumed as saved.
+  final AgentCreationDraft? initialDraft;
   final RemoteAgentController controller;
   final Community community;
   final VoidCallback onCreated;
@@ -48,23 +54,51 @@ class CreateAgentPage extends HookConsumerWidget {
       () => controller.account.account?.subject,
       const [],
     );
+    final draft = controller.pending == null ? initialDraft : null;
     final model = useState(controller.pending?['model_id'] as String?);
     final effort = useState(controller.pending?['reasoning_effort'] as String?);
+    // Draft model hints apply to the first catalog that loads (after a failed
+    // load, the one Retry fetches), and only if it offers them.
+    final hintsApplied = useRef(false);
+    useEffect(() {
+      final entries = catalog.data;
+      if (draft == null ||
+          hintsApplied.value ||
+          catalog.connectionState != ConnectionState.done ||
+          entries == null) {
+        return null;
+      }
+      hintsApplied.value = true;
+      final match = entries
+          .where((entry) => entry.id == draft.modelId)
+          .firstOrNull;
+      if (match == null) return null;
+      model.value = match.id;
+      effort.value = match.efforts.contains(draft.reasoningEffort)
+          ? draft.reasoningEffort
+          : null;
+      return null;
+    }, [catalog.connectionState]);
     final name = useTextEditingController(
-      text: controller.pending?['name'] as String? ?? '',
+      text: controller.pending?['name'] as String? ?? draft?.name ?? '',
     );
     final instructions = useTextEditingController(
-      text: controller.pending?['instructions'] as String? ?? '',
+      text:
+          controller.pending?['instructions'] as String? ??
+          draft?.instructions ??
+          '',
     );
     useListenable(name);
     final error = useState<String?>(null);
     final avatarHeroTag = useMemoized(Object.new);
     final editingAvatar = useState(false);
     final avatar = useState(
-      AgentAvatarSelection.url(
-        controller.pending?['picture'] as String? ??
-            agentAvatarCatalog[Random().nextInt(agentAvatarCatalog.length)].url,
-      ),
+      draft?.avatar ??
+          AgentAvatarSelection.url(
+            controller.pending?['picture'] as String? ??
+                agentAvatarCatalog[Random().nextInt(agentAvatarCatalog.length)]
+                    .url,
+          ),
     );
     final preparing = useState(false);
     final busy = controller.busy || preparing.value;
