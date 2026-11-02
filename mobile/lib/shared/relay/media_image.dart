@@ -48,8 +48,9 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   /// Set when [url] is a thumbnail [MediaImage] chose in place of an
   /// original: its 404 then records a missing thumbnail, so later builds load
   /// the original, rather than a failure cooldown. Any other 404, including a
-  /// profile URL that is itself a thumbnail, keeps the cooldown. Excluded from
-  /// equality: it changes how a failure is handled, not the bytes.
+  /// profile URL that is itself a thumbnail, keeps the cooldown. Part of
+  /// equality and the shared download's key, so a fallback and a direct load
+  /// of the same URL each keep their own failure handling.
   final bool isThumbnailFallback;
 
   /// Excluded from equality: transport, not identity.
@@ -81,7 +82,8 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   static const _defaultCooldown = Duration(seconds: 30);
   static const _maxRetryAfter = Duration(minutes: 5);
   static final Map<String, DateTime> _cooldownUntil = {};
-  static final Map<(String, MediaGetAuthService), _SharedFetch> _inFlight = {};
+  static final Map<(String, MediaGetAuthService, bool), _SharedFetch>
+  _inFlight = {};
 
   /// Injectable clock for cooldown tests.
   @visibleForTesting
@@ -127,7 +129,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       // Each decode size is its own cache entry (see [ResizeImage]), so one
       // URL shown at two sizes resolves twice. Share the download instead of
       // fetching the same bytes once per size.
-      final fetchKey = (url, auth);
+      final fetchKey = (url, auth, isThumbnailFallback);
       final fetch = _inFlight[fetchKey] ??= _SharedFetch(
         _fetchBytes,
         onFinished: (fetch) {
@@ -286,11 +288,12 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     return other is MediaImageProvider &&
         other.url == url &&
         other.scale == scale &&
-        other.auth == auth;
+        other.auth == auth &&
+        other.isThumbnailFallback == isThumbnailFallback;
   }
 
   @override
-  int get hashCode => Object.hash(url, scale, auth);
+  int get hashCode => Object.hash(url, scale, auth, isThumbnailFallback);
 
   @override
   String toString() =>
