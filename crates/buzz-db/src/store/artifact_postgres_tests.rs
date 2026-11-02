@@ -64,6 +64,113 @@ async fn artifact_writes_record_one_certification_before_their_timestamps() {
     .unwrap();
     assert_eq!(f.db.recover_artifact_certifications().await.unwrap(), 1);
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn access_writers_record_certification_for_grants_and_removals() {
+    use crate::channel_members::{add_member, remove_member, MemberRole};
+    let f = Fixture::new().await;
+    let owner = f.owner.public_key().to_bytes();
+    let peer = f.peer.public_key().to_bytes();
+    for _ in 0..2 {
+        add_member(
+            &f.db.pool,
+            f.community,
+            f.b,
+            &peer,
+            MemberRole::Member,
+            Some(&owner),
+        )
+        .await
+        .unwrap();
+        assert_eq!(f.db.recover_artifact_certifications().await.unwrap(), 1);
+        remove_member(&f.db.pool, f.community, f.b, &peer, &owner)
+            .await
+            .unwrap();
+        assert_eq!(f.db.recover_artifact_certifications().await.unwrap(), 1);
+    }
+    let mut tx =
+        f.db.begin_event_write_transaction(f.community)
+            .await
+            .unwrap();
+    crate::channel_members::lock_channel_memberships_in_transaction(&mut tx, &[f.b])
+        .await
+        .unwrap()
+        .insert_auto_membership(f.b, &peer, &owner)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(f.db.recover_artifact_certifications().await.unwrap(), 1);
+    crate::relay_admin_actions::deploy_kick_member(&f.db.pool, f.community, f.b, &peer, &owner)
+        .await
+        .unwrap();
+    assert_eq!(f.db.recover_artifact_certifications().await.unwrap(), 1);
+    crate::dm::create_dm(&f.db.pool, f.community, &[&owner, &peer], &owner)
+        .await
+        .unwrap();
+    assert_eq!(f.db.recover_artifact_certifications().await.unwrap(), 1);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn channel_writers_record_certification_for_creation_and_policy() {
+    use buzz_core::channel::{ChannelType, ChannelVisibility};
+    let f = Fixture::new().await;
+    let owner = f.owner.public_key().to_bytes();
+    crate::channel::create_channel(
+        &f.db.pool,
+        f.community,
+        "certified",
+        ChannelType::Stream,
+        ChannelVisibility::Open,
+        None,
+        &owner,
+        None,
+        &[],
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(f.db.recover_artifact_certifications().await.unwrap(), 1);
+    crate::channel::create_channel_with_id(
+        &f.db.pool,
+        f.community,
+        Uuid::new_v4(),
+        "certified-id",
+        ChannelType::Stream,
+        ChannelVisibility::Open,
+        None,
+        &owner,
+        None,
+        &[],
+    )
+    .await
+    .unwrap();
+    assert_eq!(f.db.recover_artifact_certifications().await.unwrap(), 1);
+    for updates in [
+        crate::channel::ChannelUpdate {
+            visibility: Some("private".into()),
+            ..Default::default()
+        },
+        crate::channel::ChannelUpdate {
+            unlisted: Some(true),
+            ..Default::default()
+        },
+        crate::channel::ChannelUpdate {
+            ttl_seconds: Some(Some(3600)),
+            ..Default::default()
+        },
+    ] {
+        crate::channel::update_channel(&f.db.pool, f.community, f.a, updates)
+            .await
+            .unwrap();
+        assert_eq!(f.db.recover_artifact_certifications().await.unwrap(), 1);
+    }
+    crate::channel::soft_delete_channel(&f.db.pool, f.community, f.a)
+        .await
+        .unwrap();
+    assert_eq!(f.db.recover_artifact_certifications().await.unwrap(), 1);
+}
 impl Fixture {
     async fn new() -> Self {
         let pool = PgPool::connect(&crate::test_support::database_url())

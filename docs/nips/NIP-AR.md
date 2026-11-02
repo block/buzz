@@ -290,9 +290,15 @@ channel removal.
 Each pass fixes `startedAt` from the database clock. A later pass reads from
 the previous completed start time minus 120 seconds through its own start
 time, inclusive. New head writes, move-source records, and membership changes
-use database `clock_timestamp()`. The protocol assumes the delay from this
-stamp to commit visibility stays within the accepted 120-second overlap.
-That overlap is an operating assumption. It is not a measured upper bound.
+use database `clock_timestamp()`. A relay with durable certification records
+pending work in the same transaction, before the first sync stamp. After
+commit, it proves visibility within the 120-second overlap or requests a
+policy reset. Recovery finishes pending work after a crash without a caller
+retry. The reset and completion of certification commit together.
+
+Certification requires every serving writer to record pending work. Without
+that coverage, the stamp-to-visibility bound is an operating assumption.
+Clients need no additional request or response fields for certification.
 
 Pages order by `(change timestamp, source, stable identity)`. The source
 separates membership removals, head changes, grants, and move-source records.
@@ -331,8 +337,9 @@ or remove. An empty delta does not confirm an accepted edit.
 ### Access recovery and bounds
 
 Relevant channel access changes atomically advance one community policy
-stamp, including transitions on empty channels. Ordinary artifact writes do
-not update this stamp. A different stamp
+stamp, including transitions on empty channels. Certification also advances
+this stamp when it cannot prove visibility within the overlap. Ordinary
+artifact acceptance does not update this stamp. A different stamp
 returns HTTP 409 `incremental_reset` with `reason: "policy_changed"`, without naming
 private channels. A checkpoint older than 30 days returns the same code with
 `reason: "checkpoint_expired"`.

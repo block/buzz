@@ -3905,6 +3905,13 @@ mod postgres_tests {
             matches!(r1, KickWithMarkerResult::Removed),
             "first kick must be Removed"
         );
+        let pending: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM artifact_sync_pending WHERE community_id=$1")
+                .bind(community_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(pending, 1);
 
         // step_marker must now be set.
         let rec = get_action(&pool, action_id)
