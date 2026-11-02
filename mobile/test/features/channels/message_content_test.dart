@@ -552,6 +552,8 @@ void main() {
           );
         }
       }
+      // Gallery labels drop their escapes too.
+      expect(find.bySemanticsLabel(RegExp(r'shot #1')), findsWidgets);
       semantics.dispose();
     });
 
