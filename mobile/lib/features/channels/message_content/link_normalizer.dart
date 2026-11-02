@@ -3,6 +3,7 @@
 String normalizeMarkdownDestination(String url) =>
     url.replaceAll(' ', '%20').replaceAll('(', '%28').replaceAll(')', '%29');
 
+const _backslashUnit = 0x5C;
 const _markdownDelimiters = ['***', '___', '**', '__', '~~', '*', '_'];
 
 final _autolinkPattern = RegExp(
@@ -11,7 +12,6 @@ final _autolinkPattern = RegExp(
 final _bareLinkPattern = RegExp(
   r'(?<![(\]=])(?:https?://|buzz://(?:message\?|join\?|channel/|(?:pr|issue|repo)\?))[^\s)>\]]+',
 );
-final _trailingBackslashPattern = RegExp(r'\\+$');
 final _trailingPunctuationPattern = RegExp(r'[.,!?:;]+$');
 final _backtickRunPattern = RegExp(r'`+');
 
@@ -293,17 +293,19 @@ String _normalizeBareLink(String segment, Match match) {
 
   // A trailing backslash escapes what follows or breaks the line; it is never
   // part of the destination, and the renderer would read it as an escape.
-  final backslashes = _trailingBackslashPattern.firstMatch(url);
-  if (backslashes != null) {
-    url = url.substring(0, backslashes.start);
-    trailing = backslashes[0]!;
+  // Scan back rather than match `\\+$`, which retries from every offset.
+  var urlEnd = url.length;
+  while (urlEnd > 0 && url.codeUnitAt(urlEnd - 1) == _backslashUnit) {
+    urlEnd--;
   }
+  trailing = url.substring(urlEnd);
+  url = url.substring(0, urlEnd);
 
   if (isBuzzUrl) {
     final outsidePunctuation = _trailingPunctuationPattern.firstMatch(url);
     if (outsidePunctuation != null) {
       url = url.substring(0, outsidePunctuation.start);
-      trailing = outsidePunctuation[0]!;
+      trailing = '${outsidePunctuation[0]}$trailing';
     }
   }
 
