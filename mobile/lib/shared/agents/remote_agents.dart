@@ -290,7 +290,9 @@ class RemoteAgentController extends ChangeNotifier {
       return;
     }
     await ensureBinding();
-    final result = await account.post('/v3/beekeeper/list-agents', {});
+    final result = await account.post('/v3/beekeeper/list-agents', {
+      'include_instructions': true,
+    });
     requireStatus(result, 'SUCCESS', 1);
     final rows = result['agents'] ?? [];
     if (rows is! List) throw StateError('Invalid agent listing.');
@@ -443,11 +445,9 @@ class RemoteAgentController extends ChangeNotifier {
     }, expectedSubject: subject);
     check();
     if (result['error'] != null) throw AccountFailure.rejected;
-    final readback = await account.post(
-      '/v3/beekeeper/list-agents',
-      {},
-      expectedSubject: subject,
-    );
+    final readback = await account.post('/v3/beekeeper/list-agents', {
+      'include_instructions': true,
+    }, expectedSubject: subject);
     check();
     requireStatus(readback, 'SUCCESS', 1);
     final rows = readback['agents'];
