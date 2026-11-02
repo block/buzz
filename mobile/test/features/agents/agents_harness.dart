@@ -19,6 +19,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../helpers/remote_agents_fixture.dart';
@@ -196,6 +197,7 @@ class AgentsHarness {
     WidgetTester tester, {
     required List<String> directory,
     Widget? home,
+    List<Override> overrides = const [],
   }) async {
     registered = [...directory, oldAppAgentKeys.public];
     final prefs = await SharedPreferences.getInstance();
@@ -226,6 +228,7 @@ class AgentsHarness {
                 AgentDirectoryEntry(pubkey: pubkey),
             ],
           ),
+          ...overrides,
         ],
         child: MaterialApp(
           theme: AppTheme.light(),

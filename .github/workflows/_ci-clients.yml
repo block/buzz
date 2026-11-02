@@ -148,6 +148,7 @@ jobs:
           test/features/onboarding/onboarding_entry_routes_test.dart
           test/shared/hosted/hosted_environment_test.dart
           test/shared/hosted/self_hosted_entry_test.dart
+          test/features/agents/agents_signed_out_prompt_test.dart
           test/shared/hosted/relay_auth_isolation_test.dart
           test/features/onboarding/hosted_app_gate_environment_test.dart
           test/features/onboarding/hosted_journeys_test.dart
