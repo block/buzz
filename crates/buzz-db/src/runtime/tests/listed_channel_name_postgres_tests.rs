@@ -180,9 +180,9 @@ async fn plan_keeps_each_listed_name_on_its_oldest_unarchived_channel() {
 /// when no open, unarchived stream has the name, and the relay refuses that
 /// create while an archived channel holds it. The plan renames every holder of
 /// a starter name when all of them are archived, and no other archived name,
-/// unless one of them is at the clients' starter id.
-/// Mutation: drop the `all_archived` or `NOT starter_held` condition in the
-/// plan, or the `at_starter_id` sort key → RED.
+/// unless a channel row has that name's starter id.
+/// Mutation: drop the `all_archived` or `NOT IN starters` condition in the
+/// plan, the `at_starter_id` sort key, or the slug binding in `starters` → RED.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn plan_frees_a_starter_name_that_only_archived_channels_hold() {
@@ -264,6 +264,35 @@ async fn plan_frees_a_starter_name_that_only_archived_channels_hold() {
     assert_eq!(
         rename_plan_with_starters(&pool, &fixed.host, &[starter, Uuid::new_v4()]).await,
         vec![(older, "general".to_owned(), renamed(older, "general").1)]
+    );
+
+    // Any row at a starter's id blocks the create there, whatever its name or
+    // visibility, so the starter rule renames nothing for that name. Each id
+    // binds only its own name: `welcome-everyone` is still freed.
+    let moved = Seed::new(&pool).await;
+    let [general_id, archived_general, archived_welcome] = [(); 3].map(|_| Uuid::new_v4());
+    moved.open(&pool, general_id, "general", 90).await;
+    moved.open(&pool, archived_general, "general", 30).await;
+    moved
+        .open(&pool, archived_welcome, "welcome-everyone", 30)
+        .await;
+    sqlx::query("UPDATE channels SET name = 'general-old', visibility = 'private' WHERE id = $1")
+        .bind(general_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE channels SET archived_at = now() WHERE id = ANY($1)")
+        .bind(vec![archived_general, archived_welcome])
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        rename_plan_with_starters(&pool, &moved.host, &[general_id, Uuid::new_v4()]).await,
+        vec![(
+            archived_welcome,
+            "welcome-everyone".to_owned(),
+            renamed(archived_welcome, "welcome-everyone").1
+        )]
     );
 }
 

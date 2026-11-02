@@ -37,9 +37,10 @@
 # (add-member also finds only an unarchived community), run this script, and
 # archive it again. For one being deleted, it stops: no rename can land there,
 # and its duplicates go when its deletion completes.
-# BUZZ_RELAY_URL defaults to wss://<community host>; it must be the URL
-# clients use, because it also gives the clients' starter channel ids.
-# BUZZ_CLI defaults to `buzz`. The script needs psql and python3.
+# BUZZ_RELAY_URL defaults to wss://<community host>. It also gives the
+# clients' starter channel ids unless BUZZ_STARTER_ORIGIN is set (below), so
+# it must be the URL clients use. BUZZ_CLI defaults to `buzz`. The script
+# needs psql and python3.
 set -euo pipefail
 
 usage() {
@@ -63,22 +64,29 @@ buzz=${BUZZ_CLI:-buzz}
 plan_sql="$(cd "$(dirname "$0")" && pwd)/plan_duplicate_listed_channel_renames.sql"
 
 # The ids released desktop and mobile apps create their starter channels at:
-# UUIDv5 of "starter-channel:v1:<relay HTTP origin>:<slug>", where the origin
-# is the relay URL with wss:// as https:// and ws:// as http://
-# (starter_channel_uuid in desktop/src-tauri/src/commands/channels.rs). The
-# plan keeps the name on an archived starter at one of these ids.
-starter_scope=${relay_url%/}
-case $starter_scope in
-wss://*) starter_scope=https://${starter_scope#wss://} ;;
-ws://*) starter_scope=http://${starter_scope#ws://} ;;
-esac
-starter_ids=$(python3 -I -c '
+# UUIDv5 of "starter-channel:v1:<origin>:<slug>" (starter_channel_uuid in
+# desktop/src-tauri/src/commands/channels.rs). The origin is the clients'
+# relay HTTP origin: BUZZ_STARTER_ORIGIN when set (for a desktop build with
+# its own BUZZ_RELAY_HTTP), else the relay URL with wss:// as https:// and
+# ws:// as http://, trimmed of whitespace and trailing "/" as desktop does.
+# The script prints the ids so they can be checked against a client.
+starter=$(python3 -I -c '
 import sys, uuid
+origin = sys.argv[1].strip().rstrip("/")
+if not sys.argv[2]:
+    for ws, http in (("wss://", "https://"), ("ws://", "http://")):
+        if origin.startswith(ws):
+            origin = http + origin[len(ws):]
+            break
 ns = uuid.UUID("3ce33bea-8f09-5f1b-9c85-8a7d2659e6b0")
-ids = (uuid.uuid5(ns, "starter-channel:v1:%s:%s" % (sys.argv[1], slug))
-       for slug in ("general", "welcome-everyone"))
-print("{" + ",".join(map(str, ids)) + "}")
-' "$starter_scope")
+ids = [str(uuid.uuid5(ns, "starter-channel:v1:%s:%s" % (origin.strip(), slug)))
+       for slug in ("general", "welcome-everyone")]
+print(origin)
+print("{" + ",".join(ids) + "}")
+' "${BUZZ_STARTER_ORIGIN:-$relay_url}" "${BUZZ_STARTER_ORIGIN:-}")
+starter_origin=${starter%%$'\n'*}
+starter_ids=${starter#*$'\n'}
+echo "starter channel ids for $starter_origin (general, welcome-everyone): $starter_ids" >&2
 
 plan=$(mktemp)
 trap 'rm -f "$plan"' EXIT

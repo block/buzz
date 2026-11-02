@@ -20,18 +20,28 @@
 -- mobile apps create those starter channels when no open, unarchived stream
 -- has the name, and the relay refuses that create while an archived channel
 -- holds the name. The rename frees the name for them. The apps create each
--- starter at a fixed id (`starter_ids`, from the rename script). When an
--- archived channel holds that id, the relay refuses the create at the id
--- whatever the name, so no rename helps: the archived starter then keeps
--- the name, and only its duplicates are renamed.
+-- starter at a fixed id (`starter_ids`, from the rename script, in the order
+-- general, welcome-everyone). When any channel row has that id, whatever
+-- its name, visibility or state, the relay refuses the create at the id, so
+-- no rename helps: the starter rule then renames nothing for that name. An
+-- archived starter at its id also keeps the name over its namesakes.
 --
 --   psql -X -v ON_ERROR_STOP=1 -v host=<community host> \
 --     -v starter_ids='{<general id>,<welcome-everyone id>}' \
 --     -f scripts/maintenance/plan_duplicate_listed_channel_renames.sql
 
-WITH listed AS (
+WITH starters AS (
+    -- The starter names whose fixed id some channel row already has.
+    SELECT s.slug, s.id
+    FROM unnest(ARRAY['general', 'welcome-everyone'], :'starter_ids'::uuid[]) AS s(slug, id)
+    JOIN communities co ON co.host = :'host'
+    WHERE EXISTS (
+        SELECT 1 FROM channels ch WHERE ch.community_id = co.id AND ch.id = s.id
+    )
+),
+listed AS (
     SELECT ch.id, ch.name, ch.archived_at, ch.created_at,
-           ch.id = ANY(:'starter_ids'::uuid[]) AS at_starter_id
+           ch.id IN (SELECT id FROM starters) AS at_starter_id
     FROM channels ch
     JOIN communities co ON co.id = ch.community_id
     WHERE co.host = :'host'
@@ -51,13 +61,13 @@ duplicates AS (
                             archived_at IS NOT NULL AND NOT at_starter_id,
                             created_at, id
                ) AS place,
-               bool_and(archived_at IS NOT NULL) OVER (PARTITION BY lower(name)) AS all_archived,
-               bool_or(at_starter_id) OVER (PARTITION BY lower(name)) AS starter_held
+               bool_and(archived_at IS NOT NULL) OVER (PARTITION BY lower(name)) AS all_archived
         FROM listed
     ) ranked
     WHERE place > 1
-       OR (all_archived AND NOT starter_held
-           AND lower(name) IN ('general', 'welcome-everyone'))
+       OR (all_archived
+           AND lower(name) IN ('general', 'welcome-everyone')
+           AND lower(name) NOT IN (SELECT slug FROM starters))
 )
 SELECT d.id AS channel_id, d.name,
        CASE WHEN EXISTS (
