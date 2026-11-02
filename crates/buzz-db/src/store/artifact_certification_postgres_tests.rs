@@ -240,3 +240,85 @@ async fn certification_closes_a_connection_after_a_blocked_reset() {
     assert_eq!(state(&db, community).await.1, 1);
     blocker.rollback().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn lost_commit_acknowledgement_recovers_the_committed_operation() {
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    let (db, community) = fixture().await;
+    let initial = state(&db, community).await;
+    let options: PgConnectOptions = crate::test_support::database_url().parse().unwrap();
+    let upstream = (options.get_host().to_owned(), options.get_port());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let proxy = tokio::spawn(async move {
+        let (client, _) = listener.accept().await.unwrap();
+        let server = TcpStream::connect(upstream).await.unwrap();
+        let (mut client_read, mut client_write) = client.into_split();
+        let (mut server_read, mut server_write) = server.into_split();
+        let forward =
+            tokio::spawn(async move { tokio::io::copy(&mut client_read, &mut server_write).await });
+        loop {
+            let mut header = [0u8; 5];
+            server_read.read_exact(&mut header).await.unwrap();
+            let length = u32::from_be_bytes(header[1..].try_into().unwrap()) as usize;
+            assert!((4..=1_048_576).contains(&length));
+            let mut body = vec![0; length - 4];
+            server_read.read_exact(&mut body).await.unwrap();
+            if header[0] == b'C' && body == b"COMMIT\0" {
+                forward.abort();
+                let _ = forward.await;
+                return;
+            }
+            client_write.write_all(&header).await.unwrap();
+            client_write.write_all(&body).await.unwrap();
+        }
+    });
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            options
+                .host("127.0.0.1")
+                .port(port)
+                .ssl_mode(PgSslMode::Disable),
+        )
+        .await
+        .unwrap();
+    let writer = Db::from_pool(pool);
+    let mut tx = begin(&writer, community).await;
+    tx.record_artifact_change().await.unwrap();
+    age(&mut tx, 121).await;
+    let operation: Uuid =
+        sqlx::query_scalar("SELECT operation_id FROM artifact_sync_pending WHERE community_id=$1")
+            .bind(community.as_uuid())
+            .fetch_one(tx.conn())
+            .await
+            .unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(3), tx.commit())
+            .await
+            .unwrap()
+            .is_err()
+    );
+    proxy.await.unwrap();
+    assert_eq!(state(&db, community).await, (initial.0, 1));
+    assert_eq!(
+        certify(db.pool(), community, Some(operation))
+            .await
+            .unwrap(),
+        1
+    );
+    let completed = state(&db, community).await;
+    assert!(completed.0 > initial.0);
+    assert_eq!(completed.1, 0);
+    assert_eq!(
+        certify(db.pool(), community, Some(operation))
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(state(&db, community).await, completed);
+}
