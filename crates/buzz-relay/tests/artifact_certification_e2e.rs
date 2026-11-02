@@ -110,8 +110,8 @@ mod external_infra_process {
                     .env("BUZZ_PUSH_ENABLED", "false")
                     .env("BUZZ_AUDIT_ENABLED", "false")
                     .env("BUZZ_GIT_CONFORMANCE_PROBE", "false")
-                    .stdout(log.reopen().unwrap())
-                    .stderr(log.reopen().unwrap())
+                    .stdout(output.try_clone().unwrap())
+                    .stderr(output)
                     .spawn()
                     .unwrap(),
             )
