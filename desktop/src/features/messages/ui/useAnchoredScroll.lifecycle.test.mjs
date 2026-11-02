@@ -94,7 +94,37 @@ function installDOMShim() {
       );
     }
 
-    closest() {
+    setAttribute(name, value) {
+      this.attrs ??= new Map();
+      this.attrs.set(name, String(value));
+    }
+
+    getAttribute(name) {
+      return this.attrs?.get(name) ?? null;
+    }
+
+    // Supports `tag`, `[attr]` and `[attr='value']` compounds in a comma list,
+    // and throws on anything else rather than silently not matching.
+    matches(selectors) {
+      const attribute = /\[([\w-]+)(?:='([^']*)')?\]/g;
+      return selectors.split(",").some((selector) => {
+        const [, tag, attributes] = /^\s*([\w-]*)(.*?)\s*$/.exec(selector);
+        if (attributes.replace(attribute, "") !== "") {
+          throw new Error(`unsupported selector: ${selector}`);
+        }
+        if (tag && tag !== this.tagName) return false;
+        return [...attributes.matchAll(attribute)].every(([, name, value]) =>
+          value === undefined
+            ? this.getAttribute(name) !== null
+            : this.getAttribute(name) === value,
+        );
+      });
+    }
+
+    closest(selectors) {
+      for (let node = this; node instanceof NodeShim; node = node.parentNode) {
+        if (node.matches(selectors)) return node;
+      }
       return null;
     }
   }
@@ -740,7 +770,11 @@ async function renderHeldTarget() {
   const targetScrolls = [];
   const fake = {
     content: { current: null },
-    messages: [{ id: "selected" }, { id: "latest" }],
+    // MessageTimeline rows carry their timestamp (Unix seconds).
+    messages: [
+      { createdAt: 100, id: "selected" },
+      { createdAt: 500, id: "latest" },
+    ],
     scrollToBottom: () => settles.push("jump"),
     scrollToMessage: (messageId) => {
       targetScrolls.push(messageId);
@@ -813,7 +847,7 @@ test("an accepted virtual target holds through the thread panel opening and floo
 
   // The floor report still drives the affordances.
   assert.equal(state().isAtBottom, true);
-  fake.messages = [...fake.messages, { id: "live" }];
+  fake.messages = [...fake.messages, { createdAt: 600, id: "live" }];
   await render({});
   assert.deepEqual(settles, [], "a live append cannot settle a held target");
   // The append lands below the held row without a scroll event, so the hook
@@ -831,6 +865,29 @@ test("an accepted virtual target holds through the thread panel opening and floo
   await act(async () => root.unmount());
 });
 
+// Mounts `tagName` inside a row in the scroller, as a focus or event target.
+function mountInRow(scroller, tagName, attributes = {}) {
+  const row = document.createElement("div");
+  const element = document.createElement(tagName);
+  for (const [name, value] of Object.entries(attributes)) {
+    element.setAttribute(name, value);
+  }
+  row.appendChild(element);
+  scroller.appendChild(row);
+  return element;
+}
+
+function pressKey(key, target) {
+  globalThis.dispatchEvent({
+    altKey: false,
+    ctrlKey: false,
+    key,
+    metaKey: false,
+    target,
+    type: "keydown",
+  });
+}
+
 const RELEASES = [
   ["wheel", ({ scroller }) => scroller.dispatchEvent({ type: "wheel" })],
   [
@@ -842,24 +899,27 @@ const RELEASES = [
     ({ scroller }) =>
       scroller.dispatchEvent({ target: scroller, type: "pointerdown" }),
   ],
+  ["PageUp on the scroller", ({ scroller }) => pressKey("PageUp", scroller)],
+  ["End on the scroller", ({ scroller }) => pressKey("End", scroller)],
   [
-    "scroll key",
-    ({ scroller }) =>
-      globalThis.dispatchEvent({
-        altKey: false,
-        ctrlKey: false,
-        key: "PageUp",
-        metaKey: false,
-        target: scroller,
-        type: "keydown",
-      }),
+    "Space on row text",
+    ({ scroller }) => pressKey(" ", mountInRow(scroller, "p")),
+  ],
+  // The browser scrolls the scroller for these, not the focused control.
+  [
+    "PageDown on a focused row action",
+    ({ scroller }) => pressKey("PageDown", mountInRow(scroller, "button")),
+  ],
+  [
+    "Space on a focused link",
+    ({ scroller }) => pressKey(" ", mountInRow(scroller, "a", { href: "#" })),
   ],
   ["Jump to latest", ({ state }) => state().scrollToBottom("auto")],
   [
     "own send",
     async ({ fake, render, state }) => {
       state().scrollToBottomOnNextUpdate();
-      fake.messages = [...fake.messages, { id: "sent" }];
+      fake.messages = [...fake.messages, { createdAt: 600, id: "sent" }];
       await render({});
     },
   ],
@@ -903,17 +963,80 @@ for (const [name, release] of RELEASES) {
   });
 }
 
-test("a descendant pointerdown keeps a virtual target held", async () => {
-  const held = await renderHeldTarget();
-  const row = document.createElement("div");
-  held.scroller.appendChild(row);
-  await act(async () =>
-    held.scroller.dispatchEvent({ target: row, type: "pointerdown" }),
-  );
-  await held.resizeViewport();
+// Row interaction, not reader scroll. Space activates these controls.
+const KEEPS = [
+  [
+    "a descendant pointerdown",
+    ({ scroller }) =>
+      scroller.dispatchEvent({
+        target: mountInRow(scroller, "div"),
+        type: "pointerdown",
+      }),
+  ],
+  [
+    "Space on a focused row action",
+    ({ scroller }) => pressKey(" ", mountInRow(scroller, "button")),
+  ],
+  [
+    "Space on a focused menu item",
+    ({ scroller }) =>
+      pressKey(" ", mountInRow(scroller, "div", { role: "menuitem" })),
+  ],
+];
 
+for (const [name, interact] of KEEPS) {
+  test(`${name} keeps a virtual target held`, async () => {
+    const held = await renderHeldTarget();
+    await act(async () => interact(held));
+    await held.resizeViewport();
+    assert.deepEqual(held.settles, []);
+    assert.equal(held.targetScrolls.length, 4, "the target is re-centred");
+
+    held.fake.messages = [
+      ...held.fake.messages,
+      { createdAt: 600, id: "live" },
+    ];
+    await held.render({});
+    assert.deepEqual(held.settles, [], "a live append cannot settle it");
+    assert.equal(held.state().newMessageCount, 1);
+    await act(async () => held.root.unmount());
+  });
+}
+
+test("a same-second live row under a held target raises the pill", async () => {
+  const held = await renderHeldTarget();
+  // The floor report left isAtBottom true. A row stamped in the newest row's
+  // second with a larger id sorts ahead of it, so the last id is unchanged.
+  held.fake.messages = [
+    { createdAt: 100, id: "selected" },
+    { createdAt: 500, id: "same-second" },
+    { createdAt: 500, id: "latest" },
+  ];
+  await held.render({});
+  assert.equal(held.state().isAtBottom, false, "the pill shows");
+  assert.equal(held.state().newMessageCount, 1);
+
+  // The previous newest row is deleted in the commit a live row lands in.
+  held.fake.messages = [
+    { createdAt: 100, id: "selected" },
+    { createdAt: 500, id: "same-second" },
+    { createdAt: 600, id: "live" },
+  ];
+  await held.render({});
+  assert.equal(held.state().newMessageCount, 2);
+
+  // A send that doesn't arm the bottom follow (a thread reply also sent to
+  // the channel) counts once. Its relay ack changes the id, not the row key.
+  const optimistic = { createdAt: 601, id: "local", renderKey: "local" };
+  held.fake.messages = [...held.fake.messages, optimistic];
+  await held.render({});
+  held.fake.messages = [
+    ...held.fake.messages.slice(0, -1),
+    { ...optimistic, id: "acked" },
+  ];
+  await held.render({});
+  assert.equal(held.state().newMessageCount, 3);
   assert.deepEqual(held.settles, []);
-  assert.equal(held.targetScrolls.length, 4, "the target is still re-centred");
   await act(async () => held.root.unmount());
 });
 
@@ -922,10 +1045,10 @@ test("history filling the gap under a held target is not counted as new", async 
   // A cold target sits older than the head window. The page that fills the
   // gap between them keeps both ends of the list, so nothing arrived below.
   held.fake.messages = [
-    { id: "selected" },
-    { id: "gap-2" },
-    { id: "gap-3" },
-    { id: "latest" },
+    { createdAt: 100, id: "selected" },
+    { createdAt: 200, id: "gap-2" },
+    { createdAt: 300, id: "gap-3" },
+    { createdAt: 500, id: "latest" },
   ];
   await held.render({});
   assert.equal(held.state().isAtBottom, true, "the floor report stands");
@@ -939,11 +1062,11 @@ test("history filling the gap under a held target is not counted as new", async 
 
   // More history and a live row in one commit: only the live row is new.
   held.fake.messages = [
-    { id: "selected" },
-    { id: "gap-1" },
-    { id: "gap-2" },
-    { id: "gap-3" },
-    { id: "live" },
+    { createdAt: 100, id: "selected" },
+    { createdAt: 150, id: "gap-1" },
+    { createdAt: 200, id: "gap-2" },
+    { createdAt: 300, id: "gap-3" },
+    { createdAt: 600, id: "live" },
   ];
   await held.render({});
   assert.equal(held.state().isAtBottom, false);
@@ -956,7 +1079,7 @@ test("reader input at the floor resumes following live messages", async () => {
   const held = await renderHeldTarget();
   // A wheel at the floor moves nothing, so no new floor report follows it.
   await act(async () => held.scroller.dispatchEvent({ type: "wheel" }));
-  held.fake.messages = [...held.fake.messages, { id: "live" }];
+  held.fake.messages = [...held.fake.messages, { createdAt: 600, id: "live" }];
   await held.render({});
 
   assert.deepEqual(held.settles, ["settle"]);

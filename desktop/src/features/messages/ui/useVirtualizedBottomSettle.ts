@@ -11,19 +11,40 @@ const SCROLL_INTENT_KEYS = new Set([
   " ",
 ]);
 
-function isEditableKeyboardTarget(target: EventTarget | null) {
+// Space activates these controls instead of scrolling. A focused link is not
+// one: links activate on Enter, and Space scrolls past them.
+const SPACE_ACTIVATED_CONTROLS = [
+  "button",
+  "summary",
+  "[role='button']",
+  "[role='checkbox']",
+  "[role='menuitem']",
+  "[role='menuitemcheckbox']",
+  "[role='menuitemradio']",
+  "[role='option']",
+  "[role='radio']",
+  "[role='switch']",
+  "[role='tab']",
+].join(", ");
+
+/** True when the focused control consumes `key` rather than scrolling. */
+function isControlKeyboardTarget(target: EventTarget | null, key: string) {
   if (!(target instanceof HTMLElement)) return false;
   if (target.isContentEditable) return true;
-  return (
+  if (
     target.closest("input, textarea, select, [contenteditable='true']") !== null
-  );
+  ) {
+    return true;
+  }
+  return key === " " && target.closest(SPACE_ACTIVATED_CONTROLS) !== null;
 }
 
 /**
  * Calls `onReaderScroll` when the reader takes scroll ownership of
  * `scroller`: a wheel, a touch drag, a pointerdown on the scroller itself
- * (scrollbar or background), or a scroll key aimed at it. Returns the
- * unsubscribe function.
+ * (scrollbar or background), or a scroll key aimed at it or at row content.
+ * Space on a row control (Reply, a reaction) activates it and doesn't count.
+ * Returns the unsubscribe function.
  */
 export function listenForReaderScroll(
   scroller: HTMLElement,
@@ -48,8 +69,8 @@ export function listenForReaderScroll(
       !event.metaKey &&
       event.target instanceof Node &&
       scroller.contains(event.target) &&
-      !isEditableKeyboardTarget(event.target) &&
-      SCROLL_INTENT_KEYS.has(event.key)
+      SCROLL_INTENT_KEYS.has(event.key) &&
+      !isControlKeyboardTarget(event.target, event.key)
     ) {
       onReaderScroll();
     }

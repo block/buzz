@@ -24,6 +24,14 @@ type AnchorState =
   | { kind: "message"; messageId: string; topOffset: number }
   | { kind: "pinned-center"; messageId: string; contentTop: number };
 
+type AnchoredMessage = {
+  id: string;
+  /** Unix seconds. Lets a held route target count live arrivals. */
+  createdAt?: number;
+  /** Identity that survives an optimistic send's relay ack. */
+  renderKey?: string;
+};
+
 type UseAnchoredScrollOptions = {
   /** Scroll container. Owned by the parent so external refs still compose. */
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
@@ -36,7 +44,7 @@ type UseAnchoredScrollOptions = {
   isLoading: boolean;
   /** Source of truth for the rendered list. Used to detect new-at-bottom
    *  arrivals and to seed/refresh the anchor pre-render. */
-  messages: Array<{ id: string }>;
+  messages: AnchoredMessage[];
   splitPanelOpen?: boolean;
 
   /** When set, scroll to this message on mount and on change. */
@@ -154,6 +162,31 @@ function computeAnchor(
   return { kind: "at-bottom" };
 }
 
+/**
+ * Counts the rows in `current` that arrived live since `previous`: new rows
+ * stamped in the previous newest row's second or later. A same-second arrival
+ * can sort ahead of that row and leave the last id unchanged, so position
+ * can't tell. History only adds older rows, including a page that fills the
+ * gap between a cold target and the head window. Rows without `createdAt`
+ * never count, and a live row stamped earlier (sender clock skew) doesn't
+ * either.
+ */
+function countLiveArrivals(
+  previous: readonly AnchoredMessage[],
+  current: readonly AnchoredMessage[],
+) {
+  const newest = previous[previous.length - 1]?.createdAt;
+  if (newest === undefined) return 0;
+  const rowKey = (message: AnchoredMessage) => message.renderKey ?? message.id;
+  const previousKeys = new Set(previous.map(rowKey));
+  return current.filter(
+    (message) =>
+      message.createdAt !== undefined &&
+      message.createdAt >= newest &&
+      !previousKeys.has(rowKey(message)),
+  ).length;
+}
+
 export function useAnchoredScroll({
   scrollContainerRef,
   contentRef,
@@ -206,7 +239,7 @@ export function useAnchoredScroll({
   const prevLastMessageIdRef = React.useRef<string | undefined>(undefined);
   const prevFirstMessageIdRef = React.useRef<string | undefined>(undefined);
   const prevMessageCountRef = React.useRef(0);
-  const prevMessagesRef = React.useRef<Array<{ id: string }>>([]);
+  const prevMessagesRef = React.useRef<AnchoredMessage[]>([]);
   const handledTargetIdRef = React.useRef<string | null>(null);
   const highlightTimeoutRef = React.useRef<number | null>(null);
   // Tracks a pending rAF queued by pinToBottomOnMount so it can be cancelled
@@ -782,17 +815,13 @@ export function useAnchoredScroll({
       if (!isPrepend) {
         setNewMessageCount((current) => current + messagesArrived);
       }
-    } else if (newLatestArrived && targetHoldRef.current) {
+    } else if (targetHoldRef.current && messages !== prevMessages) {
       // A held target keeps its message anchor through floor reports, so
       // isAtBottom can still read true when a live row lands below it. Virtua
       // reports bottom state only from scroll events, and an append emits
-      // none, so raise the new-message pill here. Only rows after the previous
-      // newest one are new. A history page that fills the gap between a cold
-      // target and the head window keeps both ends: the list grows, but
-      // nothing arrived below.
-      const prevLastIndex = messages.findIndex(({ id }) => id === prevLastId);
-      const rowsBelow =
-        prevLastIndex < 0 ? 0 : messages.length - 1 - prevLastIndex;
+      // none, so raise the new-message pill here. A same-second arrival can
+      // land without changing the last id, so count arrivals by timestamp.
+      const rowsBelow = countLiveArrivals(prevMessages, messages);
       if (rowsBelow > 0) {
         virtualizerAtBottomRef.current = false;
         setIsAtBottom(false);
