@@ -604,6 +604,10 @@ async fn dropped_incremental_read_keeps_its_filter_summary() {
         .execute(&mut *lock)
         .await
         .unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *lock)
+        .await
+        .unwrap();
     let (capture, out) = crate::access::tests::capture_access_only(tracing::Level::WARN);
     let mut request = Box::pin(f.request("/query", body));
     // Poll the request until its candidate read waits on the lock.
@@ -612,13 +616,14 @@ async fn dropped_incremental_read_keeps_its_filter_summary() {
             _ = &mut request => panic!("the read must wait on the locked table"),
             () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
         }
-        let waiting: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE '%artifact_heads%'",
+        let blocked: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))",
         )
+        .bind(blocker_pid)
         .fetch_one(&f.pool)
         .await
         .unwrap();
-        if waiting > 0 {
+        if blocked {
             break;
         }
     }
