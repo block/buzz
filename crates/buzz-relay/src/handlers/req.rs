@@ -625,8 +625,9 @@ pub async fn handle_req(
             }
         }
 
-        super::close::send_if_owner(&sub_id, owner, RelayMessage::eose(&sub_id), &conn).await;
-        access.served();
+        if super::close::send_if_owner(&sub_id, owner, RelayMessage::eose(&sub_id), &conn).await {
+            access.served();
+        }
 
         debug!(
             conn_id = %conn_id,
@@ -827,8 +828,9 @@ async fn handle_search_req(
     if build_search_channel_scope_filter(implicit_channels, include_global).is_none()
         && named_only.is_empty()
     {
-        super::close::send_if_owner(sub_id, owner, RelayMessage::eose(sub_id), conn).await;
-        access.served();
+        if super::close::send_if_owner(sub_id, owner, RelayMessage::eose(sub_id), conn).await {
+            access.served();
+        }
         return;
     }
 
@@ -1072,10 +1074,11 @@ async fn handle_search_req(
         }
     }
 
-    super::close::send_if_owner(sub_id, owner, RelayMessage::eose(sub_id), conn).await;
+    let queued = super::close::send_if_owner(sub_id, owner, RelayMessage::eose(sub_id), conn).await;
     match failure {
         Some(reason) => access.error(reason),
-        None => access.served(),
+        None if queued => access.served(),
+        None => {}
     }
 }
 
@@ -1616,8 +1619,9 @@ async fn handle_huddle_liveness_req(
         access.queued_one();
     }
 
-    super::close::send_if_owner(sub_id, owner, RelayMessage::eose(sub_id), conn).await;
-    access.served();
+    if super::close::send_if_owner(sub_id, owner, RelayMessage::eose(sub_id), conn).await {
+        access.served();
+    }
 }
 
 /// Claim `sub_id` for a live REQ under the lifecycle lock: record a fresh
@@ -2319,6 +2323,72 @@ mod tests {
             "later filters must not try the pool: took {elapsed:?} for {} filters",
             filters.len()
         );
+    }
+
+    /// A REQ whose `EOSE` is not queued did not complete, so it must log
+    /// `aborted`, not `served`: once when a same-ID replacement takes the ID
+    /// while the empty search waits to send its `EOSE`, and once when the
+    /// outbound queue rejects the frame. Mutation: ignore `send_if_owner`'s
+    /// result before `access.served()` → `served` → RED.
+    #[tokio::test]
+    async fn unqueued_eose_logs_aborted_not_served() {
+        use super::super::close::test_seam::{Pause, SEND_PAUSE};
+        let state = crate::state::tests::test_state().await;
+        let filters = vec![Filter::new().search("needle")];
+        for case in ["replaced", "queue_rejected"] {
+            let (conn, send_rx) = lifecycle_conn();
+            let owner = claim_search_subscription("s", &conn, &state)
+                .await
+                .expect("claim");
+            let (_guard, out) = crate::access::tests::capture_scoped();
+            let mut access = crate::access::ReadLog::req(&conn, "s", &filters);
+            let mut send_rx = Some(send_rx);
+            if case == "queue_rejected" {
+                drop(send_rx.take());
+            }
+            let pause = Arc::new(Pause::default());
+            let named_only = super::super::system_channels::NamedOnlyChannels::default();
+            {
+                let search = SEND_PAUSE.scope(
+                    Arc::clone(&pause),
+                    handle_search_req(
+                        "s",
+                        owner,
+                        &filters,
+                        &[],
+                        &named_only,
+                        false,
+                        &conn.tenant,
+                        &[0; 32],
+                        &conn,
+                        &state,
+                        None,
+                        &mut access,
+                    ),
+                );
+                tokio::pin!(search);
+                tokio::select! {
+                    _ = &mut search => panic!("{case}: the search must pause before EOSE"),
+                    _ = pause.reached.notified() => {}
+                }
+                if case == "replaced" {
+                    conn.subscriptions
+                        .lock()
+                        .await
+                        .insert("s".to_string(), owner + 1_000_000);
+                }
+                pause.resume.notify_one();
+                search.await;
+            }
+            drop(access);
+            let lines = out.lines();
+            assert_eq!(lines.len(), 1, "{case}: {lines:?}");
+            assert_eq!(lines[0]["outcome"], "aborted", "{case}: {}", lines[0]);
+            assert_eq!(lines[0]["level"], "INFO", "{case}: {}", lines[0]);
+            if let Some(rx) = send_rx.as_mut() {
+                assert!(closed_frames(rx).is_empty(), "{case}: no stale EOSE");
+            }
+        }
     }
 
     /// Concurrent same-ID claims and stale teardowns: whichever claim lands
