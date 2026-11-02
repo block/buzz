@@ -791,6 +791,10 @@ void main() {
 
     await tester.pumpWidget(await buildTestable(feed: feed));
     await tester.pumpAndSettle();
+    final unreadDot = find.byKey(
+      const ValueKey('inbox-unread-dot-reply-event'),
+    );
+    expect(unreadDot, findsOneWidget);
 
     await tester.tap(find.byKey(const ValueKey('inbox-row-reply-event')));
     await tester.pumpAndSettle();
@@ -805,6 +809,11 @@ void main() {
       page.initialThreadRouteBehavior,
       InitialThreadRouteBehavior.replaceCurrentRoute,
     );
+
+    // Back in the Inbox, the opened item is read.
+    tester.state<NavigatorState>(find.byType(Navigator).first).pop();
+    await tester.pumpAndSettle();
+    expect(unreadDot, findsNothing);
   });
 
   testWidgets('thread filter matches grouped thread replies', (tester) async {

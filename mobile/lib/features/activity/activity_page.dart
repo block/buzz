@@ -266,6 +266,8 @@ class ActivityPage extends HookConsumerWidget {
           : thread.parentId;
 
       if (!context.mounted) return;
+      // Opening an item reads it, like opening an email.
+      if (!isDone(item)) markItemRead(item);
       Navigator.of(context).push(
         MaterialPageRoute<void>(
           builder: (_) => ChannelDetailPage(
