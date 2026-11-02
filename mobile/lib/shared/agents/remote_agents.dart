@@ -777,7 +777,10 @@ class RemoteAgentController extends ChangeNotifier {
     final retries = Map<String, dynamic>.from(
       jsonDecode(prefs.getString('$scope:delete-retries') ?? '{}') as Map,
     );
-    retries[pubkey] = agent;
+    // Instructions are private, and this retry journal is plain preferences;
+    // a retry needs only the row's identity.
+    retries[pubkey] = Map<String, dynamic>.from(agent)
+      ..remove('agent_instructions');
     if (!await prefs.setString('$scope:delete-retries', jsonEncode(retries))) {
       throw StateError('Could not save deletion retry. Retry Delete.');
     }
