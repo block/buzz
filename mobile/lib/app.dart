@@ -128,7 +128,7 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
   /// propagates to the invite flow instead of being reported as success. The
   /// one exception is a starter whose name or id the relay reports as taken
   /// by a channel the directory shows cannot serve as the starter, or an
-  /// archived channel at the starter's own id that the directory omits: both
+  /// archived channel at the starter's own id: both
   /// are permanent, so the starter is skipped instead of blocking the join.
   @override
   Future<String?> ensureStarterChannels() async {
@@ -174,9 +174,10 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
             // its duplicate check, and keeps that id, so the starter can never
             // be created there.
             if (archivedAtId) continue;
-            // The directory omits archived channels, yet the relay still
-            // keeps the id (desktop uses the same one), so a duplicate with
-            // no match may be an archived starter. Read that id directly.
+            // The relay keeps the id (desktop uses the same one), so a
+            // duplicate with no match in the reload may be an archived
+            // starter whose metadata the reload did not return. Read that id
+            // directly.
             if (!nameTaken && _isDuplicateChannelError(error)) {
               final atId = await _fetchChannel(channelId);
               _ensureScopeCurrent();
@@ -220,9 +221,16 @@ Channel? _findStarterChannel(List<Channel> channels, String name) => channels
     .where((channel) => _hasName(channel, name) && _isUsableStarter(channel))
     .firstOrNull;
 
-/// The open channel that holds [name] in the relay's listed-name rule.
+/// The channel that holds [name] in the relay's listed-name rule: an open,
+/// not unlisted stream or forum (`LISTED_CHANNEL_SQL` in buzz-db).
 Channel? _findListedNamesake(List<Channel> channels, String name) => channels
-    .where((channel) => _hasName(channel, name) && channel.visibility == 'open')
+    .where(
+      (channel) =>
+          _hasName(channel, name) &&
+          channel.visibility == 'open' &&
+          !channel.isUnlisted &&
+          (channel.isStream || channel.isForum),
+    )
     .firstOrNull;
 
 bool _hasName(Channel channel, String name) =>

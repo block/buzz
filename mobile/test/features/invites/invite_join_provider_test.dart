@@ -564,6 +564,32 @@ void main() {
       expect(unseen.loads(), 2);
       expect(unseen.lookups, isEmpty);
 
+      // An unlisted namesake does not hold the name, so it does not explain
+      // the refusal either: the setup stays recoverable, and a retry joins
+      // the real holder once it appears.
+      final unlistedForum = _channel(
+        id: 'unlisted-general',
+        name: 'general',
+        channelType: 'forum',
+        isUnlisted: true,
+        isMember: true,
+      );
+      final realGeneral = _channel(id: 'real-general', name: 'general');
+      final unlisted = starterSetup(
+        channelsOnLoad: (load) =>
+            load <= 2 ? [unlistedForum] : [unlistedForum, realGeneral],
+        refusalError: refusal,
+      );
+      await expectLater(
+        unlisted.recovery.ensureStarterChannels(),
+        throwsException,
+      );
+      expect(unlisted.created, ['general']);
+      expect(unlisted.joined, isEmpty);
+      final focusAfterRetry = await unlisted.recovery.ensureStarterChannels();
+      expect(unlisted.joined, ['real-general']);
+      expect(focusAfterRetry, welcomeId);
+
       // A usable open channel that appeared after the first load (lost race)
       // is joined rather than skipped.
       final raced = starterSetup(
@@ -1266,11 +1292,13 @@ Channel _channel({
   bool isMember = false,
   String channelType = 'stream',
   DateTime? archivedAt,
+  bool isUnlisted = false,
 }) => Channel(
   id: id,
   name: name,
   channelType: channelType,
   archivedAt: archivedAt,
+  isUnlisted: isUnlisted,
   visibility: visibility,
   description: '',
   createdBy: 'me',
