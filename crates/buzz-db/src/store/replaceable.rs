@@ -9,6 +9,23 @@ use crate::observability::{self, LockType, TransactionOperation};
 use crate::AdmittedTx;
 use crate::{Db, DbError, Result};
 
+/// Wrap `$retire`, an `UPDATE`/`DELETE` on `events` that retires a
+/// coordinate's previous head, so the same statement drops those rows' mention
+/// index entries. Reads never return a retired row, so its mention rows are
+/// dead weight that a `#p` read must walk and discard: one per member for
+/// every kind:39002 roster republish. `$1` must bind the community.
+macro_rules! superseded_with_mentions_sql {
+    ($retire:literal) => {
+        concat!(
+            "WITH superseded AS (",
+            $retire,
+            " RETURNING id) \
+             DELETE FROM event_mentions mention USING superseded \
+             WHERE mention.community_id = $1 AND mention.event_id = superseded.id"
+        )
+    };
+}
+
 /// Result category for a parameterized-replaceable event write.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ParameterizedReplaceStatus {
@@ -278,11 +295,15 @@ async fn replace_parameterized_event_in_transaction_impl(
                     .await?;
             }
             let statement = if hard_delete_superseded {
-                "DELETE FROM events \
-                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
+                superseded_with_mentions_sql!(
+                    "DELETE FROM events \
+                     WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
+                )
             } else {
-                "UPDATE events SET deleted_at = NOW() \
-                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
+                superseded_with_mentions_sql!(
+                    "UPDATE events SET deleted_at = NOW() \
+                     WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
+                )
             };
             sqlx::query(statement)
                 .bind(community_id.as_uuid())
@@ -298,16 +319,6 @@ async fn replace_parameterized_event_in_transaction_impl(
                     .bind(previous_value)
                     .execute(tx.conn())
                     .await?;
-            }
-
-            if hard_delete_superseded {
-                if let Some((_, existing_id)) = &existing {
-                    sqlx::query("DELETE FROM event_mentions WHERE community_id = $1 AND event_id = $2")
-                        .bind(community_id.as_uuid())
-                        .bind(existing_id)
-                        .execute(tx.conn())
-                        .await?;
-                }
             }
         }
 
@@ -494,12 +505,12 @@ impl Db {
                 .await?;
 
                 // Soft-delete the old event (if any). IS NOT DISTINCT FROM for NULL safety.
-                sqlx::query(
+                sqlx::query(superseded_with_mentions_sql!(
                     "UPDATE events SET deleted_at = NOW() \
                      WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
                      AND channel_id IS NOT DISTINCT FROM $4 \
-                     AND deleted_at IS NULL",
-                )
+                     AND deleted_at IS NULL"
+                ))
                 .bind(community_id.as_uuid())
                 .bind(kind_i32)
                 .bind(pubkey_bytes.as_slice())
@@ -782,6 +793,108 @@ mod postgres_tests {
                 .await
                 .expect("count rolled-back event");
         assert_eq!(new_rows, 0, "new roster must roll back with its index");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn superseded_heads_drop_their_mention_rows() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let (pool, _scratch) = ScratchDb::migrated(&admin_url().await, "superseded_mentions").await;
+        let db = Db::from_pool(pool.clone());
+        let community_uuid = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        let keys = Keys::generate();
+        seed_community_channel(&pool, community_uuid, channel, &keys).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let owner = keys.public_key().to_hex();
+        let mentioned: Vec<String> = (0..3)
+            .map(|_| Keys::generate().public_key().to_hex())
+            .collect();
+        let mention_rows = |event: &nostr::Event| {
+            let id = event.id.as_bytes().to_vec();
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM event_mentions WHERE community_id = $1 AND event_id = $2",
+                )
+                .bind(community_uuid)
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("count mention rows")
+            }
+        };
+        let base = Timestamp::now().as_secs();
+
+        // Roster republish (kind:39002 through the addressable path; its p tags
+        // must match the channel's members) and a generic NIP-33 replacement
+        // both retire the old head with a soft delete.
+        let roster_p = vec![vec![owner.as_str(), "", "owner"]];
+        let people_p: Vec<Vec<&str>> = mentioned.iter().map(|pk| vec![pk.as_str()]).collect();
+        for (case, kind, d_tag, p_tags) in [
+            ("roster", 39002_u16, channel.to_string(), roster_p),
+            ("parameterized", 30000_u16, "people".to_owned(), people_p),
+        ] {
+            let indexed = p_tags.len() as i64;
+            let version = |offset: u64, content: &str| {
+                let mut tags = vec![Tag::parse(["d", d_tag.as_str()]).expect("d tag")];
+                tags.extend(p_tags.iter().map(|p| {
+                    let mut parts = vec!["p"];
+                    parts.extend(p.iter().copied());
+                    Tag::parse(parts).expect("p tag")
+                }));
+                EventBuilder::new(Kind::Custom(kind), content)
+                    .tags(tags)
+                    .custom_created_at(Timestamp::from(base + offset))
+                    .sign_with_keys(&keys)
+                    .expect("sign version")
+            };
+            let replace = |event: nostr::Event| {
+                let db = &db;
+                let d_tag = d_tag.clone();
+                async move {
+                    let inserted = if kind == 39002 {
+                        db.replace_addressable_event(community, &event, Some(channel))
+                            .await
+                            .expect("replace roster")
+                            .1
+                    } else {
+                        db.replace_parameterized_event(community, &event, &d_tag, None)
+                            .await
+                            .expect("replace parameterized")
+                            .1
+                    };
+                    assert!(inserted, "{case}: newer version must be inserted");
+                }
+            };
+
+            let old = version(0, "old");
+            replace(old.clone()).await;
+            assert_eq!(mention_rows(&old).await, indexed, "{case}: head is indexed");
+
+            let new = version(1, "new");
+            replace(new.clone()).await;
+            assert_eq!(
+                mention_rows(&old).await,
+                0,
+                "{case}: retired head keeps no mention rows"
+            );
+            assert_eq!(
+                mention_rows(&new).await,
+                indexed,
+                "{case}: new head is indexed"
+            );
+            let retired: bool = sqlx::query_scalar(
+                "SELECT deleted_at IS NOT NULL FROM events WHERE community_id = $1 AND id = $2",
+            )
+            .bind(community_uuid)
+            .bind(old.id.as_bytes().as_slice())
+            .fetch_one(&pool)
+            .await
+            .expect("read retired head");
+            assert!(retired, "{case}: the old head is soft-deleted, not removed");
+        }
     }
 
     #[tokio::test]
