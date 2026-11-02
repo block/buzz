@@ -264,6 +264,35 @@ void main() {
       minutes(10);
       expect(membershipReads(), slowRead + 1);
 
+      // A reconnect read fails, and its retry comes due while a slow read
+      // after another reconnect is running. That read covers every change,
+      // so the backoff starts over: the next failure is retried after the
+      // first backoff step again, not a doubled one.
+      bool isMembership(Map<String, dynamic> f) =>
+          f.containsKey('#p') && (f['kinds'] as List).contains(39002);
+      relay
+        ..failQuery(isMembership)
+        ..drop();
+      seconds(1);
+      final slowReconnect = relay.holdQuery();
+      relay.drop();
+      seconds(7);
+      slowReconnect.complete();
+      minutes(10);
+      final readsAfterCovered = membershipReads();
+      relay
+        ..failQuery(isMembership)
+        ..drop();
+      while (membershipReads() == readsAfterCovered) {
+        async.elapse(const Duration(milliseconds: 100));
+      }
+      // The first step is 3.75-6.25s with jitter; a doubled one is 7.5s or
+      // more.
+      async.elapse(const Duration(milliseconds: 6800));
+      expect(membershipReads(), readsAfterCovered + 2);
+      minutes(10);
+      expect(membershipReads(), readsAfterCovered + 2);
+
       // On a cold load with no saved list, as after a fresh sign-in, the
       // read doesn't get the hidden DMs. It keeps the DM shown and is
       // retried.
