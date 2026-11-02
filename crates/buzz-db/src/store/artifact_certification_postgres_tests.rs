@@ -46,8 +46,8 @@ async fn rollback_and_lost_commit_reply_leave_correct_recovery_work() {
 
     let mut tx = begin(&db, community).await;
     tx.record_artifact_change().await.unwrap();
-    tx.record_artifact_change().await.unwrap();
     age(&mut tx, 121).await;
+    tx.record_artifact_change().await.unwrap();
     assert_eq!(db.recover_artifact_certifications().await.unwrap(), 0);
     // The writer can lose its commit reply and never return to retry.
     tx.commit().await.unwrap();
@@ -165,4 +165,78 @@ async fn recovery_handles_clock_reversal_and_leaves_deleting_communities() {
     assert!(db.begin_event_write_transaction(community).await.is_err());
     assert_eq!(db.recover_artifact_certifications().await.unwrap(), 0);
     assert_eq!(state(&db, community).await.1, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn blocked_community_does_not_exclude_other_pending_work() {
+    let (db, a) = fixture().await;
+    let (_, b) = fixture().await;
+    let mut communities = [a, b];
+    communities.sort_by_key(|c| *c.as_uuid());
+    for community in communities {
+        let mut tx = begin(&db, community).await;
+        sqlx::query("INSERT INTO artifact_sync_pending(community_id,operation_id,earliest_at) SELECT $1,gen_random_uuid(),clock_timestamp()-interval '121 seconds' FROM generate_series(1,101)")
+            .bind(community.as_uuid()).execute(tx.conn()).await.unwrap();
+        tx.commit().await.unwrap();
+    }
+    let mut blocker = db.pool().begin().await.unwrap();
+    sqlx::query("SELECT id FROM communities WHERE id=$1 FOR NO KEY UPDATE")
+        .bind(communities[0].as_uuid())
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let (completed, after) = db
+        .recover_artifact_certifications_after(None)
+        .await
+        .unwrap();
+    assert_eq!(completed, 0);
+    assert_eq!(after, Some(*communities[0].as_uuid()));
+    let (completed, after) = db
+        .recover_artifact_certifications_after(after)
+        .await
+        .unwrap();
+    assert_eq!(completed, 100);
+    assert_eq!(after, Some(*communities[1].as_uuid()));
+    assert_eq!(state(&db, communities[0]).await.1, 101);
+    assert_eq!(state(&db, communities[1]).await.1, 1);
+    blocker.rollback().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn certification_closes_a_connection_after_a_blocked_reset() {
+    let (db, community) = fixture().await;
+    let mut tx = begin(&db, community).await;
+    tx.record_artifact_change().await.unwrap();
+    age(&mut tx, 121).await;
+    tx.commit().await.unwrap();
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&crate::test_support::database_url())
+        .await
+        .unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let mut blocker = db.pool().begin().await.unwrap();
+    sqlx::query("SELECT id FROM communities WHERE id=$1 FOR NO KEY UPDATE")
+        .bind(community.as_uuid())
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let start = tokio::time::Instant::now();
+    assert!(certify(&pool, community, None).await.is_err());
+    assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    let next: i32 = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&pool),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_ne!(pid, next);
+    assert_eq!(state(&db, community).await.1, 1);
+    blocker.rollback().await.unwrap();
 }

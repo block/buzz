@@ -84,7 +84,12 @@ Rollback removes both the changes and the record. An uncertain commit leaves
 both committed or neither committed. Recovery does not require a caller retry.
 
 Every relay starts a recovery worker, even when the incremental gate is off.
-The worker reads bounded batches. It locks pending rows with `SKIP LOCKED`.
+The worker reads bounded batches. It rotates across communities, including
+after a failed attempt. It locks pending rows with `SKIP LOCKED`. Each tick
+has a five-second work budget and at most 100 batches. Each batch has at most
+100 records. A blocked community cannot exclude other communities. Each
+operation has a short deadline. Recovery closes certification connections
+instead of returning an uncertain connection to the pool.
 After it observes a committed record, it reads database time. If less than
 120 seconds separate that time from the early timestamp, the overlap covers
 visibility of the write. A clock reversal or a delay of at least 120 seconds

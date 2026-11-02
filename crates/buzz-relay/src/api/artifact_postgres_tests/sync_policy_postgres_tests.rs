@@ -5,6 +5,8 @@ use super::*;
 async fn durable_certification_resets_existing_checkpoints_after_the_overlap() {
     let _guard = SERIAL.lock().await;
     let f = fixture().await;
+    sqlx::query("UPDATE channel_members SET sync_modified_at=clock_timestamp()-interval '1 day' WHERE community_id=$1")
+        .bind(f.community.as_uuid()).execute(&f.pool).await.unwrap();
     let first = sync(&f, None).await;
     let id = Uuid::new_v4();
     let event = f.revision(id, "create", None);
