@@ -45,6 +45,8 @@ public struct BuzzPushCachedChannel: Codable, Equatable, Sendable {
   public let displayName: String?
   /// Relay-verified Buzz channel type, when recognized.
   public let channelType: String?
+  /// Whether relay metadata marks this as a private Solo stream (`buzz.solo` label).
+  public let isSolo: Bool?
   /// Exact unique-member count when bounded, or a value above the bound when oversized.
   public let memberCount: Int?
   /// Complete community-and-channel-scoped member digests, when within bounds.
@@ -66,6 +68,7 @@ public struct BuzzPushCachedChannel: Codable, Equatable, Sendable {
     relayMetadataPubkey: String,
     displayName: String?,
     channelType: String? = nil,
+    isSolo: Bool? = nil,
     memberCount: Int? = nil,
     memberDigests: [String]? = nil,
     membershipEventID: String? = nil,
@@ -81,6 +84,7 @@ public struct BuzzPushCachedChannel: Codable, Equatable, Sendable {
     self.relayMetadataPubkey = relayMetadataPubkey
     self.displayName = displayName
     self.channelType = channelType
+    self.isSolo = isSolo
     self.memberCount = memberCount
     self.memberDigests = memberDigests
     self.membershipEventID = membershipEventID
@@ -327,6 +331,7 @@ public final class BuzzPushPresentationCacheStore: @unchecked Sendable {
         relayMetadataPubkey: normalizedRelayPubkey,
         displayName: Self.normalizedDisplayName(Self.tagValue("name", in: event)),
         channelType: Self.normalizedChannelType(Self.tagValue("t", in: event)),
+        isSolo: Self.isSoloChannel(event),
         memberCount: hasCurrentAuthority ? existing?.memberCount : nil,
         memberDigests: hasCurrentAuthority ? existing?.memberDigests : nil,
         membershipEventID: hasCurrentAuthority ? existing?.membershipEventID : nil,
@@ -378,6 +383,7 @@ public final class BuzzPushPresentationCacheStore: @unchecked Sendable {
         relayMetadataPubkey: existing.relayMetadataPubkey,
         displayName: existing.displayName,
         channelType: existing.channelType,
+        isSolo: existing.isSolo,
         memberCount: membership.count,
         memberDigests: membership.digests,
         membershipEventID: event.id,
@@ -530,6 +536,16 @@ public final class BuzzPushPresentationCacheStore: @unchecked Sendable {
       bounded.removeLast()
     }
     return bounded.isEmpty ? nil : bounded
+  }
+
+  /// Mirrors the app's Solo rule (`Channel.isSolo`): a private stream whose
+  /// NIP-CL labels (every `t` after the leading type) include `buzz.solo`.
+  static func isSoloChannel(_ event: VerifiedNostrEvent) -> Bool {
+    let types = event.tags.filter { $0.count >= 2 && $0[0] == "t" }.map { $0[1] }
+    let isPrivate =
+      !event.tags.contains { $0.first == "public" }
+      && event.tags.contains { $0.first == "private" }
+    return types.first == "stream" && isPrivate && types.dropFirst().contains("buzz.solo")
   }
 
   static func normalizedChannelType(_ value: String?) -> String? {
@@ -714,6 +730,7 @@ public final class BuzzPushPresentationCacheStore: @unchecked Sendable {
       relayMetadataPubkey: channel.relayMetadataPubkey,
       displayName: channel.displayName,
       channelType: channel.channelType,
+      isSolo: channel.isSolo,
       memberCount: channel.memberCount,
       memberDigests: nil,
       membershipEventID: channel.membershipEventID,
