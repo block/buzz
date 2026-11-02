@@ -2233,15 +2233,16 @@ pub(crate) async fn persist_edit_metadata(
     if let Some(labels) = channel_labels_from_tags(event) {
         edit.columns.labels = Some(labels.map_err(|e| anyhow::anyhow!("{e}"))?);
     }
-    // A relay operator without channel authority may rename only a listed
-    // channel, archived ones included, so that duplicate names can be
-    // repaired. The store decides that under the channel row lock, so an
-    // owner who makes the channel private or unlisted meanwhile is seen.
+    // A relay operator may rename a listed channel, archived ones included,
+    // whatever the operator's channel role, so that duplicate names can be
+    // repaired. Without channel authority the rename applies only to a
+    // listed channel. The store decides both under the channel row lock, so
+    // an owner who makes the channel private or unlisted meanwhile is seen.
     // Channel authority is looked up only for an operator's rename.
-    edit.operator_rename = is_rename_only(event)
-        && actor_is_relay_operator(state, event.pubkey.to_bytes()).await?
-        && !actor_has_channel_authority(state, tenant.community(), channel_id, &actor_bytes)
-            .await?;
+    edit.operator_rename =
+        is_rename_only(event) && actor_is_relay_operator(state, event.pubkey.to_bytes()).await?;
+    edit.channel_authority = edit.operator_rename
+        && actor_has_channel_authority(state, tenant.community(), channel_id, &actor_bytes).await?;
 
     let now = chrono::Utc::now();
     let mut notices = Vec::new();

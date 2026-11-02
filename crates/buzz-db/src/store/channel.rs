@@ -1505,11 +1505,14 @@ pub struct ChannelMetadataEdit {
     pub purpose: Option<String>,
     /// `Some(true)` archives the channel; `Some(false)` restores it.
     pub archived: Option<bool>,
-    /// Set for a relay operator's name-only rename, made without channel
-    /// authority. The edit then applies only to a listed channel
-    /// ([`LISTED_CHANNEL_SQL`]), checked under the row lock, and may rename
-    /// an archived channel, which stays archived.
+    /// Set for a relay operator's name-only rename, whatever the operator's
+    /// channel role. It may rename an archived listed channel
+    /// ([`LISTED_CHANNEL_SQL`]), which stays archived. Checked under the row
+    /// lock.
     pub operator_rename: bool,
+    /// Set when the actor is the channel's owner or admin. An operator rename
+    /// without it applies only to a listed channel.
+    pub channel_authority: bool,
 }
 
 /// The result of [`Db::apply_channel_metadata_event`].
@@ -1567,14 +1570,14 @@ pub(crate) async fn apply_channel_metadata_event(
     // as a duplicate (above), never as a channel already in the requested
     // state, and an owner who makes the channel private or unlisted
     // meanwhile is seen.
-    if edit.operator_rename && !locked.listed() {
+    if edit.operator_rename && !edit.channel_authority && !locked.listed() {
         return Err(DbError::AccessDenied(
             "a relay operator may rename only a listed channel".to_string(),
         ));
     }
     match (locked.archived(), edit.archived) {
         (true, Some(false)) | (false, None | Some(true)) => {}
-        (true, None) if edit.operator_rename => {}
+        (true, None) if edit.operator_rename && locked.listed() => {}
         (true, _) => return Err(DbError::AccessDenied("channel is archived".to_string())),
         (false, Some(false)) => {
             return Err(DbError::AccessDenied("channel is not archived".to_string()));
@@ -1611,6 +1614,7 @@ pub(crate) async fn apply_channel_metadata_event(
         purpose,
         archived,
         operator_rename: _,
+        channel_authority: _,
     } = edit;
     let actor = event.pubkey.to_bytes();
     if !columns.is_empty() {

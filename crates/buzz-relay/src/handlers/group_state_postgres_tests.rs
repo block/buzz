@@ -1140,8 +1140,12 @@ async fn a_taken_open_name_is_refused_as_a_client_error() {
 /// A relay operator who is not a channel member may rename the channel, and
 /// the relay publishes the new name in kind:39000. The operator may change
 /// nothing else, and a relay moderator may not rename it.
+/// An operator who owns an archived listed channel may rename it as well, but
+/// not an archived unlisted one.
 /// Mutation: drop the operator branch in `validate_admin_event`, or drop its
-/// `is_rename_only` or operator-role condition → RED.
+/// `is_rename_only` or operator-role condition, or set `operator_rename` only
+/// without channel authority, or drop `locked.listed()` from the archived
+/// exemption → RED.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn a_relay_operator_may_only_rename_a_channel() {
@@ -1248,6 +1252,63 @@ async fn a_relay_operator_may_only_rename_a_channel() {
         tags.iter()
             .any(|tag| tag.len() >= 2 && tag[0] == "name" && tag[1] == "renamed-by-operator"),
         "{tags:?}"
+    );
+
+    // An operator who owns an archived listed channel may rename it too, and
+    // it stays archived: the operator rule holds whatever the channel role.
+    let owned = create_channel(&state, &tenant, &operator, &[]).await;
+    state
+        .db
+        .archive_channel(community_id, owned)
+        .await
+        .expect("archive");
+    let rename = EventBuilder::new(Kind::Custom(9002), "")
+        .tags([
+            Tag::parse(["h", &owned.to_string()]).unwrap(),
+            Tag::parse(["name", "renamed-by-owning-operator"]).unwrap(),
+        ])
+        .sign_with_keys(&operator)
+        .expect("sign 9002");
+    let renamed = ingest_event(&state, &tenant, rename, http_auth(&operator))
+        .await
+        .unwrap_or_else(|error| panic!("owning operator rename: {error:?}"));
+    assert!(renamed.accepted, "{}", renamed.message);
+    let owned = state
+        .db
+        .get_channel(community_id, owned)
+        .await
+        .expect("channel");
+    assert_eq!(owned.name, "renamed-by-owning-operator");
+    assert!(owned.archived_at.is_some(), "the rename keeps it archived");
+
+    // The archived exemption covers only a listed channel: the same operator
+    // may not rename an archived unlisted channel it owns.
+    let hidden = create_channel(&state, &tenant, &operator, &[&["unlisted", "true"]]).await;
+    state
+        .db
+        .archive_channel(community_id, hidden)
+        .await
+        .expect("archive");
+    let rename = EventBuilder::new(Kind::Custom(9002), "")
+        .tags([
+            Tag::parse(["h", &hidden.to_string()]).unwrap(),
+            Tag::parse(["name", "hidden-renamed"]).unwrap(),
+        ])
+        .sign_with_keys(&operator)
+        .expect("sign 9002");
+    match ingest_event(&state, &tenant, rename, http_auth(&operator)).await {
+        Err(IngestError::Rejected(message)) => assert!(message.contains("archived"), "{message}"),
+        Err(other) => panic!("expected a refusal, got {other:?}"),
+        Ok(result) => panic!("expected a refusal, got {:?}", result.message),
+    }
+    assert_ne!(
+        state
+            .db
+            .get_channel(community_id, hidden)
+            .await
+            .expect("channel")
+            .name,
+        "hidden-renamed"
     );
 }
 
