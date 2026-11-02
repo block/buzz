@@ -9,9 +9,14 @@ final class BuzzPushSnapshotBridge {
   private let endpointGrantStore: BuzzPushEndpointGrantKeychainStore
   private let interactionDeletionDeadline: BuzzInteractionDeletionDeadline
   private let keychainAccessGroup: String?
+  // Flutter awaits every call here, and the age-gate restore runs during app
+  // launch, when this process is busiest. At utility QoS these replies were the
+  // lowest-priority work in the process and stalled for over 10 s on saturated
+  // CI hosts while main-thread work kept moving; user-initiated is the class
+  // for work a caller is waiting on.
   private let queue = DispatchQueue(
     label: "xyz.block.buzz.push-snapshot",
-    qos: .utility
+    qos: .userInitiated
   )
   private lazy var store: BuzzPushPresentationCacheStore? = {
     guard let container = containerURL() else { return nil }
@@ -31,7 +36,7 @@ final class BuzzPushSnapshotBridge {
           INInteraction.deleteAll(completion: completion)
         },
         scheduleTimeout: { delay, action in
-          DispatchQueue.global(qos: .utility).asyncAfter(
+          DispatchQueue.global(qos: .userInitiated).asyncAfter(
             deadline: .now() + delay,
             execute: action
           )

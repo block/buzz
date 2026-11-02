@@ -331,6 +331,7 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
     let snapshotURL = directory.appendingPathComponent(BuzzPushPresentationCacheStore.fileName)
     let original = try Data(contentsOf: snapshotURL)
     var deletionCalls = 0
+    var deletionQoS: [qos_class_t] = []
     let bridge = BuzzPushSnapshotBridge(
       appGroupIdentifier: nil,
       endpointGrantStore: BuzzPushEndpointGrantKeychainStore(accessGroup: nil),
@@ -340,6 +341,7 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
         timeout: 5,
         deleteAllInteractions: { completion in
           deletionCalls += 1
+          deletionQoS.append(qos_class_self())
           completion(deletionCalls == 1 ? NSError(domain: "InjectedCleanupFailure", code: 1) : nil)
         },
         scheduleTimeout: { _, _ in }
@@ -370,6 +372,8 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
     XCTAssertNil(restoreResult)
     XCTAssertFalse(BuzzAgeRestrictionSession.isRestricted(containerURL: directory))
     XCTAssertEqual(deletionCalls, 2)
+    // Flutter awaits these replies; a lower QoS left them starved on busy hosts.
+    XCTAssertEqual(deletionQoS, [QOS_CLASS_USER_INITIATED, QOS_CLASS_USER_INITIATED])
     XCTAssertEqual(try Data(contentsOf: snapshotURL), original)
   }
 
