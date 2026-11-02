@@ -114,65 +114,6 @@ void main() {
     });
   });
 
-  group('npub encoding cache', () {
-    setUp(resetNpubCacheForTesting);
-    tearDown(resetNpubCacheForTesting);
-
-    String keyAt(int i) => i.toRadixString(16).padLeft(64, '0');
-
-    test('the retained entry count is capped at 8192', () {
-      expect(npubCacheLimitForTesting, 8192);
-    });
-
-    test('repeated lookups hit the cache instead of re-encoding', () {
-      final first = fullNpub(canonicalHex);
-      expect(npubEncodeCountForTesting, 1);
-      expect(fullNpub(canonicalHex), first);
-      expect(fullNpub(canonicalHex.toUpperCase()), first);
-      expect(shortPubkey(canonicalHex), canonicalCompact);
-      expect(npubEncodeCountForTesting, 1);
-      expect(npubCacheSizeForTesting, 1);
-    });
-
-    test('never retains more than the limit and evicts the oldest', () {
-      const total = 8192 + 808; // 9000 distinct keys
-      var maxSize = 0;
-      for (var i = 0; i < total; i++) {
-        fullNpub(keyAt(i));
-        if (npubCacheSizeForTesting > maxSize) {
-          maxSize = npubCacheSizeForTesting;
-        }
-      }
-      expect(maxSize, 8192);
-      expect(npubCacheSizeForTesting, 8192);
-      expect(npubEncodeCountForTesting, total);
-
-      // The newest key is still cached; the oldest was evicted and encodes
-      // again, still canonically.
-      fullNpub(keyAt(total - 1));
-      expect(npubEncodeCountForTesting, total);
-      final evicted = fullNpub(keyAt(0));
-      expect(npubEncodeCountForTesting, total + 1);
-      expect(
-        evicted,
-        nostr.Nip19.encode(prefix: nostr.Nip19Prefix.npub, data: keyAt(0)),
-      );
-      expect(npubCacheSizeForTesting, 8192);
-    });
-
-    test('evicted and cached keys still encode canonically', () {
-      for (var i = 0; i < 9000; i += 997) {
-        final expected = nostr.Nip19.encode(
-          prefix: nostr.Nip19Prefix.npub,
-          data: keyAt(i),
-        );
-        expect(fullNpub(keyAt(i)), expected);
-        expect(fullNpub(keyAt(i).toUpperCase()), expected);
-      }
-      expect(fullNpub(canonicalHex), canonicalNpub);
-    });
-  });
-
   group('copy to paste roundtrip', () {
     test('a copied npub parses back to the original hex key', () {
       final copied = fullNpub(canonicalHex);

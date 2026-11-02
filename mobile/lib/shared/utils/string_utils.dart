@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:nostr/nostr.dart' as nostr;
 
 /// Neutral label rendered when an identity string cannot be read as a Nostr
@@ -22,31 +21,6 @@ bool isHexPubkey(String value) {
     }
   }
   return true;
-}
-
-/// Lowercase-hex keys to their npub. Encoding is pure, so entries never go
-/// stale; the bound only caps memory for very large rosters.
-final Map<String, String> _npubCache = {};
-const int _npubCacheLimit = 8192;
-int _npubEncodeCount = 0;
-
-/// Test seam: the cache's maximum retained entry count.
-@visibleForTesting
-const int npubCacheLimitForTesting = _npubCacheLimit;
-
-/// Test seam: entries currently retained by the npub cache.
-@visibleForTesting
-int get npubCacheSizeForTesting => _npubCache.length;
-
-/// Test seam: how many times the codec ran (cache misses) since the last reset.
-@visibleForTesting
-int get npubEncodeCountForTesting => _npubEncodeCount;
-
-/// Test seam: empties the npub cache and zeroes the encode counter.
-@visibleForTesting
-void resetNpubCacheForTesting() {
-  _npubCache.clear();
-  _npubEncodeCount = 0;
 }
 
 /// The canonical full NIP-19 npub for [identity], or null when [identity] is
@@ -75,18 +49,8 @@ String? fullNpub(String identity) {
   }
 }
 
-String _encodeNpub(String hexPubkey) {
-  final cached = _npubCache[hexPubkey];
-  if (cached != null) return cached;
-  if (_npubCache.length >= _npubCacheLimit) {
-    _npubCache.remove(_npubCache.keys.first);
-  }
-  _npubEncodeCount++;
-  return _npubCache[hexPubkey] = nostr.Nip19.encode(
-    prefix: nostr.Nip19Prefix.npub,
-    data: hexPubkey,
-  );
-}
+String _encodeNpub(String hexPubkey) =>
+    nostr.Nip19.encode(prefix: nostr.Nip19Prefix.npub, data: hexPubkey);
 
 /// The canonical compact public-key label: the first 8 and last 4 characters
 /// of the full npub joined by an ellipsis — the same truncation desktop uses
