@@ -250,11 +250,14 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
 
   /// Waits for a bridge callback. On timeout the failure also reports how long
   /// one fresh user-initiated-queue-then-main-queue hop takes right then (the
-  /// path every bridge reply follows), so a starved test host ("hop took 7.2 s")
-  /// reads differently from a callback that never fired ("hop took 12 ms").
-  /// Both 2026-11-01 CI failures were the former: the RunnerTests host is the
-  /// full Flutter app, and its launch saturated the 3-vCPU runner mid-class.
-  /// A passing wait returns as soon as the callback runs and measures nothing.
+  /// path every bridge reply follows), capped at 2 s. A starved test host reads
+  /// "a fresh queue->main hop did not finish within 2 s" or hundreds of ms; a
+  /// callback that never fired reads "took 0.4 ms". The hop is measured after
+  /// the 10 s window, so a fast hop does not rule out starvation that ended at
+  /// the deadline. The 2026-11-01 CI failures predate this measurement; their
+  /// timings fit starvation, since the RunnerTests host is the full Flutter app
+  /// and its launch saturated the 3-vCPU runner mid-class. A passing wait
+  /// returns as soon as the callback runs and measures nothing.
   private func waitForCallback(
     _ expectation: XCTestExpectation, file: StaticString = #filePath, line: UInt = #line
   ) {
@@ -341,7 +344,7 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
       received = value
       completed.fulfill()
     })
-    wait(for: [completed], timeout: callbackTimeout)
+    waitForCallback(completed)
     XCTAssertNil(received)
   }
 
