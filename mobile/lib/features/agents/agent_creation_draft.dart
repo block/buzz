@@ -102,7 +102,10 @@ class AgentCreationDraft {
   /// `name` and `avatarUrl` (an https URL) are required; `instructions`,
   /// `model` and `reasoningEffort` are optional and left for the user when
   /// absent or blank. A missing required field, or a known field of the wrong
-  /// type, makes the card invalid. Other keys, including `v`, are ignored.
+  /// type, makes the card invalid. Any other key, including `v` and
+  /// `description` (agents have no description to prefill), is ignored
+  /// whatever its type, so Builderlab can add fields without breaking
+  /// released apps.
   static AgentCreationDraft parseAgentCard(
     Map<String, dynamic> json,
     String cardId,

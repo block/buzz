@@ -59,6 +59,7 @@ void main() {
       'avatarUrl': avatar,
       'cardUrl': 'https://cdn.example/av_1/rev/card.png',
       'shareUrl': 'https://app.builderlab.xyz/a/av_1',
+      'description': 'Deep-water scout.',
     };
 
     test('a published card opens with name and avatar only', () {
@@ -79,7 +80,14 @@ void main() {
         'instructions': 'Reply concisely.',
         'model': 'sonnet-5-5',
         'reasoningEffort': 'high',
-        // Other keys are ignored, including other spellings of known ones.
+        // Fields Buzz doesn't know are ignored whatever their type, so
+        // Builderlab can add them without breaking older apps.
+        'description': {'unexpected': 'shape'},
+        'tags': ['ocean', 7],
+        'rarity': null,
+        'nested': {
+          'deep': [true, 1.5],
+        },
         'system_prompt': 'ignored',
         'model_id': 'ignored',
       }, 'av_1');
