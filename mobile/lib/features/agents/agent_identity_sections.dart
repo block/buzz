@@ -4,6 +4,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/community/community_provider.dart';
 import '../../shared/agents/remote_agents.dart';
+import '../../shared/community/community_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/app_list_card.dart';
 import 'agent_instructions.dart';
@@ -22,6 +23,11 @@ class AgentIdentitySections extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     useListenable(controller);
+    useListenable(controller.account.subjectChanges);
+    final unknown = agentLocationUnknown(
+      ref.watch(activeCommunityProvider).asData?.value,
+      controller,
+    );
     final remote = controller.agents.any(
       (agent) => agent['agent_pubkey'] == pubkey,
     );
@@ -58,7 +64,9 @@ class AgentIdentitySections extends HookConsumerWidget {
               child: SizedBox(
                 width: double.infinity,
                 child: Text(
-                  remote
+                  unknown && !remote
+                      ? 'Sign in to Builderlab to see whether this agent runs on Builderbot or your desktop.'
+                      : remote
                       ? 'This agent runs on Builderbot. Your desktop doesn’t need to be online for it to work.'
                       : 'This agent is managed on your desktop. Keep Buzz open and your desktop online for it to work.',
                   style: context.textTheme.bodyMedium,

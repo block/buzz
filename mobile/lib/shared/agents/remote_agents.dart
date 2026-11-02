@@ -32,6 +32,14 @@ bool supportsRemoteAgents(Community? community) =>
     community.pubkey != null &&
     HostedEnvironment.supportsRelay(Uri.parse(community.relayUrl));
 
+/// Whether a signed-out Builderlab account hides where this community's agents
+/// run: remote agents are unlistable until the user signs in, so an agent that
+/// is not in the registry is not necessarily desktop-managed.
+bool agentLocationUnknown(
+  Community? community,
+  RemoteAgentController controller,
+) => supportsRemoteAgents(community) && controller.account.account == null;
+
 /// Restores a saved Builderlab session once, so a cold start with a stored
 /// session shows remote agents without waiting for another sign-in path.
 final builderlabRestoreProvider = FutureProvider<void>((ref) async {
