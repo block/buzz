@@ -63,7 +63,10 @@ void main() {
         ...inlineAgentShape.allMatches(source),
         ...inlineAgentClip.allMatches(source),
         ...agentRadius.allMatches(source),
-        if (path.startsWith('lib/features/agents/'))
+        // Category buttons and color swatches are circular controls, not avatars.
+        if (path.startsWith('lib/features/agents/') &&
+            !path.endsWith('/agent_avatar_choices.dart') &&
+            !path.endsWith('/agent_emoji_stage.dart'))
           ...personShape.allMatches(source),
       ]) {
         final line = '\n'.allMatches(source.substring(0, match.start)).length;
