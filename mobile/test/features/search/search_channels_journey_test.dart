@@ -698,8 +698,7 @@ class _ReconnectingSession extends _HeldSession {
     List<NostrFilter> filters, {
     Duration timeout = const Duration(seconds: 8),
   }) async => [
-    if (filters.single.kinds?.contains(39000) == true &&
-        filters.single.until == null)
+    if (filters.single.kinds.contains(39000) && filters.single.until == null)
       const NostrEvent(
         id: 'meta-ops',
         pubkey: 'relay',
