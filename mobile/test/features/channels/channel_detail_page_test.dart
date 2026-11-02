@@ -9,12 +9,15 @@ import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/me/me_groups.dart';
 import 'package:flutter/semantics.dart';
 import 'package:buzz/features/channels/message_media_avatar.dart';
+
 import 'dart:async';
+
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/features/channels/channel_actions_sheet.dart';
 
 import '../profile/presence_snapshot_test.dart'
     show PresenceTestRelay, presenceEvent;
+
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
@@ -240,6 +243,7 @@ NostrEvent _edit({
 
 Widget _buildTestable({
   String? bestie,
+  String? Function()? currentBestie,
   bool useRealChannelProviders = false,
   ProfileNotifier? profileNotifier,
   String? signingPubkey,
@@ -311,8 +315,10 @@ Widget _buildTestable({
   return ProviderScope(
     retry: providerRetry ?? (disableRetries ? (_, _) => null : null),
     overrides: [
-      if (bestie != null)
-        defaultAgentProvider.overrideWith((ref) => Stream.value(bestie)),
+      if (bestie != null || currentBestie != null)
+        defaultAgentProvider.overrideWith(
+          (ref) => Stream.value(currentBestie?.call() ?? bestie),
+        ),
       if (sender != null) sendMessageProvider.overrideWithValue(sender),
       if (soloSender != null) ...[
         meSendMessageProvider.overrideWithValue(soloSender),
@@ -686,6 +692,58 @@ void main() {
         expect(tester.takeException(), isNull);
       },
     );
+  }
+  for (final creates in [true, false]) {
+    testWidgets('empty Bestie launcher opens a new Bestie: creates=$creates', (
+      tester,
+    ) async {
+      String? chosen;
+      final dm = Channel(
+        id: _channelId,
+        name: 'Bestie',
+        channelType: 'dm',
+        visibility: 'private',
+        description: '',
+        createdBy: 'self',
+        createdAt: DateTime(2026),
+        memberCount: 2,
+        participantPubkeys: const ['self', 'agent'],
+        isMember: true,
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          personalChat: true,
+          signingPubkey: 'self',
+          currentBestie: () => chosen,
+          organization: Stream.value(const MeGroups()),
+          channel: dm,
+          messages: [
+            _textMsg(id: threadIdRoot, pubkey: 'agent', content: 'Hello!'),
+          ],
+          home: Consumer(
+            builder: (context, ref, _) => Scaffold(
+              body: DefaultAgentLauncher(
+                onChooseAgent: () {
+                  // Creation selects a first agent as Bestie before closing.
+                  if (creates) chosen = 'agent';
+                  ref.invalidate(defaultAgentProvider);
+                },
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Create your Bestie'), findsOneWidget);
+      await tester.tap(find.byType(IconButton));
+      await tester.pumpAndSettle();
+      expect(
+        find.byType(ChannelDetailPage),
+        creates ? findsOneWidget : findsNothing,
+      );
+      expect(find.text('Hello!'), creates ? findsOneWidget : findsNothing);
+      expect(tester.takeException(), isNull);
+    });
   }
   testWidgets(
     'refresh replaces stale Solo details before opening and sending',
