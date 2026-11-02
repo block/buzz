@@ -467,9 +467,20 @@ async fn ensure_starter_channels_inner(
                 state.mark_pending_owned_channel(&creator_pubkey, &channel_uuid_string);
                 duplicate_starters.push((spec, channel_uuid_string.clone()));
             }
-            // A retry would be refused the same way.
+            // A retry would be refused the same way. The name may still
+            // belong to a live starter the first read missed, such as one
+            // created since, so look again before giving up on it.
             Err(error) if is_permanent_starter_rejection(&error) => {
-                skipped.insert(spec.slug);
+                let refreshed = fetch_channels(state, DirectoryScope::IncludeOpenDirectory).await?;
+                match refreshed
+                    .into_iter()
+                    .find(|channel| is_matching_starter_channel(channel, spec))
+                {
+                    Some(channel) => existing_channels.push(channel),
+                    None => {
+                        skipped.insert(spec.slug);
+                    }
+                }
                 continue;
             }
             Err(error) => return Err(error),

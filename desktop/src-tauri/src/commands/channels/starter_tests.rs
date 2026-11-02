@@ -40,6 +40,7 @@ async fn created_starter_channels_are_reported_when_metadata_is_unavailable() {
 }
 
 const LIVE_GENERAL_ID: &str = "0b9f4c1e-6a51-4f7e-9d38-2f4b7f0e3c11";
+const LIVE_WELCOME_ID: &str = "5d2a7e90-3c4b-4f18-8e6d-91a0b2c4d5e6";
 
 /// A kind:39000 open stream, relay-signed like production.
 fn channel_event(id: &str, name: &str) -> serde_json::Value {
@@ -63,10 +64,13 @@ fn channel_event(id: &str, name: &str) -> serde_json::Value {
 /// `renamed_starter`, a live channel under that name holds `welcome-everyone`'s
 /// deterministic id and is served when metadata is read by id. Returns the
 /// result, the kinds of the events the relay accepted, and whether that id is
-/// still marked as pending-owned.
+/// still marked as pending-owned. With `late_welcome`, a live
+/// `welcome-everyone` under another id joins the directory after the first
+/// read.
 async fn ensure_with_unusable_welcome(
     create_refusal: (axum::http::StatusCode, &'static str),
     renamed_starter: Option<&'static str>,
+    late_welcome: bool,
 ) -> (Result<Vec<ChannelInfo>, String>, Vec<u64>, bool) {
     use std::sync::{Arc, Mutex};
 
@@ -83,6 +87,8 @@ async fn ensure_with_unusable_welcome(
     .to_string();
 
     let general = channel_event(LIVE_GENERAL_ID, "general");
+    let welcome = channel_event(LIVE_WELCOME_ID, "welcome-everyone");
+    let directory_reads = Arc::new(Mutex::new(0));
     let renamed = renamed_starter.map(|name| channel_event(&starter_id, name));
     let accepted = Arc::new(Mutex::new(Vec::new()));
     let accepted_kinds = accepted.clone();
@@ -93,7 +99,15 @@ async fn ensure_with_unusable_welcome(
                 let filter = filters[0].clone();
                 let events = match (filter["kinds"][0].as_u64(), filter.get("#d")) {
                     // The open directory lists live channels only.
-                    (Some(39000), None) => vec![general.clone()],
+                    (Some(39000), None) => {
+                        let mut reads = directory_reads.lock().unwrap();
+                        *reads += 1;
+                        if late_welcome && *reads > 1 {
+                            vec![general.clone(), welcome.clone()]
+                        } else {
+                            vec![general.clone()]
+                        }
+                    }
                     // Metadata by id.
                     (Some(39000), Some(ids)) => renamed
                         .iter()
@@ -156,6 +170,7 @@ async fn a_starter_name_held_by_another_channel_is_skipped() {
             "invalid: an open channel named \"welcome-everyone\" already exists",
         ),
         None,
+        false,
     )
     .await;
 
@@ -175,6 +190,7 @@ async fn a_starter_id_held_by_an_archived_channel_is_skipped() {
             "invalid: channel is archived",
         ),
         None,
+        false,
     )
     .await;
 
@@ -189,6 +205,7 @@ async fn a_starter_id_held_by_a_renamed_channel_is_skipped() {
     let (result, accepted, still_pending) = ensure_with_unusable_welcome(
         (status_ok(), "duplicate: channel already exists"),
         Some("intros"),
+        false,
     )
     .await;
 
@@ -206,9 +223,12 @@ async fn a_starter_id_held_by_an_unseen_channel_is_skipped() {
     let _serial = crate::relay_admission::TEST_SERIAL.lock().await;
     // A deleted channel keeps its id, so the relay answers `duplicate`, but
     // never serves its metadata.
-    let (result, accepted, still_pending) =
-        ensure_with_unusable_welcome((status_ok(), "duplicate: channel already exists"), None)
-            .await;
+    let (result, accepted, still_pending) = ensure_with_unusable_welcome(
+        (status_ok(), "duplicate: channel already exists"),
+        None,
+        false,
+    )
+    .await;
 
     let channels = result.expect("a deleted starter must not fail setup");
     assert!(joined_live_general(&channels));
@@ -228,6 +248,7 @@ async fn other_create_refusals_still_fail_setup() {
             "invalid: channel name too long",
         ),
         None,
+        false,
     )
     .await;
 
@@ -236,4 +257,32 @@ async fn other_create_refusals_still_fail_setup() {
         Some("relay returned 400 Bad Request: invalid: channel name too long")
     );
     assert!(accepted.is_empty());
+}
+
+#[tokio::test]
+async fn a_starter_name_held_by_a_live_starter_the_first_read_missed_is_joined() {
+    let _serial = crate::relay_admission::TEST_SERIAL.lock().await;
+    let (result, accepted, _) = ensure_with_unusable_welcome(
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid: an open channel named \"welcome-everyone\" already exists",
+        ),
+        None,
+        true,
+    )
+    .await;
+
+    let channels = result.expect("a live starter must not fail setup");
+    assert!(joined_live_general(&channels));
+    assert!(
+        channels
+            .iter()
+            .any(|channel| channel.id == LIVE_WELCOME_ID && channel.is_member),
+        "the live welcome-everyone must be joined"
+    );
+    assert_eq!(
+        accepted,
+        vec![9021, 9021],
+        "joins to general and welcome-everyone"
+    );
 }
