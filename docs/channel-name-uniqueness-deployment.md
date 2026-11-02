@@ -144,9 +144,12 @@ that release no longer checks names in the relay.
    ```
 
    Then verify that PostgreSQL considers the index valid, ready, live, and an
-   exact match for the definition that migration 0081 expects:
+   exact match for the definition that migration 0081 expects. Set the
+   `search_path` first: without `public` on it, PostgreSQL prints the enum casts
+   as `public.channel_visibility` and the text no longer matches.
 
    ```sql
+   SET search_path = public, pg_catalog;
    SELECT i.indisvalid, i.indisready, i.indislive,
           pg_get_indexdef(i.indexrelid) AS definition
    FROM pg_index AS i

@@ -14,6 +14,9 @@
 -- lock. It builds the index itself only on an empty `channels` table.
 SET LOCAL lock_timeout = '1s';
 SET LOCAL statement_timeout = '5s';
+-- pg_get_indexdef qualifies the enum casts below (`public.channel_visibility`)
+-- when `public` is not on the search_path; pin it so the exact compare holds.
+SET LOCAL search_path = public, pg_catalog;
 -- IF NOT EXISTS still requests a writer-conflicting ShareLock before checking
 -- whether the index exists. Bypass CREATE entirely for a prebuilt index, then
 -- validate it below; a failed concurrent build must never count as success.
