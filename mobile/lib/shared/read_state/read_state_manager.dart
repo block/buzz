@@ -78,6 +78,7 @@ class ReadStateManager {
   Timer? _debounceTimer;
   void Function()? _unsubscribeLive;
   bool _initialized = false;
+  bool _initialSeedComplete = false;
   // Pending first fetch and subscribe. A reconnect while it runs waits for it
   // so two passes cannot each install a live subscription and leak one.
   Future<void>? _initializing;
@@ -177,6 +178,16 @@ class ReadStateManager {
 
   void seedContextRead(String contextId, int unixTimestamp) {
     seedContextsRead({contextId: unixTimestamp});
+  }
+
+  /// Baseline the first channel-list landing once per identity/community.
+  /// The journal persists even an empty scope: later channels remain unread
+  /// after process death, rather than becoming a new "first" snapshot.
+  void seedInitialContextsRead(Map<String, int> contexts) {
+    if (_disposed || _initialSeedComplete) return;
+    _initialSeedComplete = true;
+    seedContextsRead(contexts);
+    _persistLocalState();
   }
 
   /// Advance local-only seeds together, saving and notifying once per batch.
@@ -670,6 +681,8 @@ class ReadStateManager {
       (key, value) => MapEntry(key as String, value as int),
     );
     if (journal != null) {
+      // An existing journal, even empty, means this is not a first landing.
+      _initialSeedComplete = true;
       _clientId = journal['clientId'] as String;
       _effectiveState.addAll(contexts(journal['observed']));
       _localContexts.addAll(contexts(journal['local']));

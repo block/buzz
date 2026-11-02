@@ -221,9 +221,9 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
     _manager?.seedContextRead(contextId, unixTimestamp);
   }
 
-  /// Seed a channel-list snapshot with one local save and state emission.
+  /// Seed the first channel-list landing once, durably across restarts.
   void seedContextsRead(Map<String, int> contexts) {
-    _manager?.seedContextsRead(contexts);
+    _manager?.seedInitialContextsRead(contexts);
   }
 
   void _emitManagerState(ReadStateManager manager) {
