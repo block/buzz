@@ -46,6 +46,7 @@ import 'native_photo_zoom_preview.dart';
 import 'native_video_files.dart';
 import 'message_content/link_normalizer.dart';
 import 'message_content/markdown_escapes.dart';
+import 'message_content/markdown_tables.dart';
 import 'message_content/preview_text.dart';
 import 'message_media.dart';
 import 'message_content/bubble_segments.dart';
@@ -330,7 +331,7 @@ class MessageContent extends HookConsumerWidget {
         : null;
     final galleryText = trailingGallery?.content ?? normalizedContent;
     final markdownContent = useMemoized(
-      () => escapeMarkdownMathDelimiters(galleryText),
+      () => separateMarkdownTables(escapeMarkdownMathDelimiters(galleryText)),
       [galleryText],
     );
     final customEmoji = _mergeCustomEmoji(
@@ -443,6 +444,8 @@ class MessageContent extends HookConsumerWidget {
         // normalizeBareLinks() already turns bare URLs into Markdown links;
         // gpt_markdown autolinks by default, so both would run.
         autolink: false,
+        // Desktop has no GitHub alerts: a `> [!NOTE]` quote stays a quote.
+        alertBuilder: (_, alert) => alert.asBlockQuote(),
         codeBuilder: (context, name, code, closed) => _MessageCodeBlock(
           name: name,
           code: code,

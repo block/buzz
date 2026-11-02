@@ -566,6 +566,8 @@ void main() {
         ('> ```sh\n> x\n\n```\necho \\#g\n```', r'echo \#g'),
         // A quoted fence ends with its quote, so later prose is parsed.
         ('> ```sh\n> echo x\n\nplain \\#text', 'plain #text'),
+        // An unclosed run ends with its paragraph, so later code stays code.
+        ('x ``` y\n- ``` p ```\n- q ``` \\[r\\] ``` s', r'\[r\]'),
         // A strike that spans a line break still decodes its escapes.
         ('~~a\nb \\#c~~', 'b #c'),
         // A bare link's trailing backslash stays outside the link.
@@ -613,6 +615,37 @@ void main() {
       // Gallery labels drop their escapes too.
       expect(find.bySemanticsLabel(RegExp(r'shot #1')), findsWidgets);
       semantics.dispose();
+    });
+
+    testWidgets('a quote opening with an alert marker stays a quote', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _testable(const MessageContent(content: '> [!NOTE]\n> Builds run.')),
+      );
+      expect(find.textContaining('[!NOTE]', findRichText: true), findsWidgets);
+    });
+
+    testWidgets('a table typed under its caption renders as a table', (
+      tester,
+    ) async {
+      Finder pipes() => find.textContaining('|', findRichText: true);
+      for (final (content, table) in [
+        ('**Sizes:**\n| Folder | Size |\n|---|---|\n| `~/a` | 9 GB |', true),
+        ('Sizes:\n\n| Folder | Size |\n|---|---|\n| a | 9 GB |', true),
+        // As in GFM, a delimiter row with a different cell count does not
+        // open a table.
+        ('Sizes:\n| Folder | Size | Note |\n|---|---|\n| a | 9 GB |', false),
+        ('```\nSizes:\n| Folder | Size |\n|---|---|\n```', false),
+      ]) {
+        await tester.pumpWidget(_testable(MessageContent(content: content)));
+        expect(pipes(), table ? findsNothing : findsWidgets, reason: content);
+        expect(
+          find.textContaining('Folder', findRichText: true),
+          findsWidgets,
+          reason: content,
+        );
+      }
     });
 
     testWidgets('forwards text alignment to markdown rendering', (
