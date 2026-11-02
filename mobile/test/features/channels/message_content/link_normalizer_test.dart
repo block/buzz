@@ -197,6 +197,11 @@ void main() {
         expected: '> ```sh\n> $url',
       ),
       (
+        name: 'top-level fence does not close on a quoted fence',
+        input: '```md\n> ```\n$url\n```\n$url',
+        expected: '```md\n> ```\n$url\n```\n[$url]($url)',
+      ),
+      (
         name: 'quoted fence closes inside the quote',
         input: '> ~~~\n> $url\n> ~~~\n$url',
         expected: '> ~~~\n> $url\n> ~~~\n[$url]($url)',
@@ -227,6 +232,17 @@ void main() {
       expect(
         normalizeBareLinks(r'*https://example.com/a\**'),
         r'*[https://example.com/a](https://example.com/a)\**',
+      );
+    });
+
+    test('a literal backslash before a bare link stays literal', () {
+      expect(
+        normalizeBareLinks(r'see \https://example.com/a'),
+        r'see \\[https://example.com/a](https://example.com/a)',
+      );
+      expect(
+        normalizeBareLinks(r'see \\https://example.com/a'),
+        r'see \\[https://example.com/a](https://example.com/a)',
       );
     });
 

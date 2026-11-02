@@ -518,6 +518,9 @@ void main() {
         // A fence that never closes is still code inside a quote or list.
         ('> ```sh\n> echo \\#x', r'echo \#x'),
         ('- item\n\n      ```\n      echo \\#x', r'echo \#x'),
+        // A fence closes only at the quote depth it opened at.
+        ('```md\n> ```\necho \\#g\n```', r'echo \#g'),
+        ('> ```sh\n> x\n\n```\necho \\#g\n```', r'echo \#g'),
         // Known limitation: gpt_markdown's raw-text fallback for this
         // unclaimed strike skips inline components, so the stand-in shows.
         // Its fullwidth form still reads as #.
@@ -527,6 +530,7 @@ void main() {
         (r'in buzz://channel/9f18f3c6-b5e5-453d-b36d-65487913be0b.\', r'.\'),
         (r'*https://example.com/a\**', '*'),
         (r'see \<https://example.com/b>', 'see <'),
+        (r'see \https://example.com/c', r'see \'),
         (r'see <https://example.com/a\>', r'https://example.com/a\'),
         (
           '![shot \\#1](https://example.com/a.png)\n'

@@ -32,6 +32,7 @@ String mapMarkdownProse(String content, String Function(String) transform) {
   var inlineDelimiterLength = 0;
   var fenceDelimiterLength = 0;
   var fenceChar = '';
+  var fenceQuoteDepth = 0;
 
   while (offset < content.length) {
     final run = _codeRunPattern.matchAsPrefix(content, offset);
@@ -44,7 +45,13 @@ String mapMarkdownProse(String content, String Function(String) transform) {
     final runChar = content[run.start];
     if (fenceDelimiterLength > 0) {
       if (runChar == fenceChar &&
-          _isClosingFence(content, run.start, run.end, fenceDelimiterLength)) {
+          _isClosingFence(
+            content,
+            run.start,
+            run.end,
+            fenceDelimiterLength,
+            fenceQuoteDepth,
+          )) {
         buffer.write(content.substring(codeStart, run.end));
         fenceDelimiterLength = 0;
         proseStart = run.end;
@@ -62,6 +69,7 @@ String mapMarkdownProse(String content, String Function(String) transform) {
         codeStart = run.start;
         fenceDelimiterLength = runLength;
         fenceChar = runChar;
+        fenceQuoteDepth = _fenceQuoteDepth(content, run.start);
       }
     } else if (_isEscaped(content, run.start)) {
       // An escaped backtick is literal; the rest of its run may still open.
@@ -78,6 +86,7 @@ String mapMarkdownProse(String content, String Function(String) transform) {
       codeStart = run.start;
       fenceDelimiterLength = runLength;
       fenceChar = runChar;
+      fenceQuoteDepth = _fenceQuoteDepth(content, run.start);
     }
 
     offset = run.end;
@@ -101,16 +110,18 @@ bool _isEscaped(String content, int index) {
 }
 
 bool _isOpeningFence(String content, int runStart, int runLength) =>
-    runLength >= 3 && _hasFencePrefix(content, runStart);
+    runLength >= 3 && _fenceQuoteDepth(content, runStart) >= 0;
 
 bool _isClosingFence(
   String content,
   int runStart,
   int runEnd,
   int openerLength,
+  int openerQuoteDepth,
 ) {
   if (runEnd - runStart < openerLength) return false;
-  if (!_hasFencePrefix(content, runStart)) return false;
+  // A fence closes only at the quote depth it opened at.
+  if (_fenceQuoteDepth(content, runStart) != openerQuoteDepth) return false;
   // Stops at the first non-blank character, so each run scans only up to
   // the next one and a long line of runs stays linear.
   for (var i = runEnd; i < content.length; i++) {
@@ -121,18 +132,24 @@ bool _isClosingFence(
   return true;
 }
 
-/// Whether only blank characters and quote markers (`>`) precede [runStart]
-/// on its line, matching where the renderer opens a fence: gpt_markdown
-/// re-parses quote bodies, and list continuations are indented. The scan
-/// stops at the first other character, so it never crosses an earlier run
-/// and a long line of runs stays linear.
-bool _hasFencePrefix(String content, int runStart) {
+/// The number of quote markers (`>`) before [runStart] on its line when only
+/// blanks and markers precede it, or -1 when anything else does. This matches
+/// where the renderer opens a fence: gpt_markdown re-parses quote bodies, and
+/// list continuations are indented. The scan stops at the first other
+/// character, so it never crosses an earlier run and a long line of runs
+/// stays linear.
+int _fenceQuoteDepth(String content, int runStart) {
+  var depth = 0;
   for (var i = runStart - 1; i >= 0; i--) {
     final char = content[i];
-    if (char == '\n') return true;
-    if (char != '>' && char.trim().isNotEmpty) return false;
+    if (char == '\n') return depth;
+    if (char == '>') {
+      depth++;
+    } else if (char.trim().isNotEmpty) {
+      return -1;
+    }
   }
-  return true;
+  return depth;
 }
 
 bool _hasInlineCloserOnLine(String content, int start, int delimiterLength) {
@@ -372,7 +389,10 @@ String _normalizeBareLink(String segment, Match match) {
   // Preserve a URL already used as its own Markdown label. This covers both
   // converted autolinks and authored `[url](url)` links.
   if (start >= 1 && segment[start - 1] == '[') return matched;
-  return '[$url]($url)$trailing';
+  // A backslash before the URL is literal, since a letter follows it. Double
+  // it so it can't escape the synthesized `[`.
+  final literalBackslash = _isEscaped(segment, start) ? r'\' : '';
+  return '$literalBackslash[$url]($url)$trailing';
 }
 
 bool _hasUnclosedMarkdownDelimiter(String prefix, String delimiter) {
