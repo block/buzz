@@ -97,8 +97,7 @@ pub(super) async fn rename_duplicates(pool: &PgPool, host: &str) -> usize {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn plan_keeps_each_listed_name_on_its_oldest_unarchived_channel() {
-    let admin = PgPool::connect(&admin_url().await).await.unwrap();
-    let (pool, name) = create_scratch_db(&admin, "listed_name_plan").await;
+    let (pool, _scratch) = ScratchDb::migrated(&admin_url().await, "listed_name_plan").await;
     let seed = Seed::new(&pool).await;
     let [kept, archived, newer, private, deleted] = [(); 5].map(|_| Uuid::new_v4());
     seed.open(&pool, kept, "square-ios", 30).await;
@@ -164,14 +163,12 @@ async fn plan_keeps_each_listed_name_on_its_oldest_unarchived_channel() {
     ];
     names.sort();
     assert_eq!(seed.names(&pool).await, names);
-    drop_scratch_db(&admin, pool, &name).await;
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn plan_picks_a_free_name_when_the_short_one_is_taken() {
-    let admin = PgPool::connect(&admin_url().await).await.unwrap();
-    let (pool, name) = create_scratch_db(&admin, "listed_name_plan_taken").await;
+    let (pool, _scratch) = ScratchDb::migrated(&admin_url().await, "listed_name_plan_taken").await;
     let seed = Seed::new(&pool).await;
     // The longest name the column holds, so the new name must truncate it.
     let long = "a".repeat(255);
@@ -189,7 +186,6 @@ async fn plan_picks_a_free_name_when_the_short_one_is_taken() {
         vec![(duplicate, long.clone(), new_name.clone())]
     );
     assert!(new_name.chars().count() <= 255);
-    drop_scratch_db(&admin, pool, &name).await;
 }
 
 /// Runs the real script for `host` against database `db`, with `cli_body` as
@@ -254,8 +250,7 @@ async fn run_rename_script(
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn script_renames_each_planned_channel_once_whatever_its_name() {
-    let admin = PgPool::connect(&admin_url().await).await.unwrap();
-    let (pool, name) = create_scratch_db(&admin, "listed_name_script").await;
+    let (pool, scratch) = ScratchDb::migrated(&admin_url().await, "listed_name_script").await;
     let seed = Seed::new(&pool).await;
     let [kept, duplicate, other] = [(); 3].map(|_| Uuid::new_v4());
     let tricky = format!("-ops\x1e{other}\x1fowned\x1f\n\t\"$(x)");
@@ -265,7 +260,7 @@ async fn script_renames_each_planned_channel_once_whatever_its_name() {
 
     let (output, calls) = run_rename_script(
         &seed.host,
-        &name,
+        scratch.name(),
         "[[ $3 == --channel=* && $4 == --name=* ]] || exit 2\n\
          psql \"$DATABASE_URL\" -X -q -v ON_ERROR_STOP=1 -v id=\"${3#*=}\" -v name=\"${4#*=}\" <<'SQL'\n\
          UPDATE channels SET name = :'name' WHERE id = :'id';\nSQL\n",
@@ -292,7 +287,6 @@ async fn script_renames_each_planned_channel_once_whatever_its_name() {
     ];
     names.sort();
     assert_eq!(seed.names(&pool).await, names);
-    drop_scratch_db(&admin, pool, &name).await;
 }
 
 /// An auth refusal (CLI exit code 3, for example 403 relay_membership_required)
@@ -303,19 +297,17 @@ async fn script_renames_each_planned_channel_once_whatever_its_name() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn script_stops_at_the_first_auth_refusal() {
-    let admin = PgPool::connect(&admin_url().await).await.unwrap();
-    let (pool, name) = create_scratch_db(&admin, "listed_name_script_auth").await;
+    let (pool, scratch) = ScratchDb::migrated(&admin_url().await, "listed_name_script_auth").await;
     let seed = Seed::new(&pool).await;
     for (group, age) in [("first", 30), ("first", 10), ("second", 30), ("second", 10)] {
         seed.open(&pool, Uuid::new_v4(), group, age).await;
     }
 
-    let (output, calls) = run_rename_script(&seed.host, &name, "exit 3\n").await;
+    let (output, calls) = run_rename_script(&seed.host, scratch.name(), "exit 3\n").await;
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     assert_eq!(calls.len(), 1, "it stops after the first refusal");
     assert!(stderr.contains("a member of"), "{stderr}");
-    drop_scratch_db(&admin, pool, &name).await;
 }
 
 /// The relay serves only an active, unarchived community, so the script stops
@@ -326,8 +318,7 @@ async fn script_stops_at_the_first_auth_refusal() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn script_stops_for_a_community_the_relay_does_not_serve() {
-    let admin = PgPool::connect(&admin_url().await).await.unwrap();
-    let (pool, name) = create_scratch_db(&admin, "listed_name_script_state").await;
+    let (pool, scratch) = ScratchDb::migrated(&admin_url().await, "listed_name_script_state").await;
     let archived = Seed::new(&pool).await;
     let deleting = Seed::new(&pool).await;
     for seed in [&archived, &deleting] {
@@ -350,11 +341,10 @@ async fn script_stops_for_a_community_the_relay_does_not_serve() {
         (deleting.host.as_str(), "being deleted"),
         ("missing.example", "no community has host"),
     ] {
-        let (output, calls) = run_rename_script(host, &name, "exit 0\n").await;
+        let (output, calls) = run_rename_script(host, scratch.name(), "exit 0\n").await;
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.code(), Some(1), "{host}: {stderr}");
         assert!(calls.is_empty(), "{host}: no rename");
         assert!(stderr.contains(message), "{host}: {stderr}");
     }
-    drop_scratch_db(&admin, pool, &name).await;
 }
