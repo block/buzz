@@ -893,6 +893,21 @@ pub(crate) const TIGHTEN_STATEMENT_TIMEOUT_SQL: &str = "SELECT set_config('state
             OR current_setting('statement_timeout')::interval > $1::text::interval \
           THEN $1::text ELSE current_setting('statement_timeout') END, $2)";
 
+/// Lower this session's `statement_timeout` to [`READ_STATEMENT_TIMEOUT`]
+/// unless it is already tighter. Pools that serve client reads outside
+/// [`crate::Db`], such as the relay's search pool, install it in
+/// `after_connect` so none of their statements is unbounded.
+pub async fn tighten_session_to_read_deadline(
+    conn: &mut sqlx::PgConnection,
+) -> std::result::Result<(), sqlx::Error> {
+    sqlx::query(TIGHTEN_STATEMENT_TIMEOUT_SQL)
+        .bind(READ_STATEMENT_TIMEOUT)
+        .bind(false)
+        .execute(conn)
+        .await
+        .map(|_| ())
+}
+
 /// Run an event read under [`READ_STATEMENT_TIMEOUT`] without changing the
 /// deadline for anything else on `conn`. `begin()` opens a transaction on an
 /// autocommit writer connection or a savepoint inside the replica's read

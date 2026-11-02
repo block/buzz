@@ -1099,14 +1099,7 @@ impl Db {
             .test_before_acquire(false)
             .acquire_timeout(Self::READER_ACQUIRE_TIMEOUT)
             .after_connect(|conn, _meta| {
-                Box::pin(async move {
-                    sqlx::query(crate::event::TIGHTEN_STATEMENT_TIMEOUT_SQL)
-                        .bind(crate::event::READ_STATEMENT_TIMEOUT)
-                        .bind(false)
-                        .execute(&mut *conn)
-                        .await
-                        .map(|_| ())
-                })
+                Box::pin(crate::event::tighten_session_to_read_deadline(conn))
             })
             .after_release(|conn, _meta| Box::pin(Self::reader_release_check(conn)))
     }

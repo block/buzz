@@ -23,7 +23,9 @@ use crate::nip_fi_http::{admit_nip_fi_http_on_state, Nip98Proof};
 use crate::state::AppState;
 
 use super::relay_members::MembershipRefusal;
-use super::{api_error, db_read_error, internal_error, not_found, parse_query_or_400};
+use super::{
+    api_error, db_read_error, internal_error, not_found, parse_query_or_400, search_error,
+};
 
 mod thread_roots;
 mod thread_window;
@@ -2582,7 +2584,7 @@ async fn handle_bridge_search(
             .search
             .search(&search_query)
             .await
-            .map_err(|e| internal_error(&format!("search error: {e}")))?;
+            .map_err(|e| search_error("search error", &e))?;
 
         // Fetch full events from DB by ID. Hit ids are already raw 32-byte
         // arrays from the FTS layer — no hex decode.
@@ -9082,6 +9084,14 @@ pub(crate) mod postgres_tests {
         }
         let replica = pools.pop().expect("replica");
         let writer = pools.pop().expect("writer");
+        // Searches run on their own pool, as in production. Its 300ms
+        // deadline stands in for the production search deadline.
+        let search_options: sqlx::postgres::PgConnectOptions =
+            format!("{base}/{}", names[0]).parse().expect("search url");
+        let search_pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_with(search_options.options([("statement_timeout", "300ms")]))
+            .await
+            .expect("search pool");
 
         let mut config = crate::config::Config::from_env().expect("config");
         config.redis_url =
@@ -9107,7 +9117,7 @@ pub(crate) mod postgres_tests {
             buzz_audit::AuditService::new(writer.clone()),
             pubsub,
             buzz_auth::AuthService::new(config.auth.clone()),
-            buzz_search::SearchService::new(writer.clone()),
+            buzz_search::SearchService::new(search_pool),
             Arc::new(buzz_workflow::WorkflowEngine::new(
                 db,
                 buzz_workflow::WorkflowConfig::default(),
@@ -9158,18 +9168,25 @@ pub(crate) mod postgres_tests {
         }
 
         async fn http(&self, uri: &str, filter: &serde_json::Value) -> (StatusCode, Value) {
+            self.http_body(uri, &serde_json::json!([filter])).await
+        }
+
+        async fn http_body(&self, uri: &str, body: &serde_json::Value) -> (StatusCode, Value) {
             use axum::body::Body;
             use axum::http::{header, Request};
             use tower::ServiceExt;
+            let body = serde_json::to_vec(body).expect("json");
+            let url = format!("https://{}{uri}", self.host);
+            let auth = crate::nip98::nip98_header(&self.reader, &url, &body).expect("nip98");
             let resp = crate::router::build_router(self.state.clone())
                 .oneshot(
                     Request::builder()
                         .method("POST")
                         .uri(uri)
                         .header(header::HOST, &self.host)
-                        .header("x-pubkey", self.reader.public_key().to_hex())
+                        .header(header::AUTHORIZATION, auth)
                         .header("content-type", "application/json")
-                        .body(Body::from(serde_json::to_vec(&[filter]).expect("json")))
+                        .body(Body::from(body))
                         .expect("request"),
                 )
                 .await
@@ -9330,6 +9347,49 @@ pub(crate) mod postgres_tests {
         );
         assert_eq!(fx.ws_search().await, closed("s"), "WS search hydrate");
         locker.rollback().await.expect("unlock");
+
+        // The search statement itself outlives the search pool's deadline:
+        // message and profile search answer 503 `query timed out` over HTTP,
+        // and a WS search ends CLOSED rather than an empty EOSE.
+        let mut locker = fx.writer.begin().await.expect("begin locker");
+        sqlx::query("LOCK TABLE events IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *locker)
+            .await
+            .expect("lock writer events");
+        for (uri, request) in [
+            ("/query", serde_json::json!([fx.search_filter()])),
+            ("/profiles/search", serde_json::json!({"query": "needle"})),
+        ] {
+            let (status, body) = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                fx.http_body(uri, &request),
+            )
+            .await
+            .expect("search must be cancelled, not wait on the lock");
+            assert_eq!(
+                (status, body["error"].as_str()),
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Some(super::super::QUERY_TIMED_OUT)
+                ),
+                "HTTP {uri} search statement"
+            );
+        }
+        assert_eq!(
+            fx.ws_search().await,
+            format!(
+                r#"["CLOSED","s","{}"]"#,
+                crate::handlers::req::SEARCH_FAILED_CLOSED
+            ),
+            "WS search statement"
+        );
+        locker.rollback().await.expect("unlock");
+        let (status, body) = fx.http("/query", &fx.search_filter()).await;
+        assert_eq!(status, StatusCode::OK, "search pool recovers: {body}");
+        assert!(
+            body.to_string().contains("root needle"),
+            "search hit: {body}"
+        );
 
         // Ordinary-error controls: `events` gone on both pools → 42P01 on the
         // replica, writer re-run, 42P01 again. Not a timeout.

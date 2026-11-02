@@ -48,6 +48,19 @@ pub(crate) fn db_read_error(
     internal_error(&format!("{context}: {e}"))
 }
 
+/// Map a search failure the same way: a statement-deadline cancel becomes
+/// the 503 `query timed out`; anything else stays a generic 500.
+pub(crate) fn search_error(
+    context: &str,
+    e: &buzz_search::SearchError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if e.is_statement_cancelled() {
+        tracing::warn!("{context}: {e}");
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, QUERY_TIMED_OUT);
+    }
+    internal_error(&format!("{context}: {e}"))
+}
+
 #[allow(dead_code)]
 pub(crate) fn not_found(msg: &str) -> (StatusCode, Json<serde_json::Value>) {
     api_error(StatusCode::NOT_FOUND, msg)

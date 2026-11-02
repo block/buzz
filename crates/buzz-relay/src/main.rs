@@ -55,7 +55,9 @@ async fn connect_audit_pool(config: &DbConfig) -> anyhow::Result<sqlx::PgPool> {
 /// when one is configured. Like the main read pool it is lazy, so a reader
 /// that is down at boot fails searches, not startup, and it waits no longer
 /// than the writer pool for a connection, so a dead reader fails each search
-/// within that bound instead of sqlx's 30s default.
+/// within that bound instead of sqlx's 30s default. Every session carries the
+/// event-read deadline: a short typeahead prefix matches most of a community
+/// and is ranked in full, so nothing else bounds a search.
 fn connect_search_pool(config: &DbConfig) -> anyhow::Result<sqlx::PgPool> {
     let url = config
         .read_database_url
@@ -63,6 +65,9 @@ fn connect_search_pool(config: &DbConfig) -> anyhow::Result<sqlx::PgPool> {
         .unwrap_or(&config.database_url);
     sqlx::postgres::PgPoolOptions::new()
         .acquire_timeout(std::time::Duration::from_secs(config.acquire_timeout_secs))
+        .after_connect(|conn, _meta| {
+            Box::pin(buzz_db::event::tighten_session_to_read_deadline(conn))
+        })
         .connect_lazy(url)
         .map_err(|e| anyhow::anyhow!("Search DB URL is invalid: {e}"))
 }
@@ -3360,11 +3365,45 @@ mod tests {
             .expect("release audit advisory lock");
     }
 
+    /// Every search session carries the 20 s read deadline, and a search the
+    /// deadline cancels is classified as a timeout. Mutation oracle: dropping
+    /// the search pool's `after_connect` leaves the server default (`0`).
+    async fn search_pool_bounds_every_search_statement() {
+        let config = DbConfig {
+            database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL"),
+            ..DbConfig::default()
+        };
+        let pool = connect_search_pool(&config).expect("search pool");
+        let mut conn = pool.acquire().await.expect("search session");
+        let installed: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("search session timeout");
+        assert_eq!(installed, buzz_db::event::READ_STATEMENT_TIMEOUT);
+
+        sqlx::query("SET statement_timeout = '10ms'")
+            .execute(&mut *conn)
+            .await
+            .expect("shorten deadline");
+        let cancelled = sqlx::query("SELECT pg_sleep(1)")
+            .execute(&mut *conn)
+            .await
+            .expect_err("deadline must cancel the statement");
+        assert!(buzz_search::SearchError::from(cancelled).is_statement_cancelled());
+        conn.close().await.expect("discard altered session");
+    }
+
     mod postgres_tests {
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn audit_writer_pool_installs_timeouts_and_bounds_advisory_lock_waits() {
             super::audit_writer_pool_installs_timeouts_and_bounds_advisory_lock_waits().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn search_pool_bounds_every_search_statement() {
+            super::search_pool_bounds_every_search_statement().await;
         }
     }
 
