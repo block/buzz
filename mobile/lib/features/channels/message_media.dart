@@ -30,8 +30,6 @@ class ImetaEntry {
 
   bool get isVideo => mimeType?.startsWith('video/') == true;
 
-  bool get isAudio => mimeType?.startsWith('audio/') == true;
-
   String? get posterUrl => image ?? thumb;
 
   double? get aspectRatio {

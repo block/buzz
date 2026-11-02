@@ -110,7 +110,10 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
             // events are already idempotent in the unread/timestamp stores.
             if (!_lifecycleRef.mounted ||
                 _refreshCoordinator.currentScope() != fence.scope ||
-                !_desiredLiveChannelIds.contains(event.channelId)) {
+                !(_desiredLiveChannelIds.contains(event.channelId) ||
+                    (event.kind == EventKind.deletion &&
+                        event.channelId == null &&
+                        chunk.any(_desiredLiveChannelIds.contains)))) {
               return;
             }
             _handleLiveEvent(event);

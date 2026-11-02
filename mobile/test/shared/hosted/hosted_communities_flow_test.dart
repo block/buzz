@@ -20,6 +20,30 @@ void main() {
     return result;
   }
 
+  for (final changedAccount in [false, true]) {
+    test(
+      'picker snapshot rejects ${changedAccount ? "changed" : "expired"} account',
+      () async {
+        final f = HostedCommunitiesFixture();
+        await f.initialize(widget: true);
+        addTearDown(f.dispose);
+        f.rows = [f.row('one')];
+        await f.flow.signInAccount();
+        final choices = f.flow.captureCommunityChoices()!;
+        await f.flow.leave();
+        if (changedAccount) {
+          f.subject = 'other-owner';
+        } else {
+          f.expired = true;
+        }
+        expect(f.flow.restoreCommunityChoices(choices), isFalse);
+        expect(f.flow.stage, HostedFlowStage.idle);
+        expect(f.flow.communities, isEmpty);
+        expect(f.admitted, isEmpty);
+      },
+    );
+  }
+
   for (final failure in ['binding', 'backup']) {
     test(
       '$failure proof failure blocks discovery and preserves saved identity',

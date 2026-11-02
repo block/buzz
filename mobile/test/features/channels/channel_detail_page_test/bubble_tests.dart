@@ -1,6 +1,40 @@
 part of '../channel_detail_page_test.dart';
 
 void bubbleLayoutTests() {
+  testWidgets('reply footer does not add reaction padding inside the bubble', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: [
+          _textMsg(id: 'plain', pubkey: 'alice', content: 'Same text'),
+          _textMsg(id: threadIdRoot, pubkey: 'alice', content: 'Same text'),
+          _textMsg(
+            id: threadIdR1,
+            pubkey: 'bob',
+            content: 'Reply',
+            extraTags: [
+              ['e', threadIdRoot, '', 'reply'],
+            ],
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    Finder bubble(String id) => find
+        .descendant(
+          of: find.byKey(ValueKey('message-row-$id')),
+          matching: find.byType(LocalSendBubbleSurface),
+        )
+        .first;
+    expect(find.text('1 reply'), findsOneWidget);
+    expect(
+      tester.getSize(bubble(threadIdRoot)).height,
+      closeTo(tester.getSize(bubble('plain')).height, 0.01),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   for (final author in ['self', 'alice']) {
     testWidgets('date divider owns equal space around $author messages', (
       tester,

@@ -14,7 +14,10 @@ class MeProjectCreation {
   final String name;
 
   /// Build an intent; [complete] persists it before syncing.
-  const MeProjectCreation(this.id, this.name);
+  const MeProjectCreation(this.id, this.name, {this.channelId});
+
+  /// Existing Solo chat to place in this workspace in the same synced write.
+  final String? channelId;
 
   /// Isolate private drafts by both account and community.
   static String storageKey(MeSync sync) =>
@@ -26,7 +29,11 @@ class MeProjectCreation {
     if (saved == null) return null;
     final value =
         jsonDecode(nip44Decrypt(sync.key, saved)) as Map<String, dynamic>;
-    return MeProjectCreation(value['id'] as String, value['name'] as String);
+    return MeProjectCreation(
+      value['id'] as String,
+      value['name'] as String,
+      channelId: value['channelId'] as String?,
+    );
   }
 
   void _checkScope(MeSync sync) {
@@ -39,7 +46,10 @@ class MeProjectCreation {
   Future<void> save(MeSync sync) async {
     _checkScope(sync);
     final previous = pending(sync);
-    if (previous != null && (previous.id != id || previous.name != name)) {
+    if (previous != null &&
+        (previous.id != id ||
+            previous.name != name ||
+            previous.channelId != channelId)) {
       throw StateError(
         'Review your unfinished project before starting another.',
       );
@@ -47,7 +57,10 @@ class MeProjectCreation {
     if (sync.prefs == null ||
         !await sync.prefs!.setString(
           storageKey(sync),
-          nip44Encrypt(sync.key, jsonEncode({'id': id, 'name': name})),
+          nip44Encrypt(
+            sync.key,
+            jsonEncode({'id': id, 'name': name, 'channelId': ?channelId}),
+          ),
         )) {
       throw StateError('Couldn’t save this project on your phone. Try again.');
     }
@@ -58,7 +71,9 @@ class MeProjectCreation {
   Future<void> discard(MeSync sync) async {
     _checkScope(sync);
     final current = pending(sync);
-    if (current?.id != id || current?.name != name) {
+    if (current?.id != id ||
+        current?.name != name ||
+        current?.channelId != channelId) {
       throw StateError('The unfinished project changed. Review it again.');
     }
     await clearMeJournal(
@@ -74,11 +89,14 @@ class MeProjectCreation {
     await save(sync);
     final record = sync.prefs!.getString(storageKey(sync))!;
     final head = await sync.head();
+    final confirmed = head == null ? null : sync.decode(head);
     final exists =
-        head != null && sync.decode(head).groups.any((g) => g['id'] == id);
+        confirmed != null &&
+        confirmed.groups.any((g) => g['id'] == id) &&
+        (channelId == null || confirmed.assignments[channelId] == id);
     if (!exists || sync.prefs?.getString(sync.pendingKey) != null) {
-      await sync.update(
-        (current) => current.groups.any((g) => g['id'] == id)
+      await sync.update((current) {
+        final groups = current.groups.any((g) => g['id'] == id)
             ? current
             : MeGroups(
                 groups: [
@@ -87,8 +105,9 @@ class MeProjectCreation {
                 ],
                 assignments: current.assignments,
                 channels: current.channels,
-              ),
-      );
+              );
+        return channelId == null ? groups : groups.place(channelId!, group: id);
+      });
     }
     await clearMeJournal(
       sync.prefs!,

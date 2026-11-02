@@ -14,7 +14,7 @@ void main() {
   final cases = (conformance['cases'] as List).cast<Map<String, dynamic>>();
 
   test('validates the portable fixture version and non-empty case list', () {
-    expect(conformance['version'], identityNamePolicyVersion);
+    expect(conformance['version'], 1);
     expect(cases, isNotEmpty);
   });
 

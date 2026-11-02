@@ -9,9 +9,11 @@ import '../../shared/hosted/self_hosted_entry.dart';
 import '../../shared/identity_transfer/nsec_import_sheet.dart';
 import '../../shared/identity_transfer/native_community_entry.dart';
 import '../../shared/theme/theme.dart';
-import '../../shared/utils/string_utils.dart';
+import '../../shared/hosted/hosted_environment.dart';
+import 'saved_identity_card.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/onboarding_step_page.dart';
+import '../../shared/widgets/onboarding_loading_page.dart';
 import '../../shared/widgets/buzz_titled_sheet_layout.dart';
 
 /// Local preparation seam; the production service validates and retains keys.
@@ -54,7 +56,10 @@ Future<bool> showSelfHostedEntry(
     if (!context.mounted) return false;
     if (choices != null) {
       final result = await NativeCommunityEntry.show(
-        name: name.isEmpty ? Uri.parse(relay).host : name,
+        name: HostedEnvironment.communityDisplayName(
+          name.isEmpty ? Uri.parse(relay).host : name,
+          relay,
+        ),
         dark: dark,
         primaryArgb: primary,
         choices: choices,
@@ -187,8 +192,8 @@ class SelfHostedEntrySheet extends HookConsumerWidget {
               onPressed: onPressed,
               child: child,
             )
-          : OutlinedButton(
-              style: OutlinedButton.styleFrom(
+          : TextButton(
+              style: TextButton.styleFrom(
                 foregroundColor: context.colors.onSurface,
                 minimumSize: const Size.fromHeight(52),
                 shape: const StadiumBorder(),
@@ -199,6 +204,74 @@ class SelfHostedEntrySheet extends HookConsumerWidget {
     }
 
     final saved = choices.data?.choices ?? const <DeviceIdentityChoice>[];
+    final identityTitle = saved.isEmpty
+        ? 'Choose an identity'
+        : saved.length == 1
+        ? 'You already have a saved identity'
+        : 'You already have saved identities';
+    final destination = HostedEnvironment.communityDisplayName(
+      name.isEmpty ? Uri.parse(relay).host : name,
+      relay,
+    );
+    final identitySubtitle =
+        'Join $destination. ${saved.length == 1 ? 'Use this identity or import a Nostr key.' : 'Choose an identity or import a Nostr key.'}';
+    final identityCards = <Widget>[
+      for (final identity in saved)
+        SavedIdentityCard(
+          identity: identity,
+          onSelect: busy.value ? null : () => select(pubkey: identity.pubkey),
+        ),
+    ];
+    final joinActions = <Widget>[
+      if (choices.connectionState == ConnectionState.done) ...[
+        button(
+          onPressed: busy.value
+              ? null
+              : () async {
+                  if (fullScreen) {
+                    final imported = await Navigator.of(context).push<bool>(
+                      MaterialPageRoute(
+                        builder: (importContext) => NsecImportSheet(
+                          fullScreen: true,
+                          onBack: () {
+                            generation.value++;
+                            busy.value = false;
+                            error.value = null;
+                            Navigator.of(importContext).pop(false);
+                          },
+                          onImport: (nsec) => connect(nsec: nsec, close: false),
+                        ),
+                      ),
+                    );
+                    if (imported == true && context.mounted) {
+                      Navigator.of(context).pop(true);
+                    }
+                  } else {
+                    importFocusReady.value = false;
+                    importing.value = true;
+                  }
+                },
+          child: const Text('Import a Nostr key'),
+        ),
+        if (saved.isEmpty && choices.data?.complete == true)
+          button(
+            primary: true,
+            onPressed: busy.value ? null : () => select(create: true),
+            child: const Text('Create an identity and join'),
+          ),
+        if (saved.isEmpty && choices.data?.complete == true)
+          const Text(
+            'Export a backup in Settings after joining. This device will hold your only copy until you back it up.',
+          ),
+      ],
+      if (busy.value)
+        const Padding(
+          padding: EdgeInsets.all(Grid.sm),
+          child: Text('Joining…'),
+        ),
+      if (error.value != null)
+        Text(error.value!, style: TextStyle(color: context.colors.error)),
+    ];
     final joinContent = Padding(
       padding: fullScreen ? EdgeInsets.zero : const EdgeInsets.all(Grid.gutter),
       child: SingleChildScrollView(
@@ -206,103 +279,51 @@ class SelfHostedEntrySheet extends HookConsumerWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Container(
-              padding: const EdgeInsets.all(Grid.sm),
-              decoration: BoxDecoration(
-                color: context.theme.brightness == Brightness.dark
-                    ? const Color(0xFF233039)
-                    : Colors.white.withValues(alpha: 0.7),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: context.colors.primary.withValues(alpha: 0.15),
-                ),
-              ),
-              child: Text(
-                name.isEmpty ? Uri.parse(relay).host : name,
-                textAlign: TextAlign.center,
-                style: context.textTheme.titleMedium,
-              ),
-            ),
-            const SizedBox(height: Grid.sm),
             if (choices.hasError || choices.data?.complete == false)
               const Text(
                 'Some saved identities could not be read. You can use an available identity or import a key.',
               ),
-            for (final identity in saved)
-              button(
-                onPressed: busy.value
-                    ? null
-                    : () => select(pubkey: identity.pubkey),
-                child: Column(
-                  children: [
-                    Text(identity.label),
-                    Text(fullNpub(identity.pubkey) ?? identity.pubkey),
-                  ],
-                ),
-              ),
-            if (choices.connectionState == ConnectionState.done) ...[
-              button(
-                onPressed: busy.value
-                    ? null
-                    : () async {
-                        if (fullScreen) {
-                          final imported = await Navigator.of(context)
-                              .push<bool>(
-                                MaterialPageRoute(
-                                  builder: (importContext) => NsecImportSheet(
-                                    fullScreen: true,
-                                    onBack: () {
-                                      generation.value++;
-                                      busy.value = false;
-                                      error.value = null;
-                                      Navigator.of(importContext).pop(false);
-                                    },
-                                    onImport: (nsec) =>
-                                        connect(nsec: nsec, close: false),
-                                  ),
-                                ),
-                              );
-                          if (imported == true && context.mounted) {
-                            Navigator.of(context).pop(true);
-                          }
-                        } else {
-                          importFocusReady.value = false;
-                          importing.value = true;
-                        }
-                      },
-                child: const Text('Import a Nostr key'),
-              ),
-              if (saved.isEmpty && choices.data?.complete == true)
-                button(
-                  primary: true,
-                  onPressed: busy.value ? null : () => select(create: true),
-                  child: const Text('Create an identity and join'),
-                ),
-              if (saved.isEmpty && choices.data?.complete == true)
-                const Text(
-                  'Export a backup in Settings after joining. This device will hold your only copy until you back it up.',
-                ),
+            if (!fullScreen) ...[
+              Text(identitySubtitle, style: context.textTheme.bodyMedium),
+              const SizedBox(height: Grid.sm),
             ],
-            if (busy.value)
-              const Padding(
-                padding: EdgeInsets.all(Grid.sm),
-                child: Text('Joining…'),
-              ),
-            if (error.value != null)
-              Text(error.value!, style: TextStyle(color: context.colors.error)),
+            // The full-screen page already provides 16 px below its subtitle.
+            if (fullScreen && identityCards.isNotEmpty)
+              const SizedBox(height: Grid.xxs),
+            for (var i = 0; i < identityCards.length; i++) ...[
+              if (i > 0) const SizedBox(height: Grid.xxs),
+              identityCards[i],
+            ],
+            if (!fullScreen) ...[
+              if (identityCards.isNotEmpty) const SizedBox(height: Grid.xxs),
+              for (var i = 0; i < joinActions.length; i++) ...[
+                if (i > 0) const SizedBox(height: Grid.xxs),
+                joinActions[i],
+              ],
+            ],
           ],
         ),
       ),
     );
+    if (fullScreen && busy.value) {
+      return OnboardingLoadingPage(
+        title: 'Getting ready',
+        onCancel: () {
+          generation.value++;
+          busy.value = false;
+        },
+      );
+    }
     if (fullScreen) {
       return OnboardingStepPage(
-        title: 'Join community',
-        subtitle: 'Select an identity to use in this community.',
+        title: identityTitle,
+        subtitle: identitySubtitle,
         onBack: () {
           generation.value++;
           Navigator.of(context).pop(false);
         },
         content: joinContent,
+        actions: joinActions,
       );
     }
     return AnimatedSize(
@@ -315,7 +336,7 @@ class SelfHostedEntrySheet extends HookConsumerWidget {
         if (context.mounted && importing.value) importFocusReady.value = true;
       },
       child: BuzzTitledSheetLayout(
-        title: importing.value ? 'Import identity' : 'Join community',
+        title: importing.value ? 'Import identity' : 'Choose an identity',
         onClose: importing.value
             ? () {
                 generation.value++;

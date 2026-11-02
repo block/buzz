@@ -1242,6 +1242,8 @@ pub struct AppState {
     pub search: Arc<SearchService>,
     /// Registry of active client subscriptions.
     pub sub_registry: Arc<SubscriptionRegistry>,
+    /// Live NIP-AR syncs this node serves.
+    pub artifact_syncs: Arc<crate::handlers::artifact_sync::ArtifactSyncs>,
     /// Registry of active WebSocket connections.
     pub conn_manager: Arc<ConnectionManager>,
     /// Lifecycle cancellation for every long-lived socket, including huddle audio.
@@ -1578,6 +1580,7 @@ impl AppState {
             auth: Arc::new(auth),
             search: search_arc,
             sub_registry: Arc::new(SubscriptionRegistry::new()),
+            artifact_syncs: Arc::default(),
             conn_manager: Arc::new(ConnectionManager::new()),
             community_connections: Arc::new(CommunityConnectionRegistry::new()),
             community_revalidator_cancel: CancellationToken::new(),

@@ -134,6 +134,7 @@ class MainActivity : FlutterFragmentActivity() {
     private var hapticsPlugin: HapticsPlugin? = null
     private var hostedHpkePlugin: HostedHpkePlugin? = null
     private var identityFilePlugin: IdentityFilePlugin? = null
+    private var browserAuthPlugin: BrowserAuthPlugin? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -143,6 +144,7 @@ class MainActivity : FlutterFragmentActivity() {
         )
         hostedHpkePlugin = HostedHpkePlugin(flutterEngine.dartExecutor.binaryMessenger)
         identityFilePlugin = IdentityFilePlugin(this, flutterEngine.dartExecutor.binaryMessenger)
+        browserAuthPlugin = BrowserAuthPlugin(this, flutterEngine.dartExecutor.binaryMessenger)
         hapticsPlugin = HapticsPlugin(this, flutterEngine.dartExecutor.binaryMessenger)
 
         huddleMediaPlugin = HuddleMediaPlugin(
@@ -203,6 +205,22 @@ class MainActivity : FlutterFragmentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        // Resolve the browser session before resume can report cancellation.
+        browserAuthPlugin?.onNewIntent(intent)
+        super.onNewIntent(intent)
+    }
+
+    override fun onPause() {
+        browserAuthPlugin?.onPause()
+        super.onPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        browserAuthPlugin?.onResume()
+    }
+
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         identityFilePlugin?.onActivityResult(requestCode, resultCode, data)
@@ -218,6 +236,8 @@ class MainActivity : FlutterFragmentActivity() {
     }
 
     override fun onDestroy() {
+        browserAuthPlugin?.dispose()
+        browserAuthPlugin = null
         identityFilePlugin?.dispose()
         identityFilePlugin = null
         hostedHpkePlugin?.dispose()

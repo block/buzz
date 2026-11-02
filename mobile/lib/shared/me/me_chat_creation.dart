@@ -1,6 +1,8 @@
 import 'dart:convert';
 
 import '../crypto/nip44.dart';
+import '../crypto/event_signing.dart';
+import '../relay/nostr_models.dart';
 import 'me_sync.dart';
 import 'me_journal.dart';
 
@@ -9,7 +11,7 @@ class MeChatCreation {
   /// Stable channel UUID, reused for every retry.
   final String id;
 
-  /// User-supplied name frozen before the first relay mutation.
+  /// Initial name frozen before the first relay mutation.
   final String name;
 
   /// Selected agent public key.
@@ -18,8 +20,17 @@ class MeChatCreation {
   /// Optional Solo project, frozen with the rest of the creation intent.
   final String? project;
 
+  /// Signed first message, reused verbatim after interrupted delivery.
+  final NostrEvent? initialMessage;
+
   /// Create a new intent; persistence happens before [complete] performs writes.
-  const MeChatCreation(this.id, this.name, this.agent, {this.project});
+  const MeChatCreation(
+    this.id,
+    this.name,
+    this.agent, {
+    this.project,
+    this.initialMessage,
+  });
 
   /// Account and community boundary for durable creation storage.
   static String storageKey(MeSync sync) =>
@@ -36,18 +47,28 @@ class MeChatCreation {
       value['name'] as String,
       value['agent'] as String,
       project: value['project'] as String?,
+      initialMessage: value['initialMessage'] == null
+          ? null
+          : NostrEvent.fromJson(
+              value['initialMessage'] as Map<String, dynamic>,
+            ),
     );
   }
 
   /// Persist before any relay mutation. Do not replace another pending intent.
-  Future<void> save(MeSync sync) async {
+  Future<void> save(MeSync sync) => _save(sync);
+
+  Future<void> _save(MeSync sync, {String? replacingMessageId}) async {
     if (sync.disposed) throw StateError('Your community changed. Try again.');
     final previous = pending(sync);
     if (previous != null &&
         (previous.id != id ||
             previous.name != name ||
             previous.agent != agent ||
-            previous.project != project)) {
+            previous.project != project ||
+            (previous.initialMessage?.id != initialMessage?.id &&
+                (replacingMessageId == null ||
+                    previous.initialMessage?.id != replacingMessageId)))) {
       throw StateError('Resume the pending chat before starting another.');
     }
     // A matching cached value does not prove a previous disk write succeeded.
@@ -61,6 +82,8 @@ class MeChatCreation {
               'name': name,
               'agent': agent,
               'project': project,
+              if (initialMessage != null)
+                'initialMessage': initialMessage!.toJson(),
             }),
           ),
         )) {
@@ -77,7 +100,8 @@ class MeChatCreation {
     if (current?.id != id ||
         current?.name != name ||
         current?.agent != agent ||
-        current?.project != project) {
+        current?.project != project ||
+        current?.initialMessage?.id != initialMessage?.id) {
       throw StateError('The unfinished chat changed. Review it again.');
     }
     await clearMeJournal(
@@ -103,7 +127,7 @@ class MeChatCreation {
     required Future<void> Function() place,
   }) async {
     await save(sync);
-    final record = sync.prefs!.getString(storageKey(sync))!;
+    var record = sync.prefs!.getString(storageKey(sync))!;
     sync.check();
     final existing = await findChannel();
     sync.check();
@@ -121,6 +145,10 @@ class MeChatCreation {
       await place();
     }
     sync.check();
+    if (initialMessage != null) {
+      record = await _deliverInitialMessage(sync, record);
+      sync.check();
+    }
     await clearMeJournal(
       sync.prefs!,
       storageKey(sync),
@@ -128,5 +156,56 @@ class MeChatCreation {
       checkScope: sync.check,
     );
     return result;
+  }
+
+  // Relay ingestion rejects events older than 15 minutes, even duplicates.
+  // Confirm acceptance before replacing an expired identity; a lost OK must
+  // never turn one first message into two messages.
+  Future<String> _deliverInitialMessage(MeSync sync, String record) async {
+    var message = initialMessage!;
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    if ((message.createdAt - now).abs() >= 14 * 60) {
+      final existing = await sync.session.fetchHistory(
+        NostrFilter(
+          kinds: const [9],
+          authors: [sync.pubkey],
+          ids: [message.id],
+          tags: {
+            '#h': [id],
+          },
+          limit: 1,
+        ),
+      );
+      sync.check();
+      if (existing.any(
+        (event) =>
+            event.id == message.id &&
+            event.pubkey == sync.pubkey &&
+            event.kind == 9 &&
+            event.getTagValue('h') == id,
+      )) {
+        return record;
+      }
+      message = NostrEvent.fromJson(
+        signNostrEvent(
+          kind: message.kind,
+          content: message.content,
+          tags: message.tags,
+          secretKey: sync.privateHex,
+        ).toMap(),
+      );
+      await MeChatCreation(
+        id,
+        name,
+        agent,
+        project: project,
+        initialMessage: message,
+      )._save(sync, replacingMessageId: initialMessage!.id);
+      sync.check();
+      record = sync.prefs!.getString(storageKey(sync))!;
+    }
+    await sync.session.publish(message);
+    sync.check();
+    return record;
   }
 }

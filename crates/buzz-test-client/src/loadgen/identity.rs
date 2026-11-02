@@ -12,6 +12,10 @@ pub enum Role {
     Owner,
     Human,
     Agent,
+    HotAuthor,
+    /// Posts only hot-thread roots, so `run` finds them among its newest
+    /// posts however many other roots a channel has.
+    HotRoot,
 }
 
 impl Role {
@@ -20,6 +24,8 @@ impl Role {
             Role::Owner => "owner",
             Role::Human => "human",
             Role::Agent => "agent",
+            Role::HotAuthor => "hot-author",
+            Role::HotRoot => "hot-root",
         }
     }
 }
@@ -52,19 +58,29 @@ pub fn keys(run_id: &str, role: Role, index: usize) -> Keys {
     }
 }
 
+fn uuid(parts: &[&str]) -> uuid::Uuid {
+    let seed = digest(parts);
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&seed[..16]);
+    uuid::Builder::from_random_bytes(bytes).into_uuid()
+}
+
 /// Channel UUID for channel `index` of community `community`.
 pub fn channel_id(run_id: &str, community: usize, index: usize) -> String {
-    let seed = digest(&[
+    uuid(&[
         "buzz-loadgen-channel",
         run_id,
         &community.to_string(),
         &index.to_string(),
-    ]);
-    let mut bytes = [0u8; 16];
-    bytes.copy_from_slice(&seed[..16]);
-    uuid::Builder::from_random_bytes(bytes)
-        .into_uuid()
-        .to_string()
+    ])
+    .to_string()
+}
+
+/// Deletion request id for `host` in run `run_id`, so a re-run of `teardown`
+/// replays the same request instead of conflicting with it. Keyed by host,
+/// so a changed host template never reuses another host's request id.
+pub fn teardown_request_id(run_id: &str, host: &str) -> uuid::Uuid {
+    uuid(&["buzz-loadgen-teardown", run_id, host])
 }
 
 /// NIP-OA `auth` tag in which `owner` authorizes `agent`.

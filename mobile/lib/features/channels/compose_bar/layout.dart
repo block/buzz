@@ -30,6 +30,7 @@ class _ComposeBarLayout extends HookWidget {
   final bool canSend;
   final bool hasPendingUploads;
   final bool isSending;
+  final bool readOnly;
 
   const _ComposeBarLayout({
     required this.surfaceKey,
@@ -61,6 +62,7 @@ class _ComposeBarLayout extends HookWidget {
     required this.canSend,
     required this.hasPendingUploads,
     required this.isSending,
+    this.readOnly = false,
   });
 
   @override
@@ -342,6 +344,7 @@ class _ComposeBarLayout extends HookWidget {
     return TextField(
       controller: controller,
       focusNode: focusNode,
+      readOnly: readOnly,
       keyboardType: TextInputType.multiline,
       textInputAction: TextInputAction.newline,
       contextMenuBuilder: contextMenuBuilder,

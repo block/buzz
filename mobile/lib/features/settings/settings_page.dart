@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
 
 import 'package:buzz/shared/crypto/event_signing.dart';
@@ -13,7 +14,6 @@ import 'package:package_info_plus/package_info_plus.dart';
 import '../../shared/auth/auth.dart';
 import '../../shared/identity_transfer/nsec_export_sheet.dart';
 import '../../shared/clipboard_utils.dart';
-import '../../shared/success_haptic.dart';
 import '../../shared/push/push_relay_capability_provider.dart';
 import '../../shared/push/push_bootstrap.dart';
 import '../../shared/relay/relay.dart';
@@ -41,7 +41,6 @@ class SettingsPage extends HookConsumerWidget {
     required this.profileHeader,
     required this.identityRecoveryPageBuilder,
     this.profileEditPageBuilder = _emptyProfileEditPage,
-    this.embedded = false,
     this.onSetStatus,
     this.onEditDisplayName,
     this.onEditProfileDescription,
@@ -49,9 +48,6 @@ class SettingsPage extends HookConsumerWidget {
 
   /// Header widget displayed at the top of settings.
   final Widget profileHeader;
-
-  /// The profile destination in the main tab bar.
-  final bool embedded;
 
   /// Builds the identity-recovery page pushed from the recovery settings row.
   final WidgetBuilder identityRecoveryPageBuilder;
@@ -82,20 +78,15 @@ class SettingsPage extends HookConsumerWidget {
       child: FrostedScaffold(
         useUtilitySurfaceTheme: true,
         appBar: FrostedAppBar(
-          nativeTitle: embedded ? '' : 'Settings',
-          nativeLeading: embedded
-              ? null
-              : IosNavigationAction(
-                  label: 'Close settings',
-                  symbol: 'xmark',
-                  onPressed: () => Navigator.of(context).pop(),
-                ),
+          nativeTitle: 'Settings',
+          nativeLeading: IosNavigationAction(
+            label: 'Close settings',
+            symbol: 'xmark',
+            onPressed: () => Navigator.of(context).pop(),
+          ),
           automaticallyImplyLeading: false,
           horizontalInset: Grid.gutter,
-          showBottomDivider: false,
-          leading: embedded
-              ? null
-              : Theme.of(context).platform == TargetPlatform.iOS
+          leading: Theme.of(context).platform == TargetPlatform.iOS
               ? IosGlassNavigationButton(
                   key: const ValueKey('settings-ios-glass-close'),
                   icon: IosGlassNavigationIcon.close,

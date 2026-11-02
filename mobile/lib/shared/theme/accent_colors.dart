@@ -87,26 +87,12 @@ const accentColors = [
   ),
 ];
 
-Color accentColorForScheme(ColorScheme scheme, int accentIndex) {
-  if (accentIndex < 0 || accentIndex >= accentColors.length) {
-    return scheme.primary;
-  }
-  final accent = accentColors[accentIndex];
-  if (scheme.brightness == Brightness.dark && accent.useThemeForegroundInDark) {
-    return scheme.onSurface;
-  }
-  return scheme.brightness == Brightness.light ? accent.light : accent.dark;
-}
-
 /// New default: Black.
 ///
 /// Keep this at the end of [accentColors] so existing saved accent indexes keep
 /// pointing at the same colors.
 const neutralAccentIndex = 0;
 const defaultAccentIndex = neutralAccentIndex;
-
-/// Legacy default: Catppuccin Mauve/the base theme primary.
-const legacyDefaultAccentIndex = -1;
 
 int? accentIndexForWireValue(String value) {
   final index = accentColors.indexWhere((accent) => accent.wireValue == value);

@@ -360,11 +360,6 @@ TextPainter _glyphFor(String emoji) {
   return painter;
 }
 
-/// Drop the cached glyph layouts. Exposed for tests; the cache is not
-/// community- or account-scoped, so nothing else needs to reset it.
-@visibleForTesting
-void clearEmojiBurstGlyphCache() => _glyphCache.clear();
-
 class _EmojiBurstPainter extends CustomPainter {
   final EmojiBurstController controller;
 

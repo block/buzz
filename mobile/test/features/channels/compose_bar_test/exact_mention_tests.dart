@@ -17,6 +17,8 @@ void exactMentionTests() {
     List<ChannelMember> roster,
     ComposeBarOnSend onSend, {
     nostr.Keys? signer,
+    List<OwnedAgentDirectoryEntry>? ownedAgents,
+    bool ownedAgentsUnknown = false,
   }) async {
     await tester.pumpWidget(
       _buildComposeBar(
@@ -35,6 +37,8 @@ void exactMentionTests() {
                 ),
               ),
         onSend: onSend,
+        ownedAgents: ownedAgents,
+        ownedAgentsUnknown: ownedAgentsUnknown,
       ),
     );
     if (find.byType(TextField).evaluate().isEmpty &&
@@ -78,6 +82,9 @@ void exactMentionTests() {
     'tainted',
     'non-member human',
     'non-member denied agent',
+    'non-member unlisted own agent',
+    'non-member listed own agent',
+    'non-member own agent, list unknown',
   ]) {
     testWidgets('persisted selection restore to signed send: $scenario', (
       tester,
@@ -96,6 +103,16 @@ void exactMentionTests() {
             mediaTags: mediaTags,
           ),
           signer: signer,
+          // The Agents page lists the owned agent only in its own scenario.
+          ownedAgents: switch (scenario) {
+            'non-member unlisted own agent' => const [],
+            'non-member listed own agent' => [
+              OwnedAgentDirectoryEntry(pubkey: first),
+            ],
+            _ => null,
+          },
+          // Still loading (or offline): nothing is known to be unlisted.
+          ownedAgentsUnknown: scenario == 'non-member own agent, list unknown',
         );
         final container = ProviderScope.containerOf(
           tester.element(find.byType(ComposeBar)),
@@ -146,6 +163,9 @@ void exactMentionTests() {
           'removed',
           'non-member human',
           'non-member denied agent',
+          'non-member unlisted own agent',
+          'non-member listed own agent',
+          'non-member own agent, list unknown',
         ].contains(scenario))
           ChannelMember(
             pubkey: first,
@@ -162,9 +182,15 @@ void exactMentionTests() {
               UserProfile(
                 pubkey: first,
                 displayName: 'Renamed',
-                ownerPubkey: scenario == 'non-member denied agent'
-                    ? second
-                    : null,
+                // The viewer's own agent. An earlier Buzz's agent is not on
+                // the Agents page; a listed one is.
+                ownerPubkey: switch (scenario) {
+                  'non-member denied agent' => second,
+                  'non-member unlisted own agent' ||
+                  'non-member listed own agent' ||
+                  'non-member own agent, list unknown' => signer.public,
+                  _ => null,
+                },
               ),
             );
         await tester.pumpAndSettle();
@@ -195,9 +221,15 @@ void exactMentionTests() {
           }
         }
       }
+      // Admitted people and agents outside the channel are asked about.
+      final outsider = [
+        'non-member human',
+        'non-member listed own agent',
+        'non-member own agent, list unknown',
+      ].contains(scenario);
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
-      if (scenario == 'non-member human') {
+      if (outsider) {
         expect(
           find.textContaining('Renamed is not in this channel'),
           findsOneWidget,
@@ -212,6 +244,8 @@ void exactMentionTests() {
         'rename',
         'legacy',
         'non-member human',
+        'non-member listed own agent',
+        'non-member own agent, list unknown',
         'map reset',
         'map plain',
         'map reselected',
@@ -219,13 +253,13 @@ void exactMentionTests() {
         final event = messages.single;
         expect(event['content'], expectedText.trim());
         expect((event['tags'] as List).where((t) => t[0] == 'p').toList(), [
-          if (scenario != 'non-member human' && scenario != 'map plain')
+          if (!outsider && scenario != 'map plain')
             [
               'p',
               ['legacy', 'map reselected'].contains(scenario) ? second : first,
             ],
         ]);
-        if (scenario == 'non-member human') {
+        if (outsider) {
           expect(
             (event['tags'] as List).where((t) => t[0] == 'mention').toList(),
             [

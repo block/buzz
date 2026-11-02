@@ -15,92 +15,25 @@ class _MeRetry extends StatelessWidget {
   );
 }
 
-Future<String?> _name(
-  BuildContext context,
-  String title, {
-  String initialValue = '',
-}) async {
-  if (defaultTargetPlatform == TargetPlatform.iOS) {
-    final theme = utilitySurfaceThemeData(Theme.of(context));
-    try {
-      return await const MethodChannel(
-        'buzz/profile_text_editor',
-      ).invokeMethod<String>('presentProject', {
-        'title': title,
-        'initialValue': initialValue,
-        'placeholder': 'Project name',
-        'multiline': false,
-        'brightness': theme.brightness.name,
-        'pageBackgroundArgb': theme.colorScheme.surface.toARGB32(),
-        'containerBackgroundArgb': theme.colorScheme.surfaceContainerHighest
-            .toARGB32(),
-        'containerCornerRadius': Radii.container,
-      });
-    } on MissingPluginException {
-      // Use the shared sheet when the native editor is unavailable.
-    }
-  }
-  if (!context.mounted) return null;
-  return showBuzzModalBottomSheet<String>(
-    context: context,
-    title: title,
-    isScrollControlled: true,
-    requestFocus: true,
-    builder: (_) => _NewMeProject(initialValue: initialValue),
-  );
-}
-
-class _NewMeProject extends HookConsumerWidget {
-  final String initialValue;
-  const _NewMeProject({this.initialValue = ''});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final controller = useTextEditingController(text: initialValue);
-    useListenable(controller);
-    final name = controller.text.trim();
-    return Padding(
-      padding: EdgeInsets.fromLTRB(
-        Grid.gutter,
-        Grid.md,
-        Grid.gutter,
-        MediaQuery.viewInsetsOf(context).bottom + Grid.gutter,
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          TextField(
-            controller: controller,
-            autofocus: true,
-            maxLength: 120,
-            decoration: const InputDecoration(labelText: 'Project name'),
-          ),
-          const SizedBox(height: Grid.md),
-          FilledButton(
-            onPressed: name.isEmpty ? null : () => Navigator.pop(context, name),
-            child: const Text('Create project'),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _MeChatRow extends StatelessWidget {
+class _MeChatRow extends ConsumerWidget {
   const _MeChatRow({
+    required this.channelId,
     required this.name,
     required this.onTap,
     required this.isUnread,
   });
+  final String channelId;
   final String name;
   final bool isUnread;
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) {
-    final color = navigationPrimaryForeground(context);
+  Widget build(BuildContext context, WidgetRef ref) {
+    final color = channelNavigationForeground(context, unread: isUnread);
+    final working = ref.watch(meWorkingAgentsProvider(channelId));
+    final status = working.isEmpty ? '' : ', ${working.join(', ')} working';
     return Semantics(
-      label: isUnread ? '$name, unread' : name,
+      label: '${isUnread ? '$name, unread' : name}$status',
       onTap: onTap,
       excludeSemantics: true,
       button: true,
@@ -129,41 +62,20 @@ class _MeChatRow extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                   style: navigationChatTitleTextStyle.copyWith(
                     color: color,
-                    fontWeight: isUnread ? FontWeight.w700 : FontWeight.w500,
+                    fontWeight: isUnread ? FontWeight.w600 : FontWeight.w400,
                   ),
                 ),
               ),
+              if (working.isNotEmpty) ...[
+                const SizedBox(width: Grid.xs),
+                SoloWorkingDots(color: color),
+              ],
             ],
           ),
         ),
       ),
     );
   }
-}
-
-Future<void> _offerMeRecovery(BuildContext context, MeSync sync) async {
-  final pending = sync.prefs?.getString(sync.pendingKey);
-  if (pending == null) return;
-  final discard = await showDialog<bool>(
-    context: context,
-    builder: (context) => AlertDialog(
-      title: const Text('Conflicting Solo changes'),
-      content: const Text(
-        'Desktop and this phone changed the same project or chat. Keep the pending phone change to retry later, or discard it and use the current desktop organization. Your chat messages will be kept.',
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context, false),
-          child: const Text('Keep pending'),
-        ),
-        TextButton(
-          onPressed: () => Navigator.pop(context, true),
-          child: const Text('Discard phone change'),
-        ),
-      ],
-    ),
-  );
-  if (discard == true) await sync.discardPending(pending);
 }
 
 // Reconnects replace the transport service while an editor may still be open.
@@ -175,4 +87,26 @@ MeSync _currentMeSync(WidgetRef ref, MeSync reviewed) {
     throw StateError('Your account or community changed. Open Solo again.');
   }
   return current;
+}
+
+class _MeSectionEmpty extends StatelessWidget {
+  const _MeSectionEmpty(this.label);
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(
+      horizontal: Grid.xxs,
+      vertical: Grid.half,
+    ),
+    child: Align(
+      alignment: Alignment.centerLeft,
+      child: Text(
+        label,
+        style: contentListBodyTextStyle.copyWith(
+          color: context.colors.onSurfaceVariant,
+        ),
+      ),
+    ),
+  );
 }

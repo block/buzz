@@ -2,6 +2,7 @@ import 'package:flutter/gestures.dart';
 import 'community_link_focus.dart';
 import '../../shared/widgets/ios_community_link_input.dart';
 import 'package:flutter/material.dart';
+import '../../shared/widgets/onboarding_route.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
@@ -23,6 +24,9 @@ class AddCommunityPage extends StatelessWidget {
     required this.onScan,
     required this.onOpenCommunity,
     required this.onSubmitPairing,
+    this.onboarding = false,
+    this.onFindCommunities,
+    this.onCreateCommunity,
     this.enteringCommunityLink = false,
     this.existingUser = false,
     this.scannerProgress = 0,
@@ -39,6 +43,9 @@ class AddCommunityPage extends StatelessWidget {
   final VoidCallback? onScan;
   final ValueChanged<Uri> onOpenCommunity;
   final ValueChanged<String> onSubmitPairing;
+  final bool onboarding;
+  final VoidCallback? onFindCommunities;
+  final VoidCallback? onCreateCommunity;
   final bool enteringCommunityLink;
   final bool existingUser;
   final double scannerProgress;
@@ -59,6 +66,9 @@ class AddCommunityPage extends StatelessWidget {
         ? _AddCommunityConnection(
             key: const ValueKey('add-community-connection'),
             enteringLink: enteringCommunityLink,
+            onboarding: onboarding,
+            onFindCommunities: onFindCommunities,
+            onCreateCommunity: onCreateCommunity,
             scannerProgress: scannerProgress,
             accountStatus: accountStatus,
             onBack: onBack,
@@ -80,27 +90,20 @@ class AddCommunityPage extends StatelessWidget {
             errorMessage: errorMessage,
             onInputChanged: onInputChanged,
           );
-    return AnimatedSwitcher(
-      duration: MediaQuery.disableAnimationsOf(context)
-          ? Duration.zero
-          : const Duration(milliseconds: 250),
-      layoutBuilder: (current, previous) => Stack(
-        fit: StackFit.expand,
-        children: [
-          for (final child in previous)
-            ExcludeFocus(
-              child: ExcludeSemantics(child: IgnorePointer(child: child)),
-            ),
-          ?current,
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) onBack();
+      },
+      child: Navigator(
+        onDidRemovePage: (_) {},
+        pages: [
+          OnboardingPage<void>(
+            key: ValueKey(step == 'pair' ? 'pair' : 'connection'),
+            child: page,
+          ),
         ],
       ),
-      transitionBuilder: (child, animation) => SlideTransition(
-        position: Tween(begin: const Offset(1, 0), end: Offset.zero).animate(
-          CurvedAnimation(parent: animation, curve: Curves.easeOutCubic),
-        ),
-        child: child,
-      ),
-      child: page,
     );
   }
 }

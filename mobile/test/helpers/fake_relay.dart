@@ -231,9 +231,14 @@ class FakeRelay {
     final result = <String, NostrEvent>{};
     for (final filter in filters) {
       final limit = filter['limit'] as int?;
+      // Buzz offset pagination: `page` N (from 1) skips N-1 pages of `limit`.
+      final page = filter['page'] as int?;
       final matches = stored.where((e) => _matches(filter, e)).toList()
         ..sort(_newestFirst);
-      for (final event in limit == null ? matches : matches.take(limit)) {
+      final skipped = page == null || limit == null
+          ? matches
+          : matches.skip((page - 1) * limit);
+      for (final event in limit == null ? skipped : skipped.take(limit)) {
         result[event.id] = event;
       }
     }
@@ -429,6 +434,7 @@ const _filterKeys = {
   'until',
   'limit',
   'before_id',
+  'page',
 };
 const _windowKeys = {
   'top_level',

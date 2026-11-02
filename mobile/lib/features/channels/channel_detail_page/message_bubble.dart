@@ -266,6 +266,7 @@ class _MessageBubble extends HookConsumerWidget {
                                         children: [
                                           Expanded(
                                             child: MessageAuthorMeta(
+                                              mark: VerifiedMark(pubkey: pk),
                                               showTimestamp: true,
                                               reversed: false,
                                               alignment: ownMessage
@@ -349,8 +350,7 @@ class _MessageBubble extends HookConsumerWidget {
                                       content: message.content,
                                       bubble: true,
                                       hasReactions:
-                                          message.reactions.isNotEmpty ||
-                                          replyFooter != null,
+                                          message.reactions.isNotEmpty,
                                       bubbleEnd: showAvatar,
                                       bubbleStart: showAuthor,
                                       ownMessage: ownMessage,
