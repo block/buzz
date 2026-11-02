@@ -72,6 +72,7 @@ use crate::Result;
 pub struct AdmittedTx {
     tx: Transaction<'static, Postgres>,
     community: CommunityId,
+    artifact_certification: Option<Uuid>,
     /// Channels whose TTL deadline [`AdmittedTx::commit`] refreshes.
     ttl_refresh_channels: BTreeSet<Uuid>,
     push_enqueue: Option<super::push_enqueue::PushEnqueue>,
@@ -89,6 +90,7 @@ impl AdmittedTx {
         Ok(Self {
             tx,
             community,
+            artifact_certification: None,
             ttl_refresh_channels: BTreeSet::new(),
             push_enqueue: None,
             push_events: Vec::new(),
@@ -108,6 +110,7 @@ impl AdmittedTx {
         Ok(Self {
             tx,
             community: lease.community_id,
+            artifact_certification: None,
             ttl_refresh_channels: BTreeSet::new(),
             push_enqueue: None,
             push_events: Vec::new(),
@@ -129,6 +132,17 @@ impl AdmittedTx {
                 super::push_enqueue::record_drop("transaction_full");
             }
         }
+    }
+
+    /// Record work before the first change that affects incremental artifact reads.
+    pub(crate) async fn record_artifact_change(&mut self) -> Result<()> {
+        if self.artifact_certification.is_none() {
+            let operation = Uuid::new_v4();
+            sqlx::query("INSERT INTO artifact_sync_pending (community_id,operation_id,earliest_at) VALUES ($1,$2,clock_timestamp())")
+                .bind(self.community.as_uuid()).bind(operation).execute(&mut *self.tx).await?;
+            self.artifact_certification = Some(operation);
+        }
+        Ok(())
     }
 
     /// The community this transaction was admitted for.

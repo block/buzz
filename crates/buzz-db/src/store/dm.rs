@@ -187,6 +187,7 @@ pub async fn create_dm(
 
     // Add all participants as members with role='member'.
     for pk in participants {
+        tx.record_artifact_change().await?;
         sqlx::query(
             r#"
             INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)

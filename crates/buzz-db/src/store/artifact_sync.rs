@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Row};
 use uuid::Uuid;
 
+pub use super::artifact_certification::OVERLAP_SECONDS;
+
 /// Maximum changes or requested identities in one page.
 pub const PAGE_ROWS: usize = 100;
 

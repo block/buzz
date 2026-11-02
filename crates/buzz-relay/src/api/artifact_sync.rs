@@ -6,7 +6,7 @@ use buzz_core::{
     artifact::{ArtifactQuery, ArtifactView},
     TenantContext,
 };
-use buzz_db::artifact_sync::{Candidate, Position, PAGE_ROWS};
+use buzz_db::artifact_sync::{Candidate, Position, OVERLAP_SECONDS, PAGE_ROWS};
 use chrono::{DateTime, Duration, Utc};
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
@@ -18,7 +18,7 @@ use std::{
 };
 use uuid::Uuid;
 
-const OVERLAP: i64 = 120;
+const OVERLAP: i64 = OVERLAP_SECONDS;
 const CHECKPOINT_DAYS: i64 = 30;
 const RESPONSE_BYTES: usize = 8_388_608;
 static WORK: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);

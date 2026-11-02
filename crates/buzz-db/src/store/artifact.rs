@@ -184,6 +184,7 @@ impl Db {
                 }
             }
         }
+        tx.record_artifact_change().await?;
         sqlx::query(
             "INSERT INTO artifact_revisions (community_id,event_id,artifact_id,source_channel_id,modified_at) VALUES ($1,$2,$3,$4,clock_timestamp())",
         )

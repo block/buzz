@@ -253,6 +253,7 @@ impl ChannelMembershipLocks<'_> {
     ) -> Result<()> {
         self.check_covers(channel_id)?;
         let community_id = self.tx.community();
+        self.tx.record_artifact_change().await?;
         sqlx::query(
             r#"
             INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
@@ -1015,6 +1016,7 @@ async fn put_members_on(
     let mut written: std::collections::HashMap<Vec<u8>, MemberRecord> =
         std::collections::HashMap::with_capacity(write_keys.len());
     if !write_keys.is_empty() {
+        tx.record_artifact_change().await?;
         let rows = sqlx::query(
             r#"
             INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
@@ -1152,6 +1154,7 @@ pub async fn remove_member(
         }
     }
 
+    tx.record_artifact_change().await?;
     let result = sqlx::query(
         r#"
         UPDATE channel_members

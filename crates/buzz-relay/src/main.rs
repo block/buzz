@@ -1462,6 +1462,8 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         });
     }
 
+    tokio::spawn(buzz_relay::artifact_certification::run(Arc::clone(&state)));
+
     // NIP-AR Sync: a possible loss on the Redis link resyncs every sync.
     tokio::spawn(buzz_relay::handlers::artifact_sync::watch_link(Arc::clone(
         &state,

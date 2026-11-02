@@ -21,6 +21,8 @@ pub(crate) mod nip_fi_upgrade;
 
 /// REST API route handlers.
 pub mod api;
+/// Durable recovery for incremental artifact reads.
+pub mod artifact_certification;
 /// WebSocket audio relay for huddle voice channels.
 pub mod audio;
 /// Relay configuration from environment variables.

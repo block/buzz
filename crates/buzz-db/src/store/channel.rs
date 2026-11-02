@@ -161,6 +161,7 @@ pub async fn create_channel(
     .execute(tx.conn())
     .await?;
 
+    tx.record_artifact_change().await?;
     sqlx::query(
         r#"
         INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
@@ -403,6 +404,7 @@ async fn insert_channel_rows(
 
     if was_created {
         // Bootstrap the creator as owner.
+        tx.record_artifact_change().await?;
         sqlx::query(
             r#"
             INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
@@ -431,6 +433,7 @@ async fn insert_channel_rows(
                     member.len()
                 )));
             }
+            tx.record_artifact_change().await?;
             sqlx::query(
                 r#"
                 INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
@@ -1204,13 +1207,16 @@ async fn update_channel_on(
     } else {
         false
     };
+    if policy_changed {
+        tx.record_artifact_change().await?;
+    }
     let result = q.execute(tx.conn()).await?;
     if result.rows_affected() == 0 {
         return Err(DbError::ChannelNotFound(channel_id));
     }
     if policy_changed {
         sqlx::query(
-            "UPDATE communities SET artifact_policy_modified_at=clock_timestamp() WHERE id=$1",
+            "UPDATE communities SET artifact_policy_modified_at=GREATEST(clock_timestamp(),artifact_policy_modified_at + interval '1 microsecond') WHERE id=$1",
         )
         .bind(community_id.as_uuid())
         .execute(tx.conn())
@@ -1564,12 +1570,13 @@ async fn soft_delete_on(w: &mut ChannelSettingsWriter<'_>) -> Result<()> {
     }
     let channel_id = w.channel_id;
     let community_id = w.tx.community();
+    w.tx.record_artifact_change().await?;
     sqlx::query("UPDATE channels SET deleted_at = NOW() WHERE community_id = $1 AND id = $2")
         .bind(community_id.as_uuid())
         .bind(channel_id)
         .execute(w.tx.conn())
         .await?;
-    sqlx::query("UPDATE communities SET artifact_policy_modified_at=clock_timestamp() WHERE id=$1")
+    sqlx::query("UPDATE communities SET artifact_policy_modified_at=GREATEST(clock_timestamp(),artifact_policy_modified_at + interval '1 microsecond') WHERE id=$1")
         .bind(community_id.as_uuid())
         .execute(w.tx.conn())
         .await?;

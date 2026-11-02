@@ -2,6 +2,45 @@ use super::*;
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn durable_certification_resets_existing_checkpoints_after_the_overlap() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let first = sync(&f, None).await;
+    let id = Uuid::new_v4();
+    let event = f.revision(id, "create", None);
+    accept(&f, &event).await;
+    // Model a commit whose original stamp predates the checkpoint overlap.
+    sqlx::query("UPDATE artifact_heads SET modified_at=$1::timestamptz-interval '121 seconds' WHERE community_id=$2 AND artifact_id=$3")
+        .bind(first["startedAt"].as_str().unwrap()).bind(f.community.as_uuid()).bind(id).execute(&f.pool).await.unwrap();
+    sqlx::query("UPDATE artifact_sync_pending SET earliest_at=$1::timestamptz-interval '121 seconds' WHERE community_id=$2")
+        .bind(first["startedAt"].as_str().unwrap()).bind(f.community.as_uuid()).execute(&f.pool).await.unwrap();
+    let missed = sync(&f, Some(&first["checkpoint"])).await;
+    assert_eq!(missed["changes"], json!([]));
+    assert_eq!(
+        f.state.db.recover_artifact_certifications().await.unwrap(),
+        1
+    );
+    for checkpoint in [&first["checkpoint"], &missed["checkpoint"]] {
+        let (status, body) = f
+            .request(
+                "/query",
+                json!([{
+                    "artifact":"incremental", "query":query(), "checkpoint":checkpoint
+                }]),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["reason"], "policy_changed");
+    }
+    let recovered = sync(&f, None).await;
+    assert_eq!(recovered["changes"][0]["event"]["id"], event.id.to_hex());
+    let (status, ordinary) = f.request("/query", json!([query()])).await;
+    assert!(status.is_success());
+    assert!(ordinary.to_string().contains(&event.id.to_hex()));
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn incremental_resets_for_first_artifact_during_channel_transition() {
     let _guard = SERIAL.lock().await;
     for delete_channel in [false, true] {

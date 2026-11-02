@@ -1557,6 +1557,9 @@ pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
     let deleted = purged > 0 || result.rows_affected() > 0;
 
     if deleted {
+        if target.is_some_and(|(kind, _)| kind == 45010) {
+            tx.record_artifact_change().await?;
+        }
         sqlx::query("UPDATE artifact_heads SET modified_at=clock_timestamp() WHERE community_id=$1 AND artifact_id=(SELECT artifact_id FROM artifact_revisions WHERE community_id=$1 AND event_id=$2) AND event_id=$2")
             .bind(community_id.as_uuid()).bind(event_id).execute(tx.conn()).await?;
         if let Some(pid) = parent_event_id {

@@ -65,6 +65,50 @@ in a reviewed maintenance transaction under community deletion admission.
 This forces clients to discover current records and revalidate saved IDs.
 No local absence scan is permitted.
 
-The 120-second stamp-to-visibility bound remains an operating assumption.
-Runtime measurements are tracked separately. This PR does not authorize
-a deployment or a production maintenance write.
+Without durable certification on every serving writer, the 120-second
+stamp-to-visibility bound remains an operating assumption. Runtime measurements
+are tracked separately.
+
+## Durable certification
+
+Migration `0081` adds `artifact_sync_pending`. It is an expand migration.
+It adds no trigger, function, foreign key, or backfill. Old relays ignore this
+table. New relays require it before they accept relevant writes. With startup
+migrations enabled, the older binary still has the SQLx `VersionMissing`
+restriction described in `docs/database.md`.
+
+Each supported writer records one pending operation in its admitted transaction.
+The operation has a unique UUID. Its timestamp precedes every relevant sync
+stamp in that transaction. Repeated changes in the transaction reuse the record.
+Rollback removes both the changes and the record. An uncertain commit leaves
+both committed or neither committed. Recovery does not require a caller retry.
+
+Every relay starts a recovery worker, even when the incremental gate is off.
+The worker reads bounded batches. It locks pending rows with `SKIP LOCKED`.
+After it observes a committed record, it reads database time. If less than
+120 seconds separate that time from the early timestamp, the overlap covers
+visibility of the write. A clock reversal or a delay of at least 120 seconds
+requires a reset. A delayed recovery can cause an unnecessary reset.
+
+Recovery advances `artifact_policy_modified_at` only when it requires a reset.
+It removes the pending rows in that same transaction. A crash before this
+commit leaves the pending rows for retry. A retry after the commit finds no
+work. Ordinary writes do not acquire a shared counter or policy row lock.
+
+Existing clients use the existing `policy_changed` reset. They start discovery
+again and revalidate saved IDs. The request, response, cursor, checkpoint, and
+capability formats stay at version 1. No client change is required. A reset
+covers the community because that is the existing policy boundary.
+
+Full coverage requires all serving writers to use this release. The covered
+paths are artifact create, update, move, delete, restore, and redaction;
+channel creation; membership grants, rejoins, and removals; channel visibility,
+listing, TTL, and deletion changes; DM creation; and admin member removals.
+Archive state and hidden DMs do not change artifact access. Incremental reads
+exclude TTL channels. Whole-community deletion stops reads and purges pending
+records. Operator SQL and mixed old writers cannot provide this guarantee.
+Keep the gate off during a mixed rollout. Use the existing reset procedure
+before enablement or after a rollback to an old writer.
+
+This change does not authorize deployment, gate enablement, or a production
+maintenance write.

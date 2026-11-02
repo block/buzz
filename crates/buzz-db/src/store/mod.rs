@@ -82,6 +82,7 @@ pub mod workflow;
 /// NIP-AR artifact lifecycle and durable delivery.
 pub mod artifact;
 
+mod artifact_certification;
 mod artifact_query;
 /// Timestamp-based incremental artifact reads.
 pub mod artifact_sync;

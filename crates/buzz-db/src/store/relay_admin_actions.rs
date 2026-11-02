@@ -718,6 +718,7 @@ pub async fn execute_kick_with_marker(
     crate::channel_members::acquire_channel_membership_lock(tx.conn(), community_id, channel_id)
         .await?;
 
+    tx.record_artifact_change().await?;
     let kick = sqlx::query(
         r#"
         UPDATE channel_members
@@ -1726,6 +1727,7 @@ pub async fn deploy_kick_member(
         .await?;
     // Use a direct UPDATE to avoid the tenant ownership check in channel::remove_member.
     // This is the deployment-authority primitive: no actor role check.
+    tx.record_artifact_change().await?;
     let result = sqlx::query(
         r#"
         UPDATE channel_members

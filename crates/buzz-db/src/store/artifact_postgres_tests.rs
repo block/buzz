@@ -15,6 +15,55 @@ struct Fixture {
     peer: Keys,
     relay: Keys,
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn artifact_writes_record_one_certification_before_their_timestamps() {
+    let f = Fixture::new().await;
+    let id = Uuid::new_v4();
+    let mut previous = None;
+    let mut home = f.a;
+    for op in ["create", "update", "move", "delete", "restore"] {
+        let source = if op == "move" { Some(home) } else { None };
+        if op == "move" {
+            home = f.b;
+        }
+        let event = f.revision(id, op, home, previous.as_ref(), &f.owner, vec![]);
+        assert!(matches!(
+            f.accept(&event, source).await,
+            ArtifactOutcome::Accepted(_)
+        ));
+        let (count, early): (i64, bool) = sqlx::query_as(
+            "SELECT count(*),bool_and(p.earliest_at <= LEAST(h.modified_at,r.modified_at)) \
+             FROM artifact_sync_pending p JOIN artifact_heads h USING(community_id) \
+             JOIN artifact_revisions r ON r.community_id=h.community_id AND r.event_id=h.event_id \
+             WHERE p.community_id=$1 AND h.artifact_id=$2",
+        )
+        .bind(f.community.as_uuid())
+        .bind(id)
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+        assert_eq!((count, early), (1, true), "{op}");
+        assert!(matches!(
+            f.accept(&event, source).await,
+            ArtifactOutcome::Duplicate
+        ));
+        assert_eq!(f.db.recover_artifact_certifications().await.unwrap(), 1);
+        previous = Some(event);
+    }
+    let event = previous.unwrap();
+    crate::event::soft_delete_event_and_update_thread(
+        &f.db.pool,
+        f.community,
+        event.id.as_bytes(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(f.db.recover_artifact_certifications().await.unwrap(), 1);
+}
 impl Fixture {
     async fn new() -> Self {
         let pool = PgPool::connect(&crate::test_support::database_url())

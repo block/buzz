@@ -141,6 +141,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i tables/public/storage_accounting_snapshots.sql
 \i tables/public/artifact_heads.sql
 \i tables/public/artifact_revisions.sql
+\i tables/public/artifact_sync_pending.sql
 
 -- partitions
 \i partitions/events.sql
