@@ -77,6 +77,49 @@ void main() {
     });
   });
 
+  group('isHexPubkey', () {
+    test('accepts exactly 64 hex characters in either case', () {
+      expect(isHexPubkey(canonicalHex), isTrue);
+      expect(isHexPubkey(canonicalHex.toUpperCase()), isTrue);
+      expect(isHexPubkey('0' * 64), isTrue);
+      expect(isHexPubkey('F' * 64), isTrue);
+    });
+
+    test('rejects other lengths and characters', () {
+      expect(isHexPubkey(''), isFalse);
+      expect(isHexPubkey(canonicalHex.substring(1)), isFalse);
+      expect(isHexPubkey('${canonicalHex}0'), isFalse);
+      expect(isHexPubkey(' ${canonicalHex.substring(1)}'), isFalse);
+      // Characters just outside each accepted range.
+      for (final c in ['/', ':', '@', 'G', '`', 'g', 'n']) {
+        expect(isHexPubkey('$c${'0' * 63}'), isFalse, reason: c);
+      }
+      expect(isHexPubkey(canonicalNpub), isFalse);
+    });
+  });
+
+  group('npub encoding cache', () {
+    test('repeated and evicted keys still encode canonically', () {
+      // More distinct keys than the cache holds, so early ones are evicted
+      // and encoded again.
+      final keys = [
+        for (var i = 0; i < 9000; i++) i.toRadixString(16).padLeft(64, '0'),
+      ];
+      final first = [for (final key in keys) fullNpub(key)];
+      expect(fullNpub(canonicalHex), canonicalNpub);
+      for (var i = 0; i < keys.length; i += 997) {
+        final expected = nostr.Nip19.encode(
+          prefix: nostr.Nip19Prefix.npub,
+          data: keys[i],
+        );
+        expect(first[i], expected);
+        expect(fullNpub(keys[i]), expected);
+        expect(fullNpub(keys[i].toUpperCase()), expected);
+      }
+      expect(shortPubkey(canonicalHex), canonicalCompact);
+    });
+  });
+
   group('copy to paste roundtrip', () {
     test('a copied npub parses back to the original hex key', () {
       final copied = fullNpub(canonicalHex);
