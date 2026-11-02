@@ -716,10 +716,10 @@ void main() {
         after - readStateHorizonSeconds,
       ),
     );
-    final firstSince = inInclusiveRange(
-      before - relayLiveWindowSkewSeconds,
-      after - relayLiveWindowSkewSeconds,
-    );
+    // Blobs come from other devices: a writer 900s slow and this reader 900s
+    // fast are 1800s apart, plus a margin.
+    const overlap = 2 * 900 + 60;
+    final firstSince = inInclusiveRange(before - overlap, after - overlap);
     expect(relay.subscribeFilters.single.since, firstSince);
 
     // A failed re-sync fetch leaves the next one starting from the last
@@ -762,7 +762,10 @@ void main() {
     now = 1000000;
     await manager.reinitializeRemote();
     expect(relay.fetchFilters.last.since, now - readStateHorizonSeconds);
-    expect(relay.subscribeFilters.last.since, now - relayLiveWindowSkewSeconds);
+    expect(
+      relay.subscribeFilters.last.since,
+      now - relayCrossDeviceSkewSeconds,
+    );
 
     manager.dispose();
   });
@@ -796,7 +799,7 @@ void main() {
       await manager.initialize();
       expect(
         relay.subscribeFilters.last.since,
-        now - relayLiveWindowSkewSeconds,
+        now - relayCrossDeviceSkewSeconds,
       );
 
       // The clock is corrected while connected. The next read resyncs.
@@ -806,7 +809,7 @@ void main() {
       expect(relay.fetchFilters.last.since, now - readStateHorizonSeconds);
       expect(
         relay.subscribeFilters.last.since,
-        now - relayLiveWindowSkewSeconds,
+        now - relayCrossDeviceSkewSeconds,
       );
       expect(relay.subscribeCount, 2);
       expect(relay.liveSubscriptions, 1);

@@ -378,15 +378,14 @@ class ReadStateManager {
 
   /// The earliest `created_at` a blob stored since the last successful fetch
   /// was sent can carry, or null before one. Merging takes the newest mark per
-  /// context, so blobs from before it add nothing. The relay rejects a
-  /// `created_at` more than 900s from its clock;
-  /// [relayLiveWindowSkewSeconds] adds 60s of client clock skew.
+  /// context, so blobs from before it add nothing. Blobs come from other
+  /// devices, so this reaches back [relayCrossDeviceSkewSeconds].
   int? get _storedSinceLastFetch {
     final sentAt = _lastFetchSentAt;
     // A clock set back since then can't place blobs relative to it, so the
     // next fetch covers the whole horizon again.
     if (sentAt == null || sentAt > _now()) return null;
-    return sentAt - relayLiveWindowSkewSeconds;
+    return sentAt - relayCrossDeviceSkewSeconds;
   }
 
   /// The live subscription keeps the `since` it was opened with. When the
