@@ -1786,10 +1786,13 @@ async fn search_pool() -> PgPool {
         .expect("connect search pool")
 }
 
-/// Backends other than the caller's that wait on a lock inside a search.
+/// Backends in this test's database, other than the caller's, that wait on
+/// a lock inside a search. Scoped to the database so concurrent tests in
+/// sibling databases cannot change the count.
 async fn waiting_searches(pool: &PgPool) -> i64 {
     sqlx::query_scalar(
         "SELECT count(*) FROM pg_stat_activity WHERE pid <> pg_backend_pid() \
+         AND datname = current_database() \
          AND wait_event_type = 'Lock' AND query LIKE '%search_query.query%'",
     )
     .fetch_one(pool)

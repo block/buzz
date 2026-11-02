@@ -130,8 +130,8 @@ async fn cancel(pool: &PgPool, (pid, started_us): (i32, i64)) -> &'static str {
             .fetch_optional(&mut *conn)
             .await
         {
-            Ok(Some(_)) => return "cancelled",
             Ok(None) => elsewhere.push(conn),
+            Ok(Some(signalled)) => return signal_outcome(signalled),
             Err(e) => {
                 tracing::warn!(error = %e, pid, "search cancel failed");
                 return "error";
@@ -139,4 +139,25 @@ async fn cancel(pool: &PgPool, (pid, started_us): (i32, i64)) -> &'static str {
         }
     }
     "missed"
+}
+
+/// Outcome label for a [`CANCEL_SQL`] row: `pg_cancel_backend` returns false
+/// when the signal could not be sent (the backend exited in between).
+fn signal_outcome(signalled: bool) -> &'static str {
+    if signalled {
+        "cancelled"
+    } else {
+        "signal_failed"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_sent_signal_counts_as_cancelled() {
+        assert_eq!(signal_outcome(true), "cancelled");
+        assert_eq!(signal_outcome(false), "signal_failed");
+    }
 }
