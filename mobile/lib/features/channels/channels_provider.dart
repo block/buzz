@@ -27,6 +27,7 @@ import 'unread_badge/should_notify_for_event.dart';
 part 'channel_directory.dart';
 part 'channel_unread_deletions.dart';
 part 'channel_unread_catch_up.dart';
+part 'channel_latest_messages.dart';
 part 'channel_snapshot.dart';
 part 'channel_member_snapshots.dart';
 part 'channels_provider_lifecycle.dart';
@@ -71,8 +72,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   Set<String> _participatedRootIds = {};
   Set<String> _authoredRootIds = {};
   // Per channel, when this session's last successful latest-message query was
-  // sent. A later query asks only for messages stored since then.
-  final Map<String, int> _latestMessageSentAtById = {};
+  // sent and whether it was muted. Later queries ask only for what's newer.
+  final Map<String, ({int sentAt, bool muted})> _latestMessageSentAtById = {};
+  // Per channel, the message behind `lastMessageAt`, when known.
+  final Map<String, ({String id, int createdAt})> _latestMessageById = {};
   String? _threadInterestPubkey;
   bool _hasLoaded = false;
   bool _hasCachedSnapshot = false;
@@ -245,6 +248,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _clearLiveSubscriptions();
       _latestObservedByChannel.clear();
       _latestMessageSentAtById.clear();
+      _latestMessageById.clear();
       _observedUnreadEventsByChannel.clear();
       _unreadDeletedIdsByChannel.clear();
       _unscopedUnreadDeletedIds.clear();
@@ -483,14 +487,15 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
           lastMessageMap[channel.id] = at.millisecondsSinceEpoch ~/ 1000;
         }
       }
+      final mutedChannelIds = _mutedChannelIds();
       if (events != null) {
         for (final id in channelById.keys) {
           // A failed channel's next query still needs its earlier window.
           if (latestFailedIds.contains(id)) continue;
-          _latestMessageSentAtById[id] = latestSentAt;
+          final muted = mutedChannelIds.contains(id);
+          _latestMessageSentAtById[id] = (sentAt: latestSentAt, muted: muted);
         }
       }
-      final mutedChannelIds = _mutedChannelIds();
       for (final event in events ?? const <NostrEvent>[]) {
         final channelId = event.channelId;
         if (channelId == null) continue;
@@ -505,6 +510,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
             )) {
           continue;
         }
+        _noteLatestMessage(channelId, event);
         final current = lastMessageMap[channelId];
         if (current == null || event.createdAt > current) {
           lastMessageMap[channelId] = event.createdAt;
@@ -580,88 +586,6 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     return channels;
   }
 
-  /// Fetches each channel's independent latest-message window in one HTTP
-  /// bridge request. The relay preserves NIP-01 per-filter limits while
-  /// executing the filters with bounded concurrency, avoiding an unbounded
-  /// burst of websocket REQs on communities with many channels.
-  ///
-  /// A channel asked only for newer messages can't see that its latest one
-  /// was deleted, so the same request asks for deletions in those windows. A
-  /// channel with one is asked again in full and removed from [sinceById],
-  /// so its latest message is recomputed rather than kept.
-  Future<List<NostrEvent>?> _fetchLastMessageEvents(
-    RelaySessionNotifier session,
-    List<ChannelData> channels,
-    Map<String, int> sinceById,
-    Set<String> failedChannelIds,
-  ) async {
-    if (channels.isEmpty) return const [];
-
-    NostrFilter latest(ChannelData channel, {int? since}) => NostrFilter(
-      kinds: EventKind.channelMessageEventKinds,
-      tags: {
-        '#h': [channel.id],
-      },
-      since: since,
-      limit: channel.channelType == 'dm' ? 1 : 20,
-    );
-    final windowed = [
-      for (final channel in channels)
-        if (sinceById.containsKey(channel.id)) channel.id,
-    ];
-    final events = await _fetchChannelHistoryBatch(
-      session,
-      [
-        for (final channel in channels)
-          latest(channel, since: sinceById[channel.id]),
-        for (var i = 0; i < windowed.length; i += kMaxExplicitChannelValues)
-          NostrFilter(
-            kinds: const [EventKind.deletion, EventKind.nip29DeleteEvent],
-            tags: {
-              '#h': windowed.sublist(
-                i,
-                min(i + kMaxExplicitChannelValues, windowed.length),
-              ),
-            },
-            since: windowed.map((id) => sinceById[id]!).reduce(min),
-            limit: 500,
-          ),
-      ],
-      operation: 'latest-message query',
-      failedChannelIds: failedChannelIds,
-    );
-    if (events == null) return null;
-    bool isDeletion(NostrEvent event) =>
-        event.kind == EventKind.deletion ||
-        event.kind == EventKind.nip29DeleteEvent;
-    // The relay matches a deletion without an `h` tag by the channel of the
-    // event it deletes, which this can't tell, so it counts for every window.
-    final deletedIn = {
-      for (final event in events)
-        if (isDeletion(event))
-          ...switch (event.channelId) {
-            final id? => [if (sinceById.containsKey(id)) id],
-            null => windowed,
-          },
-    };
-    final messages = [
-      for (final event in events)
-        if (!isDeletion(event) && !deletedIn.contains(event.channelId)) event,
-    ];
-    if (deletedIn.isEmpty) return messages;
-    sinceById.removeWhere((id, _) => deletedIn.contains(id));
-    final full = await _fetchChannelHistoryBatch(
-      session,
-      [
-        for (final channel in channels)
-          if (deletedIn.contains(channel.id)) latest(channel),
-      ],
-      operation: 'latest-message query',
-      failedChannelIds: failedChannelIds,
-    );
-    return full == null ? null : [...messages, ...full];
-  }
-
   /// Where each channel's latest-message query starts.
   ///
   /// Every refresh path (resume, reconnect, join) asks again for each
@@ -675,16 +599,19 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   ///
   /// Only channels the current list shows with a known latest message start
   /// there: one that left the list (a hidden DM, a channel left and rejoined)
-  /// or never got a timestamp needs the full query to find it again.
+  /// or never got a timestamp needs the full query to find it again, as does
+  /// one muted or unmuted since, which changes the messages that count.
   Map<String, int> _latestMessageSince() {
     final known = {
       for (final channel in state.value ?? const <Channel>[])
         if (channel.lastMessageAt != null) channel.id,
     };
+    final muted = _mutedChannelIds();
     return {
-      for (final MapEntry(key: id, value: sentAt)
+      for (final MapEntry(key: id, value: (:sentAt, muted: wasMuted))
           in _latestMessageSentAtById.entries)
-        if (known.contains(id)) id: sentAt - relayLiveWindowSkewSeconds,
+        if (known.contains(id) && muted.contains(id) == wasMuted)
+          id: sentAt - relayLiveWindowSkewSeconds,
     };
   }
 
@@ -908,6 +835,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
             channelId: channel.id,
           ) &&
           _recordUnreadEvent(channel, event, myPk)) {
+        _noteLatestMessage(channelId, event);
         final eventTime = DateTime.fromMillisecondsSinceEpoch(
           event.createdAt * 1000,
           isUtc: true,

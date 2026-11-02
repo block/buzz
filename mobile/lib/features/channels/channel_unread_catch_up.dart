@@ -133,6 +133,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
           continue;
         }
         if (!_recordUnreadEvent(channel, event, myPk)) continue;
+        _noteLatestMessage(channelId, event);
         recordedAtByChannel[channelId] = max(
           recordedAtByChannel[channelId] ?? 0,
           event.createdAt,
@@ -153,6 +154,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
           myPk,
           countQuiet: true,
         )) {
+          _noteLatestMessage(channelId, quiet);
           recordedAtByChannel[channelId] = quiet.createdAt;
         }
       }

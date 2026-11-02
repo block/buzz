@@ -7,6 +7,8 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/channel_mutes/channel_mutes_provider.dart';
+import 'package:buzz/features/channels/channel_mutes/channel_mutes_storage.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -2256,6 +2258,7 @@ void main() {
           memberships: [_membership(_channelA, myPk)],
           metadata: [_meta(id: _channelA, name: 'general')],
           recentMessages: [message('m1', newest), message('m0', older)],
+          deletionChannels: {'unreact': _channelA},
         );
         final container = _buildContainer(session: session);
         addTearDown(container.dispose);
@@ -2266,6 +2269,47 @@ void main() {
             DateTime.fromMillisecondsSinceEpoch(seconds * 1000, isUtc: true);
         await container.read(channelsProvider.future);
         await _settle();
+        expect(lastMessageAt(), at(newest));
+
+        // Removing a reaction (kind 5 without `h`, which the relay matches
+        // by the reaction's channel) or deleting an older message leaves the
+        // latest message in place, so the query stays incremental.
+        NostrEvent deletion(String id, String target, {String? channel}) =>
+            NostrEvent(
+              id: id,
+              pubkey: 'alice',
+              createdAt: now(),
+              kind: EventKind.deletion,
+              tags: [
+                if (channel != null) ['h', channel],
+                ['e', target],
+              ],
+              content: '',
+              sig: 'sig',
+            );
+        session.recentMessages = [
+          deletion('unreact', 'reaction-1'),
+          deletion('older-deletion', 'm-1', channel: _channelA),
+        ];
+        final before = session.queryBatches.where(isLatest).length;
+        await refreshed(session, notifier);
+        expect(session.queryBatches.where(isLatest).length, before + 1);
+        expect(
+          latestSince(session.queryBatches.lastWhere(isLatest)),
+          isNotNull,
+        );
+        expect(lastMessageAt(), at(newest));
+
+        // A full page of deletions may have left out the one that matters, so
+        // the channel is asked again in full.
+        session.recentMessages = [
+          message('m1', newest),
+          message('m0', older),
+          for (var i = 0; i < 500; i++)
+            deletion('bulk-$i', 'other-$i', channel: _channelA),
+        ];
+        await refreshed(session, notifier);
+        expect(latestSince(session.queryBatches.lastWhere(isLatest)), isNull);
         expect(lastMessageAt(), at(newest));
 
         // m1 is deleted. The relay leaves it out, and m0 is older than the
@@ -2290,6 +2334,30 @@ void main() {
         expect(latestSince(latest[latest.length - 2]), isNotNull);
         expect(latestSince(latest.last), isNull);
         expect(lastMessageAt(), at(older));
+      });
+
+      test('for a channel muted since', () async {
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [_meta(id: _channelA, name: 'general')],
+          recentMessages: [message('m1', now() - 3600)],
+        );
+        final mutes = _TestMutes();
+        final container = _buildContainer(session: session, mutes: mutes);
+        addTearDown(container.dispose);
+        final notifier = container.read(channelsProvider.notifier);
+        DateTime? lastMessageAt() =>
+            container.read(channelsProvider).value!.single.lastMessageAt;
+        await container.read(channelsProvider.future);
+        await _settle();
+        expect(lastMessageAt(), isNotNull);
+
+        // Ordinary messages in a muted channel don't count, so its timestamp
+        // is recomputed rather than kept.
+        mutes.mute(_channelA);
+        await refreshed(session, notifier);
+        expect(latestSince(session.queryBatches.lastWhere(isLatest)), isNull);
+        expect(lastMessageAt(), isNull);
       });
 
       test('for a channel back in the list', () async {
@@ -3139,16 +3207,33 @@ NostrEvent _meta({
   sig: 'sig',
 );
 
-ProviderContainer _buildContainer({required _FakeRelaySession session}) {
+ProviderContainer _buildContainer({
+  required _FakeRelaySession session,
+  _TestMutes? mutes,
+}) {
   return ProviderContainer(
     retry: (_, _) => null,
     overrides: [
+      if (mutes != null) channelMutesProvider.overrideWith(() => mutes),
       appLifecycleProvider.overrideWith(() => _FakeAppLifecycleNotifier()),
       relaySessionProvider.overrideWith(() => session),
       // Route the pubkey through a mutable notifier so tests can switch the
       // signing identity mid-flight the way an account change does at runtime.
       myPubkeyProvider.overrideWith((ref) => ref.watch(_testPubkeyProvider)),
     ],
+  );
+}
+
+/// Channel mutes a test sets directly.
+class _TestMutes extends ChannelMutesNotifier {
+  @override
+  ChannelMutesState build() => const ChannelMutesState(isReady: true);
+
+  void mute(String channelId) => state = ChannelMutesState(
+    isReady: true,
+    store: ChannelMuteStore(
+      channels: {channelId: const ChannelMuteEntry(muted: true, updatedAt: 1)},
+    ),
   );
 }
 
