@@ -1619,12 +1619,7 @@ async fn query_member_events(
             .search_slots
             .run(tenant.community(), pubkey.to_bytes(), search)
             .await
-            .unwrap_or_else(|search_slots::Superseded| {
-                Err(api_error(
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "rate-limited: superseded by a newer search",
-                ))
-            });
+            .unwrap_or_else(|superseded| Err(superseded.into()));
     }
 
     if let Some(presence_result) =

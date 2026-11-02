@@ -5,7 +5,8 @@
 //! intermediary that keeps the upstream request open) leaves every one of
 //! them running. Each `(community, pubkey)` may have [`PER_USER`] searches in
 //! flight; the next one supersedes the oldest, whose request then fails with
-//! [`Superseded`]. Dropping the superseded search cancels its statement on
+//! [`Superseded`] (409, never 429: clients read 429 as relay-wide
+//! back-pressure and hold all their relay traffic). Dropping the superseded search cancels its statement on
 //! the server (see `buzz_search::cancel`).
 //!
 //! Newest wins rather than rejecting the newcomer: the newest keystroke is
@@ -18,8 +19,12 @@ use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
+use axum::http::StatusCode;
+use axum::Json;
 use buzz_core::CommunityId;
 use tokio_util::sync::CancellationToken;
+
+use crate::api::api_error;
 
 /// Bridge searches one `(community, pubkey)` may have in flight.
 pub(crate) const PER_USER: usize = 4;
@@ -29,6 +34,18 @@ type Key = (CommunityId, [u8; 32]);
 /// A search gave way to a newer one from the same user.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Superseded;
+
+/// Body of a superseded search's response.
+const SUPERSEDED: &str = "search superseded by a newer search";
+
+/// 409, not 429: desktop and the CLI treat any 429 (and any `rate-limited:`
+/// body) as relay-wide back-pressure, so a 429 here would stall every relay
+/// request the client makes, or retry the search it just replaced.
+impl From<Superseded> for (StatusCode, Json<serde_json::Value>) {
+    fn from(_: Superseded) -> Self {
+        api_error(StatusCode::CONFLICT, SUPERSEDED)
+    }
+}
 
 /// In-flight bridge searches per user, oldest first.
 #[derive(Default)]
@@ -203,6 +220,16 @@ mod tests {
         for search in &mut rest[1..] {
             assert!(poll_once(search.as_mut()).is_pending());
         }
+    }
+
+    #[test]
+    fn a_superseded_search_is_a_conflict_not_back_pressure() {
+        let (status, Json(body)) = Superseded.into();
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            body,
+            serde_json::json!({ "error": "search superseded by a newer search" })
+        );
     }
 
     #[tokio::test]
