@@ -164,17 +164,6 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         underlying_cli_install_instructions_url: None,
     },
     PresetHarness {
-        id: "opencode",
-        label: "OpenCode",
-        command: "opencode",
-        args: &["acp"],
-        install_instructions_url: "https://opencode.ai/docs",
-        install_hint: "Buzz talks to OpenCode through its CLI's ACP mode (opencode acp).",
-        underlying_cli: None,
-        underlying_cli_install_hint: None,
-        underlying_cli_install_instructions_url: None,
-    },
-    PresetHarness {
         id: "kimi",
         label: "Kimi Code",
         command: "kimi",

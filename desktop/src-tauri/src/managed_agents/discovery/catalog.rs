@@ -7,7 +7,10 @@
 use super::runtime_metadata::{
     KnownAcpRuntime, BUZZ_AGENT_EFFORT_VALUES, GOOSE_EFFORT_NORMALIZATION,
 };
-use super::{BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL};
+use super::{
+    BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
+    OPENCODE_AVATAR_URL,
+};
 
 pub(crate) const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
     KnownAcpRuntime {
@@ -119,6 +122,43 @@ pub(crate) const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         auth_probe_args: Some(&["codex", "login", "status"]),
     },
     KnownAcpRuntime {
+        id: "opencode",
+        label: "OpenCode",
+        commands: &["opencode"],
+        aliases: &[],
+        avatar_url: OPENCODE_AVATAR_URL,
+        mcp_command: None,
+        mcp_hooks: false,
+        underlying_cli: Some("opencode"),
+        cli_install_commands: &["curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path"],
+        // OpenCode publishes no PowerShell installer, so there is no Windows auto-install.
+        cli_install_commands_windows: &[],
+        adapter_install_commands: &[],
+        cli_install_instructions_url: "https://opencode.ai/docs",
+        adapter_install_instructions_url: "",
+        cli_install_hint: "Buzz talks to OpenCode through its CLI's ACP mode (opencode acp). Run `opencode auth login` to connect a provider.",
+        adapter_install_hint: "",
+        skill_dir: Some(".opencode/skills"),
+        supports_acp_model_switching: false,
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: false,
+        default_env: &[],
+        config_file_path: None,
+        config_file_format: None,
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        effort_normalization: None, // opencode: BUZZ_ACP_EFFORT_LEVEL applied to the thought_level config option
+        effort_accepted_values: None, // opencode: levels come from the session, not the catalog
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        max_rounds_env_var: None,
+        required_normalized_fields: &[],
+        login_hint: None,
+        // `opencode auth list` exits 0 with no credentials, so there is no faithful probe.
+        auth_probe_args: None,
+    },
+    KnownAcpRuntime {
         id: "buzz-agent",
         label: "Buzz Agent",
         commands: &["buzz-agent"],
@@ -154,3 +194,49 @@ pub(crate) const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         auth_probe_args: None,
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::KNOWN_ACP_RUNTIMES;
+    use crate::managed_agents::discovery::normalize_agent_args;
+
+    #[test]
+    fn opencode_is_a_tier1_runtime_without_blocking_auth() {
+        let rt = KNOWN_ACP_RUNTIMES
+            .iter()
+            .find(|rt| rt.id == "opencode")
+            .expect("opencode in catalog");
+        assert_eq!(rt.commands, &["opencode"]);
+        assert_eq!(rt.underlying_cli, Some("opencode"));
+        assert_eq!(rt.skill_dir, Some(".opencode/skills"));
+        assert!(!rt.cli_install_commands.is_empty());
+        assert!(rt.cli_install_commands_windows.is_empty());
+        assert!(rt.auth_probe_args.is_none());
+        assert!(!crate::managed_agents::discovery::preset_harness_ids().contains(&"opencode"));
+    }
+
+    #[test]
+    fn opencode_empty_args_normalize_to_acp() {
+        assert_eq!(normalize_agent_args("opencode", Vec::new()), vec!["acp"]);
+        assert_eq!(
+            normalize_agent_args("opencode", vec!["".into()]),
+            vec!["acp"]
+        );
+    }
+
+    #[test]
+    fn opencode_missing_from_path_is_not_ready() {
+        use crate::managed_agents::readiness::{agent_readiness, EffectiveAgentEnv, Requirement};
+        let env = EffectiveAgentEnv {
+            env: Default::default(),
+            config_file_path: None,
+            effective_command: "/nonexistent/bin/opencode".to_string(),
+        };
+        let readiness = agent_readiness(&env);
+        let reqs = readiness.requirements();
+        assert_eq!(reqs.len(), 1);
+        assert!(
+            matches!(&reqs[0], Requirement::MissingBinary { command } if command == "/nonexistent/bin/opencode")
+        );
+    }
+}

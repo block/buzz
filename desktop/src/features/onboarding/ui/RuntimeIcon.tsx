@@ -12,6 +12,7 @@ import { RUNTIME_MARKS } from "./HarnessMarks";
 // `currentColor`, so they adapt to dark/light without bitmap filters.
 const RUNTIME_LOGOS: Record<string, string> = {
   claude: claudeLogoUrl,
+  opencode: "/harness-logos/opencode.svg",
 };
 
 // Public-path logos for bundled presets. Served from /harness-logos/ at runtime.
@@ -21,7 +22,6 @@ export const PRESET_LOGOS: Record<string, string> = {
   omp: "/harness-logos/omp.svg",
   pi: "/harness-logos/pi.svg",
   grok: "/harness-logos/grok.svg",
-  opencode: "/harness-logos/opencode.svg",
   kimi: "/harness-logos/kimi.png",
   amp: "/harness-logos/amp.png",
   hermes: "/harness-logos/hermes.png",

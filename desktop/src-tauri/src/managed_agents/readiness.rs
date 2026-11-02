@@ -407,7 +407,7 @@ impl AgentReadiness {
 /// * **claude**: a successful `claude auth status` probe.
 /// * **codex**: a successful `codex login status` probe (checks the codex
 ///   credential store — NOT `OPENAI_API_KEY`).
-/// * **unknown / custom command**: always `Ready` (no requirements known).
+/// * **opencode / unknown / custom command**: the binary is on PATH.
 ///
 /// Databricks note: `DATABRICKS_TOKEN` is `.unwrap_or_default()` in
 /// `buzz-agent/src/config.rs:143` — it is an escape hatch for static tokens
@@ -430,15 +430,15 @@ fn collect_missing_requirements(
     effective: &EffectiveAgentEnv,
     runtime: Option<&KnownAcpRuntime>,
 ) -> Vec<Requirement> {
-    let Some(rt) = runtime else {
-        // Unknown/custom command — check that the binary is actually resolvable.
-        // No known requirement set beyond the PATH check.
-        if crate::managed_agents::resolve_command(&effective.effective_command).is_none() {
-            return vec![Requirement::MissingBinary {
+    let missing_binary =
+        || match crate::managed_agents::resolve_command(&effective.effective_command) {
+            Some(_) => vec![],
+            None => vec![Requirement::MissingBinary {
                 command: effective.effective_command.clone(),
-            }];
-        }
-        return vec![];
+            }],
+        };
+    let Some(rt) = runtime else {
+        return missing_binary();
     };
 
     match rt.id {
@@ -455,7 +455,7 @@ fn collect_missing_requirements(
             rt,
         ),
         "codex" => cli_login::requirements(&["codex", "login", "status"], "run `codex login`", rt),
-        _ => vec![],
+        _ => missing_binary(),
     }
 }
 

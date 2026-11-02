@@ -109,11 +109,10 @@ const CATALOG = [
     install_hint:
       "Buzz talks to OpenCode through its CLI's ACP mode (opencode acp).",
     install_instructions_url: "https://opencode.ai/docs",
-    can_auto_install: false,
+    can_auto_install: true,
     underlying_cli_path: null,
     node_required: false,
     auth_status: { status: "not_applicable" },
-    source: "preset",
   },
   {
     id: "my-custom",
