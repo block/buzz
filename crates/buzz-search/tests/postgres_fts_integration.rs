@@ -1919,7 +1919,28 @@ async fn cancel_signals_only_the_named_backend() {
             .await
             .map(|_| ())
     });
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // Signal only once the victim's statement is running: a cancel that
+    // lands first is a no-op, and the named cancel below would then pass
+    // without stopping anything.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let running: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+             WHERE pid = $1 AND state = 'active' AND query LIKE '%pg_sleep(30)%')",
+        )
+        .bind(pid)
+        .fetch_one(&pool)
+        .await
+        .expect("victim activity");
+        if running {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "victim statement never started"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
 
     // A same-pid backend that started at another time (another replica, or a
     // reused pid) is not signalled.
