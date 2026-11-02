@@ -62,6 +62,7 @@ Future<bool> showSelfHostedEntry(
         ),
         dark: dark,
         primaryArgb: primary,
+        onPrimaryArgb: context.colors.onPrimary.toARGB32(),
         choices: choices,
         connect: (pubkey, nsec, create, current) async {
           final community = await service.prepare(
