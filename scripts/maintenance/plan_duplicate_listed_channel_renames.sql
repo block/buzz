@@ -8,10 +8,17 @@
 -- (`LISTED_CHANNEL_SQL` in crates/buzz-db/src/store/channel.rs).
 --
 -- In each group of channels that share a name, one channel keeps it: the
--- oldest unarchived one, or the oldest archived one when all are archived.
+-- oldest unarchived one, or the oldest archived one when all are archived
+-- (except a starter name, below).
 -- Every other channel in the group gets "<name>-<first 8 characters of its
 -- id>", or "<name>-<id>" when another listed channel already has that name.
 -- It lists nothing for a community that is not active.
+--
+-- It also renames every channel named "general" or "welcome-everyone" when
+-- all the listed channels with that name are archived. Released desktop and
+-- mobile apps create those starter channels when no open, unarchived stream
+-- has the name, and the relay refuses that create while an archived channel
+-- holds the name. The rename frees the name for them.
 --
 --   psql -X -v ON_ERROR_STOP=1 -v host=<community host> -f scripts/maintenance/plan_duplicate_listed_channel_renames.sql
 
@@ -29,13 +36,16 @@ duplicates AS (
            left(name, 246) || '-' || left(id::text, 8) AS short_name,
            left(name, 218) || '-' || id::text AS long_name
     FROM (
-        SELECT id, name, row_number() OVER (
-            PARTITION BY lower(name)
-            ORDER BY archived_at IS NOT NULL, created_at, id
-        ) AS place
+        SELECT id, name,
+               row_number() OVER (
+                   PARTITION BY lower(name)
+                   ORDER BY archived_at IS NOT NULL, created_at, id
+               ) AS place,
+               bool_and(archived_at IS NOT NULL) OVER (PARTITION BY lower(name)) AS all_archived
         FROM listed
     ) ranked
     WHERE place > 1
+       OR (all_archived AND lower(name) IN ('general', 'welcome-everyone'))
 )
 SELECT d.id AS channel_id, d.name,
        CASE WHEN EXISTS (

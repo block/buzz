@@ -165,6 +165,78 @@ async fn plan_keeps_each_listed_name_on_its_oldest_unarchived_channel() {
     assert_eq!(seed.names(&pool).await, names);
 }
 
+/// Released desktop and mobile apps create `general` and `welcome-everyone`
+/// when no open, unarchived stream has the name, and the relay refuses that
+/// create while an archived channel holds it. The plan renames every holder of
+/// a starter name when all of them are archived, and no other archived name.
+/// Mutation: drop the `all_archived` condition in the plan → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn plan_frees_a_starter_name_that_only_archived_channels_hold() {
+    let (pool, _scratch) =
+        ScratchDb::migrated(&admin_url().await, "listed_name_plan_starter").await;
+    let seed = Seed::new(&pool).await;
+    let [general, welcome_old, welcome_new, random] = [(); 4].map(|_| Uuid::new_v4());
+    seed.open(&pool, general, "General", 30).await;
+    seed.open(&pool, welcome_old, "welcome-everyone", 60).await;
+    seed.open(&pool, welcome_new, "welcome-everyone", 10).await;
+    seed.open(&pool, random, "random", 20).await;
+    // A live `general` keeps its name; its archived namesake is a plain duplicate.
+    let live = Seed::new(&pool).await;
+    let [live_general, archived_general] = [(); 2].map(|_| Uuid::new_v4());
+    live.open(&pool, live_general, "general", 10).await;
+    live.open(&pool, archived_general, "general", 60).await;
+    sqlx::query("UPDATE channels SET archived_at = now() WHERE id = ANY($1)")
+        .bind(vec![
+            general,
+            welcome_old,
+            welcome_new,
+            random,
+            archived_general,
+        ])
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut expected = vec![
+        (general, "General".to_owned(), renamed(general, "General").1),
+        (
+            welcome_old,
+            "welcome-everyone".to_owned(),
+            renamed(welcome_old, "welcome-everyone").1,
+        ),
+        (
+            welcome_new,
+            "welcome-everyone".to_owned(),
+            renamed(welcome_new, "welcome-everyone").1,
+        ),
+    ];
+    expected.sort();
+    assert_eq!(rename_plan(&pool, &seed.host).await, expected);
+    assert_eq!(
+        rename_plan(&pool, &live.host).await,
+        vec![(
+            archived_general,
+            "general".to_owned(),
+            renamed(archived_general, "general").1
+        )]
+    );
+
+    assert_eq!(rename_duplicates(&pool, &seed.host).await, 3);
+    assert!(
+        rename_plan(&pool, &seed.host).await.is_empty(),
+        "nothing is left to rename"
+    );
+    let mut names = vec![
+        renamed(general, "General"),
+        renamed(welcome_old, "welcome-everyone"),
+        renamed(welcome_new, "welcome-everyone"),
+        (random, "random".to_owned()),
+    ];
+    names.sort();
+    assert_eq!(seed.names(&pool).await, names);
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn plan_picks_a_free_name_when_the_short_one_is_taken() {
