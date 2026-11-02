@@ -40,13 +40,13 @@ void _terminalSubscriptionTests() {
           expect(session.rejectionCount, 1);
           expect(session.totalSubscribeCount, 1);
           expect(logs.length, logsAfterClose);
-          expect(clock.periodicTimerCount, 1);
+          expect(clock.periodicTimerCount, 0);
           expect(clock.nonPeriodicTimerCount, 1);
           clock.elapse(const Duration(seconds: 7));
           expect(session.totalSubscribeCount, 2);
 
           // Then ever less often (5s doubling to 5 minutes, +/-25%), and never
-          // with a list or history read. Quiet backstop ticks read nothing.
+          // with a list or history read.
           clock.elapse(const Duration(minutes: 10));
           expect(session.totalSubscribeCount, inInclusiveRange(7, 8));
           expect(session.rejectionCount, session.totalSubscribeCount);
@@ -54,7 +54,7 @@ void _terminalSubscriptionTests() {
           expect(session.historyFilters.length, historyAfterClose);
           expect(session.queryBatches.length, batchesAfterClose);
           expect(session.activeSubscriptionCount, 0);
-          expect(clock.periodicTimerCount, 1);
+          expect(clock.periodicTimerCount, 0);
           expect(clock.nonPeriodicTimerCount, 1);
           expect(
             container.read(channelsProvider).requireValue.single.id,

@@ -42,6 +42,7 @@ class FakeRelay {
   final _rejections = <({bool Function(NostrEvent) match, String message})>[];
   final _refusals =
       <({bool Function(Map<String, dynamic>) match, String message})>[];
+  final _queryFailures = <bool Function(Map<String, dynamic>)>[];
   Completer<void>? _okHold;
   Completer<void>? _echoHold;
   Completer<void>? _reqHold;
@@ -77,6 +78,25 @@ class FakeRelay {
   ) => _refusals.add((match: match, message: message));
 
   /// Stores history without notifying live subscriptions.
+  /// Closes the live subscriptions a filter [match] accepts with CLOSED
+  /// [message], as a relay does when it drops an admitted REQ.
+  void closeLive(
+    bool Function(Map<String, dynamic> filter) match,
+    String message,
+  ) {
+    for (final socket in sockets) {
+      for (final entry in socket._live.entries.toList()) {
+        if (!entry.value.any(match)) continue;
+        socket._live.remove(entry.key);
+        scheduleMicrotask(() => socket._reply(['CLOSED', entry.key, message]));
+      }
+    }
+  }
+
+  /// Fails the next HTTP query with a filter [match] accepts.
+  void failQuery(bool Function(Map<String, dynamic> filter) match) =>
+      _queryFailures.add(match);
+
   void seed(Iterable<NostrEvent> events) => stored.addAll(events);
 
   /// Another client published [event]: store it and fan it out.
@@ -322,6 +342,11 @@ class FakeRelay {
     final filters = (jsonDecode(request.body) as List)
         .cast<Map<String, dynamic>>();
     queries.add(filters);
+    final failure = _queryFailures.indexWhere(filters.any);
+    if (failure >= 0) {
+      _queryFailures.removeAt(failure);
+      return http.Response('unavailable', 503);
+    }
     final events = filters.length == 1 && filters.single['top_level'] == true
         ? _channelWindow(filters.single)
         : _query(filters);

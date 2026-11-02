@@ -12,8 +12,7 @@ const _maxLiveChannelsPerSubscription = 128;
 extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
   /// Subscribe to live events in deterministic chunks that stay within the
   /// relay's aggregate explicit-`#h` limit, plus the channel list notices in
-  /// [_ChannelListChanges]. Also starts the 60s backstop, which reads the list
-  /// again only after a live event says it changed.
+  /// [_ChannelListChanges], whose events schedule a read of the list.
   Future<void> _subscribeLive(
     List<Channel> channels,
     _ChannelRefreshFence fence,
@@ -112,8 +111,6 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     _unreadCatchUp = _catchUpUnreadEvents(channels, fence, subscriptionVersion);
     _notifyUnreadReadinessChanged();
     unawaited(_unreadCatchUp);
-
-    _startBackstopTimer();
   }
 
   /// Subscribes one live chunk. Returns false when the sync should stop.
@@ -193,23 +190,66 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     return true;
   }
 
-  // Arm recovery before the first network load succeeds. A restored snapshot
-  // needs one full load. Otherwise launch, resume, reconnect and pull to
-  // refresh read the list, and live subscriptions keep it current between
-  // them, so a tick reads it again only after a live event says it changed.
-  // That also limits those reads to one a minute however busy the relay is.
-  void _startBackstopTimer() {
-    _backstopTimer ??= Timer.periodic(ChannelsNotifier._backstopInterval, (_) {
-      _noteReopenedSubscriptions();
-      // After suspension, a missed tick can precede the resumed lifecycle
-      // event. Keep recovery armed, but never poll while backgrounded.
-      if (_lifecycleRef.read(appLifecycleProvider) ==
-              AppLifecycleState.resumed &&
-          (_needsSnapshotRevalidation ||
-              _channelListChanges != _channelListChangesRead)) {
-        unawaited(_refreshInBackground());
-      }
-    });
+  /// Notes that the list may have changed and schedules a read: after
+  /// [ChannelsNotifier._listReadQuiet] without another such note, and no
+  /// later than [ChannelsNotifier._listReadMaxWait] after the first, so a
+  /// burst of changes costs one read. However busy the relay is, reads start
+  /// at least [ChannelsNotifier._listReadMinGap] apart.
+  void _noteListChanged() {
+    _channelListChanges++;
+    _scheduleListRead();
+  }
+
+  void _scheduleListRead() {
+    if (_listReadGap != null) {
+      _listReadDueAfterGap = true;
+      return;
+    }
+    _listReadQuietTimer?.cancel();
+    _listReadQuietTimer = Timer(
+      ChannelsNotifier._listReadQuiet,
+      _readListIfChanged,
+    );
+    _listReadDeadline ??= Timer(
+      ChannelsNotifier._listReadMaxWait,
+      _readListIfChanged,
+    );
+  }
+
+  void _readListIfChanged() {
+    _listReadQuietTimer?.cancel();
+    _listReadQuietTimer = null;
+    _listReadDeadline?.cancel();
+    _listReadDeadline = null;
+    if (!_lifecycleRef.mounted) return;
+    _noteReopenedSubscriptions();
+    // Resume and reconnect read the list anyway, so a read that comes due
+    // in the background or offline is left to them.
+    if (_lifecycleRef.read(appLifecycleProvider) != AppLifecycleState.resumed) {
+      return;
+    }
+    if (_needsSnapshotRevalidation ||
+        _channelListChanges != _channelListChangesRead) {
+      _listReadGap?.cancel();
+      _listReadGap = Timer(ChannelsNotifier._listReadMinGap, () {
+        _listReadGap = null;
+        if (!_listReadDueAfterGap) return;
+        _listReadDueAfterGap = false;
+        _readListIfChanged();
+      });
+      unawaited(_refreshInBackground(queueIfBusy: true));
+    }
+  }
+
+  void _cancelListRead() {
+    _listReadQuietTimer?.cancel();
+    _listReadQuietTimer = null;
+    _listReadDeadline?.cancel();
+    _listReadDeadline = null;
+    _listReadGap?.cancel();
+    _listReadGap = null;
+    _listReadDueAfterGap = false;
+    _listReadRetry.cancel();
   }
 
   Future<void> _refreshInBackground({bool queueIfBusy = false}) async {
@@ -222,12 +262,13 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
       return;
     }
     final generation = _buildGeneration;
+    final changes = _channelListChanges;
     _backgroundRefreshInFlight = true;
     try {
       if (_needsSnapshotRevalidation) {
         await refresh();
       } else {
-        await _backstopRefresh();
+        await _readListInBackground();
       }
     } finally {
       if (generation == _buildGeneration) {
@@ -235,6 +276,13 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
         if (_backgroundRefreshQueued) {
           _backgroundRefreshQueued = false;
           unawaited(_refreshInBackground());
+        } else if (_needsSnapshotRevalidation ||
+            _channelListChangesRead < changes) {
+          // The read failed. Nothing else would retry it before the next
+          // change, resume or reconnect.
+          _listReadRetry.schedule(_readListIfChanged);
+        } else {
+          _listReadRetry.cancel();
         }
       }
     }
@@ -259,8 +307,9 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     );
   }
 
-  /// Reopens the chunks the relay closed, after a backoff. One that reopens
-  /// is caught up by [_noteReopenedSubscriptions].
+  /// Reopens the chunks the relay closed, after a backoff. Events sent while
+  /// a chunk was closed are not replayed, so reopening one schedules a read
+  /// (see [_noteReopenedSubscriptions]).
   void _retryClosedLiveChunks() {
     _liveChunksRetry.schedule(() {
       _liveSubscriptionQueue = _liveSubscriptionQueue
@@ -316,24 +365,28 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
       }
       if (!proceed) break;
     }
-    if (_lifecycleRef.mounted && _terminallyClosedLiveChunks.isNotEmpty) {
+    if (!_lifecycleRef.mounted) return;
+    final reopened = _reopenedLiveChunks.isNotEmpty;
+    if (reopened) _scheduleListRead();
+    if (_terminallyClosedLiveChunks.isNotEmpty) {
       _retryClosedLiveChunks();
+    } else if (reopened) {
+      _liveChunksRetry.opened();
     }
   }
 
-  /// At a tick, a subscription reopened since the last one that is still up
-  /// counts as a change, because what it missed while down is not replayed.
-  /// Surviving until the tick also restarts its backoff, so a relay that
-  /// admits a REQ and then closes it again keeps backing off without reads.
+  /// When a read comes due, a subscription reopened since the last one that
+  /// is still up counts as a change, because what it missed while down is
+  /// not replayed. One the relay has closed again is retried, and its next
+  /// reopening is checked the same way, so a relay that admits a REQ and then
+  /// closes it costs no reads.
   void _noteReopenedSubscriptions() {
     if (_listNoticesReopened && _listNoticesUnsubscribe != null) {
       _channelListChanges++;
-      _listNoticesRetry.succeeded();
     }
     _listNoticesReopened = false;
     if (_reopenedLiveChunks.any(_liveSubscriptionsByChunk.containsKey)) {
       _channelListChanges++;
-      if (_terminallyClosedLiveChunks.isEmpty) _liveChunksRetry.succeeded();
     }
     _reopenedLiveChunks.clear();
   }
@@ -397,8 +450,7 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     _clearRetainedLiveChunks();
     _clearChannelListNotices();
     _subscriptionRelayBaseUrl = null;
-    _backstopTimer?.cancel();
-    _backstopTimer = null;
+    _cancelListRead();
   }
 }
 
@@ -429,18 +481,23 @@ class _LiveChunkSubscription {
   void Function()? unsubscribe;
 }
 
-/// Retries a refused live subscription after a jittered backoff that starts
-/// at 5s and doubles up to 5 minutes, until it is admitted or torn down.
-class _SubscriptionRetry {
+/// Retries a failed subscription or read after a jittered backoff that starts
+/// at 5s and doubles up to 5 minutes, until it succeeds or is torn down.
+class _Backoff {
   static const _baseDelayMs = 5000;
   static const _maxDelayMs = 300000;
+  // How long a reopened subscription must stay up to restart the backoff.
+  static const _stableAfter = Duration(minutes: 1);
   static final _random = Random();
 
   Timer? _timer;
+  Timer? _stableTimer;
   var _attempts = 0;
 
   /// Runs [retry] after the next backoff, unless one is already pending.
   void schedule(void Function() retry) {
+    _stableTimer?.cancel();
+    _stableTimer = null;
     if (_timer != null) return;
     final backoffMs = min(_baseDelayMs << min(_attempts, 6), _maxDelayMs);
     _attempts++;
@@ -461,12 +518,22 @@ class _SubscriptionRetry {
     _timer = null;
   }
 
-  /// Restarts the backoff once the subscription has stayed up.
-  void succeeded() => _attempts = 0;
+  /// Notes a reopened subscription. Its backoff restarts only once it has
+  /// stayed up for a minute, so a relay that admits a REQ and then closes it
+  /// keeps backing off.
+  void opened() {
+    _stableTimer?.cancel();
+    _stableTimer = Timer(_stableAfter, () {
+      _stableTimer = null;
+      _attempts = 0;
+    });
+  }
 
   /// Drops a pending retry and restarts the backoff.
   void cancel() {
     cancelPending();
+    _stableTimer?.cancel();
+    _stableTimer = null;
     _attempts = 0;
   }
 }

@@ -209,18 +209,16 @@ void main() {
         clock.flushMicrotasks();
         clock.elapse(const Duration(minutes: 2));
         clock.flushMicrotasks();
-        expect(
-          offline.membershipRequests,
-          3,
-        ); // One bounded attempt per minute.
+        // Retried ever less often: 5s doubling, +/-25%.
+        expect(offline.membershipRequests, inInclusiveRange(5, 6));
         expect(offline.listeners, isEmpty);
-        // A slow attempt cannot accumulate overlapping periodic retries.
+        // A slow attempt cannot accumulate overlapping retries.
         final gate = Completer<void>();
         offline.gate = gate;
-        clock.elapse(const Duration(minutes: 1));
+        clock.elapse(const Duration(minutes: 7));
         clock.flushMicrotasks();
         final parkedRequests = offline.membershipRequests;
-        clock.elapse(const Duration(minutes: 2));
+        clock.elapse(const Duration(minutes: 7));
         clock.flushMicrotasks();
         expect(offline.membershipRequests, parkedRequests);
         gate.complete();
@@ -231,7 +229,7 @@ void main() {
 
         offline.fail = false;
         offline.ids = ['bravo'];
-        clock.elapse(const Duration(minutes: 1));
+        clock.elapse(const Duration(minutes: 7));
         clock.flushMicrotasks();
         expect(
           container.read(channelsProvider).requireValue.single.id,

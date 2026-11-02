@@ -29,14 +29,13 @@ const _channelChangeSystemTypes = {
 ///
 /// The list is read on every launch, resume, reconnect and pull to refresh.
 /// Between those, live events say when it changed: a notice for this reader,
-/// or a metadata edit or system notice on a listed channel. The backstop timer
-/// reads the list again only after one of them, instead of every minute.
+/// or a metadata edit or system notice on a listed channel. Each one schedules
+/// a read (see [_ChannelsNotifierLiveSubscriptions._noteListChanged]).
 ///
 /// The live subscriptions ask for no stored events (`limit: 0`), so nothing
 /// sent while one is down is replayed. Each list read therefore opens the
-/// notice subscription before it reads, and a subscription reopened between
-/// reads that is still up at the next tick counts as a change, so that tick
-/// reads what it missed.
+/// notice subscription before it reads, and reopening a subscription between
+/// reads schedules a read to catch up on what it missed.
 extension _ChannelListChanges on ChannelsNotifier {
   /// Notes a live event on a listed channel that changes the channel itself.
   /// Returns whether it was one.
@@ -45,15 +44,16 @@ extension _ChannelListChanges on ChannelsNotifier {
         event.kind == EventKind.nip29EditMetadata ||
         (event.kind == EventKind.systemMessage &&
             _channelChangeSystemTypes.contains(_systemMessageType(event)));
-    if (changed) _channelListChanges++;
+    if (changed) _noteListChanged();
     return changed;
   }
 
   /// Subscribes to [_channelListNoticeKinds] unless already subscribed. The
   /// notifier rebuilds when the relay or identity changes, so one subscription
   /// serves its whole lifetime. A refused or failed subscription is retried
-  /// with backoff. Notices sent while it was down are not replayed, so one
-  /// that [isRetry] reopens is caught up by [_noteReopenedSubscriptions].
+  /// with backoff. Notices sent while it was down are not replayed, so
+  /// reopening it ([isRetry]) schedules a read (see
+  /// [_ChannelsNotifierLiveSubscriptions._noteReopenedSubscriptions]).
   Future<void> _subscribeChannelListNotices(
     String myPk, {
     bool isRetry = false,
@@ -75,7 +75,7 @@ extension _ChannelListChanges on ChannelsNotifier {
               limit: 0,
             ),
             (_) {
-              if (generation == _listNoticesGeneration) _channelListChanges++;
+              if (generation == _listNoticesGeneration) _noteListChanged();
             },
             onClosed: (message) {
               if (generation != _listNoticesGeneration) return;
@@ -92,7 +92,11 @@ extension _ChannelListChanges on ChannelsNotifier {
         return;
       }
       _listNoticesUnsubscribe = unsubscribe;
-      if (isRetry) _listNoticesReopened = true;
+      if (isRetry) {
+        _listNoticesReopened = true;
+        _listNoticesRetry.opened();
+        _scheduleListRead();
+      }
     } catch (error) {
       if (generation != _listNoticesGeneration) return;
       debugPrint('[ChannelsNotifier] channel list notices failed: $error');

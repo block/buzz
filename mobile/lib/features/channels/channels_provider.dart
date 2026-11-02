@@ -51,7 +51,12 @@ const _authoredRootIdsPrefix = 'buzz-thread-authored.v1';
 /// for any visible channel event kind. Chunks stay within the relay's explicit
 /// channel cap and incoming events bump `lastMessageAt` for their channel.
 class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
-  static const _backstopInterval = Duration(seconds: 60);
+  // A list read waits this long after the latest event that may have
+  // changed the list, and no longer than [_listReadMaxWait] after the first.
+  // Reads start at least [_listReadMinGap] apart.
+  static const _listReadQuiet = Duration(seconds: 2);
+  static const _listReadMaxWait = Duration(seconds: 10);
+  static const _listReadMinGap = Duration(seconds: 10);
 
   final Map<String, _LiveChunkSubscription> _liveSubscriptionsByChunk = {};
   Future<void> _liveSubscriptionQueue = Future.value();
@@ -65,17 +70,21 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   String? _subscriptionRelayBaseUrl;
   // The refresh whose channels the live chunks currently cover.
   _ChannelRefreshFence? _liveFence;
-  Timer? _backstopTimer;
   // Live events that may have changed the channel list, and how many of them
   // the last completed read covered. See [_ChannelListChanges].
   int _channelListChanges = 0;
   int _channelListChangesRead = 0;
+  Timer? _listReadQuietTimer;
+  Timer? _listReadDeadline;
+  Timer? _listReadGap;
+  bool _listReadDueAfterGap = false;
+  final _listReadRetry = _Backoff();
   void Function()? _listNoticesUnsubscribe;
   bool _listNoticesSubscribed = false;
   int _listNoticesGeneration = 0;
-  final _listNoticesRetry = _SubscriptionRetry();
-  final _liveChunksRetry = _SubscriptionRetry();
-  // Reopened by a retry since the last backstop tick.
+  final _listNoticesRetry = _Backoff();
+  final _liveChunksRetry = _Backoff();
+  // Reopened by a retry since the last list read was due.
   bool _listNoticesReopened = false;
   final Set<String> _reopenedLiveChunks = {};
   final Map<String, int> _latestObservedByChannel = {};
@@ -267,12 +276,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _unreadCaughtUpByChannel.clear();
       _unreadDeletedIdsByChannel.clear();
       _unscopedUnreadDeletedIds.clear();
-      _backstopTimer?.cancel();
-      _backstopTimer = null;
+      _cancelListRead();
     });
 
     if (snapshot != null) {
-      _startBackstopTimer();
       // Install local data before starting work that can notify listeners.
       unawaited(
         Future<void>.microtask(() async {
@@ -475,8 +482,9 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // Step 3: fetch the most recent message per channel to populate lastMessageAt.
     // kind:39000 metadata doesn't carry message timestamps, so channels load with
     // lastMessageAt: null. Without this, unread detection and badge computation
-    // see every channel as having no messages. Skipped on backstop refreshes since
-    // live subscriptions keep lastMessageAt current after the initial load.
+    // see every channel as having no messages. Skipped on background list
+    // reads since live subscriptions keep lastMessageAt current after the
+    // initial load.
     if (fetchLastMessage) {
       final activeChannels = [
         for (final channel in channels)
@@ -573,7 +581,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // caller assigns whatever this returns, so the last check belongs here.
     fence.ensureCurrent();
     if (!fetchLastMessage) {
-      // Backstop metadata refreshes retain live timestamps in the persisted
+      // Background list reads retain live timestamps in the persisted
       // snapshot as well as the visible list.
       for (var i = 0; i < channels.length; i++) {
         final previous = prevById[channels[i].id]?.lastMessageAt;
@@ -918,8 +926,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     }
   }
 
-  /// Backstop refresh that preserves existing state on transient failure.
-  Future<void> _backstopRefresh() async {
+  /// Reads the list again, keeping existing state on transient failure.
+  Future<void> _readListInBackground() async {
     try {
       final sessionState = ref.read(relaySessionProvider);
       final channels = await _fetch(
@@ -931,7 +939,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     } on _StaleChannelRefresh {
       return;
     } catch (error) {
-      debugPrint('[ChannelsNotifier] backstop refresh failed: $error');
+      debugPrint('[ChannelsNotifier] background list read failed: $error');
     }
   }
 
