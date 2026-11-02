@@ -186,12 +186,32 @@ bool _hasInlineCloserOnLine(String content, int start, int delimiterLength) {
   return false;
 }
 
+/// Whether a closing run follows before the paragraph ends: a code span
+/// cannot continue past a blank line or into a list item, heading or fence.
 bool _hasInlineCloser(String content, int start, int delimiterLength) {
+  final end = _paragraphEnd(content, start);
   for (final run in _backtickRunPattern.allMatches(content, start)) {
+    if (run.start >= end) return false;
     if (run.end - run.start == delimiterLength) return true;
   }
   return false;
 }
+
+int _paragraphEnd(String content, int start) {
+  var newline = content.indexOf('\n', start);
+  while (newline >= 0) {
+    if (_paragraphBreak.matchAsPrefix(content, newline + 1) != null) {
+      return newline;
+    }
+    newline = content.indexOf('\n', newline + 1);
+  }
+  return content.length;
+}
+
+final _paragraphBreak = RegExp(
+  r'[ \t]*(?:$|[-*+][ \t]|\d{1,9}[.)][ \t]|#{1,6}(?:[ \t]|$)|`{3}|~{3})',
+  multiLine: true,
+);
 
 // Numeric entities keep literal label punctuation out of the line-based
 // attachment, gallery and preview matchers, which do not balance brackets.
