@@ -86,7 +86,7 @@ async fn failed_target_soft_delete_stores_nothing() {
                 target.id.to_hex()
             ),
         ] {
-            sqlx::query(&statement)
+            sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
                 .execute(state.db.pool())
                 .await
                 .expect("install failure trigger");
