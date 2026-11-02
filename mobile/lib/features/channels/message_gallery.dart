@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 
 import 'message_media.dart';
 import 'message_content/link_normalizer.dart';
+import 'message_content/markdown_escapes.dart';
 
 /// Image metadata shared by carousel rendering and loading projection.
 @immutable
@@ -48,7 +49,9 @@ TrailingImageGallery? extractTrailingImageGallery(
     if (mediaKind != MessageMediaKind.image) {
       break;
     }
-    final markdownLabel = decodeMarkdownLabelSyntax(match.group(1)!).trim();
+    final markdownLabel = decodeMarkdownLabelSyntax(
+      unshieldMarkdownEscapes(shieldMarkdownEscapes(match.group(1)!)),
+    ).trim();
     items.add(
       MessageGalleryItem(
         url: url,

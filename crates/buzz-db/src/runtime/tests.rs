@@ -4069,6 +4069,9 @@ async fn e_tag_any_runs_with_real_binds_on_p_join_and_count() {
 #[path = "tests/thread_window_postgres_tests.rs"]
 mod thread_window_postgres_tests;
 
+#[path = "tests/listed_channel_name_postgres_tests.rs"]
+mod listed_channel_name_postgres_tests;
+
 #[path = "tests/reader_pool_postgres_tests.rs"]
 mod reader_pool_postgres_tests;
 
