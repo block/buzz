@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
+import 'package:buzz/shared/http/app_http_client.dart';
 
 import '../relay/relay.dart';
 import 'verified_profile.dart';
@@ -16,7 +17,7 @@ typedef VerifiedProfileDiscoveryFetch =
     Future<VerifiedProfileDiscovery> Function();
 
 final verifiedProfileHttpClientProvider = Provider<http.Client>((ref) {
-  final client = http.Client();
+  final client = newAppHttpClient();
   ref.onDispose(client.close);
   return client;
 });
