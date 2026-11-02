@@ -7,6 +7,8 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/channel_mutes/channel_mutes_provider.dart';
+import 'package:buzz/features/channels/channel_mutes/channel_mutes_storage.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -2263,6 +2265,49 @@ void main() {
       expect(notifier.observedUnreadEventsByChannel[_channelA]?.keys, ['old']);
     });
 
+    test('a channel unmuted since catches up over its whole window', () async {
+      int now() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+        recentMessages: [message('backlog', now() - 3600)],
+      );
+      final mutes = _TestMutes(initiallyMuted: {_channelA});
+      final container = _buildContainer(session: session, mutes: mutes);
+      addTearDown(container.dispose);
+      final notifier = container.read(channelsProvider.notifier);
+      Future<void> refreshed() async {
+        final before = session.queryBatches.where(isUnread).length;
+        await notifier.refresh();
+        await _waitUntil(
+          () => session.queryBatches.where(isUnread).length > before,
+        );
+        await _settle();
+      }
+
+      await container.read(channelsProvider.future);
+      await _waitUntil(() => session.queryBatches.any(isUnread));
+      await _settle();
+      // Muted: ordinary backlog doesn't count, and the next catch-up is
+      // incremental.
+      await refreshed();
+      expect(notifier.observedUnreadEventsByChannel[_channelA], isNull);
+      expect(
+        session.queryBatches.lastWhere(isUnread).map((f) => f.since),
+        everyElement(isNot(0)),
+      );
+
+      mutes.unmute();
+      await refreshed();
+      expect(
+        session.queryBatches.lastWhere(isUnread).map((f) => f.since),
+        everyElement(0),
+      );
+      expect(notifier.observedUnreadEventsByChannel[_channelA]?.keys, [
+        'backlog',
+      ]);
+    });
+
     test('a rebuilt channel list catches up over the whole window', () async {
       final session = _FakeRelaySession(
         memberships: [_membership(_channelA, myPk)],
@@ -2367,7 +2412,12 @@ void main() {
           if (expected.isEmpty) return;
 
           // Deleting the marker reopens the whole window, which still hides
-          // an older unread event, so the next quiet message stands in.
+          // an older unread event, so the next quiet message stands in. The
+          // deletion lands while an incremental catch-up is out, which must
+          // not restore the cursor the deletion cleared.
+          session.pauseNextUnreadCatchUpQuery();
+          final parked = notifier.refresh();
+          await session.nextUnreadCatchUpQueryStarted;
           session.emit(
             NostrEvent(
               id: 'marker-deletion',
@@ -2382,6 +2432,9 @@ void main() {
               sig: 'sig',
             ),
           );
+          await _settle();
+          session.resumePausedUnreadCatchUpQuery();
+          await parked;
           await _settle();
           final before = session.queryBatches.where(isUnread).length;
           await notifier.refresh();
@@ -3088,16 +3141,42 @@ NostrEvent _meta({
   sig: 'sig',
 );
 
-ProviderContainer _buildContainer({required _FakeRelaySession session}) {
+ProviderContainer _buildContainer({
+  required _FakeRelaySession session,
+  _TestMutes? mutes,
+}) {
   return ProviderContainer(
     retry: (_, _) => null,
     overrides: [
+      if (mutes != null) channelMutesProvider.overrideWith(() => mutes),
       appLifecycleProvider.overrideWith(() => _FakeAppLifecycleNotifier()),
       relaySessionProvider.overrideWith(() => session),
       // Route the pubkey through a mutable notifier so tests can switch the
       // signing identity mid-flight the way an account change does at runtime.
       myPubkeyProvider.overrideWith((ref) => ref.watch(_testPubkeyProvider)),
     ],
+  );
+}
+
+/// Channel mutes a test sets directly.
+class _TestMutes extends ChannelMutesNotifier {
+  _TestMutes({this.initiallyMuted = const {}});
+
+  final Set<String> initiallyMuted;
+
+  @override
+  ChannelMutesState build() => _muted(initiallyMuted);
+
+  void unmute() => state = _muted(const {});
+
+  static ChannelMutesState _muted(Set<String> channelIds) => ChannelMutesState(
+    isReady: true,
+    store: ChannelMuteStore(
+      channels: {
+        for (final id in channelIds)
+          id: const ChannelMuteEntry(muted: true, updatedAt: 1),
+      },
+    ),
   );
 }
 

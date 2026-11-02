@@ -39,6 +39,10 @@ extension _UnreadCatchUp on ChannelsNotifier {
           channel.id: readState.effectiveTimestamp(channel.id),
       };
       final requestedAt = currentUnixSeconds();
+      final cursorsAtStart = {
+        for (final channel in activeChannels)
+          channel.id: _unreadCaughtUpByChannel[channel.id],
+      };
       final filters = [
         for (final channel in activeChannels)
           for (final kinds in [
@@ -53,6 +57,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
               since: _unreadCatchUpSince(
                 channel.id,
                 readAtByChannel[channel.id],
+                muted: mutedChannelIds.contains(channel.id),
               ),
               limit: _unreadCatchUpLimit,
             ),
@@ -75,7 +80,13 @@ extension _UnreadCatchUp on ChannelsNotifier {
         return;
       }
 
-      _recordUnreadCaughtUp(readAtByChannel, requestedAt, failedChannelIds);
+      _recordUnreadCaughtUp(
+        readAtByChannel,
+        requestedAt,
+        failedChannelIds,
+        cursorsAtStart: cursorsAtStart,
+        mutedChannelIds: mutedChannelIds,
+      );
 
       // Keep this response's deletion evidence independently of the bounded
       // cross-request tombstones: a large batch can evict its own early IDs.
@@ -198,29 +209,50 @@ extension _UnreadCatchUp on ChannelsNotifier {
   /// earlier one returned every message stored before it was sent, and the
   /// relay stores no event with a `created_at` more than 900s behind its own
   /// clock, so anything stored since then is newer than that start, however
-  /// late it arrived. A read timestamp that moved back since then makes the
-  /// full window apply again.
-  int _unreadCatchUpSince(String channelId, int? readAt) {
+  /// late it arrived. A read timestamp that moved back since then, or a mute
+  /// change (which changes what counts as unread), makes the full window apply
+  /// again.
+  int _unreadCatchUpSince(
+    String channelId,
+    int? readAt, {
+    required bool muted,
+  }) {
     final afterRead = (readAt ?? -1) + 1;
     final caughtUp = _unreadCaughtUpByChannel[channelId];
-    if (caughtUp == null || (readAt ?? -1) < (caughtUp.readAt ?? -1)) {
+    if (caughtUp == null ||
+        caughtUp.muted != muted ||
+        (readAt ?? -1) < (caughtUp.readAt ?? -1)) {
       return afterRead;
     }
     return max(afterRead, caughtUp.sentAt - relayLiveWindowSkewSeconds);
   }
 
   /// Remembers when a catch-up over [readAtByChannel] was sent, and the read
-  /// timestamps it used, for every channel except [failedChannelIds]: their
-  /// filters failed, so the next catch-up still needs their earlier window.
+  /// timestamps and mute state it used, for every channel except
+  /// [failedChannelIds]: their filters failed, so the next catch-up still needs
+  /// their earlier window. A channel whose cursor changed while the request was
+  /// out, such as a live deletion of its marker, keeps that change: this
+  /// response only covered the window the old cursor asked for.
   void _recordUnreadCaughtUp(
     Map<String, int?> readAtByChannel,
     int sentAt,
-    Set<String> failedChannelIds,
-  ) {
+    Set<String> failedChannelIds, {
+    required Map<String, ({int sentAt, int? readAt, bool muted})?>
+    cursorsAtStart,
+    required Set<String> mutedChannelIds,
+  }) {
     for (final MapEntry(key: channelId, value: readAt)
         in readAtByChannel.entries) {
       if (failedChannelIds.contains(channelId)) continue;
-      _unreadCaughtUpByChannel[channelId] = (sentAt: sentAt, readAt: readAt);
+      final atStart = cursorsAtStart[channelId];
+      if (atStart != null && _unreadCaughtUpByChannel[channelId] != atStart) {
+        continue;
+      }
+      _unreadCaughtUpByChannel[channelId] = (
+        sentAt: sentAt,
+        readAt: readAt,
+        muted: mutedChannelIds.contains(channelId),
+      );
     }
   }
 }

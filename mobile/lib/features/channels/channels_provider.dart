@@ -64,9 +64,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   String? _subscriptionRelayBaseUrl;
   Timer? _backstopTimer;
   final Map<String, int> _latestObservedByChannel = {};
-  // Per channel, when an earlier unread catch-up in this session was sent and
-  // the read timestamp it used. See [_UnreadCatchUp].
-  final Map<String, ({int sentAt, int? readAt})> _unreadCaughtUpByChannel = {};
+  // Per channel, when an earlier unread catch-up in this session was sent, and
+  // the read timestamp and mute state it used. See [_UnreadCatchUp].
+  final Map<String, ({int sentAt, int? readAt, bool muted})>
+  _unreadCaughtUpByChannel = {};
   final Map<String, Map<String, ObservedUnreadEvent>>
   _observedUnreadEventsByChannel = {};
   final Map<String, Set<String>> _unreadDeletedIdsByChannel = {};
