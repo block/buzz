@@ -1924,7 +1924,8 @@ impl AppState {
     /// Best-effort drop of a pubkey's cached restriction row on this pod.
     /// A ban drops it on every pod, for the target and its agents, through
     /// [`Self::disconnect_pubkey_local`]; an unban, timeout or untimeout only
-    /// on the pod that handles it. [`RESTRICTION_CACHE_MAX_AGE`] bounds the rest.
+    /// on the pod that handles it. A read in flight at the drop can refill
+    /// the old row; [`RESTRICTION_CACHE_MAX_AGE`] bounds that and the rest.
     pub fn invalidate_restriction_cache(&self, community_id: CommunityId, pubkey: &[u8]) {
         self.restriction_cache
             .invalidate(&(community_id, pubkey.to_vec()));
@@ -2094,9 +2095,10 @@ impl AppState {
         reason: &str,
         unowned_only: bool,
     ) -> usize {
-        // Every ban reaches every pod through here, for the target and each
-        // agent it owns, so the next HTTP request or write rereads the ban
-        // instead of serving a cached row for up to `RESTRICTION_CACHE_MAX_AGE`.
+        // A ban's disconnect runs here on every pod, for the target and each
+        // agent it owns, so the pod's next HTTP request or write rereads the
+        // ban. A read already in flight can still refill the old row, and the
+        // fan-out is best-effort; `RESTRICTION_CACHE_MAX_AGE` bounds both.
         self.invalidate_restriction_cache(community, pubkey);
         self.conn_manager
             .disconnect_pubkey(community, pubkey, event_id, reason, unowned_only)
@@ -3513,15 +3515,16 @@ pub(crate) mod tests {
         use buzz_core::channel::{ChannelType, ChannelVisibility};
 
         /// Open-set reads park on a lock on `channels`, where the test counts
-        /// them. Nine concurrent misses make one read and share its set. When
-        /// the read in flight is cancelled, its eight waiters each read at
-        /// once rather than one at a time behind the gate. When the read in
-        /// flight hangs, its waiters stop waiting after
+        /// them; waiters are counted as they arrive by the clones of the
+        /// community's gate they hold. A leader's eight waiters share its
+        /// set. When the leader is cancelled, its orphans each pass the gate
+        /// and read, none holding it across its own read. When the leader's
+        /// read hangs, its waiters stop waiting after
         /// [`OPEN_CHANNELS_MAX_AGE`] and each read on their own.
-        /// Mutations: drop the waiter path (nine reads park in the first
-        /// half), hold the gate across a waiter's own read (the second's
-        /// orphans park only once their wait runs out), or wait on the gate
-        /// with no limit (the third never gets past one) → RED.
+        /// Mutations: drop the waiter path (distinct sets in the first
+        /// phase), hold the gate across a waiter's own read (the gate never
+        /// frees in the second), or wait on the gate with no limit (the third
+        /// never gets past one read) → RED.
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn open_set_misses_share_one_read_and_orphans_read_concurrently() {
@@ -3548,20 +3551,23 @@ pub(crate) mod tests {
                 .await
                 .unwrap()
             };
-            let parks = |want: i64, within: std::time::Duration| async move {
+            // Polls `ready` for up to a generous watchdog; timing is not
+            // part of what the test checks.
+            async fn eventually(what: &str, mut ready: impl AsyncFnMut() -> bool) {
                 let start = Instant::now();
-                while start.elapsed() < within {
-                    if parked().await >= want {
+                while start.elapsed() < std::time::Duration::from_secs(10) {
+                    if ready().await {
                         return;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
-                panic!(
-                    "{} open-set reads parked after {within:?}, want {want}",
-                    parked().await
-                );
+                panic!("timed out waiting for {what}");
+            }
+            let parks = |want: i64| {
+                eventually("parked open-set reads", async move || {
+                    parked().await >= want
+                })
             };
-            let soon = std::time::Duration::from_secs(5);
             let misses = |n: usize| {
                 (0..n)
                     .map(|_| {
@@ -3579,15 +3585,31 @@ pub(crate) mod tests {
                 locker
             };
 
-            let locker = lock().await;
-            let cohort = misses(9);
-            parks(1, soon).await;
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            assert_eq!(parked().await, 1, "concurrent misses share one read");
+            // Starts a leader whose read parks on `locker`, then eight
+            // misses that have reached its gate.
+            let cohort = || async {
+                let locker = lock().await;
+                let leader = misses(1).remove(0);
+                parks(1).await;
+                let gate = state
+                    .open_channels_reads
+                    .get(&community)
+                    .expect("the leader's gate");
+                let base = Arc::strong_count(&gate);
+                let waiters = misses(8);
+                eventually("eight waiters at the gate", async || {
+                    Arc::strong_count(&gate) >= base + 8
+                })
+                .await;
+                (locker, leader, gate, waiters)
+            };
+
+            let (locker, leader, _gate, waiters) = cohort().await;
+            assert_eq!(parked().await, 1, "waiters share the leader's read");
             locker.commit().await.unwrap();
-            let mut sets = Vec::new();
-            for miss in cohort {
-                sets.push(miss.await.expect("join").expect("open set"));
+            let mut sets = vec![leader.await.expect("join").expect("open set")];
+            for waiter in waiters {
+                sets.push(waiter.await.expect("join").expect("open set"));
             }
             assert!(
                 sets.iter().all(|set| Arc::ptr_eq(set, &sets[0])),
@@ -3595,16 +3617,13 @@ pub(crate) mod tests {
             );
 
             state.open_channels_cache.invalidate(&community);
-            let locker = lock().await;
-            let leader = misses(1).remove(0);
-            parks(1, soon).await;
-            let orphans = misses(8);
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            assert_eq!(parked().await, 1, "waiters queue behind the leader");
+            let (locker, leader, gate, orphans) = cohort().await;
             leader.abort();
-            // The cancelled leader's backend stays parked, plus one per orphan,
-            // well before an orphan's wait on the gate would run out.
-            parks(9, OPEN_CHANNELS_MAX_AGE / 2).await;
+            // Each orphan passes the gate and reads while the lock still holds
+            // every read, so none may keep the gate across its own read.
+            eventually("the gate to free", async || gate.try_lock().is_ok()).await;
+            // The cancelled leader's backend stays parked, plus one per orphan.
+            parks(9).await;
             locker.commit().await.unwrap();
             for orphan in orphans {
                 orphan
@@ -3614,13 +3633,10 @@ pub(crate) mod tests {
             }
 
             state.open_channels_cache.invalidate(&community);
-            let locker = lock().await;
-            let hung = misses(1).remove(0);
-            parks(1, soon).await;
-            let waiters = misses(8);
+            let (locker, hung, _gate, waiters) = cohort().await;
             // The leader's read never returns while the lock is held; each
             // waiter gives up on it and its own read parks too.
-            parks(9, soon).await;
+            parks(9).await;
             assert!(!hung.is_finished(), "the leader's read is still in flight");
             locker.commit().await.unwrap();
             hung.await.expect("join").expect("the leader reads");
