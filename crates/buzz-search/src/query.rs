@@ -63,8 +63,8 @@ pub enum SearchMode {
     ///
     /// Intended for bounded typeahead surfaces such as the desktop topbar. The
     /// relay still refetches and re-authorizes every hit; this mode changes only
-    /// the candidate tsquery, not the access boundary. Text shorter than three
-    /// characters returns no hits unless the query is kind:0-only.
+    /// the candidate tsquery, not the access boundary. A trailing token shorter
+    /// than three characters returns no hits unless the query is kind:0-only.
     Prefix,
 }
 
@@ -150,8 +150,9 @@ const SEARCH_TEXT_MAX_CHARS: usize = 4096;
 /// bridge uses page 1), but clamp here too so a future caller cannot accidentally
 /// wire untrusted input into a multi-trillion-row OFFSET.
 const PAGE_MAX: u32 = 1000;
-/// Shortest search text [`SearchMode::Prefix`] runs for anything but a
-/// kind:0-only (profile) query; shorter text returns no hits without SQL.
+/// Shortest trailing token (the one that gets `:*`) [`SearchMode::Prefix`]
+/// runs for anything but a kind:0-only (profile) query; a shorter one returns
+/// no hits without SQL, whatever completed words precede it.
 /// The GIN index cannot stop early or return rows in rank order, so a one- or
 /// two-character `:*` prefix makes Postgres fetch, recheck and rank a large
 /// share of every indexed message before it can apply `LIMIT`, and typeahead
@@ -239,7 +240,12 @@ fn normalized_search_text(q: &str) -> Option<String> {
 pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, SearchError> {
     let profile_only = query.kinds.as_deref() == Some(&[0][..]);
     let Some(search_text) = normalized_search_text(&query.q).filter(|text| {
-        query.mode != SearchMode::Prefix || profile_only || text.chars().count() >= PREFIX_MIN_CHARS
+        query.mode != SearchMode::Prefix
+            || profile_only
+            || text
+                .split_whitespace()
+                .last()
+                .is_some_and(|token| token.chars().count() >= PREFIX_MIN_CHARS)
     }) else {
         return Ok(SearchResult {
             hits: Vec::new(),

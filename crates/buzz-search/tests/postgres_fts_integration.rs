@@ -397,12 +397,23 @@ async fn prefix_mode_matches_final_token_prefix_without_changing_full_text() {
     assert!(prefix_ids.contains(&project_plan));
     assert!(prefix_ids.contains(&project_archive));
 
-    // Below three characters, non-profile prefix search returns no hits in
-    // either sort, whatever the kinds; `pro` above proves the rows exist.
+    // A trailing token below three characters returns no hits for non-profile
+    // prefix search, in either sort, whatever the kinds and whatever completed
+    // words precede it; `pro` above proves the rows exist.
     // kind:0-only stays one-character typeahead (see the `jm` test above).
     for (q, kinds, sort) in [
         ("pr", Some(vec![9]), buzz_search::SearchSort::Relevance),
         (" p ", Some(vec![9]), buzz_search::SearchSort::Relevance),
+        (
+            "project pr",
+            Some(vec![9]),
+            buzz_search::SearchSort::Relevance,
+        ),
+        (
+            "project  p ",
+            Some(vec![9]),
+            buzz_search::SearchSort::Relevance,
+        ),
         ("pr", None, buzz_search::SearchSort::Relevance),
         ("pr", Some(vec![0, 9]), buzz_search::SearchSort::Relevance),
         ("pr", Some(vec![9]), buzz_search::SearchSort::Newest),
@@ -451,7 +462,7 @@ async fn prefix_mode_matches_final_token_prefix_without_changing_full_text() {
     let completed_token_is_exact = svc
         .search(&SearchQuery {
             community: c,
-            q: "project pl".into(),
+            q: "project plan".into(),
             channel_scope: ChannelScope::Any,
             kinds: Some(vec![9]),
             authors: None,
@@ -501,7 +512,7 @@ async fn prefix_mode_handles_tsquery_boundary_punctuation() {
     let result = svc
         .search(&SearchQuery {
             community: c,
-            q: "operators ' : & | ( ) ! alpha be".into(),
+            q: "operators ' : & | ( ) ! alpha bet".into(),
             channel_scope: ChannelScope::Any,
             kinds: Some(vec![9]),
             authors: None,
