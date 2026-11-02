@@ -5,8 +5,8 @@ import type { TeamMember } from "@/features/company-team/teamModels";
 import { EmployeeAvatar } from "@/features/company-team/ui/EmployeeAvatar";
 import { TeamPage, TeamPageTitle } from "@/features/company-team/ui/TeamPage";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
+import { WorkspaceMark } from "@/features/communities/ui/WorkspaceMark";
 import { useCommunities } from "@/features/communities/useCommunities";
-import { useActiveCommunityIcon } from "@/features/communities/useCommunityIcons";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 
 import { FUNCTION_DETAILS, FUNCTION_ORDER } from "../functions";
@@ -155,7 +155,6 @@ export function CompanyMapScreen() {
     enabled: profilePubkeys.length > 0,
   });
   const profiles: ProfileLookup = profilesQuery.data?.profiles ?? {};
-  const activeIconQuery = useActiveCommunityIcon(activeCommunity?.relayUrl);
   const scout = members.find(
     (member) => displayName(member, profiles).toLowerCase() === "scout",
   );
@@ -299,25 +298,22 @@ export function CompanyMapScreen() {
           </span>
         </figure>
 
-        <div
-          aria-hidden="true"
+        <WorkspaceMark
           className="absolute z-10 grid size-[4.5rem] -translate-x-1/2 -translate-y-1/2 place-items-center overflow-hidden rounded-[1.25rem] bg-[#24212a] text-2xl font-black text-white shadow-xl sm:size-20 sm:text-3xl"
-          data-testid="cofounder-map-company-logo"
-          style={{ left: "50%", top: "51%" }}
-        >
-          {activeIconQuery.data ? (
-            <img
-              alt=""
-              className="size-full object-cover"
-              src={activeIconQuery.data}
-            />
-          ) : (
+          communityIconFit="cover"
+          communityId={activeCommunity?.id}
+          dataTestId="cofounder-map-company-logo"
+          fallbackContent={
             <span>
-              {companyName.slice(0, 1).toUpperCase()}
+              {companyName.trim().slice(0, 1).toUpperCase() || "C"}
               <i className="text-primary not-italic">.</i>
             </span>
-          )}
-        </div>
+          }
+          imageFit="contain"
+          name={companyName}
+          relayUrl={activeCommunity?.relayUrl}
+          style={{ left: "50%", top: "51%" }}
+        />
 
         {FUNCTION_ORDER.map((functionId) => {
           const slot = slotByFunction.get(functionId) ?? {

@@ -19,6 +19,7 @@ import {
   StatusEmoji,
 } from "@/features/user-status/ui/StatusEmoji";
 import { getAccountAuthClient } from "@/features/onboarding/accountAuthAdapter";
+import { WorkspaceMark } from "@/features/communities/ui/WorkspaceMark";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import {
@@ -324,9 +325,13 @@ export function AccountProfileSettingsPanel({
         className="cs-card cs-business-card"
         data-testid="settings-account-business-card"
       >
-        <span aria-hidden="true" className="cs-business-mark">
-          {(activeCommunity?.name ?? "").slice(0, 1).toUpperCase()}
-        </span>
+        <WorkspaceMark
+          className="cs-business-mark"
+          communityId={activeCommunity?.id}
+          fallbackText={activeCommunity ? undefined : ""}
+          name={activeCommunity?.name ?? ""}
+          relayUrl={activeCommunity?.relayUrl}
+        />
         <div className="cs-business-copy">
           <h2 className="cs-eyebrow" id="account-business-title">
             This business

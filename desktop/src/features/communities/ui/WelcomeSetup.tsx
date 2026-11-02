@@ -376,8 +376,10 @@ export function WelcomeSetup({
                   ownedBusinesses.map((business) => (
                     <div className="c3fr-reconnect-row" key={business.id}>
                       <BusinessMark
+                        communityId={business.id}
                         dot="#f5a4d5"
                         name={business.name || business.slug}
+                        relayUrl={businessCommunityRelayUrl(business)}
                         size="compact"
                       />
                       <span className="c3fr-reconnect-text">

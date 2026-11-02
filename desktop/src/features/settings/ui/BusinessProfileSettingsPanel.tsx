@@ -1,9 +1,9 @@
 import * as React from "react";
 import { toast } from "sonner";
 
+import { WorkspaceMark } from "@/features/communities/ui/WorkspaceMark";
 import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
 import { CommunityIconSettingsCard } from "@/features/communities/ui/CommunityIconSettingsCard";
-import { useActiveCommunityIcon } from "@/features/communities/useCommunityIcons";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
 import { CopyIcon } from "./settingsIcons";
@@ -30,13 +30,10 @@ export function BusinessProfileSettingsPanel() {
     membershipQuery.data?.membershipRequired === false ||
     role === "owner" ||
     role === "admin";
-  const iconQuery = useActiveCommunityIcon(activeCommunity?.relayUrl);
   const [name, setName] = React.useState(activeCommunity?.name ?? "");
   const [editingIcon, setEditingIcon] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
   const address = communityAddress(activeCommunity?.relayUrl);
-  const icon = iconQuery.data;
-
   React.useEffect(() => {
     setName(activeCommunity?.name ?? "");
     setSaved(false);
@@ -86,16 +83,14 @@ export function BusinessProfileSettingsPanel() {
           Workspace
         </h2>
         <div className="cs-photo-row" data-gap="small">
-          <span aria-hidden="true" className="cs-workspace-mark">
-            {icon ? (
-              <img alt="" src={icon} />
-            ) : (
-              <>
-                {community.name.slice(0, 1).toUpperCase()}
-                <i />
-              </>
-            )}
-          </span>
+          <WorkspaceMark
+            className="cs-workspace-mark"
+            communityId={community.id}
+            dataTestId="business-profile-workspace-mark"
+            dot={<i />}
+            name={community.name}
+            relayUrl={community.relayUrl}
+          />
           <div className="cs-photo-copy" data-gap="small">
             <button
               aria-expanded={editingIcon}

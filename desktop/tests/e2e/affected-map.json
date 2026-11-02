@@ -105,6 +105,7 @@
         "cofounder-phase2.spec.ts",
         "cofounder-playbooks.spec.ts",
         "cofounder-map.spec.ts",
+        "workspace-header-icon.spec.ts",
         "cofounder-customer-record.spec.ts"
       ]
     },
@@ -404,6 +405,7 @@
       "specs": [
         "cofounder-phase2.spec.ts",
         "colony3-settings.spec.ts",
+        "workspace-header-icon.spec.ts",
         "settings-section-layout.spec.ts",
         "appearance-chrome.spec.ts",
         "appearance-previews.spec.ts",
