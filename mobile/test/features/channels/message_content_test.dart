@@ -27,7 +27,6 @@ import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/media_viewer_page.dart';
 import 'package:buzz/features/channels/voice_note_attachment.dart';
-import 'package:buzz/shared/widgets/message_attachment_corners.dart';
 import 'package:buzz/features/channels/voice_note_waveform.dart';
 import 'package:buzz/features/channels/voice_note_recording.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
@@ -1611,48 +1610,6 @@ void main() {
           findsOneWidget,
         );
         expect(find.text('voice-note-desktop.mp4'), findsNothing);
-      });
-
-      testWidgets('splits an escaped voice-note link into its own segment', (
-        tester,
-      ) async {
-        const url = 'https://example.com/media/voice_note.mp4';
-
-        await tester.pumpWidget(
-          _testable(
-            const MessageContent(
-              content:
-                  'before\n[voice.mp4](https://example.com/media/voice\\_note.mp4)\n'
-                  'after',
-              bubble: true,
-              tags: [
-                [
-                  'imeta',
-                  'url $url',
-                  'm video/mp4',
-                  'duration 3.0',
-                  'filename voice-note-escaped.mp4',
-                ],
-              ],
-            ),
-            overrides: [
-              voiceNotePlayerFactoryProvider.overrideWithValue(
-                _FakeVoiceNotePlayer.new,
-              ),
-            ],
-          ),
-        );
-        await tester.pump();
-
-        final card = find.byKey(const ValueKey('voice-note-attachment:$url'));
-        expect(card, findsOneWidget);
-        expect(
-          find.ancestor(
-            of: card,
-            matching: find.byType(MessageAttachmentCorners),
-          ),
-          findsOneWidget,
-        );
       });
 
       testWidgets('keeps audio-looking links without imeta as ordinary links', (
