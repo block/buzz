@@ -85,3 +85,27 @@ List<MentionCandidate> _resolveComposerMentions(
   }
   return winners.values.toList();
 }
+
+// A prefill is not typing: skip typing indicators and the mention picker.
+void _rememberNotifiedAgents(
+  WidgetRef ref,
+  bool remembersAgents,
+  ObjectRef<bool> isModifyingText,
+  TextEditingController controller,
+  Map<String, MentionCandidate> bindings,
+  Map<String, MentionCandidate> sent,
+  List<MentionCandidate> selected,
+  List<String> notified,
+) {
+  if (!remembersAgents || !ref.read(rememberMentionedAgentsProvider)) return;
+  isModifyingText.value = true;
+  try {
+    _prefillAgentMentions(
+      controller,
+      bindings,
+      _notifiedAgentMentions(sent, selected, notified),
+    );
+  } finally {
+    isModifyingText.value = false;
+  }
+}

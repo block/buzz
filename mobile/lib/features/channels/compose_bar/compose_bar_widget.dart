@@ -513,19 +513,8 @@ class ComposeBar extends HookConsumerWidget {
     // Insert `#` at the cursor to manually trigger channel mode.
     void triggerChannel() => _insertTriggerAtCursor(controller, focusNode, '#');
 
-    // Insert a selected emoji at the cursor without replacing the draft.
-    void insertEmoji(String emoji) {
-      final text = controller.text;
-      final selection = controller.selection;
-      final cursor = selection.isValid
-          ? selection.baseOffset.clamp(0, text.length)
-          : text.length;
-      controller.value = TextEditingValue(
-        text: text.replaceRange(cursor, cursor, emoji),
-        selection: TextSelection.collapsed(offset: cursor + emoji.length),
-      );
-      focusNode.requestFocus();
-    }
+    void insertEmoji(String emoji) =>
+        _insertComposerEmoji(controller, focusNode, emoji);
 
     void clearComposer() {
       draftRevision.value += 1;
@@ -540,9 +529,8 @@ class ComposeBar extends HookConsumerWidget {
       focusNode.requestFocus();
     }
 
-    void removeAttachment(int id) {
-      _removePendingAttachment(attachments, draftRevision, id);
-    }
+    void removeAttachment(int id) =>
+        _removePendingAttachment(attachments, draftRevision, id);
 
     // Send the message.
     Future<void> send() async {
@@ -616,22 +604,17 @@ class ComposeBar extends HookConsumerWidget {
         return;
       }
       final outgoing = _OutgoingMentions(selectedMentions);
-      // A prefill is not typing: skip typing indicators and the mention picker.
-      void rememberNotifiedAgents(Map<String, MentionCandidate> sent) {
-        if (!remembersAgents || !ref.read(rememberMentionedAgentsProvider)) {
-          return;
-        }
-        isModifyingText.value = true;
-        try {
-          _prefillAgentMentions(
+      void rememberNotifiedAgents(Map<String, MentionCandidate> sent) =>
+          _rememberNotifiedAgents(
+            ref,
+            remembersAgents,
+            isModifyingText,
             controller,
             mentionMap.value,
-            _notifiedAgentMentions(sent, selectedMentions, outgoing.pubkeys),
+            sent,
+            selectedMentions,
+            outgoing.pubkeys,
           );
-        } finally {
-          isModifyingText.value = false;
-        }
-      }
 
       // Read before any await. These actions belong to this community and
       // refuse to run after a switch, so an Invite answered after a switch

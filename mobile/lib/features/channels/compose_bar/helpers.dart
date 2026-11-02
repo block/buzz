@@ -647,3 +647,21 @@ class _OutgoingMentions {
     }
   }
 }
+
+/// Insert an emoji at the cursor without replacing the draft.
+void _insertComposerEmoji(
+  TextEditingController controller,
+  FocusNode focusNode,
+  String emoji,
+) {
+  final text = controller.text;
+  final selection = controller.selection;
+  final cursor = selection.isValid
+      ? selection.baseOffset.clamp(0, text.length)
+      : text.length;
+  controller.value = TextEditingValue(
+    text: text.replaceRange(cursor, cursor, emoji),
+    selection: TextSelection.collapsed(offset: cursor + emoji.length),
+  );
+  focusNode.requestFocus();
+}
