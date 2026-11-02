@@ -1967,7 +1967,8 @@ void main() {
         'groups uploaded photos into a carousel and opens the full gallery',
         (tester) async {
           const first = 'https://example.com/media/one.png';
-          const second = 'https://example.com/media/two.png';
+          // The second destination is escaped; the carousel must unescape it.
+          const second = 'https://example.com/media/two_2.png';
           const third = 'https://example.com/media/three.png';
           await tester.pumpWidget(
             _testable(
@@ -1976,7 +1977,7 @@ void main() {
                     '''
 Photos
 ![image]($first)
-![image]($second)
+![image](https://example.com/media/two\\_2.png)
 ![image]($third)
 ''',
                 tags: [
