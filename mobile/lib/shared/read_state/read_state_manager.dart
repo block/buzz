@@ -392,10 +392,13 @@ class ReadStateManager {
   /// clock has since moved back behind the last fetch, that `since` may be in
   /// the relay's future and hide other devices' blobs until a reconnect, so
   /// resync now: the fetch covers the whole horizon and the subscription is
-  /// reopened from the corrected clock.
+  /// reopened from the corrected clock. The last fetch's time is dropped
+  /// first, so a resync that fails isn't retried on every read; the next
+  /// fetch covers the whole horizon either way.
   void _resyncIfClockMovedBack() {
     final sentAt = _lastFetchSentAt;
     if (_unsubscribeLive == null || sentAt == null || sentAt <= _now()) return;
+    _lastFetchSentAt = null;
     unawaited(reinitializeRemote());
   }
 

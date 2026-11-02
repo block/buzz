@@ -825,6 +825,52 @@ void main() {
     },
   );
 
+  test(
+    'a failed resync after the clock moves back is not retried on every read',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final relay = _FakeRelaySession();
+      var now = 1000000 + 7200;
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+        now: () => now,
+      );
+      await manager.initialize();
+
+      // The clock is corrected, and the resync's fetch fails.
+      now = 1000000;
+      relay.failNextFetch = true;
+      manager.markContextRead('channel-a', now);
+      await pumpEventQueue();
+      final fetches = relay.fetchCount;
+      expect(relay.liveSubscriptions, 1);
+      expect(relay.subscribeFilters.last.since, isNull);
+
+      // Later reads don't fetch again; the next reconnect covers the horizon.
+      manager.markContextRead('channel-b', now);
+      manager.markContextRead('channel-c', now);
+      await pumpEventQueue();
+      expect(relay.fetchCount, fetches);
+      await manager.reinitializeRemote();
+      expect(relay.fetchFilters.last.since, now - readStateHorizonSeconds);
+
+      manager.dispose();
+    },
+  );
+
   test('remote read-state rollback is ignored', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
