@@ -512,8 +512,10 @@ void main() {
         ('```\nx \\# y\n```', r'x \# y'),
         (r'code `a\#b`', r'a\#b'),
         (r'\`literal\` then `a\#b`', '`literal` then '),
-        // Authored private-use characters are not mistaken for escapes.
-        ('\uE02A \uE000\uE02A \\#', '\uE02A \uE000\uE02A #'),
+        // Authored stand-in characters are not mistaken for escapes.
+        ('\uFF0A \u2060\uFF0A \\#', '\uFF0A \u2060\uFF0A #'),
+        // gpt_markdown shows this unparsed; the stand-in still reads as #.
+        ('~~a\nb \\#c~~', '\uFF03c'),
         // A bare link's trailing backslash stays outside the link.
         (r'see https://example.com/a\', 'see '),
         (r'in buzz://channel/9f18f3c6-b5e5-453d-b36d-65487913be0b.\', r'.\'),
@@ -538,17 +540,17 @@ void main() {
             );
           }
           // No stand-in or leaked link syntax reaches text or semantics.
-          if (content.contains('\uE000')) continue;
+          if (content.contains('\u2060') || shown == '\uFF03c') continue;
           expect(
             find.textContaining(
-              RegExp('\uE000|\\]\\(http'),
+              RegExp('\u2060|\\]\\(http'),
               findRichText: true,
             ),
             findsNothing,
             reason: reason,
           );
           expect(
-            find.bySemanticsLabel(RegExp('\uE000')),
+            find.bySemanticsLabel(RegExp('\u2060')),
             findsNothing,
             reason: reason,
           );
