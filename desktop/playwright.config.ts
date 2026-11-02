@@ -330,6 +330,7 @@ export default defineConfig({
         "**/needs-restart-screenshots.spec.ts",
         "**/w07-agents-smoke.spec.ts",
         "**/w10-discovery-sales.spec.ts",
+        "**/back-to-origin.spec.ts",
         "**/w11-clients-work.spec.ts",
         "**/money.spec.ts",
         "**/cofounder-map.spec.ts",
