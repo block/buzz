@@ -1,9 +1,25 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:gpt_markdown/custom_widgets/link_button.dart';
 import 'package:buzz/features/channels/agent_activity/observer_models.dart';
 import 'package:buzz/features/channels/agent_activity/transcript_item_widget.dart';
 import 'package:buzz/shared/theme/theme.dart';
+
+/// Whether any paragraph on screen draws a link. gpt_markdown resolves link
+/// taps by text range, so a link shows up in the span tree only as its style.
+bool _rendersLink(WidgetTester tester) {
+  // gpt_markdown draws paragraphs with a RichText subclass.
+  final paragraphs = find.byWidgetPredicate((widget) => widget is RichText);
+  var found = false;
+  for (final paragraph in tester.widgetList<RichText>(paragraphs)) {
+    paragraph.text.visitChildren((span) {
+      found =
+          span.style?.decoration?.contains(TextDecoration.underline) ?? false;
+      return !found;
+    });
+    if (found) break;
+  }
+  return found;
+}
 
 Widget _testable(Widget child) {
   return MaterialApp(
@@ -30,7 +46,11 @@ void main() {
       ),
     );
 
-    expect(find.byType(LinkButton), findsNothing);
+    expect(
+      find.textContaining('https://example.com/report', findRichText: true),
+      findsOneWidget,
+    );
+    expect(_rendersLink(tester), isFalse);
   });
 
   testWidgets('leaves a bare URL in a thought as plain text', (tester) async {
@@ -47,6 +67,10 @@ void main() {
       ),
     );
 
-    expect(find.byType(LinkButton), findsNothing);
+    expect(
+      find.textContaining('https://example.com/report', findRichText: true),
+      findsOneWidget,
+    );
+    expect(_rendersLink(tester), isFalse);
   });
 }

@@ -193,8 +193,9 @@ bool _hasInlineCloser(String content, int start, int delimiterLength) {
   return false;
 }
 
-// Numeric entities shield literal label punctuation from gpt_markdown's
-// bracket-blind image/link matchers and its earlier \[...\] math pass.
+// Numeric entities keep literal label punctuation out of the line-based
+// attachment, gallery and preview matchers, which do not balance brackets.
+// The renderer decodes them.
 String _normalizeMarkdownLabel(String label) => label.replaceAllMapped(
   RegExp(r'\\([\\\[\]])|[\[\]]'),
   (match) => '&#${(match[1] ?? match[0]!).codeUnitAt(0)};',
@@ -349,10 +350,11 @@ String _normalizeProseLinks(String segment) {
   return normalized;
 }
 
-// An autolink keeps its backslashes literally. Encode them so none is read
-// as an escape of the synthesized `]` or `)`.
+// An autolink keeps its backslashes literally. Escape them so none is read
+// as an escape of the synthesized `]` or `)`. A numeric entity would show
+// verbatim: gpt_markdown leaves a URL-shaped label undecoded.
 String _autolink(String url) =>
-    '[${url.replaceAll(r'\', '&#92;')}](${url.replaceAll(r'\', '%5C')})';
+    '[${url.replaceAll(r'\', r'\\')}](${url.replaceAll(r'\', '%5C')})';
 
 String _normalizeBareLink(String segment, Match match) {
   final matched = match[0]!;
