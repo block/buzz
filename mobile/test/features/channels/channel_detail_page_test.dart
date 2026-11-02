@@ -14104,6 +14104,60 @@ void main() {
       });
     }
 
+    testWidgets(
+      'a channel link tap in a new community is not blocked by the old lookup',
+      (tester) async {
+        final relay = _ChannelMetadataRelaySession(
+          metas: [
+            _channelMetadataEvent(
+              _ChannelMetadataRelaySession.unlistedId,
+              'random',
+            ),
+          ],
+        );
+        final relayConfig = _SwitchableRelayConfigNotifier();
+        final observer = _TestNavigatorObserver();
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _textMsg(
+                id: 'msg1',
+                pubkey: 'alice',
+                content:
+                    '[#random](buzz://channel/${_ChannelMetadataRelaySession.unlistedId})',
+                createdAt: 1000,
+              ),
+            ],
+            users: {
+              'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+            relaySessionNotifier: relay,
+            relayConfigNotifier: relayConfig,
+            navigatorObservers: [observer],
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final initialPushCount = observer.pushCount;
+        await tester.tap(find.text('#random', findRichText: true));
+        await tester.pump();
+        relayConfig.switchCommunity();
+        await tester.pump();
+        await tester.tap(find.text('#random', findRichText: true));
+        await tester.pump();
+        expect(relay.metadataLookups, [
+          _ChannelMetadataRelaySession.unlistedId,
+          _ChannelMetadataRelaySession.unlistedId,
+        ]);
+
+        relay.gate.complete();
+        await tester.pumpAndSettle();
+        // The old community's lookup is dropped; the new tap opens once.
+        expect(observer.pushCount, initialPushCount + 1);
+      },
+    );
+
     testWidgets('tapping a channel link inside a thread opens that channel', (
       tester,
     ) async {
@@ -18193,6 +18247,14 @@ class _MutableHuddleMembersNotifier extends Notifier<List<ChannelMember>> {
 }
 
 /// Answers kind:39000 lookups for channels outside the loaded list.
+class _SwitchableRelayConfigNotifier extends RelayConfigNotifier {
+  @override
+  RelayConfig build() => const RelayConfig(baseUrl: 'https://relay.example');
+
+  void switchCommunity() =>
+      state = const RelayConfig(baseUrl: 'https://other.example');
+}
+
 class _ChannelMetadataRelaySession extends _IdentityUpdateRelaySession {
   _ChannelMetadataRelaySession({required this.metas, this.fail = false});
 

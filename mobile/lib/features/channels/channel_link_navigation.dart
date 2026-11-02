@@ -25,8 +25,9 @@ Future<void> openChannelLink({
   );
 }
 
-/// Channel ids whose tap is still resolving, so a repeated tap during a slow
-/// lookup doesn't open the channel twice.
+/// Taps still resolving, keyed by community scope and channel id, so a
+/// repeated tap during a slow lookup doesn't open the channel twice while a
+/// tap in another community isn't blocked by a lookup it will discard.
 final _resolving = <String>{};
 
 /// Resolves [channelId] for a tap that opens it, or shows why it can't be
@@ -42,13 +43,19 @@ Future<Channel?> resolveChannelToOpen(
   WidgetRef ref,
   String channelId,
 ) async {
-  if (!_resolving.add(channelId)) return null;
+  final key = '${_scope(ref)} $channelId';
+  if (!_resolving.add(key)) return null;
   try {
     return await _resolve(context, ref, channelId);
   } finally {
-    _resolving.remove(channelId);
+    _resolving.remove(key);
   }
 }
+
+String _scope(WidgetRef ref) => channelDirectoryScope(
+  ref.read(relayConfigProvider).baseUrl,
+  ref.read(myPubkeyProvider),
+);
 
 Future<Channel?> _resolve(
   BuildContext context,
@@ -57,11 +64,7 @@ Future<Channel?> _resolve(
 ) async {
   final notifier = ref.read(channelsProvider.notifier);
   final messenger = ScaffoldMessenger.of(context);
-  String scope() => channelDirectoryScope(
-    ref.read(relayConfigProvider).baseUrl,
-    ref.read(myPubkeyProvider),
-  );
-  final startScope = scope();
+  final startScope = _scope(ref);
   Channel? channel;
   Object? failure;
   try {
@@ -76,7 +79,7 @@ Future<Channel?> _resolve(
     failure = error;
   }
   // The tap belongs to the community it was made in.
-  if (!context.mounted || scope() != startScope) return null;
+  if (!context.mounted || _scope(ref) != startScope) return null;
   if (channel != null) {
     notifier.rememberOpened(channel);
     return channel;
