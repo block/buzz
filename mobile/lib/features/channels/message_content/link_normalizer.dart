@@ -11,13 +11,19 @@ final _autolinkPattern = RegExp(
 final _bareLinkPattern = RegExp(
   r'(?<![(\]=])(?:https?://|buzz://(?:message\?|join\?|channel/|(?:pr|issue|repo)\?))[^\s)>\]]+',
 );
+final _trailingBackslashPattern = RegExp(r'\\+$');
 final _trailingPunctuationPattern = RegExp(r'[.,!?:;]+$');
 final _backtickRunPattern = RegExp(r'`+');
 
 /// Converts supported Buzz and HTTP(S) autolinks and bare links into Markdown
 /// links while leaving inline and fenced code untouched. Punctuation peeling
 /// is limited to Buzz URLs so existing HTTP(S) destinations stay unchanged.
-String normalizeBareLinks(String content) {
+String normalizeBareLinks(String content) =>
+    mapMarkdownProse(content, _normalizeLinkSegment);
+
+/// Applies [transform] to each run of [content] outside inline and fenced
+/// code, leaving code untouched.
+String mapMarkdownProse(String content, String Function(String) transform) {
   final buffer = StringBuffer();
   var offset = 0;
   var proseStart = 0;
@@ -48,15 +54,11 @@ String normalizeBareLinks(String content) {
     } else if (_hasInlineCloserOnLine(content, run.end, runLength) ||
         (!_isOpeningFence(content, run.start, runLength) &&
             _hasInlineCloser(content, run.end, runLength))) {
-      buffer.write(
-        _normalizeLinkSegment(content.substring(proseStart, run.start)),
-      );
+      buffer.write(transform(content.substring(proseStart, run.start)));
       codeStart = run.start;
       inlineDelimiterLength = runLength;
     } else if (_isOpeningFence(content, run.start, runLength)) {
-      buffer.write(
-        _normalizeLinkSegment(content.substring(proseStart, run.start)),
-      );
+      buffer.write(transform(content.substring(proseStart, run.start)));
       codeStart = run.start;
       fenceDelimiterLength = runLength;
     }
@@ -67,7 +69,7 @@ String normalizeBareLinks(String content) {
   if (inlineDelimiterLength > 0 || fenceDelimiterLength > 0) {
     buffer.write(content.substring(codeStart));
   } else {
-    buffer.write(_normalizeLinkSegment(content.substring(proseStart)));
+    buffer.write(transform(content.substring(proseStart)));
   }
   return buffer.toString();
 }
@@ -275,6 +277,14 @@ String _normalizeBareLink(String segment, Match match) {
   var trailing = '';
   final isBuzzUrl = matched.startsWith('buzz://');
   final start = match.start;
+
+  // A trailing backslash escapes what follows or breaks the line; it is never
+  // part of the destination, and the renderer would read it as an escape.
+  final backslashes = _trailingBackslashPattern.firstMatch(url);
+  if (backslashes != null) {
+    url = url.substring(0, backslashes.start);
+    trailing = backslashes[0]!;
+  }
 
   if (isBuzzUrl) {
     final outsidePunctuation = _trailingPunctuationPattern.firstMatch(url);
