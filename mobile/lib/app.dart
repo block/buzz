@@ -156,7 +156,10 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
           _ensureScopeCurrent();
         } catch (error) {
           final nameTaken = _isChannelNameTakenError(error);
-          if (!nameTaken && !_isDuplicateChannelError(error)) rethrow;
+          final archivedAtId = _isArchivedChannelError(error);
+          if (!nameTaken && !archivedAtId && !_isDuplicateChannelError(error)) {
+            rethrow;
+          }
           _ensureScopeCurrent();
           channels = await _loadChannels();
           _ensureScopeCurrent();
@@ -167,6 +170,10 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
                   .firstOrNull ??
               (nameTaken ? _findListedNamesake(channels, starter.slug) : null);
           if (holder == null) {
+            // The relay refuses a create at an archived channel's id before
+            // its duplicate check, and keeps that id, so the starter can never
+            // be created there.
+            if (archivedAtId) continue;
             // The directory omits archived channels, yet the relay still
             // keeps the id (desktop uses the same one), so a duplicate with
             // no match may be an archived starter. Read that id directly.
@@ -226,6 +233,11 @@ bool _isUsableStarter(Channel channel) =>
 
 bool _isDuplicateChannelError(Object error) =>
     error.toString().contains('duplicate: channel already exists');
+
+/// The relay refuses any channel event whose `h` is an archived channel,
+/// a create at that id included: `invalid: channel is archived`.
+bool _isArchivedChannelError(Object error) =>
+    error.toString().contains('invalid: channel is archived');
 
 /// The relay refuses creating an open channel whose name another listed
 /// channel already holds, ignoring case:

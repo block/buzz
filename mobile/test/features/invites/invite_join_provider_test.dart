@@ -496,6 +496,20 @@ void main() {
       expect(archivedAtId.loads(), 2);
       expect(focusAfterArchived, welcomeId);
 
+      // The relay refuses a create at an archived channel's id with
+      // `channel is archived`; that starter is skipped without a lookup.
+      final refusedAsArchived = starterSetup(
+        channelsOnLoad: (_) => const [],
+        refusalError: 'invalid: channel is archived',
+      );
+      final focusAfterRefusal = await refusedAsArchived.recovery
+          .ensureStarterChannels();
+      expect(refusedAsArchived.created, ['general', 'welcome-everyone']);
+      expect(refusedAsArchived.lookups, isEmpty);
+      expect(refusedAsArchived.joined, isEmpty);
+      expect(refusedAsArchived.loads(), 2);
+      expect(focusAfterRefusal, welcomeId);
+
       // The scope fence also holds across the direct lookup, checked on the
       // last starter so the next starter's own fence cannot mask it.
       var lookedUp = false;
