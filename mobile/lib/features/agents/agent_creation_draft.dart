@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
@@ -66,7 +67,10 @@ class AgentCreationDraft {
     try {
       response = await client
           .send(
-            http.Request('GET', url)..headers['accept'] = 'application/json',
+            http.Request('GET', url)
+              ..headers['accept'] = 'application/json'
+              // A redirect could lead off the CDN; treat it as unavailable.
+              ..followRedirects = false,
           )
           .timeout(_fetchTimeout);
       if (response.statusCode == 403 || response.statusCode == 404) {
@@ -76,6 +80,9 @@ class AgentCreationDraft {
         throw AgentCardException(
           'Couldn’t load this agent card (HTTP ${response.statusCode}).',
         );
+      }
+      if ((response.contentLength ?? 0) > maxAgentCardBytes) {
+        throw const AgentCardException('This agent card is too large.');
       }
       body = await _readBounded(response.stream).timeout(_fetchTimeout);
     } on AgentCardException {
@@ -159,13 +166,13 @@ class AgentCreationDraft {
   }
 
   static Future<List<int>> _readBounded(Stream<List<int>> stream) async {
-    final bytes = <int>[];
+    final bytes = BytesBuilder(copy: false);
     await for (final chunk in stream) {
-      bytes.addAll(chunk);
-      if (bytes.length > maxAgentCardBytes) {
+      if (bytes.length + chunk.length > maxAgentCardBytes) {
         throw const AgentCardException('This agent card is too large.');
       }
+      bytes.add(chunk);
     }
-    return bytes;
+    return bytes.takeBytes();
   }
 }

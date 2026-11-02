@@ -305,6 +305,11 @@ class AgentsPage extends HookConsumerWidget {
       () {
         final link = draft;
         if (link == null || draftStep.value == _DraftStep.done) return null;
+        // Sign-in counts as attempted only once it is seen running, so a
+        // rerun before reconnectAccount reaches its sign-in stage still waits.
+        if (signingIn && draftStep.value == _DraftStep.signInRequested) {
+          draftStep.value = _DraftStep.signingIn;
+        }
         if (community == null || controller.busy || signingIn) return null;
         if (!supportsRemoteAgents(community)) {
           drop('Remote agents aren’t available in this community.');
@@ -312,9 +317,16 @@ class AgentsPage extends HookConsumerWidget {
         }
         if (controller.account.account == null) {
           if (draftStep.value == _DraftStep.wait) {
-            draftStep.value = _DraftStep.signingIn;
-            unawaited(flow.reconnectAccount());
-          } else {
+            draftStep.value = _DraftStep.signInRequested;
+            unawaited(
+              flow.reconnectAccount().catchError((Object error) {
+                debugPrint('agents: link sign-in failed: $error');
+                if (context.mounted) {
+                  drop('Couldn’t start Builderlab sign-in. Reopen the link.');
+                }
+              }),
+            );
+          } else if (draftStep.value == _DraftStep.signingIn) {
             drop(
               'Sign in to Builderlab to create this agent. Reopen the link.',
             );
@@ -342,10 +354,17 @@ class AgentsPage extends HookConsumerWidget {
           final AgentCreationDraft resolved;
           try {
             resolved = await AgentCreationDraft.fetch(link, client);
-          } on AgentCardException catch (error) {
+          } catch (error) {
+            if (error is! AgentCardException) {
+              debugPrint('agents: agent card failed: $error');
+            }
             if (context.mounted) {
               creating.value = false;
-              drop(error.message);
+              drop(
+                error is AgentCardException
+                    ? error.message
+                    : 'Couldn’t open this agent card.',
+              );
             }
             return;
           } finally {
@@ -505,5 +524,6 @@ class AgentsPage extends HookConsumerWidget {
   }
 }
 
-/// Progress of opening a link's draft: waiting on gates, in sign-in, or done.
-enum _DraftStep { wait, signingIn, done }
+/// Progress of opening a link's draft: waiting on gates, sign-in requested,
+/// sign-in seen running, or done.
+enum _DraftStep { wait, signInRequested, signingIn, done }
