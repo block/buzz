@@ -14,6 +14,7 @@ final _bareLinkPattern = RegExp(
 );
 final _trailingPunctuationPattern = RegExp(r'[.,!?:;]+$');
 final _backtickRunPattern = RegExp(r'`+');
+final _codeRunPattern = RegExp(r'`+|~{3,}');
 
 /// Converts supported Buzz and HTTP(S) autolinks and bare links into Markdown
 /// links while leaving inline and fenced code untouched. Punctuation peeling
@@ -22,7 +23,7 @@ String normalizeBareLinks(String content) =>
     mapMarkdownProse(content, _normalizeLinkSegment);
 
 /// Applies [transform] to each run of [content] outside inline and fenced
-/// code, leaving code untouched.
+/// code, leaving code untouched. Fences may use backticks or tildes.
 String mapMarkdownProse(String content, String Function(String) transform) {
   final buffer = StringBuffer();
   var offset = 0;
@@ -30,26 +31,37 @@ String mapMarkdownProse(String content, String Function(String) transform) {
   var codeStart = 0;
   var inlineDelimiterLength = 0;
   var fenceDelimiterLength = 0;
+  var fenceChar = '';
 
   while (offset < content.length) {
-    final run = _backtickRunPattern.matchAsPrefix(content, offset);
+    final run = _codeRunPattern.matchAsPrefix(content, offset);
     if (run == null) {
       offset++;
       continue;
     }
 
     final runLength = run.end - run.start;
+    final runChar = content[run.start];
     if (fenceDelimiterLength > 0) {
-      if (_isClosingFence(content, run.start, run.end, fenceDelimiterLength)) {
+      if (runChar == fenceChar &&
+          _isClosingFence(content, run.start, run.end, fenceDelimiterLength)) {
         buffer.write(content.substring(codeStart, run.end));
         fenceDelimiterLength = 0;
         proseStart = run.end;
       }
     } else if (inlineDelimiterLength > 0) {
-      if (runLength == inlineDelimiterLength) {
+      if (runChar == '`' && runLength == inlineDelimiterLength) {
         buffer.write(content.substring(codeStart, run.end));
         inlineDelimiterLength = 0;
         proseStart = run.end;
+      }
+    } else if (runChar == '~') {
+      // Tildes only fence code; shorter runs are strikethrough.
+      if (_isOpeningFence(content, run.start, runLength)) {
+        buffer.write(transform(content.substring(proseStart, run.start)));
+        codeStart = run.start;
+        fenceDelimiterLength = runLength;
+        fenceChar = runChar;
       }
     } else if (_isEscaped(content, run.start)) {
       // An escaped backtick is literal; the rest of its run may still open.
@@ -65,6 +77,7 @@ String mapMarkdownProse(String content, String Function(String) transform) {
       buffer.write(transform(content.substring(proseStart, run.start)));
       codeStart = run.start;
       fenceDelimiterLength = runLength;
+      fenceChar = runChar;
     }
 
     offset = run.end;
@@ -276,9 +289,8 @@ String _normalizeProseLinks(String segment) {
   // An escaped `\<` is literal, not an autolink; its URL stays a bare link.
   var normalized = segment.replaceAllMapped(
     _autolinkPattern,
-    (match) => _isEscaped(segment, match.start)
-        ? match[0]!
-        : '[${match[1]}](${match[1]})',
+    (match) =>
+        _isEscaped(segment, match.start) ? match[0]! : _autolink(match[1]!),
   );
   normalized = normalized.replaceAllMapped(
     _bareLinkPattern,
@@ -286,6 +298,11 @@ String _normalizeProseLinks(String segment) {
   );
   return normalized;
 }
+
+// An autolink keeps its backslashes literally. Encode them so none is read
+// as an escape of the synthesized `]` or `)`.
+String _autolink(String url) =>
+    '[${url.replaceAll(r'\', '&#92;')}](${url.replaceAll(r'\', '%5C')})';
 
 String _normalizeBareLink(String segment, Match match) {
   final matched = match[0]!;
