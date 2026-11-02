@@ -53,112 +53,104 @@ void main() {
   group('agent.json', () {
     final cdn = Uri.parse('https://cdn.example');
     const avatar = 'https://cdn.example/av_1/rev/avatar.png';
-    final cases =
-        <
-          String,
-          ({
-            Map<String, dynamic> json,
-            String name,
-            String instructions,
-            String? avatar,
-            String? model,
-            String? effort,
-          })
-        >{
-          'published v1 card: name and avatar only': (
-            json: {
-              'v': 1,
-              'id': 'av_1',
-              'collection': 'gloopie',
-              'name': 'Nitrox',
-              'number': 100,
-              'avatarUrl': avatar,
-              'cardUrl': 'https://cdn.example/av_1/rev/card.png',
-              'shareUrl': 'https://app.builderlab.xyz/a/av_1',
-            },
-            name: 'Nitrox',
-            instructions: '',
-            avatar: avatar,
-            model: null,
-            effort: null,
-          ),
-          'canonical keys': (
-            json: {
-              'name': ' Scout ',
-              'avatarUrl': avatar,
-              'instructions': 'Reply concisely.',
-              'model': 'sonnet-5-5',
-              'reasoningEffort': 'high',
-            },
-            name: 'Scout',
-            instructions: 'Reply concisely.',
-            avatar: avatar,
-            model: 'sonnet-5-5',
-            effort: 'high',
-          ),
-          'other key names are ignored': (
-            json: {
-              'name': 'Scout',
-              'avatar_url': avatar,
-              'system_prompt': 'Be kind.',
-              'model_id': 'opus-5-5',
-              'reasoning_effort': 'low',
-            },
-            name: 'Scout',
-            instructions: '',
-            avatar: null,
-            model: null,
-            effort: null,
-          ),
-          'wrong types and blanks are left for the user': (
-            json: {
-              'name': 7,
-              'instructions': ['x'],
-              'model': '  ',
-              'reasoningEffort': true,
-            },
-            name: '',
-            instructions: '',
-            avatar: null,
-            model: null,
-            effort: null,
-          ),
-          'avatar on another host is not used': (
-            json: {'name': 'Scout', 'avatarUrl': 'https://evil.example/a.png'},
-            name: 'Scout',
-            instructions: '',
-            avatar: null,
-            model: null,
-            effort: null,
-          ),
-          'http avatar is not used': (
-            json: {'name': 'Scout', 'avatarUrl': 'http://cdn.example/a.png'},
-            name: 'Scout',
-            instructions: '',
-            avatar: null,
-            model: null,
-            effort: null,
-          ),
-          'avatar with credentials is not used': (
-            json: {
-              'name': 'Scout',
-              'avatarUrl': 'https://u:p@cdn.example/a.png',
-            },
-            name: 'Scout',
-            instructions: '',
-            avatar: null,
-            model: null,
-            effort: null,
-          ),
-        };
-    cases.forEach((label, c) {
+    // A card as kgoose publishes it today (schema v1).
+    const published = <String, dynamic>{
+      'v': 1,
+      'id': 'av_1',
+      'collection': 'gloopie',
+      'name': 'Nitrox',
+      'number': 100,
+      'avatarUrl': avatar,
+      'cardUrl': 'https://cdn.example/av_1/rev/card.png',
+      'shareUrl': 'https://app.builderlab.xyz/a/av_1',
+    };
+
+    test('a published v1 card opens with name and avatar only', () {
+      final draft = AgentCreationDraft.parseAgentCard(published, 'av_1', cdn);
+      expect(draft.name, 'Nitrox');
+      expect(draft.instructions, '');
+      expect(draft.avatar?.url, avatar);
+      expect(draft.modelId, isNull);
+      expect(draft.reasoningEffort, isNull);
+    });
+
+    test('a v2 card carries instructions and model defaults', () {
+      final draft = AgentCreationDraft.parseAgentCard(
+        {
+          ...published,
+          'v': 2,
+          'name': ' Scout ',
+          'instructions': 'Reply concisely.',
+          'model': 'sonnet-5-5',
+          'reasoningEffort': 'high',
+          // Other keys are ignored, including other spellings of known ones.
+          'system_prompt': 'ignored',
+          'model_id': 'ignored',
+        },
+        'av_1',
+        cdn,
+      );
+      expect(draft.name, 'Scout');
+      expect(draft.instructions, 'Reply concisely.');
+      expect(draft.modelId, 'sonnet-5-5');
+      expect(draft.reasoningEffort, 'high');
+    });
+
+    test('blank optional fields are left for the user', () {
+      final draft = AgentCreationDraft.parseAgentCard(
+        {...published, 'v': 2, 'instructions': '', 'model': ' '},
+        'av_1',
+        cdn,
+      );
+      expect(draft.instructions, '');
+      expect(draft.modelId, isNull);
+    });
+
+    final invalid = <String, Map<String, dynamic>>{
+      'missing v': {...published}..remove('v'),
+      'unknown v': {...published, 'v': 3},
+      'string v': {...published, 'v': '1'},
+      'missing id': {...published}..remove('id'),
+      'id of another card': {...published, 'id': 'av_2'},
+      'missing name': {...published}..remove('name'),
+      'blank name': {...published, 'name': ' '},
+      'non-string name': {...published, 'name': 7},
+      'missing avatar': {...published}..remove('avatarUrl'),
+      'avatar on another host': {
+        ...published,
+        'avatarUrl': 'https://evil.example/a.png',
+      },
+      'http avatar': {...published, 'avatarUrl': 'http://cdn.example/a.png'},
+      'avatar with credentials': {
+        ...published,
+        'avatarUrl': 'https://u:p@cdn.example/a.png',
+      },
+      'non-string instructions': {
+        ...published,
+        'v': 2,
+        'instructions': ['x'],
+      },
+      'non-string model': {...published, 'v': 2, 'model': 5},
+      'non-string effort': {
+        ...published,
+        'v': 2,
+        'model': 'sonnet-5-5',
+        'reasoningEffort': true,
+      },
+      'effort without model': {...published, 'v': 2, 'reasoningEffort': 'high'},
+    };
+    invalid.forEach((label, json) {
       test(label, () {
-        final draft = AgentCreationDraft.parseAgentCard(c.json, cdn);
-        expect(draft.name, c.name);
-        expect(draft.instructions, c.instructions);
-        expect(draft.avatar?.url, c.avatar);
-        expect(draft.modelId, c.model);
-        expect(draft.reasoningEffort, c.effort);
+        expect(
+          () => AgentCreationDraft.parseAgentCard(json, 'av_1', cdn),
+          throwsA(
+            isA<AgentCardException>().having(
+              (e) => e.message,
+              'message',
+              'This agent card is invalid.',
+            ),
+          ),
+        );
       });
     });
   });
@@ -192,7 +184,18 @@ void main() {
       late http.BaseRequest seen;
       final result = await outcome((request, _) async {
         seen = request;
-        return respond(200, [utf8.encode('{"name":"Scout"}')]);
+        return respond(200, [
+          utf8.encode(
+            jsonEncode({
+              'v': 1,
+              'id': 'av_1',
+              'name': 'Scout',
+              'avatarUrl': HostedEnvironment.avatarsCdnOrigin
+                  .replace(path: '/av_1/r/avatar.png')
+                  .toString(),
+            }),
+          ),
+        ]);
       });
       expect(result, isA<AgentCreationDraft>());
       expect(

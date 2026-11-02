@@ -51,11 +51,11 @@ any length while the QR stays small.
 }
 ```
 
-- `name` and `avatarUrl` are on every published card; `instructions`, `model`
-  and `reasoningEffort` are optional. A missing field, or one that isn't a
-  non-blank string, is left for the user. Other keys are ignored.
-- The avatar is used only if it is an `https` URL on the same CDN; otherwise the
-  form picks its usual default. It stays editable.
+- `v` (1 or 2), `id` (the link's card id), `name` and `avatarUrl` are required.
+  `instructions`, `model` and `reasoningEffort` are optional and left for the
+  user when absent; `reasoningEffort` needs `model`. A missing required field,
+  a known field of the wrong type, or an avatar that isn't an `https` URL on the
+  same CDN makes the card invalid, and no form opens. Other keys are ignored.
 - `model` and `reasoningEffort` are pre-selected only if the live model catalog
   offers them (the effort only for that model).
 - The link waits for sign-in and community load. It needs Builderlab login and a

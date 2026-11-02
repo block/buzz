@@ -102,38 +102,54 @@ class AgentCreationDraft {
     if (json is! Map<String, dynamic>) {
       throw const AgentCardException('This agent card is invalid.');
     }
-    return parseAgentCard(json, cdn);
+    return parseAgentCard(json, link.cardId, cdn);
   }
 
-  /// Reads a card's draft from the `agent.json` schema's `name`,
-  /// `avatarUrl`, `instructions`, `model` and `reasoningEffort`. Cards
-  /// published before instructions and model existed have just the first two.
-  /// A missing field, or one that isn't a non-blank string, is left for the
-  /// user; other keys are ignored. An avatar is used only from [cdn], the host
-  /// the card itself came from.
-  static AgentCreationDraft parseAgentCard(Map<String, dynamic> json, Uri cdn) {
-    final avatarUrl = _string(json, 'avatarUrl');
-    final avatar = Uri.tryParse(avatarUrl ?? '');
+  /// Reads a card's draft from its `agent.json`, validated against the card
+  /// schema (v1 or v2). `v`, `id` (matching [cardId]), `name` and `avatarUrl`
+  /// are required; `instructions`, `model` and `reasoningEffort` are optional
+  /// and left for the user when absent. A required field that is missing, or
+  /// any known field of the wrong type, makes the card invalid. Other keys are
+  /// ignored. The avatar must be an https URL on [cdn], the card's own host.
+  static AgentCreationDraft parseAgentCard(
+    Map<String, dynamic> json,
+    String cardId,
+    Uri cdn,
+  ) {
+    const invalid = AgentCardException('This agent card is invalid.');
+    final version = json['v'];
+    if (version is! int || (version != 1 && version != 2)) throw invalid;
+    if (json['id'] != cardId) throw invalid;
+    final name = json['name'];
+    final avatarUrl = json['avatarUrl'];
+    if (name is! String || name.trim().isEmpty || avatarUrl is! String) {
+      throw invalid;
+    }
+    final avatar = Uri.tryParse(avatarUrl);
+    if (avatar == null ||
+        avatar.scheme != 'https' ||
+        avatar.host != cdn.host ||
+        avatar.hasPort ||
+        avatar.userInfo.isNotEmpty) {
+      throw invalid;
+    }
+    String? optional(String key) {
+      final value = json[key];
+      if (value != null && value is! String) throw invalid;
+      final text = (value as String?)?.trim();
+      return text == null || text.isEmpty ? null : text;
+    }
+
+    final modelId = optional('model');
+    final reasoningEffort = optional('reasoningEffort');
+    if (reasoningEffort != null && modelId == null) throw invalid;
     return AgentCreationDraft(
-      name: _string(json, 'name') ?? '',
-      instructions: _string(json, 'instructions') ?? '',
-      avatar:
-          avatar != null &&
-              avatar.scheme == 'https' &&
-              avatar.host == cdn.host &&
-              !avatar.hasPort &&
-              avatar.userInfo.isEmpty
-          ? AgentAvatarSelection.url(avatarUrl!)
-          : null,
-      modelId: _string(json, 'model'),
-      reasoningEffort: _string(json, 'reasoningEffort'),
+      name: name.trim(),
+      instructions: optional('instructions') ?? '',
+      avatar: AgentAvatarSelection.url(avatarUrl),
+      modelId: modelId,
+      reasoningEffort: reasoningEffort,
     );
-  }
-
-  /// [key]'s value if it is a non-blank string, trimmed.
-  static String? _string(Map<String, dynamic> json, String key) {
-    final value = json[key];
-    return value is String && value.trim().isNotEmpty ? value.trim() : null;
   }
 
   static Future<List<int>> _readBounded(Stream<List<int>> stream) async {

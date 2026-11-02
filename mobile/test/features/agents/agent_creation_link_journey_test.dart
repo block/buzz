@@ -49,8 +49,18 @@ final _cards = <String, Map<String, Object?>>{
     'avatarUrl': '$_cdn/av_v1/r1/avatar.png',
     'model': 'retired-model',
   },
-  'av_third': {'name': 'Third'},
-  'av_fourth': {'name': 'Fourth'},
+  'av_third': {
+    'v': 1,
+    'id': 'av_third',
+    'name': 'Third',
+    'avatarUrl': '$_cdn/av_third/r1/avatar.png',
+  },
+  'av_fourth': {
+    'v': 1,
+    'id': 'av_fourth',
+    'name': 'Fourth',
+    'avatarUrl': '$_cdn/av_fourth/r1/avatar.png',
+  },
 };
 
 /// Fakes only the CDN: unknown ids get S3's 403.
