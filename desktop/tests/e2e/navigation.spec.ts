@@ -672,24 +672,39 @@ test("composer Buzz chip labels wrap without orphaning their icons", async ({
   const tooltip = page.getByRole("tooltip");
   await sentChip.focus();
   const positionOverFragment = async (index: number) => {
-    const fragment = await sentChip.evaluate((element, fragmentIndex) => {
-      const container = element.parentElement;
-      if (container) container.style.width = "220px";
-      const rects = Array.from(element.getClientRects()).filter(
-        (rect) => rect.width > 0 && rect.height > 0,
-      );
-      const rect = rects.at(fragmentIndex);
-      if (!rect) return null;
-      return {
-        height: rect.height,
-        left: rect.left,
-        top: rect.top,
-        width: rect.width,
-      };
-    }, index);
-    if (!fragment) throw new Error(`Expected chip fragment ${index}`);
-    const cursorX = fragment.left + fragment.width / 2;
-    await page.mouse.move(cursorX, fragment.top + fragment.height / 2);
+    // Virtua sets pointer-events: none on the timeline's rows while the list
+    // scrolls and clears it 150 ms after the last scroll event, longer than
+    // the floor wait's two frames. A move in that window misses the chip, and
+    // nothing sends it a pointermove once the rows take pointer events again,
+    // so the tooltip stays where focus opened it. Move only once the
+    // fragment's centre hit-tests to the chip.
+    let cursorX = Number.NaN;
+    let cursorY = Number.NaN;
+    await expect
+      .poll(async () => {
+        const fragment = await sentChip.evaluate((element, fragmentIndex) => {
+          const container = element.parentElement;
+          if (container) container.style.width = "220px";
+          const rects = Array.from(element.getClientRects()).filter(
+            (rect) => rect.width > 0 && rect.height > 0,
+          );
+          const rect = rects.at(fragmentIndex);
+          if (!rect) return null;
+          const x = rect.left + rect.width / 2;
+          const y = rect.top + rect.height / 2;
+          return {
+            hitsChip: element.contains(document.elementFromPoint(x, y)),
+            x,
+            y,
+          };
+        }, index);
+        if (!fragment) throw new Error(`Expected chip fragment ${index}`);
+        cursorX = fragment.x;
+        cursorY = fragment.y;
+        return fragment.hitsChip;
+      })
+      .toBe(true);
+    await page.mouse.move(cursorX, cursorY);
     // A closing tooltip stays visible through its exit animation.
     await expect(tooltip).toHaveAttribute("data-state", /open/);
     let tooltipCenter = Number.NaN;
