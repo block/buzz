@@ -9174,24 +9174,43 @@ pub(crate) mod postgres_tests {
         }
 
         async fn http(&self, uri: &str, filter: &serde_json::Value) -> (StatusCode, Value) {
-            self.post(uri, &serde_json::json!([filter])).await
+            let body = serde_json::to_vec(&[filter]).expect("json");
+            self.post(uri, body, axum::http::HeaderMap::new()).await
         }
 
-        async fn post(&self, uri: &str, body: &serde_json::Value) -> (StatusCode, Value) {
+        /// `POST /profiles/search` for `needle`, NIP-98 signed by the reader.
+        async fn profile_search(&self) -> (StatusCode, Value) {
+            let path = super::super::profiles::SEARCH_PATH;
+            let body = serde_json::to_vec(&serde_json::json!({"query": "needle"})).expect("json");
+            let url = super::nip98_expected_url(
+                &self.state.config.relay_url,
+                &TenantContext::resolved(self.community, self.host.clone()),
+                path,
+            );
+            let auth = make_nip98_headers(&self.reader, &url, "POST", &body);
+            self.post(path, body, auth).await
+        }
+
+        async fn post(
+            &self,
+            uri: &str,
+            body: Vec<u8>,
+            headers: axum::http::HeaderMap,
+        ) -> (StatusCode, Value) {
             use axum::body::Body;
             use axum::http::{header, Request};
             use tower::ServiceExt;
+            let mut request = Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header(header::HOST, &self.host)
+                .header("x-pubkey", self.reader.public_key().to_hex())
+                .header("content-type", "application/json");
+            if let Some(map) = request.headers_mut() {
+                map.extend(headers);
+            }
             let resp = crate::router::build_router(self.state.clone())
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri(uri)
-                        .header(header::HOST, &self.host)
-                        .header("x-pubkey", self.reader.public_key().to_hex())
-                        .header("content-type", "application/json")
-                        .body(Body::from(serde_json::to_vec(body).expect("json")))
-                        .expect("request"),
-                )
+                .oneshot(request.body(Body::from(body)).expect("request"))
                 .await
                 .expect("oneshot");
             let status = resp.status();
@@ -9391,7 +9410,6 @@ pub(crate) mod postgres_tests {
     async fn search_statement_timeout_maps_to_timeout_contract() {
         use crate::handlers::req::{QUERY_TIMED_OUT_CLOSED, SEARCH_FAILED_CLOSED};
         let fx = cancel_fixture().await;
-        let profiles = serde_json::json!({"query": "needle"});
         let closed = |reason: &str| format!(r#"["CLOSED","s","{reason}"]"#);
 
         // Healthy controls.
@@ -9401,9 +9419,7 @@ pub(crate) mod postgres_tests {
             body.to_string().contains("root needle"),
             "search hit: {body}"
         );
-        let (status, body) = fx
-            .post(super::super::profiles::SEARCH_PATH, &profiles)
-            .await;
+        let (status, body) = fx.profile_search().await;
         assert_eq!(status, StatusCode::OK, "healthy profile search: {body}");
         let frame = fx.ws_search().await;
         assert!(frame.contains("root needle"), "healthy WS search: {frame}");
@@ -9421,9 +9437,7 @@ pub(crate) mod postgres_tests {
         );
         let (status, body) = fx.http("/query", &fx.search_filter()).await;
         assert_eq!((status, body["error"].as_str()), timed_out, "HTTP search");
-        let (status, body) = fx
-            .post(super::super::profiles::SEARCH_PATH, &profiles)
-            .await;
+        let (status, body) = fx.profile_search().await;
         assert_eq!(
             (status, body["error"].as_str()),
             timed_out,
@@ -9453,9 +9467,7 @@ pub(crate) mod postgres_tests {
             failed,
             "HTTP search ordinary error"
         );
-        let (status, body) = fx
-            .post(super::super::profiles::SEARCH_PATH, &profiles)
-            .await;
+        let (status, body) = fx.profile_search().await;
         assert_eq!(
             (status, body["error"].as_str()),
             failed,
