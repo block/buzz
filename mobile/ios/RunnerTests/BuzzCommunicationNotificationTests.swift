@@ -242,11 +242,62 @@ final class BuzzCommunicationNotificationTests: XCTestCase {
   }
 }
 
+/// RunnerTests load the full Flutter app as their host. On CI's 3-vCPU runners
+/// its launch saturated the machine for about 40 s (both 2026-11-01 failures):
+/// a trivial queue-to-main hop took 1.3 s, then over 10 s, while a synchronous
+/// main-thread test slowed from 0.013 s to 2.65 s, and the bridge's replies
+/// missed their 10 s waits. This barrier measures that same hop, at the QoS
+/// the bridge uses, and lets the class begin only once three consecutive hops
+/// are fast again. On an idle host it costs a few milliseconds. The cap keeps a
+/// host that never settles from hanging the run; its tests then fail with the
+/// real symptom, and the printed line says the barrier gave up.
+enum BuzzTestHostSettleBarrier {
+  /// A hop this slow leaves too little margin under the class's 10 s waits.
+  static let slowHop: TimeInterval = 0.5
+  static let consecutiveFastHops = 3
+  static let cap: TimeInterval = 60
+
+  /// Waits once per process; later calls return immediately.
+  static func waitUntilSettled() {
+    _ = settled
+  }
+
+  private static let settled: Void = {
+    let queue = DispatchQueue(label: "xyz.block.buzz.test-host-settle", qos: .userInitiated)
+    let started = Date()
+    let deadline = started.addingTimeInterval(cap)
+    var fastHops = 0
+    var slowHops = 0
+    while fastHops < consecutiveFastHops, Date() < deadline {
+      let hopStarted = Date()
+      let hop = XCTestExpectation(description: "queue to main hop")
+      queue.async { DispatchQueue.main.async { hop.fulfill() } }
+      _ = XCTWaiter().wait(for: [hop], timeout: max(deadline.timeIntervalSinceNow, 0))
+      if Date().timeIntervalSince(hopStarted) < slowHop {
+        fastHops += 1
+      } else {
+        fastHops = 0
+        slowHops += 1
+      }
+    }
+    let outcome = fastHops < consecutiveFastHops ? "gave up" : "settled"
+    print(
+      "BuzzTestHostSettleBarrier \(outcome) after \(Date().timeIntervalSince(started)) s"
+        + " (\(slowHops) slow hops)"
+    )
+  }()
+}
+
 /// Callbacks only record what they receive and assertions run after the wait,
 /// so a callback that lands after its test returned cannot fail a later test.
 /// The timeout is a cap; a passing test returns as soon as its callback runs.
 final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
   private let callbackTimeout: TimeInterval = 10
+
+  override class func setUp() {
+    super.setUp()
+    BuzzTestHostSettleBarrier.waitUntilSettled()
+  }
 
   func testAgeSignalRequestDoesNotDependOnNotificationStorage() {
     let delegate = MissingAppGroupDelegate()
@@ -373,7 +424,12 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
     XCTAssertFalse(BuzzAgeRestrictionSession.isRestricted(containerURL: directory))
     XCTAssertEqual(deletionCalls, 2)
     // Flutter awaits these replies; a lower QoS left them starved on busy hosts.
-    XCTAssertEqual(deletionQoS, [QOS_CLASS_USER_INITIATED, QOS_CLASS_USER_INITIATED])
+    for qos in deletionQoS {
+      XCTAssertEqual(
+        qos, QOS_CLASS_USER_INITIATED,
+        "deletion ran at QoS class \(qos.rawValue), expected user-initiated (\(QOS_CLASS_USER_INITIATED.rawValue))"
+      )
+    }
     XCTAssertEqual(try Data(contentsOf: snapshotURL), original)
   }
 
