@@ -5,6 +5,7 @@ mod archive;
 mod build_identity;
 mod builderlab;
 mod channel_head_cache;
+mod cofounder_wake_filter;
 mod commands;
 mod deep_link;
 mod egress_guard;

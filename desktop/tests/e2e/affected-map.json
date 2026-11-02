@@ -56,7 +56,8 @@
       "w11-clients-work.spec.ts",
       "colony3-settings.spec.ts",
       "settings-section-layout.spec.ts",
-      "thread-reply-anchor-roleplay.spec.ts"
+      "thread-reply-anchor-roleplay.spec.ts",
+      "cofounder-wake-hidden.spec.ts"
     ],
     "focus": {
       "specs": [
@@ -415,6 +416,15 @@
         "send-feedback-settings.spec.ts",
         "signout-confirmation.spec.ts"
       ]
+    },
+    {
+      "paths": [
+        "desktop/src/shared/lib/cofounderWake.ts",
+        "desktop/src/shared/api/relayClientSession.ts",
+        "desktop/src/shared/api/tauri.ts",
+        "desktop/src-tauri/src/cofounder_wake_filter.rs"
+      ],
+      "specs": ["cofounder-wake-hidden.spec.ts", "badge.spec.ts"]
     },
     {
       "paths": ["desktop/src/features/sidebar/**"],

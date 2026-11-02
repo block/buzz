@@ -32,7 +32,7 @@ mod export_util;
 mod global_agent_config;
 mod google_auth;
 mod identity;
-mod identity_archive;
+pub(crate) mod identity_archive;
 mod join_policy;
 mod key_rescue;
 mod legacy_storage;

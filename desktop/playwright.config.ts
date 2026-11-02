@@ -191,6 +191,7 @@ export default defineConfig({
         "**/auxiliary-pane-close-visibility.spec.ts",
         "**/channel-composer-overflow.spec.ts",
         "**/badge.spec.ts",
+        "**/cofounder-wake-hidden.spec.ts",
         "**/channel-browser.spec.ts",
         "**/channel-add-screenshots.spec.ts",
         "**/add-community-screenshots.spec.ts",

@@ -1,5 +1,6 @@
 import { invokeTauri } from "@/shared/api/tauriTransport";
 import { getSharedIdentity } from "@/shared/api/nativeBridge";
+import { withoutCofounderWakes } from "@/shared/lib/cofounderWake";
 import {
   fromRawInstallRuntimeResult,
   type RawInstallRuntimeResult,
@@ -371,13 +372,18 @@ export async function getHomeFeed(
   input: GetHomeFeedInput = {},
 ): Promise<HomeFeedResponse> {
   const response = await invokeTauri<RawHomeFeedResponse>("get_feed", input);
+  // The relay's wake for Scout is never an Activity row, whichever way it was
+  // tagged (the native read already drops it; this is the same rule again).
+  const readRelaySelf = () => invokeTauri<string | null>("get_relay_self");
+  const visible = (items: RawFeedItem[]) =>
+    withoutCofounderWakes(items.map(fromRawFeedItem), readRelaySelf);
 
   return {
     feed: {
-      mentions: response.feed.mentions.map(fromRawFeedItem),
-      needsAction: response.feed.needs_action.map(fromRawFeedItem),
-      activity: response.feed.activity.map(fromRawFeedItem),
-      agentActivity: response.feed.agent_activity.map(fromRawFeedItem),
+      mentions: await visible(response.feed.mentions),
+      needsAction: await visible(response.feed.needs_action),
+      activity: await visible(response.feed.activity),
+      agentActivity: await visible(response.feed.agent_activity),
     },
     meta: {
       since: response.meta.since,

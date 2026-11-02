@@ -455,7 +455,7 @@ pub async fn query_relay_at(
     let body_bytes =
         serde_json::to_vec(filters).map_err(|e| format!("filter serialization failed: {e}"))?;
     let auth = build_nip98_auth_header(&Method::POST, &url, &body_bytes, state)?;
-    send_query_request(
+    let events = send_query_request(
         &state.http_client,
         &url,
         &auth,
@@ -463,7 +463,8 @@ pub async fn query_relay_at(
         body_bytes,
         QUERY_REQUEST_TIMEOUT,
     )
-    .await
+    .await?;
+    Ok(crate::cofounder_wake_filter::without_wakes(state, events).await)
 }
 
 pub async fn query_relay_at_with_keys(
@@ -478,7 +479,7 @@ pub async fn query_relay_at_with_keys(
     let body_bytes =
         serde_json::to_vec(filters).map_err(|e| format!("filter serialization failed: {e}"))?;
     let auth = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
-    send_query_request(
+    let events = send_query_request(
         &state.http_client,
         &url,
         &auth,
@@ -486,7 +487,8 @@ pub async fn query_relay_at_with_keys(
         body_bytes,
         QUERY_REQUEST_TIMEOUT,
     )
-    .await
+    .await?;
+    Ok(crate::cofounder_wake_filter::without_wakes(state, events).await)
 }
 
 /// Build an authenticated relay HTTP request using already-signed NIP-98 auth.

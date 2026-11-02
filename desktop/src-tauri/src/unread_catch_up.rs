@@ -199,15 +199,19 @@ pub(crate) async fn unread_catch_up(
         let (order, channel, result) =
             joined.map_err(|error| format!("unread catch-up task failed: {error}"))?;
         match result {
-            Ok(events) => fetched.push(FetchedChannel {
-                order,
-                channel,
-                events: events
-                    .into_iter()
-                    .take(CATCH_UP_LIMIT)
-                    .map(EventView::from)
-                    .collect(),
-            }),
+            Ok(events) => {
+                // The relay's wake for Scout is never unread news for a person.
+                let events = crate::cofounder_wake_filter::without_wakes(&state, events).await;
+                fetched.push(FetchedChannel {
+                    order,
+                    channel,
+                    events: events
+                        .into_iter()
+                        .take(CATCH_UP_LIMIT)
+                        .map(EventView::from)
+                        .collect(),
+                });
+            }
             Err(error) => failures.push(ChannelResult::Error {
                 channel_id: channel.id,
                 error,

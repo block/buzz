@@ -38,6 +38,7 @@ import {
 import { getChannelReconnectRepairEvents } from "@/shared/api/channelReconnectRepair";
 import { replayLiveSubscriptions } from "@/shared/api/relayReconnectReplay";
 import { publishSessionEvent } from "@/shared/api/relayEventPublisher";
+import { isCofounderWakeEvent } from "@/shared/lib/cofounderWake";
 import {
   activateRateLimitIfSignalled,
   rateLimitRemainingMs,
@@ -108,6 +109,11 @@ export class RelayClient {
   private visibleChannelId: string | null = null;
   private authOkTracker = new AuthOkTracker();
   private terminal = false;
+  /**
+   * The relay's NIP-11 `self` key: `undefined` until read, `null` when the
+   * relay advertises none. Used to hide the relay's co-founder wake messages.
+   */
+  private relaySelf: string | null | undefined;
 
   private connectionStateEmitter = new RelayConnectionStateEmitter("idle");
   private stallWatchdog = new RelayStallWatchdog({
@@ -137,6 +143,7 @@ export class RelayClient {
     this.connectionGeneration++;
     this.keepAliveRequested = false;
     this.relayUrl = null;
+    this.relaySelf = undefined;
     this.hasConnectedOnce = false;
     this.notifyReconnectListeners = false;
     this.terminal = false;
@@ -572,6 +579,7 @@ export class RelayClient {
       if (!this.relayUrl) {
         this.relayUrl = await getRelayWsUrl();
       }
+      this.readRelaySelf();
       const wsId = await invoke<number>("plugin:websocket|connect", {
         url: this.relayUrl,
         onMessage: this.onMessageChannel,
@@ -915,9 +923,28 @@ export class RelayClient {
     await this.sendRaw(["AUTH", event]);
   }
 
+  /** Reads the relay's own key once per session; a failure leaves it `null`. */
+  private readRelaySelf() {
+    if (this.relaySelf !== undefined) return;
+    const epoch = this.sessionEpoch;
+    void invoke<string | null>("get_relay_self")
+      .then((value) => {
+        if (epoch === this.sessionEpoch) this.relaySelf = value ?? null;
+      })
+      .catch(() => {
+        if (epoch === this.sessionEpoch) this.relaySelf = null;
+      });
+  }
+
   private handleEvent(subId: string, event: RelayEvent, generation: number) {
     const subscription = this.subscriptions.get(subId);
     if (!subscription) {
+      return;
+    }
+
+    // The wake for Scout is not for people: no subscription, history page,
+    // Activity row or unread count ever receives it.
+    if (isCofounderWakeEvent(event, this.relaySelf)) {
       return;
     }
 
