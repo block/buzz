@@ -26,7 +26,9 @@ import 'channel_management_provider.dart';
 /// Persistent shortcut to the agent chosen in Agents.
 class DefaultAgentLauncher extends HookConsumerWidget {
   const DefaultAgentLauncher({required this.onChooseAgent, super.key});
-  final VoidCallback onChooseAgent;
+
+  /// Runs while the launcher waits; a Bestie chosen meanwhile opens next.
+  final FutureOr<void> Function() onChooseAgent;
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final preference = ref.watch(defaultAgentProvider);
@@ -47,6 +49,45 @@ class DefaultAgentLauncher extends HookConsumerWidget {
         : preference.hasError
         ? 'Retry Bestie'
         : 'Create your Bestie';
+    Future<void> openChat(String agent) async {
+      final channelState = ref.read(channelsProvider);
+      // AsyncValue may retain the previous community's list during reload.
+      final channels = channelState.isLoading || channelState.hasError
+          ? const <Channel>[]
+          : channelState.value ?? const <Channel>[];
+      final notifier = ref.read(channelsProvider.notifier);
+      final cached = channels
+          .where(
+            (channel) => isActiveDirectConversation(
+              channel,
+              notifier.cachedMembersForChannel(channel.id),
+              ref.read(myPubkeyProvider),
+              agent,
+            ),
+          )
+          .firstOrNull;
+      resolving.value = cached == null;
+      final channel =
+          cached ??
+          await ref.read(channelActionsProvider).openDm(pubkeys: [agent]);
+      if (context.mounted) resolving.value = false;
+      if (!context.mounted) return;
+      // A community switch invalidates an in-flight destination.
+      if (ref.read(meSyncProvider) != scope ||
+          ref.read(defaultAgentProvider).isLoading ||
+          ref.read(defaultAgentProvider).value != agent) {
+        return;
+      }
+      await Navigator.of(context).push<void>(
+        MaterialPageRoute(
+          // Native glass and video layers must track the live route.
+          allowSnapshotting: false,
+          builder: (_) =>
+              ChannelDetailPage(channel: channel, continuousConversation: true),
+        ),
+      );
+    }
+
     Future<void> open() async {
       final currentPreference = ref.read(defaultAgentProvider);
       if (opening.value ||
@@ -60,50 +101,17 @@ class DefaultAgentLauncher extends HookConsumerWidget {
         ref.invalidate(defaultAgentProvider);
         return;
       }
-      if (pubkey == null) {
-        onChooseAgent();
-        return;
-      }
       opening.value = true;
       try {
-        final channelState = ref.read(channelsProvider);
-        // AsyncValue may retain the previous community's list during reload.
-        final channels = channelState.isLoading || channelState.hasError
-            ? const <Channel>[]
-            : channelState.value ?? const <Channel>[];
-        final notifier = ref.read(channelsProvider.notifier);
-        final cached = channels
-            .where(
-              (channel) => isActiveDirectConversation(
-                channel,
-                notifier.cachedMembersForChannel(channel.id),
-                ref.read(myPubkeyProvider),
-                pubkey,
-              ),
-            )
-            .firstOrNull;
-        resolving.value = cached == null;
-        final channel =
-            cached ??
-            await ref.read(channelActionsProvider).openDm(pubkeys: [pubkey]);
-        if (context.mounted) resolving.value = false;
-        if (!context.mounted) return;
-        // A community switch invalidates an in-flight destination.
-        if (ref.read(meSyncProvider) != scope ||
-            ref.read(defaultAgentProvider).isLoading ||
-            ref.read(defaultAgentProvider).value != pubkey) {
+        if (pubkey != null) {
+          await openChat(pubkey);
           return;
         }
-        await Navigator.of(context).push<void>(
-          MaterialPageRoute(
-            // Native glass and video layers must track the live route.
-            allowSnapshotting: false,
-            builder: (_) => ChannelDetailPage(
-              channel: channel,
-              continuousConversation: true,
-            ),
-          ),
-        );
+        await onChooseAgent();
+        // Creating a first agent makes it Bestie, so continue into its chat.
+        if (!context.mounted || ref.read(meSyncProvider) != scope) return;
+        final created = await ref.read(defaultAgentProvider.future);
+        if (created != null && context.mounted) await openChat(created);
       } catch (error) {
         if (context.mounted) {
           ScaffoldMessenger.of(context).showFeedbackSnackBar(
