@@ -230,6 +230,17 @@ fn is_duplicate_channel_rejection(error: &str) -> bool {
     error.contains("relay rejected event:") && error.contains("duplicate: channel already exists")
 }
 
+/// A starter create the relay will refuse on every retry, with HTTP 400:
+/// - another listed channel, archived ones included, holds its name:
+///   `invalid: an open channel named "general" already exists`;
+/// - an archived channel holds its deterministic id, which the relay checks
+///   before duplicates: `invalid: channel is archived`.
+fn is_permanent_starter_rejection(error: &str) -> bool {
+    error.starts_with("relay returned 400")
+        && ((error.contains("invalid: an open channel named") && error.contains("already exists"))
+            || error.contains("invalid: channel is archived"))
+}
+
 fn is_matching_starter_channel(channel: &ChannelInfo, spec: &StarterChannelSpec) -> bool {
     normalize_channel_name(&channel.name) == normalize_channel_name(spec.name)
         && channel.channel_type == "stream"
@@ -237,12 +248,19 @@ fn is_matching_starter_channel(channel: &ChannelInfo, spec: &StarterChannelSpec)
         && channel.archived_at.is_none()
 }
 
-fn has_all_starter_channels(channels: &[ChannelInfo]) -> bool {
-    STARTER_CHANNELS.iter().all(|spec| {
-        channels
-            .iter()
-            .any(|channel| is_matching_starter_channel(channel, spec))
-    })
+/// Every starter that was not skipped has a usable channel.
+fn has_all_starter_channels(
+    channels: &[ChannelInfo],
+    skipped: &std::collections::HashSet<&str>,
+) -> bool {
+    STARTER_CHANNELS
+        .iter()
+        .filter(|spec| !skipped.contains(spec.slug))
+        .all(|spec| {
+            channels
+                .iter()
+                .any(|channel| is_matching_starter_channel(channel, spec))
+        })
 }
 
 async fn ensure_starter_channel_memberships(
@@ -413,6 +431,12 @@ async fn ensure_starter_channels_inner(
     let creator_pubkey = creator_keys.public_key().to_hex();
     let mut starter_ids = Vec::with_capacity(STARTER_CHANNELS.len());
     let mut created_ids = std::collections::HashSet::new();
+    // Starters whose deterministic id the relay already holds.
+    let mut duplicate_starters = Vec::new();
+    // Starters that can never be created here: their name or id belongs to a
+    // channel that cannot serve as the starter, such as an archived one. They
+    // are left out instead of blocking the remaining starters.
+    let mut skipped = std::collections::HashSet::new();
 
     for spec in STARTER_CHANNELS {
         if existing_channels
@@ -424,7 +448,6 @@ async fn ensure_starter_channels_inner(
 
         let channel_uuid = starter_channel_uuid(&relay_scope, spec.slug);
         let channel_uuid_string = channel_uuid.to_string();
-        starter_ids.push(channel_uuid_string.clone());
         let builder = events::build_create_channel(
             channel_uuid,
             spec.name,
@@ -442,9 +465,16 @@ async fn ensure_starter_channels_inner(
             }
             Err(error) if is_duplicate_channel_rejection(&error) => {
                 state.mark_pending_owned_channel(&creator_pubkey, &channel_uuid_string);
+                duplicate_starters.push((spec, channel_uuid_string.clone()));
+            }
+            // A retry would be refused the same way.
+            Err(error) if is_permanent_starter_rejection(&error) => {
+                skipped.insert(spec.slug);
+                continue;
             }
             Err(error) => return Err(error),
         }
+        starter_ids.push(channel_uuid_string);
     }
 
     for _ in 0..3 {
@@ -460,17 +490,28 @@ async fn ensure_starter_channels_inner(
                 existing_channels.push(channel);
             }
         }
-        if has_all_starter_channels(&existing_channels) {
+        // A live channel at the starter id that cannot serve as the starter
+        // (renamed or retyped) stays that way, so stop waiting on it.
+        for (spec, id) in &duplicate_starters {
+            if existing_channels
+                .iter()
+                .any(|channel| channel.id == *id && !is_matching_starter_channel(channel, spec))
+            {
+                state.clear_pending_owned_channel(&creator_pubkey, id);
+                skipped.insert(spec.slug);
+            }
+        }
+        if has_all_starter_channels(&existing_channels, &skipped) {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     }
 
-    if !has_all_starter_channels(&existing_channels) {
+    if !has_all_starter_channels(&existing_channels, &skipped) {
         existing_channels = fetch_channels(state, DirectoryScope::IncludeOpenDirectory).await?;
     }
 
-    if !has_all_starter_channels(&existing_channels) {
+    if !has_all_starter_channels(&existing_channels, &skipped) {
         return Err("starter channels created but metadata not yet available".to_string());
     }
 
