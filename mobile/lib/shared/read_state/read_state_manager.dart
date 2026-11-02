@@ -14,8 +14,44 @@ import 'read_state_time.dart';
 
 class ReadStateCrypto {
   final Uint8List conversationKey;
+  final String Function(Uint8List conversationKey, String ciphertext) _decrypt;
+  final int _maxRetainedLength;
 
-  const ReadStateCrypto._(this.conversationKey);
+  /// Plaintext by ciphertext, oldest first. NIP-44 payloads carry a random
+  /// nonce and a MAC, so under this one conversation key the same ciphertext
+  /// always decrypts to the same plaintext. Every publish re-reads up to
+  /// [readStateFetchLimit] of our own blobs and the relay echoes each publish
+  /// back, so most decrypts here repeat a ciphertext this instance already
+  /// decrypted or produced. Decrypting is pure-Dart ChaCha20 and HMAC on the
+  /// UI isolate, so repeats are served from this memo.
+  final Map<String, String> _plaintextByCiphertext = {};
+  int _retainedLength = 0;
+
+  /// Upper bound on the code units the memo retains, counting each ciphertext
+  /// key and its plaintext, so it cannot grow without limit however large the
+  /// blobs get (about 2 MB of one-byte strings at the default).
+  static const defaultMaxRetainedLength = 2000000;
+
+  ReadStateCrypto._(
+    this.conversationKey, {
+    String Function(Uint8List conversationKey, String ciphertext) decrypt =
+        nip44Decrypt,
+    int maxRetainedLength = defaultMaxRetainedLength,
+  }) : _decrypt = decrypt,
+       _maxRetainedLength = maxRetainedLength;
+
+  /// Builds a crypto around a known key with a counting or bounded memo.
+  @visibleForTesting
+  ReadStateCrypto.forTesting(
+    Uint8List conversationKey, {
+    String Function(Uint8List conversationKey, String ciphertext) decrypt =
+        nip44Decrypt,
+    int maxRetainedLength = defaultMaxRetainedLength,
+  }) : this._(
+         conversationKey,
+         decrypt: decrypt,
+         maxRetainedLength: maxRetainedLength,
+       );
 
   static ReadStateCrypto? tryCreate({
     required String nsec,
@@ -33,10 +69,41 @@ class ReadStateCrypto {
     }
   }
 
-  String encrypt(String plaintext) => nip44Encrypt(conversationKey, plaintext);
+  String encrypt(String plaintext) {
+    final ciphertext = nip44Encrypt(conversationKey, plaintext);
+    // The relay echoes this blob back, and the next publish fetches it.
+    _remember(ciphertext, plaintext);
+    return ciphertext;
+  }
 
-  String decrypt(String ciphertext) =>
-      nip44Decrypt(conversationKey, ciphertext);
+  /// Throws on a ciphertext that does not decrypt, every time: failures are
+  /// never memoized.
+  String decrypt(String ciphertext) {
+    final known = _plaintextByCiphertext[ciphertext];
+    if (known != null) return known;
+    final plaintext = _decrypt(conversationKey, ciphertext);
+    _remember(ciphertext, plaintext);
+    return plaintext;
+  }
+
+  void _remember(String ciphertext, String plaintext) {
+    final cost = ciphertext.length + plaintext.length;
+    if (cost > _maxRetainedLength) return;
+    final replaced = _plaintextByCiphertext.remove(ciphertext);
+    if (replaced != null) {
+      _retainedLength -= ciphertext.length + replaced.length;
+    }
+    _plaintextByCiphertext[ciphertext] = plaintext;
+    _retainedLength += cost;
+    while (_retainedLength > _maxRetainedLength) {
+      final oldest = _plaintextByCiphertext.keys.first;
+      final dropped = _plaintextByCiphertext.remove(oldest)!;
+      _retainedLength -= oldest.length + dropped.length;
+    }
+  }
+
+  @visibleForTesting
+  int get retainedLength => _retainedLength;
 }
 
 enum _ApplyRemoteContextResult { unchanged, advanced }
