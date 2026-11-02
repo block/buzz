@@ -197,6 +197,7 @@ class AgentsHarness {
     WidgetTester tester, {
     required List<String> directory,
     Widget? home,
+    bool createOnOpen = false,
     List<Override> overrides = const [],
   }) async {
     registered = [...directory, oldAppAgentKeys.public];
@@ -241,7 +242,8 @@ class AgentsHarness {
               Builder(
                 builder: (context) => Scaffold(
                   body: TextButton(
-                    onPressed: () => showAgents(context),
+                    onPressed: () =>
+                        showAgents(context, createOnOpen: createOnOpen),
                     child: const Text('Open Agents'),
                   ),
                 ),

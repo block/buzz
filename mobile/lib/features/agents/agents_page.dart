@@ -33,9 +33,41 @@ import 'agent_identity_sections.dart';
 import 'bestie_agent_action.dart';
 
 /// Opens the active community's full-page Agents navigation stack.
-Future<void> showAgents(BuildContext context) async {
+Future<void> showAgents(
+  BuildContext context, {
+  bool createOnOpen = false,
+}) async {
   final container = ProviderScope.containerOf(context);
   final controller = container.read(remoteAgentControllerProvider);
+  if (createOnOpen) {
+    final community = await container.read(activeCommunityProvider.future);
+    if (!supportsRemoteAgents(community) || community == null) return;
+    await controller.account.restore();
+    if (controller.account.account == null) {
+      await container.read(hostedFlowProvider).reconnectAccount();
+    }
+    if (!context.mounted || controller.account.account == null) return;
+    final ready = await controller.run(controller.ensureBinding);
+    if (!context.mounted ||
+        !ready ||
+        container.read(activeCommunityProvider).asData?.value?.id !=
+            community.id) {
+      return;
+    }
+    await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => CreateAgentPage(
+          controller: controller,
+          community: community,
+          onCreated: () {
+            container.invalidate(agentDirectoryProvider);
+            container.invalidate(ownedAgentDirectoryProvider);
+          },
+        ),
+      ),
+    );
+    return;
+  }
   unawaited(controller.run(controller.refresh));
   final channel = await Navigator.of(context).push<Channel>(
     MaterialPageRoute(

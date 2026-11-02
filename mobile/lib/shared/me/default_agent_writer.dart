@@ -9,7 +9,11 @@ import 'me_sync.dart';
 
 /// Publishes and confirms the owner's encrypted, community-scoped choice.
 /// Failures propagate to the selection UI so the user can retry.
-Future<void> saveDefaultAgent(MeSync sync, String? pubkey) async {
+Future<void> saveDefaultAgent(
+  MeSync sync,
+  String? pubkey, {
+  bool onlyIfUnset = false,
+}) async {
   if (pubkey != null && !RegExp(r'^[0-9a-f]{64}$').hasMatch(pubkey)) {
     throw const FormatException('Invalid agent public key');
   }
@@ -27,6 +31,7 @@ Future<void> saveDefaultAgent(MeSync sync, String? pubkey) async {
   final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
   for (final event in previous) {
     decodeDefaultAgent(event, sync);
+    if (onlyIfUnset) return;
     if (event.createdAt >= now) {
       throw StateError('Please wait a second before saving again.');
     }

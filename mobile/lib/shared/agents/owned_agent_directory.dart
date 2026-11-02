@@ -14,8 +14,12 @@ class OwnedAgentDirectoryEntry extends AgentDirectoryEntry {
     super.displayName,
     super.avatarUrl,
     this.model,
+    this.runtime,
   });
   final String? model;
+
+  /// Runtime from the verified owner-signed registration in this community.
+  final String? runtime;
 }
 
 /// The owner's agents in the active community, as desktop's Agents tab lists
@@ -97,9 +101,11 @@ Future<List<OwnedAgentDirectoryEntry>> loadOwnedAgentDirectory(
       if (verifiedProfileOaOwnerPubkey(event) == owner) {
         final profile = AgentDirectoryEntry.fromEvent(event);
         String? model;
+        String? runtime;
         try {
           final registration = registrations[event.pubkey]!;
           nostr.Event.fromJson(jsonEncode(registration.toJson()));
+          runtime = _tagValue(registration, 'runtime');
           final data = jsonDecode(registration.content);
           if (data is Map && data['model'] is String) {
             final value = (data['model'] as String).trim();
@@ -114,6 +120,7 @@ Future<List<OwnedAgentDirectoryEntry>> loadOwnedAgentDirectory(
             displayName: profile.displayName,
             avatarUrl: profile.avatarUrl,
             model: model,
+            runtime: runtime,
           ),
         );
       }
