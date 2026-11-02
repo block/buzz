@@ -68,9 +68,10 @@ Future<Channel?> _resolve(
   Channel? channel;
   Object? failure;
   try {
-    // A tap can arrive before the first list load finishes.
+    // A tap can arrive before the first list load finishes. A failed load
+    // still leaves the channel's own metadata, so the tap is a real retry.
     if (!ref.read(channelsProvider).hasValue) {
-      await ref.read(channelsProvider.future);
+      await ref.read(channelsProvider.future).then((_) {}, onError: (_) {});
     }
     channel =
         notifier.channelById(channelId) ??

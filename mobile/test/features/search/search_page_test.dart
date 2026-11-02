@@ -887,9 +887,16 @@ void main() {
   // A hit can come from a channel the loaded list lacks, such as an open
   // channel the user hasn't joined. It opens from the channel's own metadata
   // when the relay shares it, and otherwise says why it can't.
-  for (final (name, shared, toast) in [
-    ('opens its unlisted channel', true, null),
-    ('explains a channel it cannot open', false, 'Channel not found here'),
+  for (final (name, shared, listFails, toast) in [
+    ('opens its unlisted channel', true, false, null),
+    (
+      'explains a channel it cannot open',
+      false,
+      false,
+      'Channel not found here',
+    ),
+    // A failed channel list still leaves the channel's own metadata.
+    ('opens its channel when the channel list failed', true, true, null),
   ]) {
     testWidgets('a message result $name', (tester) async {
       final relay = _ChannelMetadataRelaySession(
@@ -925,7 +932,9 @@ void main() {
               () => _FakeRecentSearchesNotifier(const []),
             ),
             profileProvider.overrideWith(() => _FakeProfileNotifier()),
-            channelsProvider.overrideWith(() => _FakeChannelsNotifier()),
+            channelsProvider.overrideWith(
+              () => _FakeChannelsNotifier(const [], listFails),
+            ),
             relaySessionProvider.overrideWith(() => relay),
             savedPrefsProvider.overrideWithValue(prefs),
             meGroupsProvider.overrideWith((ref) => const Stream.empty()),
@@ -1121,12 +1130,14 @@ NostrEvent _openChannelMetadata(String id, String name) => NostrEvent(
 );
 
 class _FakeChannelsNotifier extends ChannelsNotifier {
-  _FakeChannelsNotifier([this.channels = const []]);
+  _FakeChannelsNotifier([this.channels = const [], this.fails = false]);
 
   final List<Channel> channels;
+  final bool fails;
 
   @override
-  Future<List<Channel>> build() async => channels;
+  Future<List<Channel>> build() async =>
+      fails ? throw StateError('channel list failed') : channels;
 }
 
 class _FakeDmActions implements ChannelActions {
