@@ -73,7 +73,8 @@ are tracked separately.
 
 Migration `0081` adds `artifact_sync_pending`. It is an expand migration.
 It adds no trigger, function, foreign key, or backfill. Old relays ignore this
-table. New relays require it before they accept relevant writes. With startup
+table for serving writes. Their deletion catalog fails closed until the new
+relay deploys. New relays require the table before they accept relevant writes. With startup
 migrations enabled, the older binary still has the SQLx `VersionMissing`
 restriction described in `docs/database.md`.
 
