@@ -310,6 +310,34 @@ void main() {
     expect(await stored(), isNull);
   });
 
+  test('only agent listings may exceed the default response bound', () async {
+    // 100 KB: past the 64 KB default, as a few full-length instructions are.
+    final large = jsonEncode({'status': 1, 'padding': 'x' * 100000});
+    final client = BuilderlabAccountClient(
+      httpClient: MockClient((request) async {
+        if (request.url.path.endsWith('/exchange')) {
+          return http.Response(
+            jsonEncode({'session_credential': 'secret', 'expires_at': expiry}),
+            200,
+          );
+        }
+        if (request.url.path.contains('/beekeeper/')) {
+          return http.Response(large, 200);
+        }
+        return http.Response(
+          jsonEncode({'subject': 'account-1', 'expires_at': expiry}),
+          200,
+        );
+      }),
+    );
+    await client.exchange(code: 'one-use', verifier: verifier);
+    expect((await client.post('/v3/beekeeper/list-agents', {}))['status'], 1);
+    await expectLater(
+      client.post('/v3/beekeeper/get-model-catalog', {}),
+      throwsA(anything),
+    );
+  });
+
   test('authenticated post accepts only Buzz account routes', () async {
     final client = BuilderlabAccountClient(
       httpClient: MockClient((_) async => fail('no request expected')),

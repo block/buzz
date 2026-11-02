@@ -496,7 +496,11 @@ void main() {
       final registry = FakeRegistry(bound: fakeOwner.public);
       final controller = await _controller(registry);
       registry.listed = [
-        {'agent_pubkey': fakeAgent, 'agent_id': 'remote-id'},
+        {
+          'agent_pubkey': fakeAgent,
+          'agent_id': 'remote-id',
+          'agent_instructions': 'Private prompt.',
+        },
       ];
       await controller.run(controller.refresh);
       registry.calls.clear();
@@ -534,6 +538,12 @@ void main() {
       controller.rejectRemoval = true;
       expect(await remove(), isFalse);
       expect(registry.calls, ['remove-registration']);
+      // The retry journal is plain preferences, so it never holds the prompt.
+      final journal = (await SharedPreferences.getInstance()).getString(
+        '$_scope:delete-retries',
+      );
+      expect(journal, contains('remote-id'));
+      expect(journal, isNot(contains('Private prompt.')));
       registry.calls.clear();
       controller.rejectRemoval = false;
       expect(await remove(), isFalse);
