@@ -33,7 +33,8 @@
 # `RELAY_URL=wss://<community host> buzz-admin add-member --pubkey <npub>`.
 # The relay serves only an active, unarchived community, so the script checks
 # the community first. For an archived one, it stops (or, with --dry-run, warns):
-# unarchive it with `buzz-admin communities unarchive`, run this script, then
+# unarchive it with `buzz-admin communities unarchive`, then add the member
+# (add-member also finds only an unarchived community), run this script, and
 # archive it again. For one being deleted, it stops: no rename can land there,
 # and its duplicates go when its deletion completes.
 # BUZZ_RELAY_URL defaults to wss://<community host>. BUZZ_CLI defaults to
@@ -84,8 +85,8 @@ case $community_state in
 active) ;;
 archived)
     echo "$host is archived, and the relay applies no rename there. Unarchive it" \
-        "with \`buzz-admin communities unarchive\`, run this script, then archive" \
-        "it again." >&2
+        "with \`buzz-admin communities unarchive\`, add this key as a member," \
+        "run this script, then archive it again." >&2
     $dry_run || exit 1
     ;;
 deleting)
