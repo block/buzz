@@ -223,7 +223,7 @@ class HostedRelayAuth extends ChangeNotifier {
         throw AccountFailure.invalidResponse;
       }
       final now = _now().millisecondsSinceEpoch ~/ 1000;
-      if (expiry <= now || expiry > now + 300) {
+      if (expiry <= now) {
         throw AccountFailure.invalidResponse;
       }
       final expires = DateTime.fromMillisecondsSinceEpoch(
