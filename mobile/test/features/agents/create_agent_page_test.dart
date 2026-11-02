@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/preset_agent_avatar.dart';
 import 'package:buzz/shared/agents/agent_avatar_catalog.dart';
@@ -117,9 +118,18 @@ void main() {
             find.widgetWithText(FilledButton, 'Choose avatar'),
           )
           .onPressed!;
+      // A stalled CDN must not prevent entry to the editor.
+      final stalledClient = _StalledPosterClient();
+      debugNetworkImageHttpClientProvider = () => stalledClient;
+      addTearDown(() => debugNetworkImageHttpClientProvider = null);
+      await NetworkImage(originalAvatar).evict();
       openAvatar();
       openAvatar();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 301));
       await tester.pumpAndSettle();
+      expect(stalledClient.requests, greaterThan(0));
+      debugNetworkImageHttpClientProvider = null;
       expect(find.byType(AgentAvatarEditorPage), findsOneWidget);
       expect(find.text('Instructions'), findsNothing);
       await tester.tap(find.byKey(ValueKey('agent-avatar-$targetIndex')));
@@ -218,4 +228,16 @@ void main() {
       expect(h.registry.calls, contains('publish-policy'));
     },
   );
+}
+
+class _StalledPosterClient implements HttpClient {
+  int requests = 0;
+  @override
+  Future<HttpClientRequest> getUrl(Uri url) {
+    requests++;
+    return Completer<HttpClientRequest>().future;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => null;
 }

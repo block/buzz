@@ -10,8 +10,21 @@ import '../../shared/widgets/ios_glass_navigation_button.dart';
 import 'agent_avatar_category.dart';
 import 'agent_character_artwork.dart';
 
-/// Fixed category rail height used to anchor the editor tray.
-const agentAvatarChoicesHeight = 92.0;
+/// Reserves a full scaled label line below each category control.
+double agentAvatarChoicesHeight(BuildContext context) {
+  final label = TextPainter(
+    text: TextSpan(
+      text: 'Buzzies',
+      style: context.textTheme.labelSmall?.copyWith(fontSize: 12),
+    ),
+    textScaler: MediaQuery.textScalerOf(context),
+    textDirection: Directionality.of(context),
+    maxLines: 1,
+  )..layout();
+  final height = 68 + Grid.half + label.height.ceilToDouble();
+  label.dispose();
+  return height < 92 ? 92 : height;
+}
 
 /// Character packs and existing avatar editors in one horizontal choice rail.
 class AgentAvatarChoices extends HookWidget {
@@ -51,7 +64,7 @@ class AgentAvatarChoices extends HookWidget {
       return null;
     }, const []);
     return SizedBox(
-      height: agentAvatarChoicesHeight,
+      height: agentAvatarChoicesHeight(context),
       child: SingleChildScrollView(
         controller: controller,
         scrollDirection: Axis.horizontal,
@@ -140,6 +153,8 @@ class _Choice extends StatelessWidget {
               ExcludeSemantics(
                 child: Text(
                   label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: context.textTheme.labelSmall?.copyWith(
                     fontSize: 12,
                     color: selected
@@ -190,6 +205,8 @@ class _Choice extends StatelessWidget {
                   const SizedBox(height: Grid.half),
                   Text(
                     label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: context.textTheme.labelSmall?.copyWith(
                       fontSize: 12,
                       color: selected

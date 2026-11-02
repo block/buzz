@@ -73,7 +73,7 @@ class AgentAvatarEditorPage extends HookWidget {
                   // Fill the available height so the tray shares the page gutters.
                   controlsHeight:
                       (constraints.maxHeight -
-                              agentAvatarChoicesHeight -
+                              agentAvatarChoicesHeight(context) -
                               Grid.sm -
                               agentAvatarPreviewSpace)
                           .clamp(180, double.infinity),

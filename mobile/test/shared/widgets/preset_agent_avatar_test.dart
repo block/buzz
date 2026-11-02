@@ -155,6 +155,8 @@ void main() {
     final playback = <bool>[];
     var rejectPlayback = false;
     var frameReady = false;
+    var frameFailed = false;
+    var readinessCalls = 0;
     final channels = <MethodChannel>[];
     messenger.setMockMethodCallHandler(SystemChannels.platform_views, (
       call,
@@ -165,7 +167,14 @@ void main() {
         final channel = MethodChannel('buzz/transparent-avatar/${args['id']}');
         channels.add(channel);
         messenger.setMockMethodCallHandler(channel, (call) async {
-          if (call.method == 'isReady') return frameReady;
+          if (call.method == 'isReady') {
+            readinessCalls++;
+            return frameFailed
+                ? 'failed'
+                : frameReady
+                ? 'ready'
+                : 'loading';
+          }
           if (call.method == 'setPlaying') {
             if (rejectPlayback) throw PlatformException(code: 'unavailable');
             playback.add(call.arguments as bool);
@@ -231,6 +240,21 @@ void main() {
     await tester.pumpWidget(surface(reduced: true));
     await tester.pumpAndSettle();
     expect(find.byType(AndroidView), findsNothing);
+    frameReady = false;
+    frameFailed = true;
+    await tester.pumpWidget(surface());
+    await tester.pumpAndSettle();
+    expect(find.byType(AndroidView), findsNothing);
+    expect(find.byType(AvatarImageContent), findsOneWidget);
+    final stoppedAt = readinessCalls;
+    await tester.pump(const Duration(seconds: 15));
+    await tester.pumpWidget(surface(visible: false));
+    await tester.pumpWidget(surface());
+    await tester.pump(const Duration(seconds: 15));
+    expect(readinessCalls, stoppedAt);
+    await tester.pumpWidget(surface(reduced: true));
+    await tester.pumpAndSettle();
+    frameFailed = false;
     rejectPlayback = true;
     await tester.pumpWidget(surface());
     await tester.pumpAndSettle();

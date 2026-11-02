@@ -24,14 +24,18 @@ class AndroidTransparentAvatar extends HookWidget {
     final ready = useState(false);
     useEffect(() {
       final current = channel.value;
-      if (current == null || !playing || ready.value) return null;
+      if (current == null || !playing || ready.value || failed.value) {
+        return null;
+      }
       var active = true;
       Timer? retry;
       Future<void> waitForFrame() async {
         try {
-          final available = await current.invokeMethod<bool>('isReady');
+          final state = await current.invokeMethod<String>('isReady');
           if (!active) return;
-          if (available == true) {
+          if (state == 'failed') {
+            failed.value = true;
+          } else if (state == 'ready') {
             ready.value = true;
           } else {
             retry = Timer(const Duration(milliseconds: 50), waitForFrame);
@@ -48,7 +52,7 @@ class AndroidTransparentAvatar extends HookWidget {
         active = false;
         retry?.cancel();
       };
-    }, [channel.value, playing]);
+    }, [channel.value, playing, failed.value]);
     useEffect(() {
       final current = channel.value;
       var active = true;

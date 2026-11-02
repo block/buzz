@@ -249,6 +249,9 @@ class CreateAgentPage extends HookConsumerWidget {
                                         NetworkImage(avatar.value.url!),
                                         context,
                                         onError: (_, _) {},
+                                      ).timeout(
+                                        const Duration(milliseconds: 300),
+                                        onTimeout: () {},
                                       );
                                       if (!context.mounted) return;
                                     }

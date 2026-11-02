@@ -230,7 +230,10 @@ class AgentAvatarPicker extends HookConsumerWidget {
         selection: selection,
         verticalOffset: agentCharacterOffset(selection.url, scale: 0.85),
         child: Semantics(
-          label: 'Selected agent avatar',
+          label: selection.url == null
+              ? 'Selected agent avatar'
+              : 'Selected avatar: ${agentAvatarCatalog.firstWhere((item) => item.url == selection.url).name}',
+          liveRegion: true,
           image: true,
           child: SizedBox.square(
             dimension: previewSize,

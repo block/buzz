@@ -28,51 +28,56 @@ void main() {
       ),
     ];
     for (final (selection, mode, label) in cases) {
-      await tester.pumpWidget(const SizedBox.shrink());
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            emojiDatasetProvider.overrideWith(
-              (ref) async => const EmojiDataset(
-                categories: [],
-                all: [],
-                nativeToShortcode: {},
+      for (final scale in [1.0, 1.3, 1.5, 2.0]) {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              emojiDatasetProvider.overrideWith(
+                (ref) async => const EmojiDataset(
+                  categories: [],
+                  all: [],
+                  nativeToShortcode: {},
+                ),
               ),
-            ),
-          ],
-          child: MaterialApp(
-            builder: (context, child) => MediaQuery(
-              data: MediaQuery.of(context).copyWith(disableAnimations: true),
-              child: child!,
-            ),
-            home: Scaffold(
-              body: SingleChildScrollView(
-                child: AgentAvatarPicker(
-                  selection: selection,
-                  onChanged: (_) {},
-                  disabled: false,
-                  onBusyChanged: (_) {},
+            ],
+            child: MaterialApp(
+              builder: (context, child) => MediaQuery(
+                data: MediaQuery.of(context).copyWith(
+                  disableAnimations: true,
+                  textScaler: TextScaler.linear(scale),
+                ),
+                child: child!,
+              ),
+              home: Scaffold(
+                body: SingleChildScrollView(
+                  child: AgentAvatarPicker(
+                    selection: selection,
+                    onChanged: (_) {},
+                    disabled: false,
+                    onBusyChanged: (_) {},
+                  ),
                 ),
               ),
             ),
           ),
-        ),
-      );
-      // The short test viewport scrolls vertically to the bottom category row.
-      await tester.pump();
-      await tester.ensureVisible(find.byType(AgentAvatarChoices));
-      await tester.pump();
-      expect(
-        tester
-            .widget<AgentAvatarChoices>(find.byType(AgentAvatarChoices))
-            .category,
-        mode,
-      );
-      expect(
-        find.byKey(ValueKey('agent-avatar-choice-$label')).hitTestable(),
-        findsOneWidget,
-      );
-      expect(tester.takeException(), isNull);
+        );
+        // The short test viewport scrolls vertically to the bottom category row.
+        await tester.pump();
+        await tester.ensureVisible(find.byType(AgentAvatarChoices));
+        await tester.pump();
+        expect(
+          tester
+              .widget<AgentAvatarChoices>(find.byType(AgentAvatarChoices))
+              .category,
+          mode,
+        );
+        expect(
+          find.byKey(ValueKey('agent-avatar-choice-$label')).hitTestable(),
+          findsOneWidget,
+        );
+        expect(tester.takeException(), isNull);
+      }
     }
   });
 
@@ -143,6 +148,14 @@ void main() {
       await tester.pumpAndSettle();
       expect(selection.url, isNot(agentAvatarCatalog.first.url));
       final character = selection.url;
+      final semantics = tester.ensureSemantics();
+      expect(
+        find.bySemanticsLabel(
+          'Selected avatar: ${agentAvatarCatalog.firstWhere((item) => item.url == character).name}',
+        ),
+        findsOneWidget,
+      );
+      semantics.dispose();
       final examples = Map.of(
         tester
             .widget<AgentAvatarChoices>(find.byType(AgentAvatarChoices))
@@ -207,7 +220,9 @@ void main() {
             of: find.byWidgetPredicate(
               (widget) =>
                   widget is Semantics &&
-                  widget.properties.label == 'Selected agent avatar',
+                  (widget.properties.label?.startsWith('Selected avatar:') ==
+                          true ||
+                      widget.properties.label == 'Selected agent avatar'),
             ),
             matching: find.byType(ClipPath),
           ),
