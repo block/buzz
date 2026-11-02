@@ -536,14 +536,15 @@ mod review_postgres_tests;
 /// A deletion of an author-only event is private by its `k` tag alone. Neither
 /// window's aux closure returns one to anyone but its signer, and a read by id
 /// stays author-only after its target is physically gone. Ordinary ingest can
-/// build neither case, so both use stored fixtures.
+/// build neither case, so both use stored fixtures. The thread window reaches
+/// its deletions on the deletion-of-aux hop; the channel window has no such
+/// hop, so its deletions target the row directly.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn private_deletions_reach_only_their_signer_through_windows_and_id_reads() {
     let f = Fixture::new().await;
     let reply = f.reply(0).await;
     let reply_reaction = f.aux(7, &reply, Some(f.channel)).await;
-    let root_reaction = f.aux(7, &f.root, Some(f.channel)).await;
     let signer = Keys::generate();
     let deletion = |target: &str, k: &str| {
         EventBuilder::new(Kind::EventDeletion, "")
@@ -558,8 +559,8 @@ async fn private_deletions_reach_only_their_signer_through_windows_and_id_reads(
     let reminder = buzz_core::kind::KIND_EVENT_REMINDER.to_string();
     let thread_private = deletion(&reply_reaction.id.to_hex(), &reminder);
     let thread_public = deletion(&reply_reaction.id.to_hex(), "7");
-    let channel_private = deletion(&root_reaction.id.to_hex(), &reminder);
-    let channel_public = deletion(&root_reaction.id.to_hex(), "7");
+    let channel_private = deletion(&f.root.id.to_hex(), &reminder);
+    let channel_public = deletion(&f.root.id.to_hex(), "9");
     let orphan_private = deletion(&"ab".repeat(32), &reminder);
     for event in [
         &thread_private,
