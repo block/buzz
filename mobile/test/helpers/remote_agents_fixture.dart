@@ -55,6 +55,7 @@ class FakeRegistry extends BuilderlabAccountClient {
     },
   ];
   Completer<void>? catalogGate;
+  bool failCatalog = false;
   bool failListing = false;
   bool rejectRegistration = false;
   bool loseRegistration = false;
@@ -96,6 +97,7 @@ class FakeRegistry extends BuilderlabAccountClient {
     switch (path) {
       case '/v3/beekeeper/get-model-catalog':
         await catalogGate?.future;
+        if (failCatalog) throw StateError('Catalog unavailable.');
         return {'models': models};
       case '/v3/beekeeper/list-agents':
         if (failListing) throw StateError('Registry unavailable.');

@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:buzz/shared/relay/media_auth.dart';
 import 'package:buzz/shared/relay/media_image.dart';
+import 'package:buzz/shared/utils/bounded_fetch.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -177,7 +178,7 @@ void main() {
           final error = await _waitError(
             provider.resolve(ImageConfiguration.empty),
           ).timeout(const Duration(seconds: 2));
-          expect(error, isA<FormatException>());
+          expect(error, isA<ResponseTooLargeException>());
           expect(cancelled, isTrue);
           expect(aborted, isTrue);
           expect(delivered, isFalse);
