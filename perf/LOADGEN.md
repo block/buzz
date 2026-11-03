@@ -188,6 +188,9 @@ profile read runs again when the profile subscription next establishes. A
 replacement is live-only and is opened before the subscription it replaces
 is closed. A replacement that misses its EOSE deadline is closed, the
 subscription it would have replaced stays, and the next tick tries again.
+A deadline that passes while frames received in time are still unread waits
+for them, for up to one more timeout, so under sustained traffic a missing
+EOSE times out up to one timeout late.
 In both modes, a tick with no frame from the relay since the previous tick
 sends a silence probe, a live-only REQ for the viewer's membership notices
 (`desktop_probe`). Any frame answers it, a publish's `OK` included; none
