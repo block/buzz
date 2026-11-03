@@ -65,17 +65,35 @@ pub struct Credentials {
     local_keys: Option<Keys>,
     auth_tag: Option<AuthTag>,
     evidence: Option<AdapterSession>,
+    /// The Buzz desktop, when it is the link that holds the key.
+    #[cfg(unix)]
+    desktop: Option<Arc<crate::desktop_provider::Provider>>,
 }
 
-/// Walk the credential chain and return the first configured link.
-pub fn resolve(settings: Settings) -> Result<Credentials, CliError> {
-    let evidence = evidence_source(&settings)?;
-    if let Some(credentials) = explicit_key(&settings, evidence)? {
+/// Walk the credential chain for `relay_url` and return the first link that
+/// applies: the explicit key, then (on Unix) the Buzz desktop through an
+/// inherited or paired token.
+pub async fn resolve(settings: Settings, relay_url: &str) -> Result<Credentials, CliError> {
+    if let Some(credentials) = resolve_explicit(&settings)? {
         return Ok(credentials);
     }
+    #[cfg(unix)]
+    if let Some(provider) = crate::desktop_provider::discover(relay_url).await? {
+        return Credentials::from_desktop(provider).await;
+    }
+    #[cfg(not(unix))]
+    let _ = relay_url;
     Err(CliError::Auth(
-        "no credentials: set BUZZ_PRIVATE_KEY or pass --private-key".into(),
+        "no credentials: set BUZZ_PRIVATE_KEY, pass --private-key, or run \
+         `buzz auth desktop pair` with Buzz running"
+            .into(),
     ))
+}
+
+/// The explicit-key link, with its headless evidence source.
+fn resolve_explicit(settings: &Settings) -> Result<Option<Credentials>, CliError> {
+    let evidence = evidence_source(settings)?;
+    explicit_key(settings, evidence)
 }
 
 /// Link 1: an explicit key from `--private-key` or `BUZZ_PRIVATE_KEY`.
@@ -155,7 +173,31 @@ impl Credentials {
             local_keys: Some(keys),
             auth_tag: None,
             evidence: None,
+            #[cfg(unix)]
+            desktop: None,
         }
+    }
+
+    /// Credentials backed by the Buzz desktop: it signs, encrypts and supplies
+    /// NIP-FI evidence; the private key never reaches this process.
+    #[cfg(unix)]
+    async fn from_desktop(
+        provider: Arc<crate::desktop_provider::Provider>,
+    ) -> Result<Self, CliError> {
+        let public_key = provider.public_key();
+        let auth_tag = provider
+            .auth_tag()
+            .await?
+            .map(|json| parse_auth_tag(&json, &public_key))
+            .transpose()?;
+        Ok(Self {
+            public_key,
+            signer: provider.clone(),
+            local_keys: None,
+            auth_tag,
+            evidence: None,
+            desktop: Some(provider),
+        })
     }
 
     /// Attach a verified NIP-OA auth tag.
@@ -199,6 +241,10 @@ impl Credentials {
     /// HMAC-SHA256 over the NIP-44 conversation key, so it needs the key
     /// itself rather than a signature (`docs/nips/NIP-AE.md`).
     pub async fn engram_d_tag(&self, peer: &PublicKey, slug: &str) -> Result<String, CliError> {
+        #[cfg(unix)]
+        if let Some(provider) = &self.desktop {
+            return provider.engram_d_tag(peer, slug).await;
+        }
         let keys = self.local_keys.as_ref().ok_or_else(|| {
             CliError::Auth(
                 "buzz mem needs a local key: set BUZZ_PRIVATE_KEY or pass --private-key".into(),
@@ -225,12 +271,21 @@ impl Credentials {
 
     /// Whether a NIP-FI evidence source is configured.
     pub fn has_evidence_source(&self) -> bool {
+        #[cfg(unix)]
+        if self.desktop.is_some() {
+            return true;
+        }
         self.evidence.is_some()
     }
 
     /// The NIP-FI assertion to present to `relay_url`, or `None` when no
     /// evidence source is configured.
     pub async fn evidence(&self, relay_url: &str) -> Result<Option<String>, CliError> {
+        #[cfg(unix)]
+        if let Some(provider) = &self.desktop {
+            let relay_url = crate::federated_identity::canonical_relay_url(relay_url)?;
+            return provider.federated_identity(&relay_url).await;
+        }
         match &self.evidence {
             Some(source) => source.assertion(relay_url, self).await.map(Some),
             None => Ok(None),
@@ -390,6 +445,10 @@ mod tests {
         );
     }
 
+    fn explicit(settings: Settings) -> Result<Credentials, CliError> {
+        resolve_explicit(&settings).map(|c| c.expect("explicit key"))
+    }
+
     fn settings(key: Option<&str>, token: Option<&str>, adapter: Option<&str>) -> Settings {
         Settings {
             private_key: key.map(str::to_owned),
@@ -403,15 +462,16 @@ mod tests {
     fn explicit_key_is_the_first_link() {
         let keys = Keys::generate();
         let nsec = keys.secret_key().to_secret_hex();
-        let credentials = resolve(settings(Some(&nsec), None, None)).unwrap();
+        let credentials = explicit(settings(Some(&nsec), None, None)).unwrap();
         assert_eq!(credentials.public_key(), keys.public_key());
         assert!(!credentials.has_evidence_source());
     }
 
     #[test]
     fn no_link_is_an_auth_error_naming_the_settings() {
-        let err = resolve(settings(None, None, None)).err().unwrap();
-        assert!(matches!(&err, CliError::Auth(m) if m.contains("BUZZ_PRIVATE_KEY")));
+        assert!(resolve_explicit(&settings(None, None, None))
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -425,7 +485,7 @@ mod tests {
                 FEDERATED_IDENTITY_TOKEN_ENV,
             ),
         ] {
-            let err = resolve(settings(Some(&nsec), token, adapter))
+            let err = explicit(settings(Some(&nsec), token, adapter))
                 .err()
                 .unwrap();
             assert!(
@@ -433,7 +493,7 @@ mod tests {
                 "{token:?} {adapter:?}: {err}"
             );
         }
-        let credentials = resolve(settings(
+        let credentials = explicit(settings(
             Some(&nsec),
             Some("t"),
             Some("https://adapter.example"),
@@ -532,6 +592,8 @@ mod tests {
             local_keys: None,
             auth_tag: None,
             evidence: None,
+            #[cfg(unix)]
+            desktop: None,
         };
         let err = credentials
             .sign(EventBuilder::text_note("hi"))

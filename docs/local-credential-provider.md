@@ -52,13 +52,18 @@ token and a reachable endpoint is used.
 
 ### 1. Inherited token
 
-When the desktop launches a process for an agent, it sets:
+When the desktop launches a process for an agent, through any agent harness, it
+sets:
 
 ```text
 BUZZ_CREDENTIAL_PROVIDER={"url":"http://127.0.0.1:<port>/<path>","token":"<token>"}
 ```
 
 - The token's identity is that agent. It is never the owner.
+- The token MUST reach only processes that act for that agent. A harness that
+  hosts several agents in one process MUST give each agent's tool processes
+  their own agent's token, and MUST NOT expose one agent's token to another
+  agent's tools.
 - The desktop SHOULD revoke the token when the process it launched exits, and
   MUST revoke it on the triggers in [Revocation](#revocation).
 - A caller MUST reject a `url` whose scheme is not `http`, whose host is not
@@ -72,14 +77,16 @@ and only in their own environment. It MUST NOT write the token to disk.
 ### 2. Paired token
 
 A human's own terminal, or a service the human runs such as slack2buzz, gets a
-token by [pairing](#pairing). The caller stores the token privately:
+token by [pairing](#pairing). The caller stores the token in the OS keychain
+(Keychain on macOS, the Secret Service on Linux), never in a file:
 
-- The CLI stores it at `<config dir>/buzz/desktop-pairings.json`, where
-  `<config dir>` is the platform configuration directory
-  (`~/Library/Application Support` on macOS, `$XDG_CONFIG_HOME` or
-  `~/.config` on Linux). The file maps each instance to its token, identity and
-  bound relays. It MUST be mode `0600` in a directory only the user can write.
-- Other callers MAY use the OS keychain instead.
+- The CLI keeps one keychain entry, service `buzz-cli` and account
+  `desktop-pairings`, that maps each instance to its token, identity and bound
+  relays.
+- When no keychain is reachable, pairing MUST fail with an error that says so.
+  A caller MUST NOT fall back to writing the token to disk.
+- A paired token survives a desktop restart. The desktop keeps it until it is
+  revoked or expires (see [Revocation](#revocation)), so a caller pairs once.
 
 The token does not say where the desktop is listening, because the port changes
 on every launch. The desktop advertises its current endpoint, which holds no

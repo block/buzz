@@ -2,6 +2,8 @@ pub mod agent_management;
 mod client;
 mod commands;
 mod credentials;
+#[cfg(unix)]
+mod desktop_provider;
 mod error;
 mod federated_identity;
 mod help_tree;
@@ -332,9 +334,58 @@ enum Cmd {
     /// Persona pack operations (local, no relay connection needed)
     #[command(subcommand)]
     Pack(PackCmd),
+    /// Credentials: pair this CLI with the running Buzz desktop
+    #[command(subcommand)]
+    Auth(AuthCmd),
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
+}
+
+#[derive(Subcommand)]
+enum AuthCmd {
+    /// The Buzz desktop as a credential provider (macOS and Linux)
+    #[command(subcommand)]
+    Desktop(DesktopAuthCmd),
+}
+
+#[derive(Subcommand)]
+enum DesktopAuthCmd {
+    /// Ask the running Buzz desktop to let this CLI act as you on --relay.
+    /// Approve in Buzz; the token is stored in the OS keychain.
+    Pair {
+        /// Name shown in the desktop's approval prompt
+        #[arg(long, default_value = "buzz CLI")]
+        name: String,
+        /// Desktop instance, when more than one is running
+        #[arg(long)]
+        instance: Option<String>,
+    },
+    /// Forget paired tokens (all instances unless --instance). Local only.
+    Unpair {
+        #[arg(long)]
+        instance: Option<String>,
+    },
+}
+
+#[cfg(unix)]
+async fn run_auth(cmd: AuthCmd, relay_url: &str) -> Result<(), CliError> {
+    let AuthCmd::Desktop(cmd) = cmd;
+    let out = match cmd {
+        DesktopAuthCmd::Pair { name, instance } => {
+            desktop_provider::pair(relay_url, &name, instance.as_deref()).await?
+        }
+        DesktopAuthCmd::Unpair { instance } => desktop_provider::unpair(instance.as_deref())?,
+    };
+    println!("{out}");
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn run_auth(_: AuthCmd, _: &str) -> Result<(), CliError> {
+    Err(CliError::Usage(
+        "the Buzz desktop credential provider is not available on Windows yet".into(),
+    ))
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -2234,8 +2285,13 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         };
     }
 
-    // Credential chain: the first configured link is the identity
-    // (see `credentials`). Today that is the explicit key.
+    // Pairing runs before any credential exists.
+    if let Cmd::Auth(sub) = cli.command {
+        return run_auth(sub, &relay_url).await;
+    }
+
+    // Credential chain: the first link that applies to this relay is the
+    // identity (see `credentials`).
     let credentials = credentials::resolve(
         credentials::Settings {
             private_key: cli.private_key,
@@ -2243,7 +2299,9 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             ..Default::default()
         }
         .with_env_evidence(),
-    )?;
+        &relay_url,
+    )
+    .await?;
     let client = BuzzClient::new(relay_url, credentials)?;
 
     match cli.command {
@@ -2269,7 +2327,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
-        Cmd::Pack(_) => unreachable!("handled above"),
+        Cmd::Pack(_) | Cmd::Auth(_) => unreachable!("handled above"),
     }
 }
 
@@ -2439,6 +2497,7 @@ mod tests {
     fn command_inventory_is_stable() {
         let expected_groups: Vec<&str> = vec![
             "agents",
+            "auth",
             "canvas",
             "channels",
             "dms",
