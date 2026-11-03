@@ -109,20 +109,6 @@ function parseMembershipChangePayload(
   }
 }
 
-function membershipChangesCanGroup(
-  first: MembershipChangePayload,
-  second: MembershipChangePayload,
-): boolean {
-  return (
-    (first.mode === "self-arrival" ||
-      first.mode === "addition" ||
-      first.mode === "departure") &&
-    (second.mode === "self-arrival" ||
-      second.mode === "addition" ||
-      second.mode === "departure")
-  );
-}
-
 /**
  * Membership groups are anchored from their newest entry so prepending older
  * history cannot repartition the rows that are already loaded. Their key is
@@ -137,9 +123,8 @@ function membershipChangesCanGroup(
  * absorbed, since the relay re-emits `member_joined` on each PUT_USER.
  * `buildGroupedMembershipPayload` must describe every group this emits;
  * `membershipGroupPayload.test.mjs` pins that with a matrix invariant.
- * Time between adjacent events does not split a group: only a message, a day
- * boundary, or the unread divider does, so a slow trickle of joins over a quiet
- * day still reads as one row.
+ * Time between adjacent events does not split a group; only a message, a day
+ * boundary, or the unread divider does.
  */
 function buildMembershipGroups(
   entries: readonly MainTimelineEntry[],
@@ -149,8 +134,7 @@ function buildMembershipGroups(
 
   for (let end = entries.length - 1; end >= 0; ) {
     const newestEntry = entries[end];
-    const newestPayload = parseMembershipChangePayload(newestEntry);
-    if (!newestPayload) {
+    if (!parseMembershipChangePayload(newestEntry)) {
       end -= 1;
       continue;
     }
@@ -158,11 +142,9 @@ function buildMembershipGroups(
     let start = end;
     while (start > 0) {
       const candidate = entries[start - 1];
-      const candidatePayload = parseMembershipChangePayload(candidate);
       if (
         barrierIndexes.has(start) ||
-        !candidatePayload ||
-        !membershipChangesCanGroup(candidatePayload, newestPayload) ||
+        !parseMembershipChangePayload(candidate) ||
         newestEntry.message.createdAt < candidate.message.createdAt
       ) {
         break;

@@ -67,16 +67,20 @@ export function buildGroupedMembershipPayload(
   const changes = membershipChanges as Array<MembershipChange>;
   if (changes.some((change) => change.mode === "departure")) {
     return {
-      addedTargets: uniqueTargets(
-        changes
-          .filter((change) => change.mode === "arrival")
-          .map((change) => change.target),
-      ),
-      removedTargets: uniqueTargets(
-        changes
-          .filter((change) => change.mode === "departure")
-          .map((change) => change.target),
-      ),
+      addedTargets: [
+        ...new Set(
+          changes
+            .filter((change) => change.mode === "arrival")
+            .map((change) => change.target),
+        ),
+      ],
+      removedTargets: [
+        ...new Set(
+          changes
+            .filter((change) => change.mode === "departure")
+            .map((change) => change.target),
+        ),
+      ],
       type: "members_changed",
     };
   }
@@ -129,10 +133,6 @@ function parseMembershipChange(
   }
 
   return null;
-}
-
-function uniqueTargets(targets: readonly string[]): string[] {
-  return [...new Set(targets)];
 }
 
 /**

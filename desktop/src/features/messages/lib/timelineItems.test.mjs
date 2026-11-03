@@ -242,7 +242,7 @@ test("buildTimelineItems: prepending membership history preserves the loaded suf
   assert.deepEqual(prependedKeys.slice(-loadedKeys.length), loadedKeys);
 });
 
-test("buildTimelineItems: contiguous member additions keep one group past an hour", () => {
+test("buildTimelineItems: contiguous member additions extend a group outside one hour", () => {
   const start = dayAt(2026, 6, 14);
   const entries = [
     memberAddedEntry({ id: "a", target: "target-a", createdAt: start }),
