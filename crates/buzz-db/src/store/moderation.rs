@@ -20,7 +20,7 @@ use sqlx::{PgPool, Row as _};
 use uuid::Uuid;
 
 use crate::error::Result;
-use crate::{CommunityId, Db};
+use crate::{CommunityId, Db, ReadAt};
 
 /// What a report points at. Exactly one target class per report row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -631,11 +631,23 @@ pub async fn restriction_state(
     community: CommunityId,
     pubkey: &[u8],
 ) -> Result<RestrictionState> {
+    Ok(restriction_state_read_at(pool, community, pubkey)
+        .await?
+        .value)
+}
+
+/// [`restriction_state`], with when its connection was checked out.
+pub async fn restriction_state_read_at(
+    pool: &PgPool,
+    community: CommunityId,
+    pubkey: &[u8],
+) -> Result<ReadAt<RestrictionState>> {
     let mut connection = crate::observability::acquire_writer(
         pool,
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
+    let read_at = std::time::Instant::now();
     let row = sqlx::query(
         r#"
         SELECT
@@ -659,10 +671,13 @@ pub async fn restriction_state(
     .fetch_one(&mut *connection)
     .await?;
 
-    Ok(RestrictionState {
-        banned: row.try_get("banned")?,
-        own_banned: row.try_get("own_banned")?,
-        muted_until: row.try_get("muted_until")?,
+    Ok(ReadAt {
+        value: RestrictionState {
+            banned: row.try_get("banned")?,
+            own_banned: row.try_get("own_banned")?,
+            muted_until: row.try_get("muted_until")?,
+        },
+        read_at,
     })
 }
 
@@ -1032,6 +1047,17 @@ impl Db {
         pubkey: &[u8],
     ) -> Result<RestrictionState> {
         restriction_state(&self.pool, community, pubkey).await
+    }
+
+    /// [`Self::moderation_restriction_state`], with when its connection was
+    /// checked out, for caches that bound staleness from the read.
+    #[datastore_span(name = "moderation_restriction_state", system = "postgresql")]
+    pub async fn moderation_restriction_state_read_at(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+    ) -> Result<ReadAt<RestrictionState>> {
+        restriction_state_read_at(&self.pool, community, pubkey).await
     }
 
     /// Fetch the full ban/timeout row for a member pubkey.

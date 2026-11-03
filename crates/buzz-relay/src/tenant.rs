@@ -149,8 +149,9 @@ impl HostResolver for buzz_db::Db {
 /// [`crate::state::AppState::tenant_host_cache`]. A connection's handshake and
 /// its follow-up HTTP requests resolve the same host many times a second, so
 /// a mapped host is reread at most once per
-/// [`crate::state::TENANT_HOST_CACHE_MAX_AGE`]. Unmapped hosts and lookup
-/// errors are never cached.
+/// [`crate::state::TENANT_HOST_CACHE_MAX_AGE`], and concurrent misses share
+/// one read through [`crate::state::AppState::tenant_host_reads`]. Unmapped
+/// hosts and lookup errors are never cached.
 impl HostResolver for crate::state::AppState {
     type Error = buzz_db::DbError;
 
@@ -158,18 +159,36 @@ impl HostResolver for crate::state::AppState {
         &self,
         normalized_host: &str,
     ) -> Result<Option<CommunityId>, Self::Error> {
-        if let Some((community, read_at)) = self.tenant_host_cache.get(normalized_host) {
-            if read_at.elapsed() < crate::state::TENANT_HOST_CACHE_MAX_AGE {
-                metrics::counter!("buzz_tenant_host_cache_hits_total").increment(1);
-                return Ok(Some(community));
-            }
+        let fresh = || {
+            self.tenant_host_cache
+                .get(normalized_host)
+                .filter(|(_, read_at)| read_at.elapsed() < crate::state::TENANT_HOST_CACHE_MAX_AGE)
+                .map(|(community, _)| community)
+        };
+        if let Some(community) = fresh() {
+            metrics::counter!("buzz_tenant_host_cache_hits_total").increment(1);
+            return Ok(Some(community));
+        }
+        let _turn = self
+            .tenant_host_reads
+            .turn(
+                normalized_host.to_owned(),
+                crate::state::TENANT_HOST_CACHE_MAX_AGE,
+            )
+            .await;
+        if let Some(community) = fresh() {
+            metrics::counter!("buzz_tenant_host_cache_hits_total").increment(1);
+            return Ok(Some(community));
         }
         metrics::counter!("buzz_tenant_host_cache_misses_total").increment(1);
-        let read_at = std::time::Instant::now();
-        let community = self.db.resolve_host(normalized_host).await?;
+        let read = self
+            .db
+            .lookup_community_by_host_read_at(normalized_host)
+            .await?;
+        let community = read.value.map(|record| record.id);
         if let Some(community) = community {
             self.tenant_host_cache
-                .insert(normalized_host.to_owned(), (community, read_at));
+                .insert(normalized_host.to_owned(), (community, read.read_at));
         }
         Ok(community)
     }

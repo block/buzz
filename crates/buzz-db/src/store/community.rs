@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::{relay_members, Db, DbError, Result};
+use crate::{relay_members, Db, DbError, ReadAt, Result};
 
 /// Community host-map row returned by [`Db::lookup_community_by_host`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +105,46 @@ pub enum UnarchiveCommunityResult {
     NotFound,
 }
 
+/// The active community mapped to a normalized host, with when its
+/// connection was checked out.
+async fn lookup_by_host_read_at(
+    pool: &sqlx::PgPool,
+    normalized_host: &str,
+) -> Result<ReadAt<Option<CommunityRecord>>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::TenantResolution,
+    )
+    .await?;
+    let read_at = std::time::Instant::now();
+    let row = sqlx::query(
+        r#"
+        SELECT id, host
+        FROM communities
+        WHERE lower(host) = lower($1)
+          AND archived_at IS NULL
+          AND deleted_at IS NULL
+          AND deletion_state = 'active'
+        "#,
+    )
+    .bind(normalized_host)
+    .fetch_optional(&mut *connection)
+    .await?;
+
+    let value = row
+        .map(|row| {
+            let id: Uuid = row.try_get("id")?;
+            let host: String = row.try_get("host")?;
+
+            Ok::<_, DbError>(CommunityRecord {
+                id: CommunityId::from_uuid(id),
+                host,
+            })
+        })
+        .transpose()?;
+    Ok(ReadAt { value, read_at })
+}
+
 impl Db {
     /// Returns the community mapped to a normalized request host, if one exists.
     ///
@@ -115,35 +155,19 @@ impl Db {
         &self,
         normalized_host: &str,
     ) -> Result<Option<CommunityRecord>> {
-        let mut connection = crate::observability::acquire_writer(
-            &self.pool,
-            crate::observability::WriterOperation::TenantResolution,
-        )
-        .await?;
-        let row = sqlx::query(
-            r#"
-            SELECT id, host
-            FROM communities
-            WHERE lower(host) = lower($1)
-              AND archived_at IS NULL
-              AND deleted_at IS NULL
-              AND deletion_state = 'active'
-            "#,
-        )
-        .bind(normalized_host)
-        .fetch_optional(&mut *connection)
-        .await?;
+        Ok(lookup_by_host_read_at(&self.pool, normalized_host)
+            .await?
+            .value)
+    }
 
-        row.map(|row| {
-            let id: Uuid = row.try_get("id")?;
-            let host: String = row.try_get("host")?;
-
-            Ok(CommunityRecord {
-                id: CommunityId::from_uuid(id),
-                host,
-            })
-        })
-        .transpose()
+    /// [`Self::lookup_community_by_host`], with when its connection was
+    /// checked out, for caches that bound staleness from the read.
+    #[datastore_span(name = "lookup_community_by_host", system = "postgresql")]
+    pub async fn lookup_community_by_host_read_at(
+        &self,
+        normalized_host: &str,
+    ) -> Result<ReadAt<Option<CommunityRecord>>> {
+        lookup_by_host_read_at(&self.pool, normalized_host).await
     }
 
     /// Returns whether a community id still exists in the active lifecycle state.

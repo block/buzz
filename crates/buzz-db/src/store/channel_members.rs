@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::channel::{row_to_channel_record, ChannelRecord};
 use crate::error::{DbError, Result};
-use crate::{AdmittedTx, Db};
+use crate::{AdmittedTx, Db, ReadAt};
 use buzz_core::CommunityId;
 use buzz_datastore_tracing::datastore_span;
 
@@ -1550,11 +1550,22 @@ pub async fn get_listed_open_channel_ids(
     pool: &PgPool,
     community_id: CommunityId,
 ) -> Result<Vec<Uuid>> {
+    Ok(get_listed_open_channel_ids_read_at(pool, community_id)
+        .await?
+        .value)
+}
+
+/// [`get_listed_open_channel_ids`], with when its connection was checked out.
+pub async fn get_listed_open_channel_ids_read_at(
+    pool: &PgPool,
+    community_id: CommunityId,
+) -> Result<ReadAt<Vec<Uuid>>> {
     let mut connection = crate::observability::acquire_writer(
         pool,
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
+    let read_at = std::time::Instant::now();
     let sql = format!(
         r#"
         SELECT id
@@ -1565,11 +1576,11 @@ pub async fn get_listed_open_channel_ids(
         open_types = crate::store::channel::legacy_channel_type_sql("channel_type"),
     );
     // Built only from the constant type list.
-    sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+    let value = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
         .bind(community_id.as_uuid())
         .fetch_all(&mut *connection)
-        .await
-        .map_err(Into::into)
+        .await?;
+    Ok(ReadAt { value, read_at })
 }
 
 /// Appends the channels of `more` that `ids` lacks.
@@ -2405,6 +2416,16 @@ impl Db {
         community_id: CommunityId,
     ) -> Result<Vec<Uuid>> {
         get_listed_open_channel_ids(&self.pool, community_id).await
+    }
+
+    /// [`Self::get_listed_open_channel_ids`], with when its connection was
+    /// checked out, for caches that bound staleness from the read.
+    #[datastore_span(name = "get_listed_open_channel_ids", system = "postgresql")]
+    pub async fn get_listed_open_channel_ids_read_at(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<ReadAt<Vec<Uuid>>> {
+        get_listed_open_channel_ids_read_at(&self.pool, community_id).await
     }
 
     /// The channels of non-legacy types a pubkey can read (member, or open

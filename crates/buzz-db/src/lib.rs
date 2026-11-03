@@ -111,6 +111,21 @@ pub use reminder::DueReminder;
 pub use store::{ArtifactSnapshot, SnapshotDenied};
 pub use usage::SessionLeader;
 
+/// A value read from the database, with when its reading connection was
+/// checked out of the pool.
+///
+/// The statement that produced `value` started after `read_at`, so its
+/// snapshot is no older than `read_at`. A cache that serves `value` for a
+/// bound after `read_at` is never staler than that bound, however long the
+/// read waited for a connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadAt<T> {
+    /// The value as read.
+    pub value: T,
+    /// When the connection that read `value` was checked out.
+    pub read_at: std::time::Instant,
+}
+
 use buzz_core::CommunityId;
 
 /// Durable NIP-FI verified-profile projection state.

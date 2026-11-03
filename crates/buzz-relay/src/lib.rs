@@ -63,6 +63,8 @@ pub mod push_runtime;
 pub mod readiness;
 /// Axum router construction.
 pub mod router;
+/// Per-key gates that let concurrent cache misses share one database read.
+mod shared_reads;
 /// Timing for startup work between metrics bind and serving.
 pub mod startup_steps;
 /// Shared application state.
