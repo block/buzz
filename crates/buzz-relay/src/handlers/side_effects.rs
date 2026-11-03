@@ -159,6 +159,12 @@ pub(crate) async fn apply_kick_live_side_effects(
             return Err(e.into());
         }
     }
+    // Re-publish the member list (kind:39002) before the notice, as a
+    // kind:9001 removal does. Clients build their channel list from the
+    // 39002 events that name them, so a stale one keeps the channel listed.
+    if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
+        warn!(channel = %channel_id, error = %e, "kick live effects: group discovery emission failed");
+    }
     // Tell the member, as a kind:9001 removal does. Eviction drops the channel
     // from a multi-channel subscription without a CLOSED, so this is the
     // member's only signal. A recovery re-drive may send it again; a repeated

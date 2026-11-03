@@ -11293,6 +11293,26 @@ mod postgres_tests {
             notices, 1,
             "kick must send the member one 44101 for the channel"
         );
+
+        // Assert: the channel's member list (kind:39002) was re-published
+        // without the kicked user. Clients build their channel list from it.
+        let roster: Option<serde_json::Value> = sqlx::query_scalar(
+            "SELECT tags FROM events WHERE community_id = $1 AND kind = 39002 \
+             AND tags @> $2::jsonb ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(community_id)
+        .bind(serde_json::json!([["d", channel_id.to_string()]]))
+        .fetch_optional(&pool)
+        .await
+        .expect("read member list");
+        let roster = roster.expect("kick must re-publish the channel's 39002");
+        assert!(
+            !roster
+                .as_array()
+                .expect("tags array")
+                .contains(&serde_json::json!(["p", hex::encode(&target_pubkey)])),
+            "the re-published 39002 must not list the kicked member: {roster}"
+        );
     }
 
     // ── Direct (report-less) staff actions ────────────────────────────────
