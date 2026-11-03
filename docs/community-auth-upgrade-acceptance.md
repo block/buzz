@@ -48,6 +48,23 @@ changes. The ignored `buzz-test-client` suites additionally need a running relay
 test passes. Use each cash-server package's own required checks for module and
 harness coverage.
 
+The Postgres-backed cases marked `#[ignore = "requires Postgres"]` also need the
+separate lane below; neither `just ci` nor `just test` executes them. Follow
+[CONTRIBUTING.md's PostgreSQL setup](../CONTRIBUTING.md#postgresql-tests) for
+isolated native Postgres/Redis, maintenance-role privileges and protected
+environment configuration, then run the full discovered lane from the repo root:
+
+```sh
+. ./bin/activate-hermit
+./scripts/postgres-test-run.sh
+```
+
+Retain its exit status and per-test results, including exact executed test names
+from `nip_fi_binding.rs` and Postgres-backed `router_tests.rs` cases. Verify these
+tests actually passed: compilation, discovery, filtered-out tests and CI jobs
+skipped by path selection do not count. An unavailable lane is a check gap, not
+a pass. Keep database credentials out of the evidence record.
+
 ## Run record and fixture preparation
 
 Create one run record with a unique run ID, UTC start/end, operator, independent
