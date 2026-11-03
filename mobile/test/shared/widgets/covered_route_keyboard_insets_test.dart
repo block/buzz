@@ -129,6 +129,57 @@ void main() {
     expect(seen.last, EdgeInsets.zero);
   });
 
+  testWidgets('a covered page takes the new padding when rotated', (
+    tester,
+  ) async {
+    EdgeInsets? padding;
+    final navigator = GlobalKey<NavigatorState>();
+    var landscape = false;
+    late StateSetter setOuter;
+    final app = MaterialApp(
+      navigatorKey: navigator,
+      home: CoveredRouteKeyboardInsets(
+        child: Builder(
+          builder: (context) {
+            padding = MediaQuery.paddingOf(context);
+            return const SizedBox.expand();
+          },
+        ),
+      ),
+    );
+
+    await tester.pumpWidget(
+      StatefulBuilder(
+        builder: (context, setState) {
+          setOuter = setState;
+          return MediaQuery(
+            data: MediaQueryData(
+              size: landscape ? const Size(800, 400) : const Size(400, 800),
+              padding: landscape
+                  ? const EdgeInsets.symmetric(horizontal: 44)
+                  : const EdgeInsets.only(top: 44, bottom: 34),
+            ),
+            child: app,
+          );
+        },
+      ),
+    );
+    expect(padding, const EdgeInsets.only(top: 44, bottom: 34));
+
+    navigator.currentState!.push(
+      PageRouteBuilder<void>(
+        opaque: false,
+        transitionDuration: Duration.zero,
+        pageBuilder: (_, _, _) => const SizedBox(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    setOuter(() => landscape = true);
+    await tester.pump();
+    expect(padding, const EdgeInsets.symmetric(horizontal: 44));
+  });
+
   testWidgets('a current page follows the keyboard', (tester) async {
     final builds = [0];
     final seen = <EdgeInsets>[];

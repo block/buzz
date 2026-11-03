@@ -12,8 +12,10 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 /// view insets and padding it last had as the current route, except that it
 /// still follows the keyboard down: when a covering route takes focus and the
 /// page's own keyboard closes, the page lowers behind the scrim instead of
-/// jumping when it is uncovered. Every other [MediaQueryData] field passes
-/// through. When the route becomes current again the live values return.
+/// jumping when it is uncovered. A size change (rotation) drops the held
+/// values, so safe-area padding stays right for the new orientation. Every
+/// other [MediaQueryData] field passes through. When the route becomes
+/// current again the live values return.
 class CoveredRouteKeyboardInsets extends HookWidget {
   const CoveredRouteKeyboardInsets({super.key, required this.child});
 
@@ -24,15 +26,16 @@ class CoveredRouteKeyboardInsets extends HookWidget {
     final data = MediaQuery.of(context);
     final current = ModalRoute.isCurrentOf(context) ?? true;
     // The insets and padding from the last build as the current route, or
-    // the smallest keyboard seen since it was covered.
-    final held = useRef<(EdgeInsets, EdgeInsets)?>(null);
+    // the smallest keyboard seen since it was covered at the current size.
+    final held = useRef<(EdgeInsets, EdgeInsets, Size)?>(null);
     final heldValue = held.value;
     if (current ||
         heldValue == null ||
+        data.size != heldValue.$3 ||
         data.viewInsets.bottom <= heldValue.$1.bottom) {
-      held.value = (data.viewInsets, data.padding);
+      held.value = (data.viewInsets, data.padding, data.size);
     }
-    final (viewInsets, padding) = held.value!;
+    final (viewInsets, padding, _) = held.value!;
     // Always the same widget shape, so covering never remounts the page.
     return MediaQuery(
       data: current
