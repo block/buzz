@@ -350,8 +350,12 @@ class _ComposeBarLayout extends HookWidget {
     if (readOnly || controller.value.composing.isValid) {
       return KeyEventResult.ignored;
     }
-    if (canSend && !hasPendingUploads && !isSending) onSend();
+    _sendFromKeyboard();
     return KeyEventResult.handled;
+  }
+
+  void _sendFromKeyboard() {
+    if (canSend && !hasPendingUploads && !isSending) onSend();
   }
 
   Widget _buildTextField(BuildContext context) {
@@ -369,7 +373,13 @@ class _ComposeBarLayout extends HookWidget {
       focusNode: focusNode,
       readOnly: readOnly,
       keyboardType: TextInputType.multiline,
-      textInputAction: TextInputAction.newline,
+      // On a Mac the system inserts Return as text before any key event
+      // reaches Flutter, so Return submits through the input action there.
+      textInputAction: isIosAppOnMac
+          ? TextInputAction.send
+          : TextInputAction.newline,
+      onSubmitted: isIosAppOnMac ? (_) => _sendFromKeyboard() : null,
+      onEditingComplete: isIosAppOnMac ? () {} : null,
       contextMenuBuilder: contextMenuBuilder,
       // Flutter's Cupertino magnifier rebuilds its overlay on every
       // selection-handle update. Keep the iOS handles and native edit menu,

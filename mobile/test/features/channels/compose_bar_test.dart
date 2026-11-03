@@ -36,6 +36,7 @@ import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/utils/string_utils.dart';
 import 'package:buzz/shared/widgets/anchored_popover_menu.dart';
+import 'package:buzz/shared/app_on_mac.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:buzz/shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -1255,6 +1256,40 @@ void main() {
       await tester.pumpAndSettle();
       expect(sendCount, 1);
       expect(sentContent, 'Hello');
+    });
+
+    testWidgets('Return sends through the input action on a Mac', (
+      tester,
+    ) async {
+      debugIsIosAppOnMac = true;
+      addTearDown(() => debugIsIosAppOnMac = false);
+      var sendCount = 0;
+      String? sentContent;
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                sendCount += 1;
+                sentContent = content;
+              },
+        ),
+      );
+
+      await _expandComposer(tester);
+      final field = tester.widget<TextField>(find.byType(TextField));
+      expect(field.textInputAction, TextInputAction.send);
+
+      await tester.enterText(find.byType(TextField), 'Hi from the Mac');
+      await tester.pump();
+      await tester.testTextInput.receiveAction(TextInputAction.send);
+      await tester.pumpAndSettle();
+      expect(sendCount, 1);
+      expect(sentContent, 'Hi from the Mac');
     });
 
     testWidgets('clears text before the optimistic send completes', (
