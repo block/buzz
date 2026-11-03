@@ -143,13 +143,13 @@ pub enum ActionDef {
         from: String,
         /// Message shown to the approver.
         message: String,
-        /// Duration string (e.g. `"24h"`). Defaults to 24h.
+        /// Duration string (e.g. `"24h"`, `"7d"`). Defaults to 24h, capped at 7d.
         #[serde(default)]
         timeout: Option<String>,
     },
-    /// Pause execution for a duration (e.g. `"5m"`, `"1h"`).
+    /// Pause execution for a duration (e.g. `"30s"`, `"4m"`; max 270s).
     Delay {
-        /// Duration string (e.g. `"5m"`, `"1h"`).
+        /// Duration string (e.g. `"30s"`, `"4m"`; max 270s).
         duration: String,
     },
 }
@@ -261,7 +261,7 @@ impl WorkflowDef {
             if let Some(dur) = interval {
                 let secs = crate::executor::parse_duration_secs(dur).map_err(|_| {
                     WorkflowError::InvalidDefinition(format!(
-                        "invalid interval '{dur}': expected a duration like '30m', '1h', or '60s'"
+                        "invalid interval '{dur}': expected a duration like '30m', '1h', '1d', or '60s'"
                     ))
                 })?;
                 // Fix 4: the cron loop ticks every 60s, so sub-minute intervals
@@ -271,6 +271,52 @@ impl WorkflowDef {
                         "interval must be at least 60s (cron loop ticks every 60 seconds)".into(),
                     ));
                 }
+            }
+        }
+
+        // Fail fast on invalid step durations rather than failing (delay) or
+        // silently falling back (approval timeout) at run time.
+        const MAX_DELAY_SECS: u64 = 270;
+        for step in &self.steps {
+            match &step.action {
+                ActionDef::RequestApproval {
+                    timeout: Some(t), ..
+                } => {
+                    let secs = crate::executor::parse_duration_secs(t).map_err(|_| {
+                        WorkflowError::InvalidDefinition(format!(
+                            "step '{}': invalid timeout '{t}': expected a duration like '24h', '7d', or '30m'",
+                            step.id
+                        ))
+                    })?;
+                    if secs == 0 {
+                        return Err(WorkflowError::InvalidDefinition(format!(
+                            "step '{}': timeout must be greater than 0",
+                            step.id
+                        )));
+                    }
+                }
+                ActionDef::Delay { duration } => {
+                    let secs = crate::executor::parse_duration_secs(duration).map_err(|_| {
+                        WorkflowError::InvalidDefinition(format!(
+                            "step '{}': invalid duration '{duration}': expected a duration like '30s' or '4m' (max 270s)",
+                            step.id
+                        ))
+                    })?;
+                    if secs == 0 {
+                        return Err(WorkflowError::InvalidDefinition(format!(
+                            "step '{}': duration must be greater than 0",
+                            step.id
+                        )));
+                    }
+                    if secs > MAX_DELAY_SECS {
+                        return Err(WorkflowError::InvalidDefinition(format!(
+                            "step '{}': delay exceeds maximum of {MAX_DELAY_SECS} seconds (got {secs}s); \
+                     use the scheduled resume pattern for long delays",
+                            step.id
+                        )));
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -395,7 +441,7 @@ mod tests {
             "  - id: react\n    action: add_reaction\n    emoji: white_check_mark\n",
             "  - id: hook\n    action: call_webhook\n    url: https://hooks.example.com/notify\n    method: POST\n",
             "  - id: approve\n    action: request_approval\n    from: '@manager'\n    message: Approve?\n    timeout: 4h\n",
-            "  - id: wait\n    action: delay\n    duration: 5m\n",
+            "  - id: wait\n    action: delay\n    duration: 4m\n",
         );
         let (def, _) = parse_yaml(yaml).expect("parse failed");
         assert_eq!(def.steps.len(), 7);
@@ -489,6 +535,57 @@ mod tests {
         let yaml = "name: Empty Schedule\ntrigger:\n  on: schedule\nsteps:\n  - id: s1\n    action: send_message\n    text: hi\n";
         let err = parse_yaml(yaml).unwrap_err();
         assert!(matches!(err, WorkflowError::InvalidDefinition(_)));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_approval_timeout() {
+        let yaml = "name: Bad Timeout\ntrigger:\n  on: webhook\nsteps:\n  - id: gate\n    action: request_approval\n    from: '@manager'\n    message: Approve?\n    timeout: 24x\n";
+        let err = parse_yaml(yaml).unwrap_err();
+        match &err {
+            WorkflowError::InvalidDefinition(msg) => {
+                assert!(msg.contains("gate"), "expected step id in: {msg}");
+                assert!(msg.contains("timeout"), "expected 'timeout' in: {msg}");
+            }
+            other => panic!("expected InvalidDefinition, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_zero_approval_timeout() {
+        let yaml = "name: Zero Timeout\ntrigger:\n  on: webhook\nsteps:\n  - id: gate\n    action: request_approval\n    from: '@manager'\n    message: Approve?\n    timeout: 0s\n";
+        let err = parse_yaml(yaml).unwrap_err();
+        assert!(matches!(err, WorkflowError::InvalidDefinition(_)));
+    }
+
+    #[test]
+    fn validate_accepts_day_approval_timeout() {
+        let yaml = "name: Day Timeout\ntrigger:\n  on: webhook\nsteps:\n  - id: gate\n    action: request_approval\n    from: '@manager'\n    message: Approve?\n    timeout: 7d\n";
+        parse_yaml(yaml).expect("7d approval timeout should be valid");
+    }
+
+    #[test]
+    fn validate_rejects_invalid_delay_duration() {
+        let yaml = "name: Bad Delay\ntrigger:\n  on: webhook\nsteps:\n  - id: wait\n    action: delay\n    duration: soon\n";
+        let err = parse_yaml(yaml).unwrap_err();
+        match &err {
+            WorkflowError::InvalidDefinition(msg) => {
+                assert!(msg.contains("wait"), "expected step id in: {msg}");
+                assert!(msg.contains("duration"), "expected 'duration' in: {msg}");
+            }
+            other => panic!("expected InvalidDefinition, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_delay_over_max() {
+        let yaml = "name: Long Delay\ntrigger:\n  on: webhook\nsteps:\n  - id: wait\n    action: delay\n    duration: 5m\n";
+        let err = parse_yaml(yaml).unwrap_err();
+        match &err {
+            WorkflowError::InvalidDefinition(msg) => {
+                assert!(msg.contains("270"), "expected max in: {msg}");
+            }
+            other => panic!("expected InvalidDefinition, got: {other}"),
+        }
     }
 
     #[test]
