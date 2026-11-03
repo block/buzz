@@ -539,6 +539,16 @@ void main() {
       expected: 'Only owners and admins can change access.',
     ),
     (
+      name: 'Private member inspection',
+      actorRole: 'member',
+      solo: false,
+      visibility: 'private',
+      joinRole: 'member',
+      targetRole: 'bot',
+      choice: null,
+      expected: 'Only owners and admins can change access.',
+    ),
+    (
       name: 'Guest inspection',
       actorRole: 'guest',
       solo: false,
@@ -569,6 +579,17 @@ void main() {
       choice: null,
       expected:
           'Viewing only. Ask an owner or admin to participate in this channel.',
+    ),
+    (
+      name: 'Solo Guest inspection',
+      actorRole: 'guest',
+      solo: true,
+      visibility: 'open',
+      joinRole: 'guest',
+      targetRole: 'bot',
+      choice: null,
+      expected:
+          'Viewing only. Ask an owner or admin to participate in this chat.',
     ),
     (
       name: 'Solo nonmember inspection',
@@ -635,9 +656,50 @@ void main() {
       expect(find.text('General access'), findsOneWidget);
       final choice = scenario.choice;
       if (choice == null) {
+        final semantics = tester.ensureSemantics();
         expect(find.text(scenario.expected), findsOneWidget);
+        expect(find.textContaining('Current access:'), findsNothing);
+        final selectedLabel = scenario.visibility == 'private'
+            ? 'Private'
+            : scenario.joinRole == 'guest'
+            ? 'View only'
+            : scenario.solo
+            ? 'Public (existing)'
+            : 'Public';
+        final options = find.byType(ListTile);
+        expect(
+          options,
+          findsNWidgets(
+            scenario.solo && selectedLabel != 'Public (existing)' ? 2 : 3,
+          ),
+        );
+        for (final option in options.evaluate()) {
+          final tile = option.widget as ListTile;
+          expect(tile.enabled, isFalse);
+          expect(tile.selected, (tile.title! as Text).data == selectedLabel);
+          final label = (tile.title! as Text).data!;
+          final finder = find.widgetWithText(ListTile, label);
+          await tester.ensureVisible(finder);
+          await tester.pumpAndSettle();
+          expect(
+            tester.getSemantics(finder),
+            matchesSemantics(
+              isButton: true,
+              isSelected: label == selectedLabel,
+              hasEnabledState: true,
+              isEnabled: false,
+              hasSelectedState: true,
+              label: '$label\n${(tile.subtitle! as Text).data}',
+            ),
+          );
+          await tester.tap(finder);
+          await tester.pumpAndSettle();
+          expect(find.byType(AlertDialog), findsNothing);
+        }
+        expect(find.byIcon(BuzzIcons.check), findsOneWidget);
         expect(find.text('Change access'), findsNothing);
         expect(relay.published, isEmpty);
+        semantics.dispose();
         return;
       }
       await tester.ensureVisible(find.text(choice));

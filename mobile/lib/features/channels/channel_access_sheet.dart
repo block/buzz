@@ -63,10 +63,12 @@ class ChannelAccessSheet extends HookConsumerWidget {
         : solo
         ? 'Public (existing)'
         : 'Public';
-    final editable =
+    final confirmed =
         snapshot.connectionState == ConnectionState.done &&
         !snapshot.hasError &&
-        base?.canEdit(actor) == true;
+        base != null;
+    final editable = confirmed && base.canEdit(actor);
+    final choicesEnabled = editable && !busy.value && attempt == null;
 
     Future<void> perform(
       Future<ChannelAccessSnapshot> Function() action, {
@@ -94,11 +96,7 @@ class ChannelAccessSheet extends HookConsumerWidget {
     }
 
     Future<void> choose(String choice) async {
-      if (!editable ||
-          base == null ||
-          busy.value ||
-          attempt != null ||
-          choice == access) {
+      if (!editable || busy.value || attempt != null || choice == access) {
         return;
       }
       String message;
@@ -159,7 +157,7 @@ class ChannelAccessSheet extends HookConsumerWidget {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               mainAxisSize: MainAxisSize.min,
               children: [
-                if (!editable || (solo && access == 'public'))
+                if (!confirmed || (editable && solo && access == 'public'))
                   Text(
                     'Current access: $accessLabel',
                     style: context.textTheme.bodySmall?.copyWith(
@@ -174,11 +172,11 @@ class ChannelAccessSheet extends HookConsumerWidget {
                       semanticLabel: 'Checking access',
                     ),
                   ),
-                if (editable) ...[
-                  if (!solo)
+                if (confirmed) ...[
+                  if (!solo || (!editable && access == 'public'))
                     ListTile(
                       leading: const Icon(BuzzIcons.users),
-                      title: const Text('Public'),
+                      title: Text(solo ? 'Public (existing)' : 'Public'),
                       subtitle: const Text(
                         'Anyone in the community can participate.',
                       ),
@@ -187,7 +185,7 @@ class ChannelAccessSheet extends HookConsumerWidget {
                       trailing: access == 'public'
                           ? const Icon(BuzzIcons.check)
                           : null,
-                      enabled: !busy.value && attempt == null,
+                      enabled: choicesEnabled,
                       onTap: () => choose('public'),
                     ),
                   ListTile(
@@ -199,7 +197,7 @@ class ChannelAccessSheet extends HookConsumerWidget {
                     trailing: access == 'view-only'
                         ? const Icon(BuzzIcons.check)
                         : null,
-                    enabled: !busy.value && attempt == null,
+                    enabled: choicesEnabled,
                     onTap: () => choose('view-only'),
                   ),
                   ListTile(
@@ -211,17 +209,17 @@ class ChannelAccessSheet extends HookConsumerWidget {
                     trailing: access == 'private'
                         ? const Icon(BuzzIcons.check)
                         : null,
-                    enabled: !busy.value && attempt == null,
+                    enabled: choicesEnabled,
                     onTap: () => choose('private'),
                   ),
-                ] else if (snapshot.connectionState == ConnectionState.done &&
-                    !snapshot.hasError)
+                ],
+                if (confirmed && !editable)
                   Text(
                     data?.isArchived == true
                         ? 'This $place is archived.'
-                        : channelRoleCanContribute(base?.role(actor))
+                        : channelRoleCanContribute(base.role(actor))
                         ? 'Only owners and admins can change access.'
-                        : base?.role(actor) == null &&
+                        : base.role(actor) == null &&
                               visibility == 'open' &&
                               joinRole == 'member' &&
                               !solo
