@@ -1245,11 +1245,13 @@ fn upgrade_response(
 /// authenticated by that mediator. No public user credential can select it.
 pub async fn enable_community_nip_fi(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
     let operator = authorize_operator_request(
         &state,
+        &slot,
         &headers,
         "POST",
         "/operator/communities/nip-fi-upgrade",
@@ -1322,12 +1324,14 @@ pub async fn enable_community_nip_fi(
 /// A fresh NIP-98 signature is required for every status read and POST retry.
 pub async fn community_nip_fi_upgrade_status(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
     Query(query): Query<CommunityAuthUpgradeQuery>,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
     let operator = authorize_operator_request(
         &state,
+        &slot,
         &headers,
         "GET",
         "/operator/communities/nip-fi-upgrade",
