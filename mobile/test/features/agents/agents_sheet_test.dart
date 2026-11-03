@@ -272,14 +272,15 @@ void main() {
       directory: [existing],
       home: HomePage(
         onAgents: showAgents,
-        defaultAgentBuilder: (context) =>
-            DefaultAgentLauncher(onChooseAgent: () => showAgents(context)),
+        defaultAgentBuilder: (context) => DefaultAgentLauncher(
+          onChooseAgent: () => showAgents(context, createOnOpen: true),
+        ),
         settingsPageBuilder: (_) => const SizedBox.shrink(),
         mePageBuilder: (_, _, _) =>
             const SliverToBoxAdapter(child: Text('Solo workspace')),
       ),
     );
-    await tester.tap(find.byTooltip('Bestie'));
+    await tester.tap(find.byTooltip('Create your Bestie'));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(ValueKey(existing)));
     await tester.pumpAndSettle();

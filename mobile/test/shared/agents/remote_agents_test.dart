@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:buzz/features/profile/presence_cache_provider.dart';
 import 'package:buzz/shared/agents/remote_agents.dart';
+import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/crypto/nip_oa.dart';
@@ -259,6 +260,48 @@ void main() {
         registry.bodies['/v3/beekeeper/attest-agent']?['community_url'],
         'wss://test.${HostedEnvironment.communitySuffix}',
       );
+      expect(
+        registry.calls.where((call) => call == 'register-agent'),
+        hasLength(1),
+      );
+    },
+  );
+
+  test(
+    'Bestie save failure resumes the same completed agent identity',
+    () async {
+      final registry = FakeRegistry(bound: fakeOwner.public);
+      await AccountIdentityStore()
+          .forSubject(fakeSubject)
+          .create(fakeOwner.nsec);
+      var fail = true;
+      var completions = 0;
+      final controller = RelayFakeController(
+        registry,
+        onCreated: (community, pubkey) async {
+          expect(pubkey, fakeAgent);
+          expect(registry.calls, contains('publish-policy'));
+          completions++;
+          if (fail) throw StateError('Bestie save unavailable');
+        },
+      );
+      addTearDown(() {
+        controller.dispose();
+        controller.relayAuth.dispose();
+        registry.dispose();
+      });
+      Future<bool> create() => controller.create(
+        _community(),
+        'Scout',
+        modelId: 'test-model',
+        reasoningEffort: 'high',
+      );
+      expect(await create(), isFalse);
+      expect(controller.pending?['pubkey'], fakeAgent);
+      fail = false;
+      expect(await create(), isTrue);
+      expect(controller.pending, isNull);
+      expect(completions, 2);
       expect(
         registry.calls.where((call) => call == 'register-agent'),
         hasLength(1),
@@ -901,6 +944,7 @@ void main() {
     final relay = _AgentRelay();
     final container = ProviderContainer(
       overrides: [
+        ownedAgentDirectoryProvider.overrideWith((ref) async => []),
         presenceCacheProvider.overrideWith(_AgentPresence.new),
         activeCommunityProvider.overrideWith((ref) async => _community()),
         remoteAgentControllerProvider.overrideWithValue(controller),
@@ -909,7 +953,9 @@ void main() {
     );
     addTearDown(container.dispose);
     await container.read(activeCommunityProvider.future);
+    expect(controller.registryLoaded, isFalse);
     await controller.run(controller.refresh);
+    expect(controller.registryLoaded, isTrue);
 
     expect(await container.read(availableRemoteAgentsProvider.future), isEmpty);
     expect(container.read(presentedPresenceProvider)[fakeAgent], 'offline');
@@ -953,6 +999,29 @@ void main() {
       fakeAgent,
     });
     expect(container.read(presentedPresenceProvider)[fakeAgent], 'online');
+
+    // Another community can retain its registration after account-wide deletion.
+    container.updateOverrides([
+      ownedAgentDirectoryProvider.overrideWith(
+        (ref) async => [
+          OwnedAgentDirectoryEntry(
+            pubkey: fakeAgent,
+            runtime: 'block.builderlab/builderlab',
+          ),
+        ],
+      ),
+      presenceCacheProvider.overrideWith(_AgentPresence.new),
+      activeCommunityProvider.overrideWith((ref) async => _community()),
+      remoteAgentControllerProvider.overrideWithValue(controller),
+      relaySessionProvider.overrideWith(() => relay),
+    ]);
+    registry.listed = [];
+    await controller.run(controller.refresh);
+    await container.read(ownedAgentDirectoryProvider.future);
+    await container.read(availableRemoteAgentsProvider.future);
+    expect(container.read(presentedPresenceProvider)[fakeAgent], 'offline');
+    registry.signedIn = false;
+    expect(controller.registryLoaded, isFalse);
   }, skip: !HostedEnvironment.enabled);
 
   test('owner proof verifies for only the provisioned agent key', () {
@@ -982,6 +1051,7 @@ void main() {
     () async {
       final container = ProviderContainer(
         overrides: [
+          ownedAgentDirectoryProvider.overrideWith((ref) async => []),
           presenceCacheProvider.overrideWith(_Presence.new),
           availableRemoteAgentsProvider.overrideWith((ref) async => {'remote'}),
         ],

@@ -5,6 +5,7 @@ import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/agents/remote_agents.dart';
+import '../../shared/agents/owned_agent_directory.dart';
 import '../../shared/relay/relay.dart';
 
 /// Community-scoped presence: absent means unknown. Polls recover expired leases.
@@ -243,11 +244,25 @@ final presenceCacheProvider =
     );
 
 /// Presentation shared by profiles, DMs and mentions. Remote agents wake on
-/// messages, so an ACTIVE registration shows Online whatever their socket
-/// presence. Local presence is unchanged.
+/// messages. Their verified Builderlab runtime registration is enough to show
+/// Online even when the account API is unavailable or signed out. The registry
+/// also supports older agents without runtime metadata. Local presence is unchanged.
 final presentedPresenceProvider = Provider<Map<String, String>>((ref) {
   final presence = ref.watch(presenceCacheProvider);
-  final remote = ref.watch(availableRemoteAgentsProvider).value ?? const {};
+  final directoryState = ref.watch(ownedAgentDirectoryProvider);
+  final directory = directoryState.isLoading || directoryState.hasError
+      ? null
+      : directoryState.asData?.value;
+  final controller = ref.watch(remoteAgentControllerProvider);
+  void changed() => ref.invalidateSelf();
+  controller.addListener(changed);
+  ref.onDispose(() => controller.removeListener(changed));
+  final remote = {
+    ...?ref.watch(availableRemoteAgentsProvider).value,
+    if (!controller.registryLoaded)
+      for (final agent in directory ?? <OwnedAgentDirectoryEntry>[])
+        if (agent.runtime == 'block.builderlab/builderlab') agent.pubkey,
+  }..removeAll(controller.deletedAgents);
   if (remote.isEmpty) return presence;
   return {...presence, for (final pubkey in remote) pubkey: 'online'};
 });

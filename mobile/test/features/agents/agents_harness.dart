@@ -197,6 +197,8 @@ class AgentsHarness {
     WidgetTester tester, {
     required List<String> directory,
     Widget? home,
+    bool createOnOpen = false,
+    bool settle = true,
     List<Override> overrides = const [],
   }) async {
     registered = [...directory, oldAppAgentKeys.public];
@@ -241,7 +243,8 @@ class AgentsHarness {
               Builder(
                 builder: (context) => Scaffold(
                   body: TextButton(
-                    onPressed: () => showAgents(context),
+                    onPressed: () =>
+                        showAgents(context, createOnOpen: createOnOpen),
                     child: const Text('Open Agents'),
                   ),
                 ),
@@ -252,7 +255,12 @@ class AgentsHarness {
     await tester.pumpAndSettle();
     if (home == null) {
       await tester.tap(find.text('Open Agents'));
-      await tester.pumpAndSettle();
+      if (settle) {
+        await tester.pumpAndSettle();
+      } else {
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+      }
     }
   }
 }

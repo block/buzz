@@ -10,6 +10,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import '../community/community.dart';
+import 'first_agent_bestie.dart';
+import '../me/default_agent.dart';
+import '../me/me_sync.dart';
 import '../community/community_provider.dart';
 import '../crypto/nip_oa.dart';
 import '../hosted/account_identity_store.dart';
@@ -82,6 +85,15 @@ final remoteAgentControllerProvider = Provider<RemoteAgentController>((ref) {
   final controller = RemoteAgentController(
     account: ref.watch(builderlabAccountProvider),
     keys: AccountIdentityStore(),
+    onCreated: (community, pubkey) async {
+      final sync = ref.read(meSyncProvider);
+      if (sync.pubkey != community.pubkey ||
+          ref.read(activeCommunityProvider).asData?.value?.id != community.id) {
+        throw StateError('The community changed. Resume agent setup there.');
+      }
+      await makeFirstAgentBestie(sync, pubkey);
+      ref.invalidate(defaultAgentProvider);
+    },
     relayAuth: ref.watch(hostedRelayAuthProvider),
   );
   ref.onDispose(controller.dispose);
@@ -168,6 +180,7 @@ class RemoteAgentController extends ChangeNotifier {
     required this.account,
     required AccountIdentityStore keys,
     required this.relayAuth,
+    this.onCreated,
   }) : _keys = keys {
     account.subjectChanges.addListener(_accountChanged);
   }
@@ -175,6 +188,9 @@ class RemoteAgentController extends ChangeNotifier {
   final BuilderlabAccountClient account;
   final AccountIdentityStore _keys;
   final HostedRelayAuth relayAuth;
+
+  /// Completes community preferences before clearing the resumable setup.
+  final Future<void> Function(Community community, String pubkey)? onCreated;
 
   bool busy = false;
   int _operation = 0;
@@ -226,6 +242,7 @@ class RemoteAgentController extends ChangeNotifier {
     pending = null;
     deletedAgents = {};
     listingFailed = false;
+    registryLoaded = false;
     _scope = null;
   }
 
@@ -294,6 +311,9 @@ class RemoteAgentController extends ChangeNotifier {
   /// an empty registry.
   bool listingFailed = false;
 
+  /// Whether this account has returned an authoritative registry snapshot.
+  bool registryLoaded = false;
+
   Future<void> refresh() async {
     try {
       await _refresh();
@@ -335,6 +355,7 @@ class RemoteAgentController extends ChangeNotifier {
         listed.add(row);
       }
     }
+    registryLoaded = true;
     agents = listed
         .where((row) => !deletedAgents.contains(row['agent_pubkey']))
         .toList();
@@ -659,6 +680,7 @@ class RemoteAgentController extends ChangeNotifier {
     // Retain the completed registration if the listing refresh fails, so Retry
     // resumes the same identity instead of creating another agent.
     await refresh();
+    await onCreated?.call(community, pubkey);
     // Drop the record before its instructions, so an interrupted cleanup never
     // leaves a pending setup whose instructions are gone.
     final prefs = await SharedPreferences.getInstance();
