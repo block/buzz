@@ -24,6 +24,8 @@ pub mod entity_deletion;
 pub mod event;
 /// App-owned push enqueue and channel TTL refresh for inserted events.
 pub(crate) mod event_follow_up;
+/// Guarded task archive and restore, the task projection and the state read.
+pub mod lifecycle;
 /// Per-community NIP-FI issuer bindings.
 pub mod nip_fi_binding;
 /// User-specific deletion submission and inventory preparation.

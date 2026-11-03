@@ -49,7 +49,8 @@ async fn accept(f: &Fixture, event: &Event) {
                 event,
                 &envelope,
                 source,
-                &f.state.relay_keypair
+                &f.state.relay_keypair,
+                f.state.config.lifecycle_guard_enabled,
             )
             .await
             .unwrap(),

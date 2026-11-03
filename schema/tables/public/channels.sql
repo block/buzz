@@ -42,6 +42,10 @@ CREATE TABLE channels (
     -- channel listings for non-members. Matters only while the channel is open.
     unlisted        BOOLEAN NOT NULL DEFAULT FALSE,
     auto_join       BOOLEAN NOT NULL DEFAULT false,
+    -- A fresh random value on every lifecycle change (create, archive,
+    -- restore, delete, reap, fence). NULL: unchanged since migration 0081.
+    -- Compared for equality only.
+    lifecycle_token UUID,
     PRIMARY KEY (community_id, id),
     CONSTRAINT chk_channels_id_not_nil CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid)
 );

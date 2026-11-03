@@ -3636,10 +3636,26 @@ async fn ingest_event_inner(
                 Some(buzz_db::DbError::AccessDenied(reason)) => {
                     IngestError::Rejected(format!("invalid: {reason}"))
                 }
+                // The only 409 a kind:9002 can return (see CanvasConflict).
+                Some(buzz_db::DbError::LifecycleConflict) => {
+                    IngestError::CanvasConflict("conflict: lifecycle changed".into())
+                }
                 Some(taken @ buzz_db::DbError::ChannelNameTaken(_)) => {
                     IngestError::Rejected(format!("invalid: {taken}"))
                 }
                 _ => IngestError::Internal(format!("error: channel update failed: {e}")),
+            })?
+    } else if kind_u32 == KIND_NIP29_DELETE_GROUP {
+        // One commit stores the event and deletes the channel. A refusal
+        // decided under the lock (a task with child tasks) stores nothing and
+        // is the client's error; anything else is ours.
+        crate::handlers::side_effects::persist_delete_group(tenant, &event, state)
+            .await
+            .map_err(|e| match e {
+                buzz_db::DbError::AccessDenied(reason) => {
+                    IngestError::Rejected(format!("invalid: {reason}"))
+                }
+                other => IngestError::Internal(format!("error: channel delete failed: {other}")),
             })?
     } else if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
@@ -6823,7 +6839,14 @@ mod postgres_tests {
             let env = buzz_core::artifact::validate(&create).expect("valid create");
             healthy
                 .db
-                .accept_artifact(community, &create, &env, None, &healthy.relay_keypair)
+                .accept_artifact(
+                    community,
+                    &create,
+                    &env,
+                    None,
+                    &healthy.relay_keypair,
+                    false,
+                )
                 .await
                 .map_err(db_err)?;
 

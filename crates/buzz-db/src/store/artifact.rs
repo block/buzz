@@ -3,8 +3,10 @@
 //! Channel write permission is checked by the relay's ordinary ingest gates
 //! before this transaction; here the relay only serializes each identity and
 //! compares the expected head.
+use crate::lifecycle::EdgeChange;
 use crate::{Db, DbError, Result};
 use buzz_core::artifact::{ArtifactEnvelope, ArtifactOp};
+use buzz_core::lifecycle::{task_edge, TaskEdge, TASK_ARTIFACT_TYPE};
 use buzz_core::{CommunityId, StoredEvent};
 use nostr::{Event, EventBuilder, Keys, Kind, Tag};
 use sqlx::Row;
@@ -94,6 +96,11 @@ impl Db {
     /// the head, and on a move store the source removal. `authorized_source` is
     /// the move source the caller authorized; a head that has since moved elsewhere
     /// conflicts. Relay keys only sign removals.
+    ///
+    /// A `nexus.task` revision also maintains the task projection in the same
+    /// transaction, under its family locks. With `lifecycle_guard` off, a
+    /// `parent` tag is refused unless the channel already has that projected
+    /// parent, and a channel without a projection row keeps today's behavior.
     pub async fn accept_artifact(
         &self,
         community: CommunityId,
@@ -101,11 +108,61 @@ impl Db {
         env: &ArtifactEnvelope,
         authorized_source: Option<Uuid>,
         relay_keys: &Keys,
+        lifecycle_guard: bool,
     ) -> Result<ArtifactOutcome> {
+        // A family root that moves before its lock is taken is retried once.
+        for _ in 0..2 {
+            if let Some(outcome) = self
+                .accept_artifact_once(
+                    community,
+                    event,
+                    env,
+                    authorized_source,
+                    relay_keys,
+                    lifecycle_guard,
+                )
+                .await?
+            {
+                return Ok(outcome);
+            }
+        }
+        Ok(ArtifactOutcome::Conflict("task family changed"))
+    }
+
+    async fn accept_artifact_once(
+        &self,
+        community: CommunityId,
+        event: &Event,
+        env: &ArtifactEnvelope,
+        authorized_source: Option<Uuid>,
+        relay_keys: &Keys,
+        lifecycle_guard: bool,
+    ) -> Result<Option<ArtifactOutcome>> {
         let mut tx = self.begin_event_write_transaction(community).await?;
         sqlx::query("SET LOCAL statement_timeout='5s'")
             .execute(tx.conn())
             .await?;
+        let is_task = env.artifact_type == TASK_ARTIFACT_TYPE;
+        // A task channel, or any task revision once the guard is on, takes
+        // the hierarchy path; the read is re-checked under the family lock.
+        let task = if is_task
+            && (lifecycle_guard || crate::lifecycle::is_task_channel(&mut tx, env.home).await?)
+        {
+            let edge = match task_edge(event, env) {
+                Ok(Some(edge)) => edge,
+                Ok(None) => return Ok(Some(ArtifactOutcome::Rejected("not a nexus.task"))),
+                Err(message) => return Ok(Some(ArtifactOutcome::Rejected(message))),
+            };
+            let author = event.pubkey.to_bytes();
+            match crate::lifecycle::lock_task_edge(&mut tx, edge.channel, edge.parent, &author)
+                .await?
+            {
+                Some(locks) => Some((edge, locks)),
+                None => return Ok(None),
+            }
+        } else {
+            None
+        };
         // A coordinate lock handles the missing-row create race as well as edits.
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
             .bind(format!("artifact:{}:{}", community.as_uuid(), env.id))
@@ -119,7 +176,7 @@ impl Db {
         .fetch_one(tx.conn())
         .await?;
         if duplicate {
-            return Ok(ArtifactOutcome::Duplicate);
+            return Ok(Some(ArtifactOutcome::Duplicate));
         }
         let head = sqlx::query(
             "SELECT event_id,channel_id,artifact_type,root,deleted FROM artifact_heads WHERE community_id=$1 AND artifact_id=$2 FOR UPDATE",
@@ -134,10 +191,12 @@ impl Db {
             .and_then(|h| h.get::<Option<Vec<u8>>, _>("root"));
         match (&head, env.op) {
             (Some(_), ArtifactOp::Create) => {
-                return Ok(ArtifactOutcome::Conflict("artifact identity is taken"))
+                return Ok(Some(ArtifactOutcome::Conflict(
+                    "artifact identity is taken",
+                )))
             }
             (None, ArtifactOp::Create) => {}
-            (None, _) => return Ok(ArtifactOutcome::Conflict(HEAD_UNAVAILABLE)),
+            (None, _) => return Ok(Some(ArtifactOutcome::Conflict(HEAD_UNAVAILABLE))),
             // The caller authorized writes only in `h`, or for a move in the
             // source it read before this transaction. A head anywhere else
             // answers like a missing one, before any check that describes it.
@@ -148,28 +207,30 @@ impl Db {
                         _ => Some(env.home),
                     } =>
             {
-                return Ok(ArtifactOutcome::Conflict(HEAD_UNAVAILABLE))
+                return Ok(Some(ArtifactOutcome::Conflict(HEAD_UNAVAILABLE)))
             }
             (Some(head), op) => {
                 let current: Vec<u8> = head.get("event_id");
                 if env.prev.as_deref() != Some(current.as_slice()) {
-                    return Ok(ArtifactOutcome::Conflict("artifact head changed"));
+                    return Ok(Some(ArtifactOutcome::Conflict("artifact head changed")));
                 }
                 if env.artifact_type != head.get::<String, _>("artifact_type") {
-                    return Ok(ArtifactOutcome::Rejected("artifact type is immutable"));
+                    return Ok(Some(ArtifactOutcome::Rejected(
+                        "artifact type is immutable",
+                    )));
                 }
                 if head.get::<bool, _>("deleted") != (op == ArtifactOp::Restore) {
-                    return Ok(ArtifactOutcome::Rejected(
+                    return Ok(Some(ArtifactOutcome::Rejected(
                         "deleted artifacts require restore; live artifacts cannot restore",
-                    ));
+                    )));
                 }
                 if (op == ArtifactOp::Move) != (source != Some(env.home)) {
-                    return Ok(ArtifactOutcome::Rejected(
+                    return Ok(Some(ArtifactOutcome::Rejected(
                         "only move changes home and move must change home",
-                    ));
+                    )));
                 }
                 if op == ArtifactOp::Delete && env.root != old_root {
-                    return Ok(ArtifactOutcome::Rejected("delete preserves root"));
+                    return Ok(Some(ArtifactOutcome::Rejected("delete preserves root")));
                 }
             }
         }
@@ -178,10 +239,17 @@ impl Db {
                 let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM events WHERE community_id=$1 AND id=$2 AND channel_id=$3 AND deleted_at IS NULL AND kind IN (9,40002,45001,45003))")
                     .bind(community.as_uuid()).bind(root).bind(env.home).fetch_one(tx.conn()).await?;
                 if !exists {
-                    return Ok(ArtifactOutcome::Rejected(
+                    return Ok(Some(ArtifactOutcome::Rejected(
                         "root must be an existing conversation anchor in home",
-                    ));
+                    )));
                 }
+            }
+        }
+        if is_task {
+            if let Some(refusal) =
+                check_task_revision(&mut tx, event, env, task.as_ref(), lifecycle_guard).await?
+            {
+                return Ok(Some(ArtifactOutcome::Rejected(refusal)));
             }
         }
         sqlx::query(
@@ -195,6 +263,20 @@ impl Db {
         .await?;
         sqlx::query("INSERT INTO artifact_heads (community_id,artifact_id,event_id,channel_id,artifact_type,root,deleted,modified_at) VALUES ($1,$2,$3,$4,$5,$6,$7,clock_timestamp()) ON CONFLICT (community_id,artifact_id) DO UPDATE SET event_id=EXCLUDED.event_id,channel_id=EXCLUDED.channel_id,root=EXCLUDED.root,deleted=EXCLUDED.deleted,modified_at=clock_timestamp()")
             .bind(community.as_uuid()).bind(env.id).bind(event.id.as_bytes().as_slice()).bind(env.home).bind(&env.artifact_type).bind(&env.root).bind(env.op == ArtifactOp::Delete).execute(tx.conn()).await?;
+        if let Some((edge, _)) = &task {
+            let change = if env.op == ArtifactOp::Delete {
+                EdgeChange::Remove {
+                    child: edge.channel,
+                }
+            } else {
+                EdgeChange::Upsert {
+                    child: edge.channel,
+                    parent: edge.parent,
+                    artifact: env.id,
+                }
+            };
+            crate::lifecycle::write_task_edge(&mut tx, change).await?;
+        }
         let (stored, _) =
             crate::event::insert_event_in_transaction(&mut tx, event, Some(env.home)).await?;
         crate::insert_mentions_in_transaction(&mut tx, event, Some(env.home)).await?;
@@ -206,6 +288,42 @@ impl Db {
             accepted.push(stored);
         }
         tx.commit().await?;
-        Ok(ArtifactOutcome::Accepted(accepted))
+        Ok(Some(ArtifactOutcome::Accepted(accepted)))
     }
+}
+
+/// The public refusal of a `nexus.task` revision, checked after the
+/// duplicate check. `task` is the locked hierarchy path; `None` means the
+/// guard is off and the channel has no projection row.
+async fn check_task_revision(
+    tx: &mut crate::AdmittedTx,
+    event: &Event,
+    env: &ArtifactEnvelope,
+    task: Option<&(TaskEdge, crate::lifecycle::EdgeLocks)>,
+    lifecycle_guard: bool,
+) -> Result<Option<&'static str>> {
+    const GUARD_OFF: &str = "nexus.task parent requires the lifecycle guard";
+    let Some((edge, locks)) = task else {
+        let has_parent = event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice().first().map(String::as_str) == Some("parent"));
+        return Ok(has_parent.then_some(GUARD_OFF));
+    };
+    if env.op == ArtifactOp::Move {
+        return Ok(Some("nexus.task cannot move"));
+    }
+    // Rollback floor: with the guard off, only an existing edge survives.
+    if !lifecycle_guard && edge.parent.is_some() && locks.current_parent() != Some(edge.parent) {
+        return Ok(Some(GUARD_OFF));
+    }
+    Ok(crate::lifecycle::check_task_edge(
+        tx,
+        locks,
+        edge.channel,
+        edge.parent,
+        env.op == ArtifactOp::Delete,
+    )
+    .await?
+    .err())
 }

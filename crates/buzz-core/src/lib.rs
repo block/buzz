@@ -86,3 +86,5 @@ pub mod test_helpers {
 pub mod artifact;
 /// NIP-AR sync filter parsing and limits.
 pub mod artifact_sync;
+/// Guarded task archive and restore: task profile, guard tags and digest.
+pub mod lifecycle;

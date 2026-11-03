@@ -368,6 +368,138 @@ async fn accessory_batch_outcomes_are_independent_and_return_applied_rows() {
     assert_ne!(response.status(), StatusCode::OK);
 }
 
+/// The lifecycle state read: a signed, bounded body POST that returns the
+/// actor's channels in one sorted list, deleted ones included, and omits
+/// every other id. Mutations: dropping the membership condition leaks
+/// `foreign`; dropping the canonical-id check accepts the uppercase id;
+/// reading the body after authorization lets an unsigned body through.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn lifecycle_state_read_is_signed_bounded_and_actor_scoped() {
+    let fixture = crate::api::bridge::postgres_tests::bridge_handler_test_state()
+        .await
+        .unwrap();
+    let mut state = (*fixture).clone();
+    // Needs only buzz_v1: journal recovery works with the guard off.
+    Arc::make_mut(&mut state.config).buzz_v1_enabled = true;
+    let state = Arc::new(state);
+    let host = format!("bff-lifecycle-{}.local", uuid::Uuid::new_v4());
+    let community = state
+        .db
+        .ensure_configured_community(&host)
+        .await
+        .unwrap()
+        .id;
+    let actor = Keys::generate();
+    let create = |name: &'static str, owner: &Keys| {
+        let (state, owner) = (state.clone(), owner.public_key().to_bytes());
+        async move {
+            state
+                .db
+                .create_channel(
+                    community,
+                    name,
+                    buzz_db::channel::ChannelType::Stream,
+                    buzz_db::channel::ChannelVisibility::Private,
+                    None,
+                    &owner,
+                    None,
+                )
+                .await
+                .unwrap()
+                .id
+        }
+    };
+    let active = create("active", &actor).await;
+    let archived = create("archived", &actor).await;
+    let deleted = create("deleted", &actor).await;
+    let foreign = create("foreign", &Keys::generate()).await;
+    state.db.archive_channel(community, archived).await.unwrap();
+    state
+        .db
+        .soft_delete_channel(community, deleted)
+        .await
+        .unwrap();
+    let path = "/buzz/v1/lifecycle/state";
+    let post = |body: Vec<u8>, signed: Option<Vec<u8>>| {
+        let (state, host, actor) = (state.clone(), host.clone(), actor.clone());
+        async move {
+            let auth = proof(
+                &actor,
+                &host,
+                path,
+                "POST",
+                Some(signed.as_ref().unwrap_or(&body)),
+            );
+            request(state, &host, path, "POST", Some(&auth), &body).await
+        }
+    };
+    let ids = [active, archived, deleted, foreign, uuid::Uuid::new_v4()];
+    let body = serde_json::to_vec(&json!({ "channel_ids": ids })).unwrap();
+    let (status, value) = post(body, None).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let rows: Vec<(String, Value)> = sqlx::query_as::<_, (uuid::Uuid, Option<uuid::Uuid>)>(
+        "SELECT id, lifecycle_token FROM channels WHERE id = ANY($1) ORDER BY id",
+    )
+    .bind([active, archived, deleted].as_slice())
+    .fetch_all(state.db.pool())
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|(id, token)| (id.to_string(), json!(token)))
+    .collect();
+    let channels = value["channels"].as_array().unwrap();
+    assert_eq!(
+        channels.len(),
+        3,
+        "foreign and unknown ids are omitted: {value}"
+    );
+    for ((id, token), row) in rows.iter().zip(channels) {
+        assert_eq!(row["id"], json!(id));
+        assert_eq!(&row["lifecycle_token"], token);
+        assert!(token.is_string(), "every lifecycle writer sets a token");
+        let channel: uuid::Uuid = id.parse().unwrap();
+        assert_eq!(row["archived_at"].is_i64(), channel == archived, "{row}");
+        assert_eq!(row["deleted"], json!(channel == deleted), "{row}");
+    }
+
+    let canonical = active.to_string();
+    let over: Vec<String> = (0..=buzz_db::lifecycle::MAX_STATE_CHANNELS)
+        .map(|_| uuid::Uuid::new_v4().to_string())
+        .collect();
+    for (case, body) in [
+        ("empty", json!({ "channel_ids": [] })),
+        (
+            "duplicate",
+            json!({ "channel_ids": [canonical, canonical] }),
+        ),
+        (
+            "uppercase",
+            json!({ "channel_ids": [canonical.to_uppercase()] }),
+        ),
+        (
+            "unknown field",
+            json!({ "channel_ids": [canonical], "x": 1 }),
+        ),
+        ("too many", json!({ "channel_ids": over })),
+    ] {
+        let (status, value) = post(serde_json::to_vec(&body).unwrap(), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{case}: {value}");
+    }
+    let huge = vec![b' '; 64 * 1024 + 1];
+    assert_eq!(post(huge, None).await.0, StatusCode::BAD_REQUEST);
+    // The proof binds the body.
+    let body = serde_json::to_vec(&json!({ "channel_ids": [active] })).unwrap();
+    let other = serde_json::to_vec(&json!({ "channel_ids": [foreign] })).unwrap();
+    assert_eq!(post(body, Some(other)).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        request(state.clone(), &host, path, "POST", None, b"{}")
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn accessory_write_revocation_is_terminal_before_persistence() {
@@ -473,11 +605,13 @@ async fn accessory_discovery_is_host_bound_and_opt_in() {
         .unwrap();
     let host = format!("bff-discovery-{}.local", uuid::Uuid::new_v4());
     fixture.db.ensure_configured_community(&host).await.unwrap();
-    for enabled in [false, true] {
+    for (enabled, guard) in [(false, false), (false, true), (true, false), (true, true)] {
         let mut state = (*fixture).clone();
         let config = Arc::make_mut(&mut state.config);
         config.buzz_v1_enabled = enabled;
         config.buzz_v1_retention_seconds = 1234;
+        config.lifecycle_guard_enabled = guard;
+        config.lifecycle_max_subtree_channels = 37;
         let state = Arc::new(state);
         for known_host in [true, false] {
             let request_host = if known_host {
@@ -505,6 +639,20 @@ async fn accessory_discovery_is_host_bound_and_opt_in() {
                     enabled && known_host,
                     "enabled={enabled} known_host={known_host} path={path}"
                 );
+                // The lifecycle capability needs the guard flag, buzz_v1 and
+                // a resolved host; the subtree limit is read from config.
+                assert_eq!(
+                    doc.get("lifecycle_guard").is_some(),
+                    guard && enabled && known_host,
+                    "guard={guard} enabled={enabled} known_host={known_host} path={path}"
+                );
+                if guard && enabled && known_host {
+                    assert_eq!(
+                        doc["lifecycle_guard"],
+                        json!({"version":1,"state_path":"/buzz/v1/lifecycle/state",
+                            "max_state_channels":1000,"max_subtree_channels":37})
+                    );
+                }
                 if enabled && known_host {
                     // Exactly these fields: context and thread-cap limits are gone.
                     assert_eq!(

@@ -143,9 +143,9 @@ pub async fn create_channel(
 
     sqlx::query(
         r#"
-        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline, labels, unlisted)
+        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline, labels, unlisted, lifecycle_token)
         VALUES ($1, $2, $3, $4::channel_type, $5::channel_visibility, $6, $7, $8,
-                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END, $9, $10)
+                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END, $9, $10, $11)
         "#,
     )
     .bind(id)
@@ -158,6 +158,7 @@ pub async fn create_channel(
     .bind(ttl_seconds)
     .bind(labels)
     .bind(unlisted)
+    .bind(crate::lifecycle::new_token())
     .execute(tx.conn())
     .await
     .map_err(|e| listed_name_taken(e, Some(name)))?;
@@ -381,9 +382,9 @@ async fn insert_channel_rows(
 
     let rows_affected = sqlx::query(
         r#"
-        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline, labels, unlisted)
+        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline, labels, unlisted, lifecycle_token)
         VALUES ($1, $2, $3, $4::channel_type, $5::channel_visibility, $6, $7, $8,
-                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END, $9, $10)
+                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END, $9, $10, $11)
         ON CONFLICT (community_id, id) DO NOTHING
         "#,
     )
@@ -397,6 +398,7 @@ async fn insert_channel_rows(
     .bind(ttl_seconds)
     .bind(labels)
     .bind(unlisted)
+    .bind(crate::lifecycle::new_token())
     .execute(tx.conn())
     .await
     .map_err(|e| listed_name_taken(e, Some(name)))?
@@ -1400,7 +1402,9 @@ async fn set_purpose_on(
     Ok(())
 }
 
-/// Archives a channel.
+/// Archives a channel, unless it is a task channel: a task channel changes
+/// archive state only through a guarded request, so it is kept active.
+/// Returns whether the channel was archived. Decided under the row lock.
 ///
 /// Returns `AccessDenied` if the channel is already archived.
 /// Returns `ChannelNotFound` if the channel does not exist or is deleted.
@@ -1408,7 +1412,7 @@ pub async fn archive_channel(
     pool: &PgPool,
     community_id: CommunityId,
     channel_id: Uuid,
-) -> Result<()> {
+) -> Result<bool> {
     let mut tx = crate::begin_community_write_transaction(
         pool,
         community_id,
@@ -1417,9 +1421,13 @@ pub async fn archive_channel(
     .await?;
     let mut locked =
         lock_channel_for_settings_write(&mut tx, channel_id, &ChannelUpdate::default()).await?;
+    if crate::lifecycle::is_task_channel(locked.tx(), channel_id).await? {
+        tx.rollback().await?;
+        return Ok(false);
+    }
     set_archived_on(&mut locked, true).await?;
     tx.commit().await?;
-    Ok(())
+    Ok(true)
 }
 
 /// Unarchives a channel.
@@ -1439,8 +1447,19 @@ pub async fn unarchive_channel(
     .await?;
     let mut locked =
         lock_channel_for_settings_write(&mut tx, channel_id, &ChannelUpdate::default()).await?;
+    refuse_task_channel(&mut locked).await?;
     set_archived_on(&mut locked, false).await?;
     tx.commit().await?;
+    Ok(())
+}
+
+/// Refuse an unguarded archive or restore of a task channel (VD2-b). Its
+/// archive state changes only through a guarded request, which keeps the
+/// task family consistent.
+async fn refuse_task_channel(w: &mut ChannelSettingsWriter<'_>) -> Result<()> {
+    if crate::lifecycle::is_task_channel(w.tx, w.channel_id).await? {
+        return Err(DbError::AccessDenied("lifecycle guard required".into()));
+    }
     Ok(())
 }
 
@@ -1475,10 +1494,10 @@ async fn set_archived_on(w: &mut ChannelSettingsWriter<'_>, archive: bool) -> Re
     }
 
     let sql = if archive {
-        "UPDATE channels SET archived_at = NOW() \
+        "UPDATE channels SET archived_at = NOW(), lifecycle_token = $3 \
          WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL AND archived_at IS NULL"
     } else {
-        "UPDATE channels SET archived_at = NULL, \
+        "UPDATE channels SET archived_at = NULL, lifecycle_token = $3, \
              ttl_deadline = CASE \
                  WHEN ttl_seconds IS NOT NULL THEN NOW() + (ttl_seconds || ' seconds')::interval \
                  ELSE ttl_deadline \
@@ -1488,6 +1507,7 @@ async fn set_archived_on(w: &mut ChannelSettingsWriter<'_>, archive: bool) -> Re
     sqlx::query(sql)
         .bind(community_id.as_uuid())
         .bind(channel_id)
+        .bind(crate::lifecycle::new_token())
         .execute(tx.conn())
         .await?;
     Ok(())
@@ -1563,6 +1583,19 @@ pub(crate) async fn apply_channel_metadata_event(
             inserted,
             previous_visibility,
         });
+    }
+    // A task channel changes archive state only through a guarded request
+    // and never gets a TTL. Both are decided under the row lock, so a
+    // concurrent task record either committed first or sees this change.
+    if edit.archived.is_some() {
+        refuse_task_channel(&mut locked).await?;
+    }
+    if matches!(edit.columns.ttl_seconds, Some(Some(_)))
+        && crate::lifecycle::is_task_channel(locked.tx(), channel_id).await?
+    {
+        return Err(DbError::AccessDenied(
+            "task channels cannot have a ttl".to_string(),
+        ));
     }
     // Decide the archive state and an operator's right to rename here,
     // after the duplicate check and under the row lock, not during
@@ -1671,6 +1704,84 @@ pub async fn soft_delete_channel(
     Ok(true)
 }
 
+/// The result of [`delete_channel_with_event`].
+#[derive(Debug)]
+pub struct ChannelDeleteWrite {
+    /// The stored kind:9008 event.
+    pub stored: StoredEvent,
+    /// `false` when the event was already stored. Nothing changed then: the
+    /// delete committed with it the first time.
+    pub inserted: bool,
+    /// `false` when the channel was already deleted or never existed.
+    pub deleted: bool,
+}
+
+/// Store a kind:9008 and soft-delete its channel in one commit. A refusal
+/// decided under the channel's locks (a task that has child tasks) stores
+/// nothing. An event for a channel that is already gone is still stored, so
+/// a resend of it is a duplicate.
+pub(crate) async fn delete_channel_with_event(
+    pool: &PgPool,
+    push_enqueue: Option<crate::runtime::push_enqueue::PushEnqueue>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    event: &nostr::Event,
+) -> Result<ChannelDeleteWrite> {
+    let mut tx = crate::begin_community_event_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    tx.set_push_enqueue(push_enqueue);
+    // The locks also order two copies of the same event: the second waits,
+    // then sees the first stored.
+    let write = match lock_channel_for_delete(&mut tx, channel_id).await {
+        Ok(mut writer) => {
+            let (stored, inserted) = crate::event::insert_event_with_thread_metadata_tx(
+                writer.tx(),
+                event,
+                Some(channel_id),
+                None,
+            )
+            .await?;
+            if inserted {
+                crate::insert_mentions_in_transaction(writer.tx(), event, Some(channel_id)).await?;
+                soft_delete_on(&mut writer).await?;
+            }
+            ChannelDeleteWrite {
+                stored,
+                inserted,
+                deleted: inserted,
+            }
+        }
+        Err(DbError::ChannelNotFound(_)) => {
+            let (stored, inserted) = crate::event::insert_event_with_thread_metadata_tx(
+                &mut tx,
+                event,
+                Some(channel_id),
+                None,
+            )
+            .await?;
+            if inserted {
+                crate::insert_mentions_in_transaction(&mut tx, event, Some(channel_id)).await?;
+            }
+            ChannelDeleteWrite {
+                stored,
+                inserted,
+                deleted: false,
+            }
+        }
+        Err(error) => return Err(error),
+    };
+    if write.inserted {
+        tx.commit().await?;
+    } else {
+        tx.rollback().await?;
+    }
+    Ok(write)
+}
+
 async fn soft_delete_on(w: &mut ChannelSettingsWriter<'_>) -> Result<()> {
     if !w.admission {
         return Err(DbError::InvalidData(
@@ -1679,11 +1790,23 @@ async fn soft_delete_on(w: &mut ChannelSettingsWriter<'_>) -> Result<()> {
     }
     let channel_id = w.channel_id;
     let community_id = w.tx.community();
-    sqlx::query("UPDATE channels SET deleted_at = NOW() WHERE community_id = $1 AND id = $2")
-        .bind(community_id.as_uuid())
-        .bind(channel_id)
-        .execute(w.tx.conn())
-        .await?;
+    // Under the row lock: a child attach holds this row `FOR SHARE`, so it
+    // either committed and is seen here, or finds the channel deleted.
+    if crate::lifecycle::has_child_tasks(w.tx, channel_id).await? {
+        return Err(DbError::AccessDenied(
+            crate::lifecycle::CHILD_TASKS_DELETE.into(),
+        ));
+    }
+    crate::lifecycle::remove_task_edge(w.tx, channel_id).await?;
+    sqlx::query(
+        "UPDATE channels SET deleted_at = NOW(), lifecycle_token = $3 \
+         WHERE community_id = $1 AND id = $2",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(crate::lifecycle::new_token())
+    .execute(w.tx.conn())
+    .await?;
     sqlx::query("UPDATE communities SET artifact_policy_modified_at=clock_timestamp() WHERE id=$1")
         .bind(community_id.as_uuid())
         .execute(w.tx.conn())
@@ -1731,16 +1854,28 @@ pub async fn reap_expired_ephemeral_channels(pool: &PgPool) -> Result<Vec<Reaped
             // refresh that moved the deadline wins, a channel archived or
             // deleted meanwhile is skipped, and a join that held the row
             // commits first. Do not split this into a read and a write.
+            //
+            // Task channels never have a TTL: a task record refuses a TTL
+            // channel and a TTL change refuses a task channel, both under
+            // the row lock. The `artifact_parents` exclusion is a backstop
+            // so the reaper can never archive one part of a task family.
+            // One fresh token serves the whole statement: tokens are only
+            // compared per channel, so equal values on two channels are
+            // harmless.
             let rows = sqlx::query(
-                "UPDATE channels AS ch SET archived_at = NOW() \
+                "UPDATE channels AS ch SET archived_at = NOW(), lifecycle_token = $2 \
                  FROM communities AS c \
                  WHERE ch.community_id = $1 AND ch.community_id = c.id \
                    AND ch.ttl_seconds IS NOT NULL AND ch.ttl_deadline < NOW() \
                    AND ch.archived_at IS NULL AND ch.deleted_at IS NULL \
                    AND c.archived_at IS NULL \
+                   AND NOT EXISTS (SELECT 1 FROM artifact_parents AS ap \
+                       WHERE ap.community_id = ch.community_id \
+                         AND (ap.child_channel_id = ch.id OR ap.parent_channel_id = ch.id)) \
                  RETURNING ch.community_id, c.host, ch.id",
             )
             .bind(id)
+            .bind(crate::lifecycle::new_token())
             .fetch_all(tx.conn())
             .await?;
             let parsed = rows
@@ -2035,9 +2170,14 @@ impl Db {
         set_purpose(&self.pool, community_id, channel_id, purpose, set_by).await
     }
 
-    /// Archives a channel.
+    /// Archives a channel unless it is a task channel. Returns whether it
+    /// was archived. See [`archive_channel`].
     #[datastore_span(name = "archive_channel", system = "postgresql")]
-    pub async fn archive_channel(&self, community_id: CommunityId, channel_id: Uuid) -> Result<()> {
+    pub async fn archive_channel(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+    ) -> Result<bool> {
         archive_channel(&self.pool, community_id, channel_id).await
     }
 
@@ -2059,6 +2199,25 @@ impl Db {
         channel_id: Uuid,
     ) -> Result<bool> {
         soft_delete_channel(&self.pool, community_id, channel_id).await
+    }
+
+    /// Store a kind:9008 and soft-delete its channel in one commit. See
+    /// [`delete_channel_with_event`].
+    #[datastore_span(name = "delete_channel_with_event", system = "postgresql")]
+    pub async fn delete_channel_with_event(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        event: &nostr::Event,
+    ) -> Result<ChannelDeleteWrite> {
+        delete_channel_with_event(
+            &self.pool,
+            self.push_enqueue.clone(),
+            community_id,
+            channel_id,
+            event,
+        )
+        .await
     }
 
     /// Archive ephemeral channels whose TTL deadline has passed.

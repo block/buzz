@@ -673,12 +673,19 @@ pub async fn validate_admin_event(
             }
         }
         9002 => {
+            // A lifecycle guard is all or nothing: a malformed guard is
+            // refused here and never falls through to an unguarded edit.
+            // Its state, digest and the permission on every other affected
+            // channel are decided in its atomic write.
+            let guarded = buzz_core::lifecycle::parse_lifecycle_guard(event)
+                .map_err(|reason| anyhow::anyhow!(reason))?
+                .is_some();
             // EDIT_METADATA: require at least one recognized metadata tag.
             let has_recognized = event
                 .tags
                 .iter()
                 .any(|t| is_metadata_tag(&t.kind().to_string()));
-            if !has_recognized {
+            if !guarded && !has_recognized {
                 return Err(anyhow::anyhow!(
                     "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl, t, join_role, unlisted, auto_join)"
                 ));
@@ -828,17 +835,19 @@ pub async fn validate_admin_event(
             }
 
             // name/about/archived/visibility/ttl/labels/join_role/unlisted
-            // require owner/admin; topic/purpose allow any member who may
-            // post; auto_join was decided above by relay role, so an event
+            // and every lifecycle guard require owner/admin on the `h`
+            // channel; topic/purpose allow any member who may post;
+            // auto_join was decided above by relay role, so an event
             // carrying only that tag needs neither.
             let has_member_tag = event
                 .tags
                 .iter()
                 .any(|t| MEMBER_METADATA_TAGS.contains(&t.kind().to_string().as_str()));
-            let has_privileged_tag = event
-                .tags
-                .iter()
-                .any(|t| PRIVILEGED_METADATA_TAGS.contains(&t.kind().to_string().as_str()));
+            let has_privileged_tag = guarded
+                || event
+                    .tags
+                    .iter()
+                    .any(|t| PRIVILEGED_METADATA_TAGS.contains(&t.kind().to_string().as_str()));
             if has_privileged_tag {
                 if actor_has_channel_authority(state, tenant.community(), channel_id, &actor_bytes)
                     .await?
@@ -2169,6 +2178,12 @@ pub(crate) async fn persist_edit_metadata(
 ) -> anyhow::Result<(buzz_core::StoredEvent, bool)> {
     let channel_id =
         extract_h_tag_channel(event).ok_or_else(|| anyhow::anyhow!("missing h tag"))?;
+    // Parsed again so a guard can never reach the unguarded path below.
+    if let Some(guard) =
+        buzz_core::lifecycle::parse_lifecycle_guard(event).map_err(|e| anyhow::anyhow!(e))?
+    {
+        return persist_lifecycle(tenant, event, state, channel_id, guard).await;
+    }
     let actor_bytes = event.pubkey.to_bytes().to_vec();
     let actor_hex = hex::encode(&actor_bytes);
 
@@ -2346,6 +2361,89 @@ pub(crate) async fn persist_edit_metadata(
     }
 
     Ok((write.stored, true))
+}
+
+/// Persist a guarded lifecycle request (archive, restore or fence). Its
+/// one transaction decides the state, the digest or token, and the
+/// permission on every affected channel. After the commit this runs the
+/// same live effects as an unguarded archive or restore, for each changed
+/// channel: the notice fan-out, the restore resubscribe and discovery. Like
+/// an unguarded archive, it evicts no subscription.
+async fn persist_lifecycle(
+    tenant: &TenantContext,
+    event: &Event,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    guard: buzz_core::lifecycle::LifecycleGuard,
+) -> anyhow::Result<(buzz_core::StoredEvent, bool)> {
+    use buzz_core::lifecycle::LifecycleGuard;
+    let write = match guard {
+        LifecycleGuard::Fence { expect_target } => {
+            state
+                .db
+                .apply_lifecycle_fence(tenant.community(), channel_id, event, expect_target)
+                .await?
+        }
+        LifecycleGuard::State {
+            archive,
+            scope,
+            expect,
+        } => {
+            let request = buzz_db::lifecycle::StateRequest {
+                target: channel_id,
+                event,
+                archive,
+                scope,
+                expect,
+                max_channels: state.config.lifecycle_max_subtree_channels,
+            };
+            state
+                .db
+                .apply_lifecycle_state(tenant.community(), &request, &state.relay_keypair)
+                .await?
+        }
+    };
+    if !write.inserted || write.changed.is_empty() {
+        return Ok((write.stored, write.inserted));
+    }
+    let restore = matches!(guard, LifecycleGuard::State { archive: false, .. });
+    let actor = event.pubkey.to_bytes().to_vec();
+    // The target first, before the reply. The rest of the family runs in
+    // the background so a large subtree cannot delay the reply.
+    let mut changed = write.changed.into_iter();
+    if let Some((channel, notice)) = changed.next() {
+        lifecycle_live_effects(tenant, state, channel, &notice, restore, &actor).await;
+    }
+    let rest: Vec<_> = changed.collect();
+    if !rest.is_empty() {
+        let tenant = tenant.clone();
+        let state = Arc::clone(state);
+        tokio::spawn(async move {
+            for (channel, notice) in rest {
+                lifecycle_live_effects(&tenant, &state, channel, &notice, restore, &actor).await;
+            }
+        });
+    }
+    Ok((write.stored, true))
+}
+
+/// Post-commit effects of one channel's guarded archive or restore. Each
+/// failure is logged; the next read sees the committed channel.
+async fn lifecycle_live_effects(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    notice: &Event,
+    restore: bool,
+    actor: &[u8],
+) {
+    fan_out_system_message(tenant, state, channel_id, notice).await;
+    if restore {
+        resubscribe_members_after_unarchive(tenant, state, channel_id, actor).await;
+    }
+    if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
+        warn!(channel = %channel_id, error = %e, "NIP-29 group discovery emission failed");
+    }
 }
 
 /// Resubscribe connected agents after restore: archiving evicts their
@@ -2704,6 +2802,27 @@ async fn handle_create_group(
     Ok(())
 }
 
+/// Store a kind:9008 and soft-delete its channel in one commit. A refusal
+/// decided under the channel's locks stores nothing, so the client is told.
+pub(crate) async fn persist_delete_group(
+    tenant: &TenantContext,
+    event: &Event,
+    state: &Arc<AppState>,
+) -> Result<(buzz_core::StoredEvent, bool), buzz_db::DbError> {
+    let channel_id = extract_h_tag_channel(event)
+        .ok_or_else(|| buzz_db::DbError::InvalidData("missing h tag".into()))?;
+    let write = state
+        .db
+        .delete_channel_with_event(tenant.community(), channel_id, event)
+        .await?;
+    if write.inserted && !write.deleted {
+        warn!(channel = %channel_id, "channel already deleted or not found");
+    }
+    Ok((write.stored, write.inserted))
+}
+
+/// The effects of a stored kind:9008 after its commit, which deleted the
+/// channel (see [`persist_delete_group`]).
 async fn handle_delete_group(
     tenant: &TenantContext,
     event: &Event,
@@ -2712,17 +2831,6 @@ async fn handle_delete_group(
     let channel_id =
         extract_h_tag_channel(event).ok_or_else(|| anyhow::anyhow!("missing h tag"))?;
     let actor_bytes = event.pubkey.to_bytes().to_vec();
-
-    // Soft-delete the channel.
-    let deleted = state
-        .db
-        .soft_delete_channel(tenant.community(), channel_id)
-        .await
-        .map_err(|e| anyhow::anyhow!("soft_delete_channel failed: {e}"))?;
-
-    if !deleted {
-        warn!(channel = %channel_id, "channel already deleted or not found");
-    }
 
     // Clean up NIP-29 discovery events for the deleted group.
     if let Err(e) = state

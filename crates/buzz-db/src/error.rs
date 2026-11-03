@@ -42,6 +42,11 @@ pub enum DbError {
     #[error("access denied: {0}")]
     AccessDenied(String),
 
+    /// A guarded lifecycle request or fence no longer matches the current
+    /// lifecycle state. Nothing was written.
+    #[error("lifecycle changed")]
+    LifecycleConflict,
+
     /// Invitation admission or minting was denied by authoritative restrictions.
     #[error("invitation principal is restricted")]
     InviteRestricted,
