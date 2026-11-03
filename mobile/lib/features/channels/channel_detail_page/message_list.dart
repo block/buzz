@@ -72,6 +72,9 @@ class _MessageList extends HookConsumerWidget {
     final isLoadingOlder = useState(false);
     final navigatingOldest = useRef(false);
     final olderFetchPaused = useRef(false);
+    final viewportFillPages = useRef(0);
+    final boundaryFetchInFlight = useRef(false);
+    final showLoadEarlier = useState(false);
     final oldestNavigationGeneration = useRef(0);
     final isAtLatest = useState(true);
     final settledImeBottomInset = useState(
@@ -184,9 +187,12 @@ class _MessageList extends HookConsumerWidget {
         if (canFetchTarget) {
           unreadBoundaryFetchCount.value += 1;
           var cancelled = false;
+          boundaryFetchInFlight.value = true;
           unawaited(
             Future<void>(() async {
-              final loaded = await notifier.fetchOlder();
+              final loaded = await notifier.fetchOlder().whenComplete(
+                () => boundaryFetchInFlight.value = false,
+              );
               if (cancelled || loaded) return;
               if (notifier.reachedOldest) {
                 unreadBoundaryReachedOldestCount.value += 1;
@@ -540,7 +546,18 @@ class _MessageList extends HookConsumerWidget {
           final oldestVisible = positions
               .map((position) => position.index)
               .reduce((a, b) => a > b ? a : b);
-          if (!hasUserScrolled.value ||
+          final (:fills, :offerLoadEarlier) = _viewportFill(
+            fits: _oldestRowFits(positions, displayEntries.length),
+            scrolled: hasUserScrolled.value,
+            busy: boundaryFetchInFlight.value || isLoadingOlder.value,
+            pages: viewportFillPages.value,
+            reachedOldest: notifier.reachedOldest,
+            paused: olderFetchPaused.value,
+          );
+          if (showLoadEarlier.value != offerLoadEarlier) {
+            showLoadEarlier.value = offerLoadEarlier;
+          }
+          if ((!hasUserScrolled.value && !fills) ||
               oldestVisible < displayEntries.length - 3 ||
               isLoadingOlder.value ||
               navigatingOldest.value ||
@@ -548,6 +565,7 @@ class _MessageList extends HookConsumerWidget {
             return;
           }
           if (notifier.reachedOldest) return;
+          if (fills) viewportFillPages.value++;
           isLoadingOlder.value = true;
           notifier
               .fetchOlder()
@@ -555,7 +573,11 @@ class _MessageList extends HookConsumerWidget {
                 olderFetchPaused.value = !loaded && !notifier.reachedOldest;
               })
               .whenComplete(() {
-                if (context.mounted) isLoadingOlder.value = false;
+                if (!context.mounted) return;
+                isLoadingOlder.value = false; // Re-check: may add no entry.
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (context.mounted) onPositionsChanged();
+                });
               });
         }
 
@@ -907,6 +929,7 @@ class _MessageList extends HookConsumerWidget {
               navigatingOldest.value = false;
               oldestNavigationGeneration.value++;
               olderFetchPaused.value = false;
+              viewportFillPages.value = 0;
               hasUserScrolled.value = true;
               followsLatest.value = false;
               if (showUnreadNavigation) {
@@ -938,9 +961,25 @@ class _MessageList extends HookConsumerWidget {
                 ),
                 bottom: timelineBottomInset,
               ),
-              itemCount: displayEntries.length + (isLoadingOlder.value ? 1 : 0),
+              itemCount:
+                  displayEntries.length +
+                  (isLoadingOlder.value || showLoadEarlier.value ? 1 : 0),
               itemBuilder: (context, index) {
                 // Loading indicator at the top (last index in reversed list).
+                if (index >= displayEntries.length && !isLoadingOlder.value) {
+                  return _LoadEarlierButton(
+                    onPressed: () {
+                      showLoadEarlier.value = false;
+                      viewportFillPages.value = 0;
+                      _fetchOlderByHand(
+                        context,
+                        notifier,
+                        isLoadingOlder,
+                        olderFetchPaused,
+                      );
+                    },
+                  );
+                }
                 if (index >= displayEntries.length) {
                   return const Padding(
                     padding: EdgeInsets.symmetric(vertical: Grid.xs),

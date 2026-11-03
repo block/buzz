@@ -10877,6 +10877,60 @@ void main() {
       expect(findRichText('Older chat'), findsOneWidget);
     });
 
+    testWidgets('fills a short collapsed history without a scroll', (
+      tester,
+    ) async {
+      // One collapsed row of additions fits the viewport, so clamping
+      // physics accepts no scroll to page older history.
+      List<NostrEvent> additions(int page) => [
+        for (var i = 0; i < 3; i++)
+          _systemMsg(
+            id: 'add$page-$i',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'alice',
+              'target': 'user$page-$i',
+            },
+            createdAt: 900000 - page * 86400 - i,
+          ),
+      ];
+      final messagesNotifier = _FakeMessagesNotifier(
+        additions(0),
+        olderPages: [
+          for (var page = 1; page <= 6; page++) additions(page),
+          [
+            _textMsg(
+              id: 'old',
+              pubkey: 'alice',
+              content: 'Older chat',
+              createdAt: 1000,
+            ),
+          ],
+        ],
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(messagesNotifier.fetchOlderCalls, 5);
+      expect(findRichText('Older chat'), findsNothing);
+      expect(find.text('Load earlier messages'), findsOneWidget);
+
+      await tester.tap(find.text('Load earlier messages'));
+      await tester.pumpAndSettle();
+
+      expect(messagesNotifier.fetchOlderCalls, 7);
+      expect(findRichText('Older chat'), findsOneWidget);
+      expect(find.text('Load earlier messages'), findsNothing);
+    });
+
     testWidgets('names no adder when several people added members', (
       tester,
     ) async {

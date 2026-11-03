@@ -1,12 +1,13 @@
 part of '../channel_detail_page.dart';
 
-/// Pages fetched without user input while every loaded event is a hidden
-/// membership notice. Past this, the list offers a button instead.
-const _maxHiddenOnlyAutoPages = 5;
+/// Older pages fetched without user input, while every loaded event is a
+/// hidden membership notice or the loaded rows fit the viewport. Past this,
+/// the list offers a button instead.
+const _maxAutoOlderPages = 5;
 
 /// A loaded page can hold only hidden self-joins and leaves, leaving no row to
 /// scroll for older history. While [active], pages older history automatically
-/// until something renders, at most [_maxHiddenOnlyAutoPages] times, and
+/// until something renders, at most [_maxAutoOlderPages] times, and
 /// returns what to show in place of the empty list: a loading indicator, or a
 /// button that resumes paging after the cap or a failed fetch. Null when not
 /// [active].
@@ -21,7 +22,7 @@ Widget? _useHiddenHistoryPaging({
   final autoPages = useRef(0);
   final resume = useState(0);
   if (!active) autoPages.value = 0;
-  final capped = autoPages.value >= _maxHiddenOnlyAutoPages;
+  final capped = autoPages.value >= _maxAutoOlderPages;
   useEffect(() {
     if (!active || capped || isLoadingOlder.value || olderFetchPaused.value) {
       return null;
@@ -55,14 +56,77 @@ Widget? _useHiddenHistoryPaging({
       ),
     );
   }
-  return Center(
+  return _LoadEarlierButton(
+    onPressed: () {
+      autoPages.value = 0;
+      olderFetchPaused.value = false;
+      resume.value++;
+    },
+  );
+}
+
+/// Resumes paging older history when automatic paging stopped.
+class _LoadEarlierButton extends StatelessWidget {
+  const _LoadEarlierButton({required this.onPressed});
+
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) => Center(
     child: TextButton(
-      onPressed: () {
-        autoPages.value = 0;
-        olderFetchPaused.value = false;
-        resume.value++;
-      },
+      onPressed: onPressed,
       child: const Text('Load earlier messages'),
     ),
   );
+}
+
+/// Whether the oldest loaded row is wholly on screen, leaving nothing to
+/// scroll toward older history.
+bool _oldestRowFits(Iterable<ItemPosition> positions, int rowCount) =>
+    positions.any(
+      (position) =>
+          position.index == rowCount - 1 && position.itemTrailingEdge <= 1,
+    );
+
+/// History that fits the viewport can't be scrolled (Android clamping), so
+/// while the loaded rows [fits] the viewport and the user hasn't [scrolled],
+/// older pages are fetched automatically ([fills]) up to [_maxAutoOlderPages];
+/// then, or after a [paused] failure, the list offers a button.
+({bool fills, bool offerLoadEarlier}) _viewportFill({
+  required bool fits,
+  required bool scrolled,
+  required bool busy,
+  required int pages,
+  required bool reachedOldest,
+  required bool paused,
+}) {
+  final fills = !scrolled && !busy && fits && pages < _maxAutoOlderPages;
+  return (
+    fills: fills,
+    offerLoadEarlier:
+        fits &&
+        !reachedOldest &&
+        !busy &&
+        (paused || (!scrolled && pages >= _maxAutoOlderPages)),
+  );
+}
+
+/// Fetches one older page for an explicit request, recording a failure as a
+/// pause that the next request or scroll clears.
+void _fetchOlderByHand(
+  BuildContext context,
+  ChannelMessagesNotifier notifier,
+  ValueNotifier<bool> isLoadingOlder,
+  ObjectRef<bool> olderFetchPaused,
+) {
+  olderFetchPaused.value = false;
+  isLoadingOlder.value = true;
+  notifier
+      .fetchOlder()
+      .then((loaded) {
+        olderFetchPaused.value = !loaded && !notifier.reachedOldest;
+      })
+      .whenComplete(() {
+        if (context.mounted) isLoadingOlder.value = false;
+      });
 }
