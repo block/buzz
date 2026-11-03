@@ -117,16 +117,10 @@ impl Db {
             crate::observability::WriterOperation::Authorization,
         )
         .await?;
-        Ok(sqlx::query_as(
-            "SELECT requires_nip_fi, policy_generation FROM communities c
-            WHERE lower(host) = $1 AND archived_at IS NULL AND deleted_at IS NULL
-            AND deletion_state = 'active' AND NOT EXISTS (
-                SELECT 1 FROM community_deletion_requests d
-                WHERE d.community_id = c.id AND d.stage <> 'aborted')",
-        )
-        .bind(host)
-        .fetch_optional(&mut *connection)
-        .await?)
+        Ok(sqlx::query_as(super::community::SERVING_HOST_QUERY)
+            .bind(host)
+            .fetch_optional(&mut *connection)
+            .await?)
     }
 
     /// Read current active-community policy from the writer, never a replica.
