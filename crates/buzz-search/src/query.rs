@@ -298,10 +298,12 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
             .then_some(PREFIX_RANK_WINDOW);
 
     let min_prefix_chars = if profile_only { 0 } else { PREFIX_MIN_CHARS };
+    // One checkout for both statements, so a busy pool queues a search once.
+    let mut conn = pool.acquire().await?;
     let mut resolve: QueryBuilder<sqlx::Postgres> = QueryBuilder::new("SELECT (");
     push_tsquery(&mut resolve, query.mode, &search_text, min_prefix_chars);
     resolve.push(")::text");
-    let tsquery: Option<String> = resolve.build_query_scalar().fetch_one(pool).await?;
+    let tsquery: Option<String> = resolve.build_query_scalar().fetch_one(&mut *conn).await?;
     let Some(tsquery) = tsquery.filter(|tsquery| !tsquery.is_empty()) else {
         // A too-short trailing prefix (NULL) or nothing searchable after
         // normalization (empty) matches nothing.
@@ -404,7 +406,7 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
 
     // Not a cached prepared statement: after five runs Postgres may switch a
     // cached statement to a generic plan, which cannot see the tsquery.
-    let rows = crate::cancel::fetch_all(pool, qb.build().persistent(false)).await?;
+    let rows = crate::cancel::fetch_all(pool, conn, qb.build().persistent(false)).await?;
 
     let mut hits = Vec::with_capacity(rows.len());
     for row in rows {
@@ -522,7 +524,7 @@ pub async fn search_profile_names(
     qb.push(" OFFSET ");
     qb.push_bind(offset);
 
-    let rows = crate::cancel::fetch_all(pool, qb.build()).await?;
+    let rows = crate::cancel::fetch_all(pool, pool.acquire().await?, qb.build()).await?;
     let mut hits = Vec::with_capacity(rows.len());
     for row in rows {
         let id_bytes: Vec<u8> = row.try_get("id")?;
