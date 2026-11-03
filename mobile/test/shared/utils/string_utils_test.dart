@@ -77,6 +77,43 @@ void main() {
     });
   });
 
+  group('isHexPubkey', () {
+    test('accepts exactly 64 hex characters in either case', () {
+      expect(isHexPubkey(canonicalHex), isTrue);
+      expect(isHexPubkey(canonicalHex.toUpperCase()), isTrue);
+      expect(isHexPubkey('0' * 64), isTrue);
+      expect(isHexPubkey('F' * 64), isTrue);
+    });
+
+    test('rejects other lengths and characters', () {
+      expect(isHexPubkey(''), isFalse);
+      expect(isHexPubkey(canonicalHex.substring(1)), isFalse);
+      expect(isHexPubkey('${canonicalHex}0'), isFalse);
+      expect(isHexPubkey(' ${canonicalHex.substring(1)}'), isFalse);
+      // Characters just outside each accepted range.
+      for (final c in ['/', ':', '@', 'G', '`', 'g', 'n']) {
+        expect(isHexPubkey('$c${'0' * 63}'), isFalse, reason: c);
+      }
+      expect(isHexPubkey(canonicalNpub), isFalse);
+    });
+
+    test('rejects an invalid character at any position', () {
+      // Every index, so a check that only inspects some positions fails.
+      for (final c in ['g', 'G', ':', '/', ' ']) {
+        for (var i = 0; i < 64; i++) {
+          final value = '${'a' * i}$c${'b' * (63 - i)}';
+          expect(isHexPubkey(value), isFalse, reason: '"$c" at index $i');
+        }
+      }
+      // Middle and final positions of an otherwise valid key.
+      final middle = canonicalHex.replaceRange(32, 33, 'z');
+      final last = canonicalHex.replaceRange(63, 64, 'z');
+      expect(isHexPubkey(middle), isFalse);
+      expect(isHexPubkey(last), isFalse);
+      expect(isHexPubkey(canonicalHex), isTrue);
+    });
+  });
+
   group('copy to paste roundtrip', () {
     test('a copied npub parses back to the original hex key', () {
       final copied = fullNpub(canonicalHex);

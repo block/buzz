@@ -318,9 +318,7 @@ pub(crate) async fn bind_tenant(
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let tenant = crate::tenant::bind_community(&state.db, raw_host)
-        .await
-        .ok();
+    let tenant = crate::tenant::bind_community(state, raw_host).await.ok();
     if tenant.is_none() {
         observe_unbound(state, headers).await;
     }

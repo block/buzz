@@ -1,3 +1,5 @@
+import 'dart:collection';
+
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
@@ -223,4 +225,53 @@ void main() {
     // The owner is the viewer, whose profile is cached: nothing to load.
     expect(names.missingOwnerProfiles(), isEmpty);
   });
+
+  test('a scope derives the naming facts of each key once', () {
+    final keys = [for (final d in '1234'.split('')) _key(d)];
+    final profiles = _CountingProfiles({
+      for (final key in keys) key: UserProfile(pubkey: key, displayName: key),
+    });
+    final names = IdentityNameSources(profiles: profiles).scope(keys);
+
+    // Owner loading, every label, and an outside key all read the whole
+    // context; each member's profile is still read once.
+    names.missingOwnerProfiles();
+    for (final key in keys) {
+      names.labelFor(key);
+    }
+    names.labelFor(_key('9'));
+
+    for (final key in keys) {
+      expect(profiles.reads[key], 1, reason: key);
+    }
+  });
+}
+
+/// A profile map that counts lookups per key.
+class _CountingProfiles extends MapBase<String, UserProfile> {
+  _CountingProfiles(this._inner);
+
+  final Map<String, UserProfile> _inner;
+  final Map<String, int> reads = {};
+
+  @override
+  UserProfile? operator [](Object? key) {
+    if (key is String) reads[key] = (reads[key] ?? 0) + 1;
+    return _inner[key];
+  }
+
+  @override
+  void operator []=(String key, UserProfile value) => _inner[key] = value;
+
+  @override
+  void clear() => _inner.clear();
+
+  @override
+  Iterable<String> get keys => _inner.keys;
+
+  @override
+  UserProfile? remove(Object? key) => _inner.remove(key);
+
+  @override
+  bool containsKey(Object? key) => _inner.containsKey(key);
 }

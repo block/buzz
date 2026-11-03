@@ -145,6 +145,36 @@ impl HostResolver for buzz_db::Db {
     }
 }
 
+/// Request-path [`HostResolver`]: [`buzz_db::Db`] behind
+/// [`crate::state::AppState::tenant_host_cache`]. A connection's handshake and
+/// its follow-up HTTP requests resolve the same host many times a second, so
+/// a mapped host is reread at most once per
+/// [`crate::state::TENANT_HOST_CACHE_MAX_AGE`]. Unmapped hosts and lookup
+/// errors are never cached.
+impl HostResolver for crate::state::AppState {
+    type Error = buzz_db::DbError;
+
+    async fn resolve_host(
+        &self,
+        normalized_host: &str,
+    ) -> Result<Option<CommunityId>, Self::Error> {
+        if let Some((community, read_at)) = self.tenant_host_cache.get(normalized_host) {
+            if read_at.elapsed() < crate::state::TENANT_HOST_CACHE_MAX_AGE {
+                metrics::counter!("buzz_tenant_host_cache_hits_total").increment(1);
+                return Ok(Some(community));
+            }
+        }
+        metrics::counter!("buzz_tenant_host_cache_misses_total").increment(1);
+        let read_at = std::time::Instant::now();
+        let community = self.db.resolve_host(normalized_host).await?;
+        if let Some(community) = community {
+            self.tenant_host_cache
+                .insert(normalized_host.to_owned(), (community, read_at));
+        }
+        Ok(community)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,5 +359,38 @@ mod tests {
             let err = bind_community(&r, "evil.example").await.unwrap_err();
             assert!(matches!(err, BindError::UnmappedHost));
         }
+    }
+
+    /// The request-path resolver serves a mapped host from the cache only
+    /// while the entry is younger than `TENANT_HOST_CACHE_MAX_AGE`; past
+    /// that it rereads, and a failed reread fails closed. The database is
+    /// unreachable, so any reread errors.
+    /// Mutation: drop the cache read, or its max-age check → RED.
+    #[tokio::test]
+    async fn app_state_resolver_serves_fresh_cached_hosts_only() {
+        let state = crate::state::tests::test_state_with_unreachable_database_url(
+            "postgres://buzz@127.0.0.1:1/buzz",
+        )
+        .await;
+        let community = CommunityId::from_uuid(Uuid::from_u128(3));
+        state.tenant_host_cache.insert(
+            "relay.example".into(),
+            (community, std::time::Instant::now()),
+        );
+        let ctx = bind_community(&*state, "RELAY.example")
+            .await
+            .expect("a fresh cached host binds without the database");
+        assert_eq!(ctx.community(), community);
+
+        let aged = std::time::Instant::now()
+            .checked_sub(crate::state::TENANT_HOST_CACHE_MAX_AGE)
+            .expect("instant past max age");
+        state
+            .tenant_host_cache
+            .insert("relay.example".into(), (community, aged));
+        assert!(matches!(
+            bind_community(&*state, "relay.example").await,
+            Err(BindError::Lookup(_))
+        ));
     }
 }
