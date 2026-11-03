@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
@@ -20,7 +21,8 @@ import 'hpke_backup.dart';
 ///
 /// A tenant without backups answers 404, and a definitive refusal cannot
 /// succeed unchanged, so either ends attempts for that account and key until
-/// the app restarts. Any other failure is retried at the next assertion.
+/// the app restarts. Any other failure is retried at the next assertion, up
+/// to [maxAttempts] in a row.
 class OrganizationKeyBackup {
   OrganizationKeyBackup(
     this.account, {
@@ -39,17 +41,21 @@ class OrganizationKeyBackup {
   /// Account and key pairs that are backed up, or that cannot be here.
   final _settled = <String>{};
   final _running = <String, Future<void>>{};
+  final _failures = <String, int>{};
+
+  /// Consecutive failed attempts after which a key waits for the next launch.
+  /// A relay refusal re-issues at once, so retries need their own end.
+  static const maxAttempts = 3;
 
   /// The latest attempt's failure, cleared by a completed attempt.
   @visibleForTesting
-  Object? lastFailure;
+  Enum? lastFailure;
 
-  /// Completes without error after any backup or account failure, which is
-  /// recorded and retried at the next assertion.
-  Future<void> afterAssertion(String nsec) {
+  /// Completes without error. A failure is recorded and retried at the next
+  /// assertion, up to [maxAttempts] times per launch.
+  Future<void> afterAssertion(String nsec, String pubkey) {
     final subject = account.account?.subject;
     if (subject == null) return Future.value();
-    final pubkey = AccountIdentityStore.publicKeyForNsec(nsec);
     final scope = '$subject\n$pubkey';
     if (_settled.contains(scope)) return Future.value();
     return _running[scope] ??= _attempt(subject, nsec, pubkey, scope)
@@ -67,10 +73,11 @@ class OrganizationKeyBackup {
   ) async {
     try {
       // iOS 16 can recover backups but cannot seal new ones.
-      if (await _supportsSealing()) {
+      if (await _canSeal()) {
         await _backUp(subject, nsec, pubkey);
       }
       _settled.add(scope);
+      _failures.remove(scope);
       lastFailure = null;
     } on AccountFailure catch (failure) {
       _failed(scope, failure);
@@ -78,20 +85,35 @@ class OrganizationKeyBackup {
       _failed(scope, failure);
     } on HpkeBackupFailure catch (failure) {
       _failed(scope, failure);
+    } on AccountIdentityFailure catch (failure) {
+      _failed(scope, failure);
+    }
+  }
+
+  Future<bool> _canSeal() async {
+    try {
+      return await _supportsSealing();
+    } on PlatformException {
+      throw HpkeBackupFailure.unavailable;
+    } on MissingPluginException {
+      throw HpkeBackupFailure.unavailable;
     }
   }
 
   void _failed(String scope, Enum failure) {
     debugPrint('Organization key backup failed: ${failure.name}');
     lastFailure = failure;
+    final attempts = (_failures[scope] ?? 0) + 1;
+    _failures[scope] = attempts;
     // A tenant without backups (404) and other definitive refusals cannot
     // succeed unchanged.
-    if (const {
-      AccountFailure.rejected,
-      HostedBackupFailure.unavailable,
-      HostedBackupFailure.rejected,
-      HpkeBackupFailure.invalidEnrollment,
-    }.contains(failure)) {
+    if (attempts >= maxAttempts ||
+        const {
+          AccountFailure.rejected,
+          HostedBackupFailure.unavailable,
+          HostedBackupFailure.rejected,
+          HpkeBackupFailure.invalidEnrollment,
+        }.contains(failure)) {
       _settled.add(scope);
     }
   }

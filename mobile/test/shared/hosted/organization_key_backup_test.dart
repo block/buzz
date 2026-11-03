@@ -8,6 +8,7 @@ import 'package:buzz/shared/hosted/hpke_backup.dart';
 import 'package:buzz/shared/hosted/organization_environment.dart';
 import 'package:buzz/shared/hosted/organization_key_backup.dart';
 import 'package:buzz/shared/relay/relay_provider.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -53,6 +54,7 @@ void main() {
   late List<String> uploads;
   late int statusCode;
   late List<String> listed;
+  late String current;
   late int uploadCode;
   late _FakeHpke hpke;
 
@@ -86,7 +88,7 @@ void main() {
         '/v1/buzz/nsec-backups/status' => http.Response(
           statusCode == 200
               ? jsonEncode({
-                  'current_nostr_pubkey': keys.public,
+                  'current_nostr_pubkey': current,
                   'backup_nostr_pubkeys': listed,
                 })
               : 'Not Found',
@@ -113,9 +115,9 @@ void main() {
     }),
   );
 
-  /// Issues one organization assertion, as a relay connection does, and
-  /// waits for the backup it starts.
-  Future<void> connect(OrganizationKeyBackup backup) async {
+  /// Issues an organization assertion on a fresh relay connection, as a
+  /// reconnect does, without waiting for the backup it starts.
+  Future<void> assert_(OrganizationKeyBackup backup) async {
     final auth = HostedRelayAuth(
       BuilderlabAccountClient(
         httpClient: MockClient(
@@ -131,7 +133,11 @@ void main() {
     expect(await auth.headers(relay), {
       'Nostr-Federated-Identity': 'Bearer org-token',
     });
-    // The assertion starts the backup without awaiting it.
+  }
+
+  /// One assertion, then the backup it started runs to completion.
+  Future<void> connect(OrganizationKeyBackup backup) async {
+    await assert_(backup);
     await pumpEventQueue(times: 200);
   }
 
@@ -157,6 +163,7 @@ void main() {
     uploads = [];
     statusCode = 200;
     listed = [];
+    current = keys.public;
     uploadCode = 200;
     hpke = _FakeHpke(envelope);
   });
@@ -169,9 +176,11 @@ void main() {
     () async {
       final backup = backupFor(organizationClient());
 
-      // The tenant is reachable but the upload's outcome is unknown.
+      // The tenant is reachable but the upload's outcome is unknown. Two
+      // connections asserting at once share one attempt.
       uploadCode = 503;
-      await connect(backup);
+      await Future.wait([assert_(backup), assert_(backup)]);
+      await pumpEventQueue(times: 200);
       expect(backupPaths(), [
         '/v1/buzz/nsec-backups/status',
         '/v1/buzz/nsec-backups/enrollment',
@@ -232,14 +241,47 @@ void main() {
     expect(backupPaths(), isEmpty);
   });
 
-  test('a failed status read is retried at the next assertion', () async {
-    statusCode = 503;
-    final backup = backupFor(organizationClient());
+  test(
+    'failures retry at the next assertion, a few times per launch',
+    () async {
+      final backup = backupFor(organizationClient());
+
+      statusCode = 503;
+      await connect(backup);
+      expect(backup.lastFailure, AccountFailure.unavailable);
+      statusCode = 200;
+      await connect(backup);
+      expect(uploads, hasLength(1));
+      expect(backup.lastFailure, isNull);
+
+      // A key bound to someone else's account is never uploaded, and repeated
+      // failures stop until the next launch.
+      final other = backupFor(organizationClient());
+      current = 'f' * 64;
+      paths.clear();
+      for (var i = 0; i < OrganizationKeyBackup.maxAttempts + 2; i++) {
+        await connect(other);
+      }
+      expect(other.lastFailure, HostedBackupFailure.identityMismatch);
+      expect(
+        backupPaths(),
+        List.filled(
+          OrganizationKeyBackup.maxAttempts,
+          '/v1/buzz/nsec-backups/status',
+        ),
+      );
+      expect(uploads, hasLength(1));
+    },
+  );
+
+  test('a native sealing check that fails sends nothing', () async {
+    final backup = OrganizationKeyBackup(
+      organizationClient(),
+      hpke: hpke,
+      supportsSealing: () async => throw PlatformException(code: 'failed'),
+    );
     await connect(backup);
-    expect(backup.lastFailure, AccountFailure.unavailable);
-    statusCode = 200;
-    await connect(backup);
-    expect(uploads, hasLength(1));
-    expect(backup.lastFailure, isNull);
+    expect(backup.lastFailure, HpkeBackupFailure.unavailable);
+    expect(backupPaths(), isEmpty);
   });
 }

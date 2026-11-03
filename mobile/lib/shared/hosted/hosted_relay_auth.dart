@@ -36,14 +36,18 @@ final organizationAccountProvider = Provider<BuilderlabAccountClient?>((ref) {
   return account;
 });
 
-final hostedRelayAuthProvider = Provider<HostedRelayAuth>((ref) {
+/// Outlives relay-auth rebuilds, so its settled keys and in-flight attempts
+/// are never duplicated. Null unless this build configures an organization.
+final organizationKeyBackupProvider = Provider<OrganizationKeyBackup?>((ref) {
   final organization = ref.watch(organizationAccountProvider);
+  return organization == null ? null : OrganizationKeyBackup(organization);
+});
+
+final hostedRelayAuthProvider = Provider<HostedRelayAuth>((ref) {
   final auth = HostedRelayAuth(
     ref.watch(builderlabAccountProvider),
-    organization: organization,
-    organizationBackup: organization == null
-        ? null
-        : OrganizationKeyBackup(organization),
+    organization: ref.watch(organizationAccountProvider),
+    organizationBackup: ref.watch(organizationKeyBackupProvider),
   );
   ref.onDispose(auth.dispose);
   return auth;
@@ -264,7 +268,7 @@ class HostedRelayAuth extends ChangeNotifier {
       // Issuance alone cannot prove admission after a relay refusal.
       if (failure != AccountFailure.denied) connected(config);
       if (identical(account, organization)) {
-        unawaited(organizationBackup?.afterAssertion(config.nsec!));
+        unawaited(organizationBackup?.afterAssertion(config.nsec!, pubkey));
       }
     } on AccountFailure catch (error) {
       // Issuers run in parallel, so a failure that started before another
