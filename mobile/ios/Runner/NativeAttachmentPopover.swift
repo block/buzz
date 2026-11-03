@@ -9,7 +9,6 @@ final class NativeAttachmentPopoverViewController:
   UIViewController,
   PHPickerViewControllerDelegate,
   UIPopoverPresentationControllerDelegate,
-  UIGestureRecognizerDelegate,
   AVCapturePhotoCaptureDelegate
 {
   private enum Surface {
@@ -50,7 +49,7 @@ final class NativeAttachmentPopoverViewController:
   private var isFinishing = false
   private var didNotifyDismissal = false
   private var keyboardDismissalOffset: CGFloat = 0
-  private var outsideTouchRecognizer: UIGestureRecognizer?
+  private var outsideTouchShield: NativeAttachmentOutsideTouchShield?
   var menuStackHeightConstraint: NSLayoutConstraint?
 
   var onDismiss: (() -> Void)?
@@ -136,12 +135,12 @@ final class NativeAttachmentPopoverViewController:
 
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
-    installOutsideTouchRecognizer()
+    installOutsideTouchShield()
   }
 
   override func viewWillDisappear(_ animated: Bool) {
     super.viewWillDisappear(animated)
-    removeOutsideTouchRecognizer()
+    removeOutsideTouchShield()
     invalidateCameraCapture()
     stopCamera()
   }
@@ -174,43 +173,36 @@ final class NativeAttachmentPopoverViewController:
 
   // UIKit lets touches outside this popover reach the Flutter view and
   // dismisses only for some of them: a touch on a platform view, such as the
-  // composer's glass surface, leaves the popover open. Watch the window so a
-  // touch anywhere outside the popover dismisses it. The recognizer never
-  // begins, so the touch still reaches whatever is under it.
-  private func installOutsideTouchRecognizer() {
-    guard outsideTouchRecognizer == nil else { return }
-    guard let window = presentingViewController?.view.window else {
-      assertionFailure("The attachment popover's presenter has no window.")
+  // composer's glass surface, leaves the popover open. Cover the window behind
+  // the popover with a shield that takes any outside touch and dismisses, the
+  // way a modal popover does, so the touch doesn't also act on the view below
+  // (for example, showing the edit menu on the focused composer).
+  private func installOutsideTouchShield() {
+    guard outsideTouchShield == nil else { return }
+    guard let window = presentingViewController?.view.window,
+      let containerView = presentationController?.containerView,
+      containerView.superview === window
+    else {
+      assertionFailure("The attachment popover isn't presented in a window.")
       return
     }
-    let recognizer = UITapGestureRecognizer()
-    recognizer.cancelsTouchesInView = false
-    recognizer.delaysTouchesBegan = false
-    recognizer.delaysTouchesEnded = false
-    recognizer.delegate = self
-    window.addGestureRecognizer(recognizer)
-    outsideTouchRecognizer = recognizer
-  }
-
-  private func removeOutsideTouchRecognizer() {
-    guard let recognizer = outsideTouchRecognizer else { return }
-    recognizer.view?.removeGestureRecognizer(recognizer)
-    outsideTouchRecognizer = nil
-  }
-
-  func gestureRecognizer(
-    _ gestureRecognizer: UIGestureRecognizer,
-    shouldReceive touch: UITouch
-  ) -> Bool {
-    guard gestureRecognizer === outsideTouchRecognizer else { return true }
-    // An alert presented from the popover shares the window; its buttons
-    // sit outside the popover but belong to it.
-    if presentedViewController == nil,
-      !view.bounds.contains(touch.location(in: view))
-    {
-      dismissAndNotify()
+    let shield = NativeAttachmentOutsideTouchShield(frame: window.bounds)
+    shield.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    shield.coversPoint = { [weak self, weak shield] point in
+      guard let self, let shield else { return false }
+      // An alert presented from the popover sits above it and takes its own
+      // touches; anything else outside the popover belongs to the shield.
+      return self.presentedViewController == nil
+        && !self.view.bounds.contains(shield.convert(point, to: self.view))
     }
-    return false
+    shield.onTouch = { [weak self] in self?.dismissAndNotify() }
+    window.insertSubview(shield, belowSubview: containerView)
+    outsideTouchShield = shield
+  }
+
+  private func removeOutsideTouchShield() {
+    outsideTouchShield?.removeFromSuperview()
+    outsideTouchShield = nil
   }
 
   private func updateMenuLayout() {
@@ -1025,4 +1017,30 @@ private enum NativeAttachmentPopoverError: Error {
   case cameraUnavailable
   case missingFile
   case unsupportedImage
+}
+
+/// A transparent view behind the attachment popover that takes the touches
+/// UIKit would otherwise pass through to the Flutter view.
+final class NativeAttachmentOutsideTouchShield: UIView {
+  var coversPoint: (CGPoint) -> Bool = { _ in false }
+  var onTouch: () -> Void = {}
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    backgroundColor = .clear
+    isAccessibilityElement = false
+  }
+
+  @available(*, unavailable)
+  required init?(coder: NSCoder) {
+    fatalError("init(coder:) has not been implemented")
+  }
+
+  override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+    coversPoint(point)
+  }
+
+  override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+    onTouch()
+  }
 }
