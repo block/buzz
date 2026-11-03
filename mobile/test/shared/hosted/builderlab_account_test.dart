@@ -46,15 +46,24 @@ void main() {
           200,
         );
       });
-      final client = BuilderlabAccountClient(httpClient: transport);
+      // The notification extension's copy follows every adopt and clear.
+      final shared = <String?>[];
+      final client = BuilderlabAccountClient(
+        httpClient: transport,
+        onSessionChanged: shared.add,
+      );
       expect(
         (await client.exchange(code: 'one-use', verifier: verifier)).subject,
         'account-1',
       );
-      final restored = BuilderlabAccountClient(httpClient: transport);
+      final restored = BuilderlabAccountClient(
+        httpClient: transport,
+        onSessionChanged: shared.add,
+      );
       expect((await restored.restore())!.subject, 'account-1');
       expect(requests.length, 3);
       await restored.clearLocalSession();
+      expect(shared, ['secret', 'secret', null]);
       expect(
         await BuilderlabAccountClient(httpClient: transport).restore(),
         isNull,

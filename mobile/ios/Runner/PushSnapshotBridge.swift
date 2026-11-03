@@ -78,6 +78,8 @@ final class BuzzPushSnapshotBridge {
     switch section {
     case "communities":
       syncCommunities(arguments, result: result)
+    case "organizationSession":
+      syncOrganizationSession(arguments, result: result)
     default: return false
     }
     return true
@@ -121,6 +123,50 @@ final class BuzzPushSnapshotBridge {
           value: FlutterError(
             code: "age_restriction_purge_failed",
             message: "Unable to suppress and purge restricted notifications.",
+            details: error.localizedDescription
+          )
+        )
+      }
+    }
+  }
+
+  /// Shares the organization account session with the notification extension, or removes it
+  /// when the app has none, so the extension can mint NIP-FI assertions for organization relays.
+  private func syncOrganizationSession(
+    _ arguments: [String: Any],
+    result: @escaping FlutterResult
+  ) {
+    let session: BuzzOrganizationSession?
+    if arguments["credential"] is NSNull || arguments["credential"] == nil {
+      session = nil
+    } else if let origin = arguments["origin"] as? String,
+      let credential = arguments["credential"] as? String, !credential.isEmpty,
+      credential.utf8.count <= 512,
+      let relayHosts = arguments["relayHosts"] as? [String], !relayHosts.isEmpty
+    {
+      session = BuzzOrganizationSession(
+        origin: origin, credential: credential, relayHosts: relayHosts)
+    } else {
+      result(
+        FlutterError(
+          code: "invalid_arguments",
+          message: "Expected an organization origin, credential and relay hosts.",
+          details: nil
+        )
+      )
+      return
+    }
+    queue.async { [weak self] in
+      do {
+        try BuzzPushKeychain.replace(
+          organizationSession: session, accessGroup: self?.keychainAccessGroup)
+        Self.complete(result, value: nil)
+      } catch {
+        Self.complete(
+          result,
+          value: FlutterError(
+            code: "snapshot_sync_failed",
+            message: "Unable to share the organization session.",
             details: error.localizedDescription
           )
         )

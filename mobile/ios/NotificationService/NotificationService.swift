@@ -56,8 +56,40 @@ final class NotificationService: UNNotificationServiceExtension {
         )
       },
       notificationCache: notificationCache,
-      avatarLoader: notificationAvatarLoader
+      avatarLoader: notificationAvatarLoader,
+      assertionIssuer: Self.assertionIssuer
     )
+  }
+
+  /// Process-wide, so consecutive notifications reuse an assertion until it nears expiry.
+  private static let assertionIssuer: BuzzRelayAssertionIssuer = {
+    let keychainAccessGroup =
+      Bundle.main.object(forInfoDictionaryKey: "BuzzKeychainAccessGroup") as? String
+    return BuzzRelayAssertionIssuer(
+      session: URLSession(configuration: .ephemeral),
+      loadSession: { loadOrganizationSession(keychainAccessGroup: keychainAccessGroup) }
+    )
+  }()
+
+  /// The organization account session the app shares for NIP-FI assertion issuance.
+  private static func loadOrganizationSession(
+    keychainAccessGroup: String?
+  ) -> BuzzOrganizationSession? {
+    var query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: BuzzOrganizationSession.keychainService,
+      kSecAttrAccount as String: BuzzOrganizationSession.keychainAccount,
+      kSecReturnData as String: true,
+      kSecMatchLimit as String: kSecMatchLimitOne,
+    ]
+    if let keychainAccessGroup, !keychainAccessGroup.isEmpty {
+      query[kSecAttrAccessGroup as String] = keychainAccessGroup
+    }
+    var item: CFTypeRef?
+    guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+      let data = item as? Data
+    else { return nil }
+    return try? JSONDecoder().decode(BuzzOrganizationSession.self, from: data)
   }
 
   private var notificationCacheRoot: URL? {

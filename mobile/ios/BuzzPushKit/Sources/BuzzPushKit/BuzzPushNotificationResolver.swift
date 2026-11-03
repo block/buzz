@@ -73,6 +73,7 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
   private let now: () -> Date
   private let notificationCache: BuzzNotificationCache?
   private let avatarLoader: BuzzNotificationAvatarLoader?
+  private let assertionIssuer: BuzzRelayAssertionIssuer?
 
   /// Creates a resolver around the notification extension's App Group and Keychain I/O.
   public init(
@@ -81,12 +82,14 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     loadPrivateKey: @escaping (String) -> String?,
     notificationCache: BuzzNotificationCache? = nil,
     avatarLoader: BuzzNotificationAvatarLoader? = nil,
+    assertionIssuer: BuzzRelayAssertionIssuer? = nil,
     now: @escaping () -> Date = Date.init,
     makeRetrySession: (() -> URLSession)? = nil
   ) {
     self.makeRetrySession = makeRetrySession ?? { URLSession(configuration: session.configuration) }
     self.notificationCache = notificationCache
     self.avatarLoader = avatarLoader
+    self.assertionIssuer = assertionIssuer
     self.session = session
     self.loadCommunitiesData = loadCommunitiesData
     self.loadPrivateKey = loadPrivateKey
@@ -164,28 +167,42 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       completion(nil)
       return
     }
-    send(
-      url: url, body: body, privateKey: privateKey, session: session,
-      canRetry: { self.matchingPrivateKey(for: community) == privateKey }
-    ) { data, response in
-      guard self.matchingPrivateKey(for: community) != nil,
-        let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode),
-        let data, let events = try? JSONDecoder().decode([VerifiedNostrEvent].self, from: data)
-      else {
-        completion(nil)
-        return
+    federatedIdentity(relayURL: relayURL, privateKey: privateKey) { federatedIdentity in
+      self.send(
+        url: url, body: body, privateKey: privateKey, federatedIdentity: federatedIdentity,
+        session: self.session,
+        canRetry: { self.matchingPrivateKey(for: community) == privateKey }
+      ) { data, response in
+        guard self.matchingPrivateKey(for: community) != nil,
+          let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode),
+          let data, let events = try? JSONDecoder().decode([VerifiedNostrEvent].self, from: data)
+        else {
+          completion(nil)
+          return
+        }
+        let candidate = Self.newestMessage(
+          events: events.filter { event in
+            event.hasValidIDAndSignature()
+              && community.policies.contains { policy in
+                PushLeaseMatcher.matches(event: event, policy: policy)
+              }
+          },
+          community: community
+        )
+        completion(candidate.map { ($0, community) })
       }
-      let candidate = Self.newestMessage(
-        events: events.filter { event in
-          event.hasValidIDAndSignature()
-            && community.policies.contains { policy in
-              PushLeaseMatcher.matches(event: event, policy: policy)
-            }
-        },
-        community: community
-      )
-      completion(candidate.map { ($0, community) })
     }
+  }
+
+  /// The NIP-FI assertion an organization relay requires, or nil for any other relay.
+  private func federatedIdentity(
+    relayURL: URL, privateKey: String, completion: @escaping (String?) -> Void
+  ) {
+    guard let assertionIssuer else {
+      completion(nil)
+      return
+    }
+    assertionIssuer.header(relayURL: relayURL, privateKeyHex: privateKey, completion: completion)
   }
 
   /// Sends one signed `/query`. A timeout or dropped connection is retried once on a new
@@ -202,7 +219,8 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
   }
 
   private func send(
-    url: URL, body: Data, privateKey: String, session: URLSession, canRetry: (() -> Bool)?,
+    url: URL, body: Data, privateKey: String, federatedIdentity: String?, session: URLSession,
+    canRetry: (() -> Bool)?,
     completion: @escaping (Data?, URLResponse?) -> Void
   ) {
     var request = URLRequest(url: url)
@@ -219,6 +237,9 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       return
     }
     request.setValue(auth, forHTTPHeaderField: "Authorization")
+    if let federatedIdentity {
+      request.setValue(federatedIdentity, forHTTPHeaderField: "Nostr-Federated-Identity")
+    }
     session.dataTask(with: request) { data, response, error in
       guard let error = error as? URLError,
         [.timedOut, .networkConnectionLost].contains(error.code), canRetry?() == true
@@ -237,7 +258,8 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       let retrySession = self.makeRetrySession()
       self.retrySessions.append(retrySession)
       self.send(
-        url: url, body: body, privateKey: privateKey, session: retrySession, canRetry: nil
+        url: url, body: body, privateKey: privateKey, federatedIdentity: federatedIdentity,
+        session: retrySession, canRetry: nil
       ) { data, response in
         retrySession.finishTasksAndInvalidate()
         completion(data, response)
@@ -336,29 +358,34 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       completion([])
       return
     }
-    var request = URLRequest(url: url)
-    request.httpMethod = "POST"
-    request.httpBody = body
-    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    guard let auth = try? NostrHTTPAuth.authorizationHeader(
-      url: url, method: "POST", body: body, privateKeyHex: privateKey)
-    else {
-      completion([])
-      return
-    }
-    request.setValue(auth, forHTTPHeaderField: "Authorization")
-    BuzzNotificationDownload.start(
-      request: request, configuration: session.configuration,
-      maximumBytes: Self.maximumPresentationResponseBytes
-    ) { result in
-      guard self.matchingPrivateKey(for: community) != nil,
-        case .success(let data) = result,
-        let events = try? JSONDecoder().decode([VerifiedNostrEvent].self, from: data)
+    federatedIdentity(relayURL: relayURL, privateKey: privateKey) { federatedIdentity in
+      var request = URLRequest(url: url)
+      request.httpMethod = "POST"
+      request.httpBody = body
+      request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+      guard let auth = try? NostrHTTPAuth.authorizationHeader(
+        url: url, method: "POST", body: body, privateKeyHex: privateKey)
       else {
         completion([])
         return
       }
-      completion(events.filter { $0.hasValidIDAndSignature() })
+      request.setValue(auth, forHTTPHeaderField: "Authorization")
+      if let federatedIdentity {
+        request.setValue(federatedIdentity, forHTTPHeaderField: "Nostr-Federated-Identity")
+      }
+      BuzzNotificationDownload.start(
+        request: request, configuration: self.session.configuration,
+        maximumBytes: Self.maximumPresentationResponseBytes
+      ) { result in
+        guard self.matchingPrivateKey(for: community) != nil,
+          case .success(let data) = result,
+          let events = try? JSONDecoder().decode([VerifiedNostrEvent].self, from: data)
+        else {
+          completion([])
+          return
+        }
+        completion(events.filter { $0.hasValidIDAndSignature() })
+      }
     }
   }
 

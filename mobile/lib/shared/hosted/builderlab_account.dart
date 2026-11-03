@@ -1,4 +1,5 @@
 import '../storage/serial_queue.dart';
+
 import 'dart:async';
 import 'dart:convert';
 
@@ -58,6 +59,7 @@ class BuilderlabAccountClient {
     http.Client? httpClient,
     FlutterSecureStorage? storage,
     Uri? accountOrigin,
+    this.onSessionChanged,
   }) : _http = httpClient ?? http.Client(),
        _storage = storage ?? defaultStorage,
        accountOrigin = accountOrigin ?? origin;
@@ -68,6 +70,11 @@ class BuilderlabAccountClient {
 
   static final origin = HostedEnvironment.origin;
   final Uri accountOrigin;
+
+  /// Receives the session credential each time one is adopted, and null when
+  /// it is cleared. Only a trusted owner of [accountOrigin]'s session may set
+  /// it, for example to share the session with the notification extension.
+  final void Function(String? credential)? onSessionChanged;
   static const _prefix = '/api/goose';
 
   /// Remote-agent registry routes, shared with desktop.
@@ -225,6 +232,7 @@ class BuilderlabAccountClient {
     // Assigned before notifying, so subject listeners see the new account.
     _account = verified;
     _subject.value = verified.subject;
+    onSessionChanged?.call(credential);
     return verified;
   }
 
@@ -339,6 +347,7 @@ class BuilderlabAccountClient {
     _credential = null;
     _account = null;
     if (!_disposed) _subject.value = null;
+    onSessionChanged?.call(null);
     try {
       await _storage.delete(key: _storageKey);
     } catch (_) {

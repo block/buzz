@@ -238,6 +238,30 @@ Future<void> registerBuzzPushCommunitySnapshot(
   }
 }
 
+/// Shares the organization account session with the iOS notification
+/// extension, or removes it when [credential] is null. Organization relays
+/// enforce NIP-FI, so the extension needs the session to mint the assertion
+/// that lets it read the message a push refers to.
+Future<void> shareOrganizationSessionWithNotifications({
+  required Uri origin,
+  required String? credential,
+  required List<String> relayHosts,
+}) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  try {
+    await _channel.invokeMethod<void>('syncPushSnapshot', {
+      'section': 'organizationSession',
+      'origin': origin.toString(),
+      'credential': credential,
+      'relayHosts': relayHosts,
+    });
+  } on MissingPluginException {
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
+  } catch (error, stackTrace) {
+    reportPushCommunitySnapshotError(error, stackTrace);
+  }
+}
+
 void installBuzzPushMethodHandler() {
   _channel.setMethodCallHandler((call) async {
     switch (call.method) {
