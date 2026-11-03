@@ -9,9 +9,11 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 /// reads `MediaQuery.of`, `paddingOf` or `viewInsetsOf` (directly or through
 /// a [Scaffold]) rebuilds and relays out its whole content for keyboard
 /// motion it cannot show. While the route is not current, [child] keeps the
-/// view insets and padding it last had as the current route; every other
-/// [MediaQueryData] field passes through. When the route becomes current
-/// again the live values return.
+/// view insets and padding it last had as the current route, except that it
+/// still follows the keyboard down: when a covering route takes focus and the
+/// page's own keyboard closes, the page lowers behind the scrim instead of
+/// jumping when it is uncovered. Every other [MediaQueryData] field passes
+/// through. When the route becomes current again the live values return.
 class CoveredRouteKeyboardInsets extends HookWidget {
   const CoveredRouteKeyboardInsets({super.key, required this.child});
 
@@ -21,9 +23,13 @@ class CoveredRouteKeyboardInsets extends HookWidget {
   Widget build(BuildContext context) {
     final data = MediaQuery.of(context);
     final current = ModalRoute.isCurrentOf(context) ?? true;
-    // The insets and padding from the last build as the current route.
+    // The insets and padding from the last build as the current route, or
+    // the smallest keyboard seen since it was covered.
     final held = useRef<(EdgeInsets, EdgeInsets)?>(null);
-    if (current || held.value == null) {
+    final heldValue = held.value;
+    if (current ||
+        heldValue == null ||
+        data.viewInsets.bottom <= heldValue.$1.bottom) {
       held.value = (data.viewInsets, data.padding);
     }
     final (viewInsets, padding) = held.value!;

@@ -74,6 +74,61 @@ void main() {
     expect(seen.last, const EdgeInsets.only(bottom: 300));
   });
 
+  testWidgets('a covered page follows its own keyboard closing', (
+    tester,
+  ) async {
+    final builds = [0];
+    final seen = <EdgeInsets>[];
+    final navigator = GlobalKey<NavigatorState>();
+    var insets = const EdgeInsets.only(bottom: 300);
+    late StateSetter setOuter;
+    final app = MaterialApp(
+      navigatorKey: navigator,
+      home: CoveredRouteKeyboardInsets(child: _Probe(builds, seen)),
+    );
+
+    await tester.pumpWidget(
+      StatefulBuilder(
+        builder: (context, setState) {
+          setOuter = setState;
+          return MediaQuery(
+            data: MediaQueryData(
+              size: const Size(400, 800),
+              viewInsets: insets,
+              padding: EdgeInsets.only(bottom: insets.bottom > 0 ? 0 : 34),
+            ),
+            child: app,
+          );
+        },
+      ),
+    );
+    expect(seen.last, const EdgeInsets.only(bottom: 300));
+
+    // A sheet takes focus, so the page's keyboard closes behind it.
+    navigator.currentState!.push(
+      PageRouteBuilder<void>(
+        opaque: false,
+        transitionDuration: Duration.zero,
+        pageBuilder: (_, _, _) => const SizedBox(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    for (final bottom in [200.0, 100.0, 0.0]) {
+      setOuter(() => insets = EdgeInsets.only(bottom: bottom));
+      await tester.pump();
+      expect(seen.last, EdgeInsets.only(bottom: bottom));
+    }
+
+    // A keyboard the covering route raises is still ignored.
+    final coveredBuilds = builds[0];
+    for (final bottom in [80.0, 160.0, 300.0]) {
+      setOuter(() => insets = EdgeInsets.only(bottom: bottom));
+      await tester.pump();
+    }
+    expect(builds[0], coveredBuilds);
+    expect(seen.last, EdgeInsets.zero);
+  });
+
   testWidgets('a current page follows the keyboard', (tester) async {
     final builds = [0];
     final seen = <EdgeInsets>[];
