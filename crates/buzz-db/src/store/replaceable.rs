@@ -813,10 +813,11 @@ mod postgres_tests {
         };
         let base = Timestamp::now().as_secs();
 
-        // Every supersede path retires the old head with a soft delete. The relay
-        // roster writer is the production kind:39002 path; its p tags must match
-        // the channel's members. The relay-signed kind:13535 list goes through
-        // the addressable path.
+        // Every supersede path retires the old head with a soft delete, except
+        // NIP-RS read state and mesh status, which the NIP-33 path hard-deletes.
+        // The relay roster writer is the production kind:39002 path; its p tags
+        // must match the channel's members. The relay-signed kind:13535 list
+        // goes through the addressable path.
         enum Path {
             MemberSnapshot,
             Addressable,
@@ -826,27 +827,51 @@ mod postgres_tests {
         let people_p =
             || -> Vec<Vec<&str>> { mentioned.iter().map(|pk| vec![pk.as_str()]).collect() };
         let relay_pubkey = keys.public_key().to_bytes();
-        for (case, path, kind, d_tag, p_tags) in [
+        for (case, path, kind, d_tag, extra_tags, p_tags, hard_delete) in [
             (
                 "member snapshot",
                 Path::MemberSnapshot,
                 39002_u16,
                 Some(channel.to_string()),
+                vec![],
                 roster_p,
+                false,
             ),
             (
                 "addressable",
                 Path::Addressable,
                 13535_u16,
                 None,
+                vec![],
                 people_p(),
+                false,
             ),
             (
                 "parameterized",
                 Path::Parameterized,
                 30000_u16,
                 Some("people".to_owned()),
+                vec![],
                 people_p(),
+                false,
+            ),
+            (
+                "NIP-RS read state",
+                Path::Parameterized,
+                buzz_core::kind::KIND_READ_STATE as u16,
+                Some(format!("read-state:{}", "a".repeat(32))),
+                vec![["t", "read-state"]],
+                people_p(),
+                true,
+            ),
+            (
+                "mesh status",
+                Path::Parameterized,
+                buzz_core::kind::KIND_BOOKMARK_SET as u16,
+                Some("buzz-mesh-member-status:owner-test".to_owned()),
+                vec![["k", "buzz-mesh-status"]],
+                people_p(),
+                true,
             ),
         ] {
             let indexed = p_tags.len() as i64;
@@ -855,6 +880,7 @@ mod postgres_tests {
                     .iter()
                     .map(|d| Tag::parse(["d", d.as_str()]).expect("d tag"))
                     .collect();
+                tags.extend(extra_tags.iter().map(|t| Tag::parse(*t).expect("extra tag")));
                 tags.extend(p_tags.iter().map(|p| {
                     let mut parts = vec!["p"];
                     parts.extend(p.iter().copied());
@@ -919,15 +945,23 @@ mod postgres_tests {
                 indexed,
                 "{case}: new head is indexed"
             );
-            let retired: bool = sqlx::query_scalar(
+            let retired: Option<bool> = sqlx::query_scalar(
                 "SELECT deleted_at IS NOT NULL FROM events WHERE community_id = $1 AND id = $2",
             )
             .bind(community_uuid)
             .bind(old.id.as_bytes().as_slice())
-            .fetch_one(&pool)
+            .fetch_optional(&pool)
             .await
             .expect("read retired head");
-            assert!(retired, "{case}: the old head is soft-deleted, not removed");
+            if hard_delete {
+                assert_eq!(retired, None, "{case}: the old head is removed");
+            } else {
+                assert_eq!(
+                    retired,
+                    Some(true),
+                    "{case}: the old head is soft-deleted, not removed"
+                );
+            }
         }
     }
 
