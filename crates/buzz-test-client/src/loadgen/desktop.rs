@@ -1958,7 +1958,7 @@ mod tests {
     type Frames = Shared2<Vec<(usize, String, String)>>;
 
     /// How the fake relay answers a REQ on a connection: events replayed
-    /// before its EOSE, and how long the EOSE waits.
+    /// before its EOSE, and how long the answer waits.
     type Plan = Arc<dyn Fn(usize, &str) -> (usize, Duration) + Send + Sync>;
 
     fn instant() -> Plan {
@@ -2037,10 +2037,10 @@ mod tests {
                                 let (events, delay) = plan(index, &id);
                                 let (tx, replayed, id) = (tx.clone(), replayed.clone(), id.clone());
                                 tokio::spawn(async move {
+                                    tokio::time::sleep(delay).await;
                                     for _ in 0..events {
                                         let _ = tx.send(text(json!(["EVENT", id, replayed])));
                                     }
-                                    tokio::time::sleep(delay).await;
                                     let _ = tx.send(text(json!(["EOSE", id])));
                                 });
                             }
@@ -2130,7 +2130,8 @@ mod tests {
                 ""
             };
             if let Some((_, delay)) = slow.filter(|(slow, _)| *slow == name) {
-                std::thread::sleep(delay);
+                // Off the worker, so tasks queued behind this one still run.
+                tokio::task::block_in_place(|| std::thread::sleep(delay));
             }
             if fail.contains(&name) && !failed.lock().unwrap().contains(&name) {
                 failed.lock().unwrap().push(name);
@@ -3018,10 +3019,10 @@ hold_secs = 1
 
     #[tokio::test]
     async fn a_long_backlog_behind_slow_oks_keeps_its_timely_eoses() {
-        // Every REQ replays 600 events, more than one pass drains, with its
-        // EOSE 1.2 s late, while heartbeats each second wait 3.5 s for OKs.
-        // No heartbeat may run between the backlog's passes: a second OK
-        // wait would outlast the deferral.
+        // Every REQ answers 1.2 s late with 600 events, more than one pass
+        // drains, and its EOSE, while heartbeats each second wait 3.5 s for
+        // OKs. No heartbeat may run between the backlog's passes: a second
+        // OK wait would outlast the deferral.
         let mut rig = solo(5, &format!("mode = \"current\"\n{QUIET}"));
         rig.presence_secs = 1.0;
         rig.ok_delay = Duration::from_millis(3_500);
