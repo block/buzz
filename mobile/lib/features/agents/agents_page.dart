@@ -48,14 +48,22 @@ GlobalKey<NavigatorState>? _openAgentsNavigator;
 Future<void> showAgents(
   BuildContext context, {
   AgentCreationDeepLink? draft,
+  bool createOnOpen = false,
 }) async {
   final container = ProviderScope.containerOf(context);
   final controller = container.read(remoteAgentControllerProvider);
+  if (!context.mounted) return;
   final navigator = Navigator.of(context);
   // A link replaces an Agents stack that is already open instead of stacking
   // a second one on top of it, but only while it shows just its list: a form,
   // profile or dialog above it may hold work the user hasn't finished.
   final open = _openAgentsRoute;
+  if (createOnOpen &&
+      open != null &&
+      open.isActive &&
+      open.navigator == navigator) {
+    return;
+  }
   if (draft != null &&
       open != null &&
       open.isActive &&
@@ -76,7 +84,11 @@ Future<void> showAgents(
   }
   unawaited(controller.run(controller.refresh));
   final route = MaterialPageRoute<Channel>(
-    builder: (_) => _AgentsNavigation(controller: controller, draft: draft),
+    builder: (_) => _AgentsNavigation(
+      controller: controller,
+      draft: draft,
+      createOnOpen: createOnOpen,
+    ),
   );
   _openAgentsRoute = route;
   final channel = await navigator.push(route);
@@ -92,7 +104,13 @@ Future<void> showAgents(
 }
 
 class _AgentsNavigation extends HookConsumerWidget {
-  const _AgentsNavigation({required this.controller, this.draft});
+  const _AgentsNavigation({
+    required this.controller,
+    this.draft,
+    this.createOnOpen = false,
+  });
+
+  final bool createOnOpen;
 
   final RemoteAgentController controller;
   final AgentCreationDeepLink? draft;
@@ -122,6 +140,7 @@ class _AgentsNavigation extends HookConsumerWidget {
             child: AgentsPage(
               controller: controller,
               draft: draft,
+              createOnOpen: createOnOpen,
               onClose: () => Navigator.of(context).pop(),
               onSelect: (pubkey) async {
                 final channel = await showBuzzModalBottomSheet<Channel>(
@@ -183,11 +202,15 @@ class AgentsPage extends HookConsumerWidget {
     required this.onClose,
     required this.onSelect,
     this.draft,
+    this.createOnOpen = false,
     super.key,
   });
 
   /// Link-supplied draft to open in [CreateAgentPage] when permitted.
   final AgentCreationDeepLink? draft;
+
+  /// Open creation only after confirming there are no agents or saved setup.
+  final bool createOnOpen;
   final VoidCallback onClose;
   final ValueChanged<String> onSelect;
   final RemoteAgentController controller;
@@ -315,9 +338,11 @@ class AgentsPage extends HookConsumerWidget {
             await openCreate();
           };
 
-    // Open a link's draft once: sign in first if needed, then wait for the
-    // registry so an unfinished setup is known before anything is offered.
-    final draftStep = useRef(draft == null ? _DraftStep.done : _DraftStep.wait);
+    // Open a creation request once, after sign-in and inventory loading.
+    // The Bestie shortcut leaves existing agents and saved setups in the list.
+    final draftStep = useRef(
+      draft == null && !createOnOpen ? _DraftStep.done : _DraftStep.wait,
+    );
     final draftRefreshFor = useRef<String?>(null);
     // Looked up during build: effects cannot read inherited widgets, and
     // snack bars cannot show while a frame is building.
@@ -326,7 +351,15 @@ class AgentsPage extends HookConsumerWidget {
       draftStep.value = _DraftStep.done;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         messenger?.showFeedbackSnackBar(
-          SnackBar(content: Text(message)),
+          SnackBar(
+            content: Text(
+              draft == null
+                  ? message
+                        .replaceAll('Reopen the link', 'Reopen Agents')
+                        .replaceAll('reopen the link', 'reopen Agents')
+                  : message,
+            ),
+          ),
           kind: ToastKind.error,
         );
       });
@@ -335,7 +368,16 @@ class AgentsPage extends HookConsumerWidget {
     useEffect(
       () {
         final link = draft;
-        if (link == null || draftStep.value == _DraftStep.done) return null;
+        if (draftStep.value == _DraftStep.done) return null;
+        if (link == null) {
+          if (community == null || ownedDirectory.isLoading) return null;
+          if (!supportsRemoteAgents(community) ||
+              ownedDirectory.hasError ||
+              (ownedDirectory.value?.isNotEmpty ?? false)) {
+            draftStep.value = _DraftStep.done;
+            return null;
+          }
+        }
         // Sign-in counts as attempted only once it is seen running, so a
         // rerun before reconnectAccount reaches its sign-in stage still waits.
         if (signingIn && draftStep.value == _DraftStep.signInRequested) {
@@ -381,9 +423,25 @@ class AgentsPage extends HookConsumerWidget {
           return null;
         }
         if (controller.pending != null) {
-          drop(
-            'Finish your unfinished agent setup first, then reopen the link.',
-          );
+          if (link == null) {
+            draftStep.value = _DraftStep.done;
+          } else {
+            drop(
+              'Finish your unfinished agent setup first, then reopen the link.',
+            );
+          }
+          return null;
+        }
+        if (link == null) {
+          if (registered.connectionState != ConnectionState.done) return null;
+          if (registered.hasError || keys.isNotEmpty) {
+            draftStep.value = _DraftStep.done;
+            return null;
+          }
+          draftStep.value = _DraftStep.done;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (context.mounted) unawaited(openCreate());
+          });
           return null;
         }
         draftStep.value = _DraftStep.done;
@@ -436,6 +494,9 @@ class AgentsPage extends HookConsumerWidget {
         community?.id,
         controller.account.account?.subject,
         controller.loadedForCurrentAccount,
+        ownedDirectory,
+        registered.connectionState,
+        candidateKey,
       ],
     );
 
@@ -503,6 +564,15 @@ class AgentsPage extends HookConsumerWidget {
                 SliverToBoxAdapter(
                   child: Column(
                     children: [
+                      if (createOnOpen && (loading || signingIn))
+                        const LinearProgressIndicator(),
+                      if (createOnOpen &&
+                          supportsRemoteAgents(community) &&
+                          controller.failure.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.all(Grid.sm),
+                          child: Text(controller.failure),
+                        ),
                       if (failed && keys.isEmpty)
                         ListTile(
                           title: const Text('Could not load agents'),

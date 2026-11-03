@@ -1,7 +1,9 @@
 import 'features/activity/activity_provider.dart';
 import 'features/channels/default_agent_launcher.dart';
 import 'features/agents/agents_page.dart';
+
 import 'dart:async';
+
 import 'hosted_app_gate.dart';
 import 'onboarding_app_entry.dart';
 import 'shared/widgets/ios_navigation_metrics.dart';
@@ -391,7 +393,7 @@ class App extends HookConsumerWidget {
             child: HomePage(
               onAgents: showAgents,
               defaultAgentBuilder: (context) => DefaultAgentLauncher(
-                onChooseAgent: () => showAgents(context),
+                onChooseAgent: () => showAgents(context, createOnOpen: true),
               ),
               mePageBuilder: (_, chat, workspace) => MePage(
                 sliver: true,

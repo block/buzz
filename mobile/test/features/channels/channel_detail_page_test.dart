@@ -71,6 +71,7 @@ import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/channels/small_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/profile/presence_cache_provider.dart';
+import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/features/profile/user_profile_sheet.dart';
@@ -247,6 +248,7 @@ Widget _buildTestable({
   bool personalChat = false,
   required List<NostrEvent> messages,
   PresenceCacheNotifier? presenceCache,
+  List<OwnedAgentDirectoryEntry>? ownedAgents,
   List<TypingEntry> typing = const [],
   Map<String, UserProfile> users = const {},
   Set<String>? knownAgentPubkeys,
@@ -363,6 +365,8 @@ Widget _buildTestable({
       ),
       if (signingPubkey != null)
         myPubkeyProvider.overrideWithValue(signingPubkey),
+      if (ownedAgents != null)
+        ownedAgentDirectoryProvider.overrideWith((ref) async => ownedAgents),
       if (presenceCache != null)
         presenceCacheProvider.overrideWith(() => presenceCache),
       if (!useRealChannelProviders)
