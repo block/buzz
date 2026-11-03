@@ -165,7 +165,7 @@ An adapter MAY return `session_required` for an invalid, expired, or revoked cre
 
 An agent key acts for an owner key under an owner-authorized grant (see [Relay assertion](#relay-assertion)). This section defines the grant a client holds for an agent key it controls, the assertion request made with it, and the owner's revocation. An adapter that operates an agent itself MAY keep the grant internally and issue that agent's assertions without these routes.
 
-The owner authorization is a [NIP-OA](NIP-OA.md) `auth` tag, sent as the compact JSON array of its four strings. The adapter MUST verify the tag as NIP-OA defines, with the agent key as `event.pubkey`, and MUST refuse a tag whose owner is not the owner key the adapter has bound to the authenticating user.
+The owner authorization is a [NIP-OA](NIP-OA.md) `auth` tag, sent as the compact JSON array of its four strings. The adapter MUST verify the tag as NIP-OA defines, with the agent key as `event.pubkey`, and MUST refuse a tag whose owner is not the owner key the adapter has bound to the authenticating user. Adapters MUST accept tags with empty conditions, and MUST refuse a tag carrying any condition clause they do not support.
 
 ### Agent grant
 
@@ -211,8 +211,8 @@ Exchange denials use the body shape of [Denials](#denials):
 
 | Status | `error` | Meaning | Client action |
 |---|---|---|---|
-| 400 | `invalid_request` | Malformed form, a header rule above was broken, or the NIP-98 proof failed verification | Show the error, do not retry automatically |
-| 400 | `invalid_grant` | The session is not usable, the owner may not enroll agents, the owner authorization is invalid, or the agent key cannot be enrolled | Show the refusal, do not retry automatically |
+| 400 | `invalid_request` | Malformed form, a header rule above was broken, the NIP-98 proof failed verification, or the `subject_token` is invalid or unacceptable, including a session whose owner may not enroll agents, as [RFC 8693 §2.2.2](https://www.rfc-editor.org/rfc/rfc8693#section-2.2.2) requires | Show the error, do not retry automatically |
+| 400 | `invalid_grant` | The owner authorization is invalid, or the agent key cannot be enrolled | Show the refusal, do not retry automatically |
 | 403 | `agent_unsupported` | The adapter does not issue agent grants | Show the refusal, do not retry automatically |
 | 413 | `request_too_large` | The body exceeds 8192 bytes | Show the error, do not retry automatically |
 | 429 | `rate_limited` | Too many requests or agents | Retry with bounded backoff |
@@ -241,7 +241,7 @@ Denials follow [Denials](#denials), with the grant in place of the session:
 | Status | `error` | Meaning | Client action |
 |---|---|---|---|
 | 401 | `invalid_grant` | No grant was presented, or the grant is unknown, expired, or revoked, or its owner authorization has ended | Discard the grant; enroll again only through a new owner authorization |
-| 403 | `invalid_target` | The relay is not a target for this agent's assertions | Keep the grant, disconnect from that relay, show access denied, do not retry automatically |
+| 403 | `authorization_denied` | The relay is not authorized for this agent's assertions | Keep the grant, disconnect from that relay, show access denied, do not retry automatically |
 | 403 | `agent_unsupported` | The adapter does not issue agent assertions | Keep the grant, show the refusal, do not retry automatically |
 
 The remaining codes and the rules for 429, 5xx, network failures, and undefined codes are as in [Denials](#denials), with "keep the session" read as "keep the grant".
@@ -260,7 +260,7 @@ agent_pubkey={64-char lowercase hex agent public key}
 
 The body MUST contain exactly one field, `agent_pubkey`; any other form MUST be rejected with 400 `invalid_request`. The body is limited to 1024 bytes; a larger body MUST be rejected with 413 `request_too_large`.
 
-Success response (`200`, `Cache-Control: no-store`): `{"revoked": true}`. Revocation is idempotent: revoking an agent the owner already revoked succeeds and changes nothing. The adapter MUST invalidate every grant for that agent key and stop issuing assertions for it, and SHOULD disconnect it with the [NIP-FI](NIP-FI.md) Admin disconnect API. Revocation MUST NOT affect the owner's own key or sessions. An agent key the session's owner never enrolled, including another owner's, MUST be answered as 404 `agent_not_found`, so revocation does not reveal other owners' agents. Session denials are as in [Session check](#session-check); a missing session is 401 `session_required`.
+Success response (`200`, `Cache-Control: no-store`): `{"revoked": true}`. Revocation is idempotent: revoking an agent the owner already revoked succeeds and changes nothing. The adapter MUST invalidate every grant for that agent key and stop issuing assertions for it, and MUST disconnect it with the [NIP-FI](NIP-FI.md) Admin disconnect API. Revocation MUST NOT affect the owner's own key or sessions. An agent key the session's owner never enrolled, including another owner's, MUST be answered as 404 `agent_not_found`, so revocation does not reveal other owners' agents. Session denials are as in [Session check](#session-check); a missing session is 401 `session_required`.
 
 ## NIP-FI assertion transport
 
