@@ -351,3 +351,31 @@ async fn request_scope_reuses_one_read_without_publishing_optional_cache_entries
     .await;
     assert_eq!(source.calls.load(Ordering::SeqCst), before);
 }
+
+#[tokio::test]
+async fn unmapped_legacy_rejection_scope_never_yields_an_admission_proof() {
+    let (state, _, key, _) = fixture(NipFiMode::Off).await;
+    let policy = Policy {
+        mode: NipFiMode::Off,
+        required: false,
+        stored_required: false,
+        mapped: false,
+    };
+    with_policy(policy, async {
+        let mut called = false;
+        let response =
+            admit_nip_fi_http_on_state(&state, &headers("unknown.example", false), || {
+                called = true;
+                Ok(Nip98Proof::new(key, ()))
+            })
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            !called,
+            "unmapped scope must refuse before credential extraction"
+        );
+    })
+    .await;
+}

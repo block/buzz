@@ -26,11 +26,9 @@ impl buzz_auth::Nip98ReplayGuard for Replay {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn signed_unsigned_free_controls_and_required_discovery_use_real_host_rows() {
-    let base = crate::state::tests::test_state_with_database_url_and_pool_options(
-        &crate::test_support::database_url(),
-        sqlx::postgres::PgPoolOptions::new(),
-    )
-    .await;
+    let base = crate::api::bridge::postgres_tests::bridge_handler_test_state()
+        .await
+        .expect("isolated Postgres and local Redis");
     let mut state = (*base).clone();
     let keys = Keys::generate();
     let free = format!("free-{}.example", uuid::Uuid::new_v4().simple());

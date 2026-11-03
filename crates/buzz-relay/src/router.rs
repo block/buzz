@@ -191,6 +191,24 @@ async fn nip_fi_assertion_guard(
     }
     let policy = match crate::nip_fi_policy::resolve(&state, request.headers()).await {
         Ok(policy) => policy,
+        Err(response) if response.status() == StatusCode::NOT_FOUND => {
+            // The authoritative read found no serving policy. Let the route
+            // retain its legacy rejection (e.g. Git's credential challenge).
+            // The shared admission gate refuses this scope unconditionally;
+            // this is never an optional-policy fallback or a data admission.
+            let mode = state.config.nip_fi.mode;
+            let policy = crate::nip_fi_policy::Policy {
+                mode,
+                required: mode.enforces(),
+                stored_required: false,
+                mapped: false,
+            };
+            return crate::nip_fi_policy::with_policy(
+                policy,
+                nip_fi_assertion_guard_with_policy(state, request, next, mode),
+            )
+            .await;
+        }
         Err(response) => {
             if state.config.nip_fi.mode.observes_only() {
                 crate::nip_fi_shadow::record_for(

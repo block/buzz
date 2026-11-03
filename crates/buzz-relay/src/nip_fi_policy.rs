@@ -37,6 +37,7 @@ pub(crate) struct Policy {
     pub mode: NipFiMode,
     pub required: bool,
     pub stored_required: bool,
+    pub mapped: bool,
 }
 
 tokio::task_local! { static REQUEST_POLICY: Policy; }
@@ -91,7 +92,14 @@ pub(crate) async fn resolve(
         mode: effective(global, policy.requires_nip_fi),
         required: policy.requires_nip_fi || global.enforces(),
         stored_required: policy.requires_nip_fi,
+        mapped: true,
     })
+}
+
+/// An unmapped request may retain legacy pre-auth error ordering, but must
+/// never obtain a shared admission proof if a handler omits its host check.
+pub(crate) fn unmapped_request() -> bool {
+    REQUEST_POLICY.try_with(|p| !p.mapped).unwrap_or(false)
 }
 
 /// Admission callers share the router's decision. Direct callers fail closed

@@ -170,6 +170,9 @@ async fn pod_on(
     resolver.refresh().await.expect("startup load");
 
     let mut state = (*base).clone();
+    // These witnesses advance the binding clock at the tenant-read seam;
+    // keep policy independent so its added writer read cannot consume that hook.
+    state.nip_fi_policy = Arc::new(crate::nip_fi_policy::OptionalPolicy);
     let config = Arc::make_mut(&mut state.config);
     config.nip_fi.mode = mode;
     config.nip_fi.source = crate::nip_fi_config::CommunitySource::Database;

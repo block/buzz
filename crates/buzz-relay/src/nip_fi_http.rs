@@ -780,6 +780,11 @@ pub(crate) async fn admit_nip_fi_http_on_state<X, F>(
 where
     F: FnOnce() -> Result<Nip98Proof<X>, Response<Body>>,
 {
+    if crate::nip_fi_policy::unmapped_request() {
+        return Err(http_denial(
+            buzz_auth::DenialClass::AuthorizationUnavailable,
+        ));
+    }
     let mode = crate::nip_fi_policy::mode(state, headers).await;
     let verifier = state.nip_fi_verifier.as_deref();
     let communities = state.nip_fi_communities();
