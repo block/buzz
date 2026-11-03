@@ -30,18 +30,10 @@ Widget? _useHiddenHistoryPaging({
     var cancelled = false;
     // After this build: fetching updates providers and this widget's state.
     unawaited(
-      Future<void>(() async {
+      Future<void>(() {
         if (cancelled || !context.mounted) return;
         autoPages.value++;
-        isLoadingOlder.value = true;
-        try {
-          final loaded = await notifier.fetchOlder();
-          if (context.mounted) {
-            olderFetchPaused.value = !loaded && !notifier.reachedOldest;
-          }
-        } finally {
-          if (context.mounted) isLoadingOlder.value = false;
-        }
+        _fetchOlderPage(context, notifier, isLoadingOlder, olderFetchPaused);
       }),
     );
     return () => cancelled = true;
@@ -111,22 +103,26 @@ bool _oldestRowFits(Iterable<ItemPosition> positions, int rowCount) =>
   );
 }
 
-/// Fetches one older page for an explicit request, recording a failure as a
-/// pause that the next request or scroll clears.
-void _fetchOlderByHand(
+/// Fetches one older page. A failed or thrown fetch is recorded as a pause,
+/// which an explicit request or a scroll clears.
+void _fetchOlderPage(
   BuildContext context,
   ChannelMessagesNotifier notifier,
   ValueNotifier<bool> isLoadingOlder,
-  ObjectRef<bool> olderFetchPaused,
-) {
+  ObjectRef<bool> olderFetchPaused, {
+  VoidCallback? onDone,
+}) {
   olderFetchPaused.value = false;
   isLoadingOlder.value = true;
   notifier
       .fetchOlder()
-      .then((loaded) {
-        olderFetchPaused.value = !loaded && !notifier.reachedOldest;
-      })
+      .then(
+        (loaded) => olderFetchPaused.value = !loaded && !notifier.reachedOldest,
+        onError: (Object _) => olderFetchPaused.value = true,
+      )
       .whenComplete(() {
-        if (context.mounted) isLoadingOlder.value = false;
+        if (!context.mounted) return;
+        isLoadingOlder.value = false;
+        onDone?.call();
       });
 }

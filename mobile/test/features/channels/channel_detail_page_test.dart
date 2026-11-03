@@ -10803,6 +10803,7 @@ void main() {
           ],
         ],
       );
+      messagesNotifier.throwOlderFetch = true;
       await tester.pumpWidget(
         _buildTestable(
           messages: const [],
@@ -10814,16 +10815,23 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // A failed fetch pauses paging but leaves a way to resume it.
+      // A thrown fetch pauses paging once, without retrying on its own.
       expect(messagesNotifier.fetchOlderCalls, 1);
       expect(find.text('No messages yet'), findsNothing);
+      expect(find.text('Load earlier messages'), findsOneWidget);
+
+      // So does a fetch that loads nothing, and each leaves a way to resume.
+      messagesNotifier.throwOlderFetch = false;
+      await tester.tap(find.text('Load earlier messages'));
+      await tester.pumpAndSettle();
+      expect(messagesNotifier.fetchOlderCalls, 2);
       expect(find.text('Load earlier messages'), findsOneWidget);
 
       messagesNotifier.failOlderFetch = false;
       await tester.tap(find.text('Load earlier messages'));
       await tester.pumpAndSettle();
 
-      expect(messagesNotifier.fetchOlderCalls, 2);
+      expect(messagesNotifier.fetchOlderCalls, 3);
       expect(findRichText('Older chat'), findsOneWidget);
     });
 
@@ -18188,6 +18196,9 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
   bool _hasLoadedMessages;
   final List<List<NostrEvent>> _olderPages;
   bool failOlderFetch;
+
+  /// Makes [fetchOlder] throw, as a legacy history request can.
+  bool throwOlderFetch = false;
   final Map<String, ChannelWindowThreadSummary> summaries;
   final loadedEventIds = <String>{};
   @override
@@ -18224,6 +18235,7 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
   @override
   Future<bool> fetchOlder() async {
     fetchOlderCalls += 1;
+    if (throwOlderFetch) throw StateError('offline');
     if (failOlderFetch || _olderPages.isEmpty) return false;
     _messages = [..._olderPages.removeAt(0), ..._messages]
       ..sort((a, b) => a.createdAt.compareTo(b.createdAt));

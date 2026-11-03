@@ -522,6 +522,7 @@ class _MessageList extends HookConsumerWidget {
 
     useEffect(
       () {
+        var disposed = false;
         void onPositionsChanged() {
           final positions = itemPositionsListener.itemPositions.value;
           if (positions.isEmpty) return;
@@ -566,22 +567,18 @@ class _MessageList extends HookConsumerWidget {
           }
           if (notifier.reachedOldest) return;
           if (fills) viewportFillPages.value++;
-          isLoadingOlder.value = true;
-          notifier
-              .fetchOlder()
-              .then((loaded) {
-                olderFetchPaused.value = !loaded && !notifier.reachedOldest;
-              })
-              .whenComplete(() {
-                if (!context.mounted) return;
-                isLoadingOlder.value = false; // Re-check: may add no entry.
-                WidgetsBinding.instance.addPostFrameCallback((_) {
-                  if (context.mounted) onPositionsChanged();
-                });
-              });
+          _fetchOlderPage(
+            context,
+            notifier,
+            isLoadingOlder,
+            olderFetchPaused,
+            // Re-check: a page of hidden notices adds no entry to re-run this.
+            onDone: () => WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!disposed && context.mounted) onPositionsChanged();
+            }),
+          );
         }
 
-        var disposed = false;
         itemPositionsListener.itemPositions.addListener(onPositionsChanged);
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!disposed && context.mounted) onPositionsChanged();
@@ -971,7 +968,7 @@ class _MessageList extends HookConsumerWidget {
                     onPressed: () {
                       showLoadEarlier.value = false;
                       viewportFillPages.value = 0;
-                      _fetchOlderByHand(
+                      _fetchOlderPage(
                         context,
                         notifier,
                         isLoadingOlder,
