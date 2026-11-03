@@ -160,24 +160,28 @@ channel subscriptions.
 A subscription's replay is cut when it replays 500 events, or, for the
 live-only subscription, always: it replays nothing itself. A subscription
 that misses its EOSE deadline counts as cut, and so does one the previous
-connection never caught up. When a `current` client reconnects, a profile
-or membership subscription whose replay was not cut resumed every change,
-so it skips its full read: profiles read nothing unless an earlier read is
+connection never caught up. Only an EOSE catches a subscription up: one
+that missed its deadline is recovered, but the next connection cannot
+resume or carry it. When a `current` client reconnects, a profile or
+membership subscription whose replay was not cut resumed every change, so
+it skips its full read: profiles read nothing unless an earlier read is
 still owed, and membership only repairs unreads, without the read-state
-snapshot. A cut one reads as on a cold start. The
-channel subscriptions always recover the windows and threads.
+snapshot, unless a snapshot read failed since, which a full repair retries.
+A cut one reads as on a cold start. The channel subscriptions always
+recover the windows and threads.
 
 Every `tick_secs` the client runs a recovery tick, on its own clock across
 connections. In `legacy` each tick replaces its channel subscriptions and
 rereads roster, read state and unread. In `current` each of the three waits
 `backstop_secs` since it last ran: since the batches were last replaced,
 since the roster was last read in full, and since a full unread repair (with
-its read-state snapshot) was last asked for. A failed roster or unread read
-is owed and runs again on the next tick; an owed profile read runs again
-when the profile subscription next establishes. A replacement is live-only
-and is opened before the subscription it replaces is closed. A replacement
-that misses its EOSE deadline is closed, the subscription it would have
-replaced stays, and the next tick tries again.
+its read-state snapshot) was last asked for. A failed roster read, unread
+repair or read-state snapshot is owed and runs again on the next tick; a
+repair without the snapshot does not settle an owed snapshot. An owed
+profile read runs again when the profile subscription next establishes. A
+replacement is live-only and is opened before the subscription it replaces
+is closed. A replacement that misses its EOSE deadline is closed, the
+subscription it would have replaced stays, and the next tick tries again.
 
 Every `renewal_secs` (0 disables it; the first is jittered) the client renews
 its identity and reconnects. In `legacy` that is an ordinary reconnect, which
@@ -191,9 +195,11 @@ an unread repair run again. A human's session end
 subscriptions start 960 s before the previous session ended, but not before
 300 s before the client started.
 
-Reads run in one task at a time per client. A read that comes due while the
-same read is running or queued is not added again, so a slow relay does not
-pile reads up behind it.
+Each client runs its reads in one task, at most six at a time. A read that
+comes due while the same read is running or queued is not added again, so a
+slow relay does not pile reads up behind it. A read leaves the running set
+as soon as it settles, so a failed one can retry while a slow one is still
+under way.
 
 The app also establishes the channel subscriptions when a tick's replacement
 reaches its EOSE; the generator does not model that.

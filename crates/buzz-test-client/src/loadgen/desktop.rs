@@ -327,6 +327,10 @@ pub(super) fn connect_fetches(
 pub(super) struct Owed {
     pub(super) roster: bool,
     pub(super) profiles: bool,
+    /// The read-state snapshot, owed until a snapshot read succeeds. Only a
+    /// full repair reads it, so a covered repair never settles it.
+    pub(super) snapshot: bool,
+    /// The unread repair of the channels.
     pub(super) unread: bool,
 }
 
@@ -334,8 +338,8 @@ pub(super) struct Owed {
 /// global route replayed every change since the last connection, so it
 /// skips its full read unless one is still owed: profiles resume their
 /// statuses and emoji, and membership resumes read state and reminders and
-/// only repairs unreads. A channel route recovers the open windows and
-/// threads.
+/// only repairs unreads, unless the read-state snapshot is owed, which takes
+/// a full repair. A channel route recovers the open windows and threads.
 pub(super) fn establish_fetches(
     route: Route,
     continuous: bool,
@@ -352,8 +356,10 @@ pub(super) fn establish_fetches(
             if !continuous || owed.roster {
                 reads.push(Fetch::Roster);
             }
-            if continuous {
+            if continuous && !owed.snapshot {
                 reads.push(COVERED_REPAIR);
+            } else if continuous {
+                reads.push(FULL_REPAIR);
             } else {
                 reads.extend([FULL_REPAIR, Fetch::Reminders]);
             }
@@ -378,6 +384,9 @@ pub(super) struct Establishment {
     /// Routes that reached EOSE while carried, with their continuity.
     held: Vec<(Route, bool)>,
     done: Vec<Route>,
+    /// Routes established only because their EOSE never came: recovered,
+    /// but not live, so not caught up.
+    timed_out: Vec<Route>,
 }
 
 impl Establishment {
@@ -393,12 +402,12 @@ impl Establishment {
             carried: situation == Situation::Renewal,
             held: Vec::new(),
             done: Vec::new(),
+            timed_out: Vec::new(),
         }
     }
 
-    /// `route` reached its EOSE, its replay `cut` or not. A route that missed
-    /// its deadline counts as cut. Returns the routes that establish now,
-    /// each with its continuity.
+    /// `route` reached its EOSE, its replay `cut` or not. Returns the routes
+    /// that establish now, each with its continuity.
     pub(super) fn eose(&mut self, route: Route, cut: bool) -> Vec<(Route, bool)> {
         if route == Route::Replay {
             return Vec::new();
@@ -424,11 +433,24 @@ impl Establishment {
         now
     }
 
-    /// The routes this connection has caught up: established, or carried
-    /// with their continuity kept.
+    /// `route` missed its EOSE deadline. It is recovered as if its replay
+    /// were cut, but only an EOSE proves a route live: it is not caught up,
+    /// so the next connection cannot resume or carry it.
+    pub(super) fn timeout(&mut self, route: Route) -> Vec<(Route, bool)> {
+        if route != Route::Replay {
+            self.timed_out.push(route);
+        }
+        self.eose(route, true)
+    }
+
+    /// The routes this connection has caught up: established at their EOSE,
+    /// or carried with their continuity kept.
     pub(super) fn caught_up(&self) -> Vec<Route> {
         let held = self.held.iter().map(|(route, _)| *route);
-        self.done.iter().copied().chain(held).collect()
+        let done = self.done.iter().copied();
+        done.filter(|route| !self.timed_out.contains(route))
+            .chain(held)
+            .collect()
     }
 }
 
@@ -467,7 +489,7 @@ pub(super) fn tick(mode: DesktopMode, backstop: Duration, clocks: Clocks, owed: 
         DesktopMode::Current => Due {
             batches: stale(clocks.batches),
             roster: owed.roster || stale(clocks.roster),
-            unread: owed.unread || stale(clocks.unread),
+            unread: owed.unread || owed.snapshot || stale(clocks.unread),
         },
     }
 }
@@ -749,7 +771,22 @@ impl Reader {
                 self.query(Op::DesktopEmoji, filter).await;
             }
             Fetch::Unread { snapshot } => {
-                let repaired = self.repair(snapshot).await;
+                // The snapshot and the channel repair settle separately:
+                // a repair that succeeds without the snapshot leaves it owed.
+                if snapshot {
+                    let filter = json!([{
+                        "kinds": [30078], "authors": [viewer], "read_state_snapshot": 1,
+                    }]);
+                    let read = self.query(Op::DesktopReadState, filter).await.is_some();
+                    let mut ledger = lock(&self.ledger);
+                    ledger.owed.snapshot = !read;
+                    if !read {
+                        // The repair waits for the snapshot it builds on.
+                        ledger.owed.unread = true;
+                        return;
+                    }
+                }
+                let repaired = self.repair().await;
                 lock(&self.ledger).owed.unread = !repaired;
             }
             Fetch::Reminders => {
@@ -776,17 +813,9 @@ impl Reader {
         true
     }
 
-    /// An unread repair, after the read-state snapshot when `snapshot`. The
-    /// repair reads its channels one chunk after another, as the app does.
-    /// Whether it all succeeded.
-    async fn repair(&self, snapshot: bool) -> bool {
-        if snapshot {
-            let filter =
-                json!([{"kinds": [30078], "authors": [self.viewer], "read_state_snapshot": 1}]);
-            if self.query(Op::DesktopReadState, filter).await.is_none() {
-                return false;
-            }
-        }
+    /// An unread repair of the channels, one chunk after another, as the
+    /// app does. Whether it all succeeded.
+    async fn repair(&self) -> bool {
         let now = unix_now();
         let mark = lock(&self.unread_mark).replace(now);
         for ids in self.channels.chunks(UNREAD_CHANNELS) {
@@ -893,31 +922,18 @@ fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Runs `fetches`: NIP-11 first, since notices and window bounds need the
-/// relay's pubkey, then the rest at most [`HTTP_CONCURRENCY`] at a time.
-async fn run_fetches(reader: Arc<Reader>, fetches: Vec<Fetch>) {
-    if fetches.contains(&Fetch::Nip11) {
-        reader.nip11().await;
-    }
-    stream::iter(fetches.into_iter().filter(|f| *f != Fetch::Nip11))
-        .map(|fetch| {
-            let reader = reader.clone();
-            async move { reader.fetch(fetch).await }
-        })
-        .buffer_unordered(HTTP_CONCURRENCY)
-        .collect::<Vec<()>>()
-        .await;
-}
-
-/// A client's HTTP reads: one task at a time, so reads never pile up behind
-/// a slow relay. Reads that come due while it runs are queued for its next
-/// round; one whose work is already running or queued is not added again.
-/// Dropping it (the client was cancelled) aborts the task, so its unfinished
-/// reads are recorded.
+/// A client's HTTP reads, run by one task at most [`HTTP_CONCURRENCY`] at a
+/// time, so reads never pile up behind a slow relay. A read that comes due
+/// while the same work is running or queued is not added again; a read
+/// leaves the running set as soon as it settles, so a failed one can be
+/// retried while others are still under way. Dropping it (the client was
+/// cancelled) aborts the task, so its unfinished reads are recorded.
 #[derive(Default)]
 struct Fetcher {
     task: Option<tokio::task::JoinHandle<()>>,
     work: Arc<std::sync::Mutex<Work>>,
+    /// Wakes the task for newly queued reads.
+    wake: Arc<tokio::sync::Notify>,
 }
 
 /// A [`Fetcher`]'s reads, shared with its task.
@@ -927,6 +943,26 @@ struct Work {
     active: bool,
     running: Vec<Fetch>,
     queued: Vec<Fetch>,
+}
+
+impl Work {
+    /// The next queued read that may start beside the `running` ones, taken
+    /// off the queue. NIP-11 runs alone and before anything queued with it,
+    /// since notices and window bounds need the relay's pubkey.
+    fn next(&mut self) -> Option<Fetch> {
+        if self.running.len() >= HTTP_CONCURRENCY || self.running.contains(&Fetch::Nip11) {
+            return None;
+        }
+        let i = match self.queued.iter().position(|f| *f == Fetch::Nip11) {
+            Some(_) if !self.running.is_empty() => return None,
+            Some(i) => i,
+            None if self.queued.is_empty() => return None,
+            None => 0,
+        };
+        let fetch = self.queued.remove(i);
+        self.running.push(fetch);
+        Some(fetch)
+    }
 }
 
 impl Fetcher {
@@ -941,32 +977,58 @@ impl Fetcher {
             work.queued.retain(|have| !fetch.covers(*have));
             work.queued.push(fetch);
         }
-        if work.active || work.queued.is_empty() {
+        if work.queued.is_empty() {
+            return;
+        }
+        if work.active {
+            self.wake.notify_one();
             return;
         }
         work.active = true;
         drop(work);
-        let (reader, work) = (reader.clone(), self.work.clone());
-        self.task = Some(tokio::spawn(async move {
-            loop {
-                let fetches = {
-                    let mut work = lock(&work);
-                    work.running = std::mem::take(&mut work.queued);
-                    if work.running.is_empty() {
-                        work.active = false;
-                        return;
-                    }
-                    work.running.clone()
-                };
-                run_fetches(reader.clone(), fetches).await;
-            }
-        }));
+        let task = drain(reader.clone(), self.work.clone(), self.wake.clone());
+        self.task = Some(tokio::spawn(task));
     }
 
-    /// Waits for the task under way, and the reads queued behind it.
+    /// Waits for the reads under way and queued.
     async fn finish(&mut self) {
         if let Some(task) = self.task.take() {
             let _ = task.await;
+        }
+    }
+}
+
+/// A [`Fetcher`]'s task: starts queued reads as they may start, until none
+/// are running or queued.
+async fn drain(
+    reader: Arc<Reader>,
+    work: Arc<std::sync::Mutex<Work>>,
+    wake: Arc<tokio::sync::Notify>,
+) {
+    let mut jobs = stream::FuturesUnordered::new();
+    loop {
+        {
+            let mut work = lock(&work);
+            while let Some(fetch) = work.next() {
+                let reader = reader.clone();
+                jobs.push(async move {
+                    reader.fetch(fetch).await;
+                    fetch
+                });
+            }
+            if work.running.is_empty() {
+                work.active = false;
+                return;
+            }
+        }
+        tokio::select! {
+            Some(fetch) = jobs.next() => {
+                let mut work = lock(&work);
+                if let Some(i) = work.running.iter().position(|f| *f == fetch) {
+                    work.running.remove(i);
+                }
+            }
+            () = wake.notified() => {}
         }
     }
 }
@@ -1202,7 +1264,7 @@ impl Client {
                     }
                 } else {
                     open.insert(id);
-                    established.extend(establishment.eose(w.route, true));
+                    established.extend(establishment.timeout(w.route));
                 }
             }
 
@@ -1451,6 +1513,7 @@ mod tests {
     const NO_OWED: Owed = Owed {
         roster: false,
         profiles: false,
+        snapshot: false,
         unread: false,
     };
 
@@ -1510,6 +1573,12 @@ mod tests {
         let due = tick(DesktopMode::Current, backstop, fresh, owed);
         assert!(!due.batches);
         assert_eq!(tick_fetches(due), [Fetch::Roster, FULL_REPAIR]);
+        let snapshot = Owed {
+            snapshot: true,
+            ..NO_OWED
+        };
+        let due = tick(DesktopMode::Current, backstop, fresh, snapshot);
+        assert_eq!(tick_fetches(due), [FULL_REPAIR]);
     }
 
     #[test]
@@ -1561,6 +1630,12 @@ mod tests {
             est(Route::Membership, true, roster_owed),
             [Fetch::Roster, COVERED_REPAIR]
         );
+        // A continuous route cannot settle an owed snapshot without reading it.
+        let snapshot_owed = Owed {
+            snapshot: true,
+            ..NO_OWED
+        };
+        assert_eq!(est(Route::Membership, true, snapshot_owed), [FULL_REPAIR]);
         assert_eq!(est(Route::Channels, true, NO_OWED), channels);
         assert_eq!(est(Route::Channels, false, NO_OWED), channels);
         assert!(est(Route::Replay, false, NO_OWED).is_empty());
@@ -1619,6 +1694,15 @@ mod tests {
             cut.eose(Route::Membership, false),
             [(Route::Membership, true)]
         );
+
+        // A timed-out route recovers as cut, but is not caught up.
+        let mut late = Establishment::new(Situation::Reconnect, &all);
+        assert_eq!(
+            late.timeout(Route::Membership),
+            [(Route::Membership, false)]
+        );
+        assert_eq!(late.eose(Route::Profiles, false), [(Route::Profiles, true)]);
+        assert_eq!(late.caught_up(), [Route::Profiles]);
 
         // A renewal before a route ever caught up reads it in full.
         let mut early = Establishment::new(Situation::Renewal, &all[..1]);
@@ -1795,8 +1879,12 @@ mod tests {
         (addr, frames)
     }
 
-    /// Reads the fake API fails once each, by name: `roster`, `unread`.
+    /// Reads the fake API fails once each, by name: `roster`, `read_state`,
+    /// `unread`, `reminders`.
     type FailOnce = &'static [&'static str];
+
+    /// A read the fake API answers late, by name, and how late.
+    type Slow = Option<(&'static str, Duration)>;
 
     fn signed(keys: &Keys, k: u32, content: &str, at: u64, tags: Vec<Tag>) -> Value {
         let event = EventBuilder::new(kind(k), content)
@@ -1817,8 +1905,10 @@ mod tests {
     /// older aux event and a summary; its relay-signed bounds point after the
     /// last row. The page there is full too, and its bounds say history is
     /// exhausted. Any other window cursor is refused. The read-state snapshot
-    /// answers in its own shape; `fail` reads fail the first time.
-    async fn fake_api(run_id: &str, fail: FailOnce) -> (String, Shared2<Vec<Value>>) {
+    /// answers in its own shape; `fail` reads fail the first time, and a
+    /// `slow` read blocks its connection's handler (run such a test on the
+    /// multi-thread runtime).
+    async fn fake_api(run_id: &str, fail: FailOnce, slow: Slow) -> (String, Shared2<Vec<Value>>) {
         let owner = identity::keys(run_id, Role::Owner, 0);
         let relay = Keys::generate();
         let root = Value::Array(vec![signed(&owner, 9, "lg-root 0", 2_000, vec![])]);
@@ -1853,9 +1943,16 @@ mod tests {
                 "roster"
             } else if filter["kinds"] == json!([9, 40002, 40008]) {
                 "unread"
+            } else if filter.get("read_state_snapshot").is_some() {
+                "read_state"
+            } else if filter["kinds"] == json!([30300]) {
+                "reminders"
             } else {
                 ""
             };
+            if let Some((_, delay)) = slow.filter(|(slow, _)| *slow == name) {
+                std::thread::sleep(delay);
+            }
             if fail.contains(&name) && !failed.lock().unwrap().contains(&name) {
                 failed.lock().unwrap().push(name);
                 return (500, r#"{"error":"once"}"#.into());
@@ -2002,6 +2099,7 @@ hold_secs = 1
         plan: Plan,
         drop_first: Option<Duration>,
         fail: FailOnce,
+        slow: Slow,
         req_timeout: Duration,
     }
 
@@ -2022,6 +2120,7 @@ hold_secs = 1
             plan: instant(),
             drop_first: None,
             fail: &[],
+            slow: None,
             req_timeout: REQ_TIMEOUT,
         }
     }
@@ -2030,7 +2129,7 @@ hold_secs = 1
     /// them and returns what they did. Fails after 15 s without `done`.
     async fn drive(rig: Rig, min: Duration, done: impl Fn(&Outcome) -> bool) -> Outcome {
         let (ws, frames) = fake_ws_relay(rig.plan, rig.drop_first).await;
-        let (http, queries) = fake_api("d", rig.fail).await;
+        let (http, queries) = fake_api("d", rig.fail, rig.slow).await;
         let scenario = desktops(&ws, &http, rig.humans, rig.joined, &rig.desktop);
         let net = Net::new(&scenario).await.unwrap();
         let stats = Arc::new(Stats::default());
@@ -2402,6 +2501,104 @@ hold_secs = 1
         assert_eq!(out.count("desktop_read_state"), 2);
         assert_eq!(out.count("desktop_reminders"), 1);
         assert_eq!(out.count("desktop_profiles"), 1);
+    }
+
+    #[tokio::test]
+    async fn an_owed_snapshot_survives_a_covered_repair() {
+        // The cold snapshot read fails. Before any tick, the connection
+        // drops and the membership route resumes with a complete replay:
+        // its repair must read the snapshot still owed.
+        let mut rig = solo(5, &format!("mode = \"current\"\n{QUIET}"));
+        rig.drop_first = Some(Duration::from_millis(700));
+        rig.fail = &["read_state"];
+        let out = drive(
+            rig,
+            Duration::ZERO,
+            settled(
+                |o| o.count("ws_connect_auth") >= 2 && o.count("desktop_live_eose") >= 6,
+                Duration::from_millis(800),
+            ),
+        )
+        .await;
+        let ops = &out.ops;
+        assert_eq!(
+            (
+                out.count("desktop_read_state"),
+                out.errors("desktop_read_state")
+            ),
+            (1, 1),
+            "{ops:?}"
+        );
+        // The failed snapshot held the cold repair back; the resumed route
+        // repaired once and reread neither roster nor reminders.
+        assert_eq!(out.count("desktop_unread"), 1, "{ops:?}");
+        assert_eq!(out.count("desktop_roster"), 1, "{ops:?}");
+        assert_eq!(out.count("desktop_reminders"), 1, "{ops:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_failed_read_retries_while_an_unrelated_slow_one_runs() {
+        // The cold roster read fails while reminders take 3 s; the tick at
+        // 1 s retries the roster without waiting for reminders.
+        let mut rig = solo(5, "mode = \"current\"\ntick_secs = 1.0");
+        rig.fail = &["roster"];
+        rig.slow = Some(("reminders", Duration::from_secs(3)));
+        let reminders = std::cell::Cell::new(None);
+        let out = drive(rig, Duration::ZERO, |o| {
+            let retried = o.count("desktop_roster") == 1;
+            if retried && reminders.get().is_none() {
+                reminders.set(Some(o.count("desktop_reminders")));
+            }
+            retried
+        })
+        .await;
+        assert_eq!(
+            reminders.get(),
+            Some(0),
+            "the roster retry waited for reminders"
+        );
+        assert_eq!(out.errors("desktop_roster"), 1);
+        assert_eq!(out.count("desktop_reminders"), 1);
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_route_is_recovered_again_after_a_renewal() {
+        // The first connection's membership EOSE never comes: the route is
+        // recovered as cut, but it was never live. The renewal's complete
+        // replay therefore cannot carry it, and it recovers in full again.
+        // The first renewal is jittered; with this period it comes after the
+        // short deadline and before the test ends.
+        let mut rig = solo(
+            5,
+            "mode = \"current\"\nrenewal_secs = 20.0\ntick_secs = 3600.0",
+        );
+        rig.req_timeout = Duration::from_millis(100);
+        rig.plan = Arc::new(|conn, id| {
+            let withheld = conn == 0 && id == "membership";
+            let delay = if withheld {
+                Duration::from_secs(60)
+            } else {
+                Duration::ZERO
+            };
+            (0, delay)
+        });
+        let out = drive(
+            rig,
+            Duration::ZERO,
+            settled(
+                |o| o.count("ws_connect_auth") >= 2 && o.count("desktop_live_eose") >= 5,
+                Duration::from_millis(800),
+            ),
+        )
+        .await;
+        let ops = &out.ops;
+        assert_eq!(out.errors("desktop_live_eose"), 1, "{ops:?}");
+        assert_eq!(out.count("ws_connect_auth"), 2, "{ops:?}");
+        for op in ["desktop_roster", "desktop_read_state", "desktop_reminders"] {
+            assert_eq!(out.count(op), 2, "{op}: {ops:?}");
+        }
+        // The routes that were live carried: no second profile read.
+        assert_eq!(out.count("desktop_profiles"), 1, "{ops:?}");
     }
 
     #[tokio::test]
