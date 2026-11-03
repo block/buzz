@@ -260,7 +260,12 @@ private final class NativeCommunityEntryController: UIViewController, UITextFiel
 
   @discardableResult
   private func addButton(_ title: String, primary: Bool = false, action: @escaping () -> Void) -> UIButton {
-    let config = onboardingButtonConfiguration(title, primary: primary)
+    var config = onboardingButtonConfiguration(title, primary: primary)
+    if primary, let argb = (configuration["onPrimaryArgb"] as? NSNumber)?.uint32Value {
+      config.baseBackgroundColor = view.tintColor
+      config.baseForegroundColor = UIColor(red: CGFloat((argb >> 16) & 255) / 255,
+        green: CGFloat((argb >> 8) & 255) / 255, blue: CGFloat(argb & 255) / 255, alpha: 1)
+    }
     let button = UIButton(configuration: config, primaryAction: UIAction { _ in action() })
     button.titleLabel?.numberOfLines = 0
     button.titleLabel?.adjustsFontForContentSizeCategory = true

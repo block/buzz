@@ -1,3 +1,4 @@
+import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/features/invites/invite_join_provider.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
 import 'package:buzz/features/invites/invite_join_sheet.dart';
@@ -93,6 +94,37 @@ void main() {
     expect(find.textContaining('Could not open the browser'), findsOneWidget);
     expect(tester.widget<FilledButton>(button).onPressed, isNotNull);
   });
+  testWidgets('native dark Join uses the theme foreground on its accent fill', (
+    tester,
+  ) async {
+    const channel = MethodChannel('buzz/community_entry');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    Map? config;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      config = call.arguments as Map;
+      return false;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    final theme = AppTheme.dark();
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: Theme(data: theme, child: const _InviteJoinSheetLauncher()),
+        overrides: [
+          inviteJoinProvider.overrideWith(
+            () => _StaticInviteJoinNotifier(
+              const InviteJoinState(status: InviteJoinStatus.confirming),
+            ),
+          ),
+        ],
+      ),
+    );
+    await tester.tap(find.text('Open invite'));
+    await tester.pumpAndSettle();
+    expect(config?['primaryArgb'], theme.colorScheme.primary.toARGB32());
+    expect(config?['onPrimaryArgb'], theme.colorScheme.onPrimary.toARGB32());
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
   testWidgets('recovery error is scrollable and exposes retry setup', (
     tester,
   ) async {
