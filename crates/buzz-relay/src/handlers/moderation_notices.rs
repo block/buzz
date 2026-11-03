@@ -29,7 +29,9 @@ use buzz_core::kind::{event_kind_u32, KIND_MEMBER_ADDED_NOTIFICATION, KIND_STREA
 use buzz_core::tenant::TenantContext;
 
 use super::event::dispatch_persistent_event;
-use super::side_effects::{emit_group_discovery_events, emit_membership_notification};
+use super::side_effects::{
+    emit_group_discovery_events, emit_membership_notification, publish_dm_visibility_snapshot,
+};
 use crate::state::AppState;
 
 /// Tag naming the moderation source row (report/action) a notice was derived
@@ -135,6 +137,9 @@ pub async fn send_moderation_notice(
         .db
         .unhide_dm(tenant.community(), dm_channel_id, recipient_pubkey)
         .await?;
+    // Clients filter the sidebar on the NIP-DV snapshot, not `hidden_at`, so
+    // republish it before the notice that makes them re-read.
+    publish_dm_visibility_snapshot(tenant, state, recipient_pubkey).await?;
 
     // 2. Ensure the relay's "{host} Moderation" kind:0 profile exists, and 3.
     //    the DM's kind:39000 discovery (with `hidden` / `t=dm` / `p`). Both are

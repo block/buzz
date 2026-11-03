@@ -161,12 +161,12 @@ pub(crate) async fn apply_kick_live_side_effects(
     }
 
     // The removal is committed: refresh the channel's discovery roster, then
-    // tell the kicked member, as a kind:9001 removal does. A recovery re-drive
-    // repeats both; the refresh is replaceable and a repeated notice is a
-    // harmless hint. Failures are logged and do not undo the kick.
-    if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
-        warn!(channel = %channel_id, error = %e, "NIP-29 group discovery emission failed");
-    }
+    // tell the kicked member, as a kind:9001 removal does. The notice tells a
+    // client to re-read that roster, so a failed refresh returns before it and
+    // the moderation driver retries the action. A recovery re-drive repeats
+    // both; the refresh is replaceable and a repeated notice is a harmless
+    // hint. A failed notice is logged and does not undo the kick.
+    emit_group_discovery_events(tenant, state, channel_id).await?;
     if let Err(e) = emit_membership_notification(
         tenant,
         state,
@@ -1182,6 +1182,44 @@ async fn publish_live_thread_summary(
         .await;
 }
 
+/// Test-only barrier at the point a membership notice is sent: a test parks
+/// the producer there, reads what a client would read on receipt, then lets
+/// it continue. Keyed by recipient so parallel tests do not interfere.
+#[cfg(test)]
+pub(crate) mod notice_barrier {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use tokio::sync::{mpsc, oneshot};
+
+    use uuid::Uuid;
+
+    /// A parked notice: its channel, and the handle that lets it continue.
+    pub(crate) type Parked = (Uuid, oneshot::Sender<()>);
+    type Waiters = Mutex<HashMap<Vec<u8>, mpsc::UnboundedSender<Parked>>>;
+
+    fn waiters() -> &'static Waiters {
+        static WAITERS: OnceLock<Waiters> = OnceLock::new();
+        WAITERS.get_or_init(Default::default)
+    }
+
+    /// Park every notice to `recipient`; each arrives as a release handle.
+    pub(crate) fn install(recipient: &[u8]) -> mpsc::UnboundedReceiver<Parked> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        waiters().lock().unwrap().insert(recipient.to_vec(), tx);
+        rx
+    }
+
+    pub(super) async fn reached(channel_id: Uuid, recipient: &[u8]) {
+        let waiter = waiters().lock().unwrap().get(recipient).cloned();
+        if let Some(waiter) = waiter {
+            let (release, released) = oneshot::channel();
+            if waiter.send((channel_id, release)).is_ok() {
+                let _ = released.await;
+            }
+        }
+    }
+}
+
 /// Emit a relay-signed membership notification event stored globally (channel_id = None).
 ///
 /// kind:44100 = member added, kind:44101 = member removed. Every notice
@@ -1261,6 +1299,9 @@ async fn emit_typed_membership_notification(
 
     let type_tag = Tag::parse([buzz_core::filter::NOTICE_CHANNEL_TYPE_TAG, channel_type])
         .map_err(|e| anyhow::anyhow!("failed to build channel type tag: {e}"))?;
+    #[cfg(test)]
+    notice_barrier::reached(channel_id, target_pubkey).await;
+
     let event = EventBuilder::new(Kind::Custom(notification_kind as u16), content)
         .tags([p_tag, h_tag, type_tag])
         .sign_with_keys(&state.relay_keypair)
@@ -2733,28 +2774,15 @@ async fn handle_delete_group(
         extract_h_tag_channel(event).ok_or_else(|| anyhow::anyhow!("missing h tag"))?;
     let actor_bytes = event.pubkey.to_bytes().to_vec();
 
-    // Read the members and type before the delete: `get_members` omits a
-    // deleted channel. The notices go out only after the delete and discovery
-    // cleanup, so a client that re-reads on the notice no longer sees it.
-    let members = state
-        .db
-        .get_members(tenant.community(), channel_id)
-        .await
-        .map_err(|e| anyhow::anyhow!("get_members failed: {e}"))?;
-    let channel_type = state
-        .db
-        .channel_type_of(tenant.community(), channel_id)
-        .await
-        .map_err(|e| anyhow::anyhow!("channel_type_of failed: {e}"))?;
-
-    // Soft-delete the channel.
+    // Soft-delete the channel, capturing its members under the same lock so a
+    // concurrent join is either included or refused.
     let deleted = state
         .db
-        .soft_delete_channel(tenant.community(), channel_id)
+        .soft_delete_channel_capturing_members(tenant.community(), channel_id)
         .await
         .map_err(|e| anyhow::anyhow!("soft_delete_channel failed: {e}"))?;
 
-    if !deleted {
+    if deleted.is_none() {
         warn!(channel = %channel_id, "channel already deleted or not found");
     }
 
@@ -2787,14 +2815,16 @@ async fn handle_delete_group(
     )
     .await?;
 
-    if let (true, Some(channel_type)) = (deleted, channel_type) {
-        for member in &members {
+    // Notify every member only after the delete and discovery cleanup, so a
+    // client that re-reads on the notice no longer sees the channel.
+    if let Some(deleted) = deleted {
+        for member in &deleted.members {
             if let Err(e) = emit_typed_membership_notification(
                 tenant,
                 state,
                 channel_id,
-                &channel_type,
-                &member.pubkey,
+                &deleted.channel_type,
+                member,
                 &actor_bytes,
                 KIND_MEMBER_REMOVED_NOTIFICATION,
             )

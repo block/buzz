@@ -1,11 +1,15 @@
 //! Postgres-backed tests for the membership notices sent by a channel delete,
 //! a moderation kick and a moderation DM: each notice reaches the member's
 //! live subscription, and a channel-list read made on receipt already shows
-//! the change.
+//! the change. "On receipt" is enforced by `notice_barrier`, which parks the
+//! producer at the notice while the test reads.
 
 use std::sync::Arc;
 
-use buzz_core::kind::{KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION};
+use buzz_core::kind::{
+    KIND_DM_HIDE, KIND_DM_VISIBILITY, KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_MEMBER_REMOVED_NOTIFICATION,
+};
 use buzz_core::TenantContext;
 use nostr::{EventBuilder, Keys, Kind, Tag};
 use serde_json::{json, Value};
@@ -13,6 +17,7 @@ use tokio::sync::mpsc::Receiver;
 use uuid::Uuid;
 
 use super::group_state_postgres_tests::{create_channel, http_auth, test_conn};
+use super::side_effects::notice_barrier;
 use crate::handlers::ingest::ingest_event;
 use crate::state::AppState;
 
@@ -84,72 +89,115 @@ fn subscribe_notices(
         tenant.community(),
         conn_id,
         "notices".into(),
-        vec![serde_json::from_value(filter).expect("filter")],
+        vec![
+            serde_json::from_value(filter).expect("filter"),
+            serde_json::from_value(json!({
+                "kinds": [KIND_DM_VISIBILITY],
+                "#p": [reader.public_key().to_hex()],
+            }))
+            .expect("filter"),
+        ],
         None,
     );
     rx
 }
 
-/// The `(kind, h)` of every live notice delivered so far.
-fn live_notices(rx: &mut Receiver<axum::extract::ws::Message>) -> Vec<(u64, String)> {
-    let mut notices = Vec::new();
+/// The `(kind, h tags)` of every live event delivered so far.
+fn live_events(rx: &mut Receiver<axum::extract::ws::Message>) -> Vec<(u64, Vec<String>)> {
+    let mut events = Vec::new();
     while let Ok(frame) = rx.try_recv() {
         let axum::extract::ws::Message::Text(text) = frame else {
             continue;
         };
         let message: Value = serde_json::from_str(&text).expect("relay frame");
-        if message[0] != "EVENT" {
-            continue;
+        if message[0] == "EVENT" {
+            events.push((
+                message[2]["kind"].as_u64().unwrap(),
+                tag_values(&message[2], "h"),
+            ));
         }
-        let event = &message[2];
-        let h = event["tags"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|tag| tag[0] == "h")
-            .map(|tag| tag[1].as_str().unwrap().to_owned())
-            .unwrap_or_default();
-        notices.push((event["kind"].as_u64().unwrap(), h));
     }
-    notices
+    events
 }
 
-/// A channel-list read as `reader`: the channels its 39000/39002 discovery
-/// names, as a client builds its sidebar.
-async fn listed_channels(
+fn notices(rx: &mut Receiver<axum::extract::ws::Message>) -> Vec<(u64, String)> {
+    live_events(rx)
+        .into_iter()
+        .filter(|(kind, _)| *kind != KIND_DM_VISIBILITY as u64)
+        .map(|(kind, h)| (kind, h.concat()))
+        .collect()
+}
+
+fn tag_values(event: &Value, name: &str) -> Vec<String> {
+    event["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|tag| tag[0] == name)
+        .map(|tag| tag[1].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// The `name` tag values of the events a one-shot read as `reader` returns.
+async fn read_tags(
     state: &Arc<AppState>,
     tenant: &TenantContext,
     reader: &Keys,
+    filter: Value,
+    name: &str,
 ) -> Vec<String> {
     let (conn, mut rx) = test_conn(tenant, reader);
-    let filters: Vec<nostr::Filter> = serde_json::from_value(json!([
-        {"kinds": [39002], "#p": [reader.public_key().to_hex()]},
-    ]))
-    .unwrap();
-    crate::handlers::req::handle_req("list".into(), filters, vec![None], conn, state.clone()).await;
-    let mut channels = Vec::new();
+    let filters: Vec<nostr::Filter> = serde_json::from_value(json!([filter])).unwrap();
+    crate::handlers::req::handle_req("read".into(), filters, vec![None], conn, state.clone()).await;
+    let mut values = Vec::new();
     while let Ok(frame) = rx.try_recv() {
         let axum::extract::ws::Message::Text(text) = frame else {
             continue;
         };
         let message: Value = serde_json::from_str(&text).expect("relay frame");
         match message[0].as_str() {
-            Some("EVENT") => {
-                for tag in message[2]["tags"].as_array().unwrap() {
-                    if tag[0] == "d" {
-                        channels.push(tag[1].as_str().unwrap().to_owned());
-                    }
-                }
-            }
-            Some("EOSE") | Some("CLOSED") => return channels,
+            Some("EVENT") => values.extend(tag_values(&message[2], name)),
+            Some("EOSE") | Some("CLOSED") => return values,
             _ => {}
         }
     }
     panic!("no EOSE");
 }
 
-/// Mutation: drop the notice loop in `handle_delete_group` → RED; emit the
-/// notices before `soft_delete_discovery_events` → the listed check is RED.
+/// A channel-list read as `reader`: the channels its 39002 discovery names,
+/// as a client builds its sidebar.
+async fn listed_channels(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    reader: &Keys,
+) -> Vec<String> {
+    let filter = json!({"kinds": [39002], "#p": [reader.public_key().to_hex()]});
+    read_tags(state, tenant, reader, filter, "d").await
+}
+
+/// The DMs `reader`'s current NIP-DV snapshot hides from its sidebar.
+async fn hidden_dms(state: &Arc<AppState>, tenant: &TenantContext, reader: &Keys) -> Vec<String> {
+    let filter = json!({"kinds": [KIND_DM_VISIBILITY], "#p": [reader.public_key().to_hex()]});
+    read_tags(state, tenant, reader, filter, "h").await
+}
+
+/// Wait for the producer to reach its next notice to the parked reader, run
+/// `on_receipt` while it is held there, then let it continue. Returns the
+/// notice's channel and what `on_receipt` saw.
+async fn at_receipt<T>(
+    barrier: &mut tokio::sync::mpsc::UnboundedReceiver<notice_barrier::Parked>,
+    on_receipt: impl AsyncFnOnce(String) -> T,
+) -> (String, T) {
+    let (channel, release) =
+        tokio::time::timeout(std::time::Duration::from_secs(10), barrier.recv())
+            .await
+            .expect("producer reached no notice")
+            .expect("barrier open");
+    let seen = on_receipt(channel.to_string()).await;
+    release.send(()).expect("producer waiting");
+    (channel.to_string(), seen)
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
 async fn channel_delete_notifies_every_member_after_cleanup() {
@@ -169,20 +217,28 @@ async fn channel_delete_notifies_every_member_after_cleanup() {
     assert!(listed_channels(&state, &tenant, &member).await.contains(&h));
     let mut owner_rx = subscribe_notices(&state, &tenant, &owner);
     let mut member_rx = subscribe_notices(&state, &tenant, &member);
+    let mut barrier = notice_barrier::install(&member.public_key().to_bytes());
 
-    publish(&state, &tenant, &owner, 9008, &[&["h", &h]]).await;
+    let delete = tokio::spawn({
+        let (state, tenant, owner, h) = (state.clone(), tenant.clone(), owner.clone(), h.clone());
+        async move { publish(&state, &tenant, &owner, 9008, &[&["h", &h]]).await }
+    });
+    let (noticed, listed) = at_receipt(&mut barrier, async |_| {
+        listed_channels(&state, &tenant, &member).await
+    })
+    .await;
+    delete.await.expect("delete");
 
-    for (reader, rx) in [(&owner, &mut owner_rx), (&member, &mut member_rx)] {
+    assert_eq!(noticed, h);
+    assert!(!listed.contains(&h), "notice sent before discovery cleanup");
+    for rx in [&mut owner_rx, &mut member_rx] {
         assert_eq!(
-            live_notices(rx),
+            notices(rx),
             vec![(KIND_MEMBER_REMOVED_NOTIFICATION as u64, h.clone())]
         );
-        assert!(!listed_channels(&state, &tenant, reader).await.contains(&h));
     }
 }
 
-/// Mutation: drop the notice or the discovery refresh in
-/// `apply_kick_live_side_effects` → RED.
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
 async fn moderation_kick_notifies_the_kicked_member_after_cleanup() {
@@ -202,6 +258,7 @@ async fn moderation_kick_notifies_the_kicked_member_after_cleanup() {
     .await;
     assert!(listed_channels(&state, &tenant, &member).await.contains(&h));
     let mut rx = subscribe_notices(&state, &tenant, &member);
+    let mut barrier = notice_barrier::install(&member_bytes);
 
     // The kick mutation commits the removal; live effects follow.
     state
@@ -214,75 +271,104 @@ async fn moderation_kick_notifies_the_kicked_member_after_cleanup() {
         )
         .await
         .expect("remove member");
-    crate::handlers::side_effects::apply_kick_live_side_effects(
-        &tenant,
-        &state,
-        channel,
-        &member_bytes,
-    )
-    .await
-    .expect("kick live effects");
+    let effects = tokio::spawn({
+        let (state, tenant) = (state.clone(), tenant.clone());
+        async move {
+            crate::handlers::side_effects::apply_kick_live_side_effects(
+                &tenant,
+                &state,
+                channel,
+                &member_bytes,
+            )
+            .await
+        }
+    });
+    let (noticed, listed) = at_receipt(&mut barrier, async |_| {
+        listed_channels(&state, &tenant, &member).await
+    })
+    .await;
+    effects.await.expect("task").expect("kick live effects");
 
+    assert_eq!(noticed, h);
+    assert!(
+        !listed.contains(&h),
+        "notice sent before the roster refresh"
+    );
     assert_eq!(
-        live_notices(&mut rx),
+        notices(&mut rx),
         vec![(KIND_MEMBER_REMOVED_NOTIFICATION as u64, h.clone())]
     );
-    assert!(!listed_channels(&state, &tenant, &member).await.contains(&h));
 }
 
-/// Mutation: drop the notice in `send_moderation_notice` → RED. A second
-/// delivery after the recipient hid the DM notifies again.
+/// A moderation DM resurfaces the DM, and on receipt of its notice the
+/// channel list shows it and the NIP-DV snapshot no longer hides it. The
+/// second delivery follows a real hide without waiting a second: its notice
+/// may coalesce with the first, but the live snapshot still unhides it.
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
-async fn moderation_dm_notifies_the_recipient_once_listed() {
+async fn moderation_dm_notifies_the_recipient_once_visible() {
     let (state, tenant) = fixture().await;
     let recipient = Keys::generate();
     let recipient_bytes = recipient.public_key().to_bytes();
     let mut rx = subscribe_notices(&state, &tenant, &recipient);
-    let notice = || crate::handlers::moderation_notices::ModerationNotice::ContentActioned {
-        action_id: Uuid::new_v4(),
-        public_reason: "spam".into(),
+    let mut barrier = notice_barrier::install(&recipient_bytes);
+    let deliver = || {
+        let (state, tenant) = (state.clone(), tenant.clone());
+        tokio::spawn(async move {
+            crate::handlers::moderation_notices::send_moderation_notice(
+                &tenant,
+                &state,
+                &recipient_bytes,
+                crate::handlers::moderation_notices::ModerationNotice::ContentActioned {
+                    action_id: Uuid::new_v4(),
+                    public_reason: "spam".into(),
+                },
+                chrono::Utc::now(),
+            )
+            .await
+        })
+    };
+    let on_receipt = async |dm: String| {
+        (
+            listed_channels(&state, &tenant, &recipient)
+                .await
+                .contains(&dm),
+            hidden_dms(&state, &tenant, &recipient).await.contains(&dm),
+        )
     };
 
-    crate::handlers::moderation_notices::send_moderation_notice(
-        &tenant,
-        &state,
-        &recipient_bytes,
-        notice(),
-        chrono::Utc::now(),
-    )
-    .await
-    .expect("first notice");
-    let notices = live_notices(&mut rx);
-    assert_eq!(notices.len(), 1, "{notices:?}");
-    let (kind, dm) = notices[0].clone();
-    assert_eq!(kind, KIND_MEMBER_ADDED_NOTIFICATION as u64);
-    assert!(listed_channels(&state, &tenant, &recipient)
-        .await
-        .contains(&dm));
-
-    let dm_id: Uuid = dm.parse().unwrap();
-    state
-        .db
-        .hide_dm(tenant.community(), dm_id, &recipient_bytes)
-        .await
-        .expect("hide dm");
-    // Notices are deterministic per second; a later delivery is a new event.
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-    crate::handlers::moderation_notices::send_moderation_notice(
-        &tenant,
-        &state,
-        &recipient_bytes,
-        notice(),
-        chrono::Utc::now(),
-    )
-    .await
-    .expect("second notice");
+    let first = deliver();
+    let (dm, seen) = at_receipt(&mut barrier, on_receipt).await;
+    first.await.expect("task").expect("first notice");
+    assert_eq!(seen, (true, false), "listed and visible on receipt");
     assert_eq!(
-        live_notices(&mut rx),
+        notices(&mut rx),
         vec![(KIND_MEMBER_ADDED_NOTIFICATION as u64, dm.clone())]
     );
-    assert!(listed_channels(&state, &tenant, &recipient)
-        .await
-        .contains(&dm));
+
+    publish(
+        &state,
+        &tenant,
+        &recipient,
+        KIND_DM_HIDE as u16,
+        &[&["h", &dm]],
+    )
+    .await;
+    assert!(hidden_dms(&state, &tenant, &recipient).await.contains(&dm));
+    live_events(&mut rx);
+
+    let second = deliver();
+    let (again, seen) = at_receipt(&mut barrier, on_receipt).await;
+    second.await.expect("task").expect("second notice");
+    assert_eq!(again, dm);
+    assert_eq!(seen, (true, false), "listed and visible on receipt");
+    let latest_snapshot = live_events(&mut rx)
+        .into_iter()
+        .filter(|(kind, _)| *kind == KIND_DM_VISIBILITY as u64)
+        .last()
+        .expect("live visibility snapshot");
+    assert!(
+        !latest_snapshot.1.contains(&dm),
+        "client still hides the DM"
+    );
 }
