@@ -1306,22 +1306,31 @@ pub const RESTRICTION_CACHE_MAX_AGE: std::time::Duration = std::time::Duration::
 /// [`AppState::tenant_host_cache`]).
 pub const TENANT_HOST_CACHE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// A cached restriction row and when the read that produced it began.
+/// How long a cache miss waits for a shared read's statement, beyond the
+/// writer pool's acquire timeout that its holder may spend waiting for a
+/// connection (see [`crate::shared_reads::SharedReads::new`]). A holder still
+/// waiting for a connection either gets one or times out within the acquire
+/// timeout, so only a statement that runs longer than this makes waiters
+/// give up and read on their own.
+pub const SHARED_READ_STATEMENT_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// A cached restriction row and when the read that produced it checked out
+/// its connection.
 #[derive(Debug, Clone)]
 pub struct CachedRestriction {
     /// The restriction row as read.
     pub state: buzz_db::moderation::RestrictionState,
-    /// When the database read that produced it began.
+    /// When the database read that produced it checked out its connection.
     pub read_at: Instant,
 }
 
 /// A community's listed open channel IDs and when the read that listed them
-/// began.
+/// checked out its connection.
 #[derive(Debug)]
 pub struct OpenChannels {
     /// The community's listed open channel IDs.
     pub ids: Vec<Uuid>,
-    /// When the database read that listed them began.
+    /// When the database read that listed them checked out its connection.
     pub read_at: Instant,
 }
 
@@ -1413,7 +1422,7 @@ pub struct AppState {
     /// Listed open channel IDs per community, the half of every reader's
     /// accessible set that does not depend on the reader. Invalidated with
     /// the community's accessible channels, and used only for
-    /// [`OPEN_CHANNELS_MAX_AGE`] after its database read began.
+    /// [`OPEN_CHANNELS_MAX_AGE`] after its read's connection checkout.
     pub open_channels_cache: Arc<moka::sync::Cache<CommunityId, Arc<OpenChannels>>>,
     /// Lets concurrent misses on [`Self::open_channels_cache`] share one read.
     pub(crate) open_channels_reads: Arc<crate::shared_reads::SharedReads<CommunityId>>,
@@ -1510,12 +1519,13 @@ pub struct AppState {
     /// lifts the moment `muted_until` passes. (`banned` is computed at read
     /// time, so an expiring ban can outlive its expiry by up to
     /// [`RESTRICTION_CACHE_MAX_AGE`].) Key: (community, pubkey bytes). An entry
-    /// is served only for [`RESTRICTION_CACHE_MAX_AGE`] after its read began,
-    /// which is the only staleness bound: on every pod and for every
-    /// restriction writer, a cached reader sees a ban/timeout change within
-    /// that long. As a best effort, signed moderation commands (9040–9043)
-    /// also drop the target's own entry on the pod that handles them; owned
-    /// agents' entries, other pods, and the admin/report paths just age out.
+    /// is served only for [`RESTRICTION_CACHE_MAX_AGE`] after its read's
+    /// connection checkout, which is the only staleness bound: on every pod
+    /// and for every restriction writer, a cached reader sees a ban/timeout
+    /// change within that long. As a best effort, signed moderation commands
+    /// (9040–9043) also drop the target's own entry on the pod that handles
+    /// them; owned agents' entries, other pods, and the admin/report paths
+    /// just age out.
     /// Socket admission and moderation-command actors read fresh: a grant that
     /// outlives the bound must not rest on a cached verdict.
     #[allow(clippy::type_complexity)]
@@ -1524,8 +1534,8 @@ pub struct AppState {
     pub(crate) restriction_reads: Arc<crate::shared_reads::SharedReads<(CommunityId, Vec<u8>)>>,
     /// Normalized request host → community, from the row-zero host binding
     /// ([`crate::tenant::bind_community`]). Only mapped hosts are cached, and
-    /// an entry is served only for [`TENANT_HOST_CACHE_MAX_AGE`] after its read
-    /// began: a host remapped, archived or deleted elsewhere resolves to its
+    /// an entry is served only for [`TENANT_HOST_CACHE_MAX_AGE`] after its read's
+    /// connection checkout: a host remapped, archived or deleted elsewhere resolves to its
     /// old community for at most that long.
     pub tenant_host_cache: Arc<moka::sync::Cache<String, (CommunityId, Instant)>>,
     /// Lets concurrent misses on [`Self::tenant_host_cache`] share one read.
@@ -1697,6 +1707,8 @@ impl AppState {
         let audit_enabled = audit_arc.is_some();
         // Build NIP-FI components before moving config into the state Arc.
         let (nip_fi_verifier, nip_fi_jwks_source) = build_nip_fi_components(&config);
+        let shared_read_wait =
+            db.pool().options().get_acquire_timeout() + SHARED_READ_STATEMENT_WAIT;
         let state = Self {
             config: Arc::new(config),
             db,
@@ -1750,7 +1762,10 @@ impl AppState {
                     .time_to_live(std::time::Duration::from_secs(10))
                     .build(),
             ),
-            open_channels_reads: Arc::new(crate::shared_reads::SharedReads::new(10_000)),
+            open_channels_reads: Arc::new(crate::shared_reads::SharedReads::new(
+                10_000,
+                shared_read_wait,
+            )),
             channel_visibility_cache: Arc::new(
                 moka::sync::Cache::builder()
                     .max_capacity(10_000)
@@ -1816,14 +1831,20 @@ impl AppState {
                     .time_to_live(std::time::Duration::from_secs(10))
                     .build(),
             ),
-            restriction_reads: Arc::new(crate::shared_reads::SharedReads::new(100_000)),
+            restriction_reads: Arc::new(crate::shared_reads::SharedReads::new(
+                100_000,
+                shared_read_wait,
+            )),
             tenant_host_cache: Arc::new(
                 moka::sync::Cache::builder()
                     .max_capacity(10_000)
                     .time_to_live(std::time::Duration::from_secs(10))
                     .build(),
             ),
-            tenant_host_reads: Arc::new(crate::shared_reads::SharedReads::new(10_000)),
+            tenant_host_reads: Arc::new(crate::shared_reads::SharedReads::new(
+                10_000,
+                shared_read_wait,
+            )),
             // Default to NoopTracer: production builds pay zero cost.
             // Conformance tests overwrite this with a JsonlTracer after
             // construction (see test helpers in
@@ -1948,12 +1969,11 @@ impl AppState {
 
     /// `moderation_restriction_state` served from [`Self::restriction_cache`]
     /// for [`RESTRICTION_CACHE_MAX_AGE`] after the read that produced it
-    /// began. For per-request gates (HTTP requests, publishes, ephemeral
+    /// checked out its connection. For per-request gates (HTTP requests, publishes, ephemeral
     /// pulses) whose grant ends with the request. Errors are not cached.
     ///
     /// Concurrent misses for one pubkey share a read through
-    /// [`Self::restriction_reads`], waiting for it at most
-    /// [`RESTRICTION_CACHE_MAX_AGE`].
+    /// [`Self::restriction_reads`].
     pub async fn restriction_state_cached(
         &self,
         community_id: CommunityId,
@@ -1971,7 +1991,7 @@ impl AppState {
         }
         let _turn = self
             .restriction_reads
-            .turn(key.clone(), RESTRICTION_CACHE_MAX_AGE)
+            .turn(key.clone())
             .await;
         if let Some(cached) = fresh() {
             metrics::counter!("buzz_restriction_cache_hits_total").increment(1);
@@ -2504,9 +2524,9 @@ impl AppState {
     ///
     /// The open half is shared by every reader in the community and its
     /// cross-pod invalidation is best-effort, so a cached set is served only
-    /// for [`OPEN_CHANNELS_MAX_AGE`] after its read began: a channel that left
-    /// the open set on another pod is granted from the cache for at most that
-    /// long. A caller whose own read straddles a revocation gets what that
+    /// for [`OPEN_CHANNELS_MAX_AGE`] after its read's connection checkout: a
+    /// channel that left the open set on another pod is granted from the
+    /// cache for at most that long. A caller whose own read straddles a revocation gets what that
     /// read saw, as with any uncached read.
     pub async fn get_accessible_channel_ids_cached(
         &self,
@@ -2538,9 +2558,9 @@ impl AppState {
     /// gate in [`Self::open_channels_reads`] and reads; the rest wait for it
     /// to finish and use its set. A waiter whose leader failed or was
     /// cancelled reads on its own rather than queueing behind another leader.
-    /// A waiter also stops waiting after [`OPEN_CHANNELS_MAX_AGE`] and reads
-    /// on its own, so a leader whose read hangs stalls its waiters at most
-    /// that long.
+    /// A waiter also stops waiting once the leader has had the writer pool's
+    /// acquire timeout plus [`SHARED_READ_STATEMENT_WAIT`], and reads on its
+    /// own, so a leader whose read hangs stalls its waiters at most that long.
     async fn open_channels(
         &self,
         community_id: CommunityId,
@@ -2556,7 +2576,7 @@ impl AppState {
         }
         let _turn = self
             .open_channels_reads
-            .turn(community_id, OPEN_CHANNELS_MAX_AGE)
+            .turn(community_id)
             .await;
         if let Some(open) = fresh() {
             metrics::counter!("buzz_open_channels_cache_hits_total").increment(1);
@@ -3657,31 +3677,65 @@ pub(crate) mod tests {
         use super::*;
         use buzz_core::channel::{ChannelType, ChannelVisibility};
 
-        /// Runs `read` while the pool's only connection is held for `wait`,
-        /// then releases it.
-        async fn behind_held_connection<T: Send + 'static>(
+        /// Starts `misses` concurrent runs of `read` while the pool's only
+        /// connection is held for `wait`, checks that every one is still
+        /// waiting, then releases the connection.
+        async fn behind_held_connection<T, F>(
             pool: &sqlx::PgPool,
             wait: std::time::Duration,
-            read: impl std::future::Future<Output = T> + Send + 'static,
-        ) -> T {
+            misses: usize,
+            read: impl Fn() -> F,
+        ) -> Vec<T>
+        where
+            T: Send + 'static,
+            F: std::future::Future<Output = T> + Send + 'static,
+        {
             let held = pool.acquire().await.unwrap();
-            let read = tokio::spawn(read);
+            let reads = (0..misses)
+                .map(|_| tokio::spawn(read()))
+                .collect::<Vec<_>>();
             tokio::time::sleep(wait).await;
-            assert!(!read.is_finished(), "the read waits for the connection");
+            assert!(
+                reads.iter().all(|read| !read.is_finished()),
+                "every miss waits for the connection"
+            );
             drop(held);
-            read.await.expect("join")
+            let mut results = Vec::with_capacity(misses);
+            for read in reads {
+                results.push(read.await.expect("join"));
+            }
+            results
         }
 
-        /// A cache read that waits for a pool connection longer than its
-        /// cache's max age still lands fresh, for each cache that bounds
-        /// staleness from its read: the entry is stamped at connection
-        /// checkout, not when the miss began.
-        /// Mutation: stamp any of the three entries before the pool wait → RED.
-        #[tokio::test]
+        /// The sum of every counter named `name` in `snapshotter`.
+        fn counted(snapshotter: &metrics_util::debugging::Snapshotter, name: &str) -> u64 {
+            snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .filter(|(key, ..)| key.key().name() == name)
+                .map(|(.., value)| match value {
+                    metrics_util::debugging::DebugValue::Counter(n) => n,
+                    _ => 0,
+                })
+                .sum()
+        }
+
+        /// Concurrent misses on each cache that bounds staleness from its
+        /// read, queued behind a held pool connection for longer than the
+        /// cache's max age, share one read, and its entry still lands fresh:
+        /// waiters wait out the leader's pool wait, and the entry is stamped
+        /// at connection checkout, not when the miss began.
+        /// Mutations: stamp any of the three entries before the pool wait,
+        /// or let waiters give up after the cache's max age → RED.
+        #[tokio::test(flavor = "current_thread")]
         #[ignore = "requires Postgres"]
-        async fn cache_reads_stamp_entries_after_the_pool_wait() {
+        async fn cache_misses_behind_a_held_pool_share_one_fresh_read() {
             use crate::tenant::HostResolver as _;
 
+            let recorder = metrics_util::debugging::DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let _recorder = metrics::set_default_local_recorder(&recorder);
             let pool = sqlx::postgres::PgPoolOptions::new()
                 .max_connections(1)
                 .acquire_timeout(std::time::Duration::from_secs(30))
@@ -3700,37 +3754,48 @@ pub(crate) mod tests {
             let wait = RESTRICTION_CACHE_MAX_AGE
                 .max(TENANT_HOST_CACHE_MAX_AGE)
                 .max(OPEN_CHANNELS_MAX_AGE)
+                .max(SHARED_READ_STATEMENT_WAIT)
                 + std::time::Duration::from_millis(500);
+            let misses = 8;
 
-            let (reader, key) = (Arc::clone(&state), pubkey.clone());
-            behind_held_connection(&pool, wait, async move {
-                reader.restriction_state_cached(community, &key).await
+            behind_held_connection(&pool, wait, misses, || {
+                let (reader, key) = (Arc::clone(&state), pubkey.clone());
+                async move { reader.restriction_state_cached(community, &key).await }
             })
             .await
-            .expect("restriction read");
+            .into_iter()
+            .for_each(|read| {
+                read.expect("restriction read");
+            });
+            assert_eq!(counted(&snapshotter, "buzz_restriction_cache_misses_total"), 1);
             let restriction = state
                 .restriction_cache
                 .get(&(community, pubkey))
                 .expect("restriction entry");
             assert!(restriction.read_at.elapsed() < RESTRICTION_CACHE_MAX_AGE);
 
-            let (reader, key) = (Arc::clone(&state), host.clone());
-            let mapped =
-                behind_held_connection(&pool, wait, async move { reader.resolve_host(&key).await })
-                    .await
-                    .expect("host read");
-            assert_eq!(mapped, Some(community));
+            let mapped = behind_held_connection(&pool, wait, misses, || {
+                let (reader, key) = (Arc::clone(&state), host.clone());
+                async move { reader.resolve_host(&key).await }
+            })
+            .await;
+            assert!(mapped
+                .into_iter()
+                .all(|mapped| mapped.expect("host read") == Some(community)));
+            assert_eq!(counted(&snapshotter, "buzz_tenant_host_cache_misses_total"), 1);
             let (_, read_at) = state.tenant_host_cache.get(&host).expect("host entry");
             assert!(read_at.elapsed() < TENANT_HOST_CACHE_MAX_AGE);
 
-            let reader = Arc::clone(&state);
-            behind_held_connection(
-                &pool,
-                wait,
-                async move { reader.open_channels(community).await },
-            )
+            behind_held_connection(&pool, wait, misses, || {
+                let reader = Arc::clone(&state);
+                async move { reader.open_channels(community).await }
+            })
             .await
-            .expect("open-set read");
+            .into_iter()
+            .for_each(|read| {
+                read.expect("open-set read");
+            });
+            assert_eq!(counted(&snapshotter, "buzz_open_channels_cache_misses_total"), 1);
             let open = state
                 .open_channels_cache
                 .get(&community)
@@ -3743,8 +3808,9 @@ pub(crate) mod tests {
         /// community's gate they hold. A leader's eight waiters share its
         /// set. When the leader is cancelled, its orphans each pass the gate
         /// and read, none holding it across its own read. When the leader's
-        /// read hangs, its waiters stop waiting after
-        /// [`OPEN_CHANNELS_MAX_AGE`] and each read on their own.
+        /// read hangs, its waiters stop waiting after the pool's acquire
+        /// timeout plus [`SHARED_READ_STATEMENT_WAIT`] and each read on their
+        /// own.
         /// Mutations: drop the waiter path (distinct sets in the first
         /// phase), hold the gate across a waiter's own read (the gate never
         /// frees in the second), or wait on the gate with no limit (the third
@@ -3755,7 +3821,10 @@ pub(crate) mod tests {
             let database_url = crate::test_support::database_url();
             let state = test_state_with_database_url_and_pool_options(
                 &database_url,
-                sqlx::postgres::PgPoolOptions::new().max_connections(16),
+                // Bounds how long the hung leader's waiters wait for it.
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(16)
+                    .acquire_timeout(std::time::Duration::from_secs(1)),
             )
             .await;
             let admin = sqlx::PgPool::connect(&database_url).await.unwrap();
@@ -4294,7 +4363,7 @@ pub(crate) mod tests {
 
         let leader = state
             .open_channels_reads
-            .turn(community, OPEN_CHANNELS_MAX_AGE)
+            .turn(community)
             .await
             .expect("no read in flight");
         let shared = waiters(&state);
@@ -4349,7 +4418,7 @@ pub(crate) mod tests {
 
         let leader = state
             .restriction_reads
-            .turn((community, pubkey.clone()), RESTRICTION_CACHE_MAX_AGE)
+            .turn((community, pubkey.clone()))
             .await
             .expect("no read in flight");
         let waiters = (0..8)
@@ -4375,7 +4444,7 @@ pub(crate) mod tests {
 
         let leader = state
             .tenant_host_reads
-            .turn(host.clone(), TENANT_HOST_CACHE_MAX_AGE)
+            .turn(host.clone())
             .await
             .expect("no read in flight");
         let waiters = (0..8)
