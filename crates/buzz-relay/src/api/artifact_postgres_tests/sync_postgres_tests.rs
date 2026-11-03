@@ -10,11 +10,7 @@ mod policy_postgres_tests;
 mod scale_postgres_tests;
 
 async fn fixture() -> Fixture {
-    let mut f = Fixture::new().await;
-    let mut state = (*f.state).clone();
-    Arc::make_mut(&mut state.config).artifact_incremental_enabled = true;
-    f.state = Arc::new(state);
-    f
+    Fixture::new().await
 }
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 

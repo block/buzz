@@ -262,56 +262,42 @@ async fn sync_shrinks_large_pages_and_current_batches_fail_explicitly() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn sync_gate_controls_http_reads_and_capability() {
+async fn sync_http_reads_and_capability_are_available() {
     use tower::ServiceExt;
     let _guard = SERIAL.lock().await;
-    let mut f = fixture().await;
-    let mut websocket_sync = Value::Null;
-    for enabled in [false, true] {
-        Arc::make_mut(&mut Arc::make_mut(&mut f.state).config).artifact_incremental_enabled =
-            enabled;
-        let response = crate::router::build_router(f.state.clone())
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/info")
-                    .header("host", &f.host)
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert!(response.status().is_success());
-        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
-        let info: Value = serde_json::from_slice(&bytes).unwrap();
-        if enabled {
-            assert_eq!(info["artifacts"]["sync"], websocket_sync);
-            assert_eq!(
-                info["artifacts"]["incremental"],
-                json!({"version":1,"overlapSeconds":120,
-                "pageRows":100,"currentRows":100,"responseBytes":8388608,
-                "permanentChannelsOnly":true,"checkpointLifetimeSeconds":2592000})
-            );
-        } else {
-            websocket_sync = info["artifacts"]["sync"].clone();
-            assert!(info["artifacts"].get("incremental").is_none());
-        }
-        let (status, _) = f
-            .request(
-                "/query",
-                json!([{"artifact":"incremental","query":query()}]),
-            )
-            .await;
-        assert_eq!(
-            status,
-            if enabled {
-                StatusCode::OK
-            } else {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
-        );
-    }
+    let f = fixture().await;
+    let response = crate::router::build_router(f.state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/info")
+                .header("host", &f.host)
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let info: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        info["artifacts"]["sync"],
+        json!({"version":1,"max_events":4096})
+    );
+    assert_eq!(
+        info["artifacts"]["incremental"],
+        json!({"version":1,"overlapSeconds":120,
+        "pageRows":100,"currentRows":100,"responseBytes":8388608,
+        "permanentChannelsOnly":true,"checkpointLifetimeSeconds":2592000})
+    );
+    let (status, _) = f
+        .request(
+            "/query",
+            json!([{"artifact":"incremental","query":query()}]),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
 }
 
 #[tokio::test]

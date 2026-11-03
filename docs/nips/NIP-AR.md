@@ -371,6 +371,4 @@ HTTP 400 `incremental_invalid`
 rejects invalid requests or tokens. HTTP 503 `incremental_unavailable` reports a
 service or work-budget failure. These failures do not advance progress.
 
-The rollout gate is `BUZZ_ARTIFACT_INCREMENTAL_ENABLED`, on by default. Set it
-to `false` during upgrades until the prerequisites in
-[artifact-sync-deployment.md](../artifact-sync-deployment.md) hold. Incremental completion does not establish a live subscription to every channel.
+Incremental completion does not establish a live subscription to every channel.
