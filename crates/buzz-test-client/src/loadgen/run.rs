@@ -16,16 +16,17 @@ use nostr::{Event, EventBuilder, Filter, Keys, Kind, PublicKey, Tag, Timestamp};
 use serde_json::{json, Value};
 use tokio::sync::{watch, Mutex};
 
+use super::desktop;
 use super::identity::{self, Role};
 use super::net::{http_reason, Net};
-use super::scenario::{Community, Scenario};
+use super::scenario::{Community, HumanProfile, Members, Scenario};
 use super::seed::{find_roots, hot_root_keys, reply_tags, HOT_ROOT_PREFIX, ROOT_PREFIX};
 use super::stats::{abort_reason, ops_json, Op, Stats};
 
 /// Content prefix of timed messages: `lg:<send unix micros>`.
 const TIMED_PREFIX: &str = "lg:";
 /// Longest an idle client blocks on its socket before rechecking the stop flag.
-const MAX_IDLE: Duration = Duration::from_secs(1);
+pub(super) const MAX_IDLE: Duration = Duration::from_secs(1);
 /// How long stopped clients get to settle what they have in flight and
 /// disconnect before they are cancelled.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(15);
@@ -57,14 +58,69 @@ impl Shard {
     }
 }
 
-struct Shared {
-    scenario: Scenario,
-    communities: Vec<Community>,
-    net: Net,
-    stats: Arc<Stats>,
-    stop: watch::Receiver<bool>,
+pub(super) struct Shared {
+    pub(super) scenario: Scenario,
+    pub(super) communities: Vec<Community>,
+    pub(super) net: Net,
+    pub(super) stats: Arc<Stats>,
+    pub(super) stop: watch::Receiver<bool>,
     /// Seeded thread roots per channel id, resolved lazily by whichever client needs them first.
     roots: Mutex<HashMap<String, Arc<Vec<String>>>>,
+    /// Channel members and human pubkeys, built once by the first desktop
+    /// client that needs them.
+    pub(super) directory: tokio::sync::OnceCell<Arc<Directory>>,
+}
+
+/// Who is in each channel, for clients that read their co-members' profiles.
+pub(super) struct Directory {
+    pub(super) members: Members,
+    /// Hex pubkey of every human up to the peak population, by global index.
+    pub(super) humans: Vec<String>,
+}
+
+impl Shared {
+    pub(super) fn new(
+        scenario: Scenario,
+        net: Net,
+        stats: Arc<Stats>,
+        stop: watch::Receiver<bool>,
+    ) -> Self {
+        Self {
+            communities: scenario.communities(),
+            scenario,
+            net,
+            stats,
+            stop,
+            roots: Mutex::new(HashMap::new()),
+            directory: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    /// The [`Directory`], derived off the async workers on first use: it
+    /// derives a key for every human up to the peak population.
+    pub(super) async fn directory(&self) -> Arc<Directory> {
+        self.directory
+            .get_or_init(|| async {
+                let scenario = self.scenario.clone();
+                tokio::task::spawn_blocking(move || {
+                    let humans = (0..scenario.peak().humans)
+                        .map(|i| {
+                            identity::keys(&scenario.run_id, Role::Human, i)
+                                .public_key()
+                                .to_hex()
+                        })
+                        .collect();
+                    Arc::new(Directory {
+                        members: scenario.channel_members(),
+                        humans,
+                    })
+                })
+                .await
+                .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()))
+            })
+            .await
+            .clone()
+    }
 }
 
 /// Runs every ramp step and returns the JSON report; `Err` when a step aborted.
@@ -82,14 +138,7 @@ async fn run_with(
 ) -> Result<Value, Value> {
     let stats = Arc::new(Stats::default());
     let (stop_tx, stop) = watch::channel(false);
-    let shared = Arc::new(Shared {
-        communities: scenario.communities(),
-        scenario,
-        net,
-        stats: stats.clone(),
-        stop,
-        roots: Mutex::new(HashMap::new()),
-    });
+    let shared = Arc::new(Shared::new(scenario, net, stats.clone(), stop));
     let scenario = &shared.scenario;
     let pop = &scenario.population;
     let connect_gap = Duration::from_secs_f64(1.0 / pop.connect_rate_per_sec);
@@ -121,6 +170,8 @@ async fn run_with(
                 tasks.push(tokio::spawn(async move {
                     if spawn_agent {
                         agent(shared, global).await
+                    } else if shared.scenario.is_desktop(global) {
+                        desktop::desktop(shared, global).await
                     } else {
                         human(shared, global).await
                     }
@@ -258,10 +309,10 @@ async fn shutdown(tasks: Vec<tokio::task::JoinHandle<()>>, grace: Duration) -> (
 }
 
 /// Small deterministic PRNG so every client draws an independent schedule.
-struct Rng(u64);
+pub(super) struct Rng(u64);
 
 impl Rng {
-    fn new(seed: u64) -> Self {
+    pub(super) fn new(seed: u64) -> Self {
         Self(seed ^ 0x9E37_79B9_7F4A_7C15)
     }
 
@@ -273,16 +324,16 @@ impl Rng {
         z ^ (z >> 31)
     }
 
-    fn unit(&mut self) -> f64 {
+    pub(super) fn unit(&mut self) -> f64 {
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
     }
 
-    fn below(&mut self, n: usize) -> usize {
+    pub(super) fn below(&mut self, n: usize) -> usize {
         (self.next_u64() % n.max(1) as u64) as usize
     }
 
     /// Next arrival of a Poisson process with `per_hour` events per hour.
-    fn after(&mut self, per_hour: f64) -> Option<Instant> {
+    pub(super) fn after(&mut self, per_hour: f64) -> Option<Instant> {
         if per_hour <= 0.0 {
             return None;
         }
@@ -291,43 +342,43 @@ impl Rng {
     }
 }
 
-fn now_micros() -> u128 {
+pub(super) fn now_micros() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_micros()
 }
 
-fn tag<const N: usize>(parts: [&str; N]) -> Tag {
+pub(super) fn tag<const N: usize>(parts: [&str; N]) -> Tag {
     Tag::parse(parts).expect("static tag shape")
 }
 
-fn kind(k: u32) -> Kind {
+pub(super) fn kind(k: u32) -> Kind {
     Kind::Custom(k as u16)
 }
 
-fn stopped(shared: &Shared) -> bool {
+pub(super) fn stopped(shared: &Shared) -> bool {
     *shared.stop.borrow()
 }
 
 /// Resolves once the run is stopping.
-async fn stopping(shared: &Shared) {
+pub(super) async fn stopping(shared: &Shared) {
     let mut stop = shared.stop.clone();
     let _ = stop.wait_for(|s| *s).await;
 }
 
 /// Jittered exponential backoff between failed connects or failed sessions.
-struct Backoff(f64);
+pub(super) struct Backoff(f64);
 
 impl Backoff {
     const MAX_SECS: f64 = 30.0;
 
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self(1.0)
     }
 
     /// Sleeps for the next interval, returning early when the run stops.
-    async fn wait(&mut self, shared: &Shared, rng: &mut Rng) {
+    pub(super) async fn wait(&mut self, shared: &Shared, rng: &mut Rng) {
         let wait = Duration::from_secs_f64(self.0 * (0.5 + rng.unit()));
         self.0 = (self.0 * 2.0).min(Self::MAX_SECS);
         tokio::select! {
@@ -339,7 +390,7 @@ impl Backoff {
 
 /// A stream message a client can react to: its id and channel.
 #[derive(Clone)]
-struct Seen {
+pub(super) struct Seen {
     id: String,
     channel: String,
 }
@@ -398,7 +449,7 @@ fn live(
 /// Records end-to-end delivery latency for a live timed message and returns
 /// it as a reaction target. Only live subscriptions call this: history
 /// replays old messages, whose age is not delivery latency.
-fn observe(stats: &Stats, message: &RelayMessage) -> Option<Seen> {
+pub(super) fn observe(stats: &Stats, message: &RelayMessage) -> Option<Seen> {
     if let RelayMessage::Event { event, .. } = message {
         if let Some(sent) = event
             .content
@@ -437,7 +488,7 @@ async fn publish(
 /// Connects with retry until connected or stopped. Each attempt is bounded
 /// by the connect deadline, which should be shorter than [`SHUTDOWN_GRACE`]
 /// so an attempt under way at the stop settles before clients are cancelled.
-async fn connect(
+pub(super) async fn connect(
     shared: &Shared,
     community: &Community,
     keys: &Keys,
@@ -470,7 +521,7 @@ async fn connect(
 
 /// Thread roots of `channel`, cached once found. Concurrent first callers may
 /// each query; a failed query is not cached, so a later reply retries it.
-async fn roots(
+pub(super) async fn roots(
     shared: &Shared,
     community: &Community,
     reader: &Keys,
@@ -508,8 +559,7 @@ async fn human(shared: Arc<Shared>, global: usize) {
     let profile = &scenario.human;
     let community = &shared.communities[global % shared.communities.len()];
     let keys = identity::keys(&scenario.run_id, Role::Human, global);
-    let me = keys.public_key().to_hex();
-    let channels = scenario.member_channels(community.index, global);
+    let channels = scenario.member_channels(community.index, Role::Human, global);
     let peers: Vec<PublicKey> = (1..=10)
         .map(|k| {
             let peer = (global + k * shared.communities.len()) % scenario.population.humans.max(1);
@@ -603,28 +653,10 @@ async fn human(shared: Arc<Shared>, global: usize) {
             }
         }
 
-        let interval = profile.presence_interval_secs;
-        let mut next_presence =
-            Some(Instant::now() + Duration::from_secs_f64(interval * rng.unit()));
-        let mut next_typing = rng.after(profile.typing_per_hour);
-        let mut next_message = rng.after(profile.messages_per_hour);
-        let mut next_reaction = rng.after(profile.reactions_per_hour);
-        let session_end = (profile.mean_session_secs > 0.0)
-            .then(|| rng.after(3600.0 / profile.mean_session_secs))
-            .flatten();
-
+        let mut activity = Activity::new(profile, &mut rng);
         while ok && !stopped(&shared) {
-            let due = [
-                next_presence,
-                next_typing,
-                next_message,
-                next_reaction,
-                session_end,
-            ]
-            .into_iter()
-            .flatten()
-            .min();
-            let wait = due
+            let wait = activity
+                .due()
                 .map(|d| d.saturating_duration_since(Instant::now()))
                 .unwrap_or(MAX_IDLE)
                 .min(MAX_IDLE);
@@ -646,59 +678,27 @@ async fn human(shared: Arc<Shared>, global: usize) {
                     break;
                 }
             }
-            let now = Instant::now();
-            let result = if next_presence.is_some_and(|t| t <= now) {
-                next_presence = Some(now + Duration::from_secs_f64(interval));
-                let event =
-                    EventBuilder::new(kind(KIND_PRESENCE_UPDATE), "online").sign_with_keys(&keys);
-                send(&shared.stats, &mut conn, Op::PublishEphemeral, event).await
-            } else if next_typing.is_some_and(|t| t <= now) {
-                next_typing = rng.after(profile.typing_per_hour);
-                let channel = &channels[rng.below(channels.len())];
-                let event = EventBuilder::new(kind(KIND_TYPING_INDICATOR), "")
-                    .tags([tag(["h", channel])])
-                    .sign_with_keys(&keys);
-                send(&shared.stats, &mut conn, Op::PublishEphemeral, event).await
-            } else if next_message.is_some_and(|t| t <= now) {
-                next_message = rng.after(profile.messages_per_hour);
-                let channel = &channels[rng.below(channels.len())];
-                let mut tags = vec![tag(["h", channel])];
-                if rng.unit() < profile.thread_reply_fraction {
-                    let roots = roots(&shared, community, &keys, channel).await;
-                    if !roots.is_empty() {
-                        tags.push(tag(["e", &roots[rng.below(roots.len())], "", "reply"]));
-                    }
-                }
-                let event = EventBuilder::new(
-                    kind(KIND_STREAM_MESSAGE),
-                    format!("{TIMED_PREFIX}{} {me}", now_micros()),
+            let outcome = activity
+                .step(
+                    &shared,
+                    community,
+                    &keys,
+                    &channels,
+                    &mut conn,
+                    &mut rng,
+                    &mut last_message,
                 )
-                .tags(tags)
-                .sign_with_keys(&keys);
-                send(&shared.stats, &mut conn, Op::PublishMessage, event).await
-            } else if next_reaction.is_some_and(|t| t <= now) {
-                next_reaction = rng.after(profile.reactions_per_hour);
-                // React to each seen message at most once; the relay rejects duplicates.
-                match last_message.take() {
-                    Some(target) => {
-                        let event = EventBuilder::new(kind(KIND_REACTION), "+")
-                            .tags([tag(["h", &target.channel]), tag(["e", &target.id])])
-                            .sign_with_keys(&keys);
-                        send(&shared.stats, &mut conn, Op::PublishMessage, event).await
-                    }
-                    None => Ok(()),
+                .await;
+            match outcome {
+                Ok(Step::Continue) => {}
+                Ok(Step::SessionEnd) => break,
+                Err(e) => {
+                    shared
+                        .stats
+                        .err(Op::WsConnect, &format!("disconnected: {e}"));
+                    ok = false;
+                    break;
                 }
-            } else if session_end.is_some_and(|t| t <= now) {
-                break;
-            } else {
-                Ok(())
-            };
-            if let Err(e) = result {
-                shared
-                    .stats
-                    .err(Op::WsConnect, &format!("disconnected: {e}"));
-                ok = false;
-                break;
             }
         }
         let _ = conn.disconnect().await;
@@ -715,7 +715,117 @@ async fn human(shared: Arc<Shared>, global: usize) {
     }
 }
 
-async fn send(
+/// What [`Activity::step`] leaves the session to do.
+pub(super) enum Step {
+    Continue,
+    /// The session reached its scheduled end; reconnect.
+    SessionEnd,
+}
+
+/// A human's own traffic on its socket: presence heartbeats, typing,
+/// messages (some as replies into seeded threads), reactions and the end of
+/// its session, each on its own schedule.
+pub(super) struct Activity {
+    interval: f64,
+    next_presence: Option<Instant>,
+    next_typing: Option<Instant>,
+    next_message: Option<Instant>,
+    next_reaction: Option<Instant>,
+    session_end: Option<Instant>,
+}
+
+impl Activity {
+    /// Schedules from now, the first heartbeat at a random point within one
+    /// interval so clients connecting together do not beat together.
+    pub(super) fn new(profile: &HumanProfile, rng: &mut Rng) -> Self {
+        let interval = profile.presence_interval_secs;
+        Self {
+            interval,
+            next_presence: Some(Instant::now() + Duration::from_secs_f64(interval * rng.unit())),
+            next_typing: rng.after(profile.typing_per_hour),
+            next_message: rng.after(profile.messages_per_hour),
+            next_reaction: rng.after(profile.reactions_per_hour),
+            session_end: (profile.mean_session_secs > 0.0)
+                .then(|| rng.after(3600.0 / profile.mean_session_secs))
+                .flatten(),
+        }
+    }
+
+    /// When the next item is due.
+    pub(super) fn due(&self) -> Option<Instant> {
+        [
+            self.next_presence,
+            self.next_typing,
+            self.next_message,
+            self.next_reaction,
+            self.session_end,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
+    /// Runs the first due item, if any. An error means the socket broke.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn step(
+        &mut self,
+        shared: &Shared,
+        community: &Community,
+        keys: &Keys,
+        channels: &[String],
+        conn: &mut NostrWsConnection,
+        rng: &mut Rng,
+        last_message: &mut Option<Seen>,
+    ) -> Result<Step, WsClientError> {
+        let profile = &shared.scenario.human;
+        let now = Instant::now();
+        if self.next_presence.is_some_and(|t| t <= now) {
+            self.next_presence = Some(now + Duration::from_secs_f64(self.interval));
+            let event =
+                EventBuilder::new(kind(KIND_PRESENCE_UPDATE), "online").sign_with_keys(keys);
+            send(&shared.stats, conn, Op::PublishEphemeral, event).await?;
+        } else if self.next_typing.is_some_and(|t| t <= now) {
+            self.next_typing = rng.after(profile.typing_per_hour);
+            let channel = &channels[rng.below(channels.len())];
+            let event = EventBuilder::new(kind(KIND_TYPING_INDICATOR), "")
+                .tags([tag(["h", channel])])
+                .sign_with_keys(keys);
+            send(&shared.stats, conn, Op::PublishEphemeral, event).await?;
+        } else if self.next_message.is_some_and(|t| t <= now) {
+            self.next_message = rng.after(profile.messages_per_hour);
+            let channel = &channels[rng.below(channels.len())];
+            let mut tags = vec![tag(["h", channel])];
+            if rng.unit() < profile.thread_reply_fraction {
+                let roots = roots(shared, community, keys, channel).await;
+                if !roots.is_empty() {
+                    tags.push(tag(["e", &roots[rng.below(roots.len())], "", "reply"]));
+                }
+            }
+            let me = keys.public_key().to_hex();
+            let event = EventBuilder::new(
+                kind(KIND_STREAM_MESSAGE),
+                format!("{TIMED_PREFIX}{} {me}", now_micros()),
+            )
+            .tags(tags)
+            .sign_with_keys(keys);
+            send(&shared.stats, conn, Op::PublishMessage, event).await?;
+        } else if self.next_reaction.is_some_and(|t| t <= now) {
+            self.next_reaction = rng.after(profile.reactions_per_hour);
+            // React to each seen message at most once; the relay rejects duplicates.
+            if let Some(target) = last_message.take() {
+                let event = EventBuilder::new(kind(KIND_REACTION), "+")
+                    .tags([tag(["h", &target.channel]), tag(["e", &target.id])])
+                    .sign_with_keys(keys);
+                send(&shared.stats, conn, Op::PublishMessage, event).await?;
+            }
+        } else if self.session_end.is_some_and(|t| t <= now) {
+            return Ok(Step::SessionEnd);
+        }
+        Ok(Step::Continue)
+    }
+}
+
+pub(super) async fn send(
     stats: &Stats,
     conn: &mut NostrWsConnection,
     op: Op,
@@ -850,7 +960,7 @@ async fn agent(shared: Arc<Shared>, global: usize) {
         global % scenario.population.humans.max(1),
     );
     let auth = identity::nip_oa_tag(&owner, &keys);
-    let channels = scenario.member_channels(community.index, global);
+    let channels = scenario.member_channels(community.index, Role::Agent, global);
     let me = keys.public_key().to_hex();
     let mut rng = Rng::new(u64::MAX - global as u64);
     let mut backoff = Backoff::new();
@@ -1962,14 +2072,7 @@ hold_secs = 1
         let net = Net::new(&scenario).await.unwrap();
         let stats = Arc::new(Stats::default());
         let (stop_tx, stop) = watch::channel(false);
-        let shared = Arc::new(Shared {
-            communities: scenario.communities(),
-            scenario,
-            net,
-            stats: stats.clone(),
-            stop,
-            roots: Mutex::new(HashMap::new()),
-        });
+        let shared = Arc::new(Shared::new(scenario, net, stats.clone(), stop));
         let authors: Vec<_> = (0..8)
             .map(|i| tokio::spawn(hot_author(shared.clone(), i)))
             .collect();
