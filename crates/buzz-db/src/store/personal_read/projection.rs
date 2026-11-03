@@ -159,6 +159,10 @@ impl Db {
                     LEFT JOIN personal_read_frontiers tf ON tf.community_id=$1 AND tf.actor=$2
                         AND tf.channel_id=r.id AND tf.root_id=e.root AND e.is_reply
                     WHERE e.pubkey<>$2 AND NOT e.unresolved
+                        -- NIP-CI imported history is never unread evidence.
+                        AND NOT (jsonb_typeof(e.tags)='array'
+                            AND EXISTS (SELECT 1 FROM jsonb_array_elements(e.tags) t(tag)
+                                WHERE jsonb_typeof(tag)='array' AND tag->>0='import'))
                 ), grouped AS (
                     SELECT CASE WHEN root IS NULL THEN NULL
                             WHEN is_reply THEN encode(root,'hex') ELSE '' END AS root,

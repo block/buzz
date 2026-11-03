@@ -66,6 +66,9 @@ pub enum LimitType {
     WsEvents,
     /// Concurrent WebSocket connections from a single IP address.
     IpConnections,
+    /// NIP-CI imported history events (kinds 9 and 7 carrying an `import`
+    /// tag). Charged instead of `Messages`.
+    ImportEvents,
 }
 
 impl LimitType {
@@ -77,6 +80,7 @@ impl LimitType {
             Self::GifSearches => "gif",
             Self::WsEvents => "ws",
             Self::IpConnections => "conn",
+            Self::ImportEvents => "import",
         }
     }
 }
@@ -112,6 +116,10 @@ pub struct RateLimitConfig {
     /// Maximum messages per minute for platform-tier agent tokens. Default: 600.
     #[serde(default = "default_agent_plat_msg")]
     pub agent_platform_messages_per_min: u64,
+    /// Maximum NIP-CI imported events per minute for each pubkey, any tier.
+    /// Default: 600.
+    #[serde(default = "default_import_events")]
+    pub import_events_per_min: u64,
 }
 
 fn default_human_msg() -> u64 {
@@ -138,6 +146,9 @@ fn default_agent_elev_msg() -> u64 {
 fn default_agent_plat_msg() -> u64 {
     600
 }
+fn default_import_events() -> u64 {
+    600
+}
 
 impl Default for RateLimitConfig {
     fn default() -> Self {
@@ -150,6 +161,7 @@ impl Default for RateLimitConfig {
             agent_standard_api_calls_per_min: default_agent_std_api(),
             agent_elevated_messages_per_min: default_agent_elev_msg(),
             agent_platform_messages_per_min: default_agent_plat_msg(),
+            import_events_per_min: default_import_events(),
         }
     }
 }

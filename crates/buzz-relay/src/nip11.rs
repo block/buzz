@@ -253,6 +253,9 @@ impl RelayInfo {
             // without it ignores the tag beside `visibility`, so a client
             // checks this before opening a channel as unlisted.
             "buzz-unlisted-channels".to_string(),
+            // NIP-CI: consented conversation import (kinds 42110 to 42113,
+            // relay snapshot 30623). Clients refuse to propose without it.
+            "nip-ci".to_string(),
         ];
         let gif = gif_provider.map(|provider| {
             supported_extensions.push("buzz-gif".to_string());
@@ -702,6 +705,23 @@ mod tests {
         assert!(extensions.contains(&"nip-cl".to_string()));
         assert!(extensions.contains(&"buzz-search-sort".to_string()));
         assert!(extensions.contains(&"buzz-unlisted-channels".to_string()));
+    }
+
+    /// Clients refuse to propose a conversation import against a relay whose
+    /// document lacks `nip-ci`, so every document must advertise it.
+    #[test]
+    fn advertises_nip_ci_extension() {
+        let info = RelayInfo::build(
+            None,
+            None,
+            RelayCapabilityFlags::default(),
+            DEFAULT_MAX_FRAME_BYTES,
+            None,
+            None,
+            None,
+        );
+        let extensions = info.supported_extensions.expect("extensions");
+        assert!(extensions.contains(&"nip-ci".to_string()));
     }
 
     /// NIP-WP → NIP-11 mirror: a set workspace icon is served in the standard

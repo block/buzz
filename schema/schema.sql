@@ -217,3 +217,5 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i seeds/storage_accounting_snapshots.sql
 
 \i tables/public/nip_fi_profile_heads.sql
+\i tables/public/import_sessions.sql
+\i tables/public/import_session_participants.sql

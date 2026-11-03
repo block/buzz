@@ -56,6 +56,22 @@
 //! Operational bypasses (sessions without the GUC, `session_replication_role
 //! = replica` restores) are outside the proof by design and require holding
 //! the fence closed for their duration; see `migrations/0021`.
+//!
+//! **NIP-CI imports** are the one in-band exception. An imported event keeps
+//! its original `created_at`, so `Db::insert_import_event` blanks the floor
+//! for its own transaction (`set_config(.., true)`, transaction-local; the
+//! connection is armed again after COMMIT or ROLLBACK). Soundness moves to
+//! two rules instead. First, a covered read whose snapshot shows an active
+//! import session for its channel goes to the writer
+//! (`Db::guard_covered_route`). Second, imports commit only from the
+//! session's `accepts_after`, which is activation plus [`PROOF_MAX_AGE`] plus
+//! a margin. A reader session proves an entry at most [`PROOF_MAX_AGE`] old,
+//! so a snapshot taken while imports can exist on the writer already contains
+//! the activation, and the guard sees it. That argument needs the activation
+//! to commit within the margin of the clock read that fixed `activated_at`;
+//! a transaction that can activate a session sets `SET LOCAL lock_timeout`
+//! and `statement_timeout` below the margin, so no single lock wait or
+//! statement can use it up.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -109,6 +125,16 @@ pub const PROBE_INTERVAL: Duration = Duration::from_millis(500);
 /// `<= fence_wall(M)` is present there) never decays. Closing on staleness
 /// just stops spending reader checkouts once the probe is evidently dead.
 pub const FENCE_STALENESS: Duration = Duration::from_secs(30);
+
+/// Oldest a retained entry may be and still prove a reader session: the
+/// ring's nominal history, [`RING_CAPACITY`] probes at [`PROBE_INTERVAL`].
+///
+/// The ring is count-bounded, so slow probes would otherwise let it hold
+/// older entries. Capping by age makes "a proved snapshot is at most this
+/// far behind the writer" a hard bound, which the NIP-CI import warm-up
+/// relies on (see the module docs).
+pub const PROOF_MAX_AGE: Duration =
+    Duration::from_millis(RING_CAPACITY as u64 * PROBE_INTERVAL.as_millis() as u64);
 
 /// How many `(token, fence_wall)` entries the fence retains. At one probe
 /// per [`PROBE_INTERVAL`] (500ms) this is ~60 seconds of history — a reader
@@ -176,8 +202,9 @@ pub enum ResolveOutcome {
     /// The observed epoch is not the ring's epoch — the session is on a
     /// different timeline (restore) or the ring was rotated under it.
     EpochMismatch,
-    /// The observed token is below every retained entry: the reader lags
-    /// further than the ring's history (or the ring is empty).
+    /// The observed token is below every retained entry, or the entry it
+    /// reaches is older than [`PROOF_MAX_AGE`]: the reader lags further than
+    /// the ring's history (or the ring is empty).
     TokenBehind,
 }
 
@@ -243,8 +270,9 @@ impl ReplicaFence {
 
     /// Resolve the strongest proof a reader session's observation supports:
     /// the greatest retained entry with `entry.token <= observed_token`,
-    /// provided the observed epoch matches the ring's. Non-`Proved` outcomes
-    /// fail closed; they are distinguished only for route metrics.
+    /// provided the observed epoch matches the ring's and the entry is at
+    /// most [`PROOF_MAX_AGE`] old. Non-`Proved` outcomes fail closed; they
+    /// are distinguished only for route metrics.
     pub fn resolve(&self, observed_token: i64, observed_epoch: Uuid) -> ResolveOutcome {
         let inner = self.inner.lock().expect("fence lock poisoned");
         match inner.epoch {
@@ -258,6 +286,7 @@ impl ReplicaFence {
             .iter()
             .rev()
             .find(|entry| entry.token <= observed_token)
+            .filter(|entry| entry.committed_at.elapsed() <= PROOF_MAX_AGE)
             .copied()
             .map_or(ResolveOutcome::TokenBehind, ResolveOutcome::Proved)
     }
@@ -868,6 +897,19 @@ mod postgres_tests {
         );
         // heartbeat_age is deliberately ungated (observability).
         assert!(fence.heartbeat_age().expect("entry retained") > FENCE_STALENESS);
+    }
+
+    /// An entry older than the proof age cap proves nothing, even when the
+    /// observed token reaches it.
+    #[test]
+    fn resolve_refuses_entries_older_than_the_proof_age_cap() {
+        let fence = ReplicaFence::new();
+        let epoch = Uuid::new_v4();
+        let old = Instant::now() - (PROOF_MAX_AGE + Duration::from_secs(1));
+        fence.record(10, epoch, old, Utc::now());
+        fence.record(20, epoch, Instant::now(), Utc::now());
+        assert_eq!(fence.resolve(15, epoch), ResolveOutcome::TokenBehind);
+        assert_eq!(fence.resolve(20, epoch).proved().expect("proof").token, 20);
     }
 
     /// Resolve picks the greatest retained entry <= the observed token —

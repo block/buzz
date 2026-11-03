@@ -248,3 +248,39 @@ async fn ephemeral_and_http_admission_still_fail_closed_when_redis_is_unavailabl
     );
     assert_metric(&recorder, "http", "unavailable", "api_calls", 1);
 }
+
+#[tokio::test]
+#[ignore = "requires explicit isolated BUZZ_TEST_REDIS_URL"]
+async fn import_events_use_their_own_budget() {
+    let mut state = state_with_limits(1, 1, 100).await;
+    let mut auth = state.auth.config().clone();
+    auth.rate_limits.import_events_per_min = 2;
+    state.auth = Arc::new(AuthService::new(auth));
+    let (conn, mut rx) = connection(false);
+    let imported = || {
+        let tags = [
+            nostr::Tag::parse(["import", &"ab".repeat(32)]).unwrap(),
+            nostr::Tag::parse(["source", "test", "1"]).unwrap(),
+        ];
+        let event = EventBuilder::new(Kind::from(9), "")
+            .tags(tags)
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        ClientMessage::parse(&serde_json::json!(["EVENT", event]).to_string()).unwrap()
+    };
+    for expected in 1..=2 {
+        assert!(enforce_ws_admission(&imported(), &conn, &state).await);
+        assert_eq!(
+            counter(&state, &conn, LimitType::ImportEvents).await,
+            Some(expected)
+        );
+    }
+    assert_eq!(counter(&state, &conn, LimitType::Messages).await, None);
+    let rejected = imported();
+    assert!(!enforce_ws_admission(&rejected, &conn, &state).await);
+    let frame = read_frame(&mut rx);
+    assert_eq!(frame[2], false);
+    assert_eq!(frame[3], "rate-limited: import");
+    // The ordinary message budget is still intact.
+    assert!(enforce_ws_admission(&event(9), &conn, &state).await);
+}

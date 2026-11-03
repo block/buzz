@@ -321,6 +321,21 @@ pub struct Config {
     /// Maximum media upload starts accepted from one pubkey per minute.
     pub media_uploads_per_minute: u32,
 
+    /// Longest lifetime of a NIP-CI import session, in days. A proposal's
+    /// requested `expires_at` is capped at now plus this many days.
+    /// `BUZZ_IMPORT_SESSION_MAX_DAYS`, default 30.
+    pub import_session_max_days: u32,
+
+    /// Caps on NIP-CI proposals.
+    /// `BUZZ_IMPORT_MAX_EVENTS_PER_PARTICIPANT` (default 50000) bounds one
+    /// participant's messages plus reactions and
+    /// `BUZZ_IMPORT_MAX_EVENTS_PER_SESSION` (default 200000) bounds the sum.
+    /// `BUZZ_IMPORT_MAX_ACTIVE_SESSIONS_PER_CHANNEL` (default 2) and
+    /// `BUZZ_IMPORT_MAX_ACTIVE_SESSIONS_PER_PROPOSER` (default 8) bound the
+    /// unended (proposed or active, unexpired) sessions a destination channel
+    /// or a proposer may hold.
+    pub import_limits: buzz_core::import::ImportLimits,
+
     /// Whether tamper-evident event/media audit logging is enabled. Defaults to true.
     /// This does not control the separate `moderation_actions` audit trail.
     /// Set `BUZZ_AUDIT_ENABLED=false` for deployments that do not require it.
@@ -490,6 +505,10 @@ fn rate_limit_config_from_env() -> Result<buzz_auth::RateLimitConfig, ConfigErro
         agent_platform_messages_per_min: positive_u64_from_env(
             "BUZZ_RATE_LIMIT_AGENT_PLATFORM_MESSAGES_PER_MIN",
             defaults.agent_platform_messages_per_min,
+        )?,
+        import_events_per_min: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_IMPORT_EVENTS_PER_MIN",
+            defaults.import_events_per_min,
         )?,
     })
 }
@@ -1056,6 +1075,32 @@ impl Config {
                 .filter(|&v| v > 0)
                 .unwrap_or(2)
                 .min(u32::try_from(media_max_concurrent_uploads).unwrap_or(u32::MAX));
+        let import_session_max_days = u32::try_from(positive_u64_from_env(
+            "BUZZ_IMPORT_SESSION_MAX_DAYS",
+            30,
+        )?)
+        .map_err(|_| {
+            ConfigError::InvalidValue("BUZZ_IMPORT_SESSION_MAX_DAYS must fit in 32 bits".into())
+        })?;
+        let import_defaults = buzz_core::import::ImportLimits::default();
+        let import_limits = buzz_core::import::ImportLimits {
+            max_events_per_participant: positive_u64_from_env(
+                "BUZZ_IMPORT_MAX_EVENTS_PER_PARTICIPANT",
+                import_defaults.max_events_per_participant,
+            )?,
+            max_events_per_session: positive_u64_from_env(
+                "BUZZ_IMPORT_MAX_EVENTS_PER_SESSION",
+                import_defaults.max_events_per_session,
+            )?,
+            max_active_sessions_per_channel: positive_u64_from_env(
+                "BUZZ_IMPORT_MAX_ACTIVE_SESSIONS_PER_CHANNEL",
+                import_defaults.max_active_sessions_per_channel,
+            )?,
+            max_active_sessions_per_proposer: positive_u64_from_env(
+                "BUZZ_IMPORT_MAX_ACTIVE_SESSIONS_PER_PROPOSER",
+                import_defaults.max_active_sessions_per_proposer,
+            )?,
+        };
         let media_uploads_per_minute: u32 = std::env::var("BUZZ_MEDIA_UPLOADS_PER_MINUTE")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -1471,6 +1516,8 @@ impl Config {
             media_max_concurrent_uploads,
             media_max_concurrent_uploads_per_pubkey,
             media_uploads_per_minute,
+            import_session_max_days,
+            import_limits,
             audit_enabled,
             ephemeral_ttl_override,
             git_repo_path,
@@ -2599,8 +2646,20 @@ mod tests {
         std::env::set_var("BUZZ_RATE_LIMIT_GIF_SEARCHES_PER_MIN", "1004");
         std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN", "1002");
         std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC", "1003");
+        std::env::set_var("BUZZ_RATE_LIMIT_IMPORT_EVENTS_PER_MIN", "1005");
+        std::env::set_var("BUZZ_IMPORT_SESSION_MAX_DAYS", "7");
+        std::env::set_var("BUZZ_IMPORT_MAX_EVENTS_PER_PARTICIPANT", "11");
+        std::env::set_var("BUZZ_IMPORT_MAX_EVENTS_PER_SESSION", "22");
+        std::env::set_var("BUZZ_IMPORT_MAX_ACTIVE_SESSIONS_PER_CHANNEL", "3");
+        std::env::set_var("BUZZ_IMPORT_MAX_ACTIVE_SESSIONS_PER_PROPOSER", "4");
 
         let config = Config::from_env().expect("config");
+        std::env::remove_var("BUZZ_RATE_LIMIT_IMPORT_EVENTS_PER_MIN");
+        std::env::remove_var("BUZZ_IMPORT_SESSION_MAX_DAYS");
+        std::env::remove_var("BUZZ_IMPORT_MAX_EVENTS_PER_PARTICIPANT");
+        std::env::remove_var("BUZZ_IMPORT_MAX_EVENTS_PER_SESSION");
+        std::env::remove_var("BUZZ_IMPORT_MAX_ACTIVE_SESSIONS_PER_CHANNEL");
+        std::env::remove_var("BUZZ_IMPORT_MAX_ACTIVE_SESSIONS_PER_PROPOSER");
 
         std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN");
         std::env::remove_var("BUZZ_RATE_LIMIT_GIF_SEARCHES_PER_MIN");
@@ -2610,6 +2669,20 @@ mod tests {
         assert_eq!(config.auth.rate_limits.gif_searches_per_min, 1004);
         assert_eq!(config.auth.rate_limits.human_api_calls_per_min, 1002);
         assert_eq!(config.auth.rate_limits.human_ws_events_per_sec, 1003);
+        assert_eq!(config.auth.rate_limits.import_events_per_min, 1005);
+        assert_eq!(config.import_session_max_days, 7);
+        assert_eq!(config.import_limits.max_events_per_participant, 11);
+        assert_eq!(config.import_limits.max_events_per_session, 22);
+        assert_eq!(config.import_limits.max_active_sessions_per_channel, 3);
+        assert_eq!(config.import_limits.max_active_sessions_per_proposer, 4);
+
+        let defaults = Config::from_env().expect("default config");
+        assert_eq!(defaults.auth.rate_limits.import_events_per_min, 600);
+        assert_eq!(defaults.import_session_max_days, 30);
+        assert_eq!(
+            defaults.import_limits,
+            buzz_core::import::ImportLimits::default()
+        );
     }
 
     #[test]

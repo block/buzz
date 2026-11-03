@@ -90,13 +90,14 @@ fn event_targets(event: &Event) -> Vec<Vec<u8>> {
 
 /// Insert one outbox row for each registered listener matching the event's
 /// `p` tags. The caller owns the transaction and must commit it with the event.
+/// NIP-CI imported events never wake listeners.
 pub(crate) async fn enqueue_mentions_in_transaction(
     tx: &mut AdmittedTx,
     event: &Event,
 ) -> Result<u64> {
     let community_id = tx.community();
     let kind = u32::from(event.kind.as_u16());
-    if !is_listener_mention_kind(kind) {
+    if !is_listener_mention_kind(kind) || buzz_core::import::is_import_event(event) {
         return Ok(0);
     }
     let targets = event_targets(event);

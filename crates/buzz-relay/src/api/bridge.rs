@@ -131,6 +131,41 @@ pub(crate) async fn enforce_http_admission(
     }
 }
 
+/// Charge one NIP-CI imported event to the pubkey's `ImportEvents` budget.
+async fn enforce_import_admission(
+    state: &AppState,
+    tenant: &TenantContext,
+    pubkey: &nostr::PublicKey,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let limit = state.auth.config().rate_limits.import_events_per_min;
+    match crate::admission::check_principal(
+        state.admission_rate_limiter.as_ref(),
+        tenant,
+        pubkey,
+        LimitType::ImportEvents,
+        60,
+        limit,
+    )
+    .await
+    {
+        Ok(()) => Ok(()),
+        Err(crate::admission::AdmissionError::Exceeded { .. }) => {
+            metrics::counter!("buzz_admission_rejections_total", "transport" => "http", "reason" => "quota", "bucket" => "import_events").increment(1);
+            Err(api_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                buzz_core::import::reason::RATE_LIMITED,
+            ))
+        }
+        Err(crate::admission::AdmissionError::Unavailable) => {
+            metrics::counter!("buzz_admission_rejections_total", "transport" => "http", "reason" => "unavailable", "bucket" => "import_events").increment(1);
+            Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "rate-limited: shared admission unavailable",
+            ))
+        }
+    }
+}
+
 /// Values retained from an already-verified bridge authentication event.
 #[derive(Debug)]
 pub(crate) struct VerifiedBridgeAuth {
@@ -1212,6 +1247,15 @@ async fn submit_event_authed(
     let kind_u32 = buzz_core::kind::event_kind_u32(&event);
     let is_typing = kind_u32 == buzz_core::kind::KIND_TYPING_INDICATOR;
 
+    if buzz_core::import::is_import_event(&event) {
+        if let Err(e) = enforce_import_admission(state, tenant, &pubkey).await {
+            return SubmitOutcome::Err {
+                status: e.0,
+                response: e.into(),
+            };
+        }
+    }
+
     // Enforce relay membership (with NIP-OA fallback via x-auth-tag header).
     let auth_tag = super::relay_members::extract_auth_tag_header(headers);
     let membership = super::relay_members::enforce_relay_membership(
@@ -1481,7 +1525,28 @@ async fn query_events_authed(
     )
     .await?;
 
-    Ok(query_member_events(state, tenant, body, pubkey).await?)
+    let Json(value) = query_member_events(state, tenant, body, pubkey).await?;
+    // Every /query mode funnels through here, so imported history is hidden
+    // from agent readers once, after the mode-specific reads.
+    let reader = pubkey.to_bytes();
+    let mut import_gate = crate::handlers::conversation_import::ImportReadGate::new(
+        state,
+        tenant.community(),
+        &reader,
+    );
+    let value = match value {
+        Value::Array(events) => Value::Array(import_gate.retain_json(events).await),
+        // Object-shaped pages carry their events in a nested `events` array.
+        Value::Object(mut page) => {
+            if let Some(Value::Array(events)) = page.get_mut("events") {
+                let all = std::mem::take(events);
+                *events = import_gate.retain_json(all).await;
+            }
+            Value::Object(page)
+        }
+        other => other,
+    };
+    Ok(Json(value))
 }
 
 /// The rest of [`query_events_authed`], once the caller is admitted as a relay member.

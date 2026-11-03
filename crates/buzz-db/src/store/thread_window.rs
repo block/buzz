@@ -217,14 +217,22 @@ impl Db {
         } else {
             "thread_window_head"
         };
-        if let RouteDecision::Replica(mut tx, _, reason) = self
+        let decision = self
             .route_read(
                 path,
                 RoutePredicate::from_channel_cursor(request.channel, &cursor),
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
-        {
+            .await;
+        let decision = self
+            .guard_covered_route(
+                path,
+                community,
+                crate::import_session::CoveredScope::Channel(request.channel),
+                decision,
+            )
+            .await;
+        if let RouteDecision::Replica(mut tx, _, reason) = decision {
             let result = async {
                 set_deadline(&mut tx).await?;
                 select_window(&mut tx, community, request, budget).await

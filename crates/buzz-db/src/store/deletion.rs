@@ -92,6 +92,8 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "event_mentions",
     "events",
     "git_repo_names",
+    "import_session_participants",
+    "import_sessions",
     "join_policy_acceptances",
     "moderation_actions",
     "moderation_reports",
@@ -131,6 +133,8 @@ const EXCLUDED_SCOPED_TABLES: &[&str] = &[
 /// Foreign-key-safe child-before-parent order for the PostgreSQL purge.
 pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "nip_fi_profile_heads",
+    "import_session_participants",
+    "import_sessions",
     "personal_read_frontiers",
     "personal_read_accounts",
     "workflow_approvals",
@@ -8760,6 +8764,94 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .verify_postgres_logically_deleted(&token)
             .await
             .expect("verify after straggler removed");
+    }
+
+    /// NIP-CI import session rows are tenant-owned: purge removes the target
+    /// community's sessions and participants and leaves a bystander's alone.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn purge_postgres_removes_import_session_rows() {
+        async fn seed(db: &Db, community: Uuid) {
+            let proposal = Uuid::new_v4().as_bytes().to_vec();
+            sqlx::query(
+                "INSERT INTO import_sessions (community_id, proposal_id, channel_id, proposer, \
+                 manifest, source_type, is_dm, range_from, range_to, expires_at, \
+                 requires_admin, status) \
+                 VALUES ($1, $2, $3, $4, 'm', 'test', false, 1, 2, 3, false, 'proposed')",
+            )
+            .bind(community)
+            .bind(&proposal)
+            .bind(Uuid::new_v4())
+            .bind([1u8; 32].as_slice())
+            .execute(&db.pool)
+            .await
+            .expect("seed import session");
+            sqlx::query(
+                "INSERT INTO import_session_participants (community_id, proposal_id, pubkey, \
+                 source_user, declared_messages, declared_reactions) \
+                 VALUES ($1, $2, $3, 's', 1, 0)",
+            )
+            .bind(community)
+            .bind(&proposal)
+            .bind([1u8; 32].as_slice())
+            .execute(&db.pool)
+            .await
+            .expect("seed import participant");
+        }
+        async fn counts(db: &Db, community: Uuid) -> (i64, i64) {
+            sqlx::query_as(
+                "SELECT (SELECT count(*) FROM import_sessions WHERE community_id = $1), \
+                        (SELECT count(*) FROM import_session_participants WHERE community_id = $1)",
+            )
+            .bind(community)
+            .fetch_one(&db.pool)
+            .await
+            .expect("count import rows")
+        }
+
+        let (db, store) = store().await;
+        let (request, inventory) = inventoried_request(&db, &store).await;
+        let community = *request.community_id.as_uuid();
+        seed(&db, community).await;
+        let bystander = db
+            .ensure_configured_community(&format!("bystander-{}.example", Uuid::new_v4().simple()))
+            .await
+            .expect("create bystander community")
+            .id
+            .as_uuid()
+            .to_owned();
+        seed(&db, bystander).await;
+
+        store
+            .approve(request.id, "approver", None)
+            .await
+            .expect("approve");
+        let claim = store
+            .claim_specific(request.id, "executor", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim")
+            .expect("won claim");
+        store.begin_quiescing(&claim.lease).await.expect("quiesce");
+        let generation = store.fence(&claim.lease).await.expect("fence");
+        let token = LeaseToken {
+            fence_generation: Some(generation),
+            ..claim.lease
+        };
+        store
+            .freeze_destructive_storage_manifest(&token, &inventory.storage)
+            .await
+            .expect("freeze destructive storage");
+        store.mark_drained(&token).await.expect("drain");
+        store
+            .mark_bindings_removed(&token, serde_json::json!({"keys": 0}))
+            .await
+            .expect("bindings");
+        let deleted = store.purge_postgres(&token).await.expect("purge postgres");
+
+        assert_eq!(deleted.get("import_sessions"), Some(&1));
+        assert_eq!(deleted.get("import_session_participants"), Some(&1));
+        assert_eq!(counts(&db, community).await, (0, 0));
+        assert_eq!(counts(&db, bystander).await, (1, 1));
     }
 
     /// A database bootstrapped from `schema/schema.sql` (the pgschema

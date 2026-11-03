@@ -53,11 +53,17 @@ pub async fn insert_mentions(
 /// Insert mention rows on the caller's admitted transaction. Replacement
 /// writes use this so the authoritative event and its discovery index commit
 /// or roll back as one unit.
+///
+/// NIP-CI imported events are history, not new activity: they never create
+/// mention rows, so they never reach the mention feed or inbox.
 pub(crate) async fn insert_mentions_in_transaction(
     tx: &mut AdmittedTx,
     event: &nostr::Event,
     channel_id: Option<Uuid>,
 ) -> Result<()> {
+    if buzz_core::import::is_import_event(event) {
+        return Ok(());
+    }
     let community_id = tx.community();
     let p_tags: Vec<&str> = event
         .tags

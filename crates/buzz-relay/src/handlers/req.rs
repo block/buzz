@@ -425,6 +425,11 @@ pub async fn handle_req(
         // per-filter limits or non-overlapping time windows.
         let mut seen_ids: HashSet<nostr::EventId> = HashSet::new();
         let mut total_sent: usize = 0;
+        let mut import_gate = super::conversation_import::ImportReadGate::new(
+            &state,
+            conn.tenant.community(),
+            &pubkey_bytes,
+        );
 
         // Phase 1 — pure query construction, in filter order.
         let filter_queries: Vec<(usize, Option<uuid::Uuid>, EventQuery)> = filters
@@ -569,6 +574,9 @@ pub async fn handle_req(
                 // shared-gate (kind:30175 without ["shared","true"]). Single call
                 // covers all three gated event classes.
                 if !event_visible_to_reader(&stored.event, &pubkey_bytes) {
+                    continue;
+                }
+                if import_gate.hides(&stored.event).await {
                     continue;
                 }
 
@@ -794,6 +802,11 @@ async fn handle_search_req(
     }
 
     let mut seen_ids: HashSet<nostr::EventId> = HashSet::new();
+    let mut import_gate = super::conversation_import::ImportReadGate::new(
+        state,
+        tenant.community(),
+        reader_pubkey_bytes,
+    );
 
     for filter in filters {
         let search_text = match &filter.search {
@@ -997,6 +1010,9 @@ async fn handle_search_req(
                     // Result-level gate: covers author-only, persona shared-gate,
                     // and result-gated kinds in one call.
                     if !event_visible_to_reader(&stored.event, reader_pubkey_bytes) {
+                        continue;
+                    }
+                    if import_gate.hides(&stored.event).await {
                         continue;
                     }
                     // Dedup AFTER acceptance — an event that fails filter A's constraints

@@ -2076,15 +2076,23 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
                         }
                     }
 
+                    // An imported reply carries its original time; it must not
+                    // make a historical thread look freshly active.
                     sqlx::query(
                         r#"
                         UPDATE thread_metadata
-                        SET reply_count = reply_count + 1, last_reply_at = NOW()
+                        SET reply_count = reply_count + 1,
+                            last_reply_at = CASE
+                                WHEN $3 THEN GREATEST(COALESCE(last_reply_at, $4), $4)
+                                ELSE NOW()
+                            END
                         WHERE community_id = $1 AND event_id = $2
                         "#,
                     )
                     .bind(community_id.as_uuid())
                     .bind(pid)
+                    .bind(buzz_core::import::is_import_event(event))
+                    .bind(meta.event_created_at)
                     .execute(tx.conn())
                     .await?;
 
@@ -2439,14 +2447,26 @@ impl Db {
             return answer;
         }
         let predicate = crate::RoutePredicate::for_query(q, self.replica_read_max_age.is_some());
-        match self
+        let decision = self
             .route_read(
                 path,
                 predicate,
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
-        {
+            .await;
+        let decision = match q.channel_id {
+            Some(channel) => {
+                self.guard_covered_route(
+                    path,
+                    q.community_id,
+                    crate::import_session::CoveredScope::Channel(channel),
+                    decision,
+                )
+                .await
+            }
+            None => decision,
+        };
+        match decision {
             crate::RouteDecision::Replica(mut tx, _entry, reason) => {
                 match crate::event::query_events_on(&mut tx, q, crate::event::ReadDeadline::Session)
                     .await
