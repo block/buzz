@@ -1589,8 +1589,9 @@ mod tests {
             "{lines:?}"
         );
         assert!(lines[1].contains("pubkey=\"absent\""), "{lines:?}");
+        let unsigned = enforce_count(["http", "nip98", "missing", TEST_COMMUNITY_URI]);
         let pairing = enforce_count(["http", "pairing", "denied", TEST_COMMUNITY_URI]);
-        assert_eq!(counts, [pairing.clone(), pairing]);
+        assert_eq!(counts, [unsigned, pairing]);
     }
 
     // ── R3 regression: Authorization cardinality ─────────────────────────────
