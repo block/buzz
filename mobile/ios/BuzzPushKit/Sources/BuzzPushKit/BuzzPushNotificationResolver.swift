@@ -167,13 +167,15 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       completion(nil)
       return
     }
-    federatedIdentity(relayURL: relayURL, privateKey: privateKey) { federatedIdentity in
+    federatedIdentity(relayURL: relayURL, privateKey: privateKey) { assertion in
       self.send(
-        url: url, body: body, privateKey: privateKey, federatedIdentity: federatedIdentity,
+        url: url, body: body, privateKey: privateKey, federatedIdentity: assertion?.header,
         session: self.session,
-        canRetry: { self.matchingPrivateKey(for: community) == privateKey }
+        canRetry: {
+          self.matchingPrivateKey(for: community) == privateKey && self.isCurrent(assertion)
+        }
       ) { data, response in
-        guard self.matchingPrivateKey(for: community) != nil,
+        guard self.matchingPrivateKey(for: community) != nil, self.isCurrent(assertion),
           let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode),
           let data, let events = try? JSONDecoder().decode([VerifiedNostrEvent].self, from: data)
         else {
@@ -196,13 +198,19 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
 
   /// The NIP-FI assertion an organization relay requires, or nil for any other relay.
   private func federatedIdentity(
-    relayURL: URL, privateKey: String, completion: @escaping (String?) -> Void
+    relayURL: URL, privateKey: String, completion: @escaping (BuzzRelayAssertion?) -> Void
   ) {
     guard let assertionIssuer else {
       completion(nil)
       return
     }
     assertionIssuer.header(relayURL: relayURL, privateKeyHex: privateKey, completion: completion)
+  }
+
+  /// Responses fetched with an assertion are accepted only while its organization session lasts.
+  private func isCurrent(_ assertion: BuzzRelayAssertion?) -> Bool {
+    guard let assertion else { return true }
+    return assertionIssuer?.isCurrent(assertion) ?? false
   }
 
   /// Sends one signed `/query`. A timeout or dropped connection is retried once on a new
@@ -358,7 +366,7 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       completion([])
       return
     }
-    federatedIdentity(relayURL: relayURL, privateKey: privateKey) { federatedIdentity in
+    federatedIdentity(relayURL: relayURL, privateKey: privateKey) { assertion in
       var request = URLRequest(url: url)
       request.httpMethod = "POST"
       request.httpBody = body
@@ -370,14 +378,14 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
         return
       }
       request.setValue(auth, forHTTPHeaderField: "Authorization")
-      if let federatedIdentity {
-        request.setValue(federatedIdentity, forHTTPHeaderField: "Nostr-Federated-Identity")
+      if let assertion {
+        request.setValue(assertion.header, forHTTPHeaderField: "Nostr-Federated-Identity")
       }
       BuzzNotificationDownload.start(
         request: request, configuration: self.session.configuration,
         maximumBytes: Self.maximumPresentationResponseBytes
       ) { result in
-        guard self.matchingPrivateKey(for: community) != nil,
+        guard self.matchingPrivateKey(for: community) != nil, self.isCurrent(assertion),
           case .success(let data) = result,
           let events = try? JSONDecoder().decode([VerifiedNostrEvent].self, from: data)
         else {

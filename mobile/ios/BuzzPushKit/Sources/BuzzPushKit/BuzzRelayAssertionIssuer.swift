@@ -45,6 +45,12 @@ public struct BuzzOrganizationSession: Codable, Equatable, Sendable {
   }
 }
 
+/// A minted `Nostr-Federated-Identity` header and the organization session it was minted from.
+public struct BuzzRelayAssertion {
+  public let header: String
+  let organization: BuzzOrganizationSession
+}
+
 /// Mints NIP-FI assertions for organization relays from the shared organization session.
 /// Relays outside the organization get no header, exactly as before.
 public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
@@ -69,11 +75,17 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
     self.now = now
   }
 
+  /// Whether the organization session that issued `assertion` is still the shared one. A
+  /// response fetched with an assertion from a signed-out or replaced session must be dropped.
+  public func isCurrent(_ assertion: BuzzRelayAssertion) -> Bool {
+    loadSession() == assertion.organization
+  }
+
   /// Completes with the `Nostr-Federated-Identity` value for an organization relay, or nil when
   /// the relay is not an organization relay or no assertion could be issued. A nil value for an
   /// enforcing relay leaves the relay to refuse the request.
   public func header(
-    relayURL: URL, privateKeyHex: String, completion: @escaping (String?) -> Void
+    relayURL: URL, privateKeyHex: String, completion: @escaping (BuzzRelayAssertion?) -> Void
   ) {
     guard let organization = loadSession(), organization.protects(relayURL),
       let issuerURL = organization.assertionURL,
@@ -90,7 +102,7 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
     lock.lock()
     if let entry = cached[cacheKey], entry.expiry.timeIntervalSince(now()) > Self.reuseMargin {
       lock.unlock()
-      completion("Bearer \(entry.token)")
+      completion(BuzzRelayAssertion(header: "Bearer \(entry.token)", organization: organization))
       return
     }
     lock.unlock()
@@ -140,7 +152,7 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
       lock.lock()
       cached[cacheKey] = (token, expiry)
       lock.unlock()
-      completion("Bearer \(token)")
+      completion(BuzzRelayAssertion(header: "Bearer \(token)", organization: organization))
     }
   }
 }

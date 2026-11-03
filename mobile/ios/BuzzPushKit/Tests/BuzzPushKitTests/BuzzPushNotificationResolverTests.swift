@@ -925,6 +925,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       now: { Date(timeIntervalSince1970: TimeInterval(Self.now)) })
     let issued = "header.payload.signature"
     var issuerBodies: [[String: Any]] = []
+    var signOutDuringQuery = false
     URLProtocolStub.handler = { request in
       let body = Self.body(of: request)
       if request.url?.host == "identity.org.example" {
@@ -944,6 +945,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
         return Self.response(request, status: 401, data: Data())
       }
       if !enforced { XCTAssertNil(assertion) }
+      if enforced, signOutDuringQuery { sharedSession = nil }
       let filters = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [[String: Any]])
       let kinds = filters.flatMap { $0["kinds"] as? [Int] ?? [] }
       return Self.response(request, status: 200,
@@ -962,6 +964,13 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertEqual(issuerBodies.count, 1)
     XCTAssertEqual(issuerBodies.first?["relay_url"] as? String, "wss://relay.org.example")
     XCTAssertEqual(issuerBodies.first?["nostr_pubkey"] as? String, Self.ownPubkey)
+
+    // Signing out while the relay query is in flight drops what that assertion fetched.
+    signOutDuringQuery = true
+    XCTAssertNil(resolve(makeResolver(
+      communitiesData: try snapshotData([community(relayUrl: "wss://relay.org.example")]),
+      now: Date(timeIntervalSince1970: TimeInterval(Self.now)), assertionIssuer: issuer)))
+    signOutDuringQuery = false
 
     // Signing out removes the shared session: the relay refuses, and the notification falls back.
     sharedSession = nil
