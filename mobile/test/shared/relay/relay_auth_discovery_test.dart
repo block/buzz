@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:buzz/shared/relay/relay_auth_discovery.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -14,6 +15,28 @@ void main() {
       'assertion_freshness': {'class': 'offline-jwt'},
     },
   };
+
+  test('reads the committed BUZZ-511 router discovery fixtures', () async {
+    for (final (name, requirement, compatible) in [
+      ('required', RelayAuthRequirement.required, true),
+      ('optional', RelayAuthRequirement.optional, false),
+      ('optional_capable', RelayAuthRequirement.optional, true),
+    ]) {
+      // Provenance and generator: test/fixtures/nip_fi/README.md.
+      final bytes = await File(
+        'test/fixtures/nip_fi/buzz_511_d3ae4935b_$name.json',
+      ).readAsBytes();
+      final client = MockClient((_) async => http.Response.bytes(bytes, 200));
+      addTearDown(client.close);
+      expect(
+        await fetchRelayAuthDiscovery(
+          client,
+          Uri.parse('https://community.example/info'),
+        ),
+        (requirement: requirement, compatible: compatible),
+      );
+    }
+  });
 
   test('capability alone never establishes a host requirement', () {
     for (final info in [<String, Object?>{}, capable]) {
