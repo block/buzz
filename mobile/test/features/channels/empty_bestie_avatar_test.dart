@@ -1,9 +1,24 @@
+import 'package:flutter/foundation.dart';
+import 'package:video_player_platform_interface/video_player_platform_interface.dart';
 import 'package:buzz/features/channels/empty_bestie_avatar.dart';
 import 'package:buzz/shared/agents/agent_avatar_catalog.dart';
-import 'package:buzz/shared/widgets/preset_agent_avatar.dart';
+import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+class _NoVideo extends VideoPlayerPlatform {
+  int creations = 0;
+  @override
+  Future<void> init() async {}
+  @override
+  Future<void> setMixWithOthers(bool value) async {}
+  @override
+  Future<int?> createWithOptions(VideoCreationOptions options) async {
+    creations++;
+    throw StateError('The empty Bestie carousel must not request video.');
+  }
+}
 
 void main() {
   Widget app({bool reducedMotion = false, bool enabled = true}) =>
@@ -20,19 +35,25 @@ void main() {
       );
 
   String current(WidgetTester tester) => tester
-      .widgetList<PresetAgentAvatar>(find.byType(PresetAgentAvatar))
+      .widgetList<AvatarImageContent>(find.byType(AvatarImageContent))
       .last
-      .imageUrl;
+      .imageUrl!;
 
-  testWidgets('cycles packs every five seconds with a scale transition', (
+  testWidgets('cycles still posters without creating network video players', (
     tester,
   ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final previous = VideoPlayerPlatform.instance;
+    final video = _NoVideo();
+    VideoPlayerPlatform.instance = video;
+    addTearDown(() => VideoPlayerPlatform.instance = previous);
     await tester.pumpWidget(app());
     expect(current(tester), contains('/fuzzies/'));
     await tester.pump(const Duration(milliseconds: 4999));
     expect(current(tester), contains('/fuzzies/'));
     await tester.pump(const Duration(milliseconds: 1));
-    expect(find.byType(PresetAgentAvatar), findsNWidgets(2));
+    expect(find.byType(AvatarImageContent), findsNWidgets(2));
     expect(find.byType(ScaleTransition), findsWidgets);
     await tester.pump(const Duration(milliseconds: 280));
     expect(current(tester), contains('/gloopies/'));
@@ -42,8 +63,10 @@ void main() {
       current(tester),
       agentAvatarCatalog[AgentAvatarPack.figgies.indices.first].url,
     );
+    expect(video.creations, 0);
     await tester.pumpWidget(const SizedBox());
     await tester.pump(const Duration(seconds: 10));
+    debugDefaultTargetPlatformOverride = null;
   });
 
   testWidgets('Reduce Motion keeps a single stationary character', (
@@ -53,7 +76,7 @@ void main() {
     final first = current(tester);
     await tester.pump(const Duration(seconds: 15));
     expect(current(tester), first);
-    expect(find.byType(PresetAgentAvatar), findsOneWidget);
+    expect(find.byType(AvatarImageContent), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
   });
 

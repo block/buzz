@@ -945,6 +945,7 @@ void main() {
     final container = ProviderContainer(
       overrides: [
         ownedAgentDirectoryProvider.overrideWith((ref) async => []),
+        myPubkeyProvider.overrideWithValue(fakeOwner.public),
         presenceCacheProvider.overrideWith(_AgentPresence.new),
         activeCommunityProvider.overrideWith((ref) async => _community()),
         remoteAgentControllerProvider.overrideWithValue(controller),
@@ -954,7 +955,7 @@ void main() {
     addTearDown(container.dispose);
     await container.read(activeCommunityProvider.future);
     expect(controller.registryLoaded, isFalse);
-    await controller.run(controller.refresh);
+    await controller.load(_community().relayUrl);
     expect(controller.registryLoaded, isTrue);
 
     expect(await container.read(availableRemoteAgentsProvider.future), isEmpty);
@@ -1002,12 +1003,13 @@ void main() {
   }, skip: !HostedEnvironment.enabled);
 
   test(
-    'loaded empty registry overrides a retained hosted registration',
+    'runtime absence and deletion survive sign-out and a fresh owner-scoped load',
     () async {
       final registry = FakeRegistry(bound: fakeOwner.public);
       final controller = await _controller(registry);
-      final container = ProviderContainer(
+      ProviderContainer open(String owner) => ProviderContainer(
         overrides: [
+          myPubkeyProvider.overrideWithValue(owner),
           ownedAgentDirectoryProvider.overrideWith(
             (ref) async => [
               OwnedAgentDirectoryEntry(
@@ -1021,9 +1023,11 @@ void main() {
           availableRemoteAgentsProvider.overrideWith((ref) async => {}),
         ],
       );
+      final container = open(fakeOwner.public);
       addTearDown(container.dispose);
       await container.read(ownedAgentDirectoryProvider.future);
       await container.read(availableRemoteAgentsProvider.future);
+      await container.read(savedRemoteAvailabilityProvider.future);
       expect(container.read(presentedPresenceProvider)[fakeAgent], 'online');
       await controller.run(controller.refresh);
       await container.pump();
@@ -1031,6 +1035,41 @@ void main() {
       expect(container.read(presentedPresenceProvider)[fakeAgent], 'offline');
       registry.signedIn = false;
       expect(controller.registryLoaded, isFalse);
+      await container.read(savedRemoteAvailabilityProvider.future);
+      expect(container.read(presentedPresenceProvider)[fakeAgent], 'offline');
+      final restarted = open(fakeOwner.public);
+      addTearDown(restarted.dispose);
+      await restarted.read(ownedAgentDirectoryProvider.future);
+      await restarted.read(savedRemoteAvailabilityProvider.future);
+      expect(restarted.read(presentedPresenceProvider)[fakeAgent], 'offline');
+      final otherOwner = open(_keys('3').public);
+      addTearDown(otherOwner.dispose);
+      await otherOwner.read(ownedAgentDirectoryProvider.future);
+      await otherOwner.read(savedRemoteAvailabilityProvider.future);
+      expect(otherOwner.read(presentedPresenceProvider)[fakeAgent], 'online');
+
+      // A confirmed deletion must also survive an old ACTIVE registry row.
+      registry.signedIn = true;
+      registry.listed = [
+        {
+          'agent_pubkey': fakeAgent,
+          'agent_id': 'remote-id',
+          'status': 'BEEKEEPER_AGENT_STATUS_ACTIVE',
+        },
+      ];
+      await controller.run(controller.refresh);
+      expect(
+        await controller.deleteAgent(
+          pubkey: fakeAgent,
+          community: _community(),
+          isCurrent: () => true,
+          fetch: (_) async => [],
+        ),
+        isTrue,
+      );
+      registry.signedIn = false;
+      await container.read(savedRemoteAvailabilityProvider.future);
+      expect(container.read(presentedPresenceProvider)[fakeAgent], 'offline');
     },
   );
 
@@ -1062,6 +1101,7 @@ void main() {
       final container = ProviderContainer(
         overrides: [
           ownedAgentDirectoryProvider.overrideWith((ref) async => []),
+          myPubkeyProvider.overrideWithValue(fakeOwner.public),
           presenceCacheProvider.overrideWith(_Presence.new),
           availableRemoteAgentsProvider.overrideWith((ref) async => {'remote'}),
         ],

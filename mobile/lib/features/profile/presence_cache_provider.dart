@@ -245,8 +245,9 @@ final presenceCacheProvider =
 
 /// Presentation shared by profiles, DMs and mentions. Remote agents wake on
 /// messages. Their verified Builderlab runtime registration is enough to show
-/// Online even when the account API is unavailable or signed out. The registry
-/// also supports older agents without runtime metadata. Local presence is unchanged.
+/// Online when the account API is unavailable or signed out, unless the owner
+/// has a saved registry snapshot that excludes it. The registry also supports
+/// older agents without runtime metadata. Local presence is unchanged.
 final presentedPresenceProvider = Provider<Map<String, String>>((ref) {
   final presence = ref.watch(presenceCacheProvider);
   final directoryState = ref.watch(ownedAgentDirectoryProvider);
@@ -257,11 +258,17 @@ final presentedPresenceProvider = Provider<Map<String, String>>((ref) {
   void changed() => ref.invalidateSelf();
   controller.addListener(changed);
   ref.onDispose(() => controller.removeListener(changed));
+  final saved = ref.watch(savedRemoteAvailabilityProvider);
   final remote = {
     ...?ref.watch(availableRemoteAgentsProvider).value,
-    if (!controller.registryLoaded)
+    if (!controller.registryLoaded &&
+        !saved.isLoading &&
+        !saved.hasError &&
+        saved.hasValue)
       for (final agent in directory ?? <OwnedAgentDirectoryEntry>[])
-        if (agent.runtime == 'block.builderlab/builderlab') agent.pubkey,
+        if (agent.runtime == 'block.builderlab/builderlab' &&
+            (saved.value == null || saved.value!.contains(agent.pubkey)))
+          agent.pubkey,
   }..removeAll(controller.deletedAgents);
   if (remote.isEmpty) return presence;
   return {...presence, for (final pubkey in remote) pubkey: 'online'};

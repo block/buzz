@@ -36,6 +36,7 @@ void main() {
         ]);
         final container = ProviderContainer(
           overrides: [
+            savedRemoteAvailabilityProvider.overrideWith((ref) async => null),
             remoteAgentControllerProvider.overrideWithValue(controller),
             presenceCacheProvider.overrideWith(_Presence.new),
             ownedAgentDirectoryProvider.overrideWith((ref) => directory),
@@ -46,6 +47,7 @@ void main() {
           ],
         );
         addTearDown(container.dispose);
+        await container.read(savedRemoteAvailabilityProvider.future);
         await container.read(ownedAgentDirectoryProvider.future);
         try {
           await container.read(availableRemoteAgentsProvider.future);
@@ -80,6 +82,7 @@ void main() {
         await container.pump();
         expect(container.read(presentedPresenceProvider)['hosted'], 'offline');
         next.complete([]);
+        await container.read(savedRemoteAvailabilityProvider.future);
         await container.read(ownedAgentDirectoryProvider.future);
         await container.pump();
         expect(container.read(presentedPresenceProvider)['hosted'], 'offline');

@@ -110,7 +110,7 @@ class _Relay extends FakeRelay {
 
 /// Holds creation open so a test can observe the in-flight state.
 class GatedController extends RelayFakeController {
-  GatedController(super.account);
+  GatedController(super.account, {super.onCreated});
   Completer<void>? gate;
   String? submittedName;
   String? submittedInstructions;
@@ -165,14 +165,17 @@ class AgentsHarness {
   List<String> registered = const [];
 
   /// [relayUrl] defaults to a hosted community that supports remote agents.
-  static Future<AgentsHarness> create({String? relayUrl}) async {
+  static Future<AgentsHarness> create({
+    String? relayUrl,
+    Future<void> Function(Community, String)? onCreated,
+  }) async {
     FlutterSecureStorage.setMockInitialValues({});
     SharedPreferences.setMockInitialValues({});
     final registry = FakeRegistry(bound: fakeOwner.public);
     await AccountIdentityStore()
         .forSubject(registry.account!.subject)
         .create(fakeOwner.nsec);
-    final controller = GatedController(registry);
+    final controller = GatedController(registry, onCreated: onCreated);
     addTearDown(() {
       controller.dispose();
       controller.relayAuth.dispose();

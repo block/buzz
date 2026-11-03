@@ -5,7 +5,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../../shared/agents/agent_avatar_catalog.dart';
 import '../../shared/widgets/agent_navigation_icon.dart';
-import '../../shared/widgets/preset_agent_avatar.dart';
+import '../../shared/widgets/avatar_image.dart';
 
 final _characters = [
   for (var i = 0; i < AgentAvatarPack.gloopies.indices.length; i++)
@@ -38,6 +38,25 @@ class EmptyBestieAvatar extends HookWidget {
       return timer.cancel;
     }, [reducedMotion, visible]);
     final character = _characters[index.value];
+    useEffect(() {
+      var cancelled = false;
+      if (visible && !reducedMotion) {
+        final nextPoster =
+            _characters[(index.value + 1) % _characters.length].url;
+        // precacheImage reads inherited configuration; do so after hook setup.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (cancelled || !context.mounted) return;
+          unawaited(
+            precacheImage(
+              NetworkImage(nextPoster),
+              context,
+              onError: (_, _) {}, // Keep the offline avatar fallback.
+            ),
+          );
+        });
+      }
+      return () => cancelled = true;
+    }, [index.value, visible, reducedMotion]);
     return AnimatedSwitcher(
       duration: reducedMotion
           ? Duration.zero
@@ -46,11 +65,15 @@ class EmptyBestieAvatar extends HookWidget {
       switchOutCurve: Curves.easeInCubic,
       transitionBuilder: (child, animation) =>
           ScaleTransition(scale: animation, child: child),
-      child: PresetAgentAvatar(
+      child: SizedBox.square(
         key: ValueKey(character.url),
-        imageUrl: character.url,
-        size: 47.88,
-        fallback: const AgentNavigationIcon(size: 24),
+        dimension: 47.88,
+        child: AvatarImageContent(
+          imageUrl: character.url,
+          preferThumbnail: true,
+          fit: BoxFit.contain,
+          fallback: const AgentNavigationIcon(size: 24),
+        ),
       ),
     );
   }

@@ -46,7 +46,7 @@ class DefaultAgentLauncher extends HookConsumerWidget {
         ? 'Chat with ${profile?.label ?? 'your Bestie'}'
         : preference.hasError
         ? 'Retry Bestie'
-        : 'Create your Bestie';
+        : 'Bestie';
     Future<void> open() async {
       final currentPreference = ref.read(defaultAgentProvider);
       if (opening.value ||

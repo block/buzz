@@ -280,7 +280,7 @@ void main() {
             const SliverToBoxAdapter(child: Text('Solo workspace')),
       ),
     );
-    await tester.tap(find.byTooltip('Create your Bestie'));
+    await tester.tap(find.byTooltip('Bestie'));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(ValueKey(existing)));
     await tester.pumpAndSettle();
