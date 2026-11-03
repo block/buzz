@@ -1173,10 +1173,14 @@ impl BuzzClient {
             serde_json::to_vec(&event)
                 .map_err(|e| CliError::Other(format!("event serialization failed: {e}")))?,
         );
+        // Whether any attempt reached the relay without an authoritative
+        // answer. A later failure, even one before sending, cannot clear it.
+        let maybe_delivered = std::sync::atomic::AtomicBool::new(false);
         let result = self
             .with_retry_body(|| {
                 let body = body.clone();
                 let url = url.clone();
+                let maybe_delivered = &maybe_delivered;
                 async move {
                     // Re-sign NIP-98 each attempt: the nonce tag generates a fresh
                     // event ID, keeping retries safe against the relay's replay guard.
@@ -1189,8 +1193,16 @@ impl BuzzClient {
                             Proof::post(&url, &body),
                         )
                         .await?;
-                    let resp = req.send().await?;
-                    self.handle_response(resp).await
+                    let sent = match req.send().await {
+                        Ok(resp) => self.handle_response(resp).await,
+                        Err(e) => Err(e.into()),
+                    };
+                    if let Err(ref e) = sent {
+                        if is_stored_event_exhaustion_ambiguous(e) {
+                            maybe_delivered.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                    sent
                 }
             })
             .await;
@@ -1200,7 +1212,13 @@ impl BuzzClient {
         // Connect failures stay Network (retryable:true) — definitively never received.
         // Canonical pre-ingest 429 (Relay{429}) stays retryable — definitively not stored.
         if let Err(ref e) = result {
-            if is_stored_event_exhaustion_ambiguous(e) {
+            // A relay answer other than a rate limit settles the outcome
+            // (callers resolve conflicts); anything else after a possibly
+            // delivered attempt does not.
+            let settled = matches!(e, CliError::Relay { status, .. } if *status != 429);
+            if is_stored_event_exhaustion_ambiguous(e)
+                || (maybe_delivered.load(std::sync::atomic::Ordering::Relaxed) && !settled)
+            {
                 let kind_u16 = event.kind.as_u16();
                 return Err(CliError::DeliveryUnknown(format!(
                     "stored event (kind {kind_u16}) outcome unknown after all attempts: {e}"
@@ -3032,6 +3050,76 @@ mod federated_identity_route_tests {
                 "the relay saw a request"
             );
         }
+    }
+
+    /// A first send whose outcome is lost, then an assertion refresh that
+    /// fails, is still possibly delivered: the adapter error must not invite
+    /// an outer re-sign.
+    #[tokio::test]
+    async fn a_refresh_failure_after_a_lost_send_stays_delivery_unknown() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let mints = Arc::new(AtomicUsize::new(0));
+        let sends = Arc::new(AtomicUsize::new(0));
+        let app = axum::Router::new()
+            .route(
+                "/v1/identity/assertions",
+                axum::routing::post({
+                    let mints = mints.clone();
+                    move |body: axum::body::Bytes| {
+                        let mints = mints.clone();
+                        async move {
+                            if mints.fetch_add(1, Ordering::SeqCst) > 0 {
+                                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                            }
+                            let req: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                            let pubkey = req["nostr_pubkey"].as_str().unwrap_or_default();
+                            // Due for refresh within a second.
+                            let expires_at = nostr::Timestamp::now().as_secs() + 1;
+                            axum::Json(serde_json::json!({
+                                "assertion": test_support::assertion(pubkey, expires_at),
+                                "nostr_pubkey": pubkey,
+                                "expires_at": expires_at,
+                            }))
+                            .into_response()
+                        }
+                    }
+                }),
+            )
+            .fallback({
+                let sends = sends.clone();
+                move || {
+                    let sends = sends.clone();
+                    async move {
+                        sends.fetch_add(1, Ordering::SeqCst);
+                        // The relay may have stored it; the proxy lost the answer
+                        // after the assertion reached its refresh boundary.
+                        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+                        StatusCode::BAD_GATEWAY.into_response()
+                    }
+                }
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = client_via(&base, &base);
+        let keys = client.credentials().test_keys();
+        let event = EventBuilder::new(Kind::Custom(9), "hi")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let err = client.submit_event(event).await.unwrap_err();
+        assert!(matches!(err, CliError::DeliveryUnknown(_)), "{err:?}");
+        assert!(!crate::error::is_retryable_error(&err));
+        assert_eq!(
+            sends.load(Ordering::SeqCst),
+            1,
+            "one send reached the relay"
+        );
+        assert_eq!(
+            mints.load(Ordering::SeqCst),
+            4,
+            "one mint, then three failed refreshes"
+        );
     }
 
     /// A 403 whose body is cut off is one refusal on every path, not a
