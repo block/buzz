@@ -1,3 +1,6 @@
+import 'package:flutter/widgets.dart';
+
+import 'composer_send_origin.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 const _localMessageSendAnimationClaimWindow = Duration(seconds: 1);
@@ -14,19 +17,34 @@ class LocalMessageSendAnimationNotifier
   /// Creates animation state scoped to [channelId].
   LocalMessageSendAnimationNotifier(this.channelId);
 
+  final _origins = <String, Rect>{};
+
+  /// Submitted composer geometry attached to this event's local send claim.
+  Rect? originFor(String eventId) =>
+      isRecentLocalMessageSendAnimation(state, eventId)
+      ? _origins[eventId]
+      : null;
+
   @override
   Map<String, DateTime> build() => const {};
 
   /// Marks [eventId] as a newly signed local message eligible for animation.
   void mark(String eventId) {
     final now = DateTime.now();
-    state = {
+    final claims = {
       for (final entry in state.entries)
         if (now.difference(entry.value) <=
             _localMessageSendAnimationClaimWindow)
           entry.key: entry.value,
       eventId: now,
     };
+    _origins.removeWhere((id, _) => !claims.containsKey(id));
+    if (ComposerSendOrigin.current case final origin?) {
+      _origins[eventId] = origin;
+    } else {
+      _origins.remove(eventId);
+    }
+    state = claims;
   }
 }
 

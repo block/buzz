@@ -782,6 +782,7 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
         spawnAfterCreate: input.spawnAfterCreate,
         startOnAppLaunch: input.startOnAppLaunch,
         backend: input.backend,
+        effortLevel: input.effortLevel,
         respondTo: input.respondTo,
         respondToAllowlist: input.respondToAllowlist,
         relayMesh: input.relayMesh,

@@ -47,6 +47,15 @@ async fn execute(
             "artifact queries require exactly one filter",
         ));
     }
+    if filters[0].get("artifact").and_then(Value::as_str) == Some("incremental") {
+        if count {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "incremental requires /query",
+            ));
+        }
+        return super::artifact_sync::query(state, tenant, reader, &filters[0]).await;
+    }
     let query = buzz_core::artifact::parse_query(&filters[0])
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, e))?;
     // The query's statement_timeout is the enforced execution budget.

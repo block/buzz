@@ -451,6 +451,45 @@ pub enum IngestError {
     AuthFailed(String),
     /// Server error — WS: OK false, HTTP: 500.
     Internal(String),
+    /// A durable community-ban refusal, or the failed lookup that decides
+    /// one. This is an admission refusal, so HTTP answers a verified agent
+    /// token with NIP-FI's fixed denial. WS and token-less HTTP get `legacy`
+    /// exactly as before.
+    Ban {
+        /// Whether the principal is banned or the lookup failed.
+        refusal: BanRefusal,
+        /// The error every non-NIP-FI response is built from.
+        legacy: Box<IngestError>,
+    },
+}
+
+/// Which admission outcome an [`IngestError::Ban`] carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BanRefusal {
+    /// The principal or its owner is banned.
+    Banned,
+    /// The restriction lookup failed, so no ban decision could be made.
+    Unavailable,
+}
+
+impl IngestError {
+    /// A ban refusal answered with `legacy` outside NIP-FI agent HTTP.
+    pub(crate) fn ban(refusal: BanRefusal, legacy: IngestError) -> Self {
+        Self::Ban {
+            refusal,
+            legacy: Box::new(legacy.into_legacy()),
+        }
+    }
+
+    /// The error every pre-existing transport mapping sees: a ban refusal
+    /// becomes its legacy error, everything else is unchanged. Never returns
+    /// [`Self::Ban`], because [`Self::ban`] never nests one.
+    pub(crate) fn into_legacy(self) -> Self {
+        match self {
+            Self::Ban { legacy, .. } => *legacy,
+            other => other,
+        }
+    }
 }
 
 /// Map the durable community write-fence lookup onto the ingest error taxonomy.
@@ -459,7 +498,9 @@ pub enum IngestError {
 /// `restricted:` wire text the ephemeral path uses. A lookup outage is a
 /// server fault and fails closed as `error:`/500 — a Postgres blip can
 /// neither admit a write past the fence nor read as a client mistake.
-fn map_serving_fence_state(active: Result<bool, buzz_db::DbError>) -> Result<(), IngestError> {
+pub(crate) fn map_serving_fence_state(
+    active: Result<bool, buzz_db::DbError>,
+) -> Result<(), IngestError> {
     match active {
         Ok(true) => Ok(()),
         Ok(false) => Err(IngestError::Rejected(
@@ -476,11 +517,16 @@ fn map_relay_admin_error(error: super::relay_admin::RelayAdminError) -> IngestEr
     match error {
         // Same wire prefix and HTTP status (403) as every other durable
         // restriction refusal — see the write-path gate below and `auth.rs`.
-        RelayAdminError::Banned => {
-            IngestError::AuthFailed("blocked: you are banned from this community".to_string())
-        }
+        RelayAdminError::Banned => IngestError::ban(
+            BanRefusal::Banned,
+            IngestError::AuthFailed("blocked: you are banned from this community".to_string()),
+        ),
         RelayAdminError::Rejected(reason) => IngestError::Rejected(format!("invalid: {reason}")),
-        RelayAdminError::Internal(reason) => IngestError::Internal(format!("error: {reason}")),
+        // Only the restriction lookup produces this arm.
+        RelayAdminError::Internal(reason) => IngestError::ban(
+            BanRefusal::Unavailable,
+            IngestError::Internal(format!("error: {reason}")),
+        ),
     }
 }
 
@@ -566,12 +612,13 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         // profile-publishing user already holds.
         KIND_IA_ARCHIVE_REQUEST | KIND_IA_UNARCHIVE_REQUEST => Ok(Scope::UsersWrite),
         KIND_NIP29_EDIT_METADATA => {
-            // kind:9002 scope split: archived tag → AdminChannels, else ChannelsWrite
-            let has_archived = event
-                .tags
-                .iter()
-                .any(|t| t.kind().to_string() == "archived");
-            if has_archived {
+            // kind:9002 scope split: archived or auto_join tag → AdminChannels,
+            // else ChannelsWrite
+            let has_admin_tag = event.tags.iter().any(|t| {
+                let k = t.kind().to_string();
+                k == "archived" || k == "auto_join"
+            });
+            if has_admin_tag {
                 Ok(Scope::AdminChannels)
             } else {
                 Ok(Scope::ChannelsWrite)
@@ -626,16 +673,24 @@ pub(crate) fn extract_channel_id(event: &Event) -> Option<Uuid> {
 pub(crate) enum ReactionChannelResult {
     Channel(Uuid),
     NoChannel,
+    /// Missing, soft-deleted, or not readable by the reactor.
     NotFound,
     NoTarget,
     DbError(String),
 }
 
-/// Derive channel_id from the target event for NIP-25 reactions.
+/// Rejection for a reaction whose target is missing or unusable by the sender.
+/// Every such target gets this text, so it never reveals whether, or where,
+/// the target exists.
+const REACTION_TARGET_NOT_FOUND: &str = "reaction target event not found";
+
+/// Derive channel_id from the target event for NIP-25 reactions. A target
+/// `reader` may not read resolves as `NotFound`.
 pub(crate) async fn derive_reaction_channel(
     community_id: CommunityId,
     db: &buzz_db::Db,
     event: &Event,
+    reader: &[u8],
 ) -> ReactionChannelResult {
     let target_hex = match event.tags.iter().rev().find_map(|tag| {
         if tag.kind().to_string() == "e" {
@@ -663,6 +718,9 @@ pub(crate) async fn derive_reaction_channel(
         .get_event_by_id_for_event_write(community_id, &id_bytes)
         .await
     {
+        Ok(Some(target)) if !super::req::event_visible_to_reader(&target.event, reader) => {
+            ReactionChannelResult::NotFound
+        }
         Ok(Some(target)) => match target.channel_id {
             Some(ch_id) => ReactionChannelResult::Channel(ch_id),
             None => ReactionChannelResult::NoChannel,
@@ -797,43 +855,126 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
     )
 }
 
-/// Check channel membership: member OR open-visibility channel.
+/// Which channel-write rule an event must pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChannelWrite {
+    /// Content or channel state (messages, reactions, artifacts, canvas,
+    /// forum, pins, huddles, topic, edits, deletes). Members whose role may
+    /// post ([`buzz_db::channel::MemberRole::can_post`]), never guests; and
+    /// non-members only in an open channel with `join_role = member`.
+    Post,
+    /// Membership changes (kind:9000 put-user, 9001 remove-user, 9022 leave).
+    /// Members, or anyone in an open channel. The role table does not apply
+    /// here: a guest must still be able to leave, and `decide_put_user` owns
+    /// who may add whom.
+    Membership,
+}
+
+impl ChannelWrite {
+    /// The rule for an event kind that passes the generic channel gate.
+    pub(crate) fn for_kind(kind: u32) -> Self {
+        match kind {
+            KIND_NIP29_PUT_USER | KIND_NIP29_REMOVE_USER | KIND_NIP29_LEAVE_REQUEST => {
+                Self::Membership
+            }
+            _ => Self::Post,
+        }
+    }
+}
+
+const NOT_A_CHANNEL_MEMBER: &str = "restricted: not a channel member";
+const MEMBERS_ONLY_POSTING: &str = "restricted: only members can post in this channel";
+
+/// The channel write gate: member OR open-visibility channel, plus, for
+/// [`ChannelWrite::Post`], the role-table write rule ([`may_post`]).
 ///
 /// `channel` is the request's already-fetched channel row, when the caller has
 /// one (E1 within-request threading; correctness ruling §4.8). Callers without
-/// a row pass `None` and the open-visibility fallback reads the DB directly.
+/// a row pass `None` and the gate reads the DB directly when it needs the row.
 ///
 /// Returns `Ok(())` if allowed, `Err(reason)` if denied.
 pub(crate) async fn check_channel_membership(
-    tenant: &TenantContext,
+    community_id: CommunityId,
     state: &AppState,
     ch_id: Uuid,
     pubkey_bytes: &[u8],
     channel: Option<&buzz_db::channel::ChannelRecord>,
+    write: ChannelWrite,
 ) -> Result<(), String> {
-    match state
-        .is_member_cached(tenant.community(), ch_id, pubkey_bytes)
+    let is_member = state
+        .is_member_cached(community_id, ch_id, pubkey_bytes)
         .await
-    {
-        Ok(true) => return Ok(()),
-        Ok(false) => {}
-        Err(e) => return Err(format!("error: database error: {e}")),
+        .map_err(|e| format!("error: database error: {e}"))?;
+    if is_member && write == ChannelWrite::Membership {
+        return Ok(());
     }
-    // Not a member — check if channel is open.
-    let is_open = match channel {
-        Some(ch) => ch.visibility == "open",
-        None => state
+    let fetched;
+    let channel = match channel {
+        Some(ch) => ch,
+        None => match state
             .db
-            .get_channel_for_event_write(tenant.community(), ch_id)
+            .get_channel_for_event_write(community_id, ch_id)
             .await
-            .map(|ch| ch.visibility == "open")
-            .unwrap_or(false),
+        {
+            Ok(ch) => {
+                fetched = ch;
+                &fetched
+            }
+            Err(_) if !is_member => return Err(NOT_A_CHANNEL_MEMBER.to_string()),
+            Err(e) => return Err(format!("error: database error: {e}")),
+        },
     };
-    if is_open {
-        Ok(())
-    } else {
-        Err("restricted: not a channel member".to_string())
+    if !is_member && channel.visibility != "open" {
+        return Err(NOT_A_CHANNEL_MEMBER.to_string());
     }
+    if write == ChannelWrite::Post
+        && !may_post(state, community_id, ch_id, pubkey_bytes, channel, is_member)
+            .await
+            .map_err(|e| format!("error: database error: {e}"))?
+    {
+        return Err(MEMBERS_ONLY_POSTING.to_string());
+    }
+    Ok(())
+}
+
+/// The role-table write rule, for an actor that already passed the
+/// read/membership gate of `channel`.
+///
+/// Roles mean the same thing in every channel: an active member may write
+/// when its role may post ([`buzz_db::channel::MemberRole::can_post`]), so a
+/// guest never may. A non-member may write only where joining would give a
+/// role that can write: an open channel with `join_role = member`. An unknown
+/// stored `join_role` fails closed to `guest`.
+pub(crate) async fn may_post(
+    state: &AppState,
+    community_id: CommunityId,
+    ch_id: Uuid,
+    pubkey_bytes: &[u8],
+    channel: &buzz_db::channel::ChannelRecord,
+    is_member: bool,
+) -> Result<bool, buzz_db::DbError> {
+    if !is_member {
+        return Ok(non_member_may_post(&channel.visibility, &channel.join_role));
+    }
+    let role = state
+        .db
+        .get_member_role(community_id, ch_id, pubkey_bytes)
+        .await?;
+    Ok(role_may_post(role.as_deref()))
+}
+
+/// [`may_post`] for an active member whose stored role is `role`. A missing
+/// or unknown role cannot post.
+pub(crate) fn role_may_post(role: Option<&str>) -> bool {
+    role.and_then(|r| r.parse::<buzz_db::channel::MemberRole>().ok())
+        .is_some_and(|r| r.can_post())
+}
+
+/// [`may_post`] for a non-member: only an open channel whose `join_role`
+/// (failing closed to `guest`) is `member`.
+pub(crate) fn non_member_may_post(visibility: &str, join_role: &str) -> bool {
+    use buzz_db::channel::ChannelJoinRole;
+    visibility == "open" && ChannelJoinRole::parse_fail_closed(join_role) == ChannelJoinRole::Member
 }
 
 /// The kind-9 channel write gates (token scope, membership or open channel,
@@ -847,11 +988,12 @@ pub(crate) async fn check_channel_write(
     check_token_channel_access(auth, ch_id).map_err(IngestError::Rejected)?;
     let channel = load_channel_for_write(tenant, state, ch_id).await?;
     check_channel_membership(
-        tenant,
+        tenant.community(),
         state,
         ch_id,
         &auth.pubkey().to_bytes(),
         channel.as_ref(),
+        ChannelWrite::Post,
     )
     .await
     .map_err(IngestError::Rejected)?;
@@ -919,6 +1061,18 @@ impl ThreadMetadataOwned {
     }
 }
 
+/// Whether `target` is in `channel_id` and readable by `reader`. Write paths
+/// that reference an event reject a target failing this exactly as a missing
+/// one, so the rejection never reveals whether, or where, the target exists.
+fn target_readable_in_channel(
+    target: &buzz_core::StoredEvent,
+    channel_id: Uuid,
+    reader: &[u8],
+) -> bool {
+    target.channel_id == Some(channel_id)
+        && super::req::event_visible_to_reader(&target.event, reader)
+}
+
 /// Resolve NIP-10 thread ancestry from e-tags.
 pub(crate) async fn resolve_nip10_thread_meta(
     community_id: CommunityId,
@@ -945,17 +1099,11 @@ pub(crate) async fn resolve_nip10_thread_meta(
             .get_thread_metadata_by_event(community_id, &parent_bytes),
     );
 
+    let reader = effective_message_author(event, &state.relay_keypair.public_key());
     let parent_event = parent_event_result
         .map_err(|e| format!("db error looking up parent: {e}"))?
+        .filter(|parent| target_readable_in_channel(parent, channel_id, &reader))
         .ok_or_else(|| "reply parent not found".to_string())?;
-
-    match parent_event.channel_id {
-        Some(parent_ch) if parent_ch != channel_id => {
-            return Err("parent event belongs to a different channel".to_string());
-        }
-        None => return Err("parent event has no channel association".to_string()),
-        _ => {}
-    }
 
     let parent_created =
         chrono::DateTime::from_timestamp(parent_event.event.created_at.as_secs() as i64, 0)
@@ -1128,6 +1276,7 @@ pub(crate) async fn resolve_relay_reply_thread_meta(
     community_id: CommunityId,
     parent_hex: &str,
     channel_id: Uuid,
+    reader: &[u8],
     state: &AppState,
 ) -> Result<ReplyAncestry, String> {
     let parent_bytes =
@@ -1144,15 +1293,8 @@ pub(crate) async fn resolve_relay_reply_thread_meta(
 
     let parent_event = parent_event_result
         .map_err(|e| format!("db error looking up parent: {e}"))?
+        .filter(|parent| target_readable_in_channel(parent, channel_id, reader))
         .ok_or_else(|| "reply parent not found".to_string())?;
-
-    match parent_event.channel_id {
-        Some(parent_ch) if parent_ch != channel_id => {
-            return Err("parent event belongs to a different channel".to_string());
-        }
-        None => return Err("parent event has no channel association".to_string()),
-        _ => {}
-    }
 
     let parent_created =
         chrono::DateTime::from_timestamp(parent_event.event.created_at.as_secs() as i64, 0)
@@ -1251,6 +1393,10 @@ pub(crate) fn effective_message_author(event: &Event, relay_pubkey: &nostr::Publ
     event.pubkey.to_bytes().to_vec()
 }
 
+/// Rejection for an edit whose target is missing or not editable by the
+/// sender, so the error never reveals whether, or where, the target exists.
+const EDIT_TARGET_DENIED: &str = "edit target not found or not editable by you";
+
 /// Validate kind:40003 edit ownership — event.pubkey must match target's effective author,
 /// or the actor must be the owning human of the agent that authored the target message.
 async fn validate_edit_ownership(
@@ -1278,46 +1424,37 @@ async fn validate_edit_ownership(
 
     let target_bytes =
         hex::decode(&target_hex).map_err(|_| "invalid target event ID".to_string())?;
+    // Kind 40003 skips the generic membership gate, so this validator is the
+    // only authority: a target outside the edit's `h` channel, unreadable, or
+    // not the actor's to edit is denied exactly like a missing one.
+    let edit_channel_id =
+        extract_channel_id(event).ok_or_else(|| "missing h tag for edit".to_string())?;
+    let actor = event.pubkey.to_bytes().to_vec();
     let target_event = state
         .db
         .get_event_by_id_for_event_write(community_id, &target_bytes)
         .await
         .map_err(|e| format!("db error: {e}"))?
-        .ok_or_else(|| "edit target event not found".to_string())?;
-
-    // Verify target belongs to the same channel as the edit event.
-    let edit_channel_id = extract_channel_id(event);
-    match (edit_channel_id, target_event.channel_id) {
-        (Some(edit_ch), Some(target_ch)) if edit_ch != target_ch => {
-            return Err("target event belongs to a different channel".to_string());
-        }
-        (Some(_), None) => {
-            return Err("target event has no channel".to_string());
-        }
-        _ => {} // Same channel or no channel context — OK
-    }
+        .filter(|target| target_readable_in_channel(target, edit_channel_id, &actor))
+        .ok_or_else(|| EDIT_TARGET_DENIED.to_string())?;
 
     let author = effective_message_author(&target_event.event, &state.relay_keypair.public_key());
-    let actor = event.pubkey.to_bytes().to_vec();
     if author == actor {
-        // Author editing their own message: re-gate on membership/open visibility so that
+        // Author editing their own message: re-gate on the channel write gate so that
         // a removed private-channel member cannot mutate old messages after access is revoked.
+        // A guest may not edit what they wrote before they became a guest.
         if let Some(ch_id) = target_event.channel_id {
-            let is_member = state
-                .is_member_cached(community_id, ch_id, &actor)
+            // A refused write is denied exactly like a missing target;
+            // database errors keep their own message.
+            check_channel_membership(community_id, state, ch_id, &actor, None, ChannelWrite::Post)
                 .await
-                .map_err(|e| format!("db error checking membership: {e}"))?;
-            if !is_member {
-                let is_open = state
-                    .db
-                    .get_channel_for_event_write(community_id, ch_id)
-                    .await
-                    .map(|ch| ch.visibility == "open")
-                    .unwrap_or(false);
-                if !is_open {
-                    return Err("restricted: not a channel member".to_string());
-                }
-            }
+                .map_err(|error| {
+                    if error.starts_with("error:") {
+                        error
+                    } else {
+                        EDIT_TARGET_DENIED.to_string()
+                    }
+                })?;
         }
     } else {
         // Allow the owning human to edit messages authored by their agent.
@@ -1327,7 +1464,7 @@ async fn validate_edit_ownership(
             .await
             .map_err(|e| format!("db error checking agent ownership: {e}"))?;
         if !is_owner {
-            return Err("must be event author to edit".to_string());
+            return Err(EDIT_TARGET_DENIED.to_string());
         }
     }
     Ok(())
@@ -1356,6 +1493,9 @@ async fn validate_forum_vote_target(
             }
         })
         .ok_or_else(|| "missing e tag for vote target".to_string())?;
+    let vote_channel_id =
+        extract_channel_id(event).ok_or_else(|| "missing h tag for vote".to_string())?;
+    let reader = effective_message_author(event, &state.relay_keypair.public_key());
 
     let target_bytes =
         hex::decode(&target_hex).map_err(|_| "invalid target event ID".to_string())?;
@@ -1364,23 +1504,14 @@ async fn validate_forum_vote_target(
         .get_event_by_id_for_event_write(community_id, &target_bytes)
         .await
         .map_err(|e| format!("db error: {e}"))?
+        // Readability first: the kind diagnostic below would otherwise reveal
+        // an inaccessible event's existence and kind.
+        .filter(|target| target_readable_in_channel(target, vote_channel_id, &reader))
         .ok_or_else(|| "vote target event not found".to_string())?;
 
     let target_kind = event_kind_u32(&target_event.event);
     if target_kind != KIND_FORUM_POST && target_kind != KIND_FORUM_COMMENT {
         return Err("vote target must be a forum post or comment".to_string());
-    }
-
-    // Verify target belongs to the same channel as the vote event.
-    let vote_channel_id = extract_channel_id(event);
-    match (vote_channel_id, target_event.channel_id) {
-        (Some(vote_ch), Some(target_ch)) if vote_ch != target_ch => {
-            return Err("target event belongs to a different channel".to_string());
-        }
-        (Some(_), None) => {
-            return Err("target event has no channel".to_string());
-        }
-        _ => {}
     }
     Ok(())
 }
@@ -2219,8 +2350,9 @@ fn write_restriction_denial(
     now: chrono::DateTime<Utc>,
 ) -> Option<IngestError> {
     if restriction.banned {
-        return Some(IngestError::AuthFailed(
-            "blocked: you are banned from this community".to_string(),
+        return Some(IngestError::ban(
+            BanRefusal::Banned,
+            IngestError::AuthFailed("blocked: you are banned from this community".to_string()),
         ));
     }
     match restriction.muted_until {
@@ -2249,14 +2381,45 @@ pub(crate) async fn enforce_write_restriction(
     kind: u32,
     pubkey: &nostr::PublicKey,
 ) -> Result<(), IngestError> {
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_write_ban_check(tenant.community()).await;
     let restriction = state
         .db
         .moderation_restriction_state(tenant.community(), pubkey.as_bytes())
         .await
         .map_err(|e| {
-            IngestError::Internal(format!(
-                "error: internal error checking restriction state: {e}"
-            ))
+            IngestError::ban(
+                BanRefusal::Unavailable,
+                IngestError::Internal(format!(
+                    "error: internal error checking restriction state: {e}"
+                )),
+            )
+        })?;
+    write_restriction_denial(kind, &restriction, Utc::now()).map_or(Ok(()), Err)
+}
+
+/// [`enforce_write_restriction`] over a 30-second cached restriction row, for
+/// the WebSocket ephemeral and observer paths. Those run per typing pulse and
+/// observer frame; persistent ingest keeps the uncached read. The verdict is
+/// still taken at `now`, so a cached timeout lifts on time.
+pub(crate) async fn enforce_cached_write_restriction(
+    state: &AppState,
+    tenant: &TenantContext,
+    kind: u32,
+    pubkey: &nostr::PublicKey,
+) -> Result<(), IngestError> {
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_write_ban_check(tenant.community()).await;
+    let restriction = state
+        .restriction_state_cached(tenant.community(), pubkey.as_bytes())
+        .await
+        .map_err(|e| {
+            IngestError::ban(
+                BanRefusal::Unavailable,
+                IngestError::Internal(format!(
+                    "error: internal error checking restriction state: {e}"
+                )),
+            )
         })?;
     write_restriction_denial(kind, &restriction, Utc::now()).map_or(Ok(()), Err)
 }
@@ -2355,6 +2518,19 @@ fn validate_canvas_future_timestamp(event_ts: i64, now: i64) -> Result<(), &'sta
     Ok(())
 }
 
+/// A validated kind:9007 whose channel is created when the event is stored.
+struct ChannelCreateRequest {
+    channel_id: Uuid,
+    name: String,
+    channel_type: buzz_db::channel::ChannelType,
+    visibility: buzz_db::channel::ChannelVisibility,
+    description: Option<String>,
+    ttl_seconds: Option<i32>,
+    labels: Vec<String>,
+    unlisted: bool,
+    members: Vec<Vec<u8>>,
+}
+
 async fn ingest_event_inner(
     state: &Arc<AppState>,
     tracer: &Arc<dyn buzz_conformance::Tracer>,
@@ -2388,7 +2564,13 @@ async fn ingest_event_inner(
         ));
     }
 
-    if auth.is_http() && (kind_u32 == KIND_GIFT_WRAP || kind_u32 == KIND_PRESENCE_UPDATE) {
+    // Typing indicators (kind:20002) never reach this gate: the HTTP bridge
+    // routes them to `publish_http_typing` before ingest.
+    if auth.is_http()
+        && (kind_u32 == KIND_GIFT_WRAP
+            || kind_u32 == KIND_PRESENCE_UPDATE
+            || kind_u32 == buzz_core::kind::KIND_AGENT_PRESENCE)
+    {
         return Err(IngestError::Rejected(format!(
             "invalid: kind {kind_u32} is only accepted via WebSocket"
         )));
@@ -2540,7 +2722,7 @@ async fn ingest_event_inner(
     // report; that is tolerated because reports are non-actioning signals and
     // remain visible only to moderators.
     if kind_u32 == KIND_REPORT {
-        super::report::handle_report_event(tenant, &event, state)
+        super::report::handle_report_event(tenant, &event, state, auth.channel_ids())
             .await
             .map_err(IngestError::Rejected)?;
         return Ok(IngestResult {
@@ -2558,9 +2740,7 @@ async fn ingest_event_inner(
     // The handler independently checks the durable ban state before executing
     // any command, which also covers NIP-98 and missed live disconnects.
     if buzz_core::kind::is_moderation_command_kind(kind_u32) {
-        super::moderation_commands::handle_moderation_command(tenant, state, &event)
-            .await
-            .map_err(IngestError::Rejected)?;
+        super::moderation_commands::handle_moderation_command(tenant, state, &event).await?;
         return Ok(IngestResult {
             event_id: event_id_hex,
             accepted: true,
@@ -2568,14 +2748,44 @@ async fn ingest_event_inner(
         });
     }
 
+    // NIP-09: kind:5 may reference targets via `e` tag (regular events) OR
+    // `a` tag (addressable/parameterized-replaceable events like kind:30620).
+    // Checked before any target lookup so every target faces the gates below.
+    if kind_u32 == KIND_NIP29_DELETE_EVENT || kind_u32 == KIND_DELETION {
+        let e_count = count_e_tags(&event);
+        let a_count = event
+            .tags
+            .iter()
+            .filter(|t| t.kind().to_string() == "a")
+            .count();
+        if (e_count + a_count) != 1 {
+            return Err(IngestError::Rejected(format!(
+                "invalid: deletion events must reference exactly one target via e or a tag (got e={e_count}, a={a_count})"
+            )));
+        }
+    }
+
+    // A reaction, or a kind 5 targeting an event, derives its channel from
+    // that target, so every channel gate below would reveal the target's
+    // existence or location. Their rejections all collapse to the kind's
+    // not-found denial.
+    let target_denial = if kind_u32 == KIND_REACTION {
+        Some(REACTION_TARGET_NOT_FOUND)
+    } else if kind_u32 == KIND_DELETION
+        && !crate::handlers::side_effects::extract_target_event_ids(&event).is_empty()
+    {
+        Some(crate::handlers::side_effects::DELETION_TARGET_DENIED)
+    } else {
+        None
+    };
+    let target_denied = |reason: &str| IngestError::Rejected(format!("invalid: {reason}"));
     let mut channel_id = if kind_u32 == KIND_REACTION {
-        match derive_reaction_channel(tenant.community(), &state.db, &event).await {
+        let reader = effective_message_author(&event, &state.relay_keypair.public_key());
+        match derive_reaction_channel(tenant.community(), &state.db, &event, &reader).await {
             ReactionChannelResult::Channel(ch_id) => Some(ch_id),
             ReactionChannelResult::NoChannel => None,
             ReactionChannelResult::NotFound => {
-                return Err(IngestError::Rejected(
-                    "invalid: reaction target event not found".into(),
-                ));
+                return Err(target_denied(REACTION_TARGET_NOT_FOUND));
             }
             ReactionChannelResult::NoTarget => {
                 return Err(IngestError::Rejected(
@@ -2591,43 +2801,27 @@ async fn ingest_event_inner(
     } else if is_gift_wrap {
         None
     } else if kind_u32 == KIND_DELETION {
-        // Standard deletion (kind:5): derive channel from the target event.
-        // kind:5 events don't carry an h-tag, so we look up the target event
-        // and use its channel_id. This ensures token-channel, membership, and
-        // archived checks run against the correct channel.
-        let target_hex = event.tags.iter().find_map(|t| {
-            if t.kind().to_string() == "e" {
-                t.content().and_then(|v| {
-                    if v.len() == 64 && v.chars().all(|c| c.is_ascii_hexdigit()) {
-                        Some(v.to_string())
-                    } else {
-                        None
-                    }
-                })
-            } else {
-                None
+        // Standard deletion (kind:5): decide authority over the target before
+        // the channel gates below, whose errors would otherwise reveal whether
+        // the target exists and where. The target's channel, soft-deleted or
+        // not (kind:5 carries no h-tag), then faces the token-channel,
+        // membership, and archived checks.
+        match crate::handlers::side_effects::extract_target_event_ids(&event).first() {
+            Some(target_id) => {
+                let actor = effective_message_author(&event, &state.relay_keypair.public_key());
+                crate::handlers::side_effects::authorized_standard_deletion_target(
+                    tenant, state, &actor, target_id,
+                )
+                .await
+                .map_err(|e| {
+                    IngestError::Internal(format!("error: looking up deletion target: {e}"))
+                })?
+                .ok_or_else(|| {
+                    target_denied(crate::handlers::side_effects::DELETION_TARGET_DENIED)
+                })?
+                .channel_id
             }
-        });
-        match target_hex {
-            Some(hex) => {
-                let target_bytes = hex::decode(&hex).map_err(|_| {
-                    IngestError::Rejected("invalid: malformed deletion target id".into())
-                })?;
-                match state
-                    .db
-                    .get_event_by_id_for_event_write(tenant.community(), &target_bytes)
-                    .await
-                {
-                    Ok(Some(target)) => target.channel_id,
-                    Ok(None) => None, // target not found — validate_standard_deletion will catch this
-                    Err(e) => {
-                        return Err(IngestError::Internal(format!(
-                            "error: looking up deletion target: {e}"
-                        )));
-                    }
-                }
-            }
-            None => None, // no e-tag — will be caught by single-target enforcement (step 12)
+            None => None,
         }
     } else {
         extract_channel_id(&event)
@@ -2644,12 +2838,17 @@ async fn ingest_event_inner(
     }
 
     if let Some(ch_id) = channel_id {
-        check_token_channel_access(&auth, ch_id).map_err(IngestError::AuthFailed)?;
+        check_token_channel_access(&auth, ch_id).map_err(|e| match target_denial {
+            Some(reason) => target_denied(reason),
+            None => IngestError::AuthFailed(e),
+        })?;
+    } else if let (Some(reason), Some(_)) = (target_denial, auth.channel_ids()) {
+        return Err(target_denied(reason));
     } else if auth.channel_ids().is_some() {
         // Channel-scoped tokens cannot publish global events — that would bypass
         // the token's channel restriction. This covers kind:1 (global text notes),
         // kind:3 (contact lists), kind:0 (profiles), and kind:9007 (create-group
-        // without an h-tag, which would auto-assign a server UUID).
+        // without an h-tag, which the create path also refuses).
         return Err(IngestError::AuthFailed(
             "restricted: channel-scoped tokens cannot publish global events".into(),
         ));
@@ -2709,9 +2908,15 @@ async fn ingest_event_inner(
             // at `check_channel_membership`'s `is_member_cached(tenant
             // .community(), …)` call (see crates/buzz-relay/src/handlers
             // /ingest.rs:424).
-            let auth_result =
-                check_channel_membership(tenant, state, ch_id, &pubkey_bytes, channel_row.as_ref())
-                    .await;
+            let auth_result = check_channel_membership(
+                tenant.community(),
+                state,
+                ch_id,
+                &pubkey_bytes,
+                channel_row.as_ref(),
+                ChannelWrite::for_kind(kind_u32),
+            )
+            .await;
             let claimed = claimed_community_from_event(&event);
             let verdict = if auth_result.is_ok() {
                 Verdict::Allow
@@ -2727,7 +2932,10 @@ async fn ingest_event_inner(
                 },
                 state_for_request(tenant, auth.pubkey()),
             );
-            auth_result.map_err(IngestError::Rejected)?;
+            auth_result.map_err(|e| match target_denial {
+                Some(reason) => target_denied(reason),
+                None => IngestError::Rejected(e),
+            })?;
         }
     }
 
@@ -2783,13 +2991,13 @@ async fn ingest_event_inner(
         let sender_hex = event.pubkey.to_hex();
 
         // remove_relay_member handles both the NotFound and IsOwner cases atomically.
-        let remove_result = state
+        let write = state
             .db
-            .remove_relay_member(tenant.community(), &sender_hex)
+            .remove_relay_member(tenant.community(), &sender_hex, &state.relay_keypair)
             .await
             .map_err(|e| IngestError::Internal(format!("database error: {e}")))?;
 
-        match remove_result {
+        match write.outcome {
             buzz_db::relay_members::RemoveResult::Removed => {}
             buzz_db::relay_members::RemoveResult::NotFound => {
                 return Err(IngestError::Rejected(
@@ -2828,11 +3036,8 @@ async fn ingest_event_inner(
         {
             warn!(error = %e, "failed to publish NIP-43 member removed event");
         }
-        if let Err(e) =
-            crate::handlers::side_effects::publish_nip43_membership_list(tenant, state).await
-        {
-            warn!(error = %e, "failed to publish NIP-43 membership list");
-        }
+        crate::handlers::side_effects::fan_out_nip43_membership_list(tenant, state, write.snapshot)
+            .await;
 
         info!(pubkey = %sender_hex, "relay member left via NIP-43 leave request");
         revoked.map_err(|e| {
@@ -2848,11 +3053,22 @@ async fn ingest_event_inner(
 
     validate_huddle_lifecycle_event(tenant, state, &event, kind_u32).await?;
 
-    if crate::handlers::side_effects::is_admin_kind(kind_u32) {
-        crate::handlers::side_effects::validate_admin_event(tenant, kind_u32, &event, state)
-            .await
-            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
-    }
+    // kind:9000 is checked person by person; the plan carries each result
+    // to `persist_put_user`, which stores the event and applies it.
+    let put_user = if kind_u32 == KIND_NIP29_PUT_USER {
+        Some(
+            crate::handlers::side_effects::validate_put_user(tenant, &event, state)
+                .await
+                .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?,
+        )
+    } else {
+        if crate::handlers::side_effects::is_admin_kind(kind_u32) {
+            crate::handlers::side_effects::validate_admin_event(tenant, kind_u32, &event, state)
+                .await
+                .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+        }
+        None
+    };
 
     // Processed here (verify consent, mutate archived_identities, emit the
     // relay-signed 8002/8003 delta + 13535 snapshot), then — unlike the
@@ -2865,23 +3081,37 @@ async fn ingest_event_inner(
     }
 
     if kind_u32 == KIND_DELETION {
+        // The target's archived channel blocks the deletion, so it must
+        // reject before the validator's target-kind diagnostics.
+        if let Some(reason) = target_denial {
+            if channel_row
+                .as_ref()
+                .is_some_and(|ch| ch.archived_at.is_some())
+            {
+                return Err(target_denied(reason));
+            }
+        }
         crate::handlers::side_effects::validate_standard_deletion_event(tenant, &event, state)
             .await
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
     if channel_id.is_some() {
-        // Allow kind:9002 with archived=false (unarchive operation)
-        let is_unarchive = kind_u32 == KIND_NIP29_EDIT_METADATA
-            && event.tags.iter().any(|t| {
-                let parts = t.as_slice();
-                parts.len() >= 2 && parts[0] == "archived" && parts[1] == "false"
-            });
+        // kind:9002 is not checked here: its atomic write decides the
+        // archive state under the channel row lock, after its duplicate
+        // check, so a resend that races the first commit is a duplicate.
+        let is_edit_metadata = kind_u32 == KIND_NIP29_EDIT_METADATA;
 
-        if !is_unarchive {
+        // A member may still leave an archived channel by themselves.
+        let is_self_departure = crate::handlers::side_effects::is_self_departure(&event);
+
+        if !is_edit_metadata && !is_self_departure {
             if let Some(channel) = &channel_row {
                 if channel.archived_at.is_some() {
-                    return Err(IngestError::Rejected("invalid: channel is archived".into()));
+                    return Err(match target_denial {
+                        Some(reason) => target_denied(reason),
+                        None => IngestError::Rejected("invalid: channel is archived".into()),
+                    });
                 }
             }
         }
@@ -2903,22 +3133,6 @@ async fn ingest_event_inner(
             );
         }
         return Ok(result);
-    }
-
-    // NIP-09: kind:5 may reference targets via `e` tag (regular events) OR
-    // `a` tag (addressable/parameterized-replaceable events like kind:30620).
-    if kind_u32 == KIND_NIP29_DELETE_EVENT || kind_u32 == KIND_DELETION {
-        let e_count = count_e_tags(&event);
-        let a_count = event
-            .tags
-            .iter()
-            .filter(|t| t.kind().to_string() == "a")
-            .count();
-        if (e_count + a_count) != 1 {
-            return Err(IngestError::Rejected(format!(
-                "invalid: deletion events must reference exactly one target via e or a tag (got e={e_count}, a={a_count})"
-            )));
-        }
     }
 
     if kind_u32 == KIND_STREAM_MESSAGE_EDIT {
@@ -2999,8 +3213,10 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    // Track pre-created channel UUID for compensation on insert failure.
-    let mut pre_created_channel: Option<Uuid> = None;
+    // A kind:9007 must carry the new channel's id in its `h` tag. It creates
+    // its channel when it is stored, in the same transaction (see the storage
+    // dispatch below).
+    let mut channel_create: Option<ChannelCreateRequest> = None;
 
     if kind_u32 == KIND_NIP29_CREATE_GROUP {
         // Validate name tag is present and non-empty before any DB work.
@@ -3011,33 +3227,16 @@ async fn ingest_event_inner(
                 None
             }
         });
-        if create_name
-            .as_ref()
-            .map(|n| {
-                buzz_core::channel::canonical_channel_name(n)
-                    .trim()
-                    .is_empty()
-            })
-            .unwrap_or(true)
-        {
-            return Err(IngestError::Rejected(
-                "invalid: channel name is required".into(),
-            ));
+        let name_error = match create_name.as_deref() {
+            Some(n) => buzz_core::channel::channel_name_error(n),
+            None => Some("channel name is required"),
+        };
+        if let Some(error) = name_error {
+            return Err(IngestError::Rejected(format!("invalid: {error}")));
         }
 
         // Validate visibility/channel_type for ALL kind:9007 events (with or without h-tag).
         // This runs pre-storage so invalid enums are rejected before the event is persisted.
-        let visibility_str = event
-            .tags
-            .iter()
-            .find_map(|t| {
-                if t.kind().to_string() == "visibility" {
-                    t.content().map(|s| s.to_string())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| "open".to_string());
         let channel_type_str = event
             .tags
             .iter()
@@ -3049,59 +3248,56 @@ async fn ingest_event_inner(
                 }
             })
             .unwrap_or_else(|| "stream".to_string());
-
-        let visibility: buzz_db::channel::ChannelVisibility = visibility_str
-            .parse()
-            .map_err(|_| IngestError::Rejected(format!("invalid visibility: {visibility_str}")))?;
         let channel_type: buzz_db::channel::ChannelType =
             channel_type_str.parse().map_err(|_| {
                 IngestError::Rejected(format!("invalid channel_type: {channel_type_str}"))
             })?;
-
-        if let Some(client_uuid) = channel_id {
-            let name = create_name.unwrap_or_default();
-            let name = buzz_core::channel::canonical_channel_name(&name);
-
-            let description = event.tags.iter().find_map(|t| {
-                if t.kind().to_string() == "about" {
+        let visibility: buzz_db::channel::ChannelVisibility =
+            match event.tags.iter().find_map(|t| {
+                if t.kind().to_string() == "visibility" {
                     t.content().map(|s| s.to_string())
                 } else {
                     None
                 }
+            }) {
+                Some(visibility_str) => visibility_str.parse().map_err(|_| {
+                    IngestError::Rejected(format!("invalid visibility: {visibility_str}"))
+                })?,
+                None => channel_type.default_visibility(),
+            };
+        let labels = super::side_effects::channel_labels_from_tags(&event)
+            .transpose()
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?
+            .unwrap_or_default();
+        let unlisted = super::side_effects::create_unlisted_from_tags(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+
+        if let Some(client_uuid) = channel_id {
+            let members = super::side_effects::initial_members(&event)
+                .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+            channel_create = Some(ChannelCreateRequest {
+                channel_id: client_uuid,
+                name: create_name.unwrap_or_default(),
+                channel_type,
+                visibility,
+                description: event.tags.iter().find_map(|t| {
+                    if t.kind().to_string() == "about" {
+                        t.content().map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                }),
+                ttl_seconds: super::resolve_ttl(&event, state.config.ephemeral_ttl_override),
+                labels,
+                unlisted,
+                members,
             });
-
-            let ttl_seconds = super::resolve_ttl(&event, state.config.ephemeral_ttl_override);
-
-            let actor_bytes = event.pubkey.to_bytes().to_vec();
-            let (_, was_created) = state
-                .db
-                .create_channel_with_id(
-                    tenant.community(),
-                    client_uuid,
-                    name,
-                    channel_type,
-                    visibility,
-                    description.as_deref(),
-                    &actor_bytes,
-                    ttl_seconds,
-                )
-                .await
-                .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
-
-            if !was_created {
-                return Ok(IngestResult {
-                    event_id: event_id_hex,
-                    accepted: false,
-                    message: "duplicate: channel already exists".into(),
-                });
-            }
-            pre_created_channel = Some(client_uuid);
-            metrics::counter!(
-                "buzz_channels_created_total",
-                "community" => tenant.host().to_owned(),
-                "type" => channel_type.to_string()
-            )
-            .increment(1);
+        } else {
+            // The channel is created in the same commit as its event, so a
+            // refused create (a taken name, for example) reaches the client.
+            return Err(IngestError::Rejected(
+                "invalid: create-group must include an h tag with the new channel id".into(),
+            ));
         }
     }
 
@@ -3281,9 +3477,9 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Internal(format!("error: {e}")))?
         {
             buzz_db::ReactionEventInsertOutcome::TargetMissing => {
-                return Err(IngestError::Rejected(
-                    "invalid: reaction target event not found".into(),
-                ));
+                return Err(IngestError::Rejected(format!(
+                    "invalid: {REACTION_TARGET_NOT_FOUND}"
+                )));
             }
             buzz_db::ReactionEventInsertOutcome::Duplicate => {
                 return Ok(IngestResult {
@@ -3352,13 +3548,99 @@ async fn ingest_event_inner(
     };
 
     let workflow_deletion = crate::handlers::side_effects::is_workflow_deletion(&event);
-    let (stored_event, was_inserted) = if workflow_deletion {
+    let mut message = String::new();
+    let (stored_event, was_inserted) = if let Some(create) = channel_create.as_ref() {
+        let creator = event.pubkey.to_bytes();
+        let channel = buzz_db::channel::NewChannel {
+            name: &create.name,
+            channel_type: create.channel_type,
+            visibility: create.visibility,
+            description: create.description.as_deref(),
+            created_by: &creator,
+            ttl_seconds: create.ttl_seconds,
+            labels: &create.labels,
+            unlisted: create.unlisted,
+            members: &create.members,
+        };
+        match state
+            .db
+            .create_channel_with_event(tenant.community(), create.channel_id, channel, &event)
+            .await
+            .map_err(|e| match e {
+                buzz_db::DbError::ChannelNameTaken(_) => {
+                    IngestError::Rejected(format!("invalid: {e}"))
+                }
+                _ => IngestError::Internal(format!("error: {e}")),
+            })? {
+            buzz_db::channel::ChannelCreate::Created(stored) => {
+                metrics::counter!(
+                    "buzz_channels_created_total",
+                    "community" => tenant.host().to_owned(),
+                    "type" => create.channel_type.to_string()
+                )
+                .increment(1);
+                (*stored, true)
+            }
+            // Resending a create whose OK was lost confirms it. Anything else
+            // for a taken UUID is refused. Neither writes anything, so the
+            // create's side effects never run again.
+            buzz_db::channel::ChannelCreate::Exists { resent } => {
+                return Ok(IngestResult {
+                    event_id: event_id_hex,
+                    accepted: resent,
+                    message: if resent {
+                        "duplicate:".into()
+                    } else {
+                        "duplicate: channel already exists".into()
+                    },
+                });
+            }
+        }
+    } else if workflow_deletion {
         // A single commit owns public acceptance, domain mutation, and dispatch.
         // Failure rolls everything back; identical concurrent requests cannot
         // divide insertion and repair ownership between two relay workers.
         crate::handlers::side_effects::persist_workflow_deletion(tenant, &event, state)
             .await
             .map_err(|e| IngestError::Internal(format!("error: workflow deletion failed: {e}")))?
+    } else if let Some(plan) = put_user {
+        // One commit stores the event and applies its membership changes. A
+        // failure stores nothing, so the client is told and can resend it.
+        // Refusing everyone under the membership lock is the client's error;
+        // anything else is ours.
+        let thread_params = thread_meta.as_ref().map(|m| m.as_params());
+        let (stored, inserted, ok_message) = crate::handlers::side_effects::persist_put_user(
+            tenant,
+            &event,
+            state,
+            plan,
+            thread_params,
+        )
+        .await
+        .map_err(|e| match e.downcast_ref::<buzz_db::DbError>() {
+            Some(buzz_db::DbError::AccessDenied(reason)) => {
+                IngestError::Rejected(format!("invalid: {reason}"))
+            }
+            _ => IngestError::Internal(format!("error: membership write failed: {e}")),
+        })?;
+        message = ok_message;
+        (stored, inserted)
+    } else if kind_u32 == KIND_NIP29_EDIT_METADATA {
+        // One commit stores the event and applies its channel changes. A
+        // failure stores nothing, so the client is told and can resend it.
+        // A refusal decided under the lock (for example, restoring a channel
+        // that is not archived) is the client's error; anything else is ours.
+        crate::handlers::side_effects::persist_edit_metadata(tenant, &event, state)
+            .await
+            .map_err(|e| match e.downcast_ref::<buzz_db::DbError>() {
+                Some(buzz_db::DbError::AccessDenied(reason)) => {
+                    IngestError::Rejected(format!("invalid: {reason}"))
+                }
+                Some(taken @ buzz_db::DbError::ChannelNameTaken(_)) => {
+                    IngestError::Rejected(format!("invalid: {taken}"))
+                }
+                _ => IngestError::Internal(format!("error: channel update failed: {e}")),
+            })?
     } else if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
         // channel_id is None for global kinds (0, 1, 3) due to step 5b above.
@@ -3396,7 +3678,7 @@ async fn ingest_event_inner(
         };
         let (stored_event, status) = state
             .db
-            .insert_channel_head_checked(tenant.community(), &event, channel, precondition)
+            .insert_canvas_head_checked(tenant.community(), &event, channel, precondition)
             .await
             .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
         match status {
@@ -3432,18 +3714,6 @@ async fn ingest_event_inner(
         {
             Ok(result) => result,
             Err(e) => {
-                // Compensate: if we pre-created a channel for kind:9007,
-                // soft-delete it so no orphaned channel row remains.
-                if let Some(ch_id) = pre_created_channel {
-                    if let Err(re) = state
-                        .db
-                        .soft_delete_channel(tenant.community(), ch_id)
-                        .await
-                    {
-                        warn!(event_id = %event_id_hex, "channel compensation failed: {re}");
-                    }
-                    state.invalidate_channel_deleted(tenant);
-                }
                 return Err(match e {
                     buzz_db::DbError::AuthEventRejected => {
                         IngestError::Rejected("invalid: AUTH events cannot be stored".into())
@@ -3462,7 +3732,12 @@ async fn ingest_event_inner(
         });
     }
 
-    if !workflow_deletion && crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
+    // Workflow deletion, kind:9000 and kind:9002 applied their changes in the
+    // insert's own transaction above.
+    let persisted_atomically = workflow_deletion
+        || kind_u32 == KIND_NIP29_PUT_USER
+        || kind_u32 == KIND_NIP29_EDIT_METADATA;
+    if !persisted_atomically && crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
         if let Err(e) =
             crate::handlers::side_effects::handle_side_effects(tenant, kind_u32, &event, state)
                 .await
@@ -3535,7 +3810,7 @@ async fn ingest_event_inner(
     Ok(IngestResult {
         event_id: event_id_hex,
         accepted: true,
-        message: String::new(),
+        message,
     })
 }
 
@@ -3558,8 +3833,8 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn check_channel_write_denies_when_channel_lookup_fails() {
-        let state = crate::state::tests::test_state_with_database_url(
-            "postgres://buzz:buzz_dev@127.0.0.1:1/buzz",
+        let state = crate::state::tests::test_state_with_unreachable_database_url(
+            "postgres://buzz:buzz_dev@127.0.0.1:1/buzz", // sadscan:disable np.postgres.1
         )
         .await;
         let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
@@ -3728,7 +4003,14 @@ mod postgres_tests {
     #[test]
     fn relay_admin_ban_maps_to_blocked_auth_failure() {
         let mapped = map_relay_admin_error(super::super::relay_admin::RelayAdminError::Banned);
-        match mapped {
+        assert!(matches!(
+            mapped,
+            IngestError::Ban {
+                refusal: BanRefusal::Banned,
+                ..
+            }
+        ));
+        match mapped.into_legacy() {
             IngestError::AuthFailed(msg) => {
                 assert_eq!(msg, "blocked: you are banned from this community");
             }
@@ -3763,7 +4045,14 @@ mod postgres_tests {
         let mapped = map_relay_admin_error(super::super::relay_admin::RelayAdminError::Internal(
             "internal error checking restriction state: pool timed out".to_string(),
         ));
-        match mapped {
+        assert!(matches!(
+            mapped,
+            IngestError::Ban {
+                refusal: BanRefusal::Unavailable,
+                ..
+            }
+        ));
+        match mapped.into_legacy() {
             IngestError::Internal(msg) => {
                 assert!(
                     msg.starts_with("error: "),
@@ -3847,9 +4136,10 @@ mod postgres_tests {
 
         let submitted = store
             .submit(
-                &host,
+                Some(&host),
                 "test-operator",
                 Some("lane3 ingest fence regression"),
+                None,
             )
             .await
             .expect("submit");
@@ -3992,7 +4282,8 @@ mod postgres_tests {
 
     #[test]
     fn create_group_does_not_require_h_tag() {
-        // kind:9007 creates the channel — h-tag is optional (client-chosen UUID)
+        // kind:9007 names its new channel in h, but the create path checks that
+        // itself (it refuses a create without one), not requires_h_channel_scope
         assert!(!requires_h_channel_scope(KIND_NIP29_CREATE_GROUP));
     }
 
@@ -6213,7 +6504,7 @@ mod postgres_tests {
     //   - Removing the `canvas_revision_spec` branch makes tagged writes fall
     //     through to the generic append; the stale-head step no longer returns
     //     a conflict: rejection, causing the assert! below to fail.
-    //   - Replacing `insert_channel_head_checked` with `insert_event_with_thread_metadata`
+    //   - Replacing `insert_canvas_head_checked` with `insert_event_with_thread_metadata`
     //     has the same effect — no conflict is surfaced.
     //
     // Requires Postgres (and does NOT need Redis — the fake replay guard fires
@@ -6685,7 +6976,7 @@ mod postgres_tests {
 
         // ── Step 4: untagged write still appends unconditionally ──────────────
         // No expected-revision tag → the event is routed through the generic
-        // append path, NOT through insert_channel_head_checked. It must succeed
+        // append path, NOT through insert_canvas_head_checked. It must succeed
         // regardless of the current head state.
         let untagged =
             nostr::EventBuilder::new(Kind::Custom(KIND_CANVAS as u16), "# unconditional")
@@ -6697,6 +6988,442 @@ mod postgres_tests {
         ingest_event_inner(&state, &tracer, &tenant, untagged, make_auth(&author))
             .await
             .expect("untagged canvas write must append unconditionally");
+    }
+
+    /// A channel-scoped token gets the same kind 5 rejection for a target it
+    /// has no authority over whether that target is missing, soft-deleted
+    /// (no live channel), or live in a channel outside the token's scope.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn scoped_token_deletion_rejection_does_not_reveal_target() {
+        use buzz_db::channel::{ChannelType, ChannelVisibility};
+        use nostr::{Keys, Kind, Tag};
+
+        let db_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect test Postgres");
+        let state = build_canvas_ingest_state(&db_url, &pool).await;
+        let host = format!("scoped-deletion-{}.test", Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community")
+            .id;
+        let tenant = TenantContext::resolved(community, &host);
+        let tracer: Arc<dyn buzz_conformance::Tracer> = Arc::new(VecTracer::default());
+
+        let author = Keys::generate();
+        let sender = Keys::generate();
+        let mut channels = Vec::new();
+        for creator in [&author, &sender] {
+            let channel_id = Uuid::new_v4();
+            state
+                .db
+                .create_channel_with_id(
+                    community,
+                    channel_id,
+                    &format!("scoped-deletion-{}", channel_id.simple()),
+                    ChannelType::Stream,
+                    ChannelVisibility::Open,
+                    None,
+                    creator.public_key().to_bytes().as_slice(),
+                    None,
+                )
+                .await
+                .expect("create test channel");
+            channels.push(channel_id);
+        }
+        let author_auth = || IngestAuth::Http {
+            pubkey: author.public_key(),
+            scopes: vec![Scope::MessagesWrite],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+        let publish = |kind: u16, tags: Vec<Tag>, keys: &Keys| {
+            nostr::EventBuilder::new(Kind::Custom(kind), Uuid::new_v4().to_string())
+                .tags(tags)
+                .sign_with_keys(keys)
+                .expect("sign")
+        };
+        let h = Tag::parse(["h", &channels[0].to_string()]).unwrap();
+        let live = publish(9, vec![h.clone()], &author);
+        let deleted = publish(9, vec![h.clone()], &author);
+        let global = publish(1, vec![], &author);
+        let in_scope = publish(9, vec![h], &author);
+        for event in [
+            live.clone(),
+            deleted.clone(),
+            global.clone(),
+            in_scope.clone(),
+        ] {
+            ingest_event_inner(&state, &tracer, &tenant, event, author_auth())
+                .await
+                .expect("store message");
+        }
+        let delete = |target: &str, keys: &Keys| {
+            publish(
+                KIND_DELETION as u16,
+                vec![Tag::parse(["e", target]).unwrap()],
+                keys,
+            )
+        };
+        ingest_event_inner(
+            &state,
+            &tracer,
+            &tenant,
+            delete(&deleted.id.to_hex(), &author),
+            author_auth(),
+        )
+        .await
+        .expect("soft-delete message");
+
+        let scoped_auth = |keys: &Keys, channel: Uuid| IngestAuth::Nip42 {
+            pubkey: keys.public_key(),
+            scopes: vec![Scope::MessagesWrite],
+            channel_ids: Some(vec![channel]),
+            conn_id: Uuid::new_v4(),
+        };
+        // Neither a non-owner nor the author holding a token scoped to the
+        // sender's channel may delete; both get the missing-target rejection.
+        for keys in [&sender, &author] {
+            for target in [
+                "a".repeat(64),
+                live.id.to_hex(),
+                deleted.id.to_hex(),
+                global.id.to_hex(),
+            ] {
+                let auth = scoped_auth(keys, channels[1]);
+                match ingest_event_inner(&state, &tracer, &tenant, delete(&target, keys), auth)
+                    .await
+                {
+                    Err(IngestError::Rejected(msg)) => assert_eq!(
+                        msg, "invalid: deletion target not found or not deletable by you",
+                        "target {target}"
+                    ),
+                    Err(other) => panic!("target {target}: {other:?}"),
+                    Ok(_) => panic!("target {target}: deletion accepted"),
+                }
+            }
+        }
+        // Kind 9005 from the author's out-of-scope token, naming the channel
+        // the token covers, cannot reveal where the target lives either.
+        let redact = |target: &str| {
+            publish(
+                KIND_NIP29_DELETE_EVENT as u16,
+                vec![
+                    Tag::parse(["e", target]).unwrap(),
+                    Tag::parse(["h", &channels[1].to_string()]).unwrap(),
+                ],
+                &author,
+            )
+        };
+        for target in ["a".repeat(64), live.id.to_hex(), global.id.to_hex()] {
+            match ingest_event_inner(
+                &state,
+                &tracer,
+                &tenant,
+                redact(&target),
+                scoped_auth(&author, channels[1]),
+            )
+            .await
+            {
+                Err(IngestError::Rejected(msg)) => assert_eq!(
+                    msg, "invalid: deletion target not found or not deletable by you",
+                    "9005 target {target}"
+                ),
+                Err(other) => panic!("9005 target {target}: {other:?}"),
+                Ok(_) => panic!("9005 target {target}: deletion accepted"),
+            }
+        }
+        // A token scoped to the target's channel still deletes.
+        ingest_event_inner(
+            &state,
+            &tracer,
+            &tenant,
+            delete(&in_scope.id.to_hex(), &author),
+            scoped_auth(&author, channels[0]),
+        )
+        .await
+        .expect("in-scope token deletes the author's message");
+        // Re-deleting a soft-deleted message stores the deletion in its channel.
+        let redeletion = delete(&deleted.id.to_hex(), &author);
+        ingest_event_inner(&state, &tracer, &tenant, redeletion.clone(), author_auth())
+            .await
+            .expect("author re-deletes a soft-deleted message");
+        let stored = state
+            .db
+            .get_event_by_id(community, redeletion.id.as_bytes())
+            .await
+            .expect("read re-deletion")
+            .expect("re-deletion stored");
+        assert_eq!(stored.channel_id, Some(channels[0]));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn subject_cannot_delete_relay_verified_profile() {
+        use buzz_core::kind::KIND_VERIFIED_PROFILE;
+        use buzz_db::verified_profiles::ProfileAdmission;
+        use nostr::Tag;
+        let f = ScopedTargetFixture::new("verified-profile-deletion").await;
+        let subject = f.author.public_key().to_hex();
+        let now = Utc::now();
+        let profile = f
+            .state
+            .db
+            .publish_verified_profile(
+                ProfileAdmission {
+                    community: f.tenant.community(),
+                    issuer: "https://issuer.test",
+                    pubkey: &subject,
+                    issued_at: now,
+                    admitted_at: now,
+                    display_name: "Alice",
+                    username: "alice",
+                    full_name: Some("Alice Example"),
+                    label: "Example",
+                    refresh_seconds: 3600,
+                    membership_required: false,
+                },
+                &f.state.relay_keypair,
+            )
+            .await
+            .unwrap()
+            .expect("publish relay-owned profile");
+        let auth = || IngestAuth::Http {
+            pubkey: f.author.public_key(),
+            scopes: vec![Scope::MessagesWrite],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+        let deletion = |tag: Tag| {
+            EventBuilder::new(Kind::Custom(KIND_DELETION as u16), "")
+                .tags([tag])
+                .sign_with_keys(&f.author)
+                .unwrap()
+        };
+        let coordinate = |author: String| {
+            Tag::parse([
+                "a".to_owned(),
+                format!("{KIND_VERIFIED_PROFILE}:{author}:{subject}"),
+            ])
+            .unwrap()
+        };
+        for tag in [
+            Tag::parse(["e", &profile.id.to_hex()]).unwrap(),
+            coordinate(profile.pubkey.to_hex()),
+            // Even a subject-authored coordinate cannot request deletion of this kind.
+            coordinate(subject.clone()),
+        ] {
+            let event = deletion(tag);
+            let id = event.id;
+            let result = f.submit(event, auth()).await;
+            assert!(
+                matches!(&result, Err(IngestError::Rejected(message))
+                    if message == "invalid: deletion target not found or not deletable by you"),
+                "profile deletion must be denied, got {:?}",
+                result.err()
+            );
+            assert!(f
+                .state
+                .db
+                .get_event_by_id(f.tenant.community(), id.as_bytes())
+                .await
+                .unwrap()
+                .is_none());
+            let stored = f
+                .state
+                .db
+                .get_event_by_id(f.tenant.community(), profile.id.as_bytes())
+                .await
+                .unwrap()
+                .expect("profile remains readable");
+            assert_eq!(stored.event, profile);
+        }
+
+        f.submit(
+            deletion(Tag::parse(["e", &f.global.id.to_hex()]).unwrap()),
+            auth(),
+        )
+        .await
+        .expect("ordinary author-owned note remains deletable");
+        assert!(f
+            .state
+            .db
+            .get_event_by_id(f.tenant.community(), f.global.id.as_bytes())
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    /// A community with `author`'s live message in an open channel, an
+    /// author global note, and a second open channel for out-of-scope tokens.
+    struct ScopedTargetFixture {
+        state: Arc<crate::state::AppState>,
+        tenant: TenantContext,
+        tracer: Arc<dyn buzz_conformance::Tracer>,
+        author: nostr::Keys,
+        sender: nostr::Keys,
+        target_channel: Uuid,
+        other_channel: Uuid,
+        live: Event,
+        global: Event,
+    }
+
+    impl ScopedTargetFixture {
+        async fn new(label: &str) -> Self {
+            use buzz_db::channel::{ChannelType, ChannelVisibility};
+            let state = ingest_state().await;
+            let host = format!("{label}-{}.test", Uuid::new_v4().simple());
+            let community = state
+                .db
+                .ensure_configured_community(&host)
+                .await
+                .expect("ensure community")
+                .id;
+            let tenant = TenantContext::resolved(community, &host);
+            let tracer: Arc<dyn buzz_conformance::Tracer> = Arc::new(VecTracer::default());
+            let (author, sender) = (nostr::Keys::generate(), nostr::Keys::generate());
+            let mut channels = Vec::new();
+            for creator in [&author, &sender] {
+                let channel_id = Uuid::new_v4();
+                state
+                    .db
+                    .create_channel_with_id(
+                        community,
+                        channel_id,
+                        &format!("{label}-{}", channel_id.simple()),
+                        ChannelType::Stream,
+                        ChannelVisibility::Open,
+                        None,
+                        creator.public_key().to_bytes().as_slice(),
+                        None,
+                    )
+                    .await
+                    .expect("create test channel");
+                channels.push(channel_id);
+            }
+            let publish = |kind: u16, tags: Vec<nostr::Tag>| {
+                EventBuilder::new(Kind::Custom(kind), Uuid::new_v4().to_string())
+                    .tags(tags)
+                    .sign_with_keys(&author)
+                    .expect("sign")
+            };
+            let live = publish(
+                9,
+                vec![nostr::Tag::parse(["h", &channels[0].to_string()]).unwrap()],
+            );
+            let global = publish(1, vec![]);
+            for event in [live.clone(), global.clone()] {
+                let auth = IngestAuth::Http {
+                    pubkey: author.public_key(),
+                    scopes: vec![Scope::MessagesWrite],
+                    auth_method: HttpAuthMethod::Nip98,
+                };
+                ingest_event_inner(&state, &tracer, &tenant, event, auth)
+                    .await
+                    .expect("store target");
+            }
+            Self {
+                state,
+                tenant,
+                tracer,
+                author,
+                sender,
+                target_channel: channels[0],
+                other_channel: channels[1],
+                live,
+                global,
+            }
+        }
+
+        fn scoped(&self, channel: Uuid) -> IngestAuth {
+            IngestAuth::Nip42 {
+                pubkey: self.sender.public_key(),
+                scopes: vec![Scope::MessagesWrite],
+                channel_ids: Some(vec![channel]),
+                conn_id: Uuid::new_v4(),
+            }
+        }
+
+        fn sign(&self, kind: u16, tags: Vec<Vec<String>>) -> Event {
+            EventBuilder::new(Kind::Custom(kind), "+")
+                .tags(tags.into_iter().map(|t| nostr::Tag::parse(t).unwrap()))
+                .sign_with_keys(&self.sender)
+                .expect("sign")
+        }
+
+        async fn submit(
+            &self,
+            event: Event,
+            auth: IngestAuth,
+        ) -> Result<IngestResult, IngestError> {
+            ingest_event_inner(&self.state, &self.tracer, &self.tenant, event, auth).await
+        }
+    }
+
+    /// A report sent with a token scoped to another channel answers exactly
+    /// like a report on a missing event.
+    /// Mutation: drop the `token_channels` check in `reporter_can_read` → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn scoped_token_report_does_not_reveal_target() {
+        let f = ScopedTargetFixture::new("scoped-report").await;
+        let author = f.author.public_key().to_hex();
+        let report = |target: String| {
+            f.sign(
+                KIND_REPORT as u16,
+                vec![
+                    vec!["e".into(), target, "spam".into()],
+                    vec!["p".into(), author.clone()],
+                ],
+            )
+        };
+        for target in ["a".repeat(64), f.live.id.to_hex()] {
+            match f
+                .submit(report(target.clone()), f.scoped(f.other_channel))
+                .await
+            {
+                Err(IngestError::Rejected(msg)) => {
+                    assert_eq!(msg, "invalid: report target event not found", "{target}")
+                }
+                Err(other) => panic!("target {target}: {other:?}"),
+                Ok(_) => panic!("target {target}: accepted"),
+            }
+        }
+        f.submit(report(f.live.id.to_hex()), f.scoped(f.target_channel))
+            .await
+            .expect("in-scope token reports the message");
+    }
+
+    /// A reaction sent with a token scoped to another channel, to a channel
+    /// message or to a global note, answers exactly like one to a missing event.
+    /// Mutation: drop the `(Some(reason), Some(_))` arm, or map the token
+    /// check to its own error → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn scoped_token_reaction_does_not_reveal_target() {
+        let f = ScopedTargetFixture::new("scoped-reaction").await;
+        let react = |target: String| f.sign(KIND_REACTION as u16, vec![vec!["e".into(), target]]);
+        for target in ["a".repeat(64), f.live.id.to_hex(), f.global.id.to_hex()] {
+            match f
+                .submit(react(target.clone()), f.scoped(f.other_channel))
+                .await
+            {
+                Err(IngestError::Rejected(msg)) => assert_eq!(
+                    msg,
+                    format!("invalid: {REACTION_TARGET_NOT_FOUND}"),
+                    "{target}"
+                ),
+                Err(other) => panic!("target {target}: {other:?}"),
+                Ok(_) => panic!("target {target}: accepted"),
+            }
+        }
+        f.submit(react(f.live.id.to_hex()), f.scoped(f.target_channel))
+            .await
+            .expect("in-scope token reacts to the message");
     }
 
     // ── Owner-aware ban/timeout coverage ─────────────────────────────────────
@@ -6812,9 +7539,17 @@ mod postgres_tests {
             .expect("ban owner");
 
         match enforce_write_restriction(&state, &tenant, KIND_REPORT, &agent.public_key()).await {
-            Err(IngestError::AuthFailed(msg)) => {
-                assert_eq!(msg, "blocked: you are banned from this community")
-            }
+            Err(
+                err @ IngestError::Ban {
+                    refusal: BanRefusal::Banned,
+                    ..
+                },
+            ) => match err.into_legacy() {
+                IngestError::AuthFailed(msg) => {
+                    assert_eq!(msg, "blocked: you are banned from this community")
+                }
+                other => panic!("owner ban must keep its legacy AuthFailed, got {other:?}"),
+            },
             other => panic!("banned owner's agent must not report, got {other:?}"),
         }
 
@@ -6844,15 +7579,20 @@ mod postgres_tests {
             .expect("ban owner");
 
         for keys in [&owner, &agent] {
-            let (status, body) = crate::api::relay_members::enforce_relay_membership(
-                &state,
-                tenant.community(),
-                keys.public_key().as_bytes(),
-                None,
-                None,
-            )
-            .await
-            .expect_err("banned principal (or its agent) must be refused");
+            let crate::api::relay_members::MembershipRefusal::Api((status, body)) =
+                crate::api::relay_members::enforce_relay_membership(
+                    &state,
+                    &tenant,
+                    keys.public_key().as_bytes(),
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .expect_err("banned principal (or its agent) must be refused")
+            else {
+                panic!("without a token the relay's own refusal is returned");
+            };
             assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
             assert_eq!(
                 body.0["error"],
@@ -6867,13 +7607,206 @@ mod postgres_tests {
             .expect("unban owner");
         crate::api::relay_members::enforce_relay_membership(
             &state,
-            tenant.community(),
+            &tenant,
             owner.public_key().as_bytes(),
+            None,
             None,
             None,
         )
         .await
         .expect("unbanned member is admitted");
+    }
+
+    /// A closed-relay copy of the ingest state.
+    fn closed_relay(state: &Arc<crate::state::AppState>) -> Arc<crate::state::AppState> {
+        let mut state = (**state).clone();
+        let mut config = (*state.config).clone();
+        config.require_relay_membership = true;
+        state.config = Arc::new(config);
+        Arc::new(state)
+    }
+
+    /// A community with a member owner and an agent key with no stored owner.
+    async fn token_owner_fixture(
+        state: &crate::state::AppState,
+        label: &str,
+    ) -> (TenantContext, nostr::Keys, nostr::Keys) {
+        let host = format!("{label}-{}.test", Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community")
+            .id;
+        let (owner, agent) = (nostr::Keys::generate(), nostr::Keys::generate());
+        state
+            .db
+            .add_relay_member(
+                community,
+                &owner.public_key().to_hex(),
+                "member",
+                None,
+                &nostr::Keys::generate(),
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("add owner");
+        (TenantContext::resolved(community, &host), owner, agent)
+    }
+
+    async fn http_membership(
+        state: &crate::state::AppState,
+        tenant: &TenantContext,
+        agent: &nostr::Keys,
+        token_owner: Option<nostr::PublicKey>,
+    ) -> Result<Option<nostr::PublicKey>, (axum::http::StatusCode, String)> {
+        crate::api::relay_members::enforce_relay_membership(
+            state,
+            tenant,
+            agent.public_key().as_bytes(),
+            None,
+            None,
+            token_owner,
+        )
+        .await
+        .map_err(|refusal| {
+            let status = refusal.status();
+            let body = match refusal {
+                crate::api::relay_members::MembershipRefusal::Api((_, body)) => {
+                    body.0["error"].as_str().unwrap_or("").to_owned()
+                }
+                crate::api::relay_members::MembershipRefusal::NipFi(class) => {
+                    class.http_body().to_owned()
+                }
+            };
+            (status, body)
+        })
+    }
+
+    /// A non-member agent is admitted on HTTP through its NIP-FI token owner's
+    /// membership, with no NIP-OA, and its stored owner is recorded. Removing
+    /// the owner from the community refuses it.
+    /// Mutation: drop the token-owner arm of `check_membership` → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn token_owner_membership_admits_non_member_agent_on_http() {
+        let state = closed_relay(&ingest_state().await);
+        let (tenant, owner, agent) = token_owner_fixture(&state, "token-owner").await;
+        assert_eq!(
+            http_membership(&state, &tenant, &agent, None).await,
+            Err((
+                axum::http::StatusCode::FORBIDDEN,
+                "relay_membership_required".to_owned()
+            ))
+        );
+        assert_eq!(
+            http_membership(&state, &tenant, &agent, Some(owner.public_key())).await,
+            Ok(Some(owner.public_key()))
+        );
+        assert!(state
+            .db
+            .is_agent_owner(
+                tenant.community(),
+                agent.public_key().as_bytes(),
+                owner.public_key().as_bytes()
+            )
+            .await
+            .expect("read stored owner"));
+
+        state
+            .db
+            .remove_relay_member(
+                tenant.community(),
+                &owner.public_key().to_hex(),
+                &nostr::Keys::generate(),
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("remove owner");
+        assert_eq!(
+            http_membership(&state, &tenant, &agent, Some(owner.public_key())).await,
+            Err((
+                axum::http::StatusCode::FORBIDDEN,
+                "authorization denied\n".to_owned()
+            ))
+        );
+    }
+
+    /// The token owner's ban reaches an agent that is itself a member, on a
+    /// closed and an open relay, with no stored owner link.
+    /// Mutation: ignore `token_owner` in `community_ban_outcome` → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn token_owner_ban_refuses_direct_member_agent_on_http() {
+        let open = ingest_state().await;
+        for state in [closed_relay(&open), open] {
+            let (tenant, owner, agent) = token_owner_fixture(&state, "token-owner-ban").await;
+            state
+                .db
+                .add_relay_member(
+                    tenant.community(),
+                    &agent.public_key().to_hex(),
+                    "member",
+                    None,
+                    &nostr::Keys::generate(),
+                )
+                .await
+                .map(|write| write.outcome)
+                .expect("add agent");
+            let owner_bytes = owner.public_key().to_bytes();
+            state
+                .db
+                .ban_community_member(tenant.community(), &owner_bytes, &owner_bytes, None, None)
+                .await
+                .expect("ban owner");
+
+            assert_eq!(
+                http_membership(&state, &tenant, &agent, None).await,
+                Ok(None),
+                "control: without the token owner the agent is admitted"
+            );
+            assert_eq!(
+                http_membership(&state, &tenant, &agent, Some(owner.public_key())).await,
+                Err((
+                    axum::http::StatusCode::FORBIDDEN,
+                    "authorization denied\n".to_owned()
+                ))
+            );
+        }
+    }
+
+    /// A token owner other than the agent's stored owner is refused on HTTP.
+    /// Mutation: treat `OwnerLink::Conflict` as linked → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn token_owner_other_than_stored_owner_is_refused_on_http() {
+        let state = closed_relay(&ingest_state().await);
+        let (tenant, owner, agent) = token_owner_fixture(&state, "token-owner-conflict").await;
+        let prior = nostr::Keys::generate();
+        for keys in [&agent, &prior] {
+            state
+                .db
+                .ensure_user(tenant.community(), keys.public_key().as_bytes())
+                .await
+                .expect("ensure user");
+        }
+        assert!(state
+            .db
+            .set_agent_owner(
+                tenant.community(),
+                agent.public_key().as_bytes(),
+                prior.public_key().as_bytes(),
+            )
+            .await
+            .expect("seed prior owner"));
+
+        assert_eq!(
+            http_membership(&state, &tenant, &agent, Some(owner.public_key())).await,
+            Err((
+                axum::http::StatusCode::FORBIDDEN,
+                "authorization denied\n".to_owned()
+            ))
+        );
     }
 
     /// Revoking a member's live access also closes their agents' sockets, and
@@ -6931,8 +7864,8 @@ mod postgres_tests {
         use sqlx::postgres::PgConnectOptions;
         use tokio_util::sync::CancellationToken;
 
-        // A schema with bans but no `users` table: the ban commits, and only
-        // the owned-agent lookup fails.
+        // A supported ban writer commits before the users table is taken away:
+        // only the subsequent owned-agent lookup fails.
         let db_url = crate::test_support::database_url();
         let admin = sqlx::PgPool::connect(&db_url)
             .await
@@ -6940,7 +7873,12 @@ mod postgres_tests {
         let schema = format!("revoke_owner_{}", Uuid::new_v4().simple());
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
             "CREATE SCHEMA {schema}; \
-             CREATE TABLE {schema}.community_bans (LIKE public.community_bans INCLUDING ALL);"
+             CREATE TABLE {schema}.users (LIKE public.users INCLUDING ALL); \
+             CREATE TABLE {schema}.relay_invites (LIKE public.relay_invites INCLUDING ALL); \
+             CREATE TABLE {schema}.community_bans (LIKE public.community_bans INCLUDING ALL); \
+             CREATE TABLE {schema}.communities (LIKE public.communities INCLUDING ALL); \
+             CREATE FUNCTION {schema}.community_deletion_lock_key(target UUID) RETURNS BIGINT \
+             LANGUAGE SQL IMMUTABLE STRICT AS 'SELECT public.community_deletion_lock_key(target)';"
         )))
         .execute(&admin)
         .await
@@ -6955,6 +7893,13 @@ mod postgres_tests {
         let state = build_canvas_ingest_state(&db_url, &pool).await;
         let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::new_v4());
         let tenant = TenantContext::resolved(community, "revoke-owner.test".to_string());
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "INSERT INTO {schema}.communities (id, host) VALUES ($1, 'revoke-owner.test')"
+        )))
+        .bind(community.as_uuid())
+        .execute(&admin)
+        .await
+        .expect("seed admitted community");
         let (owner, agent, bystander) = (
             nostr::Keys::generate(),
             nostr::Keys::generate(),
@@ -7011,6 +7956,10 @@ mod postgres_tests {
             )
             .await
             .expect("ban commits");
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP TABLE {schema}.users")))
+            .execute(&admin)
+            .await
+            .expect("break only the post-commit owner lookup");
         let revoked = state
             .revoke_live_access(
                 &tenant,

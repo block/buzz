@@ -52,7 +52,29 @@ void main() {
     );
     addTearDown(container.dispose);
 
+    // The profile survives reconnect transitions without launching reads on
+    // each intermediate socket state, then revalidates once connected.
+    container.read(relaySessionProvider);
+    relaySession.setStatus(SessionStatus.disconnected);
+    final subscription = container.listen(profileProvider, (_, _) {});
+    addTearDown(subscription.close);
+    await container.pump();
+    relaySession.setStatus(SessionStatus.connecting);
+    await container.pump();
+    expect(relaySession.reads, 0);
+    relaySession.setStatus(SessionStatus.connected);
     await container.read(profileProvider.future);
+    final initialReads = relaySession.reads;
+    relaySession.setStatus(SessionStatus.disconnected);
+    await container.pump();
+    relaySession.setStatus(SessionStatus.connecting);
+    await container.pump();
+    expect(container.read(profileProvider).requireValue?.displayName, 'Alice');
+    expect(relaySession.reads, initialReads);
+    relaySession.setStatus(SessionStatus.connected);
+    await container.pump();
+    await container.read(profileProvider.future);
+    expect(relaySession.reads, initialReads + 1);
     await container.read(profileProvider.notifier).updateDisplayName('Alice L');
 
     expect(relaySession.published, hasLength(1));
@@ -681,6 +703,9 @@ class _MutableRelayConfigNotifier extends RelayConfigNotifier {
 class _ProfileRelaySession extends RelaySessionNotifier {
   _ProfileRelaySession(this.profile);
 
+  int reads = 0;
+  void setStatus(SessionStatus status) => state = SessionState(status: status);
+
   final NostrEvent profile;
   final List<NostrEvent> published = [];
 
@@ -691,7 +716,10 @@ class _ProfileRelaySession extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-  }) async => [profile, ...published];
+  }) async {
+    reads++;
+    return [profile, ...published];
+  }
 
   @override
   Future<NostrEvent> publish(

@@ -2,7 +2,7 @@ import Foundation
 
 /// Verified local values used to specialize an ordinary notification as communication.
 public struct BuzzCommunicationNotificationDescriptor: Equatable, Sendable {
-  public let senderDisplayName: String
+  public let senderDisplayName: String?
   public let senderIdentifier: String
   public let senderAvatarPNG: Data?
   public let messageBody: String
@@ -12,7 +12,7 @@ public struct BuzzCommunicationNotificationDescriptor: Equatable, Sendable {
   public let recipientCount: Int
 
   public init(
-    senderDisplayName: String,
+    senderDisplayName: String?,
     senderIdentifier: String,
     senderAvatarPNG: Data?,
     messageBody: String,
@@ -39,7 +39,7 @@ public struct BuzzCommunicationNotificationDescriptor: Equatable, Sendable {
       recipientCount > 0
     else { return nil }
     self.init(
-      senderDisplayName: resolution.title,
+      senderDisplayName: resolution.title.isEmpty ? nil : resolution.title,
       senderIdentifier: BuzzPushPresentationIdentity.sender(
         communityID: target.communityID,
         pubkey: senderPubkey

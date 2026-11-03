@@ -56,7 +56,7 @@ class _ConversationAppBarTitle extends StatelessWidget {
                   children: [
                     if (!channel.isDm && channel.visibility == 'private') ...[
                       Icon(
-                        LucideIcons.lock,
+                        BuzzIcons.lock,
                         size: 14,
                         color: context.colors.onSurfaceVariant,
                         semanticLabel: 'Private channel',
@@ -153,7 +153,7 @@ class _ConversationAppBarTitle extends StatelessWidget {
     ),
   );
   final presence = ref.watch(
-    presenceCacheProvider.select(
+    presentedPresenceProvider.select(
       (presenceMap) => otherPubkey == null ? null : presenceMap[otherPubkey],
     ),
   );

@@ -9,7 +9,6 @@ import 'package:buzz/shared/community/community_membership_provider.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/theme/theme.dart';
-import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/shared/push/dev_push_lease.dart';
 import 'package:buzz/shared/push/push_relay_capability_provider.dart';
 import 'package:buzz/shared/relay/app_lifecycle_provider.dart';
@@ -75,10 +74,20 @@ void main() {
       );
       expect(find.text('Invite to community'), findsNothing);
       await tester.pumpAndSettle();
+      final version = find.text(
+        buildNumber.isEmpty ? 'v0.16.0' : 'v0.16.0 ($buildNumber)',
+      );
+      await tester.scrollUntilVisible(version, 200);
+      await tester.pumpAndSettle();
+      expect(version.hitTestable(), findsOneWidget);
       expect(
-        find.text(buildNumber.isEmpty ? 'v0.16.0' : 'v0.16.0 ($buildNumber)'),
+        find.ancestor(of: version, matching: find.byType(ListView)),
         findsOneWidget,
       );
+      final beforeScroll = tester.getTopLeft(version).dy;
+      await tester.drag(find.byType(ListView), const Offset(0, 100));
+      await tester.pumpAndSettle();
+      expect(tester.getTopLeft(version).dy, greaterThan(beforeScroll));
       expect(tester.takeException(), isNull);
     });
   }
@@ -92,7 +101,6 @@ void main() {
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
       final capability = Completer<BuzzPushLeaseDescriptor?>();
-      var permissionReads = 0;
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
@@ -105,12 +113,6 @@ void main() {
             ),
             currentRelayPushDescriptorProvider.overrideWith(
               (ref) => capability.future,
-            ),
-            buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
-              () async {
-                permissionReads += 1;
-                return BuzzPushAuthorizationStatus.authorized;
-              },
             ),
           ],
           child: MaterialApp(
@@ -134,7 +136,6 @@ void main() {
       expect(find.text('Notifications'), findsNothing);
       expect(find.text('Push notifications'), findsNothing);
       expect(find.byType(Switch), findsNothing);
-      expect(permissionReads, 0);
       expect(tester.takeException(), isNull);
       debugDefaultTargetPlatformOverride = null;
     });
@@ -161,9 +162,6 @@ void main() {
           activeCommunityProvider.overrideWith((ref) async => community),
           currentRelayPushDescriptorProvider.overrideWith((ref) => capability),
           appLifecycleProvider.overrideWith(_SettingsLifecycleNotifier.new),
-          buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
-            () async => BuzzPushAuthorizationStatus.authorized,
-          ),
         ],
         child: MaterialApp(
           theme: AppTheme.light(),
@@ -184,109 +182,6 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
-  testWidgets('shows denied display permission and opens iOS settings', (
-    tester,
-  ) async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-    addTearDown(() => debugDefaultTargetPlatformOverride = null);
-    SharedPreferences.setMockInitialValues({});
-    final prefs = await SharedPreferences.getInstance();
-    final community = Community.create(
-      name: 'Team',
-      relayUrl: 'wss://relay.example',
-    ).copyWith(pushNotificationsEnabled: true);
-    var openSettingsCalls = 0;
-
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          savedPrefsProvider.overrideWithValue(prefs),
-          activeCommunityProvider.overrideWith((ref) async => community),
-          currentRelayPushDescriptorProvider.overrideWith(
-            (ref) async => _pushDescriptor,
-          ),
-          appLifecycleProvider.overrideWith(_SettingsLifecycleNotifier.new),
-          buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
-            () async => BuzzPushAuthorizationStatus.denied,
-          ),
-          buzzPushNotificationSettingsOpenerProvider.overrideWithValue(
-            () async {
-              openSettingsCalls += 1;
-              return true;
-            },
-          ),
-        ],
-        child: MaterialApp(
-          theme: AppTheme.light(),
-          home: SettingsPage(
-            profileHeader: const SizedBox.shrink(),
-            identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
-          ),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
-    expect(
-      find.text('Enabled in Buzz, but disabled in iOS Settings'),
-      findsOneWidget,
-    );
-    await tester.tap(
-      find.byKey(const ValueKey('push-notifications-open-settings')),
-    );
-    await tester.pump();
-    expect(openSettingsCalls, 1);
-    debugDefaultTargetPlatformOverride = null;
-  });
-
-  testWidgets('shows permission lookup errors with settings recovery', (
-    tester,
-  ) async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-    addTearDown(() => debugDefaultTargetPlatformOverride = null);
-    SharedPreferences.setMockInitialValues({});
-    final prefs = await SharedPreferences.getInstance();
-    final community = Community.create(
-      name: 'Team',
-      relayUrl: 'wss://relay.example',
-    ).copyWith(pushNotificationsEnabled: true);
-
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          savedPrefsProvider.overrideWithValue(prefs),
-          activeCommunityProvider.overrideWith((ref) async => community),
-          currentRelayPushDescriptorProvider.overrideWith(
-            (ref) async => _pushDescriptor,
-          ),
-          appLifecycleProvider.overrideWith(_SettingsLifecycleNotifier.new),
-          buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
-            () async => throw StateError('authorization unavailable'),
-          ),
-        ],
-        child: MaterialApp(
-          theme: AppTheme.light(),
-          home: SettingsPage(
-            profileHeader: const SizedBox.shrink(),
-            identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
-          ),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(
-      find.text('Enabled in Buzz; iOS permission status unavailable'),
-      findsOneWidget,
-    );
-    expect(
-      find.byKey(const ValueKey('push-notifications-open-settings')),
-      findsOneWidget,
-    );
-    debugDefaultTargetPlatformOverride = null;
-  });
-
   for (final brightness in Brightness.values) {
     testWidgets(
       'shows status above profile editing and routes photo directly in ${brightness.name}',
@@ -295,8 +190,7 @@ void main() {
           await tester.runAsync(() async {
             for (final font in {
               'Inter': 'assets/fonts/InterVariable.ttf',
-              'packages/lucide_icons_flutter/Lucide':
-                  'packages/lucide_icons_flutter/assets/lucide.ttf',
+              'BuzzTabler': 'assets/fonts/TablerIcons.ttf',
             }.entries) {
               await (FontLoader(
                 font.key,

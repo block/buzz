@@ -34,6 +34,9 @@ pub struct RelayInfo {
     /// Host-bound atomic read-state snapshot capability; absent on unresolved hosts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_state_snapshot: Option<serde_json::Value>,
+    /// Opt-in, host-bound private accessory API; separate from legacy NIP-RS.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub buzz_v1: Option<BuzzV1Descriptor>,
     /// NIP-AR artifact query transport and enforced resource limits.
     pub artifacts: serde_json::Value,
     /// Relay operator's public key (hex), if published.
@@ -76,6 +79,24 @@ pub struct RelayInfo {
     /// Absent when the relay is in `Off` mode. [FI-TRACE-DISCOVERY-PRIVATE]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub federated_identity: Option<serde_json::Value>,
+}
+
+/// Private read-state accessory contract and enforced client request limits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuzzV1Descriptor {
+    /// Accessory contract version, not a Nostr protocol number.
+    pub version: u32,
+    /// Relay-relative API prefix; callers retain the requesting origin.
+    pub base_path: String,
+    /// Author-time unread horizon; does not expire messages or frontiers.
+    pub retention_seconds: u32,
+    /// Maximum joined channels per sidebar page.
+    pub max_channels: usize,
+    /// Maximum independent write intents per request.
+    pub max_intents: usize,
+    /// Message kinds that count as unread and as latest activity. Clients
+    /// classify live arrivals with this set instead of keeping a copy.
+    pub eligible_kinds: [i32; 4],
 }
 
 /// Public capability descriptor for relay-proxied GIF search.
@@ -221,7 +242,18 @@ impl RelayInfo {
             supported_nips.push(NIP_RELAY_MEMBERSHIP);
         }
 
-        let mut supported_extensions = vec!["nip-er".to_string(), "nip-ar".to_string()];
+        let mut supported_extensions = vec![
+            "nip-er".to_string(),
+            "nip-ar".to_string(),
+            // NIP-CL: identity tags, labels and system channels.
+            "nip-cl".to_string(),
+            // Bridge `/query` search accepts `search_sort: "newest"`.
+            "buzz-search-sort".to_string(),
+            // kind:9002 `unlisted` (NOSTR.md, Unlisted channels). A relay
+            // without it ignores the tag beside `visibility`, so a client
+            // checks this before opening a channel as unlisted.
+            "buzz-unlisted-channels".to_string(),
+        ];
         let gif = gif_provider.map(|provider| {
             supported_extensions.push("buzz-gif".to_string());
             GifDescriptor {
@@ -250,11 +282,16 @@ impl RelayInfo {
             description: "Buzz — private team communication relay".to_string(),
             icon: icon.filter(|s| !s.is_empty()).map(|s| s.to_string()),
             read_state_snapshot: None,
+            buzz_v1: None,
             artifacts: serde_json::json!({
                 "version": 1, "revision_kind": 45010, "removal_kind": 45011,
                 "query": "/query", "count": "/count",
-                "modes": ["current", "history"],
-                "websocket_query_extensions": false,
+                "modes": ["current", "history", "head"],
+                "sync": {
+                    "version": 1,
+                    "max_events": buzz_core::artifact_sync::MAX_SYNC_EVENTS,
+                },
+                "websocket_query_extensions": true,
                 "max_tags": buzz_core::artifact::MAX_TAGS,
                 "max_tag_name_bytes": buzz_core::artifact::MAX_TAG_NAME_BYTES,
                 "max_tag_value_bytes": buzz_core::artifact::MAX_TAG_VALUE_BYTES,
@@ -314,7 +351,6 @@ fn push_descriptor(
             "pubkey": relay_keypair.public_key().to_hex(),
             "current": true
         }],
-        "app_profiles": [{"id": "buzz-ios-dogfood", "transport": "apns"}],
         "push_kinds": crate::handlers::push_lease::PUSH_KINDS,
         "h_grammar": "uuid-v4-lowercase",
         "class_support": {"apns": ["default"]},
@@ -359,7 +395,26 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
         admin_api.as_deref(),
         state.config.klipy.as_ref().map(|_| "klipy"),
     );
+    if state.config.artifact_incremental_enabled {
+        info.artifacts["incremental"] = crate::api::artifact_sync::capability();
+    }
     if let Ok(tenant) = crate::tenant::bind_community(&state.db, raw_host).await {
+        if let Some(profile) = crate::verified_profiles::discovery(state, &tenant).await {
+            if let Some(fi) = info.federated_identity.as_mut() {
+                fi["public_profile"] = profile;
+            }
+        }
+        if state.config.buzz_v1_enabled {
+            use buzz_db::personal_read::{ELIGIBLE_KINDS, MAX_CHANNELS, MAX_INTENTS};
+            info.buzz_v1 = Some(BuzzV1Descriptor {
+                version: 1,
+                base_path: crate::api::buzz_v1::BASE_PATH.to_owned(),
+                retention_seconds: state.config.buzz_v1_retention_seconds,
+                max_channels: MAX_CHANNELS,
+                max_intents: MAX_INTENTS,
+                eligible_kinds: ELIGIBLE_KINDS,
+            });
+        }
         info.read_state_snapshot = Some(serde_json::json!({
             "version": 1,
             "community_id": tenant.community().as_uuid(),
@@ -384,7 +439,7 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
     ) {
         info.supported_extensions
             .get_or_insert_default()
-            .push("nip-pl".to_string());
+            .push("buzz-push-v1".to_string());
         info.push = Some(push);
     }
     info
@@ -481,8 +536,10 @@ mod tests {
     #[tokio::test]
     async fn shadow_serves_the_same_nip11_document_as_enforce() {
         use buzz_auth::NipFiMode;
-        let base =
-            crate::state::tests::test_state_with_database_url("postgres://127.0.0.1:1/none").await;
+        let base = crate::state::tests::test_state_with_unreachable_database_url(
+            "postgres://127.0.0.1:1/none",
+        )
+        .await;
         let mut docs = Vec::new();
         for mode in [NipFiMode::Off, NipFiMode::Enforce, NipFiMode::Shadow] {
             let mut state = (*base).clone();
@@ -627,6 +684,26 @@ mod tests {
             .supported_extensions
             .expect("extensions")
             .contains(&"buzz-gif".to_string()));
+    }
+
+    /// Clients refuse NIP-CL labels and system channels, newest-first
+    /// search, and unlisted channels unless the relay says it supports them,
+    /// so every document must advertise all three.
+    #[test]
+    fn advertises_nip_cl_search_sort_and_unlisted_extensions() {
+        let info = RelayInfo::build(
+            None,
+            None,
+            RelayCapabilityFlags::default(),
+            DEFAULT_MAX_FRAME_BYTES,
+            None,
+            None,
+            None,
+        );
+        let extensions = info.supported_extensions.expect("extensions");
+        assert!(extensions.contains(&"nip-cl".to_string()));
+        assert!(extensions.contains(&"buzz-search-sort".to_string()));
+        assert!(extensions.contains(&"buzz-unlisted-channels".to_string()));
     }
 
     /// NIP-WP → NIP-11 mirror: a set workspace icon is served in the standard

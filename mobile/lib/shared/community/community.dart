@@ -2,6 +2,7 @@ import 'dart:math';
 
 import 'package:uuid/uuid.dart';
 
+import '../hosted/hosted_environment.dart';
 import '../push/push_subscription.dart';
 
 const _uuid = Uuid();
@@ -19,8 +20,19 @@ String _newPushLeaseInstallationId() {
 enum SensitiveActionPolicy { enabled, disabledByUser }
 
 class Community {
+  static const _defaultPushNotificationsEnabled = true;
+
+  static const _pushNotificationsEnabledKey = 'pushNotificationsEnabledV2';
+
   final String id;
-  final String name;
+
+  /// Saved label, which may be a hosted relay's full host name.
+  final String _name;
+
+  /// User-facing label. Every reader goes through here so hosted host-name
+  /// fallbacks always appear in the short form onboarding shows.
+  String get name => HostedEnvironment.communityDisplayName(_name, relayUrl);
+
   final String relayUrl;
   final String? pubkey;
   final String? nsec;
@@ -40,17 +52,17 @@ class Community {
 
   const Community({
     required this.id,
-    required this.name,
+    required String name,
     required this.relayUrl,
     this.pubkey,
     this.nsec,
     this.sensitiveActionPolicy = SensitiveActionPolicy.disabledByUser,
-    this.pushNotificationsEnabled = false,
+    this.pushNotificationsEnabled = _defaultPushNotificationsEnabled,
     this.pushSubscriptionState = const BuzzPushLeaseSubscriptionState.desired(),
     this.pushLeaseInstallationId,
     this.starterSetupIncomplete = false,
     required this.addedAt,
-  });
+  }) : _name = name;
 
   factory Community.create({
     required String name,
@@ -87,7 +99,7 @@ class Community {
   }) {
     return Community(
       id: id,
-      name: name ?? this.name,
+      name: name ?? _name,
       relayUrl: relayUrl ?? this.relayUrl,
       pubkey: pubkey == _sentinel ? this.pubkey : pubkey as String?,
       nsec: nsec == _sentinel ? this.nsec : nsec as String?,
@@ -108,12 +120,12 @@ class Community {
 
   Map<String, dynamic> toJson() => {
     'id': id,
-    'name': name,
+    'name': _name,
     'relayUrl': relayUrl,
     if (pubkey != null) 'pubkey': pubkey,
     if (nsec != null) 'nsec': nsec,
     'sensitiveActionPolicy': sensitiveActionPolicy.name,
-    'pushNotificationsEnabled': pushNotificationsEnabled,
+    _pushNotificationsEnabledKey: pushNotificationsEnabled,
     'pushSubscriptionState': pushSubscriptionState.toJson(),
     if (pushLeaseInstallationId != null)
       'pushLeaseInstallationId': pushLeaseInstallationId,
@@ -130,7 +142,8 @@ class Community {
       );
     }
     final pushNotificationsEnabled =
-        json['pushNotificationsEnabled'] as bool? ?? false;
+        json[_pushNotificationsEnabledKey] as bool? ??
+        _defaultPushNotificationsEnabled;
     var pushSubscriptionState = json['pushSubscriptionState'] == null
         ? const BuzzPushLeaseSubscriptionState.desired()
         : BuzzPushLeaseSubscriptionState.fromJson(

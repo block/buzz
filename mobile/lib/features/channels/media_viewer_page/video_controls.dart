@@ -36,7 +36,7 @@ class _VideoViewerBottomControls extends StatelessWidget {
               alignment: AlignmentDirectional.centerStart,
               child: _MediaViewerCircleButton(
                 key: const ValueKey('message-media-video-viewer-reply-thread'),
-                icon: LucideIcons.messageSquareReply,
+                icon: BuzzIcons.messageSquareReply,
                 tooltip: 'Reply in thread',
                 onPressed: onReply,
               ),
@@ -88,18 +88,15 @@ class _VideoTransportBar extends HookConsumerWidget {
       } catch (error) {
         debugPrint('[VideoViewer] seek failed: $error');
         if (context.mounted && isCurrent()) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: const Text('Could not seek in this video.'),
-              action: SnackBarAction(
-                label: 'Retry',
-                onPressed: () {
-                  if (!isCurrent()) return;
-                  beginScrub(next);
-                  unawaited(finishScrub(next));
-                },
-              ),
-            ),
+          showBuzzToast(
+            context,
+            'Could not seek in this video.',
+            kind: ToastKind.error,
+            onRetry: () {
+              if (!isCurrent()) return;
+              beginScrub(next);
+              unawaited(finishScrub(next));
+            },
           );
         }
       } finally {
@@ -191,7 +188,7 @@ class _VideoTransportBar extends HookConsumerWidget {
       },
       tooltip: value.isPlaying ? 'Pause video' : 'Play video',
       icon: Icon(
-        value.isPlaying ? LucideIcons.pause : LucideIcons.play,
+        value.isPlaying ? BuzzIcons.pause : BuzzIcons.play,
         color: Colors.white,
         size: 20,
       ),
@@ -228,7 +225,7 @@ class _VideoTransportBar extends HookConsumerWidget {
         );
       },
       icon: Icon(
-        value.volume == 0 ? LucideIcons.volumeX : LucideIcons.volume2,
+        value.volume == 0 ? BuzzIcons.volumeX : BuzzIcons.volume2,
         color: Colors.white,
         size: 20,
       ),
@@ -310,7 +307,7 @@ class _VideoTransportBar extends HookConsumerWidget {
                     key: const ValueKey(
                       'message-media-video-viewer-reply-thread',
                     ),
-                    icon: LucideIcons.messageSquareReply,
+                    icon: BuzzIcons.messageSquareReply,
                     tooltip: 'Reply in thread',
                     onPressed: onReply,
                   ),

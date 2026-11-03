@@ -17,7 +17,7 @@ When writing a spec or implementing significant changes or tests, check them for
 
 Mobile and desktop follow shared rules for behavior such as channel ordering, unread state, and autocomplete. Presentation and interaction should suit each platform.
 
-The desktop implementation is a reference we can use to inform defining those rules, but it contains bugs and unintended behavior and is not itself the specification. Written intent takes priority over implementation precedent. A clearer vision or spec developed for mobile can establish the intended shared behavior for desktop too.
+The legacy `desktop/` app in this repository will soon be superseded by [block/buzz-app](https://github.com/block/buzz-app). Never use it as an implementation or design reference for mobile. Written intent takes priority over implementation precedent. A clearer vision or spec developed for mobile can establish the intended shared behavior for desktop too.
 
 ## Architecture
 
@@ -38,7 +38,7 @@ The following are preferred architectural approaches in service of the experienc
 
 - We want to minimize the average time elapsed between (a) merging a change and (b) the change appearing in Comp Portal and the app stores.
 - We should always have a release `Waiting for Review` / `In Review` in the iOS App Store. Immediately a release is approved, we submit a new one.
-- We should build and upload release candidates frequently. Every RC should go to Comp Portal and TestFlight. Building and distributing an RC from a commit on main should require only a single click/command. When the time arrives to submit the next release to public app stores, there should already be a suitable RC uploaded and dogfooded.
+- We should build and upload release candidates frequently. Every RC should go to Comp Portal and TestFlight. Building and distributing an RC from a commit on main should require only a single click/command. When the time arrives to submit the next release to public app stores, there should already be a suitable RC uploaded and tested.
 
 ## Critical functionality
 

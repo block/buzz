@@ -312,8 +312,8 @@ pub async fn flush_pending_events(
 /// The scope snapshots its relay, owner keys, and database path together
 /// before network work starts. Switching communities during the flush cannot
 /// redirect rows from the old scope into the new relay.
-pub async fn flush_active_pending_events(
-    app: &tauri::AppHandle,
+pub async fn flush_active_pending_events<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &AppState,
 ) -> Result<u32, String> {
     let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;

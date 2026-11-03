@@ -24,7 +24,9 @@ hex          = { workspace = true }
 nostr        = { workspace = true }
 bytes        = "1"
 futures-util = { workspace = true }
+metrics      = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 proptest = { workspace = true }
+metrics-util = { workspace = true }

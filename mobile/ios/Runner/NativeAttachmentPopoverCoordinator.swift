@@ -381,15 +381,8 @@ func makeNativeAttachmentMenuButton(
   )
   button.accessibilityLabel = title
 
-  let symbolConfiguration = UIImage.SymbolConfiguration(
-    pointSize: 18,
-    weight: .regular
-  )
   let iconView = UIImageView(
-    image: UIImage(
-      systemName: symbol,
-      withConfiguration: symbolConfiguration
-    )
+    image: NativeTabler.image(symbol, size: 18)
   )
   iconView.tintColor = .label
   iconView.contentMode = .center

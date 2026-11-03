@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'ios_navigation_bar.dart';
+import 'ios_scroll_to_top.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../theme/theme.dart';
@@ -20,6 +21,10 @@ class FrostedScaffold extends HookWidget {
   /// The primary content of the scaffold. Must handle its own top spacing
   /// using [frostedAppBarHeight] — the scaffold does NOT add automatic padding.
   final Widget body;
+
+  /// Non-scrolling content painted above the navigation bar and its blur.
+  /// Position this child within the scaffold's full-screen stack.
+  final Widget? foreground;
 
   /// Optional floating action button, passed through to [Scaffold].
   final Widget? floatingActionButton;
@@ -45,6 +50,7 @@ class FrostedScaffold extends HookWidget {
     super.key,
     required this.appBar,
     required this.body,
+    this.foreground,
     this.floatingActionButton,
     this.resizeToAvoidBottomInset,
     this.backgroundColor,
@@ -169,9 +175,17 @@ class FrostedScaffold extends HookWidget {
         if (!nativePinned && depth == 0 && metrics.axis == Axis.vertical) {
           // Keep real depth so a later UIKit metrics update (Dynamic Type or
           // rotation) can apply its new collapse range without another scroll.
-          final next = topContentDepth.clamp(0.0, double.infinity);
-          if ((scrollOffset.value - next).abs() > 0.1) {
-            scrollOffset.value = next;
+          // Lazy reversed lists can report an unbounded extentAfter. The
+          // visible viewport is enough depth for UIKit's collapsed state,
+          // while infinity is not a valid UIScrollView content offset.
+          final finiteDepth = topContentDepth.isFinite
+              ? topContentDepth
+              : metrics.viewportDimension;
+          final next = finiteDepth.clamp(0.0, double.infinity);
+          if (next.isFinite && (scrollOffset.value - next).abs() > 0.1) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (context.mounted) scrollOffset.value = next;
+            });
           }
         }
         final next = topContentDepth > 0.5;
@@ -180,20 +194,36 @@ class FrostedScaffold extends HookWidget {
       },
       child: body,
     );
-    final scaffold = IosNavigationScrollScope(
-      offset: scrollOffset,
-      child: Scaffold(
-        backgroundColor: backgroundColor,
-        resizeToAvoidBottomInset: resizeToAvoidBottomInset,
-        floatingActionButton: floatingActionButton,
-        body: FrostedScrollUnderScope(
-          isScrolledUnder: isScrolledUnder.value,
-          child: Stack(
-            children: _stackChildren(
-              observedBody,
-              pinnedController,
-              pinnedStorage,
-              pinnedKey,
+    final scaffold = IosScrollToTop(
+      onScrollToTop: nativePinned
+          ? () {
+              if (!pinnedController.hasClients) return;
+              if (MediaQuery.disableAnimationsOf(context)) {
+                pinnedController.jumpTo(0);
+              } else {
+                pinnedController.animateTo(
+                  0,
+                  duration: const Duration(milliseconds: 300),
+                  curve: Curves.easeOutCubic,
+                );
+              }
+            }
+          : null,
+      child: IosNavigationScrollScope(
+        offset: scrollOffset,
+        child: Scaffold(
+          backgroundColor: backgroundColor,
+          resizeToAvoidBottomInset: resizeToAvoidBottomInset,
+          floatingActionButton: floatingActionButton,
+          body: FrostedScrollUnderScope(
+            isScrolledUnder: isScrolledUnder.value,
+            child: Stack(
+              children: _stackChildren(
+                observedBody,
+                pinnedController,
+                pinnedStorage,
+                pinnedKey,
+              ),
             ),
           ),
         ),
@@ -248,7 +278,13 @@ class FrostedScaffold extends HookWidget {
     // only samples pixels that were already painted behind it. This is the
     // same composition as channel navigation, so top-level headers blur their
     // content rather than only the fixed gradient.
-    return [...backdrop, bodyMotion, appBar];
+    return [
+      ...backdrop,
+      bodyMotion,
+      appBar,
+      if (foreground != null)
+        Positioned.fill(child: DirectionalTransitionMotion(child: foreground!)),
+    ];
   }
 }
 

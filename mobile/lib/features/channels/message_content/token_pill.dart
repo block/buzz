@@ -10,13 +10,16 @@ String? _channelNameForId(Map<String, String> channels, String channelId) {
 class _ChannelLinkMd extends InlineMd {
   final Map<String, String> channelNames;
   final void Function(String channelId)? onChannelTap;
-  late final RegExp _exp = _buildPrefixPattern(
-    prefix: '#',
-    knownNames: channelNames.keys,
-    genericTokenPattern: r'[A-Za-z0-9_][A-Za-z0-9_-]*',
-  );
+  late final RegExp _exp = channelTokenPattern(channelNames.keys);
 
   _ChannelLinkMd({required this.channelNames, this.onChannelTap});
+
+  /// Excluded from link labels: this component renders a [WidgetSpan], and a
+  /// placeholder nested inside the link's own placeholder does not paint on
+  /// iOS — an authored `[#channel](url)` renders as nothing. Link resolution
+  /// wins over token detection inside a label.
+  @override
+  Set<MarkdownScope> get scopes => MarkdownComponent.allScopesExceptLinkLabel;
 
   @override
   RegExp get exp => _exp;
@@ -36,7 +39,7 @@ class _ChannelLinkMd extends InlineMd {
     final channelName = raw.substring(1);
     final opensChannel = channelId != null && onChannelTap != null;
     final child = _TokenPill(
-      icon: LucideIcons.hash,
+      icon: BuzzIcons.hash,
       interactive: opensChannel,
       semanticLabel: opensChannel
           ? 'Open channel $channelName'

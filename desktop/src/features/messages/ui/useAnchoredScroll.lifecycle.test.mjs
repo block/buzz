@@ -281,7 +281,10 @@ function VirtualTargetHarness({ refs }) {
     scrollContainerRef: refs.scroller,
     virtualCancelBottomIntent: bottomApi.cancel,
     virtualizerOwnsPrependAnchoring: true,
-    virtualScrollToMessage: () => true,
+    virtualScrollToMessage: (messageId, options) => {
+      refs.targetScrolls.push({ messageId, options });
+      return refs.targetResolves;
+    },
   });
   React.useLayoutEffect(() => {
     if (didRun.current) return;
@@ -522,7 +525,7 @@ test("user interaction releases and retires a pending pinned target", async () =
   await act(async () => root.unmount());
 });
 
-test("mounted virtual target retires bottom intent before direct centering", async () => {
+async function renderVirtualTarget({ targetResolves }) {
   const resizeObservers = [];
   globalThis.ResizeObserver = class {
     constructor(callback) {
@@ -571,7 +574,9 @@ test("mounted virtual target retires bottom intent before direct centering", asy
       },
     },
     scroller: { current: scroller },
+    targetResolves,
     targetResult: { current: null },
+    targetScrolls: [],
   };
   const root = createRoot(document.createElement("div"));
   await act(async () => {
@@ -579,21 +584,113 @@ test("mounted virtual target retires bottom intent before direct centering", asy
   });
 
   assert.deepEqual(bottomWrites, [{ index: 4, options: { align: "end" } }]);
-  assert.equal(refs.targetResult.current, true);
-  assert.equal(row.getBoundingClientRect().top, 180);
-  const bottomGeometryObserver = resizeObservers.find(
-    (observer) =>
-      observer.targets.includes(content) && observer.targets.includes(scroller),
-  );
-  assert.ok(bottomGeometryObserver);
-  bottomGeometryObserver.callback();
-  await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+  const settleBottomGeometry = async () => {
+    const bottomGeometryObserver = resizeObservers.find(
+      (observer) =>
+        observer.targets.includes(content) &&
+        observer.targets.includes(scroller),
+    );
+    assert.ok(bottomGeometryObserver);
+    bottomGeometryObserver.callback();
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+  };
+  return { bottomWrites, refs, root, scroller, settleBottomGeometry };
+}
 
-  assert.equal(
-    row.getBoundingClientRect().top,
-    180,
-    "target remains centered after later virtual geometry activity",
-  );
+test("mounted virtual target retires bottom intent and scrolls through the virtualizer", async () => {
+  const { bottomWrites, refs, root, scroller, settleBottomGeometry } =
+    await renderVirtualTarget({ targetResolves: true });
+
+  assert.equal(refs.targetResult.current, true);
+  // Even an on-screen row goes through the virtualizer: a direct DOM scroll
+  // would not supersede a bottom pin the virtualizer still has in flight.
+  assert.deepEqual(refs.targetScrolls, [
+    { messageId: "selected", options: { behavior: "auto" } },
+  ]);
+  assert.equal(scroller.scrollTop, 0, "no direct DOM centering write");
+  await settleBottomGeometry();
+
   assert.equal(bottomWrites.length, 1, "geometry cannot re-pin to bottom");
   await act(async () => root.unmount());
+});
+
+test("unresolved virtual target keeps the bottom pin", async () => {
+  const { bottomWrites, refs, root, settleBottomGeometry } =
+    await renderVirtualTarget({ targetResolves: false });
+
+  // A target that is not loaded yet retries on later commits. Until it
+  // resolves, the channel must keep following its floor.
+  assert.equal(refs.targetResult.current, false);
+  await settleBottomGeometry();
+
+  assert.equal(bottomWrites.length, 2, "geometry still re-pins to bottom");
+  await act(async () => root.unmount());
+});
+
+test("target arriving before the second mount frame supersedes the bottom pin", async () => {
+  const nodes = makePinnedCenterNodes();
+  nodes.container.querySelector = () => null;
+  const frames = new Map();
+  let nextFrameId = 0;
+  const previousRaf = globalThis.requestAnimationFrame;
+  const previousCancelRaf = globalThis.cancelAnimationFrame;
+  globalThis.requestAnimationFrame = (callback) => {
+    nextFrameId += 1;
+    frames.set(nextFrameId, callback);
+    return nextFrameId;
+  };
+  globalThis.cancelAnimationFrame = (id) => frames.delete(id);
+  const writes = [];
+  let targetLoaded = false;
+  const scrollContainerRef = { current: nodes.container };
+  const contentRef = { current: nodes.content };
+  function RaceHarness({ messages }) {
+    useAnchoredScroll({
+      channelId: "conversation",
+      contentRef,
+      isLoading: false,
+      messages,
+      scrollContainerRef,
+      targetMessageId: "selected",
+      virtualizerOwnsPrependAnchoring: true,
+      virtualScrollToBottom: () => writes.push("bottom"),
+      virtualScrollToMessage: () => {
+        if (!targetLoaded) return false;
+        writes.push("target");
+        return true;
+      },
+    });
+    return null;
+  }
+  const root = createRoot(document.createElement("div"));
+  try {
+    // The target is not loaded on mount, so the hook pins to bottom now and
+    // queues a second pin for the next frame.
+    await act(async () =>
+      root.render(
+        React.createElement(RaceHarness, { messages: [{ id: "tail" }] }),
+      ),
+    );
+    // The target lands before that frame runs.
+    targetLoaded = true;
+    await act(async () =>
+      root.render(
+        React.createElement(RaceHarness, {
+          messages: [{ id: "selected" }, { id: "tail" }],
+        }),
+      ),
+    );
+    await act(async () => {
+      for (const [id, callback] of [...frames]) {
+        frames.delete(id);
+        callback();
+      }
+    });
+
+    assert.equal(writes.at(-1), "target", JSON.stringify(writes));
+  } finally {
+    await act(async () => root.unmount());
+    globalThis.requestAnimationFrame = previousRaf;
+    globalThis.cancelAnimationFrame = previousCancelRaf;
+  }
 });

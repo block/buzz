@@ -1,0 +1,20 @@
+# Alert rules from docs/partition-catalog-monitoring.md. Keep them identical to
+# the doc; partition-catalog-monitoring.rules.test.yml tests them.
+groups:
+  - name: buzz-partition-catalog
+    rules:
+      - alert: BuzzPartitionAuditStale
+        expr: time() - buzz_partition_audit_last_success_timestamp_seconds > 1800
+        for: 10m
+
+      - alert: BuzzPartitionAuditNotRunning
+        expr: |
+          sum without (outcome) (increase(buzz_partition_audit_runs_total[30m])) == 0
+            and sum without (outcome) (buzz_partition_audit_runs_total)
+            and sum without (outcome) (buzz_partition_audit_runs_total offset 30m)
+        for: 5m
+
+      - alert: BuzzPartitionAuditFailing
+        expr: |
+          increase(buzz_partition_audit_failures_total[1h]) >= 2
+            and buzz_partition_audit_failures_total

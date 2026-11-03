@@ -1,23 +1,41 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
+
+import 'message_swipe_reply.dart';
+import 'agent_reply_handoff.dart';
+import 'huddle_timeline.dart';
+import '../../shared/widgets/modal_presentation.dart';
+import '../../shared/widgets/ios_scroll_to_top.dart';
+import 'message_footer_layout.dart';
+import 'reply_summary_link.dart';
+
 import 'dart:async';
 import 'dart:math' show cos, max, min, pi;
 import 'dart:ui' show ImageFilter, lerpDouble;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart' show ScrollDirection;
+import 'package:flutter/rendering.dart' show ScrollCacheExtent, ScrollDirection;
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../../shared/emoji/emoji_burst.dart';
+import '../../shared/me/me_assistants.dart';
+import '../../shared/me/me_sync.dart';
+import '../../shared/me/me_search_placement.dart';
+import 'me/me_assistant_picker.dart';
+import 'me/me_chat_assistant.dart';
+import 'me/me_workspace_picker.dart';
+import 'me/me_messages_provider.dart';
 import '../../shared/huddle/huddle.dart';
 import '../../shared/identity_names/identity_names.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/avatar_shape.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/bouncing_dots_indicator.dart';
@@ -28,12 +46,13 @@ import '../../shared/widgets/flapping_bee.dart';
 import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
 import '../../shared/widgets/load_error_view.dart';
 import '../../shared/widgets/message_author_meta.dart';
+import '../../shared/widgets/verified_mark.dart';
 import '../../shared/widgets/skeleton.dart';
 import '../profile/presence_cache_provider.dart';
-import '../profile/profile_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import '../forum/forum_posts_view.dart';
+import '../forum/forum_provider.dart';
 import 'android_ime_lift.dart';
 import 'channel.dart';
 import 'channel_actions_sheet.dart';
@@ -44,7 +63,9 @@ import 'channel_management_provider.dart';
 import 'channel_sections/channel_sections_provider.dart';
 import 'channel_messages_provider.dart';
 import 'channel_typing_provider.dart';
-import 'channel_typing_indicator.dart';
+import 'inline_agent_typing.dart';
+import 'typing_motion_preview.dart';
+import 'channel_ids_by_name_provider.dart';
 import 'channels_provider.dart';
 import 'unread_badge/observed_unread_event.dart';
 import 'compose_bar.dart';
@@ -53,7 +74,7 @@ import 'date_formatters.dart';
 import 'day_divider.dart';
 import 'dm_channel_labels.dart';
 import 'ephemeral_channel_display.dart';
-import 'emoji_picker.dart';
+import '../../shared/emoji/emoji_picker.dart';
 import 'ime_metrics_settle_observer.dart';
 import 'jump_to_latest_button.dart';
 import 'jump_to_latest_switcher.dart';
@@ -64,22 +85,30 @@ import 'message_actions.dart';
 import 'message_action_backdrop_state.dart';
 import 'message_long_press_region.dart';
 import 'message_content.dart';
+import '../../shared/widgets/message_attachment_corners.dart';
+import 'message_media_avatar.dart';
+import 'message_skeleton_body.dart';
 import '../../shared/read_state/deferred_read_state_update.dart';
-import '../../shared/read_state/read_state_format.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
 import 'reaction_row.dart';
-import 'recent_emoji_provider.dart';
+import '../../shared/emoji/recent_emoji_provider.dart';
 import 'send_message_provider.dart';
 import '../profile/user_profile_sheet.dart';
 import 'small_avatar.dart';
 import 'sticky_date_header.dart';
 import 'thread_detail_page.dart';
 import 'thread_replies_provider.dart';
+import 'reading_marks.dart';
 import 'timeline_message.dart';
 
 part 'channel_detail_page/message_list.dart';
+part 'channel_detail_page/placement_route.dart';
+part 'channel_detail_page/empty_messages.dart';
+part 'channel_detail_page/oldest_navigation.dart';
 part 'channel_detail_page/system_rows.dart';
+part 'channel_detail_page/thread_working.dart';
+part 'channel_detail_page/activity_members_sheet.dart';
 part 'channel_detail_page/huddle_sheet.dart';
 part 'channel_detail_page/huddle_call_avatar.dart';
 part 'channel_detail_page/huddle_participant_cluster.dart';
@@ -94,14 +123,11 @@ part 'channel_detail_page/app_bar.dart';
 
 /// Fetch deep-link targets that may be outside the loaded channel window.
 Future<void> _loadDeepLinkEvents(
-  WidgetRef ref,
-  String channelId,
+  ChannelMessagesNotifier notifier,
   Set<String> eventIds,
 ) async {
   try {
-    await ref
-        .read(channelMessagesProvider(channelId).notifier)
-        .loadEventsById(eventIds);
+    await notifier.loadEventsById(eventIds);
   } catch (error) {
     debugPrint('deep-link: failed to load target messages: $error');
   }
@@ -122,7 +148,7 @@ Future<bool> _preloadMembers(
     final members = await ref.read(channelMembersProvider(channelId).future);
     await notifier.preload(members.map((member) => member.pubkey).toList());
     if (refreshDmParticipants) {
-      return notifier.refresh(participantPubkeys);
+      return await notifier.refresh(participantPubkeys);
     }
     return true;
   } catch (_) {
@@ -204,29 +230,21 @@ Future<void Function()> _subscribeToDmIdentityUpdates(
   }
 }
 
-int? _channelReadTimestamp({
+/// The time that opening [channel] reads it through, or null when opening it
+/// reads nothing. Forums read through their last activity. DMs read through
+/// the newest loaded message, including replies, or the last activity before
+/// messages load.
+int? _openReadTimestamp({
   required Channel channel,
   required AsyncValue<List<NostrEvent>> messagesState,
 }) {
-  if (channel.isForum) {
-    return dateTimeToUnixSeconds(channel.lastMessageAt);
+  if (channel.isForum) return dateTimeToUnixSeconds(channel.lastMessageAt);
+  if (!channel.isDm) return null;
+  var latest = 0;
+  for (final event in messagesState.value ?? const <NostrEvent>[]) {
+    if (event.createdAt > latest) latest = event.createdAt;
   }
-
-  final events = messagesState.value;
-  if (events != null && events.isNotEmpty) {
-    var latest = 0;
-    for (final event in events) {
-      if (event.threadReference.parentId != null) continue;
-      if (event.createdAt > latest) {
-        latest = event.createdAt;
-      }
-    }
-    if (latest > 0) {
-      return latest;
-    }
-  }
-
-  return dateTimeToUnixSeconds(channel.lastMessageAt);
+  return latest > 0 ? latest : dateTimeToUnixSeconds(channel.lastMessageAt);
 }
 
 bool _isOneToOneAgentDm(Channel channel, Set<String> agentPubkeys) {
@@ -248,17 +266,27 @@ enum InitialThreadRouteBehavior {
   replaceCurrentRoute,
 }
 
-class ChannelDetailPage extends HookConsumerWidget {
+class _ResolvedChannelDetailPage extends HookConsumerWidget {
   final Channel channel;
+
+  /// Uses personal assistant routing for a chat placed in Me.
+  final bool personalChat;
+  final bool continuousConversation;
+  final bool placementKnown;
+  final String? initialAssistant;
   final String? initialMessageId;
   final String? initialThreadRootId;
 
   /// How the automatically opened initial thread affects the route stack.
   final InitialThreadRouteBehavior initialThreadRouteBehavior;
 
-  const ChannelDetailPage({
+  const _ResolvedChannelDetailPage({
     super.key,
     required this.channel,
+    required this.personalChat,
+    required this.continuousConversation,
+    required this.placementKnown,
+    this.initialAssistant,
     this.initialMessageId,
     this.initialThreadRootId,
     this.initialThreadRouteBehavior = InitialThreadRouteBehavior.push,
@@ -266,13 +294,45 @@ class ChannelDetailPage extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final flatConversation = personalChat || continuousConversation;
+    final messagesProvider = flatConversation
+        ? meMessagesProvider(channel.id)
+        : channelMessagesProvider(channel.id);
+    final stickyDateHeaderState = useValueNotifier(
+      StickyDateHeaderState.hidden,
+      [channel.id],
+    );
     final composerDockHeight = useState(0.0);
     final composerFocusNode = useFocusNode();
     final restoreComposerFocus = useRef<VoidCallback?>(null);
-    final sendMessage = ref.read(sendMessageProvider);
+    final sendMessage = ref.read(
+      flatConversation ? meSendMessageProvider : sendMessageProvider,
+    );
+    final messagesState = ref.watch(messagesProvider);
+    final workspace = useMeWorkspace(
+      context,
+      ref,
+      enabled: personalChat,
+      channelId: channel.id,
+    );
+    final assistant = useMeChatAssistant(
+      context,
+      ref,
+      enabled: personalChat,
+      channelId: channel.id,
+      initial: initialAssistant,
+      messages: messagesState.value ?? const [],
+    );
+    final mePlacement = personalChat ? ref.watch(meGroupsProvider) : null;
     final detailsAsync = ref.watch(channelDetailsProvider(channel.id));
-    final channelsAsync = ref.watch(channelsProvider);
-    final messagesState = ref.watch(channelMessagesProvider(channel.id));
+    // Only this channel's entry: the list republishes on every live event.
+    final listedChannel = ref.watch(
+      channelsProvider.select(
+        (channels) => channels.value
+            ?.where((candidate) => candidate.id == channel.id)
+            .firstOrNull,
+      ),
+    );
     final huddleLifecycle =
         ref.watch(huddleLifecycleProvider(channel.id)).value ?? const [];
     final sessionStatus = ref.watch(relaySessionProvider).status;
@@ -283,24 +343,18 @@ class ChannelDetailPage extends HookConsumerWidget {
     final initialForcedUnreadMessageIdsRef = useRef<Set<String>>(const {});
     final didCaptureInitialReadAt = useRef(false);
     if (readState.isReady && !didCaptureInitialReadAt.value) {
-      final channelReadAt = readState.effectiveTimestamp(channel.id);
       final ordinaryUnreadEvents = [
         for (final event
             in channelsNotifier
                     .observedUnreadEventsByChannel[channel.id]
                     ?.values ??
                 const <ObservedUnreadEvent>[])
-          if (event.rootId == null &&
+          if ((flatConversation || event.rootId == null) &&
               event.createdAt >
                   (observedUnreadEventReadAt(
                         event,
-                        channelReadAt,
-                        (rootId) => readState.effectiveTimestamp(
-                          threadContextKey(rootId),
-                        ),
-                        (messageId) => readState.effectiveTimestamp(
-                          msgContextKey(messageId),
-                        ),
+                        channel.id,
+                        readState.effectiveTimestamp,
                       ) ??
                       0))
             event,
@@ -323,30 +377,9 @@ class ChannelDetailPage extends HookConsumerWidget {
         initialOldestOrdinaryUnreadMessageIdRef.value;
     final initialForcedUnreadMessageIds =
         initialForcedUnreadMessageIdsRef.value;
-    final currentPubkey = ref
-        .watch(profileProvider)
-        .whenData((value) => value?.pubkey)
-        .value;
-    // Only show channel-level typing (exclude thread-scoped entries and self).
-    final typingEntries = ref
-        .watch(channelTypingProvider(channel.id))
-        .where((e) => e.threadHeadId == null)
-        .where(
-          (e) =>
-              currentPubkey == null ||
-              e.pubkey.toLowerCase() != currentPubkey.toLowerCase(),
-        )
-        .toList();
-    final baseChannel =
-        channelsAsync
-            .whenData(
-              (channels) => channels.firstWhere(
-                (candidate) => candidate.id == channel.id,
-                orElse: () => channel,
-              ),
-            )
-            .value ??
-        channel;
+    // Ownership comes from the signing identity, not reloadable profile metadata.
+    final currentPubkey = ref.watch(currentPubkeyProvider);
+    final baseChannel = listedChannel ?? channel;
     final resolvedChannel =
         detailsAsync.whenData(baseChannel.mergeDetails).value ?? baseChannel;
     final participantCount = resolvedChannel.participantPubkeys
@@ -426,6 +459,37 @@ class ChannelDetailPage extends HookConsumerWidget {
       channelBotPubkeys:
           channelBotPubkeysState.asData?.value ?? const <String>{},
     );
+    // Flat conversations show agent work inline instead of linking to threads.
+    final threadWorking = _threadWorkingAgents(
+      ref,
+      flatConversation
+          ? ''
+          : ref.watch(
+              channelTypingProvider(
+                channel.id,
+              ).select((all) => _threadTypingKey(all, currentPubkey)),
+            ),
+    );
+    final ownedThreadTypers = {
+      for (final agents in threadWorking.values) ...agents,
+    };
+    // Agent work is visible in every DM, even when its response is threaded.
+    // Ordinary channels keep other thread activity inside the thread view,
+    // but, as on desktop, show the user's own agents working in any thread.
+    final typingEntries = ref
+        .watch(
+          visibleTypingProvider(
+            channel.id,
+            selfPubkey: currentPubkey,
+            include: (e) =>
+                flatConversation ||
+                e.threadHeadId == null ||
+                ownedThreadTypers.contains(e.pubkey.toLowerCase()) ||
+                (resolvedChannel.isDm &&
+                    agentPubkeys.contains(e.pubkey.toLowerCase())),
+          ),
+        )
+        .entries;
     useEffect(() {
       if (sessionStatus != SessionStatus.connected ||
           identitySubscriptionPubkeys.isEmpty) {
@@ -490,16 +554,17 @@ class ChannelDetailPage extends HookConsumerWidget {
         showsComposer &&
         !isAgentIdentityUnresolved &&
         !_isOneToOneAgentDm(resolvedChannel, agentPubkeys);
-    final messagesNotifier = ref.read(
-      channelMessagesProvider(channel.id).notifier,
-    );
+    final messagesNotifier = ref.read(messagesProvider.notifier);
     final isConnectionInProgress =
         sessionStatus == SessionStatus.connecting ||
         sessionStatus == SessionStatus.reconnecting;
+    // A loaded timeline stays on screen through a reconnect, as a loaded
+    // forum does. The session drops its socket five seconds into the
+    // background, so nearly every return to the app reconnects. Only a forum
+    // with no posts yet waits out this debounce for its skeleton.
     final showConnectionSkeleton = useState(false);
     final shouldDebounceConnectionSkeleton =
-        isConnectionInProgress &&
-        (resolvedChannel.isForum || messagesNotifier.hasLoadedMessages);
+        isConnectionInProgress && resolvedChannel.isForum;
     useEffect(() {
       if (!shouldDebounceConnectionSkeleton) {
         showConnectionSkeleton.value = false;
@@ -516,7 +581,11 @@ class ChannelDetailPage extends HookConsumerWidget {
         !messagesNotifier.hasLoadedMessages;
     final appBarTitleContentHeight = _twoLineAppBarTitleContentHeight(context);
 
-    final readTimestamp = _channelReadTimestamp(
+    // Opening a forum or a DM reads the whole channel: a forum has no
+    // timeline to read row by row, and a DM is all for the reader. Other
+    // timelines write their read marks while the reader looks at rows; see
+    // `readingMarks`.
+    final openReadTimestamp = _openReadTimestamp(
       channel: resolvedChannel,
       messagesState: messagesState,
     );
@@ -536,8 +605,8 @@ class ChannelDetailPage extends HookConsumerWidget {
           ...initialForcedUnreadMessageIds,
         };
         if (eventIds.isEmpty) return null;
-        final notifier = ref.read(channelMessagesProvider(channel.id).notifier);
-        unawaited(_loadDeepLinkEvents(ref, channel.id, eventIds));
+        final notifier = ref.read(messagesProvider.notifier);
+        unawaited(_loadDeepLinkEvents(notifier, eventIds));
         return () => notifier.releaseDeepLinkEvents(eventIds);
       },
       [
@@ -549,19 +618,25 @@ class ChannelDetailPage extends HookConsumerWidget {
       ],
     );
 
+    // Opening reads only while this page is in front and the app is in use.
+    // A covered or backgrounded DM must not read a reply that loads meanwhile;
+    // it reads through it when it is shown again.
+    final openReadActive =
+        isAppInUse(useAppLifecycleState()) &&
+        (ModalRoute.of(context)?.isCurrent ?? true);
     useEffect(() {
-      if (!readState.isReady || readTimestamp == null) {
+      if (!readState.isReady || !openReadActive || openReadTimestamp == null) {
         return null;
       }
       return deferReadStateUpdate(context, () {
         ref
             .read(readStateProvider.notifier)
-            .markContextRead(channel.id, readTimestamp);
+            .markContextRead(channel.id, openReadTimestamp);
         ref
             .read(channelsProvider.notifier)
-            .clearObservedUnreadCoveredByRead(channel.id, readTimestamp);
+            .clearObservedUnreadCoveredByRead(channel.id, openReadTimestamp);
       });
-    }, [channel.id, readState.isReady, readTimestamp]);
+    }, [channel.id, readState.isReady, openReadActive, openReadTimestamp]);
 
     final dmHeader = resolvedChannel.isDm
         ? _watchDmHeader(ref, resolvedChannel, currentPubkey)
@@ -595,24 +670,74 @@ class ChannelDetailPage extends HookConsumerWidget {
       }
     }
 
+    final retention = ephemeralChannelDisplay(resolvedChannel);
+    final nativeHeaderSubtitle = isOneToOneDm
+        ? dmHeader?.presenceLabel
+        : headerMemberLabel;
+
+    final timelineMessages = resolvedChannel.isForum
+        ? <TimelineMessage>[]
+        : formatTimeline(
+            messagesState.value ?? const [],
+            currentPubkey: currentPubkey,
+          );
+    final timelineEntries = buildMainTimelineEntries(
+      // End events still update the original card through allMessages.
+      timelineMessages
+          .where(
+            (message) => !isCollapsedHuddleEnding(message, timelineMessages),
+          )
+          .toList(),
+      flat: flatConversation,
+      relaySummaries: ref.read(messagesProvider.notifier).threadSummaries,
+    );
+
     return FrostedScaffold(
+      foreground:
+          !resolvedChannel.isForum &&
+              timelineEntries.isNotEmpty &&
+              !showInitialConnectionSkeleton &&
+              !messagesState.isLoading
+          ? Stack(
+              children: [
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  top:
+                      frostedAppBarHeight(
+                        context,
+                        titleContentHeight: appBarTitleContentHeight,
+                      ) +
+                      Grid.twelve,
+                  child: StickyDateHeader(
+                    key: const ValueKey('channel-sticky-date-header'),
+                    state: stickyDateHeaderState,
+                  ),
+                ),
+              ],
+            )
+          : null,
       resizeToAvoidBottomInset:
           !usesFixedAndroidImeViewport || resolvedChannel.isForum,
       appBar: FrostedAppBar(
         alwaysFrosted: true,
         nativeViewSuppressed: messageActionBackdropActive,
-        nativeEphemeralLabel: ephemeralChannelDisplay(
-          resolvedChannel,
-        )?.tooltipLabel,
         nativeTitle:
             dmHeader?.label ??
             resolveDmChannelDisplayLabel(
               resolvedChannel,
               currentPubkey: currentPubkey,
             ),
-        nativeSubtitle: isOneToOneDm
-            ? dmHeader?.presenceLabel
-            : headerMemberLabel,
+        nativeSubtitle: retention == null
+            ? nativeHeaderSubtitle
+            : [
+                'Temporary',
+                if (retention.detailLabel != null) retention.detailLabel!,
+                if (nativeHeaderSubtitle != null &&
+                    nativeHeaderSubtitle.isNotEmpty)
+                  nativeHeaderSubtitle,
+              ].join(' · '),
+        nativeEphemeralLabel: retention?.tooltipLabel,
         nativeTitlePresenceColor: switch (isOneToOneDm
             ? dmHeader?.presence
             : null) {
@@ -621,9 +746,19 @@ class ChannelDetailPage extends HookConsumerWidget {
           'offline' => context.colors.outline,
           _ => null,
         },
+        // Loaded content stays readable while it reconnects and catches up;
+        // the title capsule shows that it is not current yet.
+        nativeTitleRefreshing: resolvedChannel.isForum
+            ? isConnectionInProgress &&
+                  ref.watch(forumPostsProvider(channel.id)).value != null
+            : (isConnectionInProgress && messagesNotifier.hasLoadedMessages) ||
+                  messagesNotifier.isCatchingUp,
         onNativeTitlePressed: openChannelDetails,
         nativeActions: [
-          if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)
+          if (personalChat) workspace.nativeAction,
+          if (personalChat)
+            assistant.nativeAction
+          else if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)
             _huddleNavigationAction(context, ref, resolvedChannel, [
               ...messagesState.value ?? const [],
               ...huddleLifecycle,
@@ -641,7 +776,10 @@ class ChannelDetailPage extends HookConsumerWidget {
           onTap: openChannelDetails,
         ),
         actions: [
-          if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)
+          if (personalChat) workspace.action,
+          if (personalChat)
+            assistant.action
+          else if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)
             _HuddleButton(
               channel: resolvedChannel,
               events: [...messagesState.value ?? const [], ...huddleLifecycle],
@@ -662,7 +800,9 @@ class ChannelDetailPage extends HookConsumerWidget {
                             channel: resolvedChannel,
                             currentPubkey: currentPubkey,
                           ),
-                          if (showConnectionSkeleton.value)
+                          if (showConnectionSkeleton.value &&
+                              ref.watch(forumPostsProvider(channel.id)).value ==
+                                  null)
                             Positioned(
                               top:
                                   frostedAppBarHeight(
@@ -673,6 +813,7 @@ class ChannelDetailPage extends HookConsumerWidget {
                                   Grid.xs,
                               left: Grid.gutter,
                               right: Grid.gutter,
+                              bottom: 0,
                               child: _ForumConnectionSkeleton(
                                 status: sessionStatus,
                               ),
@@ -680,17 +821,33 @@ class ChannelDetailPage extends HookConsumerWidget {
                         ],
                       )
                     : SkeletonReveal(
+                        key: ValueKey('message-loading:${channel.id}'),
                         loading:
                             showInitialConnectionSkeleton ||
-                            showConnectionSkeleton.value ||
                             messagesState.isLoading,
                         shimmerEnabled:
                             sessionStatus != SessionStatus.disconnected,
                         skeleton: _MessageTimelineSkeleton(
+                          messages: timelineEntries
+                              .map((entry) => entry.message)
+                              .toList(),
                           appBarTitleContentHeight: appBarTitleContentHeight,
-                          status: sessionStatus,
+                        ),
+                        loadingSemanticsKey: const Key(
+                          'channel-detail-connection-skeleton',
+                        ),
+                        loadingLabel: switch (sessionStatus) {
+                          SessionStatus.connecting => 'Connecting',
+                          SessionStatus.reconnecting => 'Reconnecting',
+                          _ => 'Loading',
+                        },
+                        skeletonPadding: EdgeInsets.only(
+                          bottom: showsComposer ? composerDockHeight.value : 0,
                         ),
                         content: messagesState.when(
+                          skipLoadingOnReload:
+                              messagesState.hasValue && !messagesState.hasError,
+                          skipLoadingOnRefresh: !messagesState.hasError,
                           loading: SizedBox.shrink,
                           error: (e, _) => Padding(
                             padding: EdgeInsets.only(
@@ -701,30 +858,29 @@ class ChannelDetailPage extends HookConsumerWidget {
                             ),
                             child: LoadErrorView(
                               message: 'Failed to load messages',
-                              onRetry: () => ref.invalidate(
-                                channelMessagesProvider(channel.id),
-                              ),
+                              onRetry: () => ref.invalidate(messagesProvider),
                             ),
                           ),
                           data: (events) {
-                            final messages = formatTimeline(
-                              events,
-                              currentPubkey: currentPubkey,
-                            );
-                            final summaries = ref
-                                .read(
-                                  channelMessagesProvider(channel.id).notifier,
-                                )
-                                .threadSummaries;
-                            final entries = buildMainTimelineEntries(
-                              messages,
-                              relaySummaries: summaries,
-                            );
                             return _MessageList(
-                              entries: entries,
-                              allMessages: messages,
-                              initialMessageId: initialMessageId,
-                              initialThreadRootId: initialThreadRootId,
+                              notifier: ref.watch(messagesProvider.notifier),
+                              inlineTyping:
+                                  resolvedChannel.isMember &&
+                                      !resolvedChannel.isArchived
+                                  ? typingEntries
+                                  : const [],
+                              threadWorking: threadWorking,
+                              allowThreads: !continuousConversation,
+                              stickyDateHeaderState: stickyDateHeaderState,
+                              entries: timelineEntries,
+                              allMessages: timelineMessages,
+                              initialMessageId: flatConversation
+                                  ? initialMessageId ?? initialThreadRootId
+                                  : initialMessageId,
+                              initialThreadRootId:
+                                  flatConversation || !placementKnown
+                                  ? null
+                                  : initialThreadRootId,
                               initialThreadRouteBehavior:
                                   initialThreadRouteBehavior,
                               initialOrdinaryUnreadMessageIds:
@@ -741,6 +897,7 @@ class ChannelDetailPage extends HookConsumerWidget {
                                       initialOldestOrdinaryUnreadMessageId !=
                                           null),
                               channelId: channel.id,
+                              isDm: resolvedChannel.isDm,
                               currentPubkey: currentPubkey,
                               isMember: resolvedChannel.isMember,
                               isArchived: resolvedChannel.isArchived,
@@ -763,19 +920,6 @@ class ChannelDetailPage extends HookConsumerWidget {
               if (!resolvedChannel.isForum &&
                   (!resolvedChannel.isMember ||
                       resolvedChannel.isArchived)) ...[
-                AnimatedSize(
-                  duration: MediaQuery.disableAnimationsOf(context)
-                      ? Duration.zero
-                      : const Duration(milliseconds: 180),
-                  curve: Curves.easeOutCubic,
-                  alignment: Alignment.bottomCenter,
-                  child: typingEntries.isEmpty
-                      ? const SizedBox.shrink()
-                      : ChannelTypingIndicator(
-                          channelId: resolvedChannel.id,
-                          entries: typingEntries,
-                        ),
-                ),
                 if (!resolvedChannel.isDm)
                   _ReadOnlyNotice(channel: resolvedChannel),
               ],
@@ -794,19 +938,7 @@ class ChannelDetailPage extends HookConsumerWidget {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      AnimatedSize(
-                        duration: MediaQuery.disableAnimationsOf(context)
-                            ? Duration.zero
-                            : const Duration(milliseconds: 180),
-                        curve: Curves.easeOutCubic,
-                        alignment: Alignment.bottomCenter,
-                        child: typingEntries.isEmpty
-                            ? const SizedBox.shrink()
-                            : ChannelTypingIndicator(
-                                channelId: resolvedChannel.id,
-                                entries: typingEntries,
-                              ),
-                      ),
+                      ?assistant.pendingNotice,
                       ComposeBar(
                         channelId: channel.id,
                         focusNode: composerFocusNode,
@@ -820,13 +952,39 @@ class ChannelDetailPage extends HookConsumerWidget {
                               content,
                               mentionPubkeys, {
                               mediaTags = const <List<String>>[],
-                            }) => sendMessage.call(
-                              channelId: channel.id,
-                              content: content,
-                              mentionPubkeys: mentionPubkeys,
-                              channel: resolvedChannel,
-                              mediaTags: mediaTags,
-                            ),
+                            }) async {
+                              if (!placementKnown) {
+                                ref.invalidate(meGroupsProvider);
+                                throw StateError(
+                                  'Reconnect to verify this chat before sending.',
+                                );
+                              }
+                              var recipients = mentionPubkeys;
+                              if (personalChat) {
+                                if (!resolvedChannel.isPersonalChat(
+                                  ref.read(myPubkeyProvider),
+                                  mePlacement?.asData?.value.channels ??
+                                      const [],
+                                )) {
+                                  throw StateError(
+                                    'Refresh Solo before sending to this chat.',
+                                  );
+                                }
+                                recipients = await meRecipients(
+                                  ref,
+                                  channel.id,
+                                  assistant.selected,
+                                  mentionPubkeys,
+                                );
+                              }
+                              await sendMessage.call(
+                                channelId: channel.id,
+                                content: content,
+                                mentionPubkeys: recipients,
+                                channel: resolvedChannel,
+                                mediaTags: mediaTags,
+                              );
+                            },
                       ),
                     ],
                   ),

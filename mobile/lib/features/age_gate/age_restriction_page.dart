@@ -1,3 +1,4 @@
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:flutter/material.dart';
 
 import '../../shared/theme/theme.dart';
@@ -19,7 +20,7 @@ class AgeRestrictionPage extends StatelessWidget {
                 children: [
                   ExcludeSemantics(
                     child: Icon(
-                      Icons.lock_outline,
+                      BuzzIcons.lock,
                       size: 48,
                       color: context.colors.primary,
                     ),

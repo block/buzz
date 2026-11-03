@@ -24,10 +24,14 @@ pub(crate) async fn accept(
             .artifact_home(tenant.community(), env.id)
             .await
             .map_err(|e| IngestError::Internal(format!("artifact storage: {e}")))?
-            .ok_or_else(|| {
-                IngestError::CanvasConflict("conflict: artifact head unavailable".into())
+            .ok_or_else(head_unavailable)?;
+        // A source the sender cannot write answers like a missing artifact.
+        super::ingest::check_channel_write(tenant, state, auth, source)
+            .await
+            .map_err(|e| match e {
+                IngestError::Internal(_) => e,
+                _ => head_unavailable(),
             })?;
-        super::ingest::check_channel_write(tenant, state, auth, source).await?;
         Some(source)
     } else {
         None
@@ -64,27 +68,23 @@ pub(crate) async fn accept(
     })
 }
 
+fn head_unavailable() -> IngestError {
+    IngestError::CanvasConflict(format!("conflict: {}", buzz_db::artifact::HEAD_UNAVAILABLE))
+}
+
 /// Live delivery only; unlike kind 9 there are no audit, workflow, or thread
-/// side effects. Missed deliveries are recovered by replaying stored events.
+/// side effects. A failed publish is retried, because syncs depend on it.
 async fn publish(state: &Arc<AppState>, tenant: &TenantContext, stored: &StoredEvent) {
     let Some(channel) = stored.channel_id else {
         return;
     };
-    state.mark_local_event(tenant.community(), &stored.event.id);
-    if let Err(e) = state
-        .pubsub
-        .publish_event(
-            tenant,
-            buzz_pubsub::EventTopic::Channel(channel),
-            &stored.event,
-        )
-        .await
-    {
-        state
-            .local_event_ids
-            .invalidate(&(tenant.community(), stored.event.id.to_bytes()));
-        tracing::warn!(error=%e, "artifact Redis publish failed");
-    }
+    super::artifact_sync::publish_reliably(
+        state,
+        tenant,
+        buzz_pubsub::EventTopic::Channel(channel),
+        stored,
+    )
+    .await;
     super::event::fan_out_event_to_local_subscribers(state, tenant.community(), stored).await;
 }
 

@@ -7,7 +7,7 @@ void main() {
   testWidgets('selected chip resolves the accent (scheme.primary) as fill', (
     tester,
   ) async {
-    final accented = applyAccent(darkColorScheme, 0); // Blue accent
+    final accented = darkColorScheme.copyWith(primary: const Color(0xFF3B82F6));
     final accent = accented.primary;
 
     await tester.pumpWidget(
@@ -47,8 +47,11 @@ void main() {
     final chip = tester.widget<FilterChip>(
       find.widgetWithText(FilterChip, 'Everyone'),
     );
-    final shape = chip.shape! as RoundedRectangleBorder;
-    expect(shape.borderRadius, BorderRadius.circular(Radii.lg));
+    expect(chip.shape, isA<StadiumBorder>());
+    expect(
+      selectedLabel.style?.leadingDistribution,
+      TextLeadingDistribution.even,
+    );
     expect(chip.labelPadding, EdgeInsets.zero);
   });
 

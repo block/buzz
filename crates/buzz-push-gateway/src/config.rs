@@ -8,8 +8,9 @@ pub enum ApnsEnvironment {
     Sandbox,
 }
 
+/// The single server-owned Apple application and APNs connection identity.
 #[derive(Debug, Clone)]
-pub struct AppProfileConfig {
+pub struct ApplicationConfig {
     pub app_attest_app_id: String,
     /// Exact Apple attestation environment accepted for enrollment.
     pub app_attest_environment: AppAttestEnvironment,
@@ -42,8 +43,8 @@ pub struct Config {
     pub max_installation_lifetime_seconds: i64,
     pub endpoint_quota_window_seconds: i64,
     pub endpoint_quota_max_deliveries: i64,
-    /// Server-owned dogfood application identity and APNs transport.
-    pub profile: AppProfileConfig,
+    /// Server-owned application identity and APNs transport.
+    pub application: ApplicationConfig,
     pub database_url: String,
     pub app_attest_root_cert_path: PathBuf,
     /// Ordered current key first, followed by decrypt-only predecessors.
@@ -106,11 +107,11 @@ fn parse_keyring(
     Ok(keys)
 }
 
-fn parse_profile(e: &HashMap<String, String>) -> Result<AppProfileConfig, ConfigError> {
-    let app_id_key = "BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID";
-    let cert_key = "BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH";
-    let topic_key = "BUZZ_PUSH_DOGFOOD_APNS_TOPIC";
-    let environment_key = "BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT";
+fn parse_application(e: &HashMap<String, String>) -> Result<ApplicationConfig, ConfigError> {
+    let app_id_key = "BUZZ_PUSH_APP_ATTEST_APP_ID";
+    let cert_key = "BUZZ_PUSH_APNS_CERT_PATH";
+    let topic_key = "BUZZ_PUSH_APNS_TOPIC";
+    let environment_key = "BUZZ_PUSH_APNS_ENVIRONMENT";
     let required = |key: &'static str| {
         e.get(key)
             .map(String::as_str)
@@ -134,7 +135,7 @@ fn parse_profile(e: &HashMap<String, String>) -> Result<AppProfileConfig, Config
         Some("sandbox") => ApnsEnvironment::Sandbox,
         Some(_) => return Err(ConfigError::Invalid(environment_key)),
     };
-    Ok(AppProfileConfig {
+    Ok(ApplicationConfig {
         app_attest_app_id,
         app_attest_environment,
         apns_cert_path,
@@ -195,7 +196,7 @@ impl Config {
             bounded_positive("BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SECONDS", 10, 86_400)?;
         let endpoint_quota_max_deliveries =
             bounded_positive("BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES", 10, 10_000)?;
-        let profile = parse_profile(e)?;
+        let application = parse_application(e)?;
         let bind_addr = e
             .get("BUZZ_PUSH_BIND_ADDR")
             .map(String::as_str)
@@ -215,7 +216,7 @@ impl Config {
             max_installation_lifetime_seconds,
             endpoint_quota_window_seconds,
             endpoint_quota_max_deliveries,
-            profile,
+            application,
             database_url: req(e, "DATABASE_URL")?.to_owned(),
             app_attest_root_cert_path: req(e, "BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH")?.into(),
             grant_keys,
@@ -233,7 +234,7 @@ mod tests {
         assert_eq!(
             Config::from_map(&env)
                 .unwrap()
-                .profile
+                .application
                 .app_attest_environment,
             AppAttestEnvironment::Production
         );
@@ -248,7 +249,7 @@ mod tests {
         assert_eq!(
             Config::from_map(&env)
                 .unwrap()
-                .profile
+                .application
                 .app_attest_environment,
             AppAttestEnvironment::Production
         );
@@ -260,7 +261,7 @@ mod tests {
         assert_eq!(
             Config::from_map(&env)
                 .unwrap()
-                .profile
+                .application
                 .app_attest_environment,
             AppAttestEnvironment::Development
         );
@@ -295,43 +296,37 @@ mod tests {
                 "postgres://buzz:test@localhost/buzz".into(), // sadscan:disable np.postgres.1
             ),
             (
-                "BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID".into(),
-                "TEAM.xyz.block.buzz.dogfood.mobile".into(),
+                "BUZZ_PUSH_APP_ATTEST_APP_ID".into(),
+                "TEAM.com.example.buzz".into(),
             ),
             (
                 "BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH".into(),
                 "/apple-root.pem".into(),
             ),
             (
-                "BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH".into(),
-                "/dogfood-identity.pem".into(),
+                "BUZZ_PUSH_APNS_CERT_PATH".into(),
+                "/apns-identity.pem".into(),
             ),
-            (
-                "BUZZ_PUSH_DOGFOOD_APNS_TOPIC".into(),
-                "xyz.block.buzz.dogfood.mobile".into(),
-            ),
-            (
-                "BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT".into(),
-                "production".into(),
-            ),
+            ("BUZZ_PUSH_APNS_TOPIC".into(), "com.example.buzz".into()),
+            ("BUZZ_PUSH_APNS_ENVIRONMENT".into(), "production".into()),
             ("BUZZ_PUSH_BIND_ADDR".into(), "127.0.0.1:8080".into()),
             ("BUZZ_PUSH_HEALTH_ADDR".into(), "127.0.0.1:8081".into()),
         ])
     }
 
     #[test]
-    fn dogfood_profile_requires_server_owned_identity_and_certificate() {
+    fn application_requires_server_owned_identity_and_certificate() {
         let config = Config::from_map(&base()).unwrap();
         assert_eq!(
-            config.profile.apns_cert_path,
-            PathBuf::from("/dogfood-identity.pem")
+            config.application.apns_cert_path,
+            PathBuf::from("/apns-identity.pem")
         );
-        assert_eq!(config.profile.apns_topic, "xyz.block.buzz.dogfood.mobile");
+        assert_eq!(config.application.apns_topic, "com.example.buzz");
 
         for variable in [
-            "BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH",
-            "BUZZ_PUSH_DOGFOOD_APNS_TOPIC",
-            "BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID",
+            "BUZZ_PUSH_APNS_CERT_PATH",
+            "BUZZ_PUSH_APNS_TOPIC",
+            "BUZZ_PUSH_APP_ATTEST_APP_ID",
         ] {
             let mut env = base();
             env.remove(variable);
@@ -374,8 +369,8 @@ mod tests {
     #[test]
     fn malformed_security_configuration_fails_startup() {
         for (key, value) in [
-            ("BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID", ""),
-            ("BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT", "staging"),
+            ("BUZZ_PUSH_APP_ATTEST_APP_ID", ""),
+            ("BUZZ_PUSH_APNS_ENVIRONMENT", "staging"),
             ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "0"),
             ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "31536001"),
             ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "2.592e+06"),

@@ -502,6 +502,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn auth_command_uses_augmented_path_for_node_adapter() {
+        let _nest = crate::managed_agents::pin_temp_nest_dir_for_thread();
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
 

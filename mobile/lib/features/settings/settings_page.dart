@@ -1,19 +1,21 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
 
+import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:package_info_plus/package_info_plus.dart';
 
 import '../../shared/auth/auth.dart';
+import '../../shared/identity_transfer/nsec_export_sheet.dart';
 import '../../shared/clipboard_utils.dart';
-import '../../shared/success_haptic.dart';
-import '../../shared/push/push_bridge.dart';
 import '../../shared/push/push_relay_capability_provider.dart';
+import '../../shared/push/push_bootstrap.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/utils/string_utils.dart';
 import '../pairing/pairing_provider.dart';
@@ -71,71 +73,70 @@ class SettingsPage extends HookConsumerWidget {
       bottomHeight: Grid.xxs,
     );
 
-    return FrostedScaffold(
-      useUtilitySurfaceTheme: true,
-      appBar: FrostedAppBar(
-        nativeTitle: 'Settings',
-        nativeLeading: IosNavigationAction(
-          label: 'Close settings',
-          symbol: 'xmark',
-          onPressed: () => Navigator.of(context).pop(),
-        ),
-        automaticallyImplyLeading: false,
-        horizontalInset: Grid.gutter,
-        showBottomDivider: false,
-        leading: Theme.of(context).platform == TargetPlatform.iOS
-            ? IosGlassNavigationButton(
-                key: const ValueKey('settings-ios-glass-close'),
-                icon: IosGlassNavigationIcon.close,
-                semanticLabel: 'Close settings',
-                onPressed: () {
-                  unawaited(HapticFeedback.lightImpact());
-                  Navigator.of(context).pop();
-                },
-                foregroundColor: navigationPrimaryForeground(context),
-              )
-            : SizedBox(
-                width: Grid.xl,
-                height: Grid.xl,
-                child: IconButton(
-                  tooltip: 'Close settings',
+    // Keep feedback local even while Home is mounted during the transition.
+    return ScaffoldMessenger(
+      child: FrostedScaffold(
+        useUtilitySurfaceTheme: true,
+        appBar: FrostedAppBar(
+          nativeTitle: 'Settings',
+          nativeLeading: IosNavigationAction(
+            label: 'Close settings',
+            symbol: 'xmark',
+            onPressed: () => Navigator.of(context).pop(),
+          ),
+          automaticallyImplyLeading: false,
+          horizontalInset: Grid.gutter,
+          leading: Theme.of(context).platform == TargetPlatform.iOS
+              ? IosGlassNavigationButton(
+                  key: const ValueKey('settings-ios-glass-close'),
+                  icon: IosGlassNavigationIcon.close,
+                  semanticLabel: 'Close settings',
                   onPressed: () {
                     unawaited(HapticFeedback.lightImpact());
                     Navigator.of(context).pop();
                   },
-                  color: navigationPrimaryForeground(context),
-                  icon: const Icon(LucideIcons.x),
+                  foregroundColor: navigationPrimaryForeground(context),
+                )
+              : SizedBox(
+                  width: Grid.xl,
+                  height: Grid.xl,
+                  child: IconButton(
+                    tooltip: 'Close settings',
+                    onPressed: () {
+                      unawaited(HapticFeedback.lightImpact());
+                      Navigator.of(context).pop();
+                    },
+                    color: navigationPrimaryForeground(context),
+                    icon: const Icon(BuzzIcons.x),
+                  ),
                 ),
-              ),
-        bottomHeight: Grid.xxs,
-        bottom: const SizedBox.expand(),
-      ),
-      body: Column(
-        children: [
-          Expanded(
-            child: ListView(
-              padding: EdgeInsets.only(top: topSectionHeight, bottom: Grid.xs),
-              children: [
-                profileHeader,
-                _StatusSection(onSetStatus: onSetStatus),
-                _ProfileSection(
-                  profileEditPageBuilder: profileEditPageBuilder,
-                  onEditDisplayName: onEditDisplayName,
-                  onEditProfileDescription: onEditProfileDescription,
-                ),
-                const _NotificationsSection(),
-                _ConnectionSection(
-                  identityRecoveryPageBuilder: identityRecoveryPageBuilder,
-                ),
-              ],
-            ),
+          bottomHeight: Grid.xxs,
+          bottom: const SizedBox.expand(),
+        ),
+        body: ListView(
+          padding: EdgeInsets.only(
+            top: topSectionHeight,
+            bottom: MediaQuery.paddingOf(context).bottom + Grid.xs,
           ),
-          if (packageInfo.hasData)
-            _VersionFooter(
-              version: packageInfo.data!.version,
-              buildNumber: packageInfo.data!.buildNumber,
+          children: [
+            profileHeader,
+            _StatusSection(onSetStatus: onSetStatus),
+            _ProfileSection(
+              profileEditPageBuilder: profileEditPageBuilder,
+              onEditDisplayName: onEditDisplayName,
+              onEditProfileDescription: onEditProfileDescription,
             ),
-        ],
+            const _NotificationsSection(),
+            _ConnectionSection(
+              identityRecoveryPageBuilder: identityRecoveryPageBuilder,
+            ),
+            if (packageInfo.hasData)
+              _VersionFooter(
+                version: packageInfo.data!.version,
+                buildNumber: packageInfo.data!.buildNumber,
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -173,7 +174,7 @@ class _RowChevron extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Icon(
-      LucideIcons.chevronRight,
+      BuzzIcons.chevronRight,
       size: 18,
       color: context.colors.onSurfaceVariant,
     );

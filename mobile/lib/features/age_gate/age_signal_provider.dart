@@ -80,14 +80,14 @@ class AgeSignalNotifier extends Notifier<AgeSignalState> {
   }
 }
 
-/// Explicit dogfood opt-in. Production builds keep enforcement disabled.
+/// Explicit pre-release testing opt-in. Production builds keep enforcement disabled.
 const ageGatingEnabled = bool.fromEnvironment('BUZZ_AGE_GATING_ENABLED');
 
 final ageSignalProvider = NotifierProvider<AgeSignalNotifier, AgeSignalState>(
   ageGatingEnabled ? AgeSignalNotifier.new : _DisabledAgeSignalNotifier.new,
 );
 
-// Remains disabled until the fail-open implementation is validated in dogfood.
+// Remains disabled until the fail-open implementation is validated in pre-release testing.
 class _DisabledAgeSignalNotifier extends AgeSignalNotifier {
   @override
   Future<void> request() async {}

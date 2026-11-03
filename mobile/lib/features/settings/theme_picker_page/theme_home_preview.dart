@@ -341,13 +341,7 @@ class _FigmaChatScreen extends StatelessWidget {
             authorWidth: 118,
             bodyWidths: const [244, 198, 126],
           ),
-          _PreviewTimelineMessage(
-            key: const ValueKey('theme-chat-timeline-message-3'),
-            top: 432,
-            avatarColor: chrome,
-            authorWidth: 76,
-            bodyWidths: const [206, 148],
-          ),
+          const _PreviewOutgoingMessage(),
           Positioned(
             key: const ValueKey('theme-chat-composer-preview'),
             left: 16,
@@ -387,6 +381,50 @@ class _FigmaChatScreen extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _PreviewOutgoingMessage extends StatelessWidget {
+  const _PreviewOutgoingMessage();
+
+  @override
+  Widget build(BuildContext context) {
+    final chat = ChatColors.of(context);
+    return Positioned(
+      top: 432,
+      right: 18,
+      width: 238,
+      child: DecoratedBox(
+        key: const ValueKey('theme-chat-outgoing-bubble'),
+        decoration: BoxDecoration(
+          color: chat.outgoing,
+          borderRadius: BorderRadius.circular(Radii.dialog),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(Grid.sm),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              for (final width in [206.0, 148.0])
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+                  child: SizedBox(
+                    width: width,
+                    height: 11,
+                    child: DecoratedBox(
+                      key: ValueKey('theme-chat-outgoing-line-$width'),
+                      decoration: BoxDecoration(
+                        color: chat.foreground,
+                        borderRadius: BorderRadius.circular(Radii.full),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
       ),
     );
   }

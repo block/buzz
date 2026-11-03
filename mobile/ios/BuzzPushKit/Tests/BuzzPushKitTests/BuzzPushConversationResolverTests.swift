@@ -99,7 +99,7 @@ extension BuzzPushNotificationResolverTests {
     XCTAssertEqual(result.subtitle, "Community")
   }
 
-  func testFreshEvictedMembershipDigestsTriggerOneBoundedRefresh() throws {
+  func testPartialMembershipRefreshDoesNotReuseCachedChannel() throws {
     let message = try Self.signedEvent(
       privateKey: Self.profilePrivateKey,
       createdAt: Self.now,
@@ -142,7 +142,7 @@ extension BuzzPushNotificationResolverTests {
       if URLProtocolStub.requests.count == 1 {
         return Self.response(request, status: 200, data: try JSONEncoder().encode([message]))
       }
-      XCTAssertEqual(request.timeoutInterval, 3)
+      XCTAssertEqual(request.timeoutInterval, 60)
       return Self.response(
         request,
         status: 200,
@@ -160,9 +160,10 @@ extension BuzzPushNotificationResolverTests {
       )
     )
 
-    XCTAssertEqual(result.conversationDisplayName, "#General")
-    XCTAssertEqual(result.conversationRecipientCount, 1)
-    XCTAssertEqual(URLProtocolStub.requests.count, 2)
+    // Only membership was returned. Do not pair it with the cached channel.
+    XCTAssertNil(result.conversationDisplayName)
+    XCTAssertNil(result.conversationRecipientCount)
+    XCTAssertEqual(URLProtocolStub.requests.count, 4)
   }
 
   func testTwoPersonDMUsesDirectCommunicationPresentation() throws {

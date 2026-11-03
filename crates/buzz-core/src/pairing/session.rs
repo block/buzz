@@ -27,6 +27,14 @@
 //! handle_complete(&event)              → complete_event
 //! ```
 
+//! # Code-entry confirmation extension
+//!
+//! A target advertises `"confirmation":"desktop-code-v1"` in its encrypted
+//! offer. The source generates a separate random six-digit code, never included
+//! in the QR or challenge. The target submits user input through NIP-44. Only a
+//! matching code releases the source proof and payload; five guesses abort the
+//! entire session. Legacy offers still require explicit source-side approval.
+
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
@@ -104,6 +112,9 @@ pub struct PairingSession {
     created_at: Instant,
     /// Maximum session lifetime.
     timeout: Duration,
+    desktop_code_requested: bool,
+    desktop_code: Option<Zeroizing<String>>,
+    code_attempts: u8,
 }
 
 impl PairingSession {
@@ -136,6 +147,9 @@ impl PairingSession {
             processed_ids: HashSet::new(),
             created_at: Instant::now(),
             timeout: DEFAULT_TIMEOUT,
+            desktop_code_requested: false,
+            desktop_code: None,
+            code_attempts: 0,
         };
 
         (session, qr)
@@ -147,17 +161,33 @@ impl PairingSession {
     /// formatted SAS code to display. After this call the session is in
     /// [`SessionState::Confirming`].
     pub fn handle_offer(&mut self, event: &Event) -> Result<String, PairingError> {
+        self.handle_offer_with_confirmation(event)
+            .map(|(code, _)| code)
+    }
+
+    /// Validate an offer and return its SAS and whether the target requests
+    /// code-entry confirmation. The capability is encrypted so strict relays
+    /// still receive only the required recipient tag.
+    pub fn handle_offer_with_confirmation(
+        &mut self,
+        event: &Event,
+    ) -> Result<(String, bool), PairingError> {
         self.check_expired()?;
         self.expect_state(SessionState::Waiting)?;
         self.expect_role(Role::Source)?;
         self.validate_event_basics(event)?;
 
         let msg = self.decrypt_message(event)?;
-        let (session_id_hex, version) = match &msg {
+        let (session_id_hex, version, code_entry) = match &msg {
             PairingMessage::Offer {
                 session_id,
                 version,
-            } => (session_id.clone(), *version),
+                confirmation,
+            } => (
+                session_id.clone(),
+                *version,
+                confirmation.as_deref() == Some("desktop-code-v1"),
+            ),
             other => return Err(unexpected("offer", other)),
         };
 
@@ -192,7 +222,8 @@ impl PairingSession {
         self.state = SessionState::Confirming;
         self.record_event(event);
 
-        Ok(format_sas(code))
+        self.desktop_code_requested = code_entry;
+        Ok((format_sas(code), code_entry))
     }
 
     /// (Source) User confirmed the SAS codes match. Build the `sas-confirm`
@@ -349,12 +380,16 @@ impl PairingSession {
             processed_ids: HashSet::new(),
             created_at: Instant::now(),
             timeout: DEFAULT_TIMEOUT,
+            desktop_code_requested: false,
+            desktop_code: None,
+            code_attempts: 0,
         };
 
         // Build and return the offer event.
         let msg = PairingMessage::Offer {
             session_id: hex::encode(session_id),
             version: 1,
+            confirmation: None,
         };
         let event = session.build_event(&msg)?;
         session.state = SessionState::Confirming;
@@ -514,9 +549,15 @@ impl PairingSession {
         }
     }
 
+    /// Absolute protocol deadline. Transports must use this same deadline for
+    /// UI expiry so connection setup never adds time to an expired QR.
+    pub fn deadline(&self) -> Instant {
+        self.created_at + self.timeout
+    }
+
     /// Check if the session has expired.
     pub fn is_expired(&self) -> bool {
-        self.created_at.elapsed() > self.timeout
+        Instant::now() >= self.deadline()
     }
 
     /// Current protocol state.
@@ -784,6 +825,9 @@ impl Drop for PairingSession {
 fn unexpected(expected: &str, got: &PairingMessage) -> PairingError {
     let got_name = match got {
         PairingMessage::Offer { .. } => "offer",
+        PairingMessage::DesktopCode {} => "desktop-code",
+        PairingMessage::CodeSubmit { .. } => "code-submit",
+        PairingMessage::CodeRejected { .. } => "code-rejected",
         PairingMessage::SasConfirm { .. } => "sas-confirm",
         PairingMessage::Payload { .. } => "payload",
         PairingMessage::Complete { .. } => "complete",
@@ -1423,3 +1467,10 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "session_code_entry_tests.rs"]
+mod code_entry_tests;
+
+#[path = "session_desktop_code.rs"]
+mod desktop_code;

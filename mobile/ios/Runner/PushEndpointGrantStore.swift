@@ -6,8 +6,8 @@ import Security
 /// UserDefaults or logs. Dart can read the closed record through the push bridge.
 final class BuzzPushEndpointGrantKeychainStore: BuzzPushEndpointGrantStore {
   private static let service = "buzz.push.endpoint-grants"
-  private static let recordsAccount = "v2"
-  private static let pendingAccount = "pending-v2"
+  private static let recordsAccount = "records-buzz-push-v1"
+  private static let pendingAccount = "pending-buzz-push-v1"
 
   private let accessGroup: String?
 
@@ -40,7 +40,6 @@ final class BuzzPushEndpointGrantKeychainStore: BuzzPushEndpointGrantStore {
     var all = try records()
     all.removeAll {
       $0.gatewayOrigin == record.gatewayOrigin && $0.relayOrigin == record.relayOrigin
-        && $0.appProfile == record.appProfile
     }
     all.append(record)
     try replaceValue(all, account: Self.recordsAccount)
@@ -48,12 +47,10 @@ final class BuzzPushEndpointGrantKeychainStore: BuzzPushEndpointGrantStore {
 
   func pendingEnrollment(
     gatewayOrigin: String,
-    relayOrigin: String,
-    appProfile: String
+    relayOrigin: String
   ) throws -> BuzzPushPendingEnrollmentRecord? {
     try pendingEnrollments().first {
       $0.gatewayOrigin == gatewayOrigin && $0.relayOrigin == relayOrigin
-        && $0.appProfile == appProfile
     }
   }
 
@@ -61,7 +58,6 @@ final class BuzzPushEndpointGrantKeychainStore: BuzzPushEndpointGrantStore {
     var all = try pendingEnrollments()
     all.removeAll {
       $0.gatewayOrigin == record.gatewayOrigin && $0.relayOrigin == record.relayOrigin
-        && $0.appProfile == record.appProfile
     }
     all.append(record)
     try replaceValue(all, account: Self.pendingAccount)
@@ -69,13 +65,11 @@ final class BuzzPushEndpointGrantKeychainStore: BuzzPushEndpointGrantStore {
 
   func removePendingEnrollment(
     gatewayOrigin: String,
-    relayOrigin: String,
-    appProfile: String
+    relayOrigin: String
   ) throws {
     var all = try pendingEnrollments()
     all.removeAll {
       $0.gatewayOrigin == gatewayOrigin && $0.relayOrigin == relayOrigin
-        && $0.appProfile == appProfile
     }
     try replaceValue(all, account: Self.pendingAccount)
   }
@@ -153,7 +147,6 @@ extension BuzzPushEndpointGrantRecord {
       "installationId": installationId,
       "endpointGrant": endpointGrant,
       "endpointHash": endpointHash,
-      "appProfile": appProfile,
       "endpointEpoch": endpointEpoch,
       "generation": generation,
       "expiresAt": expiresAt,

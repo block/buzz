@@ -12,8 +12,13 @@ on:
         description: Expected next release-candidate number
         required: true
         type: string
+      source_branch:
+        description: Source branch (main or mobile-vMAJOR.MINOR matching version)
+        required: true
+        default: main
+        type: string
       target_sha:
-        description: Exact current block/buzz main commit
+        description: Pinned commit in the selected source branch history
         required: true
         type: string
 
@@ -65,5 +70,6 @@ jobs:
           GH_TOKEN: ${{ steps.release-tagger.outputs.token }}
           MOBILE_VERSION: ${{ inputs.version }}
           CANDIDATE_NUMBER: ${{ inputs.candidate_number }}
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
           TARGET_SHA: ${{ inputs.target_sha }}
-        run: scripts/publish-mobile-release-candidate.sh "$MOBILE_VERSION" "$CANDIDATE_NUMBER" "$TARGET_SHA"
+        run: scripts/publish-mobile-release-candidate.sh "$MOBILE_VERSION" "$CANDIDATE_NUMBER" "$TARGET_SHA" "$SOURCE_BRANCH"

@@ -12,8 +12,6 @@ public struct BuzzPushPendingEnrollmentRecord: Codable, Equatable, Sendable {
   public let endpoint: String
   /// Lowercase SHA-256 digest of the binary APNs device token.
   public let endpointHash: String
-  /// Server-owned application identity used for enrollment.
-  public let appProfile: String
   /// Unix expiration time of the installation or delegation authority.
   public let expiresAt: Int64
   /// Unlinkable per-relay lease address, distinct from the gateway handle.
@@ -30,6 +28,14 @@ public struct BuzzPushPendingEnrollmentRecord: Codable, Equatable, Sendable {
   public let attestation: String?
   /// Highest delegation generation reserved before a network request.
   public let delegationGeneration: Int64
+  /// Unix time the journaled installation request was prepared, or its latest
+  /// replacement attempt began; nil when there is none or the journal predates
+  /// this field.
+  public let preparedAt: Int64?
+  /// Gateway rejections and replacement attempts recorded for this journal and
+  /// the rejected journals it replaced, which lengthen the wait before the
+  /// next replacement; nil or 0 means none.
+  public let rejectedReplacements: Int?
 
   /// Creates a gateway-scoped durable record from authenticated enrollment state.
   public init(
@@ -38,7 +44,6 @@ public struct BuzzPushPendingEnrollmentRecord: Codable, Equatable, Sendable {
     relayPubkey: String,
     endpoint: String,
     endpointHash: String,
-    appProfile: String,
     expiresAt: Int64,
     installationId: String,
     gatewayInstallationHandle: String? = nil,
@@ -46,14 +51,15 @@ public struct BuzzPushPendingEnrollmentRecord: Codable, Equatable, Sendable {
     challenge: String? = nil,
     keyId: String? = nil,
     attestation: String? = nil,
-    delegationGeneration: Int64 = 0
+    delegationGeneration: Int64 = 0,
+    preparedAt: Int64? = nil,
+    rejectedReplacements: Int? = nil
   ) {
     self.gatewayOrigin = gatewayOrigin
     self.relayOrigin = relayOrigin
     self.relayPubkey = relayPubkey
     self.endpoint = endpoint
     self.endpointHash = endpointHash
-    self.appProfile = appProfile
     self.expiresAt = expiresAt
     self.installationId = installationId
     self.gatewayInstallationHandle = gatewayInstallationHandle
@@ -62,6 +68,8 @@ public struct BuzzPushPendingEnrollmentRecord: Codable, Equatable, Sendable {
     self.keyId = keyId
     self.attestation = attestation
     self.delegationGeneration = delegationGeneration
+    self.preparedAt = preparedAt
+    self.rejectedReplacements = rejectedReplacements
   }
 
 }

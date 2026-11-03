@@ -186,7 +186,7 @@ class _HuddleButton extends ConsumerWidget {
       color: context.colors.primary,
       onPressed: action.onPressed,
       tooltip: action.label,
-      icon: const Icon(LucideIcons.headphones, size: 22),
+      icon: const Icon(BuzzIcons.headphones, size: 22),
     );
   }
 }
@@ -263,8 +263,9 @@ IosNavigationAction _huddleNavigationAction(
               );
             } catch (error) {
               if (!context.mounted) return;
-              ScaffoldMessenger.of(context).showSnackBar(
+              ScaffoldMessenger.of(context).showFeedbackSnackBar(
                 SnackBar(content: Text(_huddleActionError(error))),
+                kind: ToastKind.error,
               );
             }
           },
@@ -330,26 +331,20 @@ class _HuddleJoinSurface extends ConsumerWidget {
           };
 
     return Padding(
-      padding: const EdgeInsets.only(
-        left: messageAvatarSize + messageAvatarContentGap,
-        top: Grid.xxs,
-      ),
+      padding: const EdgeInsets.only(top: Grid.xxs),
       child: Container(
+        key: ValueKey('huddle-card-${message.id}'),
         padding: const EdgeInsets.all(Grid.twelve),
         decoration: BoxDecoration(
           color: context.colors.primary.withValues(alpha: 0.08),
-          borderRadius: BorderRadius.circular(Radii.md),
+          borderRadius: conversationAttachmentCorners,
           border: Border.all(
             color: context.colors.primary.withValues(alpha: 0.18),
           ),
         ),
         child: Row(
           children: [
-            Icon(
-              LucideIcons.headphones,
-              size: 20,
-              color: context.colors.primary,
-            ),
+            Icon(BuzzIcons.headphones, size: 20, color: context.colors.primary),
             const SizedBox(width: Grid.xxs),
             Expanded(
               child: Column(
@@ -448,9 +443,10 @@ Future<void> _startMobileHuddleFromChannel({
     );
   } catch (error) {
     if (!context.mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(_huddleActionError(error))));
+    ScaffoldMessenger.of(context).showFeedbackSnackBar(
+      SnackBar(content: Text(_huddleActionError(error))),
+      kind: ToastKind.error,
+    );
   }
 }
 
@@ -462,8 +458,9 @@ void _openMobileHuddle({
   final config = ref.read(relayConfigProvider);
   final nsec = config.nsec;
   if (nsec == null || nsec.isEmpty) {
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context).showFeedbackSnackBar(
       const SnackBar(content: Text('A paired identity is required.')),
+      kind: ToastKind.generic,
     );
     return;
   }
@@ -561,9 +558,10 @@ Future<void> _startReplacementHuddle({
     );
   } catch (error) {
     if (!context.mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(_huddleActionError(error))));
+    ScaffoldMessenger.of(context).showFeedbackSnackBar(
+      SnackBar(content: Text(_huddleActionError(error))),
+      kind: ToastKind.error,
+    );
   }
 }
 
@@ -646,7 +644,7 @@ class _MobileHuddleCallPage extends ConsumerWidget {
     final (retryTooltip, retryIcon, onRetry) = switch (true) {
       _ when unavailable => (
         'Start a new Huddle',
-        LucideIcons.headphones,
+        BuzzIcons.headphones,
         () => unawaited(
           _startReplacementHuddle(
             context: context,
@@ -657,12 +655,12 @@ class _MobileHuddleCallPage extends ConsumerWidget {
       ),
       _ when needsMicrophoneSettings => (
         'Open Settings',
-        LucideIcons.settings,
+        BuzzIcons.settings,
         () => unawaited(sessionController.openMicrophoneSettings()),
       ),
       _ => (
         'Try again',
-        LucideIcons.refreshCw,
+        BuzzIcons.refreshCw,
         () => unawaited(
           lifecycleController.join(
             parentChannelId: invite.parentChannelId,
@@ -776,10 +774,13 @@ class _MobileHuddleCallPage extends ConsumerWidget {
                               )
                               .catchError((Object error) {
                                 if (!context.mounted) return;
-                                ScaffoldMessenger.of(context).showSnackBar(
+                                ScaffoldMessenger.of(
+                                  context,
+                                ).showFeedbackSnackBar(
                                   const SnackBar(
                                     content: Text('Reaction failed'),
                                   ),
+                                  kind: ToastKind.error,
                                 );
                               }),
                         );
@@ -833,13 +834,13 @@ class _HuddleCallHeader extends StatelessWidget {
               unawaited(HapticFeedback.selectionClick());
               onMinimize();
             },
-            icon: const Icon(LucideIcons.chevronDown, size: 32),
+            icon: const Icon(BuzzIcons.chevronDown, size: 32),
           ),
           const Spacer(),
           _HuddleRoundControl(
             key: const ValueKey('huddle-leave'),
             tooltip: 'Leave Huddle',
-            icon: LucideIcons.phoneOff,
+            icon: BuzzIcons.phoneOff,
             foregroundColor: context.colors.error,
             backgroundColor: context.colors.surfaceContainerHighest,
             useHapticFeedback: true,

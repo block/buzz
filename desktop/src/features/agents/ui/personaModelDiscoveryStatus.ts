@@ -45,7 +45,7 @@ export function formatModelDiscoveryErrorStatus(
   error: unknown,
   provider: string,
   agentLabel?: string,
-): PersonaModelDiscoveryStatus | null {
+): PersonaModelDiscoveryStatus {
   const message = errorMessage(error);
 
   if (provider.trim() === "relay-mesh") {
@@ -116,12 +116,21 @@ export function formatModelDiscoveryErrorStatus(
     };
   }
 
+  // Desktop discovers Databricks models in-process whenever DATABRICKS_HOST
+  // is set, so either error from the harness fallback means the host is missing.
   if (
     message.includes("DATABRICKS_HOST required") ||
-    message.includes("DATABRICKS_MODEL required") ||
-    message.includes("BUZZ_AGENT_PROVIDER is required")
+    message.includes("DATABRICKS_MODEL required")
   ) {
-    return null;
+    return {
+      message:
+        "Set DATABRICKS_HOST to your Databricks workspace URL under Advanced to load Databricks models.",
+      tone: "warning",
+    };
+  }
+
+  if (message.includes("BUZZ_AGENT_PROVIDER is required")) {
+    return { message: "Choose a provider to load models.", tone: "muted" };
   }
 
   // Databricks transparent auth (agent_models_databricks.rs). The backend

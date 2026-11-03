@@ -99,7 +99,7 @@ Clients **partition by kind before any cursor math**:
 
 - tags: `["e", <root-id>]`, `["d", <root-id>]`, `["h", <channel-id>]`
 - content: `{"reply_count":n,"descendant_count":n,"last_reply_at":ts|null,"participants":["<hex-pubkey>",...]}`
-  (participants: up to 10, most recent first)
+  (participants: up to 10 from the newest 1000 replies, deleted ones included, most recent first)
 - Signed by the relay keypair. Synthesized at query time, **never stored**.
   Clients treat it as replace-by-target metadata keyed by the `e`/`d` tag
   (the `d` tag gives parameterized-replaceable semantics natively); it is

@@ -39,8 +39,8 @@ use super::build_deploy_payload;
 /// message exactly like a local spawn. Per-invocation only — never persisted
 /// on the record, so later redeploys do not carry a stale floor.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn deploy_to_provider(
-    app: &AppHandle,
+pub(crate) async fn deploy_to_provider<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     state: &AppState,
     pubkey: &str,
     _provider_id: &str,

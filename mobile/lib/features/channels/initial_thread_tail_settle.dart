@@ -41,14 +41,15 @@ class InitialThreadTailSettle {
     if (_isComplete) return;
 
     final generation = ++_generation;
-    if (targetIndex == null) {
-      _isComplete = true;
-      onSettled();
-      return;
-    }
-
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!context.mounted || generation != _generation) return;
+      // Report readiness after build, including empty threads. A synchronous
+      // hook update can otherwise leave the just-built visibility value stale.
+      if (targetIndex == null) {
+        _isComplete = true;
+        onSettled();
+        return;
+      }
 
       // Let events received during hydration rebuild the list before committing
       // the target. That rebuild schedules a new generation at the current tail.

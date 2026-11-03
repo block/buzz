@@ -60,6 +60,12 @@ pub enum WorkflowError {
     #[error("unauthorized: {0}")]
     Unauthorized(String),
 
+    /// The workflow's owner, or the human owner of an agent owner, is banned
+    /// from the community. An expected, repeating denial for as long as the
+    /// ban lasts, so callers may log it at a lower rate than `Unauthorized`.
+    #[error("unauthorized: workflow owner is banned from the community")]
+    OwnerBanned,
+
     /// The action is defined but not yet implemented.
     #[error("action not implemented: {0}")]
     NotImplemented(String),
@@ -78,6 +84,7 @@ impl WorkflowError {
             Self::CapacityExceeded => "capacity_exceeded",
             Self::Database(_) => "database_error",
             Self::Unauthorized(_) => "owner_unauthorized",
+            Self::OwnerBanned => "owner_banned",
             Self::NotImplemented(_) => "action_not_implemented",
         }
     }

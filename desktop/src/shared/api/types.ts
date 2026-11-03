@@ -420,6 +420,8 @@ export type CreateManagedAgentInput = {
   spawnAfterCreate?: boolean;
   startOnAppLaunch?: boolean;
   backend?: ManagedAgentBackend;
+  /** Local-only thinking effort saved on the new record before first spawn. */
+  effortLevel?: string;
   /** Omitted uses the linked persona default, then `"owner-only"`. */
   respondTo?: RespondToMode;
   /**

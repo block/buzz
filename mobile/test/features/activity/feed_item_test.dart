@@ -1,6 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/features/activity/feed_item.dart';
 
+import '../../helpers/thread_ids.dart';
+
 void main() {
   group('FeedItem.fromJson', () {
     test('parses all fields', () {
@@ -66,19 +68,30 @@ void main() {
     test('uses the reply marker for a direct thread reply', () {
       expect(
         makeItem(const [
-          ['e', 'root', '', 'reply'],
+          ['e', threadIdRoot, '', 'reply'],
         ]).threadHeadId,
-        'root',
+        threadIdRoot,
       );
     });
 
     test('uses the direct parent marker for a nested thread reply', () {
       expect(
         makeItem(const [
-          ['e', 'root', '', 'root'],
-          ['e', 'parent', '', 'reply'],
+          ['e', threadIdRoot, '', 'root'],
+          ['e', threadIdParent, '', 'reply'],
         ]).threadHeadId,
-        'parent',
+        threadIdParent,
+      );
+    });
+
+    test('uses the last valid parent and normalizes its case', () {
+      expect(
+        makeItem([
+          ['e', threadIdRoot, '', 'reply'],
+          ['e', threadIdParent.toUpperCase(), '', 'reply'],
+          ['e', 'bad', '', 'reply'],
+        ]).threadHeadId,
+        threadIdParent,
       );
     });
 

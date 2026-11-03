@@ -21,7 +21,7 @@
 //!   NIP-01 event ID hash. Events with invalid signatures are rejected.
 //! - **No persistence** — events exist only in-flight between matched pub/sub.
 //! - **Bounded resources** — 128 max WS connections, 4 KiB max frame, 120s TTL.
-//! - **Session cap** — at most 6 accepted EVENTs per connection.
+//! - **Session cap** — at most 8 attempted EVENTs per connection.
 //! - **Freshness** — `created_at` must be within ±120 s of relay wall-clock.
 //! - **Deduplication** — duplicate event IDs are rejected; dedup entries expire after 300 s.
 
@@ -70,10 +70,12 @@ const RATE_EVENT_MAX: u32 = 10;
 const SUB_ID_MAX: usize = 64;
 
 /// Hard session cap: at most this many attempted EVENTs (post-sig-check) per connection.
-const MAX_EVENTS_PER_CONN: u32 = 6;
+// Desktop-code pairing needs seven events per peer at the fifth successful
+// guess (including offer/challenge, proof, payload and completion), plus abort.
+const MAX_EVENTS_PER_CONN: u32 = 8;
 
 /// Per-#p delivery budget: enough for one full pairing from each direction.
-const MAX_DELIVERED_PER_P: u32 = 12;
+const MAX_DELIVERED_PER_P: u32 = 2 * MAX_EVENTS_PER_CONN;
 
 /// Dedup vec rejects new events when still at capacity after TTL eviction (fail closed).
 const DEDUP_CAP: usize = 1024;

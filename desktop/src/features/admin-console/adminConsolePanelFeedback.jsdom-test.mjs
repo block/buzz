@@ -138,7 +138,7 @@ test("feedback-detail-renders-structured-fields: FeedbackDetail shows field layo
   const allButtons = container.querySelectorAll("button");
   for (const btn of allButtons) {
     const testid = btn.getAttribute("data-testid") ?? "";
-    if (testid.startsWith("admin-tab")) continue;
+    if (testid.match(/^(admin-tab|community-badge)/)) continue;
     await act(async () => {
       fireEvent.click(btn);
       await new Promise((r) => setTimeout(r, 30));
@@ -249,7 +249,9 @@ test("feedback-grouped-by-community: multi-community feedback renders per-commun
   await settle(30);
 
   const hosts = Array.from(
-    container.querySelectorAll("[data-testid='community-group-host']"),
+    container.querySelectorAll(
+      "[data-testid='community-group-host'] [data-testid='community-badge-host']",
+    ),
   ).map((el) => el.textContent);
   assert.deepEqual(
     hosts,
@@ -321,8 +323,9 @@ test("feedback-status-honest: a reviewed detail reports reviewed, never defaulti
   // Navigate into the feedback detail.
   const listRow = Array.from(container.querySelectorAll("button")).find(
     (btn) =>
-      !(btn.getAttribute("data-testid") ?? "").startsWith("admin-tab") &&
-      btn.textContent?.includes("Already-triaged feedback"),
+      !(btn.getAttribute("data-testid") ?? "").match(
+        /^(admin-tab|community-badge)/,
+      ) && btn.textContent?.includes("Already-triaged feedback"),
   );
   assert.ok(listRow, "feedback list row must be present");
   await act(async () => {
@@ -421,8 +424,9 @@ test("feedback-severed-community: a purged-source feedback row renders in list a
   // The severed row still renders in the list (did not throw / vanish).
   const listRow = Array.from(container.querySelectorAll("button")).find(
     (btn) =>
-      !(btn.getAttribute("data-testid") ?? "").startsWith("admin-tab") &&
-      btn.textContent?.includes("since-purged community"),
+      !(btn.getAttribute("data-testid") ?? "").match(
+        /^(admin-tab|community-badge)/,
+      ) && btn.textContent?.includes("since-purged community"),
   );
   assert.ok(listRow, "the severed feedback row must render in the list");
 
@@ -513,8 +517,9 @@ test("feedback-list-refetches-on-back-after-mutation: changing status then navig
   // Open the first feedback row.
   const row = Array.from(container.querySelectorAll("button")).find(
     (b) =>
-      !(b.getAttribute("data-testid") ?? "").startsWith("admin-tab") &&
-      b.textContent?.includes("App crashes"),
+      !(b.getAttribute("data-testid") ?? "").match(
+        /^(admin-tab|community-badge)/,
+      ) && b.textContent?.includes("App crashes"),
   );
   assert.ok(row, "feedback row must be present");
   await act(async () => {
@@ -583,7 +588,10 @@ test("canMutate-false-feedback: feedback-status-control absent in disabled mode"
     });
     await settle(30);
     const listBtns = Array.from(container.querySelectorAll("button")).filter(
-      (b) => !(b.getAttribute("data-testid") ?? "").startsWith("admin-tab"),
+      (b) =>
+        !(b.getAttribute("data-testid") ?? "").match(
+          /^(admin-tab|community-badge)/,
+        ),
     );
     assert.ok(listBtns.length > 0, "feedback list item must be present");
     await act(async () => {
@@ -664,7 +672,10 @@ test("feedback-status-readonly: read-only detail shows status badge, no status-c
 
     // Click the feedback list item to open detail.
     const listBtns = Array.from(container.querySelectorAll("button")).filter(
-      (b) => !(b.getAttribute("data-testid") ?? "").startsWith("admin-tab"),
+      (b) =>
+        !(b.getAttribute("data-testid") ?? "").match(
+          /^(admin-tab|community-badge)/,
+        ),
     );
     assert.ok(listBtns.length > 0, "feedback list item must be present");
     await act(async () => {
@@ -764,7 +775,10 @@ test("non-image-attachment-save-button: a non-image attachment shows a Save butt
     // Navigate to feedback detail.
     const allButtons = Array.from(container.querySelectorAll("button"));
     const itemBtn = allButtons.find(
-      (b) => !(b.getAttribute("data-testid") ?? "").startsWith("admin-tab"),
+      (b) =>
+        !(b.getAttribute("data-testid") ?? "").match(
+          /^(admin-tab|community-badge)/,
+        ),
     );
     assert.ok(itemBtn, "feedback item button must exist");
     await act(async () => {

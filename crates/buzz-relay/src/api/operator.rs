@@ -41,6 +41,12 @@ pub struct ListCommunitiesQuery {
     owner_pubkey: String,
 }
 
+/// Query parameters for joined-community discovery by an authenticated operator.
+#[derive(Debug, Deserialize)]
+pub struct JoinedCommunitiesQuery {
+    member_pubkey: String,
+}
+
 /// Query parameters for `GET /operator/communities/availability`.
 #[derive(Debug, Deserialize)]
 pub struct CommunityAvailabilityQuery {
@@ -70,6 +76,17 @@ struct ListenerPubkeysRequest {
     pubkeys: Vec<String>,
 }
 
+/// Registration body: one proof signed by each target pubkey.
+#[derive(Debug, Deserialize)]
+struct ListenerRegistrationRequest {
+    registrations: Vec<nostr::Event>,
+}
+
+const MAX_LISTENER_PUBKEYS: usize = 1_000;
+const LISTENER_PUBKEYS_PATH: &str = "/operator/listener/pubkeys";
+/// Matches the NIP-98 request window: proofs are signed just before sending.
+const REGISTRATION_PROOF_MAX_SKEW_SECS: u64 = 60;
+
 fn parse_listener_pubkeys(body: &[u8]) -> Result<Vec<Vec<u8>>, (StatusCode, Json<Value>)> {
     let request: ListenerPubkeysRequest = serde_json::from_slice(body).map_err(|e| {
         api_error(
@@ -77,7 +94,7 @@ fn parse_listener_pubkeys(body: &[u8]) -> Result<Vec<Vec<u8>>, (StatusCode, Json
             &format!("invalid operator-listener pubkeys JSON: {e}"),
         )
     })?;
-    if request.pubkeys.is_empty() || request.pubkeys.len() > 1_000 {
+    if request.pubkeys.is_empty() || request.pubkeys.len() > MAX_LISTENER_PUBKEYS {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "pubkeys must contain between 1 and 1000 entries",
@@ -101,6 +118,75 @@ fn parse_listener_pubkeys(body: &[u8]) -> Result<Vec<Vec<u8>>, (StatusCode, Json
             })
         })
         .collect()
+}
+
+/// Parse a registration body and return the target pubkeys whose proofs
+/// verify for `listener` at `url`.
+fn parse_listener_registrations(
+    body: &[u8],
+    listener: &nostr::PublicKey,
+    url: &str,
+    now: u64,
+) -> Result<Vec<Vec<u8>>, (StatusCode, Json<Value>)> {
+    let request: ListenerRegistrationRequest = serde_json::from_slice(body).map_err(|e| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid operator-listener registration JSON: {e}"),
+        )
+    })?;
+    if request.registrations.is_empty() || request.registrations.len() > MAX_LISTENER_PUBKEYS {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "registrations must contain between 1 and 1000 entries",
+        ));
+    }
+    request
+        .registrations
+        .iter()
+        .map(|proof| verify_registration_proof(proof, listener, url, now))
+        .collect::<Result<_, _>>()
+        .map_err(|reason| api_error(StatusCode::BAD_REQUEST, reason))
+}
+
+/// Verify one target-signed registration proof and return the target pubkey.
+///
+/// The proof binds the target's consent to this listener (`p`) and this
+/// deployment's registration endpoint (`u`). The outer NIP-98 request is
+/// replay-checked; within the skew window a proof can only re-register the
+/// pair it was signed for.
+fn verify_registration_proof(
+    proof: &nostr::Event,
+    listener: &nostr::PublicKey,
+    url: &str,
+    now: u64,
+) -> Result<Vec<u8>, &'static str> {
+    if u32::from(proof.kind.as_u16()) != buzz_core::kind::KIND_OPERATOR_LISTENER_REGISTRATION {
+        return Err("registration proof has the wrong kind");
+    }
+    if proof.verify().is_err() {
+        return Err("registration proof signature is invalid");
+    }
+    if proof.created_at.as_secs().abs_diff(now) > REGISTRATION_PROOF_MAX_SKEW_SECS {
+        return Err("registration proof is outside the timestamp window");
+    }
+    let listener_hex = listener.to_hex();
+    let tag_values = |name: &str| {
+        proof
+            .tags
+            .iter()
+            .filter_map(|tag| match tag.as_slice() {
+                [tag_name, value, ..] if tag_name == name => Some(value.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    if tag_values("p") != [listener_hex.as_str()] {
+        return Err("registration proof must name exactly this listener in one p tag");
+    }
+    if tag_values("u") != [url] {
+        return Err("registration proof must name this endpoint in one u tag");
+    }
+    Ok(proof.pubkey.to_bytes().to_vec())
 }
 
 /// Shared deployment-global operator auth prelude. The canonical management
@@ -187,15 +273,20 @@ pub async fn register_listener_pubkeys(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let listener = authorize_operator_listener_request(
-        &state,
-        &headers,
-        "POST",
-        "/operator/listener/pubkeys",
+    let listener =
+        authorize_operator_listener_request(&state, &headers, "POST", LISTENER_PUBKEYS_PATH, &body)
+            .await?;
+    let origin = state
+        .config
+        .relay_operator_api_origin
+        .as_deref()
+        .ok_or_else(|| internal_error("operator API origin is not configured"))?;
+    let target_pubkeys = parse_listener_registrations(
         &body,
-    )
-    .await?;
-    let target_pubkeys = parse_listener_pubkeys(&body)?;
+        &listener,
+        &format!("{origin}{LISTENER_PUBKEYS_PATH}"),
+        nostr::Timestamp::now().as_secs(),
+    )?;
     state
         .db
         .register_operator_listener_pubkeys(listener.as_bytes(), &target_pubkeys)
@@ -214,7 +305,7 @@ pub async fn remove_listener_pubkeys(
         &state,
         &headers,
         "DELETE",
-        "/operator/listener/pubkeys",
+        LISTENER_PUBKEYS_PATH,
         &body,
     )
     .await?;
@@ -317,6 +408,9 @@ pub async fn provision_community(
             tracing::error!(error = %msg, "operator community persistence failed");
             Err(internal_error("operator community persistence failed"))
         }
+        Err(msg) if msg == buzz_auth::BindRefusal::ReservedHost.to_string() => Err(
+            coded_api_error(StatusCode::BAD_REQUEST, "reserved_host", &msg),
+        ),
         Err(msg) => Err(api_error(StatusCode::BAD_REQUEST, &msg)),
     }
 }
@@ -374,7 +468,10 @@ pub async fn archive_community(
         .map_err(|e| internal_error(&format!("archive community: {e}")))?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "community not found"))?;
     let tenant = TenantContext::resolved(record.id, &record.host);
-    let closed = match state.disconnect_community_clusterwide(&tenant).await {
+    let closed = match state
+        .disconnect_community_clusterwide(&tenant, record.archived_at)
+        .await
+    {
         Ok(closed) => closed,
         Err(error) => {
             tracing::warn!(community = %record.id, host = %record.host, %error, "community archived but disconnect propagation is pending");
@@ -597,6 +694,42 @@ pub async fn delete_community(
     ))
 }
 
+/// Return active memberships for an operator-supplied pubkey.
+/// The operator is trusted to select the identity; this route does not bind it to a user session.
+pub async fn list_joined_communities(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    Query(query): Query<JoinedCommunitiesQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    authorize_operator_request(
+        &state,
+        &headers,
+        "GET",
+        "/operator/communities/joined",
+        raw_query.as_deref(),
+        None,
+    )
+    .await?;
+    let pubkey = validate_pubkey_hex(&query.member_pubkey).ok_or_else(|| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid member_pubkey: expected 64-char hex pubkey",
+        )
+    })?;
+    let communities = state
+        .db
+        .list_communities_joined_by(&pubkey)
+        .await
+        .map_err(|e| internal_error(&format!("list joined communities: {e}")))?;
+    Ok(Json(serde_json::json!({
+        "member_pubkey": pubkey,
+        "communities": communities.into_iter().map(|row| serde_json::json!({
+            "community_id": row.id.to_string(), "host": row.host,
+        })).collect::<Vec<_>>()
+    })))
+}
+
 /// List communities where a pubkey currently holds the `owner` role.
 pub async fn list_owned_communities(
     State(state): State<Arc<AppState>>,
@@ -699,13 +832,41 @@ pub async fn transfer_community(
 
     let community = CommunityId::from_uuid(community_uuid);
 
-    let result = state
+    let write = state
         .db
-        .transfer_ownership(community, &new_owner_pubkey, &expected_owner_pubkey)
+        .transfer_ownership(
+            community,
+            &new_owner_pubkey,
+            &expected_owner_pubkey,
+            &state.relay_keypair,
+        )
         .await
         .map_err(|e| internal_error(&format!("transfer ownership: {e}")))?;
 
-    let (status, previous_owner) = match result {
+    // The transfer committed the NIP-43 membership list with it; deliver it
+    // to live subscribers. A delivery failure must not turn a success into an
+    // HTTP error, and the next fetch is already correct.
+    if write.snapshot.is_some() {
+        match state.db.lookup_community_host(community).await {
+            Ok(Some(host)) => {
+                let tenant = TenantContext::resolved(community, host);
+                crate::handlers::side_effects::fan_out_nip43_membership_list(
+                    &tenant,
+                    &state,
+                    write.snapshot,
+                )
+                .await;
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(
+                community = %community,
+                error = %error,
+                "ownership transferred but the community host lookup for list delivery failed"
+            ),
+        }
+    }
+
+    let (status, previous_owner) = match write.outcome {
         buzz_db::relay_members::TransferResult::Transferred { previous_owner } => {
             ("transferred", previous_owner)
         }
@@ -744,29 +905,6 @@ pub async fn transfer_community(
         }
     };
 
-    // Best-effort NIP-43 membership snapshot publication — same pattern as
-    // provision_community. The DB mutation is already committed; a publication
-    // failure must not turn a success into an HTTP error.
-    if state.config.require_relay_membership {
-        if let Some(host) = state
-            .db
-            .lookup_community_host(community)
-            .await
-            .map_err(|e| internal_error(&format!("lookup community host: {e}")))?
-        {
-            let tenant = TenantContext::resolved(community, host);
-            if let Err(error) =
-                crate::handlers::side_effects::publish_nip43_membership_list(&tenant, &state).await
-            {
-                tracing::warn!(
-                    community = %community,
-                    error = %error,
-                    "ownership transferred but NIP-43 membership snapshot publication failed"
-                );
-            }
-        }
-    }
-
     let response = TransferCommunityResponse {
         community_id: request.community_id,
         new_owner_pubkey,
@@ -804,13 +942,203 @@ pub async fn community_availability(
         .lookup_community_by_host_for_management(&normalized_host)
         .await
         .map_err(|e| internal_error(&format!("check community availability: {e}")))?;
+    // A reserved host (a NIP-FI command audience) is refused by create.
+    let reserved = state
+        .config
+        .nip_fi_provision_binding
+        .as_ref()
+        .is_some_and(|policy| policy.is_reserved(&normalized_host));
 
-    Ok(Json(serde_json::json!({
+    let mut body = serde_json::json!({
         "host": query.host,
         "normalized_host": normalized_host,
-        "available": existing.is_none(),
+        "available": existing.is_none() && !reserved,
         "community_id": existing.map(|record| record.id.to_string()),
+    });
+    if reserved {
+        body["error"] = "reserved_host".into();
+    }
+    Ok(Json(body))
+}
+
+/// Query parameters for `GET /operator/communities/nip-fi-binding`.
+#[derive(Debug, Deserialize)]
+pub struct CommunityNipFiBindingQuery {
+    host: String,
+}
+
+/// Read a community's NIP-FI issuer binding from the database. Only issuers
+/// that could authorize are reported: none unless the host is bindable under
+/// the provisioning policy (one label under the suffix, not reserved), and
+/// only issuers configured in `BUZZ_NIP_FI_ISSUERS`.
+///
+/// Contract relied on by kgoose:
+/// - `host` is the host stored on the community row, not the queried text.
+/// - A community in any lifecycle state answers 200. Archived or deletion
+///   quiesced communities, including tombstones, report `active: false`.
+/// - An unset provisioning policy, or no binding, reports `issuers: []`.
+/// - 404 means no community row has this host.
+pub async fn community_nip_fi_binding(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    Query(query): Query<CommunityNipFiBindingQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    authorize_operator_request(
+        &state,
+        &headers,
+        "GET",
+        "/operator/communities/nip-fi-binding",
+        raw_query.as_deref(),
+        None,
+    )
+    .await?;
+
+    let normalized_host = normalize_candidate_host(&query.host)
+        .map_err(|msg| api_error(StatusCode::BAD_REQUEST, &msg))?;
+    let record = state
+        .db
+        .lookup_nip_fi_binding_by_host(&normalized_host)
+        .await
+        .map_err(|e| internal_error(&format!("look up NIP-FI binding: {e}")))?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "community not found"))?;
+    let issuers = state
+        .config
+        .nip_fi_provision_binding
+        .as_ref()
+        .map_or_else(Vec::new, |policy| {
+            policy.effective_issuers(&record.host, record.issuers)
+        });
+
+    Ok(Json(serde_json::json!({
+        "host": record.host,
+        "active": record.active,
+        "issuers": issuers,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use nostr::{EventBuilder, Keys, Kind, Tag, TagKind, Timestamp};
+
+    use super::*;
+
+    const URL: &str = "https://operator.example/operator/listener/pubkeys";
+    const NOW: u64 = 1_800_000_000;
+
+    fn proof(target: &Keys, kind: u16, created_at: u64, tags: Vec<Tag>) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(kind), "")
+            .tags(tags)
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(target)
+            .expect("sign registration proof")
+    }
+
+    fn proof_tags(listener: &Keys, url: &str) -> Vec<Tag> {
+        vec![
+            Tag::public_key(listener.public_key()),
+            Tag::custom(TagKind::custom("u"), [url]),
+        ]
+    }
+
+    const PROOF_KIND: u16 = buzz_core::kind::KIND_OPERATOR_LISTENER_REGISTRATION as u16;
+
+    #[test]
+    fn registration_proof_returns_signing_target() {
+        let listener = Keys::generate();
+        let target = Keys::generate();
+        let valid = proof(&target, PROOF_KIND, NOW - 30, proof_tags(&listener, URL));
+
+        assert_eq!(
+            verify_registration_proof(&valid, &listener.public_key(), URL, NOW),
+            Ok(target.public_key().to_bytes().to_vec())
+        );
+    }
+
+    #[test]
+    fn registration_proof_rejects_unbound_or_forged_consent() {
+        let listener = Keys::generate();
+        let other_listener = Keys::generate();
+        let target = Keys::generate();
+        let mut forged = proof(&target, PROOF_KIND, NOW, proof_tags(&listener, URL));
+        forged.pubkey = Keys::generate().public_key();
+        let mut two_listeners = proof_tags(&listener, URL);
+        two_listeners.push(Tag::public_key(other_listener.public_key()));
+
+        for (case, event) in [
+            ("forged signer", forged),
+            (
+                "wrong kind",
+                proof(&target, 27235, NOW, proof_tags(&listener, URL)),
+            ),
+            (
+                "stale",
+                proof(&target, PROOF_KIND, NOW - 61, proof_tags(&listener, URL)),
+            ),
+            (
+                "future",
+                proof(&target, PROOF_KIND, NOW + 61, proof_tags(&listener, URL)),
+            ),
+            (
+                "other listener",
+                proof(&target, PROOF_KIND, NOW, proof_tags(&other_listener, URL)),
+            ),
+            (
+                "ambiguous listener",
+                proof(&target, PROOF_KIND, NOW, two_listeners),
+            ),
+            (
+                "other endpoint",
+                proof(
+                    &target,
+                    PROOF_KIND,
+                    NOW,
+                    proof_tags(&listener, "https://other.example/operator/listener/pubkeys"),
+                ),
+            ),
+            (
+                "missing endpoint",
+                proof(
+                    &target,
+                    PROOF_KIND,
+                    NOW,
+                    vec![Tag::public_key(listener.public_key())],
+                ),
+            ),
+        ] {
+            assert!(
+                verify_registration_proof(&event, &listener.public_key(), URL, NOW).is_err(),
+                "{case} proof was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn registration_body_requires_signed_proofs() {
+        let listener = Keys::generate();
+        let target = Keys::generate();
+        let valid = proof(&target, PROOF_KIND, NOW, proof_tags(&listener, URL));
+        let parse = |body: serde_json::Value| {
+            parse_listener_registrations(
+                body.to_string().as_bytes(),
+                &listener.public_key(),
+                URL,
+                NOW,
+            )
+        };
+
+        assert_eq!(
+            parse(serde_json::json!({"registrations": [valid]})).expect("signed registration"),
+            vec![target.public_key().to_bytes().to_vec()]
+        );
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"registrations": []}),
+            serde_json::json!({"pubkeys": [target.public_key().to_hex()]}),
+        ] {
+            assert!(parse(body.clone()).is_err(), "accepted {body}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -907,7 +1235,15 @@ mod postgres_tests {
     }
 
     async fn operator_test_state(operator_keys: &[Keys]) -> Option<Arc<AppState>> {
+        operator_test_state_with_policy(operator_keys, None).await
+    }
+
+    async fn operator_test_state_with_policy(
+        operator_keys: &[Keys],
+        nip_fi_provision_binding: Option<buzz_auth::ProvisionBindingPolicy>,
+    ) -> Option<Arc<AppState>> {
         let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
+        config.nip_fi_provision_binding = nip_fi_provision_binding;
         config.database_url = crate::test_support::database_url();
         config.redis_url = "redis://127.0.0.1:1".to_string();
         config.relay_url = "wss://tenant.example".to_string();
@@ -2197,7 +2533,28 @@ mod postgres_tests {
             .iter()
             .map(|target| target.public_key().to_hex())
             .collect::<Vec<_>>();
-        let register_body = serde_json::json!({"pubkeys": target_hex}).to_string();
+        let registration_proof = |target: &Keys, listener: &Keys| {
+            EventBuilder::new(
+                Kind::Custom(buzz_core::kind::KIND_OPERATOR_LISTENER_REGISTRATION as u16),
+                "",
+            )
+            .tags([
+                Tag::public_key(listener.public_key()),
+                Tag::custom(
+                    nostr::TagKind::custom("u"),
+                    [format!("http://{INGRESS_HOST}/operator/listener/pubkeys")],
+                ),
+            ])
+            .sign_with_keys(target)
+            .expect("sign registration proof")
+        };
+        let register_body = serde_json::json!({
+            "registrations": targets
+                .iter()
+                .map(|target| registration_proof(target, &listener))
+                .collect::<Vec<_>>()
+        })
+        .to_string();
         let response = signed_operator_request(
             Arc::clone(&state),
             &listener,
@@ -2224,6 +2581,26 @@ mod postgres_tests {
         .expect("count other listener targets");
         assert_eq!(listener_count, 2);
         assert_eq!(other_listener_count, 0);
+
+        // A proof signed for another listener, and the old unsigned form.
+        for rejected_body in [
+            serde_json::json!({"registrations": [registration_proof(&targets[1], &other_listener)]}),
+            serde_json::json!({"pubkeys": [target_hex[1]]}),
+        ] {
+            let rejected = signed_operator_request(
+                Arc::clone(&state),
+                &listener,
+                "POST",
+                "/operator/listener/pubkeys",
+                Some(rejected_body.to_string()),
+            )
+            .await;
+            assert_eq!(
+                rejected.status(),
+                StatusCode::BAD_REQUEST,
+                "{rejected_body}"
+            );
+        }
 
         let body = serde_json::json!({"pubkeys": [target_hex[0]]}).to_string();
         let missing_payload_auth = nip98_auth_header_without_payload(
@@ -2256,7 +2633,7 @@ mod postgres_tests {
             &listener,
             "POST",
             "/operator/listener/pubkeys",
-            Some(r#"{"pubkeys":["not-a-pubkey"]}"#.to_string()),
+            Some(r#"{"registrations":["not-an-event"]}"#.to_string()),
         )
         .await;
         assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
@@ -2321,6 +2698,303 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn nip_fi_binding_route_reads_bound_issuers_and_404s_unknown_hosts() {
+        let operator = Keys::generate();
+        let (policy, _, host) = reserved_host_policy();
+        let Some(state) =
+            operator_test_state_with_policy(std::slice::from_ref(&operator), Some(policy)).await
+        else {
+            return;
+        };
+        let issuer = NIP_FI_ISSUER.to_string();
+        state
+            .db
+            .ensure_configured_community_with_nip_fi_issuers(
+                &host,
+                &[issuer.clone(), "https://unconfigured.example".to_string()],
+            )
+            .await
+            .expect("seed bound community");
+        let router = build_router(state);
+
+        for (query_host, expected) in [
+            (host.to_uppercase(), StatusCode::OK),
+            (format!("missing-{host}"), StatusCode::NOT_FOUND),
+        ] {
+            let query = format!("host={query_host}");
+            let url = format!("http://{INGRESS_HOST}/operator/communities/nip-fi-binding?{query}");
+            let auth = nip98_auth_header(&operator, &url, "GET", None);
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/operator/communities/nip-fi-binding?{query}"))
+                        .header(header::HOST, INGRESS_HOST)
+                        .header(header::AUTHORIZATION, auth)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), expected, "{query_host}");
+            if expected == StatusCode::OK {
+                let json = read_json(response).await;
+                assert_eq!(json["host"], host);
+                assert_eq!(json["active"], true);
+                // The unconfigured issuer is stored but never reported.
+                assert_eq!(json["issuers"], serde_json::json!([issuer]));
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip_fi_binding_route_reports_no_issuers_outside_the_suffix() {
+        let operator = Keys::generate();
+        let (policy, _, control) = reserved_host_policy();
+        let Some(state) =
+            operator_test_state_with_policy(std::slice::from_ref(&operator), Some(policy)).await
+        else {
+            return;
+        };
+        let nested = format!("a.{control}");
+        let elsewhere = format!("community-{}.example", Uuid::new_v4().simple());
+        for host in [&nested, &elsewhere] {
+            state
+                .db
+                .ensure_configured_community_with_nip_fi_issuers(host, &[NIP_FI_ISSUER.to_string()])
+                .await
+                .expect("seed raw binding");
+            let lookup = nip_fi_lookup(Arc::clone(&state), &operator, host).await;
+            assert_eq!(lookup["issuers"], serde_json::json!([]), "{host}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn availability_reports_a_reserved_host_unavailable() {
+        let operator = Keys::generate();
+        let (policy, reserved, control) = reserved_host_policy();
+        let Some(state) =
+            operator_test_state_with_policy(std::slice::from_ref(&operator), Some(policy)).await
+        else {
+            return;
+        };
+        for (host, available) in [(&reserved, false), (&control, true)] {
+            let response = signed_operator_request(
+                Arc::clone(&state),
+                &operator,
+                "GET",
+                &format!("/operator/communities/availability?host={host}"),
+                None,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{host}");
+            let json = read_json(response).await;
+            assert_eq!(json["available"], available, "{host}");
+            let error = (!available).then_some("reserved_host");
+            assert_eq!(json["error"].as_str(), error, "{host}");
+        }
+    }
+
+    const NIP_FI_ISSUER: &str = "https://issuer.example/api/goose";
+
+    /// A provisioning policy under a fresh suffix whose `cmd.<suffix>` host is
+    /// a command audience. Returns the policy, the reserved host and a normal
+    /// one-label control host.
+    fn reserved_host_policy() -> (buzz_auth::ProvisionBindingPolicy, String, String) {
+        let suffix = format!("{}.example", Uuid::new_v4().simple());
+        let reserved = format!("cmd.{suffix}");
+        let policy = buzz_auth::ProvisionBindingPolicy::parse(
+            &serde_json::json!({"host_suffix": suffix, "authorized_issuers": [NIP_FI_ISSUER]})
+                .to_string(),
+            &serde_json::json!([{
+                "issuer": NIP_FI_ISSUER,
+                "command_audiences": [format!("https://{reserved}")],
+            }])
+            .to_string(),
+        )
+        .expect("valid policy");
+        (policy, reserved, format!("acme.{suffix}"))
+    }
+
+    async fn nip_fi_lookup(state: Arc<AppState>, operator: &Keys, host: &str) -> Value {
+        let response = signed_operator_request(
+            state,
+            operator,
+            "GET",
+            &format!("/operator/communities/nip-fi-binding?host={host}"),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "{host}");
+        read_json(response).await
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip_fi_provisioning_never_binds_a_reserved_host() {
+        let operator = Keys::generate();
+        let owner = Keys::generate();
+        let (policy, reserved, control) = reserved_host_policy();
+        let Some(state) =
+            operator_test_state_with_policy(std::slice::from_ref(&operator), Some(policy)).await
+        else {
+            return;
+        };
+
+        for create_only in [true, false] {
+            let control = control.replacen("acme.", &format!("acme-{create_only}."), 1);
+            // create_only refuses a reserved host; the legacy branch creates
+            // its row but binds nothing.
+            for (host, bindable) in [(reserved.as_str(), false), (control.as_str(), true)] {
+                let created = bindable || !create_only;
+                let body = serde_json::json!({
+                    "host": host,
+                    "initial_owner_pubkey": owner.public_key().to_hex(),
+                    "create_only": create_only,
+                })
+                .to_string();
+                let response = signed_operator_request(
+                    Arc::clone(&state),
+                    &operator,
+                    "POST",
+                    "/operator/communities",
+                    Some(body),
+                )
+                .await;
+                assert_eq!(
+                    response.status().is_success(),
+                    created,
+                    "create_only={create_only} {host}"
+                );
+                if !created {
+                    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                    assert_eq!(read_json(response).await["code"], "reserved_host");
+                }
+                let row = state
+                    .db
+                    .lookup_community_by_host(host)
+                    .await
+                    .expect("lookup");
+                assert_eq!(row.is_some(), created, "create_only={create_only} {host}");
+                let bound = state
+                    .db
+                    .nip_fi_bound_hosts(&[host.to_string()])
+                    .await
+                    .expect("bound hosts");
+                assert_eq!(
+                    !bound.is_empty(),
+                    bindable,
+                    "create_only={create_only} {host}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip_fi_bootstrap_leaves_reserved_host_unbound_across_restarts() {
+        let (policy, reserved, control) = reserved_host_policy();
+        let Ok(pool) = sqlx::PgPool::connect(&crate::test_support::database_url()).await else {
+            return;
+        };
+        let db = buzz_db::Db::from_pool(pool);
+        for start in 0..2 {
+            for (host, bound) in [(&reserved, false), (&control, true)] {
+                let record = crate::handlers::community_provisioning::ensure_deployment_community(
+                    &db,
+                    Some(&policy),
+                    host,
+                )
+                .await
+                .expect("startup")
+                .expect("community");
+                assert_eq!(&record.host, host);
+                let issuers = db
+                    .nip_fi_bound_hosts(std::slice::from_ref(host))
+                    .await
+                    .expect("bound hosts");
+                assert_eq!(!issuers.is_empty(), bound, "start {start}: {host}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip_fi_raw_reserved_binding_refuses_startup_and_reports_no_issuers() {
+        let operator = Keys::generate();
+        let (policy, reserved, control) = reserved_host_policy();
+        let Some(state) =
+            operator_test_state_with_policy(std::slice::from_ref(&operator), Some(policy.clone()))
+                .await
+        else {
+            return;
+        };
+        let startup = || {
+            crate::handlers::community_provisioning::verify_reserved_hosts_unbound(
+                &state.db, &policy,
+            )
+        };
+        state
+            .db
+            .ensure_configured_community_with_nip_fi_issuers(&control, &[NIP_FI_ISSUER.to_string()])
+            .await
+            .expect("bound control community");
+        startup()
+            .await
+            .expect("control: startup with no reserved binding");
+
+        // Bind the reserved host with raw SQL, bypassing every policy check.
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect");
+        state
+            .db
+            .ensure_configured_community_for_bootstrap(&reserved, &[])
+            .await
+            .expect("reserved community");
+        sqlx::query(
+            "INSERT INTO community_nip_fi_issuers (community_id, issuer) \
+             SELECT id, $2 FROM communities WHERE host = $1",
+        )
+        .bind(&reserved)
+        .bind(NIP_FI_ISSUER)
+        .execute(&pool)
+        .await
+        .expect("raw reserved binding");
+
+        let refusal = startup()
+            .await
+            .expect_err("reserved binding refuses startup");
+        assert!(matches!(
+            refusal,
+            crate::handlers::community_provisioning::ReservedHostsError::Bound(ref hosts)
+                if hosts == std::slice::from_ref(&reserved)
+        ));
+        assert!(
+            refusal
+                .to_string()
+                .contains("buzz-admin nip-fi unbind --host"),
+            "{refusal}"
+        );
+        let lookup = nip_fi_lookup(Arc::clone(&state), &operator, &reserved).await;
+        assert_eq!(lookup["issuers"], serde_json::json!([]));
+        let lookup = nip_fi_lookup(Arc::clone(&state), &operator, &control).await;
+        assert_eq!(lookup["issuers"], serde_json::json!([NIP_FI_ISSUER]));
+
+        sqlx::query(
+            "DELETE FROM community_nip_fi_issuers \
+             WHERE community_id = (SELECT id FROM communities WHERE host = $1)",
+        )
+        .bind(&reserved)
+        .execute(&pool)
+        .await
+        .expect("remove raw binding so later startups in this database pass");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn unmapped_management_host_can_check_availability() {
         let operator = Keys::generate();
         let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
@@ -2379,6 +3053,359 @@ mod postgres_tests {
             json.get("owner_pubkey").and_then(Value::as_str),
             Some(owner_hex.as_str())
         );
+    }
+
+    /// A relay that predates the archive transition timestamp publishes a bare
+    /// `DisconnectCommunity`. A current relay must still apply it under the
+    /// lifecycle fence: never against a restored community, and with the
+    /// archive close reason against an archived one.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn legacy_disconnect_command_is_fenced_by_community_lifecycle() {
+        use crate::state::{CommunityConnectionControl, CommunityDisconnectReason};
+        use tokio_util::sync::CancellationToken;
+
+        let operator = Keys::generate();
+        let owner = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+        let host = format!("community-{}.example", Uuid::new_v4().simple());
+        assert_eq!(
+            provision_community(Arc::clone(&state), &operator, &host, &owner)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("active admission lookup")
+            .expect("active community")
+            .id;
+        let owner_hex = owner.public_key().to_hex();
+
+        // Active (for example, unarchived before the command arrived): keep sockets.
+        let active_cancel = CancellationToken::new();
+        let active_control = CommunityConnectionControl::new(active_cancel.clone());
+        let active_reason = active_control.disconnect_reason();
+        let active_guard =
+            state
+                .community_connections
+                .register(Uuid::new_v4(), community, active_control);
+        assert_eq!(
+            state
+                .apply_community_disconnect(community, None)
+                .await
+                .expect("fenced legacy disconnect"),
+            None
+        );
+        assert!(
+            !active_cancel.is_cancelled(),
+            "a legacy disconnect must not close an active community"
+        );
+        assert_eq!(*active_reason.borrow(), None);
+
+        // Archived: close with the archive reason, not `community deleted`.
+        state
+            .db
+            .archive_community_owned_by(&host, &owner_hex, "protected.example")
+            .await
+            .expect("archive community")
+            .expect("owned community");
+        assert_eq!(
+            state
+                .apply_community_disconnect(community, None)
+                .await
+                .expect("fenced legacy disconnect"),
+            Some(1)
+        );
+        assert!(active_cancel.is_cancelled());
+        assert_eq!(
+            *active_reason.borrow(),
+            Some(CommunityDisconnectReason::CommunityArchived)
+        );
+
+        // Fenced deletion: this is the state `buzz-deletion` publishes the bare
+        // command from, so it must close with the deletion reason even though
+        // the row is also archived.
+        drop(active_guard);
+        let deleted_cancel = CancellationToken::new();
+        let deleted_control = CommunityConnectionControl::new(deleted_cancel.clone());
+        let deleted_reason = deleted_control.disconnect_reason();
+        let _deleted_guard =
+            state
+                .community_connections
+                .register(Uuid::new_v4(), community, deleted_control);
+        let mut tx = state
+            .db
+            .pool()
+            .begin()
+            .await
+            .expect("begin deletion fixture");
+        sqlx::query(
+            "SELECT set_config('buzz.deletion_executor_community', $1, true), \
+             set_config('buzz.deletion_fence_generation', '0', true)",
+        )
+        .bind(community.to_string())
+        .execute(&mut *tx)
+        .await
+        .expect("enter deletion executor scope");
+        sqlx::query("UPDATE communities SET deletion_state = 'fenced' WHERE id = $1")
+            .bind(community.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .expect("fence community deletion");
+        tx.commit().await.expect("commit deletion fixture");
+        assert_eq!(
+            state
+                .apply_community_disconnect(community, None)
+                .await
+                .expect("fenced legacy disconnect"),
+            Some(1)
+        );
+        assert!(deleted_cancel.is_cancelled());
+        assert_eq!(
+            *deleted_reason.borrow(),
+            Some(CommunityDisconnectReason::CommunityDeleted)
+        );
+    }
+
+    /// Lifecycle revalidation runs for every live community on every pod each
+    /// tick. Active communities must be checked without the row lock, so a
+    /// conflicting lock on an active row must not stall the tick, while an
+    /// archived community is still closed under the fence.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn revalidation_skips_the_row_lock_for_active_communities() {
+        use crate::state::{CommunityConnectionControl, CommunityDisconnectReason};
+        use tokio_util::sync::CancellationToken;
+
+        let operator = Keys::generate();
+        let owner = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+        let host = format!("community-{}.example", Uuid::new_v4().simple());
+        assert_eq!(
+            provision_community(Arc::clone(&state), &operator, &host, &owner)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("active admission lookup")
+            .expect("active community")
+            .id;
+        let cancel = CancellationToken::new();
+        let control = CommunityConnectionControl::new(cancel.clone());
+        let reason = control.disconnect_reason();
+        let guard = state
+            .community_connections
+            .register(Uuid::new_v4(), community, control);
+
+        let mut row_lock = state.db.pool().begin().await.expect("begin row lock");
+        sqlx::query("SELECT 1 FROM communities WHERE id = $1 FOR UPDATE")
+            .bind(community.as_uuid())
+            .execute(&mut *row_lock)
+            .await
+            .expect("hold the community row lock");
+        assert_eq!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                state.revalidate_live_communities()
+            )
+            .await
+            .expect("revalidation must not wait on an active community's row lock"),
+            0
+        );
+        row_lock.rollback().await.expect("release row lock");
+        assert!(!cancel.is_cancelled());
+
+        state
+            .db
+            .archive_community_owned_by(&host, &owner.public_key().to_hex(), "protected.example")
+            .await
+            .expect("archive community")
+            .expect("owned community");
+        assert_eq!(state.revalidate_live_communities().await, 1);
+        assert!(cancel.is_cancelled());
+        assert_eq!(
+            *reason.borrow(),
+            Some(CommunityDisconnectReason::CommunityArchived)
+        );
+
+        drop(guard);
+
+        // A community fenced for deletion but never archived must not pass the
+        // unlocked active pre-check; it closes with the deletion reason.
+        let deleted_host = format!("community-{}.example", Uuid::new_v4().simple());
+        assert_eq!(
+            provision_community(Arc::clone(&state), &operator, &deleted_host, &owner)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let deleted_community = state
+            .db
+            .lookup_community_by_host(&deleted_host)
+            .await
+            .expect("active admission lookup")
+            .expect("active community")
+            .id;
+        let deleted_cancel = CancellationToken::new();
+        let deleted_control = CommunityConnectionControl::new(deleted_cancel.clone());
+        let deleted_reason = deleted_control.disconnect_reason();
+        let _deleted_guard = state.community_connections.register(
+            Uuid::new_v4(),
+            deleted_community,
+            deleted_control,
+        );
+        let mut tx = state
+            .db
+            .pool()
+            .begin()
+            .await
+            .expect("begin deletion fixture");
+        sqlx::query(
+            "SELECT set_config('buzz.deletion_executor_community', $1, true), \
+             set_config('buzz.deletion_fence_generation', '0', true)",
+        )
+        .bind(deleted_community.to_string())
+        .execute(&mut *tx)
+        .await
+        .expect("enter deletion executor scope");
+        sqlx::query("UPDATE communities SET deletion_state = 'fenced' WHERE id = $1")
+            .bind(deleted_community.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .expect("fence community deletion");
+        tx.commit().await.expect("commit deletion fixture");
+        assert_eq!(state.revalidate_live_communities().await, 1);
+        assert!(deleted_cancel.is_cancelled());
+        assert_eq!(
+            *deleted_reason.borrow(),
+            Some(CommunityDisconnectReason::CommunityDeleted)
+        );
+    }
+
+    /// The connection-control consumer serves ban disconnects and archive
+    /// disconnects from one receiver. An archive disconnect waits on the
+    /// community row lock, so a pubkey disconnect queued behind it must still
+    /// close its socket promptly, and the archive disconnect must still land
+    /// once the lock is released.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn conn_control_consumer_does_not_queue_pubkey_disconnects_behind_a_locked_archive() {
+        use crate::state::{CommunityConnectionControl, CommunityDisconnectReason};
+        use buzz_pubsub::conn_control::{ConnControl, ScopedConnControl};
+        use std::time::Duration;
+        use tokio_util::sync::CancellationToken;
+
+        let operator = Keys::generate();
+        let owner = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+        let host = format!("community-{}.example", Uuid::new_v4().simple());
+        assert_eq!(
+            provision_community(Arc::clone(&state), &operator, &host, &owner)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("active admission lookup")
+            .expect("active community")
+            .id;
+        let community_control = CommunityConnectionControl::new(CancellationToken::new());
+        let community_reason = community_control.disconnect_reason();
+        let _community_guard = state.community_connections.register(
+            Uuid::new_v4(),
+            community,
+            community_control.clone(),
+        );
+        let banned = [7u8; 32];
+        let banned_control = CommunityConnectionControl::new(CancellationToken::new());
+        banned_control.bind_pubkey(banned);
+        let banned_reason = banned_control.disconnect_reason();
+        let _banned_guard =
+            state
+                .community_connections
+                .register(Uuid::new_v4(), community, banned_control.clone());
+
+        let archived = state
+            .db
+            .archive_community_owned_by(&host, &owner.public_key().to_hex(), "protected.example")
+            .await
+            .expect("archive community")
+            .expect("owned community");
+        let mut row_lock = state.db.pool().begin().await.expect("begin row lock");
+        sqlx::query("SELECT 1 FROM communities WHERE id = $1 FOR UPDATE")
+            .bind(community.as_uuid())
+            .execute(&mut *row_lock)
+            .await
+            .expect("hold the community row lock");
+
+        let (tx, rx) = tokio::sync::broadcast::channel(8);
+        let consumer = tokio::spawn(Arc::clone(&state).run_conn_control_consumer(rx));
+        tx.send(ScopedConnControl {
+            community_id: community,
+            command: ConnControl::DisconnectCommunity {
+                archived_at: Some(archived.archived_at),
+            },
+        })
+        .expect("send community disconnect");
+        tx.send(ScopedConnControl {
+            community_id: community,
+            command: ConnControl::DisconnectPubkey {
+                pubkey: banned.to_vec(),
+                event_id: "ban".to_string(),
+                reason: "blocked: you are banned from this community".to_string(),
+                unowned_only: false,
+            },
+        })
+        .expect("send pubkey disconnect");
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            banned_control.cancellation_token().cancelled(),
+        )
+        .await
+        .expect("a pubkey disconnect must not wait behind a locked community disconnect");
+        assert_eq!(
+            *banned_reason.borrow(),
+            Some(CommunityDisconnectReason::AccessRevoked)
+        );
+        assert!(
+            !community_control.cancellation_token().is_cancelled(),
+            "the community disconnect must wait for the row lock"
+        );
+
+        row_lock.rollback().await.expect("release row lock");
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            community_control.cancellation_token().cancelled(),
+        )
+        .await
+        .expect("the community disconnect must land once the row lock is released");
+        assert_eq!(
+            *community_reason.borrow(),
+            Some(CommunityDisconnectReason::CommunityArchived)
+        );
+
+        drop(tx);
+        tokio::time::timeout(Duration::from_secs(5), consumer)
+            .await
+            .expect("the consumer must stop when the broadcast closes")
+            .expect("consumer task");
     }
 
     #[tokio::test]

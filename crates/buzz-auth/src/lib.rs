@@ -46,17 +46,18 @@ pub use rate_limit::{
 pub use scope::{parse_scopes, Scope};
 
 pub use nip_fi::{
-    command_replay_key, validate_nip_fi_config, AssertionKeySet, AssertionPolicyId,
+    command_replay_key, validate_nip_fi_config, AssertionKeySet, AssertionPolicyId, BindRefusal,
     CanonicalCapabilities, ClientSubjectPosture, CommandError, CommandIssuerPolicy,
     CommandPolicyError, CommandReplayGuard, CommandResult, CommandVerifier, CommunityBinding,
     CommunityBindingError, ConfidentialAssertion, CrossPodMergeResult, DenialClass, DenySetFull,
     FederatedAssertionVerifier, FederatedIdentity, FederatedIdentityDiscovery, FreshnessClass,
     HttpJwksFetcher, IssuerCapacity, IssuerJwksConfig, IssuerKeySource, IssuerPolicy,
     IssuerPolicyError, IssuerRegistry, JwksFetchError, JwksFetcher, JwksSourceContract,
-    NipFiDenyMap, NipFiMode, NipFiStartupError, ProductionJwksSource, RevalidationDependencies,
-    SubjectClass, SubjectClassContract, TokenClass, TransportContractId, VerifiedAssertion,
-    VerifierError, VerifyAssertion, CLIENT_ATTACHED_HEADER, COMMAND_JWT_TYP,
-    MAX_COMMAND_AGE_SECONDS, NOSTR_PUBKEY_CLAIM, OAUTH_CLIENT_ID_CLAIM,
+    NipFiDenyMap, NipFiMode, NipFiStartupError, ProductionJwksSource, ProvisionBindingError,
+    ProvisionBindingPolicy, RevalidationDependencies, SubjectClass, SubjectClassContract,
+    TokenClass, TransportContractId, VerifiedAssertion, VerifierError, VerifyAssertion,
+    CLIENT_ATTACHED_HEADER, COMMAND_JWT_TYP, MAX_COMMAND_AGE_SECONDS, NOSTR_OWNER_PUBKEY_CLAIM,
+    NOSTR_PUBKEY_CLAIM, OAUTH_CLIENT_ID_CLAIM,
 };
 
 #[cfg(any(test, feature = "test-utils"))]

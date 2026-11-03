@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/buzz_toast.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui' show ImageFilter;
@@ -9,7 +10,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:video_player/video_player.dart';
 
@@ -20,6 +21,7 @@ import '../../shared/widgets/concentric_sheet_surface.dart';
 import '../../shared/widgets/page_indicator.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/ios_navigation_bar.dart';
+import '../../shared/widgets/navigation_backdrop.dart';
 import 'media_viewer_hero.dart';
 
 export 'media_viewer_hero.dart';
@@ -554,7 +556,7 @@ class MediaImageViewerPage extends HookConsumerWidget {
                                           errorBuilder: (_, _, _) =>
                                               const _MediaLoadFailure(
                                                 message: 'Failed to load image',
-                                                icon: LucideIcons.imageOff,
+                                                icon: BuzzIcons.imageOff,
                                               ),
                                         ),
                                       ),
@@ -627,16 +629,33 @@ class MediaImageViewerPage extends HookConsumerWidget {
                 ),
               )
             else
-              PositionedDirectional(
+              Positioned(
                 top: 0,
-                end: Grid.sm,
+                left: 0,
+                right: 0,
                 child: Opacity(
                   opacity: chromeOpacity,
-                  child: SafeArea(
-                    child: _MediaViewerCloseButton(
-                      key: const ValueKey('message-media-image-viewer-close'),
-                      tooltip: 'Close image viewer',
-                      onPressed: () => unawaited(dismiss()),
+                  child: Theme(
+                    data: ThemeData.dark(),
+                    child: NavigationBackdrop(
+                      child: SafeArea(
+                        bottom: false,
+                        child: Align(
+                          alignment: AlignmentDirectional.centerEnd,
+                          child: Padding(
+                            padding: const EdgeInsetsDirectional.only(
+                              end: Grid.sm,
+                            ),
+                            child: _MediaViewerCloseButton(
+                              key: const ValueKey(
+                                'message-media-image-viewer-close',
+                              ),
+                              tooltip: 'Close image viewer',
+                              onPressed: () => unawaited(dismiss()),
+                            ),
+                          ),
+                        ),
+                      ),
                     ),
                   ),
                 ),

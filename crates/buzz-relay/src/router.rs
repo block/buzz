@@ -189,17 +189,26 @@ async fn nip_fi_assertion_guard(
         return http_denial(buzz_auth::DenialClass::AuthorizationUnavailable);
     }
 
-    let verdict = nip_fi_guard_steps(&state, request.headers());
+    // Shadow resolves exactly as enforce does; enforce hands the binding to
+    // the handler's admission, so a request costs one resolution.
+    let community = state.nip_fi_communities().resolve(request.headers()).await;
+    let verdict = nip_fi_guard_steps(&state, request.headers(), community.as_deref());
     // Shadow: transparent, but the guard's verdict is recorded in enforce's
     // order, ahead of any handler step.
+    // The resolved binding rides along so the handler's observed admission
+    // rechecks the same deadline enforce does.
     if mode.observes_only() {
-        let headers = request.headers().clone();
-        return crate::nip_fi_shadow::observe_guard(&state, &headers, verdict, next.run(request))
-            .await;
+        let label = crate::nip_fi_shadow::label(&community);
+        let run = crate::nip_fi_http::with_resolved_community(community, next.run(request));
+        return crate::nip_fi_shadow::observe_guard(label, verdict, run).await;
     }
-    match verdict {
-        Ok(()) => next.run(request).await,
-        Err((_, class)) => http_denial(class),
+    match (verdict, community) {
+        (Ok(()), Ok(community)) => {
+            crate::nip_fi_http::with_resolved_community(Ok(community), next.run(request)).await
+        }
+        (Err(crate::nip_fi_shadow::WouldDeny { class, .. }), _) | (Ok(()), Err(class)) => {
+            http_denial(class)
+        }
     }
 }
 
@@ -213,22 +222,22 @@ async fn nip_fi_assertion_guard(
 fn nip_fi_guard_steps(
     state: &AppState,
     headers: &axum::http::HeaderMap,
+    community: Result<&buzz_auth::CommunityBinding, &buzz_auth::DenialClass>,
 ) -> Result<(), crate::nip_fi_shadow::WouldDeny> {
-    let community =
-        crate::nip_fi_core::resolve_community(headers, &state.config.nip_fi.communities)
-            .map_err(|class| (crate::nip_fi_shadow::Stage::Community, class))?;
+    let community = community.map_err(|class| {
+        crate::nip_fi_shadow::WouldDeny::new(
+            crate::nip_fi_shadow::Stage::Community,
+            *class,
+            crate::nip_fi_shadow::UNRESOLVED,
+        )
+    })?;
     crate::nip_fi_core::evaluate_attached_assertion(
         headers,
         community,
         state.nip_fi_verifier.as_deref(),
     )
     .map(drop)
-    .map_err(|rejection| {
-        (
-            crate::nip_fi_shadow::Stage::Assertion,
-            rejection.denial_class(),
-        )
-    })
+    .map_err(crate::nip_fi_shadow::WouldDeny::assertion)
 }
 
 /// Paths the assertion guard never checks.
@@ -306,6 +315,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let admin_router = admin_enabled
         .then(|| Router::new().nest("/api/admin/v1", api::admin::router(state.clone())));
 
+    // Unmounted when disabled, so every /buzz/v1 path answers exactly as it
+    // did before the accessory API existed.
+    let accessory_router = state
+        .config
+        .buzz_v1_enabled
+        .then(|| Router::new().nest(api::buzz_v1::BASE_PATH, api::buzz_v1::router(state.clone())));
+
     let api_router = Router::new()
         // WebSocket + NIP-11
         .route("/", get(nip11_or_ws_handler))
@@ -322,6 +338,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Relay-owned third-party GIF metadata proxy (NIP-98 auth).
         .route(api::gifs::SEARCH_PATH, post(api::gifs::search))
         .route(api::gifs::SHARE_PATH, post(api::gifs::share))
+        // Profile search over `name` and `display_name` only (NIP-98 auth).
+        .route(api::profiles::SEARCH_PATH, post(api::profiles::search))
         .route(
             "/workflows/{workflow_id}/runs",
             get(api::workflows::workflow_runs),
@@ -333,6 +351,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/operator/communities",
             get(api::operator::list_owned_communities).post(api::operator::provision_community),
+        )
+        .route(
+            "/operator/communities/joined",
+            get(api::operator::list_joined_communities),
         )
         .route(
             "/operator/listener/pubkeys",
@@ -354,6 +376,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/operator/communities/availability",
             get(api::operator::community_availability),
+        )
+        .route(
+            "/operator/communities/nip-fi-binding",
+            get(api::operator::community_nip_fi_binding),
         )
         .route(
             "/operator/communities/transfer",
@@ -407,8 +433,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(media_router)
         .merge(git_router)
         .merge(git_policy_router);
-    if let Some(admin_router) = admin_router {
-        merged = merged.merge(admin_router);
+    for optional in [accessory_router, admin_router].into_iter().flatten() {
+        merged = merged.merge(optional);
     }
 
     // Serve both bundles from one fallback. The admin host is checked first so
@@ -618,15 +644,16 @@ async fn nip11_or_ws_handler(
     // accepts is also gated — no hand-rolled predicate can diverge from the
     // extractor's accepted shapes when `http2` is eventually enabled.
     //
-    // Zero DB cost invariant: the active HTTP/1.1 fire-point runs before
-    // `bind_community`, so denied h1 upgrades pay zero DB cost
+    // No-tenant-lookup invariant: the active HTTP/1.1 fire-point runs before
+    // `bind_community`, so denied h1 upgrades skip the tenant lookup (a
+    // resolver cache miss still costs one bounded binding lookup)
     // [FI-TRACE-TRANSPORT-CLOSED], and tests that assert 401/503 are not
     // pre-empted by a 404 from an unseeded DB. The `Ok(ws)` backstop runs after
     // `bind_community`; it is unreachable until `http2` is enabled.
     //
     // Keying on the header pair (not on `Accept`) means an HTML Accept header
     // on a real WS upgrade is still gated correctly.
-    let (upgrade_checked, nip_fi_assertion, shadow_assertion) = {
+    let (upgrade_checked, nip_fi_assertion, shadow_assertion, nip_fi_deadline, shadow_line) = {
         let is_h1_ws_upgrade = headers
             .get(axum::http::header::UPGRADE)
             .and_then(|v| v.to_str().ok())
@@ -653,18 +680,21 @@ async fn nip11_or_ws_handler(
             use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
             let mode = state.config.nip_fi.mode;
             let verifier = state.nip_fi_verifier.as_deref();
-            let communities = &state.config.nip_fi.communities;
+            let communities = state.nip_fi_communities();
             match check_nip_fi_at_upgrade(Root, &headers, communities, verifier, mode)
+                .await
                 .into_assertions()
             {
-                Ok((assertion, shadow)) => (true, assertion, shadow),
+                Ok((assertion, shadow, deadline, line)) => {
+                    (true, assertion, shadow, deadline, line)
+                }
                 Err(resp) => return (*resp).into_response(),
             }
         } else {
             // Not a WS upgrade shape — a NIP-11 request or a plain browser GET.
             // The `Ok(ws)` arm below backstops any extractor-accepted shape this
             // predicate misses. [F3-H2-GATE]
-            (false, None, None)
+            (false, None, None, Default::default(), None)
         }
     };
 
@@ -676,7 +706,7 @@ async fn nip11_or_ws_handler(
     // That normative sequence runs in handlers/auth.rs after set_authenticated_pubkey.
     //
     // This pre-upgrade check provides a cheap bounce for keys already in the deny
-    // map before the connection is upgraded — pays zero DB cost and rejects before
+    // map before the connection is upgraded — needs no DB read and rejects before
     // tungstenite hands the socket to the application. It is NOT race-free against
     // a concurrent disconnect (the session isn't registered yet), which is why the
     // normative post-registration check in auth.rs is the correctness gate.
@@ -685,17 +715,15 @@ async fn nip11_or_ws_handler(
     // `asserted_key` is `None` → no key to check → pass through.
     // [FI-TRACE-DENY-SET]
     if let Some(assertion) = &nip_fi_assertion {
-        if let Some(key) = assertion.asserted_key() {
-            if let Some(deny_map) = state.nip_fi_deny_map.as_deref() {
-                if deny_map.is_denied(assertion.identity().issuer(), &key, chrono::Utc::now()) {
-                    return http_denial(buzz_auth::DenialClass::AuthorizationDenied)
-                        .into_response();
-                }
+        if let Some(deny_map) = state.nip_fi_deny_map.as_deref() {
+            if crate::nip_fi_core::assertion_denied(deny_map, assertion, chrono::Utc::now()) {
+                return http_denial(buzz_auth::DenialClass::AuthorizationDenied).into_response();
             }
         }
     }
-    let shadow_assertion = shadow_assertion
-        .filter(|a| !crate::nip_fi_shadow_session::upgrade_denied(&state, &headers, a));
+    let shadow_assertion = shadow_assertion.filter(|(a, c)| {
+        !crate::nip_fi_shadow_session::upgrade_denied(&state, &c.shadow_label(), a)
+    });
 
     // Row zero: bind the connection to its community from the request host
     // BEFORE the WebSocket upgrade, so no frame is ever read on an unbound
@@ -706,7 +734,7 @@ async fn nip11_or_ws_handler(
     // `icon` simply absent), so the doc cannot leak which hosts are mapped.
     //
     // The NIP-FI upgrade gate runs above (before bind_community) so denied
-    // upgrades pay zero DB cost; the `Ok(ws)` backstop runs below.
+    // upgrades skip the tenant lookup; the `Ok(ws)` backstop runs below.
     let tenant = match crate::tenant::bind_community(&state.db, raw_host).await {
         Ok(ctx) => ctx,
         Err(_) => {
@@ -720,6 +748,15 @@ async fn nip11_or_ws_handler(
                 .into_response();
         }
     };
+    // The tenant lookup awaited since the community resolved; a snapshot
+    // that went stale meanwhile accepts no socket.
+    if let Err(class) = nip_fi_deadline.check() {
+        return http_denial(class).into_response();
+    }
+    let shadow_assertion = crate::nip_fi_upgrade::observe_deadline(
+        crate::nip_fi_session::NipFiWsRoute::Root,
+        shadow_assertion,
+    );
 
     let max_frame_bytes = state.config.max_frame_bytes;
 
@@ -735,21 +772,25 @@ async fn nip11_or_ws_handler(
             // For HTTP/1.1 requests, `nip_fi_assertion` was already set above
             // and this block is unreachable (the h1 denial is returned before
             // we get here).
-            let (nip_fi_assertion, shadow_assertion) = if !upgrade_checked {
+            let (nip_fi_assertion, shadow_assertion, shadow_line) = if !upgrade_checked {
                 // Only re-check if the pre-extractor gate did not fire (h2 path).
                 use crate::nip_fi_session::NipFiWsRoute::Root;
                 use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
                 let mode = state.config.nip_fi.mode;
                 let verifier = state.nip_fi_verifier.as_deref();
-                let communities = &state.config.nip_fi.communities;
+                let communities = state.nip_fi_communities();
+                // Resolved after every await of this upgrade: nothing to re-check.
                 match check_nip_fi_at_upgrade(Root, &headers, communities, verifier, mode)
+                    .await
                     .into_assertions()
                 {
-                    Ok(assertions) => assertions,
+                    Ok((assertion, shadow, _deadline, line)) => {
+                        (assertion, shadow.map(|(a, c)| (a, c.shadow_label())), line)
+                    }
                     Err(resp) => return (*resp).into_response(),
                 }
             } else {
-                (nip_fi_assertion, shadow_assertion)
+                (nip_fi_assertion, shadow_assertion, shadow_line)
             };
 
             // Shutting down: refuse new sockets instead of accepting a
@@ -766,11 +807,11 @@ async fn nip11_or_ws_handler(
             // handshake, not the post-community-active-check instant.
             // [FI-TRACE-LEASE-BOUND]
             let connection_time = chrono::Utc::now();
-            let shadow = shadow_assertion.map(|a| {
+            let shadow = shadow_assertion.map(|(a, community)| {
                 crate::nip_fi_shadow_session::ShadowSession::start(
                     &state,
                     "ws",
-                    &headers,
+                    community,
                     a,
                     connection_time,
                 )
@@ -784,6 +825,7 @@ async fn nip11_or_ws_handler(
                         tenant,
                         nip_fi_assertion,
                         shadow,
+                        shadow_line,
                         connection_time,
                     )
                 })
@@ -1952,7 +1994,7 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(
             tracing_opentelemetry::layer()
                 .with_tracer(provider.tracer("test"))
-                .with_filter(crate::telemetry::otel_env_filter(None)),
+                .with_filter(crate::telemetry::otel_filter(None)),
         );
         let _subscriber_guard = tracing::subscriber::set_default(subscriber);
         let service = ServiceBuilder::new()
@@ -2131,6 +2173,8 @@ mod tests {
         // Enforce that is the startup-race condition that must return 503 for
         // a token-carrying request.
         config.nip_fi = NipFiRelayConfig {
+            profile_policies: Vec::new(),
+            source: Default::default(),
             mode,
             registry: IssuerRegistry::new(),
             jwks_configs: vec![],
@@ -2336,7 +2380,7 @@ mod tests {
     // (gate denial codes), which holds regardless of host resolution state.
     //
     // Fix 6: corrected the DB-free comment (bind_community is reached by plain
-    // GETs; only WS-upgrade requests pay zero DB cost via the pre-gate path).
+    // GETs; only WS-upgrade requests skip the tenant lookup via the pre-gate path).
     //
     // Mutation evidence:
     //   A) Move the NIP-FI gate to fire on plain GETs too → response becomes
@@ -2886,6 +2930,11 @@ mod tests {
                     br#"{"q":"cat"}"#.to_vec(),
                 ),
                 ("POST", "/gifs/share".to_owned(), br#"{"id":"x"}"#.to_vec()),
+                (
+                    "POST",
+                    "/profiles/search".to_owned(),
+                    br#"{"query":"wes"}"#.to_vec(),
+                ),
                 ("POST", "/api/invites".to_owned(), b"{}".to_vec()),
                 (
                     "GET",
@@ -3169,6 +3218,86 @@ mod tests {
                 serde_json::json!({"error": "rate-limited: shared admission unavailable"})
             );
         }
+
+        /// Through `build_router`, a root upgrade without an assertion hands
+        /// its shadow line to the socket, which writes it at the verified AUTH
+        /// with that key while the socket stays open. Mutation: passing `None`
+        /// instead of `shadow_line` to `handle_connection` writes the line as
+        /// `absent` at upgrade.
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn shadow_root_router_writes_line_at_auth_while_open() {
+            use futures_util::{SinkExt as _, StreamExt as _};
+            use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+            let log = crate::nip_fi_shadow::tests::WouldDenyLog::capture();
+            let base = real_db_state().await.expect("PostgreSQL must be available");
+            let community_id = uuid::Uuid::new_v4();
+            let host = format!("shadow-router-{}.example", community_id.simple());
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community_id)
+                .bind(&host)
+                .execute(base.db.pool())
+                .await
+                .expect("seed community");
+            let mut state = (*base).clone();
+            let config = Arc::make_mut(&mut state.config);
+            config.nip_fi.mode = buzz_auth::NipFiMode::Shadow;
+            config.nip_fi.communities = crate::nip_fi_config::NipFiCommunities::for_test(
+                &format!("https://{host}"),
+                &["https://issuer.test"],
+            );
+            let tenant = buzz_core::tenant::TenantContext::resolved(
+                buzz_core::tenant::CommunityId::from_uuid(community_id),
+                host.clone(),
+            );
+            let relay_url: nostr::RelayUrl =
+                crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &tenant)
+                    .parse()
+                    .expect("expected NIP-42 relay URL");
+
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            let app = build_router(Arc::new(state))
+                .into_make_service_with_connect_info::<std::net::SocketAddr>();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await });
+            let mut req = format!("ws://{addr}/")
+                .into_client_request()
+                .expect("request");
+            req.headers_mut().insert("host", host.parse().unwrap());
+            let (mut client, _) = connect_async(req).await.expect("shadow admits the upgrade");
+
+            let Some(Ok(Message::Text(challenge))) = client.next().await else {
+                panic!("expected AUTH challenge")
+            };
+            let challenge: serde_json::Value =
+                serde_json::from_str(&challenge).expect("challenge json");
+            let key = nostr::Keys::generate();
+            let auth =
+                nostr::EventBuilder::auth(challenge[1].as_str().expect("challenge"), relay_url)
+                    .sign_with_keys(&key)
+                    .expect("sign AUTH");
+            client
+                .send(Message::Text(
+                    serde_json::json!(["AUTH", auth]).to_string().into(),
+                ))
+                .await
+                .expect("send AUTH");
+            let ok = loop {
+                match client.next().await {
+                    Some(Ok(Message::Text(ok))) => break ok,
+                    Some(Ok(Message::Ping(_))) => {}
+                    other => panic!("expected AUTH OK, got {other:?}"),
+                }
+            };
+            assert!(ok.contains("true"), "AUTH must succeed: {ok}");
+
+            let lines = log.lines();
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            let proven = format!("pubkey=\"{}\"", key.public_key().to_hex());
+            assert!(lines[0].contains(&proven), "{lines:?}");
+            drop(client);
+            server.abort();
+        }
     }
 
     // ── nip_fi_assertion_guard: fail-closed classification tests ─────────────
@@ -3274,6 +3403,10 @@ mod tests {
         assert!(
             !is_exempt("/gifs/share"),
             "POST /gifs/share must be protected"
+        );
+        assert!(
+            !is_exempt("/profiles/search"),
+            "POST /profiles/search must be protected"
         );
         assert!(
             !is_exempt("/workflows/abc/runs"),
@@ -3828,7 +3961,7 @@ mod tests {
     // ── NIP-FI S4 deny witnesses ──
     // ES256 key pair — same as command.rs / api/nip_fi.rs test material.
     const DENY_TEST_PRIVATE_KEY_PEM: &str =
-        "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\nWZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\nzhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n-----END PRIVATE KEY-----\n";
+        "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\nWZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\nzhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n-----END PRIVATE KEY-----\n"; // sadscan:disable np.pem.1 kingfisher.privkey.2 -- public ES256 test fixture
 
     const DENY_TEST_ISS: &str = "https://nip-fi-deny-test.example.com";
     const DENY_TEST_AUD: &str = "https://relay.example";
@@ -3904,6 +4037,8 @@ mod tests {
         };
 
         config.nip_fi = NipFiRelayConfig {
+            profile_policies: Vec::new(),
+            source: Default::default(),
             mode: NipFiMode::Enforce,
             registry: {
                 let mut r = IssuerRegistry::new();
@@ -4207,6 +4342,7 @@ mod tests {
             ("GET", git, Some("Nostr !!not-base64!!")),
             ("POST", "/gifs/search".to_owned(), Some(&signed)),
             ("POST", "/gifs/share".to_owned(), Some(&signed)),
+            ("POST", "/profiles/search".to_owned(), Some(&signed)),
             ("GET", branch.clone(), Some(&signed)),
             ("POST", branch, Some(&signed)),
             ("POST", "/api/invites".to_owned(), Some(&signed)),

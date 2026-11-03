@@ -12,11 +12,16 @@ class _EphemeralBadge extends StatelessWidget {
 
     return Tooltip(
       message: display.tooltipLabel,
-      child: Icon(
-        LucideIcons.clockFading,
-        key: Key('channel-ephemeral-${channel.id}'),
-        size: 16,
-        color: context.colors.onSurfaceVariant,
+      child: SizedBox(
+        width: _kChannelIconSize,
+        child: Center(
+          child: Icon(
+            BuzzIcons.clockFading,
+            key: Key('channel-ephemeral-${channel.id}'),
+            size: 16,
+            color: context.colors.onSurfaceVariant,
+          ),
+        ),
       ),
     );
   }
@@ -52,11 +57,7 @@ class _ErrorView extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(
-              LucideIcons.wifiOff,
-              size: Grid.xl,
-              color: context.colors.error,
-            ),
+            Icon(BuzzIcons.wifiOff, size: Grid.xl, color: context.colors.error),
             const SizedBox(height: Grid.xs),
             Text(
               'Could not load channels',
@@ -75,7 +76,7 @@ class _ErrorView extends StatelessWidget {
             const SizedBox(height: Grid.xs),
             FilledButton.icon(
               onPressed: onRetry,
-              icon: const Icon(LucideIcons.refreshCw),
+              icon: const Icon(BuzzIcons.refreshCw),
               label: const Text('Retry'),
             ),
           ],

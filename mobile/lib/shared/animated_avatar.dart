@@ -1,3 +1,6 @@
+/// Artwork scale inside an animated agent's unchanged avatar frame.
+const animatedAvatarArtworkScale = 0.85;
+
 // Animated avatar URL scheme shared with the desktop client.
 //
 // The static poster is the normal selected frame. The animated PNG URL lives
@@ -60,4 +63,15 @@ bool _isHttpUrl(String value) {
   return uri != null &&
       (uri.scheme == 'http' || uri.scheme == 'https') &&
       uri.host.isNotEmpty;
+}
+
+/// Character presets can be saved as plain poster URLs without buzz-anim.
+/// Keep photographs and ordinary emoji avatars at their existing size.
+bool usesInsetAgentArtwork(String? url) {
+  if (parseAnimatedAvatarUrl(url) != null) return true;
+  final uri = url == null ? null : Uri.tryParse(url);
+  return uri != null &&
+      uri.scheme == 'https' &&
+      uri.host == 'dwwgwmfqqjotj.cloudfront.net' &&
+      RegExp(r'^/avatars/[^/]+/poster/[^/]+/[^/]+\.png$').hasMatch(uri.path);
 }

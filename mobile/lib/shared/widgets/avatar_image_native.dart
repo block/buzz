@@ -5,23 +5,23 @@ Future<Uint8List?> nativeAvatarImage({
   required String? url,
   required String initial,
   bool isAgent = false,
+  bool circular = false,
   required Color background,
   required Color foreground,
   required ImageProvider Function(String) networkImage,
 }) async {
   const dimension = 72.0;
-  final poster = parseAnimatedAvatarUrl(url)?.posterUrl ?? url;
+  final animatedAvatar = parseAnimatedAvatarUrl(url);
+  final poster = animatedAvatar?.posterUrl ?? url;
   final source = _AvatarSource.parse(poster);
   final recorder = ui.PictureRecorder();
   final canvas = Canvas(recorder);
   final bounds = const Rect.fromLTWH(0, 0, dimension, dimension);
-  canvas.clipRRect(
-    RRect.fromRectAndRadius(
-      bounds,
-      Radius.circular(dimension * (isAgent ? 0.3 : 0.5)),
-    ),
-  );
+  canvas.clipPath(avatarPath(bounds, isAgent: isAgent && !circular));
   canvas.drawColor(background, BlendMode.src);
+  final imageBounds = isAgent && usesInsetAgentArtwork(url)
+      ? bounds.deflate(dimension * (1 - animatedAvatarArtworkScale) / 2)
+      : bounds;
   var rendered = false;
   try {
     switch (source) {
@@ -59,7 +59,7 @@ Future<Uint8List?> nativeAvatarImage({
           final frame = await codec.getNextFrame();
           paintImage(
             canvas: canvas,
-            rect: bounds,
+            rect: imageBounds,
             image: frame.image,
             fit: BoxFit.cover,
           );
@@ -91,7 +91,7 @@ Future<Uint8List?> nativeAvatarImage({
           );
           paintImage(
             canvas: canvas,
-            rect: bounds,
+            rect: imageBounds,
             image: image.image,
             fit: BoxFit.cover,
           );

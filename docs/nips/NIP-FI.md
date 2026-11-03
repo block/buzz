@@ -70,8 +70,10 @@ The assertion is a compact JWS carrying the following claims.
 
 Policy selects exactly one token class before parsing claims:
 
-- **`nip-fi+jwt`**: a dedicated assertion whose protected `typ` is exactly
-  `nip-fi+jwt`.
+- **Dedicated NIP-FI assertion**: a dedicated assertion whose protected `typ`
+  is exactly `nip-fi+jwt` (a human assertion) or exactly `nip-fi-agent+jwt`
+  (an agent assertion; see "Agent keys").  The `typ` value, not any claim,
+  determines which of the two an assertion is.
 - **`at+jwt` access token**: a resource access token whose protected `typ` is
   exactly `at+jwt`.  When this class is selected:
   - The assertion MUST contain a non-empty `client_id` claim.
@@ -84,10 +86,13 @@ Policy selects exactly one token class before parsing claims:
     client-subject `(iss, sub)` coordinates are disjoint.
   - Absent, unknown, or ambiguous classification always denies; no fallback to
     the other class is attempted.
+  - The access token MUST NOT carry `nostr_owner_pubkey`; its presence, with
+    any value, denies.
 
 OIDC ID tokens always deny, even when `iss`, `aud`, and `sub` match.  A
-generic or absent `typ` has no accepted class.  Failure under one class never
-triggers validation under another.  [FI-TRACE-TOKEN-CLASS]
+generic or absent `typ` has no accepted class.  `nip-fi-agent+jwt` is accepted
+only under the dedicated NIP-FI class.  Failure under one class never triggers
+validation under another.  [FI-TRACE-TOKEN-CLASS]
 
 ### Time bounds
 
@@ -127,6 +132,32 @@ authority.  Signature verification remains mandatory before acceptance.
 `VerifyAssertion` MUST compare `aud` with the resolved community's expected
 audience; issuer policy selection by `iss` MUST NOT broaden either binding.
 
+### Agent keys
+
+An issuer MAY issue an agent assertion: an assertion whose `nostr_pubkey`
+names an agent key acting for an owner key.  An agent assertion MUST use the
+protected `typ` `nip-fi-agent+jwt` and MUST carry `nostr_owner_pubkey`: the
+lowercase hexadecimal encoding of one 32-byte public key, distinct from
+`nostr_pubkey`.  An issuer MUST NOT issue an assertion of any other type for a
+key it has issued an agent assertion for, and MUST NOT issue an agent assertion
+while the owner is not authorized by the issuer.
+
+A relay MUST verify `nostr_owner_pubkey` as part of every `nip-fi-agent+jwt`
+assertion.  An absent or malformed value, or one equal to `nostr_pubkey`, MUST
+deny `evidence_rejected`.  A `nip-fi+jwt` assertion carrying
+`nostr_owner_pubkey`, with any value, MUST deny `evidence_rejected`.  The relay
+MUST record the value as the
+owner of the session or request the assertion admits.  If the relay already
+associates a different owner with the asserted key in the resolved community,
+it MUST deny `authorization_denied`.
+For every agent assertion, regardless of whether the asserted key is itself
+authorized in the community, the relay MUST deny when the community bans the
+asserted key or the owner, or when the issuer has denied either key.  Only
+then, when the asserted key is not itself authorized in the community, the
+relay MUST authorize it if and only if the issuer is trusted for the community
+and the owner is authorized in the community when access is decided.
+[FI-TRACE-AGENT-OWNER]
+
 ### Unverified claims
 
 Relays MUST ignore claims they do not verify.  An unverified claim — including
@@ -146,6 +177,9 @@ TransportContractId = H(canonical transport contract)
 association, audience, token class, allowed algorithms, key-source contract,
 identity/key/claim mapping, time and size rules, and compiled verifier
 behavior.  JWKS key rotation changes the snapshot, not the policy ID.
+The key-source contract includes the JWKS transport. A mesh transport tag is
+encoded only when `jwks_transport` is `mesh`; `public_https` is represented by
+the absence of that tag.
 `TransportContractId` covers the client-attached field, parsing, attachment,
 and no-fallback semantics.
 
@@ -204,9 +238,28 @@ regardless of issuer policy.
 
 Each issuer policy configures:
 
-- `jwks_uri`: HTTPS URI selecting the authenticated key source.  SSRF-protected
-  at both URI validation and DNS-resolution time; no credentials, fragments,
-  or private-IP endpoints accepted.
+- `jwks_uri`: selects the authenticated key source. With the default
+  `public_https` transport, it MUST use HTTPS and contain no credentials or
+  fragment. DNS address checks and pinning are specified under
+  [Security considerations](#security-considerations).
+- `jwks_transport`: optional per-issuer transport, defaulting to
+  `public_https`. The explicit value `mesh` permits an HTTP URI only when it
+  uses a DNS hostname rather than an IP literal and has no userinfo, query,
+  fragment, or backslash. The only accepted IPv4 ranges are RFC 1918 (`10/8`,
+  `172.16/12`, and `192.168/16`), CGNAT (`100.64/10`), reserved `240/4` except
+  `255.255.255.255`, and loopback `127/8`. The only accepted IPv6 ranges or
+  addresses are ULA (`fc00::/7`) and `::1`. Every other IPv4 or IPv6 class is
+  rejected. IPv4-mapped, IPv4-compatible, NAT64, 6to4, and SIIT-translated
+  IPv6 addresses are also rejected; embedded IPv4 does not inherit eligibility.
+  Every DNS answer is checked and the first allowed address is pinned. Empty or
+  mixed answers deny the fetch. Loopback is accepted for isolated local use;
+  in production it can reach services on the relay host, so operators MUST
+  constrain endpoint selection and egress accordingly. Mesh transport does not
+  authenticate itself: selecting it is an operator assertion that the
+  deployment enforces mutual TLS peer authentication and integrity protection,
+  endpoint authorization, and egress restrictions. The relay cannot verify
+  those properties. Unauthenticated HTTP permits JWKS key substitution and
+  issuer impersonation. There is no public-network fallback.
 - `refresh_interval_seconds`: positive, ≤ 1 year, strictly less than
   `key_snapshot_hard_deadline_seconds`.
 - `key_snapshot_hard_deadline_seconds`: the outer time bound after which no
@@ -248,8 +301,15 @@ VerifyAssertion(token, community, D, R_t):
   AssertAudienceMatch(claims.aud, community.expected_aud) or DENY(evidence_rejected)
   AssertTimeBounds(claims, policy) or DENY(evidence_rejected)  // [FI-TRACE-ASSERTION-VALIDATION]
   k_claimed := ParseHexKey(claims.nostr_pubkey) or DENY(evidence_rejected)
+  owner := absent
+  if header.typ == "nip-fi-agent+jwt":
+    owner := ParseHexKey(claims.nostr_owner_pubkey) or DENY(evidence_rejected)
+    AssertNotEqual(owner, k_claimed) or DENY(evidence_rejected)
+  else:
+    AssertAbsent(claims.nostr_owner_pubkey) or DENY(evidence_rejected)
 
   return VerifiedAssertion(identity=(claims.iss, claims.sub), asserted_key=k_claimed,
+                           owner=owner,
                            authority_deadlines=ComputeDeadlines(claims, snapshot))
 ```
 
@@ -275,15 +335,19 @@ On WebSocket upgrade:
    [FI-TRACE-ASSERTION-KEY-MISMATCH]
 6. Register the session's proven `k` and admitting issuer `iss` in the
    relay's session table, making it visible to the disconnect close scan.
+   Registration includes the session's owner, if any.
    Registration MUST occur before the deny-set check in step 7.  This ordering
    ensures any connection that straddles a concurrent disconnect is caught by
    one side or the other: either the close scan sees the registered session, or
    the deny-set check (step 7) sees the inserted entry.  Both checks use the
-   same `(iss, k)` key.  A concurrent disconnect close scan MAY cancel this
-   registered connection before step 8; cancellation is terminal, so a
+   same keys: `(iss, k)` and, for a session with an owner,
+   `(iss, verified.owner)`.  A concurrent disconnect close scan MAY cancel
+   this registered connection before step 8; cancellation is terminal, so a
    cancelled connection MUST NOT be admitted.
-7. Check deny set for `(iss, k)`; active entry (`now < until`) → deny
-   `authorization_denied`.  [FI-TRACE-DENY-SET]
+7. Check the deny set for `(iss, k)` and, if `verified.owner` is present, for
+   `(iss, verified.owner)`.  Either active entry (`now < until`) denies
+   `authorization_denied`.
+   [FI-TRACE-DENY-SET]
 8. Admit the connection only if it remains live and uncancelled.  The session's
    authority deadline is the minimum of all `authority_deadlines`; see Session
    policy.
@@ -351,9 +415,10 @@ A disconnect call causes the relay to:
    capacity and a new entry cannot be inserted, the relay MUST reject the command
    `503`; no sessions are closed and no replay state is consumed.
 2. Close all live WebSocket connections registered under the command's issuer
-   whose proven `k` equals the target pubkey, whether or not admission has
-   completed, synchronously.  Disconnect cancellation is terminal: a cancelled
-   in-progress connection MUST NOT be subsequently admitted.  Connections
+   whose proven `k` equals the target pubkey or whose recorded owner equals
+   the target pubkey, whether or not admission has completed, synchronously.
+   Disconnect cancellation is terminal: a cancelled in-progress connection
+   MUST NOT be subsequently admitted.  Connections
    registered under another issuer are not affected.
 
 The deny set is held **in relay memory only** — no durable storage, no schema
@@ -517,12 +582,14 @@ performs all pure authorization checks and then, as its single atomic admission
 mutation (step 7), simultaneously reserves the `(iss, jti)` replay identity and
 inserts the deny entry — both or neither.  A capacity failure at that step rejects
 `503`; neither the jti nor the deny entry is recorded, and the caller may safely
-retry the same signed command.  On success, the relay closes all live connections
-registered under the command's issuer (`claims.iss`) whose proven `k` equals
+retry the same signed command.  On success, the relay MUST close every live connection
+registered under the command's issuer (`claims.iss`) whose proven key equals
+`CommandResult.target_pubkey` or whose recorded owner equals
 `CommandResult.target_pubkey`, whether or not admission has completed.
 Disconnect cancellation is terminal: a cancelled in-progress connection MUST NOT
-be subsequently admitted.  This close scan matches the same
-`(iss, target_pubkey)` key as the deny entry; connections registered under
+be subsequently admitted.  This close scan matches the deny
+entry's `target_pubkey` against each connection's proven key and recorded
+owner; connections registered under
 another issuer are not affected.  The `until` expiry is taken exclusively from
 the signed command JWT claim; the request body carries no `until` field.  An
 unknown or unprovable pubkey is not an error; the relay responds `200`
@@ -743,8 +810,10 @@ On each protected HTTP request:
    `evidence_rejected`.  [FI-TRACE-HTTP-INGRESS]
 5. Assert `verified.asserted_key == k`; mismatch → deny `authorization_denied`.
    [FI-TRACE-ASSERTION-KEY-MISMATCH]
-6. Check deny set for `(iss, k)`; active entry (`now < until`) → deny
-   `authorization_denied`.  [FI-TRACE-DENY-SET]
+6. Check the deny set for `(iss, k)` and, if `verified.owner` is present, for
+   `(iss, verified.owner)`.  Either active entry (`now < until`) denies
+   `authorization_denied`.
+   [FI-TRACE-DENY-SET]
 7. Admit the request.
 
 A body is **authorization-relevant** whenever any body byte influences the
@@ -809,14 +878,15 @@ normative behavior for them:
 - Per-session (`sid`-level) revocation: issuer-side.  The relay's revocation
   primitive is pubkey-scoped and community-wide, keyed `(iss, target_pubkey)`
   (see Admin disconnect API).  If an issuer revokes an entire identity, it
-  enumerates and disconnects each key it has asserted for that identity.
+  disconnects each key it has asserted for that identity.  A disconnect of an
+  owner key also covers that owner's agent keys.
   Individual session/device logout is handled by assertion expiry within the
   configured TTL window.
 - Revocation signaling to the issuer/IdP: issuer-side; the issuer stops
   issuing assertions, which closes the relay window within assertion TTL.
 - Directory integration and account-offboarding automation: issuer-side.
 - Audit logging beyond what the relay operator chooses to retain: issuer-side.
-- Delegation: out of scope.
+- Delegation other than "Agent keys": out of scope.
 
 ## Discovery
 
@@ -857,7 +927,8 @@ deployment-local identifiers.  [FI-TRACE-DISCOVERY-PRIVATE]
 |---|---|
 | `FI-TRACE-TRANSPORT-CLOSED` | Exact one-header input succeeds; missing, repeated, combined, malformed, and fallback variants deny. |
 | `FI-TRACE-ASSERTION-VALIDATION` | Valid boundary input passes; each signature, key-selection, issuer, audience, time, size, and missing-configuration negative denies; a missing or unavailable community configuration denies `authorization_unavailable`; a known-but-community-unauthorized issuer denies `evidence_rejected` without touching its key source, indistinguishably from an unknown issuer, including when that issuer's snapshot is unavailable; an issuer authorized only for community A cannot authorize community B merely by signing an assertion with community B's audience; an assertion for community A presented on a `Host` resolved to community B denies on the community binding; an unknown, ambiguous, or unresolvable `Host` denies `authorization_unavailable`. |
-| `FI-TRACE-TOKEN-CLASS` | `at+jwt` and `nip-fi+jwt` pass only their selected class; ID tokens, wrong or generic types, and cross-class fallback deny. |
+| `FI-TRACE-TOKEN-CLASS` | `at+jwt`, `nip-fi+jwt`, and `nip-fi-agent+jwt` pass only their selected class; ID tokens, wrong or generic types, `nip-fi-agent+jwt` under an `at+jwt` policy, and cross-class fallback deny. |
+| `FI-TRACE-AGENT-OWNER` | A `nip-fi-agent+jwt` with a valid `nostr_owner_pubkey` distinct from `nostr_pubkey` passes verification and records that owner; a `nip-fi-agent+jwt` whose `nostr_owner_pubkey` is absent, malformed, or equal to `nostr_pubkey` denies `evidence_rejected`; a `nip-fi+jwt` or `at+jwt` carrying `nostr_owner_pubkey` with any value denies `evidence_rejected`; an agent assertion denies when the community bans the asserted key or the owner, or the issuer has denied either key, even when the asserted key is itself authorized; an asserted key already associated with a different owner in the community denies `authorization_denied`; an agent whose key is not itself authorized is admitted only while its owner is authorized in the community. |
 | `FI-TRACE-ASSERTION-KEY-MISMATCH` | Mismatch between `nostr_pubkey` and the NIP-42 proven key denies with the private-state response. |
 | `FI-TRACE-JWKS-ADD` | A key added to the JWKS is accepted after the next snapshot refresh. |
 | `FI-TRACE-JWKS-REMOVE` | Connections verified under a removed key deny on next revalidation or reconnect. |
@@ -896,7 +967,8 @@ For the deny-until-TTL disconnect model (issuer issues a successful disconnect
 call with an `until` timestamp), the relay inserts a deny entry for the target
 pubkey with expiry `until` and then closes all matching connections synchronously.
 Here, matching means connections registered under that issuer whose proven `k`
-equals that target pubkey, whether or not admission has completed; disconnect
+equals that target pubkey or whose recorded owner equals the target pubkey,
+whether or not admission has completed; disconnect
 cancellation is terminal, so a cancelled in-progress connection MUST NOT be
 subsequently admitted.  Connections registered under another issuer are not
 affected.  Any subsequent admission attempt for that pubkey under the same issuer
@@ -927,10 +999,15 @@ gap by requiring assertion verification on every protected HTTP request.
 The per-request re-verification model means there is no cached admission
 window; a deny-set entry takes effect on the very next request.
 
-**SSRF.** The JWKS fetcher MUST enforce SSRF protection: HTTPS-only URI
-validation, DNS resolution with IP deny-list enforcement, address pinning to
-prevent DNS rebinding TOCTOU, and redirect denial.  The IP deny-list covers
-the complete IANA Special-Purpose address registry.
+**JWKS SSRF.** `public_https` MUST validate an HTTPS URI, reject every
+resolved address on its IP deny-list, pin the checked address to prevent DNS
+rebinding, and deny redirects. The IP deny-list covers the complete IANA
+Special-Purpose address registry. The `mesh` address allow-list and operator
+security boundary are defined in the [JWKS snapshot contract](#jwks-snapshot).
+Both modes MUST resolve once, validate every answer before pinning the first
+permitted address, disable proxies, deny redirects, enforce a 10-second
+whole-fetch deadline, cap the streamed response at 512 KiB, reject non-2xx
+responses, and provide no fallback network path.
 
 **Issuer compromise.** A compromised assertion issuer can impersonate any
 identity but cannot prove possession of the assertion-named Nostr key.  The NIP-42

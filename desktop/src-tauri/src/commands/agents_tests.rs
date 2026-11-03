@@ -793,3 +793,91 @@ fn owner_only_access_deploy_payload_clamps_stale_access() {
         "owner-only-access deploy payload retained a stale allowlist"
     );
 }
+
+/// Runs the real create in a child process: temp app-data and nest paths,
+/// keychain use turned off so agent keys stay inline in the temp agent file,
+/// and no background work outliving the test.
+#[test]
+fn create_managed_agent_persists_picked_effort_and_drops_env_aliases() {
+    const CHILD: &str = "BUZZ_CREATE_EFFORT_TEST_HOME";
+    if let Some(home) = std::env::var_os(CHILD) {
+        return create_with_effort_in_confined_child(std::path::Path::new(&home));
+    }
+    let home = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "commands::agents::tests::create_managed_agent_persists_picked_effort_and_drops_env_aliases", "--nocapture"])
+        .env(CHILD, home.path()).env("HOME", home.path())
+        .env("XDG_DATA_HOME", home.path()).env("APPDATA", home.path())
+        .env("LOCALAPPDATA", home.path())
+        .env_remove("BUZZ_PRIVATE_KEY").env_remove("BUZZ_AUTH_TAG")
+        .env_remove("BUZZ_RELAY_URL").env_remove("BUZZ_NETWORK_TRACE")
+        .output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "child failed: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn create_with_effort_in_confined_child(home: &std::path::Path) {
+    use tauri::Manager;
+    crate::managed_agents::storage::NO_KEYCHAIN_FOR_TEST
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    crate::managed_agents::pin_nest_dir_for_test(home.join("nest"));
+    // Windows known-folder APIs ignore HOME/APPDATA; an absolute mock
+    // identifier replaces the app-data base on every platform.
+    let app_data = home.join("app-data");
+    let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+    context.config_mut().identifier = app_data.to_str().unwrap().to_owned();
+
+    // Unroutable relay: profile publish fails fast and is reported, not fatal.
+    const RELAY: &str = "ws://127.0.0.1:9";
+    let state = crate::app_state::build_app_state();
+    *state.relay_url_override.lock().unwrap() = Some(RELAY.to_string());
+    let app = tauri::test::mock_builder()
+        .manage(state)
+        .build(context)
+        .expect("mock app builds headless");
+    assert_eq!(app.path().app_data_dir().unwrap(), app_data);
+    let alias = crate::managed_agents::config_bridge::effort::effort_suppress_keys()[0];
+    let create = |name: &str, effort: Option<&str>| {
+        let input: CreateManagedAgentRequest = serde_json::from_value(serde_json::json!({
+            "name": name, "relayUrl": RELAY, "acpCommand": null,
+            "agentCommand": null, "idleTimeoutSeconds": null,
+            "maxTurnDurationSeconds": null, "parallelism": null,
+            "systemPrompt": null, "avatarUrl": null, "model": null,
+            "provider": null, "effortLevel": effort,
+            "envVars": { alias: "low" }, "spawnAfterCreate": false,
+        }))
+        .unwrap();
+        let state = app.state::<AppState>();
+        tauri::async_runtime::block_on(create_managed_agent_in(input, app.handle().clone(), &state))
+            .expect("create succeeds")
+            .agent
+            .pubkey
+    };
+    let picked = create("Picked", Some("high"));
+    let unpicked = create("Unpicked", None);
+    let records = load_managed_agents(app.handle()).unwrap();
+
+    let find = |pubkey: &str| records.iter().find(|r| r.pubkey == pubkey).unwrap();
+    assert_eq!(find(&picked).effort_level.as_deref(), Some("high"));
+    assert!(!find(&picked).env_vars.contains_key(alias));
+    assert_eq!(find(&unpicked).effort_level, None);
+    assert!(
+        find(&unpicked).env_vars.contains_key(alias),
+        "no pick leaves env alone"
+    );
+    // The keychain step was skipped: both keys are still inline on disk.
+    let path = crate::managed_agents::storage::managed_agents_store_path(app.handle()).unwrap();
+    let raw: Vec<serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    for pubkey in [&picked, &unpicked] {
+        let entry = raw.iter().find(|r| r["pubkey"] == pubkey.as_str()).unwrap();
+        assert!(entry["private_key_nsec"]
+            .as_str()
+            .unwrap()
+            .starts_with("nsec1"));
+    }
+}

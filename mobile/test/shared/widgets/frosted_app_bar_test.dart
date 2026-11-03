@@ -10,6 +10,34 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 void main() {
+  testWidgets('iOS conversations request a backdrop before scrolling', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: const Stack(
+            children: [
+              FrostedAppBar(
+                title: Text('Alice'),
+                nativeSubtitle: 'Online',
+                alwaysFrosted: true,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    final view = tester.widget<UiKitView>(find.byType(UiKitView));
+    expect(view.creationParams, containsPair('alwaysFrosted', true));
+    expect(view.creationParams, containsPair('subtitle', 'Online'));
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets(
     'conversation backdrop stays mounted across scroll and keyboard changes',
     (tester) async {
@@ -134,7 +162,7 @@ void main() {
       matching: find.byType(ClipRect),
     );
     expect(tester.getSize(clip).height, closeTo(reportedHeight, 0.01));
-    expect(reportedHeight, closeTo(titleContentHeight + Grid.xs + 1, 0.01));
+    expect(reportedHeight, closeTo(titleContentHeight + Grid.xs, 0.01));
     expect(tester.takeException(), isNull);
   });
 

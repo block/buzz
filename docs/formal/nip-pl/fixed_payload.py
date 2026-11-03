@@ -5,7 +5,7 @@ caller-controlled or capability-derived category; none is an argument to body().
 """
 from itertools import product
 
-C = b'{"aps":{"alert":{"body":"Reconnect to your relay now"},"mutable-content":1}}'
+C = b'{"aps":{"alert":{"body":"Reconnect to your relay now"},"sound":"default","mutable-content":1}}'
 DOMAINS = [
     (b"request-a", b"request-b"),        # exact signed body
     (b"auth-a", b"auth-b"),              # NIP-98 event/header

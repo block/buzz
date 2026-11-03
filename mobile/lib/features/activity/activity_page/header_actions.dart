@@ -33,7 +33,7 @@ class _ActivityActionsPill extends StatelessWidget {
     borderRadius: BorderRadius.circular(Radii.full),
     child: DecoratedBox(
       decoration: BoxDecoration(
-        color: context.colors.primaryContainer,
+        color: context.controlSurface,
         borderRadius: BorderRadius.circular(Radii.full),
       ),
       child: Padding(
@@ -89,7 +89,7 @@ class _FilterMenuButton extends StatelessWidget {
                         width: Grid.sm,
                         child: entry.key == filter
                             ? Icon(
-                                LucideIcons.check,
+                                BuzzIcons.check,
                                 size: 16,
                                 color: context.colors.primary,
                               )
@@ -128,7 +128,7 @@ class _FilterMenuButton extends StatelessWidget {
                 ),
                 const SizedBox(width: Grid.quarter),
                 Icon(
-                  LucideIcons.chevronDown,
+                  BuzzIcons.chevronDown,
                   size: 16,
                   color: navigationPrimaryForeground(context),
                 ),
@@ -161,14 +161,14 @@ class _InboxOptionsButton extends StatelessWidget {
     return Builder(
       builder: (buttonContext) => IconButton(
         key: const ValueKey('activity-options-menu'),
-        tooltip: 'Activity options',
+        tooltip: 'Inbox options',
         color: navigationPrimaryForeground(context),
         padding: const EdgeInsets.symmetric(horizontal: Grid.xxs),
         constraints: const BoxConstraints.tightFor(
           width: Grid.xl,
           height: Grid.xl,
         ),
-        icon: const Icon(LucideIcons.ellipsis, size: 20),
+        icon: const Icon(BuzzIcons.ellipsis, size: 20),
         onPressed: () async {
           final selected = await showAnchoredPopover<String>(
             context: buttonContext,
@@ -185,7 +185,7 @@ class _InboxOptionsButton extends StatelessWidget {
                     ),
                     if (unreadOnly)
                       Icon(
-                        LucideIcons.check,
+                        BuzzIcons.check,
                         size: 16,
                         color: context.colors.primary,
                       ),

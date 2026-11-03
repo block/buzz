@@ -1,0 +1,1 @@
+SELECT attach_community_write_fence('parameterized_event_watermarks');

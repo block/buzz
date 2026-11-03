@@ -2,10 +2,8 @@ import 'dart:async';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
-import '../community/community_provider.dart';
-import '../push/push_presentation_cache.dart';
-import '../push/push_presentation_export_recovery.dart';
 import '../relay/relay.dart';
+import '../verified_profiles/verified_profile_directory.dart';
 import 'user_profile.dart';
 import 'profile_event_parser.dart';
 
@@ -19,7 +17,6 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
   static const _maximumProfilesPerQuery = 1000;
 
   final Set<String> _pending = {};
-  final _pushExport = PushPresentationExportRecovery();
   final Map<String, ({int createdAt, String eventId})> _profileEventOrders = {};
   int _generation = 0;
   bool _flushInFlight = false;
@@ -46,6 +43,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
   /// Request a profile for [pubkey]. Returns immediately from cache if
   /// available, otherwise schedules a batch fetch.
   UserProfile? get(String pubkey) {
+    _trackVerified([pubkey]);
     final cached = state[pubkey.toLowerCase()];
     if (cached != null) return cached;
     _scheduleFetch(pubkey.toLowerCase());
@@ -57,9 +55,43 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     state = {...state, profile.pubkey.toLowerCase(): profile};
   }
 
+  /// Resolves profiles through verified batch admission.
+  ///
+  /// Unlike [preload], failures propagate to callers whose result requires
+  /// profile hydration. Set [refreshCached] for a full revalidation; otherwise
+  /// cached profiles remain reusable within this scope.
+  Future<Map<String, UserProfile>> resolve(
+    List<String> pubkeys, {
+    bool refreshCached = false,
+  }) async {
+    final requested = pubkeys.map((pubkey) => pubkey.toLowerCase()).toSet();
+    _trackVerified(requested);
+    final toFetch = requested
+        .where((pubkey) => refreshCached || !state.containsKey(pubkey))
+        .toList();
+    final generation = _generation;
+    final session = ref.read(relaySessionProvider.notifier);
+    for (final batch in _profileQueryBatches(toFetch)) {
+      if (!_isCurrent(generation)) {
+        throw StateError('Profile request belongs to a retired cache');
+      }
+      final events = await session.fetchHistory(
+        NostrFilters.profilesBatch(batch),
+      );
+      if (!await _verifyAndMerge(events, generation)) {
+        throw StateError('Profile request belongs to a retired cache');
+      }
+    }
+    if (!_isCurrent(generation)) {
+      throw StateError('Profile request belongs to a retired cache');
+    }
+    return {for (final pubkey in requested) pubkey: ?state[pubkey]};
+  }
+
   /// Preload profiles for a list of pubkeys (e.g. channel members).
   /// Returns whether the batch completed successfully.
   Future<bool> preload(List<String> pubkeys) {
+    _trackVerified(pubkeys);
     final normalized = pubkeys.map((pk) => pk.toLowerCase()).toSet();
     final alreadyPending = normalized.any(_pending.contains);
     final uncached = normalized
@@ -84,6 +116,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
         .toSet()
         .toList();
     if (normalized.isEmpty) return true;
+    _trackVerified(normalized);
     final generation = _generation;
     try {
       final session = ref.read(relaySessionProvider.notifier);
@@ -111,6 +144,10 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     if (_cacheProfileEvent(event, updated)) state = updated;
   }
 
+  /// Anyone whose name is needed may also have a NIP-FI verified name.
+  void _trackVerified(Iterable<String> pubkeys) =>
+      ref.read(verifiedProfilesProvider.notifier).track(pubkeys);
+
   void _scheduleFetch(String pubkey) {
     if (state.containsKey(pubkey) || _pending.contains(pubkey)) return;
     _pending.add(pubkey);
@@ -131,7 +168,6 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     final generation = _generation;
     var succeeded = false;
     try {
-      final communityID = ref.read(activeCommunityProvider).value?.id;
       final session = ref.read(relaySessionProvider.notifier);
       var remaining = pubkeys.length;
       for (final batch in _profileQueryBatches(pubkeys)) {
@@ -143,16 +179,9 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
         if (!await _verifyAndMerge(events, generation)) return;
         remaining -= batch.length;
         if (remaining == 0) {
-          // All requested pages are ready. Native export does not gate readers.
+          // All requested pages are ready.
           succeeded = true;
           completer?.complete(true);
-        }
-        if (communityID != null) {
-          // Drain each page before fetching another, retaining at most one raw
-          // response while later requests coalesce as pubkeys in _pending.
-          await _pushExport.export(
-            () => cacheBuzzPushProfileEvents(communityID, events),
-          );
         }
       }
     } catch (_) {

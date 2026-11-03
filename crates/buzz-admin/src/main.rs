@@ -12,16 +12,17 @@
 //! and rides Redis to live clients. Do not wire a delta call that passes
 //! in-process tests and silently no-ops in the deployed `compose exec` path.
 //!
-//! ## Same-second domination guard
+//! ## Where the list is written
 //!
-//! The `custom_created_at = max(now, newest_existing_13534 + 1s)` bump defeats
-//! same-second domination for serial invocations; it does NOT serialize
-//! concurrent CLI processes — two near-simultaneous adds can read the same
-//! newest timestamp and collide on the bumped second. run.sh serialization is
-//! the guard against parallel adds (e.g. `xargs -P`).
+//! `buzz-db` writes the kind:13534 list in the same transaction as the
+//! membership change, under the per-community list lock, with a `created_at`
+//! past every earlier list's. Concurrent CLI processes therefore serialize in
+//! the database; the CLI only pushes the committed list to Redis.
 
+mod communities;
 mod deletions;
-mod storage_snapshot_startup;
+mod nip_fi;
+mod user_deletions;
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -29,9 +30,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST;
 use buzz_core::tenant::{relay_url_authority, TenantContext};
-use buzz_db::{partition::PartitionAuditReport, Db, DbConfig};
+use buzz_db::{
+    partition::{PartitionAuditOutcome, PartitionAuditReport},
+    Db, DbConfig,
+};
 use buzz_media::{BucketSnapshot, MediaConfig, MediaStorage, S3AddressingStyle, SweepError};
 use buzz_pubsub::{EventTopic, PubSubManager};
 use clap::{Parser, Subcommand};
@@ -53,7 +56,9 @@ enum Command {
     ///
     /// Accepts a bech32 npub or 64-char hex pubkey. After inserting the DB row,
     /// publishes a kind:13534 membership roster via Redis so live clients see
-    /// the updated list immediately.
+    /// the updated list immediately. Does not join the member to the
+    /// community's default (`auto_join`) channels: the relay does that on an
+    /// invite claim or a kind:9030 add, which this command bypasses.
     AddMember {
         /// Nostr public key — bech32 npub or 64-char hex.
         #[arg(long)]
@@ -79,6 +84,13 @@ enum Command {
         #[arg(long)]
         role: Option<String>,
     },
+    /// Rewrite the community's kind:13534 membership list from the stored
+    /// members and push it to live clients.
+    ///
+    /// Membership changes write the list themselves; this repairs a list that
+    /// is missing or stale (membership turned on after running without it, a
+    /// manual `relay_members` edit, a restore).
+    RepublishMembers,
     /// List all relay members.
     ListMembers,
     /// Generate a new Nostr keypair (for bootstrapping).
@@ -94,7 +106,7 @@ enum Command {
     /// Run the partition catalog audit using a read-only database session.
     PartitionAudit {
         /// Future months to include in the coverage check.
-        #[arg(long, default_value_t = 3)]
+        #[arg(long, default_value_t = buzz_db::partition::PARTITION_MANAGER_MONTHS_AHEAD)]
         months_ahead: u32,
     },
     /// Inspect deployment-wide Buzz product feedback.
@@ -102,10 +114,25 @@ enum Command {
         #[command(subcommand)]
         command: ProductFeedbackCommand,
     },
+    /// Reversible whole-community lifecycle controls.
+    Communities {
+        #[command(subcommand)]
+        command: communities::CommunitiesCommand,
+    },
+    /// NIP-FI community issuer bindings.
+    NipFi {
+        #[command(subcommand)]
+        command: nip_fi::NipFiCommand,
+    },
     /// Durable CLI-only whole-community deletion control plane.
     Deletions {
         #[command(subcommand)]
         command: deletions::DeletionsCommand,
+    },
+    /// Preview real user memberships or manage synthetic user-deletion requests.
+    UserDeletions {
+        #[command(subcommand)]
+        command: user_deletions::UserDeletionsCommand,
     },
     /// Emit missing kind:39000/39001/39002 channel discovery events, or
     /// republish only a targeted channel's kind:39002 roster.
@@ -177,15 +204,28 @@ async fn run(cli: Cli) -> Result<i32> {
         Command::PartitionAudit { months_ahead } => cmd_partition_audit(months_ahead).await,
         Command::AddMember { pubkey, role } => cmd_add_member(pubkey, role).await,
         Command::RemoveMember { pubkey, role } => cmd_remove_member(pubkey, role).await,
+        Command::RepublishMembers => cmd_republish_members().await,
         Command::ListMembers => cmd_list_members().await,
         Command::ProductFeedback {
             command: ProductFeedbackCommand::List { limit },
         } => cmd_list_product_feedback(limit).await,
+        Command::Communities { command } => communities::run(command).await,
         Command::Deletions { command } => deletions::run(command).await,
+        Command::UserDeletions { command } => user_deletions::run(command).await,
+        Command::NipFi { command } => nip_fi::run(command).await,
         Command::ReconcileChannels { channel, relay_key } => {
             reconcile_channels(channel, relay_key).await?;
             Ok(0)
         }
+    }
+}
+
+/// One session: the worker detaches its lock-owning connection, and the
+/// cold-start pool opens no idle replacements while it scans S3.
+fn storage_snapshot_db_config(base: DbConfig) -> DbConfig {
+    DbConfig {
+        max_connections: 1,
+        ..base
     }
 }
 
@@ -196,7 +236,11 @@ async fn cmd_storage_snapshot(max_objects: u64) -> Result<i32> {
         return Err(anyhow::anyhow!("--max-objects must be greater than zero"));
     }
 
-    let db = storage_snapshot_startup::connect_db().await?;
+    let db = Db::connect_cold_start(
+        storage_snapshot_db_config(db_config_from_env()),
+        "storage_snapshot",
+    )
+    .await?;
     let mut leader = db.try_lock_storage_accounting().await?.ok_or_else(|| {
         anyhow::anyhow!("another storage-snapshot worker already holds the lease")
     })?;
@@ -339,7 +383,7 @@ struct PartitionAuditOutput {
     source_sha: &'static str,
     build_id: &'static str,
     build_url: &'static str,
-    outcome: &'static str,
+    outcome: PartitionAuditOutcome,
     months_ahead: u32,
     identity: PartitionAuditIdentity,
     report: PartitionAuditReport,
@@ -380,20 +424,8 @@ async fn cmd_partition_audit(months_ahead: u32) -> Result<i32> {
     let report = Db::from_pool(pool)
         .audit_partitions_report(months_ahead)
         .await;
-    let outcome = if !report.errors.is_empty() {
-        "error"
-    } else if !report.serving_safe() {
-        "unsafe"
-    } else if report.tables.iter().any(|table| table.degraded()) {
-        "degraded"
-    } else {
-        "ok"
-    };
-    let code = match outcome {
-        "error" => 5,
-        "unsafe" => 2,
-        _ => 0,
-    };
+    let outcome = report.outcome();
+    let code = partition_audit_exit_code(outcome);
     println!(
         "{}",
         serde_json::to_string_pretty(&PartitionAuditOutput {
@@ -409,6 +441,15 @@ async fn cmd_partition_audit(months_ahead: u32) -> Result<i32> {
         })?
     );
     Ok(code)
+}
+
+/// Exit nonzero only when the audit is incomplete or a table cannot serve.
+fn partition_audit_exit_code(outcome: PartitionAuditOutcome) -> i32 {
+    match outcome {
+        PartitionAuditOutcome::Error => 5,
+        PartitionAuditOutcome::Unsafe => 2,
+        PartitionAuditOutcome::Degraded | PartitionAuditOutcome::Ok => 0,
+    }
 }
 
 async fn cmd_add_member(pubkey_arg: String, role: String) -> Result<i32> {
@@ -428,21 +469,22 @@ async fn cmd_add_member(pubkey_arg: String, role: String) -> Result<i32> {
     let (db, pubsub, relay_keypair) = connect_member_services().await?;
 
     let tenant = resolve_admin_tenant(&db).await?;
-    match db
-        .add_relay_member(tenant.community(), &pubkey_hex, &role, None)
+    let write = match db
+        .add_relay_member(tenant.community(), &pubkey_hex, &role, None, &relay_keypair)
         .await
     {
-        Ok(true) => println!("added {pubkey_hex} as {role}"),
-        Ok(false) => println!("already a member: {pubkey_hex} (no change)"),
+        Ok(write) => write,
         Err(e) => {
             eprintln!("error: DB write failed: {e}");
             return Ok(5);
         }
+    };
+    if write.outcome {
+        println!("added {pubkey_hex} as {role}");
+    } else {
+        println!("already a member: {pubkey_hex} (no change)");
     }
-
-    if let Err(e) = publish_membership_list_with_bump(&db, &pubsub, &relay_keypair, &tenant).await {
-        eprintln!("warning: member added to DB but list publish failed: {e}");
-    }
+    fan_out_membership_list(&pubsub, &tenant, write.snapshot).await;
 
     Ok(0)
 }
@@ -468,27 +510,30 @@ async fn cmd_remove_member(pubkey_arg: String, role_filter: Option<String>) -> R
     let tenant = resolve_admin_tenant(&db).await?;
     use buzz_db::relay_members::RemoveResult;
     let result = if let Some(ref role) = role_filter {
-        db.remove_relay_member_if_role(tenant.community(), &pubkey_hex, role)
+        db.remove_relay_member_if_role(tenant.community(), &pubkey_hex, role, &relay_keypair)
             .await
     } else {
-        db.remove_relay_member(tenant.community(), &pubkey_hex)
+        db.remove_relay_member(tenant.community(), &pubkey_hex, &relay_keypair)
             .await
     };
 
-    match result {
-        Ok(RemoveResult::Removed) => println!("removed {pubkey_hex}"),
-        Ok(RemoveResult::NotFound) => {
+    match result.map(|write| (write.outcome, write.snapshot)) {
+        Ok((RemoveResult::Removed, snapshot)) => {
+            println!("removed {pubkey_hex}");
+            fan_out_membership_list(&pubsub, &tenant, snapshot).await;
+        }
+        Ok((RemoveResult::NotFound, _)) => {
             eprintln!("error: member not found: {pubkey_hex}");
             return Ok(2);
         }
-        Ok(RemoveResult::IsOwner) => {
+        Ok((RemoveResult::IsOwner, _)) => {
             eprintln!(
                 "error: cannot remove relay owner: {pubkey_hex}\n\
                  To change the owner, update RELAY_OWNER_PUBKEY and restart."
             );
             return Ok(3);
         }
-        Ok(RemoveResult::RoleMismatch) => {
+        Ok((RemoveResult::RoleMismatch, _)) => {
             let role_str = role_filter.as_deref().unwrap_or("(unknown)");
             eprintln!("error: role mismatch — {pubkey_hex} is not currently '{role_str}'");
             return Ok(4);
@@ -499,10 +544,26 @@ async fn cmd_remove_member(pubkey_arg: String, role_filter: Option<String>) -> R
         }
     }
 
-    if let Err(e) = publish_membership_list_with_bump(&db, &pubsub, &relay_keypair, &tenant).await {
-        eprintln!("warning: member removed from DB but list publish failed: {e}");
-    }
+    Ok(0)
+}
 
+async fn cmd_republish_members() -> Result<i32> {
+    let (db, pubsub, relay_keypair) = connect_member_services().await?;
+    let tenant = resolve_admin_tenant(&db).await?;
+    let write = match db
+        .rewrite_nip43_membership_list(tenant.community(), &relay_keypair)
+        .await
+    {
+        Ok(write) => write,
+        Err(e) => {
+            eprintln!("error: DB write failed: {e}");
+            return Ok(5);
+        }
+    };
+    if let Some(stored) = &write.snapshot {
+        println!("republished membership list {}", stored.event.id.to_hex());
+    }
+    fan_out_membership_list(&pubsub, &tenant, write.snapshot).await;
     Ok(0)
 }
 
@@ -562,81 +623,25 @@ fn parse_pubkey_hex(input: &str) -> std::result::Result<String, String> {
         .map_err(|e| format!("invalid pubkey '{input}': {e}"))
 }
 
-/// Publish kind:13534 with `custom_created_at = max(now, newest_existing + 1s)`.
-///
-/// Guarantees the new event is not dominated by a same-second prior invocation,
-/// so `replace_addressable_event` always inserts and dispatches to Redis.
-///
-/// See module-level doc for the TOCTOU caveat on concurrent CLI processes.
-async fn publish_membership_list_with_bump(
-    db: &Db,
+/// Push the kind:13534 list a membership change committed to Redis, so live
+/// clients receive the updated roster. The list is already stored, so a
+/// failed push only delays live updates.
+async fn fan_out_membership_list(
     pubsub: &Arc<PubSubManager>,
-    relay_keypair: &Keys,
     tenant: &TenantContext,
-) -> Result<()> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let relay_pubkey = relay_keypair.public_key();
-    let relay_pubkey_bytes = relay_pubkey.to_bytes();
-
-    // Query the newest existing kind:13534 for this relay's pubkey (channel_id=None).
-    let newest_ts = db
-        .get_latest_global_replaceable(
-            tenant.community(),
-            KIND_NIP43_MEMBERSHIP_LIST as i32,
-            &relay_pubkey_bytes,
-        )
-        .await?
-        .map(|e| e.event.created_at.as_secs());
-
-    // custom_created_at = max(now, existing + 1s) — defeats same-second domination.
-    let ts = match newest_ts {
-        Some(existing) => (existing + 1).max(now),
-        None => now,
+    snapshot: Option<buzz_core::StoredEvent>,
+) {
+    let Some(stored) = snapshot else {
+        return;
     };
-
-    let members = db.list_relay_members(tenant.community()).await?;
-
-    let mut tags: Vec<Tag> = Vec::with_capacity(members.len() + 1);
-    // NIP-70 protected-event marker — prevents re-broadcasting by third parties.
-    tags.push(Tag::parse(["-"]).map_err(|e| anyhow::anyhow!("failed to build '-' tag: {e}"))?);
-    for member in &members {
-        tags.push(
-            Tag::parse(["member", &member.pubkey, &member.role])
-                .map_err(|e| anyhow::anyhow!("failed to build member tag: {e}"))?,
-        );
+    // Community-global scope (EventTopic::Global) matches the relay's own
+    // membership-list delivery; the tenant fixes the community.
+    if let Err(e) = pubsub
+        .publish_event(tenant, EventTopic::Global, &stored.event)
+        .await
+    {
+        warn!("Redis publish of kind:13534 failed: {e}");
     }
-
-    let event = EventBuilder::new(Kind::Custom(KIND_NIP43_MEMBERSHIP_LIST as u16), "")
-        .tags(tags)
-        .custom_created_at(nostr::Timestamp::from(ts))
-        .sign_with_keys(relay_keypair)
-        .map_err(|e| anyhow::anyhow!("failed to sign kind:13534: {e}"))?;
-
-    let (stored, was_inserted) = db
-        .replace_addressable_event(tenant.community(), &event, None)
-        .await?;
-    if was_inserted {
-        // Publish to Redis so live clients receive the updated roster.
-        // Community-global scope (EventTopic::Global) matches the relay's own
-        // membership-list publish path; the tenant fixes the community.
-        if let Err(e) = pubsub
-            .publish_event(tenant, EventTopic::Global, &stored.event)
-            .await
-        {
-            warn!("Redis publish of kind:13534 failed: {e}");
-        }
-    }
-
-    tracing::info!(
-        member_count = members.len(),
-        ts,
-        "NIP-43 membership list published by buzz-admin"
-    );
-    Ok(())
 }
 
 /// Connect to DB, Redis pub/sub, and load the relay keypair.
@@ -648,7 +653,7 @@ async fn connect_member_services() -> Result<(Db, Arc<PubSubManager>, Keys)> {
     let relay_keypair = {
         let hex = std::env::var("BUZZ_RELAY_PRIVATE_KEY").map_err(|_| {
             anyhow::anyhow!(
-                "BUZZ_RELAY_PRIVATE_KEY is required for add-member/remove-member.\n\
+                "BUZZ_RELAY_PRIVATE_KEY is required for add-member/remove-member/republish-members.\n\
                  The relay must have a stable signing key to publish kind:13534 events."
             )
         })?;
@@ -720,6 +725,7 @@ async fn reconcile_channels(
     channel_arg: Option<String>,
     relay_key_arg: Option<String>,
 ) -> Result<()> {
+    use buzz_core::channel::group_state_identity_tags;
     use buzz_core::kind::KIND_NIP29_GROUP_ADMINS;
     use buzz_db::event::EventQuery;
 
@@ -804,24 +810,10 @@ async fn reconcile_channels(
         if target_channel.is_none() {
             // kind:39000 — channel metadata
             {
-                let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
-                tags.push(Tag::parse(["name", &channel.name])?);
-                if let Some(ref desc) = channel.description {
-                    if !desc.is_empty() {
-                        tags.push(Tag::parse(["about", desc])?);
-                    }
-                }
-                if channel.visibility == "private" {
-                    tags.push(Tag::parse(["private"])?);
-                } else {
-                    tags.push(Tag::parse(["public"])?);
-                }
-                if channel.channel_type == "dm" {
-                    tags.push(Tag::parse(["hidden"])?);
-                }
-                tags.push(Tag::parse(["closed"])?);
-                tags.push(Tag::parse(["t", &channel.channel_type])?);
-
+                let tags = buzz_db::channel::group_metadata_tags(channel, &members)
+                    .into_iter()
+                    .map(Tag::parse)
+                    .collect::<Result<Vec<_>, _>>()?;
                 let event = EventBuilder::new(Kind::Custom(39000), "")
                     .tags(tags)
                     .sign_with_keys(&relay_keys)
@@ -833,6 +825,11 @@ async fn reconcile_channels(
             // kind:39001 — admins
             {
                 let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
+                tags.extend(group_state_identity_tags(
+                    &channel.channel_type,
+                    &channel.labels,
+                    &channel.created_by,
+                )?);
                 for m in members
                     .iter()
                     .filter(|m| m.role == "owner" || m.role == "admin")
@@ -852,6 +849,11 @@ async fn reconcile_channels(
         // kind:39002 — members
         {
             let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
+            tags.extend(group_state_identity_tags(
+                &channel.channel_type,
+                &channel.labels,
+                &channel.created_by,
+            )?);
             for m in &members {
                 let pk = hex::encode(&m.pubkey);
                 tags.push(Tag::parse(["p", &pk, "", &m.role])?);
@@ -879,6 +881,17 @@ mod storage_snapshot_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+
+    #[test]
+    fn storage_snapshot_holds_a_single_database_session() {
+        let config = storage_snapshot_db_config(DbConfig {
+            max_connections: 20,
+            lock_timeout_ms: 123,
+            ..DbConfig::default()
+        });
+        assert_eq!(config.max_connections, 1);
+        assert_eq!(config.lock_timeout_ms, 123);
+    }
 
     #[tokio::test]
     async fn failed_fold_never_invokes_snapshot_persistence() {
@@ -910,5 +923,167 @@ mod tests {
             cli.command,
             Command::PartitionAudit { months_ahead: 6 }
         ));
+    }
+
+    const OWNER: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    #[test]
+    fn communities_command_parses_archive() {
+        let cli = Cli::try_parse_from([
+            "buzz-admin",
+            "communities",
+            "archive",
+            "--host",
+            "example.communities.buzz.xyz",
+            "--owner-pubkey",
+            OWNER,
+            "--operator-id",
+            "codex",
+            "--reason",
+            "requested deletion",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Command::Communities {
+                command:
+                    communities::CommunitiesCommand::Archive {
+                        host,
+                        owner_pubkey,
+                        operator_id,
+                        reason,
+                    },
+            } => {
+                assert_eq!(host, "example.communities.buzz.xyz");
+                assert_eq!(owner_pubkey, OWNER);
+                assert_eq!(operator_id, "codex");
+                assert_eq!(reason, "requested deletion");
+            }
+            _ => panic!("expected communities archive command"),
+        }
+    }
+
+    #[test]
+    fn communities_command_parses_unarchive() {
+        let cli = Cli::try_parse_from([
+            "buzz-admin",
+            "communities",
+            "unarchive",
+            "--host",
+            "example.communities.buzz.xyz",
+            "--owner-pubkey",
+            OWNER,
+            "--operator-id",
+            "codex",
+            "--reason",
+            "rollback",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Command::Communities {
+                command:
+                    communities::CommunitiesCommand::Unarchive {
+                        host,
+                        owner_pubkey,
+                        operator_id,
+                        reason,
+                    },
+            } => {
+                assert_eq!(host, "example.communities.buzz.xyz");
+                assert_eq!(owner_pubkey, OWNER);
+                assert_eq!(operator_id, "codex");
+                assert_eq!(reason, "rollback");
+            }
+            _ => panic!("expected communities unarchive command"),
+        }
+    }
+
+    #[test]
+    fn communities_commands_require_all_safety_and_audit_arguments() {
+        let missing_argument_cases = [
+            vec![
+                "buzz-admin",
+                "communities",
+                "archive",
+                "--owner-pubkey",
+                OWNER,
+                "--operator-id",
+                "codex",
+                "--reason",
+                "requested deletion",
+            ],
+            vec![
+                "buzz-admin",
+                "communities",
+                "archive",
+                "--host",
+                "example.communities.buzz.xyz",
+                "--operator-id",
+                "codex",
+                "--reason",
+                "requested deletion",
+            ],
+            vec![
+                "buzz-admin",
+                "communities",
+                "unarchive",
+                "--host",
+                "example.communities.buzz.xyz",
+                "--owner-pubkey",
+                OWNER,
+                "--reason",
+                "rollback",
+            ],
+            vec![
+                "buzz-admin",
+                "communities",
+                "unarchive",
+                "--host",
+                "example.communities.buzz.xyz",
+                "--owner-pubkey",
+                OWNER,
+                "--operator-id",
+                "codex",
+            ],
+        ];
+
+        for args in missing_argument_cases {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+    }
+
+    #[test]
+    fn communities_commands_do_not_expose_deletion_approval_arguments() {
+        let command = Cli::try_parse_from([
+            "buzz-admin",
+            "communities",
+            "archive",
+            "--host",
+            "example.communities.buzz.xyz",
+            "--owner-pubkey",
+            OWNER,
+            "--operator-id",
+            "codex",
+            "--reason",
+            "requested deletion",
+            "--approved-by",
+            "second-operator",
+        ]);
+
+        assert!(command.is_err());
+    }
+
+    #[test]
+    fn partition_audit_outcomes_keep_their_json_names_and_exit_codes() {
+        for (outcome, name, code) in [
+            (PartitionAuditOutcome::Ok, "ok", 0),
+            (PartitionAuditOutcome::Degraded, "degraded", 0),
+            (PartitionAuditOutcome::Unsafe, "unsafe", 2),
+            (PartitionAuditOutcome::Error, "error", 5),
+        ] {
+            assert_eq!(serde_json::to_value(outcome).unwrap(), name);
+            assert_eq!(partition_audit_exit_code(outcome), code, "{name}");
+        }
     }
 }

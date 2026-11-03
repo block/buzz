@@ -1,3 +1,8 @@
+import '../../helpers/controllable_pairing_socket.dart';
+import 'package:buzz/features/pairing/pairing_page.dart';
+import 'package:buzz/shared/theme/theme.dart';
+import 'package:flutter/material.dart';
+import 'package:buzz/shared/community/paired_community_landing.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -5,12 +10,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:nostr/nostr.dart' as nostr;
-import 'package:buzz/features/pairing/pairing_crypto.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/features/pairing/pairing_socket.dart';
 import 'package:buzz/shared/auth/auth.dart';
-import 'package:buzz/shared/crypto/ecdh.dart';
-import 'package:buzz/shared/crypto/nip44.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/security/sensitive_action_authorizer.dart';
 
@@ -66,6 +68,45 @@ void main() {
         await pending;
         expect(auth.lastCommunity, isNull);
         expect(container.read(pairingProvider).status, PairingStatus.idle);
+      },
+    );
+
+    test(
+      'legacy validation rejects failed connection before saving, then retries',
+      () async {
+        final auth = FakeAuthNotifier();
+        var connected = false;
+        final notifier = PairingNotifier(
+          validationSocketFactory:
+              ({
+                required wsUrl,
+                required nsec,
+                required onMessage,
+                required onConnected,
+                required onDisconnected,
+              }) => _ValidationOutcomeSocket(() => connected),
+        );
+        container = ProviderContainer(
+          overrides: [
+            pairingProvider.overrideWith(() => notifier),
+            authProvider.overrideWith(() => auth),
+          ],
+        );
+        final input = base64Url.encode(
+          utf8.encode(
+            jsonEncode({
+              'relayUrl': 'https://relay.example',
+              'nsec': nostr.Keys.generate().nsec,
+            }),
+          ),
+        );
+        await container.read(pairingProvider.notifier).pair(input);
+        expect(container.read(pairingProvider).status, PairingStatus.error);
+        expect(auth.lastCommunity, isNull);
+        connected = true;
+        await notifier.pair(input);
+        expect(container.read(pairingProvider).status, PairingStatus.success);
+        expect(auth.lastCommunity, isNotNull);
       },
     );
 
@@ -218,7 +259,7 @@ void main() {
           '09b3065e3570a3a4054660dccd66e12774a99a904fdb0ca02dbc6c3136249506';
       const sessionSecretHex =
           'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';
-      late _ControllableSocket socket;
+      late ControllablePairingSocket socket;
       late PairingNotifier notifier;
       late FakeAuthNotifier importAuth;
       late _FakeSensitiveActionAuthorizer authorizer;
@@ -245,7 +286,7 @@ void main() {
                 required onMessage,
                 required onDisconnected,
               }) {
-                socket = _ControllableSocket(
+                socket = ControllablePairingSocket(
                   ephemeralPrivkey: ephemeralPrivkey,
                   onMessage: onMessage,
                   onDisconnected: onDisconnected,
@@ -293,6 +334,268 @@ void main() {
         expect(container.read(pairingProvider).status, PairingStatus.storing);
       }
 
+      testWidgets('early input is submitted when desktop negotiation arrives', (
+        tester,
+      ) async {
+        final pairing = notifier.pair(pairingCode);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 500));
+        await pairing;
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: MaterialApp(
+              theme: AppTheme.light(),
+              home: const PairingPage(),
+            ),
+          ),
+        );
+        final localCode = container.read(pairingProvider).sasCode;
+        final code = localCode == '111111' ? '222222' : '111111';
+        await tester.enterText(
+          find.byKey(const Key('pairing-code-input')),
+          code,
+        );
+        await tester.pump();
+        expect(
+          socket
+              .decryptedPublishedMessages(sourceSecret)
+              .where((m) => m['type'] == 'code-submit'),
+          isEmpty,
+        );
+        socket.sendSourceMessage(
+          sourceSecret: sourceSecret,
+          sessionSecretHex: sessionSecretHex,
+          message: {'type': 'desktop-code'},
+        );
+        await tester.pump();
+        await tester.pump();
+        final submissions = socket
+            .decryptedPublishedMessages(sourceSecret)
+            .where((m) => m['type'] == 'code-submit')
+            .toList();
+        expect(submissions, hasLength(1));
+        expect(submissions.single['code'], code);
+        socket.sendSourceMessage(
+          sourceSecret: sourceSecret,
+          sessionSecretHex: sessionSecretHex,
+          message: {'type': 'sas-confirm'},
+          includeTranscriptHash: true,
+        );
+        await tester.pump();
+        expect(find.text('Enter pairing code'), findsNothing);
+        expect(find.text('Protect your identity'), findsOneWidget);
+        notifier.reset();
+        await tester.pumpWidget(const SizedBox.shrink());
+      });
+
+      testWidgets(
+        'delayed desktop responses retain one attempt and leave code entry',
+        (tester) async {
+          final pairing = notifier.pair(pairingCode);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 500));
+          await pairing;
+          expect(socket.published.single['tags'], hasLength(1));
+          expect(
+            socket
+                .decryptedPublishedMessages(sourceSecret)
+                .single['confirmation'],
+            'desktop-code-v1',
+          );
+          socket.sendSourceMessage(
+            sourceSecret: sourceSecret,
+            sessionSecretHex: sessionSecretHex,
+            message: {'type': 'desktop-code'},
+          );
+          expect(container.read(pairingProvider).requiresDesktopCode, isTrue);
+          final wrong = notifier.verifyDesktopCode('111111');
+          final first = socket.decryptedPublishedMessages(sourceSecret).last;
+          expect(first['type'], 'code-submit');
+          expect(first['code'], '111111');
+          bool? wrongResult;
+          unawaited(wrong.then((value) => wrongResult = value));
+          await tester.pump(const Duration(seconds: 11));
+          expect(wrongResult, isNull);
+          expect(await notifier.verifyDesktopCode('111111'), isFalse);
+          expect(
+            socket
+                .decryptedPublishedMessages(sourceSecret)
+                .where((m) => m['type'] == 'code-submit'),
+            hasLength(1),
+          );
+          socket.sendSourceMessage(
+            sourceSecret: sourceSecret,
+            sessionSecretHex: sessionSecretHex,
+            message: {
+              'type': 'code-rejected',
+              'request_id': first['request_id'],
+              'remaining_attempts': 4,
+            },
+          );
+          expect(await wrong, isFalse);
+          expect(importAuth.lastCommunity, isNull);
+          await tester.pumpWidget(
+            UncontrolledProviderScope(
+              container: container,
+              child: MaterialApp(
+                theme: AppTheme.light(),
+                home: const PairingPage(),
+              ),
+            ),
+          );
+          await tester.enterText(
+            find.byKey(const Key('pairing-code-input')),
+            '222222',
+          );
+          await tester.pump(const Duration(seconds: 11));
+          expect(find.text('Enter pairing code'), findsOneWidget);
+          expect(
+            find.text('Couldn’t check the code. Try again.'),
+            findsNothing,
+          );
+          expect(
+            socket
+                .decryptedPublishedMessages(sourceSecret)
+                .where((m) => m['type'] == 'code-submit'),
+            hasLength(2),
+          );
+          socket.sendSourceMessage(
+            sourceSecret: sourceSecret,
+            sessionSecretHex: sessionSecretHex,
+            message: {'type': 'sas-confirm'},
+            includeTranscriptHash: true,
+          );
+          socket.sendSourceMessage(
+            sourceSecret: sourceSecret,
+            sessionSecretHex: sessionSecretHex,
+            message: {
+              'type': 'payload',
+              'payload_type': 'credentials',
+              'payload': jsonEncode({
+                'relayUrl': 'https://relay.test',
+                'pubkey': nostr.Keys(sourceSecret).public,
+                'nsec': nostr.Keys(sourceSecret).nsec,
+              }),
+            },
+          );
+          await tester.pump();
+          expect(find.text('Enter pairing code'), findsNothing);
+          expect(find.text('Protect your identity'), findsOneWidget);
+          expect(
+            container.read(pairingProvider).status,
+            PairingStatus.confirmingSas,
+          );
+          expect(importAuth.lastCommunity, isNull);
+          notifier.setProtectSensitiveActions(false);
+          notifier.confirmSas();
+          await tester.pump();
+          expect(container.read(pairingProvider).status, PairingStatus.storing);
+          expect(
+            socket
+                .decryptedPublishedMessages(sourceSecret)
+                .where((m) => m['type'] == 'sas-confirm'),
+            isEmpty,
+          );
+          notifier.reset();
+          await tester.pumpWidget(const SizedBox.shrink());
+        },
+      );
+
+      testWidgets(
+        'delayed final rejection exits the session and reset cancels pending verification',
+        (tester) async {
+          final pairing = notifier.pair(pairingCode);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 500));
+          await pairing;
+          socket.sendSourceMessage(
+            sourceSecret: sourceSecret,
+            sessionSecretHex: sessionSecretHex,
+            message: {'type': 'desktop-code'},
+          );
+          final result = notifier.verifyDesktopCode('111111');
+          final request = socket.decryptedPublishedMessages(sourceSecret).last;
+          await tester.pump(const Duration(seconds: 11));
+          socket.sendSourceMessage(
+            sourceSecret: sourceSecret,
+            sessionSecretHex: sessionSecretHex,
+            message: {
+              'type': 'code-rejected',
+              'request_id': request['request_id'],
+              'remaining_attempts': 0,
+            },
+          );
+          expect(await result, isFalse);
+          expect(container.read(pairingProvider).status, PairingStatus.error);
+          expect(importAuth.lastCommunity, isNull);
+          notifier.reset();
+          final nextPairing = notifier.pair(pairingCode);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 500));
+          await nextPairing;
+          socket.sendSourceMessage(
+            sourceSecret: sourceSecret,
+            sessionSecretHex: sessionSecretHex,
+            message: {'type': 'desktop-code'},
+          );
+          final pending = notifier.verifyDesktopCode('222222');
+          notifier.reset();
+          expect(await pending, isFalse);
+          expect(container.read(pairingProvider).status, PairingStatus.idle);
+        },
+      );
+
+      test(
+        'a rejected offer exits code entry instead of silently waiting',
+        () async {
+          await notifier.pair(pairingCode);
+          socket.relayMessageCallback([
+            'OK',
+            socket.published.single['id'],
+            false,
+            'event must have exactly one p tag',
+          ]);
+          expect(container.read(pairingProvider).status, PairingStatus.error);
+          expect(
+            container.read(pairingProvider).errorMessage,
+            contains('Scan a new desktop QR code'),
+          );
+          expect(socket.isConnected, isFalse);
+        },
+      );
+
+      test('admission rejection never reports a successful transfer', () async {
+        importAuth.authentication = Completer<void>();
+        importAuth.entered = Completer<void>();
+        final finished = Completer<void>();
+        container.listen(pairingProvider, (_, next) {
+          if (next.status == PairingStatus.error && !finished.isCompleted) {
+            finished.complete();
+          }
+        });
+        await beginImport(protected: false);
+        validation.complete();
+        await importAuth.entered!.future;
+        expect(
+          socket
+              .decryptedPublishedMessages(sourceSecret)
+              .where((message) => message['type'] == 'complete'),
+          isEmpty,
+        );
+        importAuth.authentication!.completeError(
+          StateError('Admission refused'),
+        );
+        await finished.future;
+        final completions = socket
+            .decryptedPublishedMessages(sourceSecret)
+            .where((message) => message['type'] == 'complete')
+            .toList();
+        expect(completions, hasLength(1));
+        expect(completions.single['success'], isFalse);
+        expect(container.read(pairedCommunityLandingProvider), isNull);
+      });
+
       test('unchecked protection persists on a successful import', () async {
         await beginImport(protected: false);
 
@@ -304,6 +607,10 @@ void main() {
           SensitiveActionPolicy.disabledByUser,
         );
         expect(container.read(pairingProvider).status, PairingStatus.success);
+        expect(
+          container.read(pairedCommunityLandingProvider),
+          importAuth.lastCommunity,
+        );
       });
 
       test('checked protection persists on a successful import', () async {
@@ -399,6 +706,10 @@ void main() {
         await Future<void>.delayed(Duration.zero);
 
         expect(container.read(pairingProvider).status, PairingStatus.idle);
+        expect(
+          container.read(authProvider).value!.status,
+          AuthStatus.unauthenticated,
+        );
         expect(socket.isConnected, isFalse);
       });
 
@@ -425,7 +736,7 @@ void main() {
           '09b3065e3570a3a4054660dccd66e12774a99a904fdb0ca02dbc6c3136249506';
       const sessionSecretHex =
           'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';
-      late _ControllableSocket socket;
+      late ControllablePairingSocket socket;
       late PairingNotifier notifier;
       late String recoveryCode;
       late _FakeSensitiveActionAuthorizer authorizer;
@@ -447,7 +758,7 @@ void main() {
                 required onMessage,
                 required onDisconnected,
               }) {
-                socket = _ControllableSocket(
+                socket = ControllablePairingSocket(
                   ephemeralPrivkey: ephemeralPrivkey,
                   onMessage: onMessage,
                   onDisconnected: onDisconnected,
@@ -482,6 +793,15 @@ void main() {
         final state = container.read(pairingProvider);
         expect(state.status, PairingStatus.confirmingSas);
         expect(state.sendsIdentityToDesktop, isTrue);
+        expect(
+          socket.published.first['tags'],
+          isNot(contains(equals(['confirmation', 'code-entry']))),
+        );
+        notifier.confirmSas();
+        expect(
+          socket.decryptedPublishedMessages(sourceSecret).map((m) => m['type']),
+          ['offer'],
+        );
         expect(state.sasCode, hasLength(6));
       });
 
@@ -543,52 +863,64 @@ void main() {
         expect(authorizer.lastIdentityBiometricOnly, isFalse);
       });
 
-      test(
-        'matching SAS sends nsec and successful completion finishes',
-        () async {
-          expect(
-            await notifier.authorizeIdentityExport(
-              community: _exportCommunity(SensitiveActionPolicy.disabledByUser),
-            ),
-            isTrue,
-          );
-          await notifier.pair(recoveryCode);
-          notifier.confirmSas();
-          expect(container.read(pairingProvider).userConfirmedSas, isTrue);
+      for (final padded in [false, true]) {
+        test(
+          'matching SAS exports normalized nsec (padded: $padded)',
+          () async {
+            final community =
+                _exportCommunity(SensitiveActionPolicy.disabledByUser).copyWith(
+                  nsec: padded
+                      ? ' \n${_RecoveryRelayConfig.nsec}\t '
+                      : _RecoveryRelayConfig.nsec,
+                );
+            container
+                .read(relayConfigProvider.notifier)
+                .update(baseUrl: community.relayUrl, nsec: community.nsec);
+            expect(
+              await notifier.authorizeIdentityExport(community: community),
+              isTrue,
+            );
+            await notifier.pair(recoveryCode);
+            notifier.confirmSas();
+            expect(container.read(pairingProvider).userConfirmedSas, isTrue);
 
-          socket.sendSourceMessage(
-            sourceSecret: sourceSecret,
-            sessionSecretHex: sessionSecretHex,
-            message: {'type': 'sas-confirm'},
-            includeTranscriptHash: true,
-          );
+            socket.sendSourceMessage(
+              sourceSecret: sourceSecret,
+              sessionSecretHex: sessionSecretHex,
+              message: {'type': 'sas-confirm'},
+              includeTranscriptHash: true,
+            );
 
-          await Future<void>.delayed(Duration.zero);
+            await Future<void>.delayed(Duration.zero);
 
-          expect(
-            container.read(pairingProvider).status,
-            PairingStatus.transferring,
-          );
-          expect(authorizer.calls, 1);
-          final sentMessages = socket.decryptedPublishedMessages(sourceSecret);
-          expect(
-            sentMessages.any(
-              (message) =>
-                  message['type'] == 'payload' &&
-                  message['payload_type'] == 'nsec' &&
-                  message['payload'] == _RecoveryRelayConfig.nsec,
-            ),
-            isTrue,
-          );
+            expect(
+              container.read(pairingProvider).status,
+              PairingStatus.transferring,
+            );
+            expect(container.read(pairingProvider).errorMessage, isNull);
+            expect(authorizer.calls, 1);
+            final sentMessages = socket.decryptedPublishedMessages(
+              sourceSecret,
+            );
+            final payloads = sentMessages.where(
+              (message) => message['type'] == 'payload',
+            );
+            expect(payloads, hasLength(1));
+            expect(payloads.single['payload_type'], 'nsec');
+            expect(payloads.single['payload'], _RecoveryRelayConfig.nsec);
 
-          socket.sendSourceMessage(
-            sourceSecret: sourceSecret,
-            sessionSecretHex: sessionSecretHex,
-            message: {'type': 'complete', 'success': true},
-          );
-          expect(container.read(pairingProvider).status, PairingStatus.success);
-        },
-      );
+            socket.sendSourceMessage(
+              sourceSecret: sourceSecret,
+              sessionSecretHex: sessionSecretHex,
+              message: {'type': 'complete', 'success': true},
+            );
+            expect(
+              container.read(pairingProvider).status,
+              PairingStatus.success,
+            );
+          },
+        );
+      }
 
       test(
         'malformed payload invalidates authorization before another session',
@@ -815,50 +1147,56 @@ void main() {
         },
       );
 
-      for (final expired in [false, true]) {
-        test(
-          'community switch aborts ${expired ? 'expired' : 'fresh'} export grant',
-          () async {
-            expect(
-              await notifier.authorizeIdentityExport(
-                community: _exportCommunity(
-                  SensitiveActionPolicy.disabledByUser,
+      for (final change in ['community', 'key']) {
+        for (final expired in [false, true]) {
+          test(
+            '$change switch aborts ${expired ? 'expired' : 'fresh'} export grant',
+            () async {
+              expect(
+                await notifier.authorizeIdentityExport(
+                  community: _exportCommunity(
+                    SensitiveActionPolicy.disabledByUser,
+                  ),
                 ),
-              ),
-              isTrue,
-            );
-            await notifier.pair(recoveryCode);
-            if (expired) now = now.add(identityExportAuthorizationTtl);
-            container
-                .read(relayConfigProvider.notifier)
-                .update(
-                  baseUrl: 'https://other-relay.test',
-                  nsec: nostr.Keys(
-                    '2222222222222222222222222222222222222222222222222222222222222222',
-                  ).nsec,
-                );
-            notifier.confirmSas();
-            socket.sendSourceMessage(
-              sourceSecret: sourceSecret,
-              sessionSecretHex: sessionSecretHex,
-              message: {'type': 'sas-confirm'},
-              includeTranscriptHash: true,
-            );
-            await Future<void>.delayed(Duration.zero);
+                isTrue,
+              );
+              await notifier.pair(recoveryCode);
+              if (expired) now = now.add(identityExportAuthorizationTtl);
+              container
+                  .read(relayConfigProvider.notifier)
+                  .update(
+                    baseUrl: change == 'community'
+                        ? 'https://other-relay.test'
+                        : 'https://relay.test',
+                    nsec: change == 'community'
+                        ? _RecoveryRelayConfig.nsec
+                        : nostr.Keys(
+                            '2222222222222222222222222222222222222222222222222222222222222222',
+                          ).nsec,
+                  );
+              notifier.confirmSas();
+              socket.sendSourceMessage(
+                sourceSecret: sourceSecret,
+                sessionSecretHex: sessionSecretHex,
+                message: {'type': 'sas-confirm'},
+                includeTranscriptHash: true,
+              );
+              await Future<void>.delayed(Duration.zero);
 
-            final state = container.read(pairingProvider);
-            expect(state.status, PairingStatus.confirmingSas);
-            expect(state.userConfirmedSas, isFalse);
-            expect(state.errorMessage, contains('active community changed'));
-            expect(authorizer.calls, 1);
-            expect(
-              socket
-                  .decryptedPublishedMessages(sourceSecret)
-                  .any((message) => message['type'] == 'payload'),
-              isFalse,
-            );
-          },
-        );
+              final state = container.read(pairingProvider);
+              expect(state.status, PairingStatus.confirmingSas);
+              expect(state.userConfirmedSas, isFalse);
+              expect(state.errorMessage, contains('active community changed'));
+              expect(authorizer.calls, 1);
+              expect(
+                socket
+                    .decryptedPublishedMessages(sourceSecret)
+                    .any((message) => message['type'] == 'payload'),
+                isFalse,
+              );
+            },
+          );
+        }
       }
 
       test('expired biometric-only authorization preserves its mode', () async {
@@ -985,22 +1323,23 @@ class FakeAuthNotifier extends AsyncNotifier<AuthState>
     implements AuthNotifier {
   Community? lastCommunity;
   Completer<void>? authentication;
-  bool signedOut = false;
+  Completer<void>? entered;
 
   @override
   Future<AuthState> build() async =>
       const AuthState(status: AuthStatus.unauthenticated);
 
   @override
-  Future<void> signOut() async {
-    signedOut = true;
-    state = const AsyncData(AuthState(status: AuthStatus.unauthenticated));
-  }
-
-  @override
-  Future<void> authenticateWithCommunity(Community community) async {
+  Future<void> authenticateWithCommunity(
+    Community community, {
+    bool Function()? shouldContinue,
+    bool activate = true,
+  }) async {
+    if (shouldContinue != null && !shouldContinue()) return;
     lastCommunity = community;
+    entered?.complete();
     await authentication?.future;
+    if (shouldContinue != null && !shouldContinue()) return;
     state = AsyncData(
       AuthState(status: AuthStatus.authenticated, community: community),
     );
@@ -1068,86 +1407,6 @@ class _FakeSensitiveActionAuthorizer implements SensitiveActionAuthorizer {
   Future<List<BiometricType>> enrolledBiometrics() async => const [];
 }
 
-class _ControllableSocket extends PairingSocket {
-  final String ephemeralPrivkey;
-  final void Function(List<dynamic> message) relayMessageCallback;
-  final List<Map<String, dynamic>> published = [];
-  bool _connected = false;
-  int _eventSequence = 0;
-
-  _ControllableSocket({
-    required this.ephemeralPrivkey,
-    required super.onMessage,
-    required super.onDisconnected,
-  }) : relayMessageCallback = onMessage,
-       super(wsUrl: 'ws://unused', ephemeralPrivkey: ephemeralPrivkey);
-
-  @override
-  bool get isConnected => _connected;
-
-  @override
-  Future<void> connect() async => _connected = true;
-
-  @override
-  void subscribe(String subId, int kind, String pubkeyHex) {}
-
-  @override
-  void publishEvent(Map<String, dynamic> event) => published.add(event);
-
-  @override
-  void dispose() => _connected = false;
-
-  List<Map<String, dynamic>> decryptedPublishedMessages(String sourceSecret) {
-    final key = getConversationKey(
-      sourceSecret,
-      nostr.Keys(ephemeralPrivkey).public,
-    );
-    return published
-        .map(
-          (event) =>
-              jsonDecode(nip44Decrypt(key, event['content'] as String))
-                  as Map<String, dynamic>,
-        )
-        .toList();
-  }
-
-  void sendSourceMessage({
-    required String sourceSecret,
-    required String sessionSecretHex,
-    required Map<String, dynamic> message,
-    bool includeTranscriptHash = false,
-  }) {
-    final source = nostr.Keys(sourceSecret);
-    final targetPubkey = nostr.Keys(ephemeralPrivkey).public;
-    final sessionSecret = hexToBytes(sessionSecretHex);
-    final body = Map<String, dynamic>.from(message);
-    if (includeTranscriptHash) {
-      final shared = ecdhSharedSecret(sourceSecret, targetPubkey);
-      final (_, sasInput) = deriveSas(shared, sessionSecret);
-      body['transcript_hash'] = bytesToHex(
-        deriveTranscriptHash(
-          deriveSessionId(sessionSecret),
-          hexToBytes(source.public),
-          hexToBytes(targetPubkey),
-          sasInput,
-          sessionSecret,
-        ),
-      );
-    }
-    final key = getConversationKey(sourceSecret, targetPubkey);
-    final event = nostr.Event.from(
-      kind: 24134,
-      content: nip44Encrypt(key, jsonEncode(body)),
-      tags: [
-        ['p', targetPubkey],
-      ],
-      secretKey: sourceSecret,
-      createdAt: 1_700_000_000 + _eventSequence++,
-    );
-    relayMessageCallback(['EVENT', 'pair', event.toMap()]);
-  }
-}
-
 class _PendingValidationSocket extends RelaySocket {
   _PendingValidationSocket()
     : super(
@@ -1165,4 +1424,23 @@ class _PendingValidationSocket extends RelaySocket {
   void dispose() => disposed = true;
   @override
   Future<void> disconnect() async => disposed = true;
+}
+
+class _ValidationOutcomeSocket extends RelaySocket {
+  _ValidationOutcomeSocket(this.connected)
+    : super(
+        wsUrl: 'wss://relay.example',
+        nsec: null,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (_) {},
+      );
+  final bool Function() connected;
+  @override
+  SocketState get state =>
+      connected() ? SocketState.connected : SocketState.disconnected;
+  @override
+  Future<void> connect() async {}
+  @override
+  Future<void> disconnect() async {}
 }

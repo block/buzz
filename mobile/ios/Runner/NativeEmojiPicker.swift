@@ -87,6 +87,7 @@ final class NativeEmojiPickerCoordinator: NSObject,
     let content = NativeEmojiPickerView(
       data: data,
       appearance: appearance,
+      largeEmoji: arguments["largeEmoji"] as? Bool ?? false,
       initialSkinTone: (arguments["skinTone"] as? NSNumber)?.intValue ?? 0,
       onSelect: { [weak self] emoji in self?.select(emoji) },
       onSkinToneChanged: { [weak self] value in

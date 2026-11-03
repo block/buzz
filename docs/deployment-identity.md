@@ -85,3 +85,38 @@ image:
 
 When `image.digest` is set, the chart renders `repository@digest` and ignores
 `image.tag`. Existing tag-only values remain backwards compatible.
+
+## Derived deployment labels
+
+Every chart-managed Pod — the relay, the pairing relay, the storage-accounting
+CronJob, and operator jobs such as the deletion drain — carries a
+chart-owned `tags.datadoghq.com/version` label derived from the deployed image,
+so a wrapper never restates the image identity once per workload. The label
+names `image.tag` when it is set (the readable `sha-<commit>` build name that
+promotion writes together with `image.digest`), otherwise `image.digest`,
+otherwise `Chart.AppVersion`.
+
+The exact runtime identity stays exact elsewhere: the Pod's image reference is
+`repository@digest` when a digest is pinned, and the storage-accounting
+`BUZZ_STORAGE_SNAPSHOT_CODE_SHA` (persisted as `code_sha` on every snapshot
+row) is the digest when set, otherwise the tag, otherwise `Chart.AppVersion`.
+
+The label value has to be sanitized: a
+label value is capped at 63 bytes, must begin and end with an alphanumeric, and
+may otherwise contain only `[-._a-zA-Z0-9]`, while `image.tag` accepts any OCI
+tag. Because that domain is larger than the label codomain, no mapping onto it
+is injective; the chart provides a deterministic, collision-resistant one. A
+digest keeps the first 63 characters of its hex, a revision that is already a
+valid label value in Datadog's normal form (lowercase, no `__`) is preserved
+byte for byte, and anything else (a leading `_`, an uppercase letter, a `__`
+run, a byte outside the label alphabet, more than 63 bytes) is replaced by the first
+63 hex characters of its SHA-256 — 252 retained bits, the same margin as the
+digest case, and no readable prefix.
+
+Exactly 63 lowercase hex characters is reserved for those hashed and digest
+forms: a tag of that shape is hashed instead of preserved, so a rendered label
+cannot be copied into `image.tag` to make two revisions report one version.
+Shorter hex tags and 40-character git SHAs pass through unchanged.
+
+Any `tags.datadoghq.com/version` supplied through a workload's `podLabels` is
+ignored; see the chart README's "Datadog version label" section.

@@ -25,6 +25,11 @@ pub enum DbError {
     #[error("channel not found: {0}")]
     ChannelNotFound(uuid::Uuid),
 
+    /// Another listed open channel in the community already has this name
+    /// (see `channel::ensure_listed_channel_name_unique`).
+    #[error("an open channel named \"{0}\" already exists")]
+    ChannelNameTaken(String),
+
     /// The requested member is not in the channel.
     #[error("member not found in channel {0}")]
     MemberNotFound(uuid::Uuid),
@@ -37,6 +42,14 @@ pub enum DbError {
     #[error("access denied: {0}")]
     AccessDenied(String),
 
+    /// Invitation admission or minting was denied by authoritative restrictions.
+    #[error("invitation principal is restricted")]
+    InviteRestricted,
+
+    /// A verified invitation owner conflicts with the recorded owner.
+    #[error("invitation owner does not match the recorded owner")]
+    InviteOwnerMismatch,
+
     /// JSON serialization or deserialization failed.
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
@@ -44,6 +57,11 @@ pub enum DbError {
     /// A value in the database is malformed or unexpected.
     #[error("invalid data: {0}")]
     InvalidData(String),
+
+    /// A partition the catalog audit had already listed was dropped before the
+    /// audit finished. A fresh snapshot sees a consistent catalog.
+    #[error("partition catalog changed mid-audit: {0}")]
+    PartitionDroppedMidAudit(String),
 
     /// A serving write admitted before the lifecycle transition is still live.
     /// This is an ordinary retryable drain condition, not a safety violation.
@@ -63,6 +81,10 @@ pub enum DbError {
     /// operator/code remediation rather than blind retry.
     #[error("deletion safety error: {0}")]
     DeletionSafety(String),
+
+    /// An artifact sync page exceeds its resource limit.
+    #[error("artifact sync limit exceeded")]
+    ArtifactSyncLimit,
 
     /// A complete read-state snapshot exceeds its bounded resource budget.
     #[error("read-state snapshot exceeds event or byte limit")]
@@ -86,15 +108,58 @@ pub enum DbError {
 
 impl DbError {
     /// Whether Postgres cancelled the statement (SQLSTATE 57014:
-    /// `statement_timeout` or an explicit cancel). Re-running such a query on
-    /// the writer would only repeat the same expensive work.
+    /// `statement_timeout` or an explicit cancel).
+    ///
+    /// Replica-routed reads surface a cancel instead of re-running on the
+    /// writer. Usually the cancel means expensive work that the writer would
+    /// only repeat at the primary's cost. It can also mean the replica waited
+    /// on a lock that only it holds (a replayed `ACCESS EXCLUSIVE` from
+    /// primary DDL), when the writer would have answered quickly. That miss is
+    /// the accepted price of keeping runaway reads off the primary. Per-call
+    /// routed reads record it as the `statement_cancelled` route reason;
+    /// `ReadSession` reads return it to the relay, which logs the failed read.
     pub fn is_statement_cancelled(&self) -> bool {
         matches!(
             self,
             DbError::Sqlx(sqlx::Error::Database(db)) if db.code().as_deref() == Some("57014")
         )
     }
+
+    /// Whether the failure is about reaching the database at all (pool
+    /// acquire timeout, closed pool, or socket I/O) rather than about the
+    /// statement or its tenant. Every later query on the pool is expected to
+    /// fail the same way.
+    pub fn is_connection_unavailable(&self) -> bool {
+        matches!(
+            self,
+            DbError::Sqlx(sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed | sqlx::Error::Io(_))
+        )
+    }
 }
 
 /// Convenience alias for `Result<T, DbError>`.
 pub type Result<T> = std::result::Result<T, DbError>;
+
+#[cfg(test)]
+mod tests {
+    use super::DbError;
+
+    #[test]
+    fn connection_unavailable_covers_only_pool_and_io_failures() {
+        for error in [
+            sqlx::Error::PoolTimedOut,
+            sqlx::Error::PoolClosed,
+            sqlx::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+        ] {
+            assert!(DbError::Sqlx(error).is_connection_unavailable());
+        }
+        for error in [
+            DbError::Sqlx(sqlx::Error::RowNotFound),
+            DbError::Sqlx(sqlx::Error::Protocol("bad frame".into())),
+            DbError::AccessDenied("write-fenced".into()),
+            DbError::InvalidData("bad row".into()),
+        ] {
+            assert!(!error.is_connection_unavailable(), "{error:?}");
+        }
+    }
+}

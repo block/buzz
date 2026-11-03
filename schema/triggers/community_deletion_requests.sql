@@ -1,0 +1,4 @@
+CREATE TRIGGER community_deletion_request_retargeting_guard
+BEFORE UPDATE ON community_deletion_requests
+FOR EACH ROW
+EXECUTE FUNCTION prevent_community_deletion_request_retargeting();

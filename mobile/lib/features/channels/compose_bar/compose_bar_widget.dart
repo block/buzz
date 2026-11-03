@@ -6,6 +6,16 @@ class ComposeBar extends HookConsumerWidget {
   final String? hintText;
   final ComposeBarOnSend onSend;
 
+  /// Temporarily freezes composition while its destination is being changed.
+  final bool interactionLocked;
+
+  /// Intended recipients before a new Solo channel exists. Suppresses typing
+  /// and membership writes; other mentions are references until creation.
+  final List<ChannelMember>? draftMembers;
+
+  /// Reports whether a send or upload is in flight.
+  final ValueChanged<bool>? onSendingChanged;
+
   /// Lets a parent prepare its layout before the editor requests focus.
   final VoidCallback? onFocusRequested;
 
@@ -21,8 +31,11 @@ class ComposeBar extends HookConsumerWidget {
   const ComposeBar({
     super.key,
     required this.channelId,
+    this.interactionLocked = false,
     this.channelName = '',
     this.hintText,
+    this.draftMembers,
+    this.onSendingChanged,
     this.threadHeadId,
     this.rootId,
     this.focusNode,
@@ -32,6 +45,7 @@ class ComposeBar extends HookConsumerWidget {
   });
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final sendSurfaceKey = useMemoized(GlobalKey.new);
     final controller = useMemoized(_MarkdownEditingController.new);
     final composerText = useListenableSelector(
       controller,
@@ -72,6 +86,25 @@ class ComposeBar extends HookConsumerWidget {
     final uploadError = useState<String?>(null);
     final uploadingCount = useState(0);
     final uploadProgress = useState(0.0);
+    final preparingAttachments = useState(0);
+    final lockedNow = useRef(interactionLocked);
+    lockedNow.value = interactionLocked;
+    bool rejectsAttachment() =>
+        draftMembers != null &&
+        (isSending.value || uploadingCount.value > 0 || lockedNow.value);
+    Future<T> prepare<T>(Future<T> Function() action) =>
+        _prepareComposerAttachment(context, preparingAttachments, action);
+    final sending =
+        isSending.value ||
+        uploadingCount.value > 0 ||
+        (draftMembers != null && preparingAttachments.value > 0);
+    _useComposerBusy(
+      isSending: isSending,
+      uploadingCount: uploadingCount,
+      preparingAttachments: preparingAttachments,
+      isDraft: draftMembers != null,
+      onChanged: onSendingChanged,
+    );
     final uploadGeneration = useRef(0);
     final activeUploadCancellation = useRef<UploadCancellationToken?>(null);
     final voiceNote = _useComposerVoiceNote(
@@ -218,6 +251,15 @@ class ComposeBar extends HookConsumerWidget {
     // Mention state --------------------------------------------------------
     final mentionQuery = useState<String?>(null);
     final mentionStartIdx = useState(-1);
+    // Counts chooser openings: a new `@` starts fresh rows and searches.
+    final mentionOpening = useRef(0);
+    final shownMentions = useRef<_MentionRows>((
+      rows: const [],
+      unavailable: const {},
+      searchFailed: false,
+      reserveHeight: false,
+      searching: false,
+    ));
     // Map of displayName → selected mention candidate built as the user selects
     // mentions. Used to pass resolved pubkeys directly to onSend and to attach
     // selected non-member agents before the message is published.
@@ -228,7 +270,9 @@ class ComposeBar extends HookConsumerWidget {
     final channelsAsync = ref.watch(channelsProvider);
     _useComposerChannelNames(controller, channelsAsync);
 
-    final membersAsync = ref.watch(channelMembersProvider(channelId));
+    final membersAsync = draftMembers == null
+        ? ref.watch(channelMembersProvider(channelId))
+        : AsyncData(draftMembers!);
     final sessionStatus = ref.watch(relaySessionProvider).status;
     final cachedMembers = channelsAsync.asData == null
         ? const <ChannelMember>[]
@@ -237,14 +281,14 @@ class ComposeBar extends HookConsumerWidget {
               .cachedMembersForChannel(channelId);
     final currentPubkey = ref.watch(currentPubkeyProvider);
     final userCache = ref.watch(userCacheProvider);
-    final isDmChannel =
-        channelsAsync.asData?.value.any((c) => c.id == channelId && c.isDm) ??
-        false;
+    final composeChannel = ref.watch(channelByIdProvider(channelId));
+    final isDmChannel = composeChannel?.isDm ?? false;
 
     // Preload profiles for channel members, mentionable agents, and their
     // owners so @mention suggestions show names ("managed by …" included).
     final relayAgents = ref.watch(agentDirectoryProvider).asData?.value;
     final agentOwners = ref.watch(agentOwnersProvider).asData?.value;
+    final ownedAgents = ref.watch(ownedAgentDirectoryProvider).asData?.value;
     final agentMentionLabels = _agentMentionLabels(bindings: mentionMap.value);
     final agentMentionLabelsKey = (agentMentionLabels.toList()..sort()).join(
       '\u0000',
@@ -288,6 +332,34 @@ class ComposeBar extends HookConsumerWidget {
     final isModifyingText = useRef(false);
     final lastObservedEditingValue = useRef(controller.value);
 
+    // Insert a selected mention into the text field.
+    void insertMention(MentionCandidate candidate) {
+      final name = selectedMentionLabel(candidate.label, candidate.pubkey, {
+        for (final entry in mentionMap.value.entries)
+          entry.key: entry.value.pubkey,
+      });
+      // Track the resolved candidate so we can pass its pubkey and prepare
+      // selected non-member agents at send time.
+      mentionMap.value[name] = candidate;
+      ref
+          .read(mentionHistoryProvider.notifier)
+          .remember(channelId, candidate.pubkey);
+
+      final start = mentionStartIdx.value.clamp(0, controller.text.length);
+      isModifyingText.value = true;
+      try {
+        spliceAndMoveCursor(
+          controller,
+          focusNode,
+          start: start,
+          replacement: '@$name ',
+        );
+      } finally {
+        isModifyingText.value = false;
+      }
+      mentionQuery.value = null;
+    }
+
     // Detect @mention query and broadcast typing on text / selection change.
     useEffect(() {
       lastObservedEditingValue.value = controller.value;
@@ -301,7 +373,7 @@ class ComposeBar extends HookConsumerWidget {
         final textChanged = text != previousValue.text;
 
         // Broadcast typing indicator (throttled).
-        if (textChanged && text.isNotEmpty) {
+        if (draftMembers == null && textChanged && text.isNotEmpty) {
           final now = DateTime.now().millisecondsSinceEpoch;
           if (now - lastTypingSentMs.value > _typingThrottleMs) {
             lastTypingSentMs.value = now;
@@ -326,13 +398,45 @@ class ComposeBar extends HookConsumerWidget {
           return;
         }
 
-        // Walk backward from cursor looking for trigger characters.
-        // stopAtSpace: false — @mentions support multi-word display names.
-        final atPos = findTrigger(text, cursor, '@', stopAtSpace: false);
+        var open = findMentionQuery(text, cursor);
+        if (open != null &&
+            _insideSelectedMention(
+              text,
+              open.start,
+              cursor,
+              mentionMap.value.keys,
+            )) {
+          open = null;
+        }
 
-        if (atPos != null) {
-          mentionQuery.value = text.substring(atPos + 1, cursor).toLowerCase();
-          mentionStartIdx.value = atPos;
+        // Space after an exact, unique name selects it (section 5).
+        final previousQuery = mentionQuery.value;
+        if (open != null &&
+            previousQuery != null &&
+            previousQuery.trim().isNotEmpty &&
+            open.start == mentionStartIdx.value &&
+            open.query == '$previousQuery ' &&
+            text.length == previousValue.text.length + 1) {
+          final chosen = _spaceMention(
+            ref,
+            channelId: channelId,
+            query: previousQuery,
+            opening: mentionOpening.value,
+            shown: shownMentions.value,
+            viewer: currentPubkey,
+          );
+          if (chosen != null) {
+            insertMention(chosen);
+            return;
+          }
+        }
+
+        if (open != null) {
+          if (previousQuery == null || mentionStartIdx.value != open.start) {
+            mentionOpening.value++;
+          }
+          mentionQuery.value = open.query;
+          mentionStartIdx.value = open.start;
           channelQuery.value = null;
         } else {
           mentionQuery.value = null;
@@ -358,18 +462,15 @@ class ComposeBar extends HookConsumerWidget {
       return () => controller.removeListener(listener);
     }, [controller]);
 
-    // Ranked mention candidates (desktop-parity ordering + eligibility).
-    final suggestions = mentionQuery.value == null
-        ? const <MentionCandidate>[]
-        : ref
-              .watch(
-                mentionCandidatesProvider((
-                  channelId: channelId,
-                  query: mentionQuery.value!,
-                )),
-              )
-              .take(_mentionSuggestionLimit)
-              .toList();
+    // Ranked mention rows; shown rows hold still while the query stays.
+    final mentionRows = _useMentionRows(
+      ref,
+      channelId: channelId,
+      query: mentionQuery.value,
+      opening: mentionOpening.value,
+    );
+    shownMentions.value = mentionRows;
+    final suggestions = mentionRows.rows;
 
     // Resolve owner names for the visible "managed by …" subtitles.
     useEffect(() {
@@ -383,31 +484,6 @@ class ComposeBar extends HookConsumerWidget {
     // Filter channels against the query.
     final channels = channelsAsync.asData?.value ?? <Channel>[];
     final channelSuggestions = filterChannels(channels, channelQuery.value);
-
-    // Insert a selected mention into the text field.
-    void insertMention(MentionCandidate candidate) {
-      final name = selectedMentionLabel(candidate.label, candidate.pubkey, {
-        for (final entry in mentionMap.value.entries)
-          entry.key: entry.value.pubkey,
-      });
-      // Track the resolved candidate so we can pass its pubkey and prepare
-      // selected non-member agents at send time.
-      mentionMap.value[name] = candidate;
-
-      final start = mentionStartIdx.value.clamp(0, controller.text.length);
-      isModifyingText.value = true;
-      try {
-        spliceAndMoveCursor(
-          controller,
-          focusNode,
-          start: start,
-          replacement: '@$name ',
-        );
-      } finally {
-        isModifyingText.value = false;
-      }
-      mentionQuery.value = null;
-    }
 
     // Insert a selected channel into the text field.
     void insertChannel(Channel channel) {
@@ -466,11 +542,22 @@ class ComposeBar extends HookConsumerWidget {
     // Send the message.
     Future<void> send() async {
       final text = controller.text.trim();
-      if ((text.isEmpty && !hasAttachments) ||
+      if ((draftMembers != null && preparingAttachments.value > 0) ||
+          interactionLocked ||
+          (text.isEmpty && !hasAttachments) ||
           isSending.value ||
           uploadingCount.value > 0) {
         return;
       }
+      final submittedOrigin = ComposerSendOrigin.capture(sendSurfaceKey);
+      Future<void> sendWithOrigin(
+        String content,
+        List<String> mentionPubkeys, {
+        List<List<String>> mediaTags = const [],
+      }) => ComposerSendOrigin.run(
+        submittedOrigin,
+        () => onSend(content, mentionPubkeys, mediaTags: mediaTags),
+      );
       final submittedDraftRevision = draftRevision.value;
       // Resolved before any await: see
       // `_reportSendCancelledByCommunitySwitch`.
@@ -503,6 +590,10 @@ class ComposeBar extends HookConsumerWidget {
             userCache: userCache,
             ownerByAgentPubkey: agentOwners ?? const {},
             currentPubkey: currentPubkey,
+            ownedAgents: ownedAgents,
+            offerOwnedAgents:
+                composeChannel != null &&
+                (composeChannel.isStream || composeChannel.isForum),
             // Reuse ordinary search-result classification, not membership as
             // permission. Persisted keys/flags themselves prove no role.
             searchResults: [
@@ -513,33 +604,71 @@ class ComposeBar extends HookConsumerWidget {
           ),
         );
       } on FormatException catch (error) {
-        messenger?.showSnackBar(SnackBar(content: Text(error.message)));
+        messenger?.showFeedbackSnackBar(
+          SnackBar(content: Text(error.message)),
+          kind: ToastKind.error,
+        );
         return;
       }
       final outgoing = _OutgoingMentions(selectedMentions);
-      final scan = await _scanNonMemberMentions(
-        ref,
-        channelId: channelId,
-        selectedMentions: selectedMentions,
-        currentPubkey: currentPubkey,
-      );
+      // Read before any await. These actions belong to this community and
+      // refuse to run after a switch, so an Invite answered after a switch
+      // cannot add people in the new community.
+      final channelActions = ref.read(channelActionsProvider);
+      final _NonMemberMentionScan scan;
+      try {
+        scan = draftMembers != null
+            ? _NonMemberMentionScan(
+                channelId: channelId,
+                outside: selectedMentions
+                    .where(
+                      (candidate) => !draftMembers!.any(
+                        (member) => member.pubkey == candidate.pubkey,
+                      ),
+                    )
+                    .toList(),
+                canAddMembers: false,
+                isDm: true,
+              )
+            : await _scanNonMemberMentions(
+                ref,
+                channelId: channelId,
+                selectedMentions: selectedMentions,
+                currentPubkey: currentPubkey,
+              );
+      } catch (_) {
+        // Nothing was sent and the draft is untouched, so Retry sends it again.
+        if (context.mounted) {
+          showBuzzToast(
+            context,
+            'Not sent. Couldn’t check members.',
+            kind: ToastKind.error,
+            onRetry: () => unawaited(send()),
+          );
+        }
+        return;
+      }
 
-      // Mentioning humans outside the channel prompts "Invite" / "Do
-      // nothing" (send without inviting) — mirrors desktop's
-      // NonMemberMentionDialog. Agents keep the existing silent auto-add.
-      if (scan.humans.isNotEmpty) {
+      // Mentioning anyone outside the channel, person or agent, prompts
+      // "Invite" / "Do nothing" (portable mention rules, section 7). Nobody
+      // can be added to a DM, so a DM sends them as references without asking.
+      if (scan.outside.isNotEmpty && scan.isDm) {
+        outgoing.resolveOutsideChoice(
+          _NonMemberMentionChoice.sendWithoutInviting,
+          scan.outside,
+        );
+      } else if (scan.outside.isNotEmpty) {
         if (!context.mounted) return;
         final choice = await _promptNonMemberMention(
           context,
-          names: [for (final candidate in scan.humans) candidate.label],
+          names: [for (final candidate in scan.outside) candidate.label],
           canInvite: scan.canAddMembers,
         );
         if (choice == null) return; // Dismissed — keep the draft, send nothing.
-        outgoing.resolveHumanChoice(choice, scan.humans);
+        outgoing.resolveOutsideChoice(choice, scan.outside);
       }
 
       final queuedAttachments = List<_PendingAttachment>.of(attachments.value);
-      final channelActions = ref.read(channelActionsProvider);
 
       // An add that was refused doesn't block the message: it is reported and
       // the un-added mentions are demoted to reference tags so the send lands.
@@ -568,7 +697,7 @@ class ComposeBar extends HookConsumerWidget {
               customEmoji: customEmoji,
             ),
             outgoing: outgoing,
-            onSend: onSend,
+            onSend: sendWithOrigin,
             messenger: messenger,
           );
           return;
@@ -588,7 +717,7 @@ class ComposeBar extends HookConsumerWidget {
         final cancellation = UploadCancellationToken();
         final uploadService = ref.read(mediaUploadServiceProvider);
         activeUploadCancellation.value = cancellation;
-        final delivery = onSend;
+        final delivery = sendWithOrigin;
         unawaited(() async {
           var retainedForRetry = false;
           try {
@@ -656,12 +785,16 @@ class ComposeBar extends HookConsumerWidget {
       }
     }
 
-    final queueAttachment = useCallback(
-      (
-        XFile file,
-        _PendingAttachmentKind kind, {
-        bool deleteAfterUse = false,
-      }) => _queueComposerAttachment(
+    final queueAttachment = useCallback((
+      XFile file,
+      _PendingAttachmentKind kind, {
+      bool deleteAfterUse = false,
+    }) {
+      if (rejectsAttachment()) {
+        if (deleteAfterUse) unawaited(_deleteXFile(file));
+        return;
+      }
+      _queueComposerAttachment(
         file,
         kind,
         voiceNoteRef,
@@ -669,9 +802,8 @@ class ComposeBar extends HookConsumerWidget {
         uploadError,
         draftRevision,
         deleteAfterUse: deleteAfterUse,
-      ),
-      [voiceNoteRef, draftRevision, uploadError, attachments],
-    );
+      );
+    }, [voiceNoteRef, draftRevision, uploadError, attachments]);
     Future<void> pickThenQueue({
       required Future<XFile?> Function() pick,
       required _PendingAttachmentKind kind,
@@ -689,6 +821,7 @@ class ComposeBar extends HookConsumerWidget {
     }
 
     bool queueImages(List<XFile> images, {bool deleteAfterUse = false}) =>
+        !rejectsAttachment() &&
         _queueComposerImages(
           images,
           voiceNote,
@@ -699,24 +832,26 @@ class ComposeBar extends HookConsumerWidget {
         );
 
     Future<void> retainAndQueueImages(List<XFile> images) =>
-        _retainAndQueueImages(context, images, queueImages);
+        prepare(() => _retainAndQueueImages(context, images, queueImages));
 
     final pasteClipboardImage = useCallback(() {
       ContextMenuController.removeAny();
-      unawaited(() async {
-        try {
-          final image = await ref
-              .read(mediaUploadServiceProvider)
-              .readClipboardImage();
-          if (image != null && context.mounted) {
-            queueAttachment(image, _PendingAttachmentKind.image);
-          } else if (context.mounted) {
-            uploadError.value = 'Unable to read pasted image';
+      unawaited(
+        prepare(() async {
+          try {
+            final image = await ref
+                .read(mediaUploadServiceProvider)
+                .readClipboardImage();
+            if (image != null && context.mounted) {
+              queueAttachment(image, _PendingAttachmentKind.image);
+            } else if (context.mounted) {
+              uploadError.value = 'Unable to read pasted image';
+            }
+          } catch (error) {
+            if (context.mounted) uploadError.value = _formatUploadError(error);
           }
-        } catch (error) {
-          if (context.mounted) uploadError.value = _formatUploadError(error);
-        }
-      }());
+        }),
+      );
     }, [context, ref, queueAttachment, uploadError]);
 
     final buildContextMenu = useCallback<EditableTextContextMenuBuilder>((
@@ -809,7 +944,7 @@ class ComposeBar extends HookConsumerWidget {
             context,
             attachmentSurface,
             uploadError,
-            choose,
+            () => prepare(choose),
             errorMessage: errorMessage,
           );
 
@@ -840,7 +975,7 @@ class ComposeBar extends HookConsumerWidget {
                     .read(mediaUploadServiceProvider)
                     .pickGalleryImages();
                 queueImages(photos);
-              }, errorMessage: 'Unable to open your photo library.'),
+              }, errorMessage: 'Couldn’t open photo library'),
               onVideo: () => chooseAttachment(() {
                 final service = ref.read(mediaUploadServiceProvider);
                 return pickThenQueue(
@@ -910,6 +1045,14 @@ class ComposeBar extends HookConsumerWidget {
     final suggestionPanel = _composerSuggestionPanel(
       channelSuggestions: channelSuggestions,
       mentionSuggestions: suggestions,
+      unavailableMentions: mentionRows.unavailable,
+      mentionSearchFailed: mentionRows.searchFailed,
+      reserveMentionHeight: mentionRows.reserveHeight,
+      mentionSearching: mentionRows.searching,
+      onMentionSearchRetry: () {
+        final query = mentionQuery.value;
+        if (query != null) ref.invalidate(mentionUserSearchProvider(query));
+      },
       userCache: userCache,
       currentPubkey: currentPubkey,
       isDmChannel: isDmChannel,
@@ -918,6 +1061,7 @@ class ComposeBar extends HookConsumerWidget {
     );
     Widget buildOverlayPanel(_AttachmentSurface surface) {
       return _composerAttachmentPanel(
+        preparePhotos: prepare,
         surface: surface,
         suggestionPanel: suggestionPanel,
         onBack: () => attachmentSurface.value = _AttachmentSurface.menu,
@@ -945,7 +1089,8 @@ class ComposeBar extends HookConsumerWidget {
           attachmentSurface.value = _AttachmentSurface.closed;
           await retainAndQueueImages([image]);
         },
-        onPickAllPhotos: ref.read(mediaUploadServiceProvider).pickGalleryImages,
+        onPickAllPhotos: () =>
+            prepare(ref.read(mediaUploadServiceProvider).pickGalleryImages),
         onChoosePhotos: (photos) async {
           attachmentSurface.value = _AttachmentSurface.closed;
           await retainAndQueueImages(photos);
@@ -984,51 +1129,57 @@ class ComposeBar extends HookConsumerWidget {
             onDismissAttachmentSurface: () {
               attachmentSurface.value = _AttachmentSurface.closed;
             },
-            child: _ComposeBarLayout(
-              voiceNoteRecorder: voiceNote.recorder,
-              attachments: attachments.value,
-              onRemoveAttachment: removeAttachment,
-              uploadError: uploadError.value,
-              isExpanded: isComposerExpanded.value,
-              controller: controller,
-              focusNode: focusNode,
-              contextMenuBuilder: buildContextMenu,
-              onContentInserted: uploadPastedImage,
-              onSend: () => unawaited(send()),
-              resolvedHint: resolvedHint,
-              attachmentSurface: attachmentSurface.value,
-              onAttachmentTap: handleAttachmentTap,
-              onExpand: expandComposer,
-              expansionAnimation: composerExpansionController,
-              formattingOpen: showFormatting.value,
-              onCloseFormatting: () => showFormatting.value = false,
-              motionDuration: motionDuration,
-              resizeDuration: resizeDuration,
-              onFormat: applyFormat,
-              onMention: () {
-                attachmentSurface.value = _AttachmentSurface.closed;
-                triggerMention();
-              },
-              onChannel: () {
-                attachmentSurface.value = _AttachmentSurface.closed;
-                triggerChannel();
-              },
-              onEmoji: () {
-                attachmentSurface.value = _AttachmentSurface.closed;
-                isEmojiPickerOpen.value = true;
-                _showComposerEmojiPicker(context, insertEmoji, () {
-                  if (!context.mounted) return;
-                  isEmojiPickerOpen.value = false;
-                  focusNode.requestFocus();
-                });
-              },
-              onOpenFormatting: () {
-                attachmentSurface.value = _AttachmentSurface.closed;
-                showFormatting.value = true;
-              },
-              hasPendingUploads: hasPendingUploads,
-              canSend: composerText.trim().isNotEmpty || hasAttachments,
-              isSending: isSending.value,
+            child: AbsorbPointer(
+              absorbing: interactionLocked || (draftMembers != null && sending),
+              child: _ComposeBarLayout(
+                surfaceKey: sendSurfaceKey,
+                voiceNoteRecorder: voiceNote.recorder,
+                attachments: attachments.value,
+                onRemoveAttachment: removeAttachment,
+                uploadError: uploadError.value,
+                isExpanded: isComposerExpanded.value,
+                controller: controller,
+                focusNode: focusNode,
+                contextMenuBuilder: buildContextMenu,
+                onContentInserted: uploadPastedImage,
+                onSend: () => unawaited(send()),
+                resolvedHint: resolvedHint,
+                attachmentSurface: attachmentSurface.value,
+                onAttachmentTap: handleAttachmentTap,
+                onExpand: expandComposer,
+                expansionAnimation: composerExpansionController,
+                formattingOpen: showFormatting.value,
+                onCloseFormatting: () => showFormatting.value = false,
+                motionDuration: motionDuration,
+                resizeDuration: resizeDuration,
+                onFormat: applyFormat,
+                onMention: () {
+                  attachmentSurface.value = _AttachmentSurface.closed;
+                  triggerMention();
+                },
+                onChannel: () {
+                  attachmentSurface.value = _AttachmentSurface.closed;
+                  triggerChannel();
+                },
+                onEmoji: () {
+                  attachmentSurface.value = _AttachmentSurface.closed;
+                  isEmojiPickerOpen.value = true;
+                  _showComposerEmojiPicker(context, insertEmoji, () {
+                    if (!context.mounted) return;
+                    isEmojiPickerOpen.value = false;
+                    focusNode.requestFocus();
+                  });
+                },
+                onOpenFormatting: () {
+                  attachmentSurface.value = _AttachmentSurface.closed;
+                  showFormatting.value = true;
+                },
+                hasPendingUploads: hasPendingUploads,
+                canSend: composerText.trim().isNotEmpty || hasAttachments,
+                isSending: isSending.value || (draftMembers != null && sending),
+                readOnly:
+                    interactionLocked || (draftMembers != null && sending),
+              ),
             ),
           ),
         ],

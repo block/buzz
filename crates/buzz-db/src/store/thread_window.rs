@@ -251,6 +251,12 @@ impl Db {
                 Err(error @ (DbError::InvalidData(_) | DbError::ThreadWindowBudgetExceeded(_))) => {
                     return Err(error);
                 }
+                // Surface a cancel instead of re-running it on the writer; see
+                // `DbError::is_statement_cancelled` for the trade-off.
+                Err(error) if error.is_statement_cancelled() => {
+                    Self::record_route(path, "replica", "statement_cancelled");
+                    return Err(error);
+                }
                 Err(error) => {
                     tracing::warn!(%error, path, "replica thread window failed; re-running on writer");
                     Self::record_route(path, "writer", "replica_error");
@@ -436,6 +442,8 @@ async fn writer_aux(
 impl ReadSession {
     /// Strict NIP-CW thread-mode auxiliary scan on the same proved snapshot, with the
     /// existing permanent writer degradation on mid-request replica failure.
+    /// Exception: a statement cancel (57014) is returned and the session stays
+    /// on the replica.
     #[datastore_span(name = "thread_window_aux", system = "postgresql")]
     pub async fn thread_window_aux(
         &mut self,
@@ -448,6 +456,10 @@ impl ReadSession {
                 Err(error @ (DbError::InvalidData(_) | DbError::ThreadWindowBudgetExceeded(_))) => {
                     return Err(error);
                 }
+                // Surface a cancel instead of re-running it on the writer (see
+                // `DbError::is_statement_cancelled`) and keep the proved
+                // replica session.
+                Err(error) if error.is_statement_cancelled() => return Err(error),
                 Err(error) => {
                     tracing::warn!(%error, "thread auxiliary read failed; degrading to writer");
                     metrics::counter!("buzz_db_read_session_degraded").increment(1);

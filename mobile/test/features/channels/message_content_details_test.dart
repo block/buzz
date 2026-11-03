@@ -19,6 +19,7 @@ Widget _app(
   ValueNotifier<String> content, {
   String? messageId = 'event-1',
   Map<String, String> mentionNames = const {},
+  bool bubble = false,
 }) => ProviderScope(
   overrides: [customEmojiListProvider.overrideWith((ref) => const [])],
   child: MaterialApp(
@@ -31,6 +32,7 @@ Widget _app(
             content: value,
             messageId: messageId,
             mentionNames: mentionNames,
+            bubble: bubble,
           ),
         ),
       ),
@@ -52,6 +54,21 @@ bool _shows(String text) =>
     find.textContaining(text, findRichText: true).evaluate().isNotEmpty;
 
 void main() {
+  testWidgets('sections work in conversation bubbles', (tester) async {
+    await tester.pumpWidget(_app(ValueNotifier(_board), bubble: true));
+
+    expect(_shows('Fleet working (2)'), isTrue);
+    expect(_shows('Footer'), isTrue);
+    expect(_shows('model routing pilot'), isFalse);
+    expect(_shows(':::'), isFalse);
+
+    await _tapTitle(tester, 'Fleet working');
+    await tester.pump();
+
+    expect(_shows('model routing pilot'), isTrue);
+    expect(_shows('personal website'), isFalse);
+  });
+
   testWidgets('sections start collapsed and open on tap', (tester) async {
     await tester.pumpWidget(_app(ValueNotifier(_board)));
 

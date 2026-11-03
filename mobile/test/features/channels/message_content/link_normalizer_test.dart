@@ -30,6 +30,125 @@ void main() {
     );
   });
 
+  group('attachment destinations', () {
+    const media = 'https://relay.example/media/image.png';
+    for (final prefix in ['!', '']) {
+      test('$prefix preserves angle destinations and optional titles', () {
+        for (final destination in ['<$media>', media, '<$media> "Title"']) {
+          expect(
+            normalizeBareLinks('$prefix[label]($destination)'),
+            '$prefix[label]($media)',
+          );
+        }
+      });
+    }
+    for (final title in [
+      '(Video title)',
+      r'"A \"preview\""',
+      r"'A \'preview\''",
+      r'(A \(preview\))',
+    ]) {
+      for (final prefix in ['!', '']) {
+        test('$prefix supports title $title', () {
+          expect(
+            normalizeBareLinks('$prefix[label](<$media> $title)'),
+            '$prefix[label]($media)',
+          );
+        });
+      }
+    }
+    test('near-limit malformed openers complete without suffix rescans', () {
+      // A generous wall-clock ceiling catches the original ~20 second freeze
+      // while allowing slow CI hosts ample headroom for the linear scanner.
+      for (final unit in ['[x](', '[', r'[x\[', r'[x\]']) {
+        final input = unit * (256 * 1024 ~/ unit.length);
+        final watch = Stopwatch()..start();
+        final result = normalizeBareLinks(input);
+        watch.stop();
+        expect(result == input, isTrue);
+        expect(watch.elapsed, lessThan(const Duration(seconds: 2)));
+      }
+    });
+    for (final (label, rendered) in [
+      (r'report \[Q4\].pdf', 'report &#91;Q4&#93;.pdf'),
+      (r'only \[ opening', 'only &#91; opening'),
+      (r'only \] closing', 'only &#93; closing'),
+      (
+        r'backslash \\ and \[brackets\]',
+        'backslash &#92; and &#91;brackets&#93;',
+      ),
+      ('nested [label]', 'nested &#91;label&#93;'),
+    ]) {
+      for (final prefix in ['!', '']) {
+        test('$prefix preserves escaped label $label', () {
+          expect(
+            normalizeBareLinks('$prefix[$label](<$media>)'),
+            '$prefix[$rendered]($media)',
+          );
+        });
+      }
+    }
+    test('URL and title brackets do not capture a later attachment label', () {
+      expect(
+        normalizeBareLinks(
+          '[first](<https://relay.example/file?q=[> "Title [") '
+          r'[second \[Q4\]](<https://relay.example/file.pdf>)',
+        ),
+        '[first](https://relay.example/file?q=[) '
+        '[second &#91;Q4&#93;](https://relay.example/file.pdf)',
+      );
+    });
+    for (final prose in ['oops [ then ', 'oops [[ text ', 'oops [x] [ ']) {
+      for (final prefix in ['!', '']) {
+        test('$prefix recovers after unmatched prose $prose', () {
+          expect(
+            normalizeBareLinks(
+              '$prose$prefix[outer [inner] label](<$media>) '
+              r'[report \[Q4\]](<https://relay.example/report.pdf>)',
+            ),
+            '$prose$prefix[outer &#91;inner&#93; label]($media) '
+            '[report &#91;Q4&#93;](https://relay.example/report.pdf)',
+          );
+        });
+      }
+    }
+    test('near-limit unmatched prose preserves every later attachment', () {
+      const source = '[file](<https://relay.example/file.pdf>) ';
+      const expected = '[file](https://relay.example/file.pdf) ';
+      final count = (256 * 1024 - 2) ~/ source.length;
+      final watch = Stopwatch()..start();
+      final output = normalizeBareLinks('[ ${source * count}');
+      watch.stop();
+      expect(output == '[ ${expected * count}', isTrue);
+      expect(watch.elapsed, lessThan(const Duration(seconds: 2)));
+    });
+    test('escapes spaces and parentheses without double-encoding URLs', () {
+      const raw = 'https://relay.example/media/photo (1).png?q=a%20b&v=2';
+      const encoded =
+          'https://relay.example/media/photo%20%281%29.png?q=a%20b&v=2';
+      expect(normalizeBareLinks('![photo](<$raw>)'), '![photo]($encoded)');
+      expect(normalizeBareLinks('![photo]($encoded)'), '![photo]($encoded)');
+      expect(
+        normalizeBareLinks('![photo](https://relay.example/a(b).png)'),
+        '![photo](https://relay.example/a%28b%29.png)',
+      );
+    });
+    test('normalizes prose surrounding multiple authored destinations', () {
+      expect(
+        normalizeBareLinks('See <$media> ![one](<$media>) [two](<$media>)'),
+        'See [$media]($media) ![one]($media) [two]($media)',
+      );
+    });
+    test('preserves attachment examples inside inline and fenced code', () {
+      const example = '![photo](<$media>)';
+      expect(normalizeBareLinks('`$example`'), '`$example`');
+      expect(
+        normalizeBareLinks('```md\n$example\n```'),
+        '```md\n$example\n```',
+      );
+    });
+  });
+
   group('code boundaries', () {
     final cases = <({String name, String input, String expected})>[
       (
@@ -63,6 +182,46 @@ void main() {
         expected: '```\n$url ``` still code\n```\n[$url]($url)',
       ),
       (
+        name: 'tilde fence indented three spaces',
+        input: '   ~~~\n$url\n   ~~~\n$url',
+        expected: '   ~~~\n$url\n   ~~~\n[$url]($url)',
+      ),
+      (
+        name: 'fence opens after deeper indentation',
+        input: '    ~~~\n$url',
+        expected: '    ~~~\n$url',
+      ),
+      (
+        name: 'unclosed fence inside a quote',
+        input: '> ```sh\n> $url',
+        expected: '> ```sh\n> $url',
+      ),
+      (
+        name: 'unclosed quoted fence ends with its quote',
+        input: '> ```sh\n> $url\n\n$url',
+        expected: '> ```sh\n> $url\n\n[$url]($url)',
+      ),
+      (
+        name: 'quoted fence ends at a lazy line',
+        input: '> ```sh\n> $url\n$url',
+        expected: '> ```sh\n> $url\n[$url]($url)',
+      ),
+      (
+        name: 'top-level fence does not close on a quoted fence',
+        input: '```md\n> ```\n$url\n```\n$url',
+        expected: '```md\n> ```\n$url\n```\n[$url]($url)',
+      ),
+      (
+        name: 'quoted fence closes inside the quote',
+        input: '> ~~~\n> $url\n> ~~~\n$url',
+        expected: '> ~~~\n> $url\n> ~~~\n[$url]($url)',
+      ),
+      (
+        name: 'fence closer must end its line',
+        input: '~~~\n$url\n~~~ x\n~~~\n$url',
+        expected: '~~~\n$url\n~~~ x\n~~~\n[$url]($url)',
+      ),
+      (
         name: 'unclosed backticks remain prose',
         input: '$url then `$url',
         expected: '[$url]($url) then `[$url]($url)',
@@ -74,6 +233,46 @@ void main() {
         expect(normalizeBareLinks(testCase.input), testCase.expected);
       });
     }
+
+    test('bare links leave a trailing backslash outside the destination', () {
+      expect(
+        normalizeBareLinks(r'see https://example.com/a\'),
+        r'see [https://example.com/a](https://example.com/a)\',
+      );
+      expect(
+        normalizeBareLinks(r'*https://example.com/a\**'),
+        r'*[https://example.com/a](https://example.com/a)\**',
+      );
+    });
+
+    test('a literal backslash before a bare link stays literal', () {
+      expect(
+        normalizeBareLinks(r'see \https://example.com/a'),
+        r'see \\[https://example.com/a](https://example.com/a)',
+      );
+      expect(
+        normalizeBareLinks(r'see \\https://example.com/a'),
+        r'see \\[https://example.com/a](https://example.com/a)',
+      );
+    });
+
+    test('near-limit fence-like runs on one line complete linearly', () {
+      // Each run checks only its own indentation and the rest of its line up
+      // to the next character, so a long line of runs is not rescanned.
+      for (final input in [
+        'x~~~' * (256 * 1024 ~/ 4),
+        '~~~\n${' ~~~' * (256 * 1024 ~/ 4)}',
+        '```\n${' ```' * (256 * 1024 ~/ 4)}',
+        '>' * (256 * 1024 - 3) + '~~~',
+        '> ~~~' * (256 * 1024 ~/ 5),
+      ]) {
+        final watch = Stopwatch()..start();
+        final result = normalizeBareLinks(input);
+        watch.stop();
+        expect(result == input, isTrue);
+        expect(watch.elapsed, lessThan(const Duration(seconds: 2)));
+      }
+    });
   });
 
   test(

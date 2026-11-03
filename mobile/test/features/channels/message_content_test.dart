@@ -1,4 +1,10 @@
+import 'package:buzz/shared/widgets/buzz_agent_icon.dart';
+import 'package:buzz/features/channels/local_send_bubble_surface.dart';
 import 'dart:async';
+import 'dart:convert';
+import 'package:http/testing.dart';
+import 'package:buzz/shared/widgets/media_loading_placeholder.dart';
+import 'package:buzz/shared/widgets/skeleton.dart';
 import 'dart:ui' as ui;
 
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
@@ -14,7 +20,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
 import 'package:http/http.dart' as http;
 import 'package:just_audio/just_audio.dart' as audio;
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
@@ -30,10 +36,15 @@ import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
 
+part 'message_content_bubble_cases.dart';
+part 'message_carousel_preview_cases.dart';
+
 Widget _testable(
   Widget child, {
   List<Override> overrides = const [],
   bool disableAnimations = false,
+  bool dark = false,
+  ThemeData? theme,
   VideoPreviewFrameLoader? videoPreviewFrameLoader,
 }) {
   return ProviderScope(
@@ -44,7 +55,7 @@ Widget _testable(
       ...overrides,
     ],
     child: MaterialApp(
-      theme: AppTheme.light(),
+      theme: theme ?? (dark ? AppTheme.dark() : AppTheme.light()),
       // Use MaterialApp.builder so the MediaQuery override (including
       // disableAnimations) applies to every pushed route, not just the
       // home scaffold.  Navigator-pushed routes (e.g. MediaVideoViewerPage)
@@ -123,6 +134,20 @@ class _LoadingVoiceNotePlayer extends _FakeVoiceNotePlayer {
     required Map<String, String> Function() headers,
     required Duration fallbackDuration,
   }) async {}
+}
+
+class _ReadyTransitionVoiceNotePlayer extends _LoadingVoiceNotePlayer {
+  bool loading = true;
+  @override
+  VoiceNotePlaybackState get state => VoiceNotePlaybackState(
+    isLoading: loading,
+    canCancelLoading: loading,
+    duration: const Duration(seconds: 3),
+  );
+  void finishLoading() {
+    loading = false;
+    notifyListeners();
+  }
 }
 
 class _ToggleTrackingLoadingVoiceNotePlayer extends _LoadingVoiceNotePlayer {
@@ -270,9 +295,49 @@ bool _isImageViewerHeroEnabled(WidgetTester tester) {
   return tester.widget<HeroMode>(_imageViewerHeroMode()).enabled;
 }
 
+/// Whether any placeholder span in the tree contains a further placeholder.
+///
+/// This is the shape that renders as nothing on iOS: a token component's
+/// `WidgetSpan` nested inside the `WidgetSpan` a link is already drawn in.
+/// Each placeholder becomes its own paragraph, so a paragraph that both sits
+/// under another paragraph's placeholder and holds a placeholder of its own is
+/// the defect.
+bool _hasNestedPlaceholder(WidgetTester tester) {
+  for (final rich in tester.widgetList<RichText>(_anyRichText())) {
+    var placeholders = 0;
+    rich.text.visitChildren((span) {
+      if (span is PlaceholderSpan) placeholders++;
+      return true;
+    });
+    if (placeholders == 0) continue;
+    // A paragraph holding a placeholder is fine on its own — the message body
+    // does that for every link. It is only a defect when that paragraph is
+    // itself inside another paragraph's placeholder.
+    final ancestors = find.ancestor(
+      of: find.byWidget(rich),
+      matching: _anyRichText(),
+    );
+    if (ancestors.evaluate().isNotEmpty) return true;
+  }
+  return false;
+}
+
+/// Matches every `RichText` in the tree, including subclasses.
+///
+/// gpt_markdown renders body paragraphs through `BidiRichText`, a `RichText`
+/// subclass. `find.byType` matches the exact runtime type only, so it silently
+/// skips those paragraphs — an assertion that text is rendered then fails, and
+/// an assertion that text is absent then passes for the wrong reason.
+Finder _anyRichText() {
+  return find.byWidgetPredicate(
+    (widget) => widget is RichText,
+    description: 'any RichText (including subclasses)',
+  );
+}
+
 /// Extracts all plain text from all RichText widgets in the tree.
 String _allRichText(WidgetTester tester) {
-  final richTexts = tester.widgetList<RichText>(find.byType(RichText));
+  final richTexts = tester.widgetList<RichText>(_anyRichText());
   return richTexts.map((rt) => rt.text.toPlainText()).join('\n');
 }
 
@@ -287,7 +352,7 @@ Finder _findRich(String text) {
 /// Checks that the given text appears as bold (fontWeight >= w600) in some
 /// TextSpan within any RichText widget.
 bool _hasBoldSpan(WidgetTester tester, String text) {
-  for (final rt in tester.widgetList<RichText>(find.byType(RichText))) {
+  for (final rt in tester.widgetList<RichText>(_anyRichText())) {
     if (_spanHasStyle(
       rt.text,
       text,
@@ -301,7 +366,7 @@ bool _hasBoldSpan(WidgetTester tester, String text) {
 }
 
 bool _hasItalicSpan(WidgetTester tester, String text) {
-  for (final rt in tester.widgetList<RichText>(find.byType(RichText))) {
+  for (final rt in tester.widgetList<RichText>(_anyRichText())) {
     if (_spanHasStyle(rt.text, text, (s) => s.fontStyle == FontStyle.italic)) {
       return true;
     }
@@ -310,7 +375,7 @@ bool _hasItalicSpan(WidgetTester tester, String text) {
 }
 
 bool _hasStrikethroughSpan(WidgetTester tester, String text) {
-  for (final rt in tester.widgetList<RichText>(find.byType(RichText))) {
+  for (final rt in tester.widgetList<RichText>(_anyRichText())) {
     if (_spanHasStyle(
       rt.text,
       text,
@@ -355,6 +420,8 @@ class _TestChannelsNotifier extends ChannelsNotifier {
 }
 
 void main() {
+  carouselPreviewTests();
+  bubbleContentTests();
   test('wide voice-note waveforms distribute bars across their full width', () {
     const width = 320.0;
     const sampleCount = 48;
@@ -425,6 +492,88 @@ void main() {
   });
 
   group('MessageContent', () {
+    testWidgets('renders backslash escapes as the escaped character', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      String visible() => [
+        for (final element in find.byType(RichText).evaluate())
+          (element.widget as RichText).text.toPlainText(),
+      ].join('|');
+
+      for (final (content, shown) in [
+        (r'plain \# \* \_ \\ end', r'plain # * _ \ end'),
+        (r'**bold \#x** \[not math\](y)', '[not math](y)'),
+        (r'[\#buzz-mobile](https://example.com/x)', '#buzz-mobile'),
+        (
+          r'[\#buzz-mobile](buzz://channel/9f18f3c6-b5e5-453d-b36d-65487913be0b)',
+          '#buzz-mobile',
+        ),
+        ('```\nx \\# y\n```', r'x \# y'),
+        (r'code `a\#b`', r'a\#b'),
+        (r'\`literal\` then `a\#b`', '`literal` then '),
+        // Authored stand-in characters are not mistaken for escapes.
+        ('\uFF0A \u2060\uFF0A \\#', '\uFF0A \u2060\uFF0A #'),
+        ('~~~\nx \\# y\n~~~', r'x \# y'),
+        // A fence that never closes is still code inside a quote or list.
+        ('> ```sh\n> echo \\#x', r'echo \#x'),
+        ('- item\n\n      ```\n      echo \\#x', r'echo \#x'),
+        // A fence closes only at the quote depth it opened at.
+        ('```md\n> ```\necho \\#g\n```', r'echo \#g'),
+        ('> ```sh\n> x\n\n```\necho \\#g\n```', r'echo \#g'),
+        // A quoted fence ends with its quote, so later prose is parsed.
+        ('> ```sh\n> echo x\n\nplain \\#text', 'plain #text'),
+        // Known limitation: gpt_markdown's raw-text fallback for this
+        // unclaimed strike skips inline components, so the stand-in shows.
+        // Its fullwidth form still reads as #.
+        ('~~a\nb \\#c~~', '\uFF03c'),
+        // A bare link's trailing backslash stays outside the link.
+        (r'see https://example.com/a\', 'see '),
+        (r'in buzz://channel/9f18f3c6-b5e5-453d-b36d-65487913be0b.\', r'.\'),
+        (r'*https://example.com/a\**', '*'),
+        (r'see \<https://example.com/b>', 'see <'),
+        (r'see \https://example.com/c', r'see \'),
+        (r'see <https://example.com/a\>', r'https://example.com/a\'),
+        (
+          '![shot \\#1](https://example.com/a.png)\n'
+              '![shot \\#2](https://example.com/b.png)',
+          null,
+        ),
+      ]) {
+        for (final bubble in [false, true]) {
+          await tester.pumpWidget(
+            _testable(MessageContent(content: content, bubble: bubble)),
+          );
+          final reason = '$content (bubble: $bubble) showed ${visible()}';
+          if (shown != null) {
+            expect(
+              find.textContaining(shown, findRichText: true),
+              findsWidgets,
+              reason: reason,
+            );
+          }
+          // No stand-in or leaked link syntax reaches text or semantics.
+          if (content.contains('\u2060') || shown == '\uFF03c') continue;
+          expect(
+            find.textContaining(
+              RegExp('\u2060|\\]\\(http'),
+              findRichText: true,
+            ),
+            findsNothing,
+            reason: reason,
+          );
+          expect(
+            find.bySemanticsLabel(RegExp('\u2060')),
+            findsNothing,
+            reason: reason,
+          );
+        }
+      }
+      // Gallery labels drop their escapes too.
+      expect(find.bySemanticsLabel(RegExp(r'shot #1')), findsWidgets);
+      semantics.dispose();
+    });
+
     testWidgets('forwards text alignment to markdown rendering', (
       tester,
     ) async {
@@ -1070,6 +1219,91 @@ void main() {
     });
 
     group('media attachments', () {
+      testWidgets('reserves image metadata dimensions while bytes load', (
+        tester,
+      ) async {
+        const url = 'https://example.com/content-shaped-loading.png';
+        final response = Completer<http.Response>();
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: '![image]($url)',
+              channelNames: {'general': 'general-id'},
+              tags: [
+                ['imeta', 'url $url', 'm image/png', 'dim 1200x2400'],
+              ],
+            ),
+            disableAnimations: true,
+            overrides: [
+              mediaGetAuthServiceProvider.overrideWithValue(
+                MediaGetAuthService(baseUrl: 'https://example.com', nsec: null),
+              ),
+              mediaHttpClientProvider.overrideWithValue(
+                MockClient((_) => response.future),
+              ),
+            ],
+          ),
+        );
+        await tester.pump();
+        final preview = find.byKey(
+          const ValueKey('message-media-image-preview:$url'),
+        );
+        final before = tester.getSize(preview);
+        expect(before.height, 240);
+        expect(before.width, 120);
+        expect(find.byType(MediaLoadingPlaceholder), findsOneWidget);
+        response.complete(
+          http.Response.bytes(
+            base64Decode(
+              'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aL1sAAAAASUVORK5CYII=',
+            ),
+            200,
+          ),
+        );
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 100)),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(MediaLoadingPlaceholder), findsNothing);
+        expect(tester.getSize(preview), before);
+        expect(tester.takeException(), isNull);
+      });
+
+      testWidgets('keeps video loading and decoded frame the same size', (
+        tester,
+      ) async {
+        final frame = Completer<LoadedVideoPreviewFrame?>();
+        const url = 'https://example.com/loading-video.mp4';
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: '![video]($url)',
+              channelNames: {'general': 'general-id'},
+              tags: [
+                ['imeta', 'url $url', 'm video/mp4', 'dim 1920x1080'],
+              ],
+            ),
+            disableAnimations: true,
+            videoPreviewFrameLoader: (_) => frame.future,
+          ),
+        );
+        final preview = find.byKey(
+          const ValueKey('message-media-video-preview:$url'),
+        );
+        final before = tester.getSize(preview);
+        expect(find.byType(MediaLoadingPlaceholder), findsOneWidget);
+        frame.complete(
+          LoadedVideoPreviewFrame(
+            child: const ColoredBox(color: Colors.black),
+            aspectRatio: 16 / 9,
+            dispose: () async {},
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(MediaLoadingPlaceholder), findsNothing);
+        expect(tester.getSize(preview), before);
+      });
+
       testWidgets('uses the shared Buzz loader while a voice note loads', (
         tester,
       ) async {
@@ -1098,6 +1332,20 @@ void main() {
         );
         await tester.pump();
 
+        expect(
+          find.descendant(
+            of: find.byType(SkeletonShimmer),
+            matching: find.byType(VoiceNoteWaveform),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          tester
+              .widget<VoiceNoteWaveform>(find.byType(VoiceNoteWaveform))
+              .onSeek,
+          isNull,
+        );
+        expect(find.text('0:03'), findsOneWidget);
         expect(find.byType(BuzzLoadingIndicator), findsOneWidget);
         final spinner = find.byType(BuzzLoadingIndicator);
         expect(tester.getSize(spinner), const Size.square(18));
@@ -1113,6 +1361,43 @@ void main() {
         );
         expect(find.bySemanticsLabel('Loading voice note'), findsNothing);
       });
+
+      testWidgets(
+        'voice waveform semantics return only when playback is ready',
+        (tester) async {
+          final semantics = tester.ensureSemantics();
+
+          final player = _ReadyTransitionVoiceNotePlayer();
+          await tester.pumpWidget(
+            _testable(
+              const VoiceNoteAttachment.remote(
+                url: 'https://example.com/voice.m4a',
+                duration: Duration(seconds: 3),
+                waveform: [],
+              ),
+              overrides: [
+                voiceNotePlayerFactoryProvider.overrideWithValue(() => player),
+              ],
+            ),
+          );
+          await tester.pump();
+          expect(find.bySemanticsLabel('Voice note waveform'), findsNothing);
+          player.finishLoading();
+          await tester.pumpAndSettle();
+          final node = tester.getSemantics(
+            find.bySemanticsLabel('Voice note waveform'),
+          );
+          expect(
+            node.getSemanticsData().hasAction(SemanticsAction.increase),
+            isTrue,
+          );
+          expect(
+            node.getSemanticsData().hasAction(SemanticsAction.decrease),
+            isTrue,
+          );
+          semantics.dispose();
+        },
+      );
 
       testWidgets('routes repeated loading-control taps through toggle', (
         tester,
@@ -1639,7 +1924,8 @@ void main() {
         'groups uploaded photos into a carousel and opens the full gallery',
         (tester) async {
           const first = 'https://example.com/media/one.png';
-          const second = 'https://example.com/media/two.png';
+          // The second destination is escaped; the carousel must unescape it.
+          const second = 'https://example.com/media/two_2.png';
           const third = 'https://example.com/media/three.png';
           await tester.pumpWidget(
             _testable(
@@ -1648,7 +1934,7 @@ void main() {
                     '''
 Photos
 ![image]($first)
-![image]($second)
+![image](https://example.com/media/two\\_2.png)
 ![image]($third)
 ''',
                 tags: [
@@ -2178,7 +2464,7 @@ Photos
       });
 
       testWidgets(
-        'keeps no-dim image previews max-bounded without fixed crop',
+        'reserves no-dim image bounds without cropping decoded content',
         (tester) async {
           _setSurfaceSize(tester, const Size(400, 800));
           addTearDown(() {
@@ -2215,8 +2501,8 @@ Photos
           );
 
           expect(preview.constraints, isNotNull);
-          expect(preview.constraints!.minWidth, 0);
-          expect(preview.constraints!.minHeight, 0);
+          expect(preview.constraints!.minWidth, closeTo(288, 0.1));
+          expect(preview.constraints!.minHeight, closeTo(240, 0.1));
           expect(preview.constraints!.maxWidth, closeTo(288, 0.1));
           expect(preview.constraints!.maxHeight, closeTo(240, 0.1));
           expect(image.fit, BoxFit.contain);
@@ -2249,7 +2535,7 @@ Photos
           ),
           findsOneWidget,
         );
-        expect(find.byIcon(LucideIcons.play), findsOneWidget);
+        expect(find.byIcon(BuzzIcons.play), findsOneWidget);
       });
 
       testWidgets('derives a first frame for a posterless video event', (
@@ -2577,11 +2863,11 @@ Photos
           expect(find.text('engineering'), findsOneWidget);
           expect(find.text('buzz'), findsOneWidget);
           expect(find.text('buzz · cdcdcdcd'), findsNWidgets(2));
-          expect(find.byIcon(LucideIcons.messageSquare), findsOneWidget);
-          expect(find.byIcon(LucideIcons.hash), findsOneWidget);
-          expect(find.byIcon(LucideIcons.folderGit2), findsOneWidget);
-          expect(find.byIcon(LucideIcons.gitPullRequest), findsOneWidget);
-          expect(find.byIcon(LucideIcons.circleDot), findsOneWidget);
+          expect(find.byIcon(BuzzIcons.messageSquare), findsOneWidget);
+          expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
+          expect(find.byIcon(BuzzIcons.folderGit2), findsOneWidget);
+          expect(find.byIcon(BuzzIcons.gitPullRequest), findsOneWidget);
+          expect(find.byIcon(BuzzIcons.circleDot), findsOneWidget);
           expect(
             find.bySemanticsLabel(
               'Open message cdcdcdcd in channel engineering',
@@ -2659,7 +2945,7 @@ Photos
           ),
         );
 
-        expect(find.byIcon(LucideIcons.bot), findsOneWidget);
+        expect(find.byType(BuzzAgentIcon), findsOneWidget);
         expect(find.text('@'), findsNothing);
         expect(find.text('Helper Bot'), findsOneWidget);
       });
@@ -2677,7 +2963,7 @@ Photos
           ),
         );
 
-        expect(find.byIcon(LucideIcons.bot), findsOneWidget);
+        expect(find.byType(BuzzAgentIcon), findsOneWidget);
         expect(find.text('Helper Bot'), findsOneWidget);
         expect(_allRichText(tester), isNot(contains('Bot Bot')));
       });
@@ -2790,7 +3076,7 @@ Photos
           ),
         );
 
-        expect(find.byIcon(LucideIcons.hash), findsOneWidget);
+        expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
         expect(find.text('general'), findsOneWidget);
         expect(find.text('#general'), findsNothing);
       });
@@ -2853,16 +3139,49 @@ Photos
         );
       });
 
-      testWidgets('unknown channel renders without tap', (tester) async {
+      testWidgets('unknown #token stays text', (tester) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'Took over #8700 from #general',
+              channelNames: {'general': 'ch-id-1'},
+            ),
+          ),
+        );
+
+        expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
+        expect(find.text('general'), findsOneWidget);
+        expect(_allRichText(tester), contains('Took over #8700 from'));
+      });
+
+      testWidgets('no #token becomes a chip before channel names load', (
+        tester,
+      ) async {
         await tester.pumpWidget(
           _testable(
             const MessageContent(content: 'Check #unknown', channelNames: {}),
           ),
         );
 
-        expect(find.byIcon(LucideIcons.hash), findsOneWidget);
-        expect(find.text('unknown'), findsOneWidget);
-        expect(find.text('#unknown'), findsNothing);
+        expect(find.byIcon(BuzzIcons.hash), findsNothing);
+        expect(_allRichText(tester), contains('Check #unknown'));
+      });
+
+      testWidgets('possessive #channel keeps the pill and the suffix', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: "See #general's pinned plan",
+              channelNames: {'general': 'ch-id-1'},
+            ),
+          ),
+        );
+
+        expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
+        expect(find.text('general'), findsOneWidget);
+        expect(_allRichText(tester), contains("'s pinned plan"));
       });
 
       testWidgets('does not treat URL fragments as channel links', (
@@ -2879,6 +3198,89 @@ Photos
 
         expect(_allRichText(tester), contains('https://example.com/docs#frag'));
         expect(find.text('#frag'), findsNothing);
+      });
+    });
+
+    // Regression: https://github.com/block/buzz/issues/6124
+    //
+    // gpt_markdown renders a link's label by recursing with
+    // `MarkdownScope.linkLabel`. A token component that claims the label
+    // returns a WidgetSpan, which then sits inside the link's own WidgetSpan
+    // — and a placeholder nested in a placeholder does not paint on iOS, so
+    // the whole link disappears. The components opt out of that scope; these
+    // tests fail if any of the `scopes` overrides is removed.
+    group('authored link labels', () {
+      testWidgets('a #channel label stays link text, not a channel pill', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'See [#2959](https://example.com/x) for details.',
+              // Known name and generic token both reach the component; use the
+              // known one so the pill would definitely render if not excluded.
+              channelNames: {'2959': 'ch-id-1'},
+            ),
+          ),
+        );
+
+        expect(_findRich('#2959'), findsOneWidget);
+        expect(find.byIcon(BuzzIcons.hash), findsNothing);
+        expect(_hasNestedPlaceholder(tester), isFalse);
+      });
+
+      testWidgets('an @mention label stays link text, not a mention pill', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'Ask [@Alice](https://example.com/x) about it.',
+              mentionNames: {'pk1': 'Alice'},
+            ),
+          ),
+        );
+
+        expect(_findRich('@Alice'), findsOneWidget);
+        // The pill splits the label into a separate '@' and name; the link
+        // must not.
+        expect(find.text('@'), findsNothing);
+        expect(_hasNestedPlaceholder(tester), isFalse);
+      });
+
+      testWidgets('a label with no token renders unchanged', (tester) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'See [ticket 2959](https://example.com/x) for details.',
+              channelNames: {'2959': 'ch-id-1'},
+            ),
+          ),
+        );
+
+        expect(_findRich('ticket 2959'), findsOneWidget);
+        expect(_hasNestedPlaceholder(tester), isFalse);
+      });
+
+      testWidgets('tokens outside a link label still render as pills', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'See #2959 and @Alice, plus [#2959](https://x.test/y).',
+              channelNames: {'2959': 'ch-id-1'},
+              mentionNames: {'pk1': 'Alice'},
+            ),
+          ),
+        );
+
+        // Excluding the link-label scope must not disable the components
+        // everywhere else: the bare tokens keep their pills.
+        expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
+        expect(find.text('@'), findsOneWidget);
+        expect(find.text('Alice'), findsOneWidget);
+        expect(_findRich('#2959'), findsOneWidget);
       });
     });
 

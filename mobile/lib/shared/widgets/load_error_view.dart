@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../theme/theme.dart';
 
@@ -22,7 +22,7 @@ class LoadErrorView extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Icon(
-            LucideIcons.triangleAlert,
+            BuzzIcons.triangleAlert,
             size: Grid.lg,
             color: context.colors.error,
           ),
@@ -37,7 +37,7 @@ class LoadErrorView extends StatelessWidget {
           FilledButton.icon(
             key: const ValueKey('load-error-retry'),
             onPressed: onRetry,
-            icon: const Icon(LucideIcons.refreshCcw, size: 16),
+            icon: const Icon(BuzzIcons.refreshCcw, size: 16),
             label: const Text('Retry'),
           ),
         ],

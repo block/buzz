@@ -11,9 +11,12 @@ import {
   setIpcHandler,
   resetTestState,
   mutationReject,
-  mountPanel,
+  mountCommunityPanel,
   settle,
   capturedToasts,
+  capturedErrorToasts,
+  ipcHandlers,
+  TEST_COMMUNITY,
   CM_ORIGIN,
   CM_PUBKEY,
   TEST_RELAY_WS_URL,
@@ -23,14 +26,57 @@ import { pubkeyToNpub } from "@/shared/lib/nostrUtils.ts";
 afterEach(resetTestState);
 
 const TARGET = "ab".repeat(32);
+const HOST = TEST_COMMUNITY.host;
+const BETA = {
+  id: "22222222-2222-4222-8222-222222222222",
+  host: "beta.example.com",
+  icon: null,
+};
 const q = (c, id) => c.querySelector(`[data-testid='${id}']`);
 
+const memberDto = (pubkey, extra = {}) => ({
+  pubkey,
+  profile: null,
+  role: "member",
+  banned: false,
+  mutedUntil: null,
+  isStaff: false,
+  ...extra,
+});
+
+const readReject = (
+  relayStatus,
+  { code = null, bodyEmpty = false, bodyComplete = true } = {},
+) =>
+  Promise.reject({
+    message: code ? `admin API error: ${code}` : "admin API error: ",
+    relayStatus,
+    bodyComplete,
+    bodyEmpty,
+    code,
+  });
+
+/** Default community reads: a plain member, no events, empty search. */
+function stubReads() {
+  for (const [cmd, fn] of [
+    ["admin_get_member", ({ pubkey }) => Promise.resolve(memberDto(pubkey))],
+    ["admin_get_event", () => readReject(404, { code: "event_not_found" })],
+    ["admin_search_members", () => Promise.resolve({ items: [] })],
+    ["admin_list_feedback", () => Promise.resolve([])],
+    [
+      "admin_list_communities",
+      () =>
+        Promise.resolve({ items: [TEST_COMMUNITY, BETA], nextCursor: null }),
+    ],
+  ]) {
+    if (!ipcHandlers.get(cmd)) setIpcHandler(cmd, fn);
+  }
+}
+
 async function mountActions({ canMutate = true } = {}) {
-  const panel = mountPanel({
-    origin: CM_ORIGIN,
-    pubkey: CM_PUBKEY,
+  stubReads();
+  const panel = mountCommunityPanel(CM_ORIGIN, CM_PUBKEY, "actions", {
     canMutate,
-    initialTab: "actions",
   });
   await panel.doRender();
   await settle();
@@ -50,9 +96,12 @@ async function click(c, id) {
   await settle();
 }
 
-async function setHost(c, host) {
-  if (q(c, "direct-host-change")) await click(c, "direct-host-change");
-  await type(c, "direct-host-input", host);
+/** Open `community`'s page from the Communities tab, on its Actions section. */
+async function openActions(c, community = TEST_COMMUNITY) {
+  await click(c, "admin-tab-communities");
+  await settle();
+  await click(c, `community-row-${community.host}`);
+  await click(c, "community-section-actions");
 }
 
 /** Paste a key and pick its direct result. */
@@ -65,7 +114,6 @@ async function pickKey(c, key, hex = TARGET) {
 
 async function fillTimeout(c) {
   await click(c, "direct-action-timeout");
-  await setHost(c, " team.example.com ");
   await pickKey(c, TARGET);
   await type(c, "direct-duration-input", "60");
   await type(c, "direct-reason-input", "spam");
@@ -81,14 +129,10 @@ test("actions-validation: bad target or duration shows an error and sends nothin
   try {
     await click(c, "direct-review-btn");
     assert.match(q(c, "direct-error").textContent, /Choose a member/);
-    await setHost(c, "");
-    await click(c, "direct-review-btn");
-    assert.match(q(c, "direct-error").textContent, /community host/);
-    await type(c, "direct-host-input", "team.example.com");
     await click(c, "direct-action-delete");
-    await type(c, "direct-target-input", TARGET.toUpperCase());
+    await type(c, "direct-target-input", "nevent1notreal");
     await click(c, "direct-review-btn");
-    assert.match(q(c, "direct-error").textContent, /64 lowercase hex/);
+    assert.match(q(c, "direct-error").textContent, /64-hex event id/);
     await click(c, "direct-action-timeout");
     await pickKey(c, TARGET);
     await type(c, "direct-duration-input", "0");
@@ -101,7 +145,7 @@ test("actions-validation: bad target or duration shows an error and sends nothin
   }
 });
 
-test("actions-success: confirm sends the frozen intent with signer, relay, and typed host", async () => {
+test("actions-success: confirm sends the frozen intent with signer, relay, and the page host", async () => {
   const sent = [];
   setIpcHandler("admin_direct_action", ({ intent }) => {
     sent.push(intent);
@@ -124,7 +168,7 @@ test("actions-success: confirm sends the frozen intent with signer, relay, and t
       origin: CM_ORIGIN,
       expectedRelay: TEST_RELAY_WS_URL,
       expectedPubkey: CM_PUBKEY,
-      communityHost: "team.example.com",
+      communityHost: HOST,
       action: "timeout",
       target: TARGET,
       reason: "spam",
@@ -265,8 +309,8 @@ test("actions-pending: a 202 keeps the intent for a same-id retry", async () => 
   }
 });
 
-test("actions-identity: a signer change remounts the tab and drops the frozen intent", async () => {
-  // Mutation: remove the ActionsTab key → frozen intent survives → RED.
+test("actions-identity: a signer change remounts the controller and drops the frozen intent", async () => {
+  // Mutation: remove the DirectActionsProvider key → frozen intent survives → RED.
   let calls = 0;
   setIpcHandler("admin_direct_action", () => {
     calls += 1;
@@ -283,6 +327,7 @@ test("actions-identity: a signer change remounts the tab and drops the frozen in
     assert.ok(q(c, "direct-confirm"));
     await doRender({ origin: CM_ORIGIN, pubkey: "ee".repeat(32) });
     await settle();
+    await openActions(c);
     assert.ok(!q(c, "direct-confirm"), "direct-confirm must be absent");
     assert.equal(q(c, "direct-member-input").value, "");
     assert.equal(calls, 0);
@@ -291,26 +336,70 @@ test("actions-identity: a signer change remounts the tab and drops the frozen in
   }
 });
 
-test("actions-disabled-auth: canMutate=false keeps Review and every field off", async () => {
-  // Mutation: drop !canMutate from the Review/lock gates → RED.
+test("actions-disabled-auth: with admin auth disabled, community pages render read-only", async () => {
+  // Mutation: drop `!canMutate` from any community-page control's disabled
+  // gate, or restore a Communities-tab gate on canMutate → RED.
+  const banned = "29".repeat(32);
+  setIpcHandler("admin_list_restrictions", () =>
+    Promise.resolve({
+      items: [
+        {
+          pubkey: banned,
+          banned: true,
+          banExpiresAt: null,
+          banReason: "spam",
+          mutedUntil: "2099-01-01T00:00:00Z",
+          muteReason: "noise",
+          actorPubkey: "aa".repeat(32),
+          updatedAt: "2024-06-01T09:00:00Z",
+        },
+      ],
+      nextCursor: null,
+    }),
+  );
   const { container: c, unmount } = await mountActions({ canMutate: false });
   try {
-    assert.ok(q(c, "direct-review-btn").disabled);
-    assert.ok(q(c, "direct-member-input").disabled);
-    assert.ok(q(c, "direct-action-ban").disabled);
+    await openActions(c);
+    assert.ok(q(c, "community-page"), "community page renders");
+    for (const id of [
+      "direct-action-ban",
+      "direct-action-timeout",
+      "direct-action-delete",
+      "direct-member-input",
+      "direct-reason-input",
+      "direct-review-btn",
+    ]) {
+      assert.ok(q(c, id)?.disabled, `${id} must be disabled`);
+    }
+    await click(c, "community-section-members");
+    await pickKey(c, TARGET);
+    for (const id of ["member-ban", "member-timeout"]) {
+      assert.ok(q(c, id)?.disabled, `${id} must be disabled`);
+    }
+    await click(c, "community-section-restrictions");
+    await settle(50);
+    for (const id of [
+      `restrictions-lift-ban-btn-${banned}`,
+      `restrictions-lift-timeout-btn-${banned}`,
+    ]) {
+      assert.ok(q(c, id)?.disabled, `${id} must be disabled`);
+    }
   } finally {
     await unmount();
   }
 });
 
 test("actions-review-race: a late second Review never replaces the submitted intent", async () => {
-  // Mutation: drop the in-flight guard at the top of handleReview → RED
+  // Mutation: drop the in-flight guard in DirectActionsProvider.locked() → RED
   // (the second Review re-freezes with a new requestId and Retry sends it).
+  // Relay reads answer at once while the page mounts, then are held from
+  // the first Review on so the two Reviews race.
   const relays = [];
-  setIpcHandler(
-    "get_relay_ws_url",
-    () =>
-      new Promise((resolve) => relays.push(() => resolve(TEST_RELAY_WS_URL))),
+  let hold = false;
+  setIpcHandler("get_relay_ws_url", () =>
+    hold
+      ? new Promise((resolve) => relays.push(() => resolve(TEST_RELAY_WS_URL)))
+      : Promise.resolve(TEST_RELAY_WS_URL),
   );
   const ids = [];
   const replies = [
@@ -322,15 +411,10 @@ test("actions-review-race: a late second Review never replaces the submitted int
     ids.push(intent.requestId);
     return replies[ids.length - 1]();
   });
-  const mounted = mountActions();
-  await settle();
-  // The tab reads the active relay once on mount to prefill the host.
-  await act(async () => {
-    for (const resolve of relays.splice(0)) resolve();
-  });
-  const { container: c, unmount } = await mounted;
+  const { container: c, unmount } = await mountActions();
   try {
     await fillTimeout(c);
+    hold = true;
     await act(async () => {
       fireEvent.click(q(c, "direct-review-btn"));
       fireEvent.click(q(c, "direct-review-btn"));
@@ -371,8 +455,11 @@ test("actions-audience: the reason's recipients are disclosed and the frozen rea
   }
 });
 
-test("actions-host-prefill: the host follows the active relay read-only, and Change reveals the input", async () => {
-  // Mutation: drop the active-relay prefill (activeHost stays null) → RED.
+test("actions-page-host: the form acts in the page's community and has no host field", async () => {
+  // Mutation: send the connected host instead of the page's → RED.
+  setIpcHandler("admin_connected_community_host", () =>
+    Promise.resolve("relay.test"),
+  );
   const sent = [];
   setIpcHandler("admin_direct_action", ({ intent }) => {
     sent.push(intent);
@@ -384,40 +471,35 @@ test("actions-host-prefill: the host follows the active relay read-only, and Cha
   });
   const { container: c, unmount } = await mountActions();
   try {
-    assert.ok(
-      q(c, "direct-host"),
-      "host must be prefilled from the active relay",
-    );
-    assert.match(q(c, "direct-host").textContent, /Community: relay\.test/);
-    assert.ok(!q(c, "direct-host-input"), "host input hidden until Change");
+    assert.ok(!q(c, "direct-host-input"), "no free-text host");
+    assert.match(q(c, "community-banner").textContent, /alpha\.example\.com/);
     await pickKey(c, TARGET);
     await click(c, "direct-review-btn");
+    assert.match(q(c, "direct-confirm").textContent, /alpha\.example\.com/);
     await click(c, "direct-confirm-btn");
-    assert.equal(sent[0].communityHost, "relay.test");
-    await click(c, "direct-host-change");
-    assert.equal(q(c, "direct-host-input").value, "relay.test");
+    assert.equal(sent[0].communityHost, HOST);
   } finally {
     await unmount();
   }
 });
 
 test("actions-member-search: a name result is sent as hex and named on the confirm step", async () => {
-  setIpcHandler("search_users", ({ query }) =>
-    Promise.resolve({
-      users: query.startsWith("ali")
+  const searched = [];
+  setIpcHandler("admin_search_members", (args) => {
+    searched.push(args);
+    return Promise.resolve({
+      items: args.q.startsWith("ali")
         ? [
             {
               pubkey: TARGET,
-              display_name: "Alice",
-              avatar_url: null,
-              nip05_handle: null,
-              owner_pubkey: null,
+              displayName: "Alice",
+              nip05: null,
+              avatarUrl: null,
             },
           ]
         : [],
-      next_cursor: null,
-    }),
-  );
+    });
+  });
   const sent = [];
   setIpcHandler("admin_direct_action", ({ intent }) => {
     sent.push(intent);
@@ -436,6 +518,11 @@ test("actions-member-search: a name result is sent as hex and named on the confi
     assert.match(q(c, "direct-confirm-member").textContent, /^Alice \(npub1/);
     await click(c, "direct-confirm-btn");
     assert.equal(sent[0].target, TARGET);
+    assert.deepEqual(searched.at(-1), {
+      origin: CM_ORIGIN,
+      communityHost: HOST,
+      q: "ali",
+    });
   } finally {
     await unmount();
   }
@@ -468,85 +555,38 @@ test("actions-member-keys: an npub and uppercase hex are both sent as lowercase 
   );
 });
 
-test("actions-foreign-host: another community's host turns name search off and says why", async () => {
-  let searches = 0;
-  setIpcHandler("search_users", () => {
-    searches += 1;
-    return Promise.resolve({ users: [], next_cursor: null });
-  });
-  const { container: c, unmount } = await mountActions();
-  try {
-    assert.ok(
-      !q(c, "direct-member-search-hint"),
-      "no hint on the active community",
-    );
-    await setHost(c, "other.example.com");
-    assert.match(
-      q(c, "direct-member-search-hint").textContent,
-      /only works in the community you're connected to/,
-    );
-    await type(c, "direct-member-input", "alice");
-    await settle();
-    assert.equal(searches, 0, "no name search against another community");
-    await pickKey(c, TARGET);
-    assert.ok(q(c, "direct-member-selected"), "keys still work");
-  } finally {
-    await unmount();
-  }
-});
-
 const OTHER = "cd".repeat(32);
 
 function searchReturns(users) {
-  setIpcHandler("search_users", () =>
+  setIpcHandler("admin_search_members", () =>
     Promise.resolve({
-      users: users.map(([pubkey, name]) => ({
+      items: users.map(([pubkey, name]) => ({
         pubkey,
-        display_name: name,
-        avatar_url: null,
-        nip05_handle: null,
-        owner_pubkey: null,
+        displayName: name,
+        nip05: null,
+        avatarUrl: null,
       })),
-      next_cursor: null,
     }),
   );
 }
 
-test("actions-host-change-drops-member: a name picked in one community can't be reviewed in another", async () => {
-  // Mutation: mask the pick by host instead of clearing it → RED on A→B→A.
+test("actions-community-change-drops-member: a name picked in one community isn't carried to another", async () => {
+  // Mutation: key the draft by nothing instead of by host → RED.
   searchReturns([[TARGET, "Alice"]]);
   const { container: c, unmount } = await mountActions();
   try {
     await type(c, "direct-member-input", "ali");
     await settle();
     await click(c, `direct-member-result-${TARGET}`);
-    await click(c, "direct-host-change");
-    assert.ok(q(c, "direct-member-selected"), "Change alone keeps the pick");
-    await setHost(c, "other.example.com");
+    assert.ok(q(c, "direct-member-selected"));
+    await openActions(c, BETA);
     assert.ok(
       !q(c, "direct-member-selected"),
-      "the pick must not survive a host change",
+      "no pick in the other community",
     );
-    assert.equal(q(c, "direct-member-input").value, "", "query is cleared");
     await click(c, "direct-review-btn");
     assert.ok(!q(c, "direct-confirm"), "nothing to review");
     assert.match(q(c, "direct-error").textContent, /Choose a member/);
-    await setHost(c, "relay.test");
-    assert.ok(
-      !q(c, "direct-member-selected"),
-      "returning to the first host must not restore the old pick",
-    );
-    await click(c, "direct-review-btn");
-    assert.ok(!q(c, "direct-confirm"), "still nothing to review");
-    assert.match(q(c, "direct-error").textContent, /Choose a member/);
-    await setHost(c, "other.example.com");
-    await pickKey(c, TARGET);
-    assert.ok(
-      q(c, "direct-member-search-hint"),
-      "hint stays visible with a key selected",
-    );
-    await click(c, "direct-review-btn");
-    assert.doesNotMatch(q(c, "direct-confirm-member").textContent, /Alice/);
   } finally {
     await unmount();
   }
@@ -575,7 +615,7 @@ test("actions-same-name: two same-name results are told apart and the chosen ful
     const b = q(c, `direct-member-result-${OTHER}`).textContent;
     assert.notEqual(a, b, "same-name results must differ by key");
     await click(c, `direct-member-result-${OTHER}`);
-    assert.ok(q(c, "direct-member-inspect"), "selected chip is inspectable");
+    assert.ok(q(c, "direct-member-npub"), "selected chip shows its key");
     await click(c, "direct-review-btn");
     assert.ok(q(c, "direct-confirm-npub"), "confirm must show the full npub");
     assert.match(
@@ -590,34 +630,15 @@ test("actions-same-name: two same-name results are told apart and the chosen ful
   }
 });
 
-test("actions-results-disabled: results showing when auth drops can't be selected", async () => {
-  searchReturns([[TARGET, "Alice"]]);
-  const panel = await mountActions();
-  const c = panel.container;
-  try {
-    await type(c, "direct-member-input", "ali");
-    await settle();
-    await panel.doRender({ canMutate: false });
-    await settle();
-    const result = q(c, `direct-member-result-${TARGET}`);
-    assert.ok(result, "results still shown");
-    assert.ok(result.disabled, "results must be disabled");
-    await click(c, `direct-member-result-${TARGET}`);
-    assert.ok(!q(c, "direct-member-selected"));
-  } finally {
-    await panel.unmount();
-  }
-});
-
 test("actions-secret-key: a pasted secret key or key backup is never searched and is flagged", async () => {
-  // Mutation: drop the isSecretKey gate from the picker's search → RED.
+  // Mutation: drop the containsSecretKey gate from the picker's search → RED.
   // The backup prefix is assembled so this file stays outside the frontend
   // key-backup source scan's allowlist; it is only ever typed into the picker.
   const backup = ["ncrypt", "sec1"].join("");
   const queries = [];
-  setIpcHandler("search_users", ({ query }) => {
+  setIpcHandler("admin_search_members", ({ q: query }) => {
     queries.push(query);
-    return Promise.resolve({ users: [], next_cursor: null });
+    return Promise.resolve({ items: [] });
   });
   const { container: c, unmount } = await mountActions();
   try {
@@ -626,6 +647,8 @@ test("actions-secret-key: a pasted secret key or key backup is never searched an
       `NSEC1${"Q".repeat(58)}`,
       `${backup}${"q".repeat(40)}`,
       `${backup.toUpperCase()}${"Q".repeat(40)}`,
+      `ban alice ${backup}${"q".repeat(40)} please`,
+      `see:${backup.toUpperCase()}${"Q".repeat(40)}`,
     ]) {
       await type(c, "direct-member-input", key);
       await settle();
@@ -635,7 +658,7 @@ test("actions-secret-key: a pasted secret key or key backup is never searched an
         `no warning for ${key.slice(0, 10)}`,
       );
     }
-    assert.deepEqual(queries, [], "a secret key reached search_users");
+    assert.deepEqual(queries, [], "a secret key reached admin_search_members");
     await type(c, "direct-member-input", "");
     assert.ok(!q(c, "direct-member-secret"), "clearing drops the warning");
     await type(c, "direct-member-input", "alice");
@@ -649,11 +672,12 @@ test("actions-secret-key: a pasted secret key or key backup is never searched an
 });
 
 async function toTab(c, tab) {
-  await click(c, `admin-tab-${tab}`);
+  if (tab === "actions") await openActions(c);
+  else await click(c, `admin-tab-${tab}`);
 }
 
 test("actions-tab-roundtrip-pending: a 202 survives a tab switch and Retry reuses the requestId", async () => {
-  // Mutation: render ActionsTab only while it is the active tab → RED.
+  // Mutation: mount DirectActionsProvider inside ActionsSection → RED.
   setIpcHandler("admin_list_feedback", () => Promise.resolve([]));
   const ids = [];
   setIpcHandler("admin_direct_action", ({ intent }) => {
@@ -717,6 +741,11 @@ test("actions-tab-roundtrip-inflight: a send that fails on another tab shows its
     await toTab(c, "feedback");
     await act(async () => fail());
     await settle();
+    assert.equal(capturedErrorToasts.length, 1, "a hidden failure toasts");
+    assert.match(
+      capturedErrorToasts[0],
+      /alpha\.example\.com failed: network down/,
+    );
     await toTab(c, "actions");
     assert.match(q(c, "direct-error")?.textContent ?? "", /network down/);
     assert.equal(q(c, "direct-confirm-btn")?.textContent, "Retry");
@@ -739,7 +768,6 @@ test("actions-not-sent: a refusal before sending drops the intent and offers no 
   });
   const { container: c, unmount } = await mountActions();
   try {
-    await setHost(c, "team.example.com/");
     await pickKey(c, TARGET);
     await click(c, "direct-review-btn");
     await click(c, "direct-confirm-btn");
@@ -753,26 +781,17 @@ test("actions-not-sent: a refusal before sending drops the intent and offers no 
 });
 
 test("actions-old-relay: only an empty 404 or 405 says the relay lacks direct actions", async () => {
-  // Mutation: drop the empty-body condition from directErrorMessage → RED.
-  for (const [status, message, expected] of [
-    [
-      404,
-      "admin API error: ",
-      "This relay doesn't support direct actions yet.",
-    ],
-    [
-      405,
-      "admin API error: ",
-      "This relay doesn't support direct actions yet.",
-    ],
-    [404, "admin API error: Not Found", "admin API error: Not Found"],
-    [
-      405,
-      "admin API error: Method Not Allowed",
-      "admin API error: Method Not Allowed",
-    ],
+  // Mutation: match the message text instead of bodyEmpty → RED.
+  const unsupported = "This relay doesn't support direct actions yet.";
+  for (const [status, message, empty, expected] of [
+    [404, "admin API error: ", true, unsupported],
+    [405, "admin API error: ", true, unsupported],
+    [404, "admin API error: Not Found", false, "admin API error: Not Found"],
+    [405, "admin API error: ", false, "admin API error: "],
   ]) {
-    setIpcHandler("admin_direct_action", () => mutationReject(message, status));
+    setIpcHandler("admin_direct_action", () =>
+      mutationReject(message, status, true, empty),
+    );
     const { container: c, unmount } = await mountActions();
     try {
       await pickKey(c, TARGET);
@@ -820,4 +839,243 @@ test("actions-backup-reason-not-sent: a key-backup reason refusal returns to edi
   } finally {
     await unmount();
   }
+});
+
+// ── Multi-community: navigation, fencing, lookups ──────────────────────────
+
+const EVENT = "ef".repeat(32);
+const preview = (content) => ({
+  id: EVENT,
+  authorPubkey: TARGET,
+  kind: 9,
+  content,
+  createdAt: "2026-09-30T00:00:00Z",
+  deletedAt: null,
+  channelId: null,
+});
+
+test("actions-pending-nav: a pending intent survives a community change and only Discard drops it", async () => {
+  // Mutation: drop the frozen-elsewhere guard in ActionsSection → RED (B's
+  // form offers Review while A's intent is pending).
+  const ids = [];
+  setIpcHandler("admin_direct_action", ({ intent }) => {
+    ids.push(intent.requestId);
+    return mutationReject("network down", null);
+  });
+  const { container: c, unmount } = await mountActions();
+  try {
+    await fillTimeout(c);
+    await click(c, "direct-review-btn");
+    await click(c, "direct-confirm-btn");
+    await openActions(c, BETA);
+    assert.ok(q(c, "direct-elsewhere"), "B shows A's pending intent");
+    assert.match(q(c, "direct-elsewhere").textContent, /alpha\.example\.com/);
+    assert.ok(!q(c, "direct-review-btn"), "B can't review while A is pending");
+    assert.ok(!q(c, "direct-confirm-btn"), "A's intent is read-only on B");
+    await openActions(c);
+    await click(c, "direct-confirm-btn");
+    assert.equal(ids.length, 2);
+    assert.equal(ids[0], ids[1], "the retry after the trip reuses the id");
+    await openActions(c, BETA);
+    await click(c, "direct-discard-btn");
+    assert.ok(!q(c, "direct-elsewhere"));
+    assert.ok(q(c, "direct-review-btn"), "Discard frees B's form");
+  } finally {
+    await unmount();
+  }
+});
+
+test("actions-fenced-lookup: a late member lookup from one community never unlocks another", async () => {
+  // Mutation: drop communityHost from the lookup fence key → RED.
+  const lookups = {};
+  setIpcHandler(
+    "admin_get_member",
+    ({ communityHost }) =>
+      new Promise((resolve) => {
+        lookups[communityHost] = resolve;
+      }),
+  );
+  const { container: c, unmount } = await mountActions();
+  try {
+    await pickKey(c, TARGET);
+    await openActions(c, BETA);
+    await pickKey(c, TARGET);
+    assert.ok(q(c, "direct-review-btn").disabled, "B waits for its lookup");
+    await act(async () => lookups[HOST](memberDto(TARGET)));
+    await settle();
+    assert.ok(q(c, "direct-review-btn").disabled, "A's answer can't unlock B");
+    await act(async () =>
+      lookups[BETA.host](memberDto(TARGET, { role: null, banned: true })),
+    );
+    await settle();
+    assert.match(
+      q(c, "direct-member-state").textContent,
+      /Not on the community roster · Currently banned/,
+    );
+    assert.ok(!q(c, "direct-review-btn").disabled);
+  } finally {
+    await unmount();
+  }
+});
+
+test("actions-same-ids: one pubkey and one event id read per community", async () => {
+  // Mutation: read the lookups with the connected host instead of the page's → RED.
+  setIpcHandler("admin_get_member", ({ communityHost, pubkey }) =>
+    Promise.resolve(
+      memberDto(pubkey, {
+        isStaff: false,
+        banned: communityHost === BETA.host,
+      }),
+    ),
+  );
+  setIpcHandler("admin_get_event", ({ communityHost }) =>
+    communityHost === HOST
+      ? Promise.resolve(preview("content in a"))
+      : readReject(404, { code: "event_not_found" }),
+  );
+  const { container: c, unmount } = await mountActions();
+  try {
+    await pickKey(c, TARGET);
+    assert.doesNotMatch(q(c, "direct-member-state").textContent, /banned/);
+    await click(c, "direct-action-delete");
+    await type(c, "direct-target-input", EVENT);
+    await settle();
+    assert.match(q(c, "direct-event-preview").textContent, /content in a/);
+    await openActions(c, BETA);
+    await pickKey(c, TARGET);
+    assert.match(q(c, "direct-member-state").textContent, /Currently banned/);
+    await click(c, "direct-action-delete");
+    await type(c, "direct-target-input", EVENT);
+    await settle();
+    assert.ok(!q(c, "direct-event-preview"), "A's message never shows in B");
+    assert.equal(
+      q(c, "direct-lookup-error").textContent,
+      "Not found in this community.",
+    );
+    assert.ok(q(c, "direct-review-btn").disabled);
+  } finally {
+    await unmount();
+  }
+});
+
+test("actions-preview-errors: only a coded 404 says not found, and no failed preview enables Review", async () => {
+  // Mutation: treat any 404 as event_not_found → RED on the empty 404.
+  for (const [reply, copy] of [
+    [
+      () => readReject(404, { code: "event_not_found" }),
+      /^Not found in this community\.$/,
+    ],
+    [
+      () => readReject(404, { bodyEmpty: true }),
+      /doesn't support community browsing/,
+    ],
+    [
+      () => readReject(405, { bodyEmpty: true }),
+      /doesn't support community browsing/,
+    ],
+    [
+      () => readReject(404, { code: "event_not_found", bodyComplete: false }),
+      /^(?!Not found)/,
+    ],
+    [() => readReject(null, { bodyComplete: false }), /^(?!Not found)/],
+  ]) {
+    setIpcHandler("admin_get_event", reply);
+    const { container: c, unmount } = await mountActions();
+    try {
+      await click(c, "direct-action-delete");
+      await type(c, "direct-target-input", EVENT);
+      await settle();
+      assert.match(q(c, "direct-lookup-error").textContent, copy);
+      assert.ok(q(c, "direct-review-btn").disabled, "Review stays off");
+    } finally {
+      await unmount();
+    }
+  }
+});
+
+test("actions-delete-link: a note link previews the message and sends its hex id", async () => {
+  // Mutation: accept only hex in parseEventIdInput → RED.
+  const { noteEncode } = await import("nostr-tools/nip19");
+  setIpcHandler("admin_get_event", ({ id }) =>
+    Promise.resolve(preview(`preview of ${id.slice(0, 4)}`)),
+  );
+  const sent = [];
+  setIpcHandler("admin_direct_action", ({ intent }) => {
+    sent.push(intent);
+    return Promise.resolve({
+      actionId: "a1",
+      state: "succeeded",
+      replayed: false,
+    });
+  });
+  const { container: c, unmount } = await mountActions();
+  try {
+    await click(c, "direct-action-delete");
+    await type(c, "direct-target-input", noteEncode(EVENT));
+    await settle();
+    assert.match(q(c, "direct-event-preview").textContent, /preview of efef/);
+    await click(c, "direct-review-btn");
+    assert.ok(
+      q(c, "direct-confirm").querySelector(
+        "[data-testid='direct-event-preview']",
+      ),
+    );
+    await click(c, "direct-confirm-btn");
+    assert.equal(sent[0].target, EVENT);
+  } finally {
+    await unmount();
+  }
+});
+
+test("actions-staff-target: a staff member can't reach Review", async () => {
+  // Mutation: drop the isStaff check from lookupBlock → RED.
+  setIpcHandler("admin_get_member", ({ pubkey }) =>
+    Promise.resolve(memberDto(pubkey, { isStaff: true })),
+  );
+  let calls = 0;
+  setIpcHandler("admin_direct_action", () => {
+    calls += 1;
+    return Promise.resolve({});
+  });
+  const { container: c, unmount } = await mountActions();
+  try {
+    await pickKey(c, TARGET);
+    assert.match(
+      q(c, "direct-lookup-error").textContent,
+      /Relay staff can't be banned/,
+    );
+    assert.ok(q(c, "direct-review-btn").disabled);
+    assert.equal(calls, 0);
+  } finally {
+    await unmount();
+  }
+});
+
+test("fenced-load: an answer for an old key never shows under the new key", async () => {
+  // Mutation: drop both the effect-local `active` flag and the result-key
+  // check from useFencedLoad → RED (A's late answer shows under key B).
+  const React = await import("react");
+  const { createRoot } = await import("react-dom/client");
+  const { useFencedLoad } = await import("./AdminConsoleActionsTab.tsx");
+  const resolvers = {};
+  const seen = [];
+  function Probe({ k }) {
+    const state = useFencedLoad(
+      k,
+      () => new Promise((resolve) => (resolvers[k] = resolve)),
+    );
+    seen.push(`${k}:${state.status}:${state.data ?? ""}`);
+    return null;
+  }
+  const el = document.createElement("div");
+  const root = createRoot(el);
+  await act(async () =>
+    root.render(React.createElement(Probe, { k: "alpha" })),
+  );
+  await act(async () => root.render(React.createElement(Probe, { k: "beta" })));
+  await act(async () => resolvers.alpha("from alpha"));
+  assert.equal(seen.at(-1), "beta:loading:", "alpha's answer must not show");
+  await act(async () => resolvers.beta("from beta"));
+  assert.equal(seen.at(-1), "beta:ok:from beta");
+  await act(async () => root.unmount());
 });

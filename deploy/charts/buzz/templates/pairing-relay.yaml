@@ -16,9 +16,7 @@ spec:
     metadata:
       labels:
         {{- include "buzz.pairingRelaySelectorLabels" . | nindent 8 }}
-        {{- with .Values.pairingRelay.podLabels }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
+        {{- include "buzz.podLabelsWithVersion" (dict "root" . "labels" .Values.pairingRelay.podLabels) | nindent 8 }}
       {{- with .Values.pairingRelay.podAnnotations }}
       annotations:
         {{- toYaml . | nindent 8 }}

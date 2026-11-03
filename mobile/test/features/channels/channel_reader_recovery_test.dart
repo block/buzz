@@ -8,6 +8,8 @@ import 'package:buzz/features/channels/channel_sort/channel_sort_provider.dart';
 import 'package:buzz/features/channels/channel_stars/channel_stars_provider.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
+import 'package:buzz/shared/read_state/read_state_format.dart';
+import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/shared/theme/theme_provider.dart';
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -51,6 +53,7 @@ final _lanes = [
   _Lane('channel-stars', 'starred', (prefs, relay) {
     final m = ChannelStarsManager(
       pubkey: relay.pubkey,
+      relayUrl: 'https://relay.example',
       prefs: prefs,
       crypto: ChannelStarsCrypto(relay.keys.nsec, relay.pubkey),
       relaySession: relay.session,
@@ -71,6 +74,7 @@ final _lanes = [
   _Lane('channel-mutes', 'muted', (prefs, relay) {
     final m = ChannelMutesManager(
       pubkey: relay.pubkey,
+      relayUrl: 'https://relay.example',
       prefs: prefs,
       crypto: ChannelMutesCrypto(relay.keys.nsec, relay.pubkey),
       relaySession: relay.session,
@@ -102,6 +106,16 @@ class _Config extends RelayConfigNotifier {
   @override
   RelayConfig build() =>
       RelayConfig(baseUrl: 'https://relay.example', nsec: nsec);
+}
+
+class _SwitchableConfig extends RelayConfigNotifier {
+  _SwitchableConfig(this.nsec);
+  final String nsec;
+  @override
+  RelayConfig build() =>
+      RelayConfig(baseUrl: 'https://relay.example', nsec: nsec);
+  void switchTo(String baseUrl) =>
+      state = RelayConfig(baseUrl: baseUrl, nsec: nsec);
 }
 
 class _InitializingSortSession extends ConnectedRelaySession {
@@ -235,6 +249,194 @@ void main() {
     expect(c.read(channelSortProvider).isReady, isTrue);
     c.dispose();
   });
+
+  fakeAsyncTest('groups stay with the community that owns them', (clock) {
+    final relay = SidebarRelay();
+    final config = _SwitchableConfig(relay.keys.nsec);
+    final c = ProviderContainer(
+      overrides: [
+        savedPrefsProvider.overrideWithValue(prefs),
+        relayConfigProvider.overrideWith(() => config),
+        relaySessionProvider.overrideWith(() => relay.session),
+        activeCommunityProvider.overrideWith(
+          (ref) async => Community(
+            id: 'c',
+            name: 'c',
+            relayUrl: 'wss://relay.example',
+            addedAt: DateTime(2026),
+          ),
+        ),
+        appLifecycleProvider.overrideWith(_Lifecycle.new),
+      ],
+    );
+    List<String> names() => [
+      for (final s in c.read(channelSectionsProvider).store.sections) s.name,
+    ];
+    c.read(relaySessionProvider);
+    relay.stored.add(
+      relay.event('channel-sections', {
+        'version': 1,
+        'sections': [
+          {'id': 'studio', 'name': 'Studio', 'order': 0},
+        ],
+        'assignments': <String, String>{},
+      }, nowSeconds()),
+    );
+    c.listen(channelSectionsProvider, (_, _) {});
+    clock.elapse(const Duration(seconds: 1));
+    expect(names(), ['Studio']);
+
+    // The same identity in a second community that has no groups.
+    config.switchTo('https://second.example');
+    clock.elapse(const Duration(seconds: 1));
+    expect(names(), isEmpty);
+
+    // Returning shows the first community's cached groups before its relay
+    // answers.
+    final held = relay.holdHistory = Completer<void>();
+    config.switchTo('https://relay.example');
+    clock.flushMicrotasks();
+    expect(names(), ['Studio']);
+    held.complete();
+    c.dispose();
+  });
+
+  // Each lane: what it shows, one local change to it, and the second
+  // community's own value as its relay retains it.
+  final scopedLanes =
+      <
+        String,
+        (
+          Set<String> Function(ProviderContainer),
+          void Function(ProviderContainer, String),
+          (String, Object) Function(String),
+        )
+      >{
+        'channel-stars': (
+          (c) => c.read(channelStarsProvider).store.channels.keys.toSet(),
+          (c, id) => c.read(channelStarsProvider.notifier).starChannel(id),
+          (id) => (
+            'channel-stars',
+            {
+              'version': 1,
+              'channels': {
+                id: {'starred': true, 'updatedAt': nowSeconds()},
+              },
+            },
+          ),
+        ),
+        'channel-mutes': (
+          (c) => c.read(channelMutesProvider).store.channels.keys.toSet(),
+          (c, id) => c.read(channelMutesProvider.notifier).muteChannel(id),
+          (id) => (
+            'channel-mutes',
+            {
+              'version': 1,
+              'channels': {
+                id: {'muted': true, 'updatedAt': nowSeconds()},
+              },
+            },
+          ),
+        ),
+        'channel-sections': (
+          (c) => {
+            for (final s in c.read(channelSectionsProvider).store.sections)
+              s.name,
+          },
+          (c, name) =>
+              c.read(channelSectionsProvider.notifier).createSection(name),
+          (name) => (
+            'channel-sections',
+            {
+              'version': 1,
+              'sections': [
+                {'id': name, 'name': name, 'order': 0},
+              ],
+              'assignments': <String, String>{},
+            },
+          ),
+        ),
+        'read-state': (
+          (c) => c.read(readStateProvider).contexts.keys.toSet(),
+          (c, id) => c
+              .read(readStateProvider.notifier)
+              .markContextRead(id, nowSeconds()),
+          (id) => (
+            '$readStateDTagPrefix${'b' * 32}',
+            ReadStateBlob(
+              clientId: 'second-device',
+              contexts: {id: nowSeconds()},
+            ).toJson(),
+          ),
+        ),
+      };
+  for (final MapEntry(key: dTag, value: (values, set, secondHead))
+      in scopedLanes.entries) {
+    for (final reaches in ['live', 'in-flight fetch']) {
+      fakeAsyncTest('$dTag stay with the community they were set in '
+          '(other community reached by $reaches)', (clock) {
+        final relay = SidebarRelay();
+        final config = _SwitchableConfig(relay.keys.nsec);
+        final c = ProviderContainer(
+          overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            relayConfigProvider.overrideWith(() => config),
+            relaySessionProvider.overrideWith(() => relay.session),
+            activeCommunityProvider.overrideWith((ref) async => null),
+            appLifecycleProvider.overrideWith(_Lifecycle.new),
+          ],
+        );
+        // Either the first community's subscription is live at the switch, or
+        // its startup fetch is still in flight.
+        final history = reaches == 'live' ? null : Completer<void>();
+        relay.holdHistory = history;
+        for (final p in [
+          channelStarsProvider,
+          channelMutesProvider,
+          channelSectionsProvider,
+          readStateProvider,
+        ]) {
+          c.listen(p, (_, _) {});
+        }
+        clock.elapse(const Duration(seconds: 1));
+        set(c, 'chan-a');
+
+        // The session rebuilds for the second community before the first
+        // community's manager is retired. Until then that manager must neither
+        // flush its pending change through it nor take in what it delivers.
+        config.switchTo('https://second.example');
+        c.read(relaySessionProvider);
+        final (headTag, payload) = secondHead('chan-b');
+        final head = relay.event(
+          headTag,
+          payload,
+          nowSeconds() + 1,
+          tags: [
+            if (dTag == 'read-state') ['t', 'read-state'],
+          ],
+        );
+        relay.stored.add(head);
+        if (history == null) {
+          relay.emit(head);
+        } else {
+          history.complete();
+        }
+        clock.elapse(const Duration(seconds: 10));
+        final sentToSecond = [
+          for (var i = 0; i < relay.published.length; i++)
+            if (relay.publishedTo[i] == 'https://second.example')
+              jsonEncode(relay.decrypt(relay.published[i])),
+        ];
+        expect(sentToSecond, everyElement(isNot(contains('chan-a'))));
+        expect(values(c), {'chan-b'});
+
+        config.switchTo('https://relay.example');
+        clock.elapse(const Duration(seconds: 1));
+        expect(values(c), {'chan-a'});
+        c.dispose();
+      });
+    }
+  }
 
   for (final lane in _lanes) {
     Map<String, Object> blob(Map<String, (bool, int)> entries) => {
@@ -425,6 +627,7 @@ void wholeBlobLanes(SharedPreferences Function() prefs) {
     ChannelSectionsManager start(FakeAsync clock) {
       m = ChannelSectionsManager(
         pubkey: relay.pubkey,
+        relayUrl: 'https://relay.example',
         prefs: prefs(),
         crypto: ChannelSectionsCrypto(relay.keys.nsec, relay.pubkey),
         relaySession: relay.session,
@@ -554,6 +757,7 @@ void wholeBlobLanes(SharedPreferences Function() prefs) {
         clock.flushMicrotasks();
         m = ChannelSectionsManager(
           pubkey: relay.pubkey,
+          relayUrl: 'https://relay.example',
           prefs: prefs(),
           crypto: ChannelSectionsCrypto(relay.keys.nsec, relay.pubkey),
           relaySession: relay.session,
@@ -611,6 +815,7 @@ void wholeBlobLanes(SharedPreferences Function() prefs) {
       m.dispose(flushPending: false);
       m = ChannelSectionsManager(
         pubkey: relay.pubkey,
+        relayUrl: 'https://relay.example',
         prefs: prefs(),
         crypto: ChannelSectionsCrypto(relay.keys.nsec, relay.pubkey),
         relaySession: relay.session,

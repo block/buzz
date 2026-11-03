@@ -140,9 +140,7 @@ class _MessageDetailsSection extends HookConsumerWidget {
                     Padding(
                       padding: const EdgeInsets.only(top: Grid.quarter),
                       child: Icon(
-                        open
-                            ? LucideIcons.chevronDown
-                            : LucideIcons.chevronRight,
+                        open ? BuzzIcons.chevronDown : BuzzIcons.chevronRight,
                         size: 16,
                         color: context.colors.onSurfaceVariant,
                       ),

@@ -58,6 +58,28 @@ export function parsePubkeyInput(input: string): string | null {
 }
 
 /**
+ * Parse a user-entered event reference — 64-char hex, `note1…` or
+ * `nevent1…` — into a lowercase hex event id. Relay hints in an `nevent`
+ * are ignored. Returns null for anything else (does NOT throw).
+ */
+export function parseEventIdInput(input: string): string | null {
+  const trimmed = input.trim().toLowerCase();
+  if (HEX_PUBKEY_REGEX.test(trimmed)) return trimmed;
+  try {
+    const decoded = decode(trimmed);
+    const id =
+      decoded.type === "note"
+        ? decoded.data
+        : decoded.type === "nevent"
+          ? decoded.data.id
+          : null;
+    return id && HEX_PUBKEY_REGEX.test(id) ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Decode a bech32 nsec string and derive the matching npub. Returns null if
  * the input is not a syntactically valid `nsec1…` (does NOT throw — this is
  * intended for live form validation where the user is mid-typing).

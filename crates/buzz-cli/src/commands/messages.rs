@@ -3,6 +3,7 @@ use nostr::PublicKey;
 use uuid::Uuid;
 
 use crate::client::{normalize_events, normalize_write_response, BuzzClient};
+use crate::commands::event_output::{format_events, thread_markers};
 use crate::error::CliError;
 use crate::validate::{
     infer_language, parse_event_id, parse_uuid, read_or_stdin, truncate_diff,
@@ -23,20 +24,7 @@ use buzz_sdk::mentions::{
 /// - A root-only or marker-less parent returns `None` (it is top-level and its
 ///   own root).
 fn find_root_from_tags(tags: &serde_json::Value) -> Option<String> {
-    let parts: Vec<Vec<String>> = tags
-        .as_array()?
-        .iter()
-        .filter_map(|tag| {
-            tag.as_array().map(|a| {
-                a.iter()
-                    .map(|v| v.as_str().unwrap_or("").to_string())
-                    .collect()
-            })
-        })
-        .collect();
-    buzz_core::nip10::parse_thread_markers_from_parts(parts.iter().map(Vec::as_slice))
-        .resolve()
-        .map(|(root, _)| root)
+    thread_markers(tags).resolve().map(|(root, _)| root)
 }
 
 fn thread_ref_from_parent_tags(
@@ -330,27 +318,6 @@ fn parse_member_pubkeys(event: &serde_json::Value) -> Vec<String> {
             PublicKey::from_hex(pk).ok().map(|k| k.to_hex())
         })
         .collect()
-}
-
-fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
-    match format {
-        crate::OutputFormat::Compact => {
-            let events: Vec<serde_json::Value> =
-                serde_json::from_str(normalized).unwrap_or_default();
-            let compact: Vec<serde_json::Value> = events
-                .iter()
-                .map(|e| {
-                    serde_json::json!({
-                        "id": e.get("id").cloned().unwrap_or_default(),
-                        "content": e.get("content").cloned().unwrap_or_default(),
-                        "created_at": e.get("created_at").cloned().unwrap_or_default(),
-                    })
-                })
-                .collect();
-            serde_json::to_string(&compact).unwrap_or_default()
-        }
-        crate::OutputFormat::Json => normalized.to_string(),
-    }
 }
 
 pub async fn cmd_get_messages(
@@ -1085,10 +1052,10 @@ pub async fn dispatch(
 mod tests {
     use super::{
         channel_id_from_event, cmd_get_thread, cmd_send_message, event_mention_pubkeys,
-        find_root_from_tags, format_events, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_names_to_pubkeys, resolve_thread_target, thread_ref_from_event,
-        thread_ref_from_parent_tags, BuzzClient, CliError, Uuid,
+        find_root_from_tags, match_profiles_by_name, merge_message_mentions, missing_members,
+        normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
+        resolve_thread_target, thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient,
+        CliError, Uuid,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1105,33 +1072,6 @@ mod tests {
     const PK_VALID_A: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
     const PK_VALID_B: &str = "c6237ef84fa537c78dcee78efd2d4e59f728859c7f194da42ac51ededfa0be05";
     const PK_VALID_C: &str = "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68";
-
-    #[test]
-    fn compact_event_format_remains_the_three_key_contract() {
-        let normalized = serde_json::json!([{
-            "id": ID_A,
-            "pubkey": PUBKEY,
-            "kind": 9,
-            "content": "compact content",
-            "created_at": 1_787_754_972_u64,
-            "tags": [["h", "channel-id"]],
-            "sig": "d".repeat(128),
-        }])
-        .to_string();
-
-        let output: Vec<serde_json::Value> =
-            serde_json::from_str(&format_events(&normalized, &crate::OutputFormat::Compact))
-                .unwrap();
-
-        assert_eq!(
-            output[0],
-            serde_json::json!({
-                "id": ID_A,
-                "content": "compact content",
-                "created_at": 1_787_754_972_u64,
-            })
-        );
-    }
 
     #[tokio::test]
     async fn malformed_channel_is_rejected_before_thread_fetch() {

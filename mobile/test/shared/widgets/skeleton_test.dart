@@ -5,6 +5,68 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  for (final reducedMotion in [false, true]) {
+    testWidgets(
+      'holds the placeholder through metadata and reveal updates (reduced motion: $reducedMotion)',
+      (tester) async {
+        final state = ValueNotifier((loading: true, media: false));
+        addTearDown(state.dispose);
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: AppTheme.light(),
+            home: MediaQuery(
+              data: MediaQueryData(disableAnimations: reducedMotion),
+              child: Scaffold(
+                body: ValueListenableBuilder(
+                  valueListenable: state,
+                  builder: (context, value, _) => SkeletonReveal(
+                    loading: value.loading,
+                    skeleton: Align(
+                      alignment: Alignment.topLeft,
+                      child: SkeletonBar(
+                        key: ValueKey(
+                          value.media ? 'media-shape' : 'text-shape',
+                        ),
+                        width: 200,
+                        height: value.media ? 240 : 16,
+                      ),
+                    ),
+                    content: const Text('Actual content'),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        state.value = (loading: true, media: true);
+        await tester.pump();
+        expect(find.byKey(const ValueKey('text-shape')), findsOneWidget);
+        expect(find.byKey(const ValueKey('media-shape')), findsNothing);
+        state.value = (loading: false, media: true);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 200));
+        expect(find.byKey(const ValueKey('text-shape')), findsOneWidget);
+        expect(find.byKey(const ValueKey('media-shape')), findsNothing);
+        // A new loading cycle may use the now-known media layout, even if it
+        // interrupts an in-progress reveal.
+        state.value = (loading: true, media: true);
+        await tester.pump();
+        expect(find.byKey(const ValueKey('media-shape')), findsOneWidget);
+        expect(find.byKey(const ValueKey('text-shape')), findsNothing);
+        state.value = (loading: false, media: false);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 450));
+        expect(find.byKey(const ValueKey('media-shape')), findsOneWidget);
+        expect(
+          tester
+              .widget<Opacity>(find.byKey(const Key('skeleton-reveal-content')))
+              .opacity,
+          1,
+        );
+      },
+    );
+  }
+
   Widget buildShimmerTestable({
     bool disableAnimations = false,
     bool enabled = true,

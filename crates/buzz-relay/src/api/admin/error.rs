@@ -118,7 +118,8 @@ impl IntoResponse for ApiError {
 }
 
 impl From<buzz_db::DbError> for ApiError {
-    fn from(_: buzz_db::DbError) -> Self {
+    fn from(err: buzz_db::DbError) -> Self {
+        tracing::error!(error = %err, "admin API database error");
         Self::internal()
     }
 }

@@ -54,7 +54,7 @@ class _AnimatedReviewNav extends StatelessWidget {
     children: [
       Expanded(
         child: AvatarEditorOptionButton(
-          icon: LucideIcons.userRound,
+          icon: BuzzIcons.userRound,
           iosIcon: IosGlassNavigationIcon.person,
           label: 'You',
           selected: selected == _AnimatedReviewSection.person,
@@ -64,7 +64,7 @@ class _AnimatedReviewNav extends StatelessWidget {
       const SizedBox(width: Grid.half),
       Expanded(
         child: AvatarEditorOptionButton(
-          icon: LucideIcons.palette,
+          icon: BuzzIcons.palette,
           iosIcon: IosGlassNavigationIcon.palette,
           label: 'Background',
           selected: selected == _AnimatedReviewSection.color,
@@ -74,7 +74,7 @@ class _AnimatedReviewNav extends StatelessWidget {
       const SizedBox(width: Grid.half),
       Expanded(
         child: AvatarEditorOptionButton(
-          icon: LucideIcons.galleryThumbnails,
+          icon: BuzzIcons.galleryThumbnails,
           iosIcon: IosGlassNavigationIcon.frame,
           label: 'Frame',
           selected: selected == _AnimatedReviewSection.poster,
@@ -86,7 +86,7 @@ class _AnimatedReviewNav extends StatelessWidget {
       const SizedBox(width: Grid.half),
       Expanded(
         child: AvatarEditorOptionButton(
-          icon: LucideIcons.camera,
+          icon: BuzzIcons.camera,
           iosIcon: IosGlassNavigationIcon.camera,
           label: 'Retake',
           selected: false,
@@ -141,7 +141,7 @@ class _AnimatedFramingControl extends HookWidget {
                   onOutlineChanged(!outline);
                 },
                 icon: Icon(
-                  outline ? LucideIcons.circle : LucideIcons.circleDashed,
+                  outline ? BuzzIcons.circle : BuzzIcons.circleDashed,
                   size: 24,
                 ),
                 constraints: const BoxConstraints.tightFor(

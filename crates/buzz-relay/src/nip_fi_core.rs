@@ -47,8 +47,14 @@ impl AssertionRejection {
     }
 }
 
-/// Resolve the community served at the request `Host` — enforce-mode
-/// admission step 1, before any evidence is examined (NIP-FI.md:266-268).
+/// The request `Host`, if present and readable.
+fn request_host(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+}
+
+/// Resolve the community served at the request `Host` from a static map.
 ///
 /// An absent, unreadable, or unmapped Host is `authorization_unavailable`.
 /// This makes mapped and unmapped Hosts distinguishable (401/403 vs 503) in
@@ -57,12 +63,98 @@ impl AssertionRejection {
 pub(crate) fn resolve_community<'a>(
     headers: &HeaderMap,
     communities: &'a NipFiCommunities,
-) -> Result<&'a CommunityBinding, DenialClass> {
-    headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
+) -> Result<&'a std::sync::Arc<CommunityBinding>, DenialClass> {
+    request_host(headers)
         .and_then(|host| communities.resolve(host))
         .ok_or(DenialClass::AuthorizationUnavailable)
+}
+
+/// A community resolved for one enforce admission.
+#[derive(Clone)]
+pub(crate) struct ResolvedCommunity {
+    binding: std::sync::Arc<CommunityBinding>,
+    deadline: AdmissionDeadline,
+}
+
+impl ResolvedCommunity {
+    /// The deadline admission must re-check after its own awaits.
+    pub(crate) fn deadline(&self) -> AdmissionDeadline {
+        self.deadline.clone()
+    }
+
+    /// The shadow `community` label: the configured URI for an `env`
+    /// binding, whose set is bounded by config, else `bound`, since the
+    /// database's host set is unbounded.
+    pub(crate) fn shadow_label(&self) -> metrics::SharedString {
+        if self.deadline.0.is_none() {
+            self.binding.expected_aud().to_owned().into()
+        } else {
+            metrics::SharedString::const_str(crate::nip_fi_shadow::BOUND)
+        }
+    }
+}
+
+impl std::ops::Deref for ResolvedCommunity {
+    type Target = CommunityBinding;
+    fn deref(&self) -> &CommunityBinding {
+        &self.binding
+    }
+}
+
+/// The point past which admitting on a resolved community is
+/// `authorization_unavailable`: the database snapshot's staleness deadline.
+/// A static `env` binding never goes stale.
+#[derive(Clone, Default)]
+pub(crate) struct AdmissionDeadline(Option<crate::nip_fi_resolver::FreshUntil>);
+
+impl AdmissionDeadline {
+    /// Run immediately before admitting.
+    pub(crate) fn check(&self) -> Result<(), DenialClass> {
+        self.0.as_ref().map_or(Ok(()), |fresh| fresh.check())
+    }
+}
+
+/// The relay's community source (`BUZZ_NIP_FI_COMMUNITY_SOURCE`): the
+/// static `env` map, or the database resolver.
+#[derive(Clone, Copy)]
+pub(crate) enum Communities<'a> {
+    Env(&'a NipFiCommunities),
+    Database(&'a std::sync::Arc<crate::nip_fi_resolver::DatabaseResolver>),
+    /// The `database` source with no resolver built: every host is
+    /// `authorization_unavailable`.
+    Unavailable,
+}
+
+impl Communities<'_> {
+    /// Resolve the community at the request `Host` — enforce-mode admission
+    /// step 1, before any evidence is examined (NIP-FI.md:266-268). Called
+    /// once per admission; the returned binding is what verification uses.
+    pub(crate) async fn resolve(
+        self,
+        headers: &HeaderMap,
+    ) -> Result<ResolvedCommunity, DenialClass> {
+        match self {
+            Self::Env(map) => resolve_community(headers, map).map(|b| ResolvedCommunity {
+                binding: std::sync::Arc::clone(b),
+                deadline: AdmissionDeadline::default(),
+            }),
+            Self::Database(resolver) => {
+                let host = request_host(headers).ok_or(DenialClass::AuthorizationUnavailable)?;
+                let (binding, fresh) = resolver.resolve(host).await?;
+                Ok(ResolvedCommunity {
+                    binding,
+                    deadline: AdmissionDeadline(Some(fresh)),
+                })
+            }
+            Self::Unavailable => Err(DenialClass::AuthorizationUnavailable),
+        }
+    }
+}
+
+impl<'a> From<&'a NipFiCommunities> for Communities<'a> {
+    fn from(map: &'a NipFiCommunities) -> Self {
+        Self::Env(map)
+    }
 }
 
 /// Extract and verify the attached assertion for `community`.
@@ -88,6 +180,51 @@ pub(crate) fn asserted_key_matches(
     proven_pubkey: nostr::PublicKey,
 ) -> bool {
     assertion.asserted_key() == Some(proven_pubkey)
+}
+
+/// Whether the deny set holds `(iss, k)` or, for an agent assertion,
+/// `(iss, owner)` (NIP-FI.md, admission step 7).
+pub(crate) fn assertion_denied(
+    deny_map: &impl crate::nip_fi_http::HttpDenyMap,
+    assertion: &VerifiedAssertion,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let issuer = assertion.identity().issuer();
+    [assertion.asserted_key(), assertion.owner()]
+        .into_iter()
+        .flatten()
+        .any(|key| deny_map.is_denied(issuer, &key, now))
+}
+
+/// The NIP-FI facts a live session is registered under: its admitting issuer
+/// and, for an agent assertion, the verified owner.
+#[derive(Clone)]
+pub(crate) struct NipFiSession {
+    issuer: String,
+    owner: Option<[u8; 32]>,
+}
+
+impl NipFiSession {
+    pub(crate) fn new(issuer: impl Into<String>, owner: Option<[u8; 32]>) -> Self {
+        Self {
+            issuer: issuer.into(),
+            owner,
+        }
+    }
+
+    pub(crate) fn from_assertion(assertion: &VerifiedAssertion) -> Self {
+        Self::new(
+            assertion.identity().issuer(),
+            assertion.owner().map(|owner| owner.to_bytes()),
+        )
+    }
+
+    /// An admin disconnect of `(issuer, target)` reaches this session when
+    /// its proven key or its recorded owner is `target`.
+    pub(crate) fn matches(&self, issuer: &str, proven: &[u8], target: &[u8]) -> bool {
+        self.issuer == issuer
+            && (proven == target || self.owner.is_some_and(|owner| owner[..] == *target))
+    }
 }
 
 // ── Transport extraction ──────────────────────────────────────────────────────
@@ -168,6 +305,124 @@ pub(crate) mod test_support {
     pub(crate) const TEST_HOST: &str = "relay.example";
     pub(crate) const TEST_COMMUNITY_URI: &str = "https://relay.example";
 
+    /// The issuer and key ID of [`assertion_signing_key`].
+    pub(crate) const TEST_ISSUER: &str = "https://issuer.example";
+    pub(crate) const TEST_KID: &str = "test-key-1";
+
+    /// Ephemeral signing material shared by the test signer and verifier.
+    /// Never persist a private key fixture in source or on disk.
+    pub(crate) fn assertion_signing_key(
+    ) -> &'static (jsonwebtoken::EncodingKey, jsonwebtoken::jwk::JwkSet) {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
+        static KEY: std::sync::OnceLock<(jsonwebtoken::EncodingKey, jsonwebtoken::jwk::JwkSet)> =
+            std::sync::OnceLock::new();
+        KEY.get_or_init(|| {
+            let rng = ring::rand::SystemRandom::new();
+            let algorithm = &ECDSA_P256_SHA256_FIXED_SIGNING;
+            let der = EcdsaKeyPair::generate_pkcs8(algorithm, &rng).expect("generate test key");
+            let pair = EcdsaKeyPair::from_pkcs8(algorithm, der.as_ref(), &rng)
+                .expect("parse generated test key");
+            // P-256 public keys use uncompressed SEC1: 0x04 || x || y.
+            let public = pair.public_key().as_ref();
+            assert_eq!(public.len(), 65);
+            assert_eq!(public[0], 4);
+            let jwks = serde_json::from_value(serde_json::json!({
+                "keys": [{
+                    "kty": "EC", "crv": "P-256", "use": "sig", "alg": "ES256",
+                    "kid": TEST_KID,
+                    "x": URL_SAFE_NO_PAD.encode(&public[1..33]),
+                    "y": URL_SAFE_NO_PAD.encode(&public[33..65])
+                }]
+            }))
+            .expect("valid generated JWKS");
+            (jsonwebtoken::EncodingKey::from_ec_der(der.as_ref()), jwks)
+        })
+    }
+
+    /// The real verifier trusting [`assertion_signing_key`] for [`TEST_ISSUER`]
+    /// at [`TEST_COMMUNITY_URI`], under `token_class`.
+    pub(crate) fn assertion_verifier(
+        token_class: buzz_auth::TokenClass,
+    ) -> buzz_auth::FederatedAssertionVerifier<buzz_auth::StaticIssuerKeySource> {
+        use buzz_auth::{
+            AssertionKeySet, FederatedAssertionVerifier, FreshnessClass, IssuerPolicy,
+            IssuerRegistry, StaticIssuerKeySource,
+        };
+        use jsonwebtoken::Algorithm;
+
+        let jwks = assertion_signing_key().1.clone();
+        let hard_deadline = chrono::Utc::now() + chrono::Duration::seconds(3600);
+        let key_set = AssertionKeySet::new_for_test(TEST_ISSUER.to_owned(), 1, jwks, hard_deadline)
+            .expect("valid test key set");
+        let jwks_contract = buzz_auth::JwksSourceContract::new(
+            format!("{TEST_ISSUER}/.well-known/jwks.json"),
+            300,
+            3600,
+        )
+        .expect("valid jwks contract");
+        let policy = IssuerPolicy::new(
+            TEST_ISSUER.to_owned(),
+            vec![TEST_COMMUNITY_URI.to_owned()],
+            token_class,
+            FreshnessClass::OfflineJwt,
+            vec![Algorithm::ES256],
+            60,
+            3600,
+            None,
+            jwks_contract,
+        )
+        .expect("valid issuer policy");
+        let mut registry = IssuerRegistry::new();
+        registry.insert(policy);
+        FederatedAssertionVerifier::new(registry, StaticIssuerKeySource::new([key_set]))
+    }
+
+    /// An `at+jwt` token class whose resource-owner subjects carry
+    /// `sub_type: "user"`.
+    pub(crate) fn at_jwt_class() -> buzz_auth::TokenClass {
+        buzz_auth::TokenClass::AccessTokenAtJwt {
+            subject_class: buzz_auth::SubjectClassContract::new(
+                "sub_type".to_owned(),
+                vec!["user".to_owned()],
+                vec!["client".to_owned()],
+                buzz_auth::ClientSubjectPosture::Reject,
+            )
+            .expect("valid subject class"),
+        }
+    }
+
+    /// Sign an assertion with an explicit `typ` and raw `nostr_owner_pubkey`.
+    /// It also carries claims satisfying [`at_jwt_class`] (`client_id`,
+    /// resource-owner `sub_type`), so under an `at+jwt` policy only `typ`
+    /// decides; dedicated policies ignore them.
+    pub(crate) fn sign_assertion(
+        typ: &str,
+        pubkey_hex: &str,
+        owner: Option<serde_json::Value>,
+    ) -> String {
+        use jsonwebtoken::{Algorithm, Header};
+        let now = chrono::Utc::now().timestamp();
+        let mut claims = serde_json::json!({
+            "iss": TEST_ISSUER,
+            "aud": TEST_COMMUNITY_URI,
+            "iat": now,
+            "exp": now + 600,
+            "sub": "test-subject",
+            "nostr_pubkey": pubkey_hex,
+            "client_id": "test-client",
+            "sub_type": "user",
+        });
+        if let Some(owner) = owner {
+            claims[buzz_auth::NOSTR_OWNER_PUBKEY_CLAIM] = owner;
+        }
+        let mut header = Header::new(Algorithm::ES256);
+        header.kid = Some(TEST_KID.to_owned());
+        header.typ = Some(typ.to_owned());
+        let key = &assertion_signing_key().0;
+        jsonwebtoken::encode(&header, &claims, key).expect("sign assertion")
+    }
+
     /// One community at [`TEST_COMMUNITY_URI`] authorizing `issuers`.
     pub(crate) fn communities_for(issuers: &[&str]) -> NipFiCommunities {
         NipFiCommunities::for_test(TEST_COMMUNITY_URI, issuers)
@@ -198,7 +453,7 @@ pub(crate) mod test_support {
 
     /// The binding a fixture community expecting `aud` presents.
     pub(crate) fn binding(aud: &str) -> CommunityBinding {
-        any_host(aud).resolve(TEST_HOST).expect("served").clone()
+        (**any_host(aud).resolve(TEST_HOST).expect("served")).clone()
     }
 
     /// Request headers addressed to [`TEST_HOST`].
@@ -220,10 +475,76 @@ pub(crate) mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn community() -> CommunityBinding {
-        communities()
-            .resolve(super::test_support::TEST_HOST)
-            .expect("mapped")
-            .clone()
+        CommunityBinding::clone(
+            communities()
+                .resolve(super::test_support::TEST_HOST)
+                .expect("mapped"),
+        )
+    }
+
+    /// An agent assertion for `agent` owned by `owner`, from `test-issuer`.
+    fn agent_assertion(agent: nostr::PublicKey, owner: nostr::PublicKey) -> VerifiedAssertion {
+        VerifiedAssertion::for_test(
+            Some(agent),
+            vec![chrono::Utc::now() + chrono::Duration::seconds(300)],
+        )
+        .with_owner_for_test(owner)
+    }
+
+    fn deny_map_denying(key: &nostr::PublicKey) -> buzz_auth::NipFiDenyMap {
+        let map = buzz_auth::NipFiDenyMap::new(
+            16,
+            vec![buzz_auth::IssuerCapacity {
+                issuer: "test-issuer".to_owned(),
+                capacity: 16,
+            }],
+        );
+        let now = chrono::Utc::now();
+        map.merge_cross_pod_deny("test-issuer", key, now + chrono::Duration::seconds(60), now);
+        map
+    }
+
+    #[test]
+    fn deny_entry_for_the_owner_denies_its_agent_assertion() {
+        let agent = nostr::Keys::generate().public_key();
+        let owner = nostr::Keys::generate().public_key();
+        let unrelated = nostr::Keys::generate().public_key();
+        let assertion = agent_assertion(agent, owner);
+        let now = chrono::Utc::now();
+        assert!(assertion_denied(&deny_map_denying(&owner), &assertion, now));
+        assert!(assertion_denied(&deny_map_denying(&agent), &assertion, now));
+        assert!(!assertion_denied(
+            &deny_map_denying(&unrelated),
+            &assertion,
+            now
+        ));
+    }
+
+    #[test]
+    fn owner_deny_entry_does_not_reach_an_ownerless_assertion() {
+        let key = nostr::Keys::generate().public_key();
+        let other = nostr::Keys::generate().public_key();
+        let assertion = VerifiedAssertion::for_test(
+            Some(key),
+            vec![chrono::Utc::now() + chrono::Duration::seconds(300)],
+        );
+        assert!(!assertion_denied(
+            &deny_map_denying(&other),
+            &assertion,
+            chrono::Utc::now()
+        ));
+    }
+
+    #[test]
+    fn session_matches_disconnect_of_its_key_or_owner_under_its_issuer() {
+        let (agent, owner, other) = ([1u8; 32], [2u8; 32], [3u8; 32]);
+        let session = NipFiSession::new("test-issuer", Some(owner));
+        assert!(session.matches("test-issuer", &agent, &agent));
+        assert!(session.matches("test-issuer", &agent, &owner));
+        assert!(!session.matches("test-issuer", &agent, &other));
+        assert!(!session.matches("other-issuer", &agent, &owner));
+        let human = NipFiSession::new("test-issuer", None);
+        assert!(!human.matches("test-issuer", &agent, &owner));
     }
 
     /// Verifier returning a fixed result and counting calls.

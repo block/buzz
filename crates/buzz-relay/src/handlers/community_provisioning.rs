@@ -28,7 +28,7 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::info;
 
 use buzz_core::tenant::{normalize_host, TenantContext};
 use url::{Host, Url};
@@ -201,31 +201,27 @@ pub(crate) fn normalize_candidate_host(host: &str) -> Result<String, String> {
     Ok(normalized)
 }
 
-/// Publish the event-backed membership view after owner persistence.
-///
-/// Provisioning is already committed when this runs. Publication therefore
-/// remains best-effort, matching every other membership mutation path: turning
-/// a stored success into an HTTP failure would make create-only retries report
-/// a misleading conflict while leaving clients without a repair path.
-async fn publish_membership_snapshot_if_required(
+/// Deliver the membership list that owner persistence committed to live
+/// subscribers. The list is already stored, so this is best-effort.
+async fn fan_out_membership_snapshot(
     state: &Arc<AppState>,
     community: buzz_core::CommunityId,
     host: &str,
+    snapshot: Option<buzz_core::StoredEvent>,
 ) {
-    if !state.config.require_relay_membership {
-        return;
-    }
-
     let tenant = TenantContext::resolved(community, host);
-    if let Err(error) =
-        crate::handlers::side_effects::publish_nip43_membership_list(&tenant, state).await
-    {
-        warn!(
-            community = %community,
-            host,
-            error = %error,
-            "community provisioned but NIP-43 membership snapshot publication failed"
-        );
+    crate::handlers::side_effects::fan_out_nip43_membership_list(&tenant, state, snapshot).await;
+}
+
+/// After a committed creation that bound issuers, drop this pod's cached
+/// "not found" for the host so the creator's first login looks it up.
+pub(crate) fn record_binding_creation(
+    resolver: Option<&crate::nip_fi_resolver::DatabaseResolver>,
+    host: &str,
+    issuers: &[String],
+) {
+    if let (Some(resolver), false) = (resolver, issuers.is_empty()) {
+        resolver.record_creation(host);
     }
 }
 
@@ -261,6 +257,10 @@ pub async fn provision_community(
     }
 
     validate_host(&request.host)?;
+    let nip_fi_policy = state.config.nip_fi_provision_binding.as_ref();
+    // Unbound either way: `issuers_for_new_host` binds nothing on a reserved host.
+    let nip_fi_issuers =
+        nip_fi_policy.map_or(&[][..], |policy| policy.issuers_for_new_host(&request.host));
 
     let initial_owner = request
         .initial_owner_pubkey
@@ -273,15 +273,23 @@ pub async fn provision_community(
         .transpose()?;
 
     if request.create_only {
+        if nip_fi_policy.is_some_and(|policy| policy.is_reserved(&request.host)) {
+            return Err(buzz_auth::BindRefusal::ReservedHost.to_string());
+        }
         let owner_hex = initial_owner.as_deref().ok_or_else(|| {
             "initial_owner_pubkey is required when create_only is true".to_string()
         })?;
-        let record = match state
+        let write = state
             .db
-            .create_community_with_owner(&request.host, owner_hex)
+            .create_community_with_owner_and_nip_fi_issuers(
+                &request.host,
+                owner_hex,
+                nip_fi_issuers,
+                &state.relay_keypair,
+            )
             .await
-            .map_err(|e| format!("failed to create community: {e}"))?
-        {
+            .map_err(|e| format!("failed to create community: {e}"))?;
+        let record = match write.outcome {
             buzz_db::CreateCommunityWithOwnerResult::Created(record) => record,
             buzz_db::CreateCommunityWithOwnerResult::HostExists => {
                 return Err("community already exists".to_string());
@@ -298,7 +306,12 @@ pub async fn provision_community(
             owner = %owner_hex,
             "community created via operator endpoint"
         );
-        publish_membership_snapshot_if_required(state, record.id, &record.host).await;
+        record_binding_creation(
+            state.nip_fi_resolver.as_deref(),
+            &record.host,
+            nip_fi_issuers,
+        );
+        fan_out_membership_snapshot(state, record.id, &record.host, write.snapshot).await;
         return Ok(ProvisionCommunityResponse {
             community_id: record.id.to_string(),
             host: record.host,
@@ -312,17 +325,24 @@ pub async fn provision_community(
     // create_only so an existing owner can never be rotated by a create race.
     let record = state
         .db
-        .ensure_configured_community(&request.host)
+        .ensure_configured_community_with_nip_fi_issuers(&request.host, nip_fi_issuers)
         .await
         .map_err(|e| format!("failed to create community: {e}"))?;
+    if record.created {
+        record_binding_creation(
+            state.nip_fi_resolver.as_deref(),
+            &record.host,
+            nip_fi_issuers,
+        );
+    }
 
     if let Some(owner_hex) = &initial_owner {
-        match state
+        let write = state
             .db
-            .provision_owner(record.id, owner_hex)
+            .provision_owner(record.id, owner_hex, &state.relay_keypair)
             .await
-            .map_err(|e| format!("community provisioned but owner bootstrap failed: {e}"))?
-        {
+            .map_err(|e| format!("community provisioned but owner bootstrap failed: {e}"))?;
+        match write.outcome {
             buzz_db::relay_members::ProvisionOwnerResult::Applied => {}
             buzz_db::relay_members::ProvisionOwnerResult::LifecycleConflict => {
                 return Err(
@@ -333,7 +353,7 @@ pub async fn provision_community(
                 return Err("owner_conflict: community deletion is pending".to_string());
             }
         }
-        publish_membership_snapshot_if_required(state, record.id, &record.host).await;
+        fan_out_membership_snapshot(state, record.id, &record.host, write.snapshot).await;
     }
 
     info!(
@@ -353,9 +373,69 @@ pub async fn provision_community(
     })
 }
 
+/// Startup: ensure the deployment community at `host`, bound only as the
+/// provisioning policy allows. `Ok(None)` when `host` is empty.
+pub async fn ensure_deployment_community(
+    db: &buzz_db::Db,
+    policy: Option<&buzz_auth::ProvisionBindingPolicy>,
+    host: &str,
+) -> Result<Option<buzz_db::EnsuredCommunityRecord>, buzz_db::DbError> {
+    if host.is_empty() {
+        return Ok(None);
+    }
+    let issuers = policy.map_or(&[][..], |policy| policy.issuers_for_new_host(host));
+    db.ensure_configured_community_for_bootstrap(host, issuers)
+        .await
+        .map(Some)
+}
+
+/// Why the reserved-host startup check refused.
+#[derive(Debug, thiserror::Error)]
+pub enum ReservedHostsError {
+    /// A reserved host holds an issuer binding.
+    #[error(
+        "reserved hosts hold NIP-FI issuer bindings (a command audience must never be a \
+         community audience): {0:?}; remove each with `buzz-admin nip-fi unbind --host <h> \
+         --issuer <i>`, or revert the command audience"
+    )]
+    Bound(Vec<String>),
+    /// The check could not read the database.
+    #[error("failed to check reserved NIP-FI hosts: {0}")]
+    Check(buzz_db::DbError),
+}
+
+/// Refuse startup when a reserved host (a NIP-FI command audience) holds an
+/// issuer binding. An unbound reserved community row is valid.
+pub async fn verify_reserved_hosts_unbound(
+    db: &buzz_db::Db,
+    policy: &buzz_auth::ProvisionBindingPolicy,
+) -> Result<(), ReservedHostsError> {
+    let bound = db
+        .nip_fi_bound_hosts(&policy.reserved_hosts())
+        .await
+        .map_err(ReservedHostsError::Check)?;
+    if bound.is_empty() {
+        Ok(())
+    } else {
+        Err(ReservedHostsError::Bound(bound))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_verifies_reserved_hosts_before_seeding_the_deployment_community() {
+        let main = include_str!("../main.rs");
+        let verify = main
+            .find("verify_reserved_hosts_unbound(&db, policy).await?;")
+            .expect("startup must refuse a bound reserved host");
+        let seed = main
+            .find("match ensure_deployment_community(&db,")
+            .expect("startup seeds the deployment community");
+        assert!(verify < seed, "the reserved-host check must run first");
+    }
 
     #[test]
     fn host_valid_bare_domain() {

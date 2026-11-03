@@ -127,24 +127,28 @@ pub(crate) use teams::delete_catalog_team_at;
 /// `ensure_nest()` must be called during app setup before this is first
 /// invoked, so that `~/.buzz` exists and gets cached.
 ///
-/// Cached for the process lifetime via `OnceLock`.
+/// Cached for the process lifetime via `OnceLock`, except in unit tests.
 /// Returns `None` in sandboxed/containerized environments where `$HOME` is
 /// unset or points to a non-existent path; callers fall back to inheriting
 /// the parent's CWD.
 pub fn default_agent_workdir() -> Option<std::path::PathBuf> {
     use std::sync::OnceLock;
     static WORKDIR: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
-    WORKDIR
-        .get_or_init(|| {
-            // Prefer ~/.buzz if it exists (created by ensure_nest()).
-            // Reject symlinks to prevent redirect attacks — is_dir()
-            // follows symlinks, so check symlink_metadata() first.
-            // Fall back to $HOME for resilience.
-            nest_dir()
-                .filter(|p| is_real_dir(p))
-                .or_else(|| dirs::home_dir().filter(|p| p.is_dir()))
-        })
-        .clone()
+    let resolve = || {
+        // Prefer ~/.buzz if it exists (created by ensure_nest()).
+        // Reject symlinks to prevent redirect attacks — is_dir()
+        // follows symlinks, so check symlink_metadata() first.
+        // Fall back to $HOME for resilience.
+        nest_dir()
+            .filter(|p| is_real_dir(p))
+            .or_else(|| dirs::home_dir().filter(|p| p.is_dir()))
+    };
+    // Tests pin a temp nest per thread, so a process-wide cache would hand a
+    // later test an earlier test's deleted nest.
+    if cfg!(test) {
+        return resolve();
+    }
+    WORKDIR.get_or_init(resolve).clone()
 }
 
 /// Returns `true` if `path` is a real directory (not a symlink).

@@ -1,10 +1,13 @@
 part of 'relay_session.dart';
 
+/// Pass the signer's hex [pubkey] when it is already known: deriving it from
+/// the key costs about a third of a signature, on the UI isolate.
 String buildNip98AuthHeader({
   required String method,
   required String url,
   required List<int> bodyBytes,
   required String? nsec,
+  String? pubkey,
 }) {
   if (nsec == null || nsec.isEmpty) {
     throw Exception('Cannot query relay: no signing key available');
@@ -17,7 +20,7 @@ String buildNip98AuthHeader({
       .process(Uint8List.fromList(bodyBytes))
       .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
       .join();
-  final event = nostr.Event.from(
+  final event = signNostrEvent(
     kind: 27235,
     content: '',
     tags: [
@@ -27,7 +30,7 @@ String buildNip98AuthHeader({
       ['nonce', const Uuid().v4()],
     ],
     secretKey: privkeyHex,
-    verify: false,
+    pubkey: pubkey,
   );
   return 'Nostr ${base64.encode(utf8.encode(event.toJson()))}';
 }
