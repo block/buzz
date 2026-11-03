@@ -15,7 +15,7 @@ pub struct Thumb {
     pub mime: &'static str,
 }
 
-/// Lossy WebP keeps alpha, so new descriptors reference it.
+/// Lossy WebP keeps alpha, so upload descriptors reference it.
 pub const WEBP: Thumb = Thumb {
     ext: "webp",
     mime: "image/webp",
