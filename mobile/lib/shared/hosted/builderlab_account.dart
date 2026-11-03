@@ -72,9 +72,12 @@ class BuilderlabAccountClient {
   final Uri accountOrigin;
 
   /// Receives the session credential each time one is adopted, and null when
-  /// it is cleared. Only a trusted owner of [accountOrigin]'s session may set
-  /// it, for example to share the session with the notification extension.
-  final void Function(String? credential)? onSessionChanged;
+  /// it is cleared or a restore finds no session. Only a trusted owner of
+  /// [accountOrigin]'s session may set it, for example to share the session
+  /// with the notification extension. A failed clear fails the operation that
+  /// cleared, so a signed-out session is never left shared; a failed share of
+  /// an adopted session is retried at the next adopt.
+  final Future<void> Function(String? credential)? onSessionChanged;
   static const _prefix = '/api/goose';
 
   /// Remote-agent registry routes, shared with desktop.
@@ -129,7 +132,11 @@ class BuilderlabAccountClient {
   Future<BuilderlabAccount?>? _restoring;
   Future<BuilderlabAccount?> _restore() => _serial(() async {
     final record = await _readRecord();
-    if (record == null) return null;
+    if (record == null) {
+      // Retries a removal that failed after an earlier sign-out.
+      await _unshare();
+      return null;
+    }
     try {
       final verified = await _verify(record.credential);
       if (verified.subject != record.subject) {
@@ -232,7 +239,15 @@ class BuilderlabAccountClient {
     // Assigned before notifying, so subject listeners see the new account.
     _account = verified;
     _subject.value = verified.subject;
-    onSessionChanged?.call(credential);
+    final share = onSessionChanged;
+    if (share != null) {
+      // Sharing is push enrichment and must never gate sign-in.
+      unawaited(
+        share(credential).catchError(
+          (Object error) => debugPrint('Session share failed: $error'),
+        ),
+      );
+    }
     return verified;
   }
 
@@ -347,9 +362,19 @@ class BuilderlabAccountClient {
     _credential = null;
     _account = null;
     if (!_disposed) _subject.value = null;
-    onSessionChanged?.call(null);
     try {
       await _storage.delete(key: _storageKey);
+    } catch (_) {
+      throw AccountFailure.storage;
+    }
+    await _unshare();
+  }
+
+  Future<void> _unshare() async {
+    final share = onSessionChanged;
+    if (share == null) return;
+    try {
+      await share(null);
     } catch (_) {
       throw AccountFailure.storage;
     }

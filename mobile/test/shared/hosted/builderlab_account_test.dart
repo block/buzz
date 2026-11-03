@@ -48,9 +48,15 @@ void main() {
       });
       // The notification extension's copy follows every adopt and clear.
       final shared = <String?>[];
+      var unshareFails = false;
+      Future<void> share(String? credential) async {
+        if (credential == null && unshareFails) throw StateError('keychain');
+        shared.add(credential);
+      }
+
       final client = BuilderlabAccountClient(
         httpClient: transport,
-        onSessionChanged: shared.add,
+        onSessionChanged: share,
       );
       expect(
         (await client.exchange(code: 'one-use', verifier: verifier)).subject,
@@ -58,12 +64,29 @@ void main() {
       );
       final restored = BuilderlabAccountClient(
         httpClient: transport,
-        onSessionChanged: shared.add,
+        onSessionChanged: share,
       );
       expect((await restored.restore())!.subject, 'account-1');
       expect(requests.length, 3);
-      await restored.clearLocalSession();
+      // A failed removal fails the sign-out instead of leaving it shared, and
+      // the next restore retries it.
+      unshareFails = true;
+      await expectLater(
+        restored.clearLocalSession(),
+        throwsA(AccountFailure.storage),
+      );
+      expect(shared, ['secret', 'secret']);
+      unshareFails = false;
+      expect(
+        await BuilderlabAccountClient(
+          httpClient: transport,
+          onSessionChanged: share,
+        ).restore(),
+        isNull,
+      );
       expect(shared, ['secret', 'secret', null]);
+      await restored.clearLocalSession();
+      expect(shared, ['secret', 'secret', null, null]);
       expect(
         await BuilderlabAccountClient(httpClient: transport).restore(),
         isNull,

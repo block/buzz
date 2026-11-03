@@ -239,7 +239,8 @@ Future<void> registerBuzzPushCommunitySnapshot(
 }
 
 /// Shares the organization account session with the iOS notification
-/// extension, or removes it when [credential] is null. Organization relays
+/// extension, or removes it when [credential] is null. Failures propagate to
+/// the account client, which owns retrying them. Organization relays
 /// enforce NIP-FI, so the extension needs the session to mint the assertion
 /// that lets it read the message a push refers to.
 Future<void> shareOrganizationSessionWithNotifications({
@@ -257,8 +258,6 @@ Future<void> shareOrganizationSessionWithNotifications({
     });
   } on MissingPluginException {
     // Flutter tests and non-Runner embeddings do not install the native bridge.
-  } catch (error, stackTrace) {
-    reportPushCommunitySnapshotError(error, stackTrace);
   }
 }
 

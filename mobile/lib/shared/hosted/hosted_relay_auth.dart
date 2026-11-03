@@ -25,12 +25,10 @@ final organizationAccountProvider = Provider<BuilderlabAccountClient?>((ref) {
   final account = BuilderlabAccountClient(
     accountOrigin: origin,
     // The notification extension mints its own assertions for these relays.
-    onSessionChanged: (credential) => unawaited(
-      shareOrganizationSessionWithNotifications(
-        origin: origin,
-        credential: credential,
-        relayHosts: OrganizationEnvironment.relayHosts,
-      ),
+    onSessionChanged: (credential) => shareOrganizationSessionWithNotifications(
+      origin: origin,
+      credential: credential,
+      relayHosts: OrganizationEnvironment.relayHosts,
     ),
   );
   ref.onDispose(account.dispose);
