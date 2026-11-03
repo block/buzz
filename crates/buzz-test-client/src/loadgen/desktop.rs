@@ -1249,6 +1249,8 @@ impl Client {
         // Whether any frame came since the last tick, the probe a silent
         // tick sends, and that probe's subscription, closed by the next one.
         let mut heard = false;
+        // When the deadlines past due were first deferred to a backlog.
+        let mut deferred_since: Option<Instant> = None;
         let mut probe: Option<Probe<'_>> = None;
         let mut probe_id: Option<String> = None;
         let mut activity = Activity::new(&scenario.human, &mut self.rng, self.split);
@@ -1395,9 +1397,16 @@ impl Client {
             // replacement keeps the batch it would have replaced, and the next
             // tick tries again); a connection's live route stays open, and
             // establishes as cut, since it may have missed history.
+            let overdue = |w: &Waiting| w.sent.elapsed() >= self.req_timeout;
+            let deferring = defer(
+                &mut deferred_since,
+                backlogged,
+                waiting.values().any(overdue),
+                self.req_timeout,
+            );
             let timed_out: Vec<String> = waiting
                 .iter()
-                .filter(|(_, w)| expired(w.sent.elapsed(), self.req_timeout, backlogged))
+                .filter(|(_, w)| !deferring && overdue(w))
                 .map(|(id, _)| id.clone())
                 .collect();
             for id in timed_out {
@@ -1442,14 +1451,10 @@ impl Client {
                 }
             }
 
-            // While a deadline waits on the backlog, the pass only drains: a
+            // While deadlines wait on the backlog, the pass only drains: a
             // publish waiting for its OK, or a tick, could outlast the
             // deferral and expire an EOSE already in hand.
-            if backlogged
-                && waiting
-                    .values()
-                    .any(|w| w.sent.elapsed() >= self.req_timeout)
-            {
+            if deferring {
                 continue;
             }
 
@@ -1544,12 +1549,16 @@ impl Client {
     }
 }
 
-/// Whether a REQ that has waited `waited` for its EOSE is judged expired. A
-/// backlog still in hand may hold the EOSE in time, so its deadline waits for
-/// the next pass, but at most one more `timeout`: traffic that keeps every
-/// pass full does not defer it forever.
-fn expired(waited: Duration, timeout: Duration, backlogged: bool) -> bool {
-    waited >= timeout && (!backlogged || waited >= timeout * 2)
+/// Whether a pass defers the deadlines already past. A backlog still in hand
+/// may hold their EOSEs in time, so they wait for the next pass, but for at
+/// most `timeout` from the first pass that deferred them (`since`): traffic
+/// that keeps every pass full does not defer them forever.
+fn defer(since: &mut Option<Instant>, backlogged: bool, overdue: bool, timeout: Duration) -> bool {
+    if !(backlogged && overdue) {
+        *since = None;
+        return false;
+    }
+    since.get_or_insert_with(Instant::now).elapsed() < timeout
 }
 
 async fn close(conn: &mut NostrWsConnection, id: &str) -> Result<(), WsClientError> {
@@ -3006,27 +3015,37 @@ hold_secs = 1
     }
 
     #[test]
-    fn a_backlog_defers_a_deadline_by_at_most_one_more_timeout() {
+    fn a_backlog_defers_deadlines_for_at_most_one_timeout() {
         let t = Duration::from_secs(10);
-        let s = Duration::from_secs;
-        assert!(!expired(s(9), t, false));
-        assert!(expired(s(10), t, false));
-        // A backlog may hold the EOSE: wait for it, but not forever.
-        assert!(!expired(s(10), t, true));
-        assert!(!expired(s(19), t, true));
-        assert!(expired(s(20), t, true));
+        let mut since = None;
+        // Nothing past due, or nothing in hand: nothing to defer.
+        assert!(!defer(&mut since, true, false, t));
+        assert!(!defer(&mut since, false, true, t));
+        assert!(since.is_none());
+        // A backlog may hold the EOSEs: wait for them, however late the
+        // first deferring pass comes, but not forever.
+        assert!(defer(&mut since, true, true, t));
+        assert!(since.is_some());
+        since = Instant::now().checked_sub(Duration::from_secs(9));
+        assert!(defer(&mut since, true, true, t));
+        since = Instant::now().checked_sub(t);
+        assert!(!defer(&mut since, true, true, t));
+        // A drained backlog starts the next deferral afresh.
+        assert!(!defer(&mut since, false, true, t));
+        assert!(since.is_none());
     }
 
     #[tokio::test]
     async fn a_long_backlog_behind_slow_oks_keeps_its_timely_eoses() {
         // Every REQ answers 1.2 s late with 600 events, more than one pass
         // drains, and its EOSE, while heartbeats each second wait 3.5 s for
-        // OKs. No heartbeat may run between the backlog's passes: a second
-        // OK wait would outlast the deferral.
+        // OKs, more than twice the 1.5 s deadline. The deferral runs from
+        // the first pass that defers, not from the REQ, and no heartbeat may
+        // run between the backlog's passes: a second OK wait would outlast it.
         let mut rig = solo(5, &format!("mode = \"current\"\n{QUIET}"));
         rig.presence_secs = 1.0;
         rig.ok_delay = Duration::from_millis(3_500);
-        rig.req_timeout = Duration::from_millis(2_500);
+        rig.req_timeout = Duration::from_millis(1_500);
         rig.plan = Arc::new(|_, _| (600, Duration::from_millis(1_200)));
         let out = drive(rig, Duration::ZERO, |o| {
             o.count("publish_ephemeral_ok") >= 2 && o.count("desktop_live_eose") >= 4
@@ -3034,6 +3053,7 @@ hold_secs = 1
         .await;
         assert_eq!(out.errors("desktop_live_eose"), 0, "{:?}", out.ops);
         assert_eq!(out.count("desktop_live_eose"), 4, "{:?}", out.ops);
+        assert!(!out.saw("CLOSE", "batch-1-0"), "{:?}", out.frames);
     }
 
     #[tokio::test]
