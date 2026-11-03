@@ -295,6 +295,107 @@ async fn moderation_kick_notifies_the_kicked_member_after_cleanup() {
     );
 }
 
+/// A re-add that commits after the kick's fence, while its notice is still
+/// to come, stops the notice: a client never hears the removal after the
+/// re-add that undid it.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn moderation_kick_sends_no_notice_after_a_re_add() {
+    let (state, tenant) = fixture().await;
+    let owner = Keys::generate();
+    let member = Keys::generate();
+    let channel = create_channel(&state, &tenant, &owner, &[]).await;
+    let h = channel.to_string();
+    let member_bytes = member.public_key().to_bytes();
+    let owner_bytes = owner.public_key().to_bytes();
+    publish(
+        &state,
+        &tenant,
+        &owner,
+        9000,
+        &[&["h", &h], &["p", &member.public_key().to_hex()]],
+    )
+    .await;
+    let mut rx = subscribe_notices(&state, &tenant, &member);
+    let mut barrier = notice_barrier::install(&member_bytes);
+
+    state
+        .db
+        .remove_member(tenant.community(), channel, &member_bytes, &owner_bytes)
+        .await
+        .expect("remove member");
+    let effects = tokio::spawn({
+        let (state, tenant) = (state.clone(), tenant.clone());
+        async move {
+            crate::handlers::side_effects::apply_kick_live_side_effects(
+                &tenant,
+                &state,
+                channel,
+                &member_bytes,
+            )
+            .await
+        }
+    });
+    // Parked after the fence committed, before the notice: re-add now.
+    at_receipt(&mut barrier, async |_| {
+        state
+            .db
+            .add_member(
+                tenant.community(),
+                channel,
+                &member_bytes,
+                buzz_db::channel::MemberRole::Member,
+                Some(&owner_bytes),
+            )
+            .await
+            .expect("re-add")
+    })
+    .await;
+    effects.await.expect("task").expect("kick live effects");
+
+    assert_eq!(notices(&mut rx), vec![], "removal notice after the re-add");
+}
+
+/// A recipient whose channel set is cached when its moderation DM is
+/// created still finds the DM in the read its notice prompts.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn moderation_dm_notice_follows_a_cached_channel_list() {
+    let (state, tenant) = fixture().await;
+    let recipient = Keys::generate();
+    let recipient_bytes = recipient.public_key().to_bytes();
+    // Warm the recipient's cached channel set, as a recent REQ does.
+    assert_eq!(
+        listed_channels(&state, &tenant, &recipient).await,
+        Vec::<String>::new()
+    );
+    let mut barrier = notice_barrier::install(&recipient_bytes);
+
+    let deliver = tokio::spawn({
+        let (state, tenant) = (state.clone(), tenant.clone());
+        async move {
+            crate::handlers::moderation_notices::send_moderation_notice(
+                &tenant,
+                &state,
+                &recipient_bytes,
+                crate::handlers::moderation_notices::ModerationNotice::ContentActioned {
+                    action_id: Uuid::new_v4(),
+                    public_reason: "spam".into(),
+                },
+                chrono::Utc::now(),
+            )
+            .await
+        }
+    });
+    let (dm, listed) = at_receipt(&mut barrier, async |_| {
+        listed_channels(&state, &tenant, &recipient).await
+    })
+    .await;
+    deliver.await.expect("task").expect("notice");
+
+    assert!(listed.contains(&dm), "notice sent before the cache drop");
+}
+
 /// A moderation DM resurfaces the DM, and on receipt of its notice the
 /// channel list shows it and the NIP-DV snapshot no longer hides it. The
 /// second delivery follows a real hide in the same (pinned) second and still

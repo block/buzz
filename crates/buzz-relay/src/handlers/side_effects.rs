@@ -161,8 +161,9 @@ pub(crate) async fn apply_kick_live_side_effects(
     }
 
     // The removal is committed: refresh the channel's discovery roster, then
-    // tell the kicked member, as a kind:9001 removal does. The notice tells a
-    // client to re-read that roster, so a failed refresh returns before it and
+    // tell the kicked member, as a kind:9001 removal does, unless a re-add has
+    // restored them since (see `emit_kick_removed_notification`). The notice
+    // tells a client to re-read that roster, so a failed refresh returns before it and
     // the moderation driver retries the action. A channel deleted since the
     // kick has no roster to refresh: that is convergence, once its discovery
     // is gone. A recovery re-drive repeats both; the refresh is replaceable
@@ -184,16 +185,7 @@ pub(crate) async fn apply_kick_live_side_effects(
             )
             .await?;
     }
-    if let Err(e) = emit_membership_notification(
-        tenant,
-        state,
-        channel_id,
-        target_pubkey,
-        state.relay_keypair.public_key().as_bytes(),
-        KIND_MEMBER_REMOVED_NOTIFICATION,
-    )
-    .await
-    {
+    if let Err(e) = emit_kick_removed_notification(tenant, state, channel_id, target_pubkey).await {
         warn!(channel = %channel_id, error = %e, "membership notification emission failed");
     }
     Ok(())
@@ -1358,6 +1350,37 @@ async fn emit_typed_membership_notification(
     notification_kind: u32,
     extra_tags: &[Tag],
 ) -> anyhow::Result<()> {
+    let event = build_membership_notification(
+        state,
+        channel_id,
+        channel_type,
+        target_pubkey,
+        actor_pubkey,
+        notification_kind,
+        extra_tags,
+    )
+    .await?;
+    // Store with channel_id = None → globally scoped, reachable by global subscribers.
+    let (stored, was_inserted) = state
+        .db
+        .insert_event(tenant.community(), &event, None)
+        .await?;
+    if was_inserted {
+        deliver_membership_notification(tenant, state, channel_id, &stored).await;
+    }
+    Ok(())
+}
+
+/// Sign a membership notice; see [`emit_membership_notification`].
+async fn build_membership_notification(
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    channel_type: &str,
+    target_pubkey: &[u8],
+    actor_pubkey: &[u8],
+    notification_kind: u32,
+    extra_tags: &[Tag],
+) -> anyhow::Result<Event> {
     let target_hex = hex::encode(target_pubkey);
     let actor_hex = hex::encode(actor_pubkey);
     let channel_id_str = channel_id.to_string();
@@ -1397,19 +1420,18 @@ async fn emit_typed_membership_notification(
         Some(at) => builder.custom_created_at(nostr::Timestamp::from(at)),
         None => builder,
     };
-    let event = builder
+    builder
         .sign_with_keys(&state.relay_keypair)
-        .map_err(|e| anyhow::anyhow!("failed to sign membership notification: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("failed to sign membership notification: {e}"))
+}
 
-    // Store with channel_id = None → globally scoped, reachable by global subscribers.
-    let (stored, was_inserted) = state
-        .db
-        .insert_event(tenant.community(), &event, None)
-        .await?;
-    if !was_inserted {
-        return Ok(());
-    }
-
+/// Fan out a newly stored membership notice to every pod.
+async fn deliver_membership_notification(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    stored: &StoredEvent,
+) {
     // Fan-out only — skip search indexing and workflow evaluation. Publish through
     // Redis before local fan-out so agents connected to other relay pods receive
     // the global membership notification and can subscribe to the new channel.
@@ -1426,23 +1448,68 @@ async fn emit_typed_membership_notification(
             .invalidate(&(tenant.community(), stored.event.id.to_bytes()));
         warn!(
             channel = %channel_id,
-            target = %target_hex,
-            kind = notification_kind,
+            kind = stored.event.kind.as_u16(),
             "membership notification Redis publish failed: {e}"
         );
     }
 
     // Routed through the guarded send path for uniformity; the access gate no-ops
     // for these globally-scoped (channel_id = None) events.
-    crate::handlers::event::fan_out_event_to_local_subscribers(state, tenant.community(), &stored)
+    crate::handlers::event::fan_out_event_to_local_subscribers(state, tenant.community(), stored)
         .await;
 
     info!(
         channel = %channel_id,
-        target = %target_hex,
-        kind = notification_kind,
+        kind = stored.event.kind.as_u16(),
         "membership notification emitted"
     );
+}
+
+/// Send the kicked member's kind:44101 only while the kick still stands.
+///
+/// The notice is signed, then re-checked, stored and fanned out under the
+/// membership lock. A re-add either commits first, and no notice is sent, or
+/// waits for the lock, so its kind:44100 is stamped and published after this
+/// notice. Either way a client never hears the removal after the re-add.
+async fn emit_kick_removed_notification(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    target_pubkey: &[u8],
+) -> anyhow::Result<()> {
+    let Some(channel_type) = state
+        .db
+        .channel_type_of(tenant.community(), channel_id)
+        .await?
+    else {
+        warn!(%channel_id, "membership notice skipped: channel not found");
+        return Ok(());
+    };
+    let event = build_membership_notification(
+        state,
+        channel_id,
+        &channel_type,
+        target_pubkey,
+        state.relay_keypair.public_key().as_bytes(),
+        KIND_MEMBER_REMOVED_NOTIFICATION,
+        &[],
+    )
+    .await?;
+    let mut fence = state
+        .db
+        .membership_removal_fence(tenant.community(), channel_id, target_pubkey)
+        .await?;
+    if !fence.still_removed {
+        info!(%channel_id, "kick notice skipped: member re-added");
+        return Ok(());
+    }
+    // Stored on the fence's own connection: no second pool connection is
+    // taken while the lock is held (see `apply_kick_live_side_effects`).
+    let (stored, was_inserted) = fence.insert_event(&event, None).await?;
+    if was_inserted {
+        deliver_membership_notification(tenant, state, channel_id, &stored).await;
+    }
+    fence.commit().await?;
     Ok(())
 }
 

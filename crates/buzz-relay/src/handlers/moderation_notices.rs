@@ -118,6 +118,13 @@ pub async fn send_moderation_notice(
         )
         .await?;
     let dm_channel_id = dm_channel.id;
+    // Drop both participants' cached channel sets on every pod, as opening a
+    // DM does (`command_executor::handle_dm_open`), so the read the notice
+    // below prompts includes this DM. Done on every delivery, not just on
+    // creation, so a retry after a failed first delivery still drops them.
+    for participant in [recipient_pubkey, relay_pubkey_bytes.as_slice()] {
+        state.invalidate_membership(tenant, dm_channel_id, participant);
+    }
 
     // Count new DM creation; side-effect gates below intentionally do not
     // gate on was_created (see comment at step 2).
