@@ -68,13 +68,25 @@ const CATCH_UP_PAGES: usize = 5;
 /// The app's custom emoji set.
 const EMOJI_SET: &str = "buzz:custom-emoji";
 
+/// What a subscription carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Route {
+    /// The global profiles route: profiles, statuses and custom emoji.
+    Profiles,
+    /// The global membership route: grants, read state and reminders.
+    Membership,
+    /// A channel batch, which stays open.
+    Channels,
+    /// A replay of channels behind a live-only batch, closed at its EOSE.
+    Replay,
+}
+
 /// One REQ frame.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Req {
     pub(super) id: String,
     pub(super) filters: Vec<Value>,
-    /// A replay subscription, closed at its EOSE. Others stay open.
-    pub(super) replay: bool,
+    pub(super) route: Route,
 }
 
 impl Req {
@@ -83,6 +95,25 @@ impl Req {
         frame.extend(self.filters.iter().cloned());
         Value::Array(frame)
     }
+
+    /// A route whose replay counts as cut whatever it sends: a live-only
+    /// channel batch over more than ten channels replays nothing itself.
+    fn cut_by_design(&self) -> bool {
+        let live_only =
+            self.route == Route::Channels && self.filters.iter().all(|f| f["limit"] == json!(0));
+        let scope: usize = self
+            .filters
+            .iter()
+            .map(|f| f["#h"].as_array().map_or(0, Vec::len))
+            .sum();
+        live_only && scope > REPLAY_BATCH
+    }
+}
+
+/// Whether a route's replay was cut at its EOSE: it replayed the app's limit
+/// of events across its filters, or it was cut by design.
+pub(super) fn limited(cut_by_design: bool, events: usize) -> bool {
+    cut_by_design || events >= REPLAY_LIMIT
 }
 
 fn channel_filter(ids: &[String], since: u64, limit: usize) -> Value {
@@ -100,7 +131,7 @@ fn global_reqs(viewer: &str, since: u64) -> [Req; 2] {
                 json!({"kinds": [30315], "#d": ["general"], "since": since, "limit": limit}),
                 json!({"kinds": [30030], "#d": [EMOJI_SET], "since": since, "limit": limit}),
             ],
-            replay: false,
+            route: Route::Profiles,
         },
         Req {
             id: "membership".into(),
@@ -110,7 +141,7 @@ fn global_reqs(viewer: &str, since: u64) -> [Req; 2] {
                 json!({"kinds": [30078], "authors": [viewer], "#t": ["read-state"], "since": since, "limit": limit}),
                 json!({"kinds": [30300], "authors": [viewer], "since": since, "limit": limit}),
             ],
-            replay: false,
+            route: Route::Membership,
         },
     ]
 }
@@ -139,7 +170,7 @@ pub(super) fn batch_reqs(
                     .iter()
                     .map(|c| channel_filter(std::slice::from_ref(c), since, limit))
                     .collect(),
-                replay: false,
+                route: Route::Channels,
             })
             .collect()
     } else {
@@ -149,7 +180,7 @@ pub(super) fn batch_reqs(
             .map(|(i, chunk)| Req {
                 id: id(i),
                 filters: vec![channel_filter(chunk, since, 0)],
-                replay: false,
+                route: Route::Channels,
             })
             .collect()
     }
@@ -175,7 +206,7 @@ pub(super) fn replay_reqs(
                 .iter()
                 .map(|c| channel_filter(std::slice::from_ref(c), since, REPLAY_LIMIT))
                 .collect(),
-            replay: true,
+            route: Route::Replay,
         })
         .collect()
 }
@@ -199,26 +230,19 @@ pub(super) fn connect_reqs(
 pub(super) enum Situation {
     /// The client's first connection.
     Cold,
-    /// A reconnect whose replay is not continuous. Everything is read again
-    /// except channel names and sidebar preferences, which the client
-    /// already holds.
+    /// Any other reconnect: routes resume from the last connection.
     Reconnect,
-    /// A `current` renewal with every channel in one replaying batch: the
-    /// subscriptions are re-sent and nothing is read.
-    QuietRenewal,
-    /// A `current` renewal whose batches are live-only (more than 10
-    /// channels). Channel routes establish again, so windows, threads and
-    /// unreads are refreshed; global reads are skipped.
-    LimitedRenewal,
+    /// A `current` identity renewal: routes are carried over, and none
+    /// establishes unless one of them replays a cut window.
+    Renewal,
 }
 
-/// What an identity renewal is for a client in `mode` with `joined` channels.
-/// Before the fixes, it was an ordinary reconnect.
-pub(super) fn renewal(mode: DesktopMode, joined: usize) -> Situation {
+/// What an identity renewal is in `mode`. Before the fixes it was an
+/// ordinary reconnect.
+pub(super) fn renewal(mode: DesktopMode) -> Situation {
     match mode {
         DesktopMode::Legacy => Situation::Reconnect,
-        DesktopMode::Current if joined <= REPLAY_BATCH => Situation::QuietRenewal,
-        DesktopMode::Current => Situation::LimitedRenewal,
+        DesktopMode::Current => Situation::Renewal,
     }
 }
 
@@ -234,45 +258,178 @@ pub(super) enum Fetch {
     Profiles,
     Statuses,
     Emoji,
-    ReadState,
-    Unread,
+    /// Unread repair. With `snapshot`, a full repair: the read-state
+    /// snapshot first, then the repair. Without, the membership route's
+    /// replay covered read state and only the repair runs.
+    Unread {
+        snapshot: bool,
+    },
     Reminders,
     Window(usize),
     Thread(usize),
 }
 
-/// The reads a connection makes once established in `situation`, with
-/// `windows` channel windows and `threads` thread views open.
-pub(super) fn connect_fetches(situation: Situation, windows: usize, threads: usize) -> Vec<Fetch> {
-    let mut reads = match situation {
-        Situation::Cold => vec![
-            Fetch::Nip11,
-            Fetch::Roster,
-            Fetch::Metadata,
-            Fetch::Sidebar,
-            Fetch::Profiles,
-            Fetch::Statuses,
-            Fetch::Emoji,
-            Fetch::ReadState,
-            Fetch::Unread,
-            Fetch::Reminders,
-        ],
-        Situation::Reconnect => vec![
-            Fetch::Nip11,
-            Fetch::Roster,
-            Fetch::Profiles,
-            Fetch::Statuses,
-            Fetch::Emoji,
-            Fetch::ReadState,
-            Fetch::Unread,
-            Fetch::Reminders,
-        ],
-        Situation::QuietRenewal => return Vec::new(),
-        Situation::LimitedRenewal => vec![Fetch::Unread],
-    };
-    reads.extend((0..windows).map(Fetch::Window));
-    reads.extend((0..threads).map(Fetch::Thread));
-    reads
+const FULL_REPAIR: Fetch = Fetch::Unread { snapshot: true };
+const COVERED_REPAIR: Fetch = Fetch::Unread { snapshot: false };
+
+impl Fetch {
+    /// Whether this job, queued or running, already does `other`'s work.
+    fn covers(self, other: Fetch) -> bool {
+        self == other || (self == FULL_REPAIR && other == COVERED_REPAIR)
+    }
+}
+
+fn channel_recovery(windows: usize, threads: usize) -> impl Iterator<Item = Fetch> {
+    (0..windows)
+        .map(Fetch::Window)
+        .chain((0..threads).map(Fetch::Thread))
+}
+
+/// The reads a connection makes as soon as it opens. `legacy` reads
+/// everything here: all of it cold, all but channel names and sidebar
+/// preferences on a reconnect, which it treats a renewal as. `current`
+/// reads only what no route covers; the rest follows each route's
+/// establishment ([`establish_fetches`]).
+pub(super) fn connect_fetches(
+    mode: DesktopMode,
+    situation: Situation,
+    windows: usize,
+    threads: usize,
+) -> Vec<Fetch> {
+    let cold = situation == Situation::Cold;
+    match (mode, situation) {
+        (DesktopMode::Legacy, _) => {
+            let mut reads = vec![Fetch::Nip11, Fetch::Roster];
+            if cold {
+                reads.extend([Fetch::Metadata, Fetch::Sidebar]);
+            }
+            reads.extend([
+                Fetch::Profiles,
+                Fetch::Statuses,
+                Fetch::Emoji,
+                FULL_REPAIR,
+                Fetch::Reminders,
+            ]);
+            reads.extend(channel_recovery(windows, threads));
+            reads
+        }
+        (DesktopMode::Current, Situation::Cold) => {
+            vec![Fetch::Nip11, Fetch::Metadata, Fetch::Sidebar]
+        }
+        (DesktopMode::Current, Situation::Reconnect) => vec![Fetch::Nip11],
+        (DesktopMode::Current, Situation::Renewal) => Vec::new(),
+    }
+}
+
+/// Reads still owed after a failed or unfinished one, as the app's stores
+/// track them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Owed {
+    pub(super) roster: bool,
+    pub(super) profiles: bool,
+    pub(super) unread: bool,
+}
+
+/// The reads `current` makes when `route` establishes. A `continuous`
+/// global route replayed every change since the last connection, so it
+/// skips its full read unless one is still owed: profiles resume their
+/// statuses and emoji, and membership resumes read state and reminders and
+/// only repairs unreads. A channel route recovers the open windows and
+/// threads.
+pub(super) fn establish_fetches(
+    route: Route,
+    continuous: bool,
+    owed: Owed,
+    windows: usize,
+    threads: usize,
+) -> Vec<Fetch> {
+    match route {
+        Route::Profiles if !continuous => vec![Fetch::Profiles, Fetch::Statuses, Fetch::Emoji],
+        Route::Profiles if owed.profiles => vec![Fetch::Profiles],
+        Route::Profiles => Vec::new(),
+        Route::Membership => {
+            let mut reads = Vec::new();
+            if !continuous || owed.roster {
+                reads.push(Fetch::Roster);
+            }
+            if continuous {
+                reads.push(COVERED_REPAIR);
+            } else {
+                reads.extend([FULL_REPAIR, Fetch::Reminders]);
+            }
+            reads
+        }
+        Route::Channels => channel_recovery(windows, threads).collect(),
+        Route::Replay => Vec::new(),
+    }
+}
+
+/// Which of a connection's routes establish, and when. Each route kind
+/// establishes once per connection. A route resumes only if the previous
+/// connection had it caught up; one that had not counts as cut. On a
+/// renewal, routes are carried: one whose replay kept continuity establishes
+/// nothing, until any route's replay is cut, which establishes every route
+/// again.
+#[derive(Debug)]
+pub(super) struct Establishment {
+    /// Routes the previous connection had caught up.
+    resumed: Vec<Route>,
+    carried: bool,
+    /// Routes that reached EOSE while carried, with their continuity.
+    held: Vec<(Route, bool)>,
+    done: Vec<Route>,
+}
+
+impl Establishment {
+    /// A connection's establishment, after one that had `caught_up` routes
+    /// (see [`Establishment::caught_up`]). A cold start resumes nothing.
+    pub(super) fn new(situation: Situation, caught_up: &[Route]) -> Self {
+        let resumed = match situation {
+            Situation::Cold => Vec::new(),
+            _ => caught_up.to_vec(),
+        };
+        Self {
+            resumed,
+            carried: situation == Situation::Renewal,
+            held: Vec::new(),
+            done: Vec::new(),
+        }
+    }
+
+    /// `route` reached its EOSE, its replay `cut` or not. A route that missed
+    /// its deadline counts as cut. Returns the routes that establish now,
+    /// each with its continuity.
+    pub(super) fn eose(&mut self, route: Route, cut: bool) -> Vec<(Route, bool)> {
+        if route == Route::Replay {
+            return Vec::new();
+        }
+        let cut = cut || !self.resumed.contains(&route);
+        let mut now = Vec::new();
+        if self.carried {
+            if !cut {
+                self.held.push((route, true));
+                return Vec::new();
+            }
+            self.carried = false;
+            now = std::mem::take(&mut self.held);
+        }
+        now.push((route, !cut));
+        now.retain(|(route, _)| {
+            let first = !self.done.contains(route);
+            if first {
+                self.done.push(*route);
+            }
+            first
+        });
+        now
+    }
+
+    /// The routes this connection has caught up: established, or carried
+    /// with their continuity kept.
+    pub(super) fn caught_up(&self) -> Vec<Route> {
+        let held = self.held.iter().map(|(route, _)| *route);
+        self.done.iter().copied().chain(held).collect()
+    }
 }
 
 /// What a recovery tick re-sends or rereads.
@@ -281,19 +438,26 @@ pub(super) struct Due {
     /// Replace every channel batch with a live-only copy.
     pub(super) batches: bool,
     pub(super) roster: bool,
-    /// Read state and unread repair.
+    /// A full unread repair.
     pub(super) unread: bool,
 }
 
+/// How long since each tick item was last done. `None`: never, or a
+/// replacement that never established.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Clocks {
+    /// Since the batches were last sent.
+    pub(super) batches: Option<Duration>,
+    /// Since the roster was last read in full.
+    pub(super) roster: Option<Duration>,
+    /// Since a full unread repair was last asked for.
+    pub(super) unread: Option<Duration>,
+}
+
 /// A tick's work. `legacy` does all of it every tick. `current` waits for
-/// `backstop` since each was last done.
-pub(super) fn tick(
-    mode: DesktopMode,
-    backstop: Duration,
-    since_batches: Duration,
-    since_roster: Duration,
-    since_unread: Duration,
-) -> Due {
+/// `backstop` since each was last done, and retries owed reads at once.
+pub(super) fn tick(mode: DesktopMode, backstop: Duration, clocks: Clocks, owed: Owed) -> Due {
+    let stale = |since: Option<Duration>| since.is_none_or(|d| d >= backstop);
     match mode {
         DesktopMode::Legacy => Due {
             batches: true,
@@ -301,9 +465,9 @@ pub(super) fn tick(
             unread: true,
         },
         DesktopMode::Current => Due {
-            batches: since_batches >= backstop,
-            roster: since_roster >= backstop,
-            unread: since_unread >= backstop,
+            batches: stale(clocks.batches),
+            roster: owed.roster || stale(clocks.roster),
+            unread: owed.unread || stale(clocks.unread),
         },
     }
 }
@@ -315,9 +479,101 @@ pub(super) fn tick_fetches(due: Due) -> Vec<Fetch> {
         reads.push(Fetch::Roster);
     }
     if due.unread {
-        reads.extend([Fetch::ReadState, Fetch::Unread]);
+        reads.push(FULL_REPAIR);
     }
     reads
+}
+
+/// A window page's position: `(created_at, id)` of the row the next page
+/// starts after.
+pub(super) type Cursor = (u64, String);
+
+/// The relay's verdict on a window page: the cursor of the next page, or
+/// `None` once history is exhausted. The relay answers every window with
+/// one kind 39006 bounds event for this channel and cursor, signed by
+/// `relay` (when known); rows, aux events and summaries say nothing about
+/// exhaustion. Anything else is an error, as in the app.
+pub(super) fn window_bounds(
+    events: &[Value],
+    channel: &str,
+    cursor: Option<&Cursor>,
+    relay: Option<&str>,
+) -> Result<Option<Cursor>, String> {
+    let suffix = match cursor {
+        Some((until, id)) => format!("{channel}:{until}:{id}"),
+        None => format!("{channel}:head"),
+    };
+    let bounds: Vec<&Value> = events
+        .iter()
+        .filter(|e| {
+            e["kind"] == json!(39006)
+                && relay.is_none_or(|r| e["pubkey"] == json!(r))
+                && has_tag(e, "h", channel)
+                && has_tag(e, "d", &suffix)
+        })
+        .collect();
+    let [bound] = bounds[..] else {
+        return Err(format!("{} window bounds for {suffix}", bounds.len()));
+    };
+    let body: Value = serde_json::from_str(bound["content"].as_str().unwrap_or_default())
+        .map_err(|e| format!("window bounds: {e}"))?;
+    let has_more = body["has_more"]
+        .as_bool()
+        .ok_or("window bounds omit has_more")?;
+    let next = match &body["next_cursor"] {
+        Value::Null => None,
+        next => {
+            let until = next["created_at"].as_u64();
+            let id = next["id"].as_str().filter(|id| id.len() == 64);
+            let (Some(until), Some(id)) = (until, id) else {
+                return Err("window cursor is malformed".into());
+            };
+            Some((until, id.to_string()))
+        }
+    };
+    if has_more != next.is_some() {
+        return Err("window bounds contradict their cursor".into());
+    }
+    // History runs newest first, then by ascending id at equal times.
+    if let (Some((until, id)), Some((next_until, next_id))) = (cursor, &next) {
+        if next_until > until || (next_until == until && next_id <= id) {
+            return Err("window cursor does not advance".into());
+        }
+    }
+    Ok(next)
+}
+
+fn has_tag(event: &Value, name: &str, value: &str) -> bool {
+    event["tags"].as_array().is_some_and(|tags| {
+        tags.iter()
+            .any(|t| t[0] == json!(name) && t[1] == json!(value))
+    })
+}
+
+/// The last row of a page in the relay's order (newest first, then by
+/// ascending id): the cursor of the page after it.
+pub(super) fn last_row(page: &[Value]) -> Option<(u64, &str)> {
+    page.iter()
+        .filter_map(|e| Some((e["created_at"].as_u64()?, e["id"].as_str()?)))
+        .min_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(a.1)))
+}
+
+/// Points `filter` at the page after `cursor`. The relay takes `until` and
+/// `before_id` together.
+fn page_before(filter: &mut Value, (until, id): (u64, &str)) {
+    filter["until"] = json!(until);
+    filter["before_id"] = json!(id);
+}
+
+/// The events of a `/query` response: an array, or the object a read-state
+/// snapshot answers with.
+fn events(text: &str) -> serde_json::Result<Vec<Value>> {
+    match serde_json::from_str(text)? {
+        Value::Object(mut body) => {
+            serde_json::from_value(body.remove("events").unwrap_or_default())
+        }
+        other => serde_json::from_value(other),
+    }
 }
 
 /// Where a resumed subscription starts: [`RESUME_LAG_SECS`] before the
@@ -361,6 +617,15 @@ fn co_members(
     out
 }
 
+/// What the client's reads have settled: what is still owed and when the
+/// roster was last read in full. Its read tasks write it; ticks and route
+/// establishments read it.
+#[derive(Debug)]
+struct Ledger {
+    owed: Owed,
+    roster_read: Option<Instant>,
+}
+
 /// What a client's reads use. Its sessions and read tasks share it.
 struct Reader {
     shared: Arc<Shared>,
@@ -370,16 +635,30 @@ struct Reader {
     channels: Vec<String>,
     profiles: Vec<String>,
     windows: usize,
-    /// The relay's own pubkey from NIP-11 `self`, the author of notices.
+    /// The relay's own pubkey from NIP-11 `self`, the author of notices and
+    /// window bounds.
     relay: std::sync::Mutex<Option<String>>,
     /// When the last unread repair started (Unix seconds).
     unread_mark: std::sync::Mutex<Option<u64>>,
+    ledger: std::sync::Mutex<Ledger>,
 }
 
 impl Reader {
     /// One `POST /query`, timed as `op`. Returns the events, or `None` once
     /// it failed (recorded) or the run is stopping (not started).
     async fn query(&self, op: Op, filters: Value) -> Option<Vec<Value>> {
+        self.query_with(op, filters, |events| Ok(events.to_vec()))
+            .await
+    }
+
+    /// [`Reader::query`], where the response only succeeds once `check`
+    /// accepts its events.
+    async fn query_with<T>(
+        &self,
+        op: Op,
+        filters: Value,
+        check: impl FnOnce(&[Value]) -> Result<T, String>,
+    ) -> Option<T> {
         if stopped(&self.shared) {
             return None;
         }
@@ -399,14 +678,21 @@ impl Reader {
                 pending.err(&http_reason(status, &text))
             }
             Ok(Ok((_, text))) => match events(&text) {
-                Ok(events) => {
-                    pending.ok();
-                    return Some(events);
-                }
+                Ok(events) => match check(&events) {
+                    Ok(value) => {
+                        pending.ok();
+                        return Some(value);
+                    }
+                    Err(e) => pending.err(&e),
+                },
                 Err(e) => pending.err(&format!("decode: {e}")),
             },
         }
         None
+    }
+
+    fn owed(&self) -> Owed {
+        lock(&self.ledger).owed
     }
 
     async fn fetch(&self, fetch: Fetch) {
@@ -414,15 +700,11 @@ impl Reader {
         match fetch {
             Fetch::Nip11 => self.nip11().await,
             Fetch::Roster => {
-                let mut filter = json!({"kinds": [39002], "#p": [viewer], "limit": PAGE});
-                for _ in 0..MAX_ROSTER_PAGES {
-                    let Some(page) = self.query(Op::DesktopRoster, json!([filter])).await else {
-                        break;
-                    };
-                    match oldest(&page) {
-                        Some(cursor) if page.len() >= PAGE => page_before(&mut filter, cursor),
-                        _ => break,
-                    }
+                let read = self.roster().await;
+                let mut ledger = lock(&self.ledger);
+                ledger.owed.roster = !read;
+                if read {
+                    ledger.roster_read = Some(Instant::now());
                 }
             }
             Fetch::Metadata => {
@@ -445,10 +727,13 @@ impl Reader {
                 self.query(Op::DesktopSidebar, Value::Array(filters)).await;
             }
             Fetch::Profiles => {
+                lock(&self.ledger).owed.profiles = true;
+                let mut read = true;
                 for authors in self.profiles.chunks(PAGE) {
                     let filter = json!([{"kinds": [0], "authors": authors, "limit": PAGE}]);
-                    self.query(Op::DesktopProfiles, filter).await;
+                    read &= self.query(Op::DesktopProfiles, filter).await.is_some();
                 }
+                lock(&self.ledger).owed.profiles = !read;
             }
             Fetch::Statuses => {
                 let authors = &self.profiles[..self.profiles.len().min(STATUS_AUTHORS)];
@@ -463,30 +748,9 @@ impl Reader {
                 let filter = json!([{"kinds": [30030], "#d": [EMOJI_SET], "limit": PAGE}]);
                 self.query(Op::DesktopEmoji, filter).await;
             }
-            Fetch::ReadState => {
-                let filter =
-                    json!([{"kinds": [30078], "authors": [viewer], "read_state_snapshot": 1}]);
-                self.query(Op::DesktopReadState, filter).await;
-            }
-            Fetch::Unread => {
-                let now = unix_now();
-                let mark = lock(&self.unread_mark).replace(now);
-                // Sequential, as the app repairs one chunk after another.
-                for ids in self.channels.chunks(UNREAD_CHANNELS) {
-                    let mut filter = json!({
-                        "kinds": [9, 40002, 40008], "#h": ids, "include_aux": true, "limit": REPLAY_LIMIT,
-                    });
-                    if let Some(mark) = mark {
-                        filter["since"] = json!(mark.saturating_sub(RESUME_LAG_SECS));
-                    }
-                    if self
-                        .query(Op::DesktopUnread, json!([filter]))
-                        .await
-                        .is_none()
-                    {
-                        break;
-                    }
-                }
+            Fetch::Unread { snapshot } => {
+                let repaired = self.repair(snapshot).await;
+                lock(&self.ledger).owed.unread = !repaired;
             }
             Fetch::Reminders => {
                 let filter = json!([{"kinds": [30300], "authors": [viewer], "limit": 201}]);
@@ -495,6 +759,52 @@ impl Reader {
             Fetch::Window(i) => self.window(&self.channels[i]).await,
             Fetch::Thread(i) => self.thread(i).await,
         }
+    }
+
+    /// The roster in pages until a short page. Whether every page was read.
+    async fn roster(&self) -> bool {
+        let mut filter = json!({"kinds": [39002], "#p": [self.viewer], "limit": PAGE});
+        for _ in 0..MAX_ROSTER_PAGES {
+            let Some(page) = self.query(Op::DesktopRoster, json!([filter])).await else {
+                return false;
+            };
+            match last_row(&page) {
+                Some(cursor) if page.len() >= PAGE => page_before(&mut filter, cursor),
+                _ => break,
+            }
+        }
+        true
+    }
+
+    /// An unread repair, after the read-state snapshot when `snapshot`. The
+    /// repair reads its channels one chunk after another, as the app does.
+    /// Whether it all succeeded.
+    async fn repair(&self, snapshot: bool) -> bool {
+        if snapshot {
+            let filter =
+                json!([{"kinds": [30078], "authors": [self.viewer], "read_state_snapshot": 1}]);
+            if self.query(Op::DesktopReadState, filter).await.is_none() {
+                return false;
+            }
+        }
+        let now = unix_now();
+        let mark = lock(&self.unread_mark).replace(now);
+        for ids in self.channels.chunks(UNREAD_CHANNELS) {
+            let mut filter = json!({
+                "kinds": [9, 40002, 40008], "#h": ids, "include_aux": true, "limit": REPLAY_LIMIT,
+            });
+            if let Some(mark) = mark {
+                filter["since"] = json!(mark.saturating_sub(RESUME_LAG_SECS));
+            }
+            if self
+                .query(Op::DesktopUnread, json!([filter]))
+                .await
+                .is_none()
+            {
+                return false;
+            }
+        }
+        true
     }
 
     /// `GET /` for the relay's NIP-11 document, remembering its `self`.
@@ -521,24 +831,33 @@ impl Reader {
         }
     }
 
-    /// A window catch-up: the head page, then older pages while each comes
-    /// back full (at most [`CATCH_UP_PAGES`]), then the channel's notices.
+    /// A window catch-up: the head page, then older pages while the relay's
+    /// bounds say there are more (at most [`CATCH_UP_PAGES`]), then the
+    /// channel's notices.
     async fn window(&self, channel: &str) {
-        let mut filter = json!({
-            "kinds": WINDOW_KINDS, "#h": [channel], "limit": WINDOW_PAGE,
-            "top_level": true, "include_aux": true, "include_summaries": true,
-        });
+        let relay = lock(&self.relay).clone();
+        let mut cursor: Option<Cursor> = None;
         for _ in 0..=CATCH_UP_PAGES {
-            let Some(page) = self.query(Op::DesktopWindow, json!([filter])).await else {
-                break;
-            };
-            match oldest(&page) {
-                Some(cursor) if page.len() >= WINDOW_PAGE => page_before(&mut filter, cursor),
+            let mut filter = json!({
+                "kinds": WINDOW_KINDS, "#h": [channel], "limit": WINDOW_PAGE,
+                "top_level": true, "include_aux": true, "include_summaries": true,
+            });
+            if let Some((until, id)) = &cursor {
+                page_before(&mut filter, (*until, id));
+            }
+            let at = cursor.as_ref();
+            let next = self
+                .query_with(Op::DesktopWindow, json!([filter]), |events| {
+                    window_bounds(events, channel, at, relay.as_deref())
+                })
+                .await;
+            match next {
+                Some(Some(next)) => cursor = Some(next),
                 _ => break,
             }
         }
         let mut notices = json!({"kinds": [40099], "#h": [channel], "limit": REPLAY_LIMIT});
-        if let Some(relay) = lock(&self.relay).clone() {
+        if let Some(relay) = relay {
             notices["authors"] = json!([relay]);
         }
         self.query(Op::DesktopNotices, json!([notices])).await;
@@ -574,33 +893,8 @@ fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// `(created_at, id)` of the oldest event in a page.
-fn oldest(page: &[Value]) -> Option<(u64, &str)> {
-    page.iter()
-        .filter_map(|e| Some((e["created_at"].as_u64()?, e["id"].as_str()?)))
-        .min()
-}
-
-/// Points `filter` at the page before `cursor`, the oldest event so far. The
-/// relay takes `until` and `before_id` together.
-fn page_before(filter: &mut Value, (until, id): (u64, &str)) {
-    filter["until"] = json!(until);
-    filter["before_id"] = json!(id);
-}
-
-/// The events of a `/query` response: an array, or the object a read-state
-/// snapshot answers with.
-fn events(text: &str) -> serde_json::Result<Vec<Value>> {
-    match serde_json::from_str(text)? {
-        Value::Object(mut body) => {
-            serde_json::from_value(body.remove("events").unwrap_or_default())
-        }
-        other => serde_json::from_value(other),
-    }
-}
-
-/// Runs `fetches`: NIP-11 first, since notices need the relay's pubkey, then
-/// the rest at most [`HTTP_CONCURRENCY`] at a time.
+/// Runs `fetches`: NIP-11 first, since notices and window bounds need the
+/// relay's pubkey, then the rest at most [`HTTP_CONCURRENCY`] at a time.
 async fn run_fetches(reader: Arc<Reader>, fetches: Vec<Fetch>) {
     if fetches.contains(&Fetch::Nip11) {
         reader.nip11().await;
@@ -616,35 +910,60 @@ async fn run_fetches(reader: Arc<Reader>, fetches: Vec<Fetch>) {
 }
 
 /// A client's HTTP reads: one task at a time, so reads never pile up behind
-/// a slow relay. Reads that come due while it runs are queued, once each,
-/// for the next task. Dropping it (the client was cancelled) aborts the task,
-/// so its unfinished reads are recorded.
+/// a slow relay. Reads that come due while it runs are queued for its next
+/// round; one whose work is already running or queued is not added again.
+/// Dropping it (the client was cancelled) aborts the task, so its unfinished
+/// reads are recorded.
 #[derive(Default)]
 struct Fetcher {
     task: Option<tokio::task::JoinHandle<()>>,
+    work: Arc<std::sync::Mutex<Work>>,
+}
+
+/// A [`Fetcher`]'s reads, shared with its task.
+#[derive(Default)]
+struct Work {
+    /// Whether the task is under way; it clears this when it runs dry.
+    active: bool,
+    running: Vec<Fetch>,
     queued: Vec<Fetch>,
 }
 
 impl Fetcher {
     fn start(&mut self, reader: &Arc<Reader>, fetches: Vec<Fetch>) {
+        let mut work = lock(&self.work);
         for fetch in fetches {
-            if !self.queued.contains(&fetch) {
-                self.queued.push(fetch);
+            let covered = |have: &Fetch| have.covers(fetch);
+            if work.running.iter().any(covered) || work.queued.iter().any(covered) {
+                continue;
             }
+            // A full repair queued now does a queued covered one's work too.
+            work.queued.retain(|have| !fetch.covers(*have));
+            work.queued.push(fetch);
         }
-        self.poll(reader);
-    }
-
-    /// Starts the queued reads once the previous task finished.
-    fn poll(&mut self, reader: &Arc<Reader>) {
-        if self.queued.is_empty() || self.task.as_ref().is_some_and(|t| !t.is_finished()) {
+        if work.active || work.queued.is_empty() {
             return;
         }
-        let fetches = std::mem::take(&mut self.queued);
-        self.task = Some(tokio::spawn(run_fetches(reader.clone(), fetches)));
+        work.active = true;
+        drop(work);
+        let (reader, work) = (reader.clone(), self.work.clone());
+        self.task = Some(tokio::spawn(async move {
+            loop {
+                let fetches = {
+                    let mut work = lock(&work);
+                    work.running = std::mem::take(&mut work.queued);
+                    if work.running.is_empty() {
+                        work.active = false;
+                        return;
+                    }
+                    work.running.clone()
+                };
+                run_fetches(reader.clone(), fetches).await;
+            }
+        }));
     }
 
-    /// Waits for the task under way. Reads still queued are dropped.
+    /// Waits for the task under way, and the reads queued behind it.
     async fn finish(&mut self) {
         if let Some(task) = self.task.take() {
             let _ = task.await;
@@ -672,7 +991,13 @@ enum End {
 
 /// A REQ awaiting its EOSE.
 struct Waiting<'a> {
-    replay: bool,
+    route: Route,
+    /// [`Req::cut_by_design`].
+    cut: bool,
+    /// For a tick's replacement, the batch it takes over at its EOSE.
+    slot: Option<usize>,
+    /// Events replayed so far.
+    events: usize,
     pending: Pending<'a>,
     sent: Instant,
 }
@@ -681,6 +1006,11 @@ struct Waiting<'a> {
 /// cold, a renewal follows [`renewal`], and any other reconnect is a
 /// [`Situation::Reconnect`].
 pub(super) async fn desktop(shared: Arc<Shared>, global: usize) {
+    run_client(shared, global, REQ_TIMEOUT).await;
+}
+
+/// [`desktop`], where a REQ may wait `req_timeout` for its EOSE.
+async fn run_client(shared: Arc<Shared>, global: usize, req_timeout: Duration) {
     let scenario = &shared.scenario;
     let profile = &scenario.desktop;
     let community = global % shared.communities.len();
@@ -697,6 +1027,13 @@ pub(super) async fn desktop(shared: Arc<Shared>, global: usize) {
         windows: profile.windows.min(indices.len()),
         relay: Default::default(),
         unread_mark: Default::default(),
+        ledger: std::sync::Mutex::new(Ledger {
+            owed: Owed {
+                profiles: true,
+                ..Owed::default()
+            },
+            roster_read: None,
+        }),
     });
     let mut client = Client {
         shared: shared.clone(),
@@ -704,8 +1041,10 @@ pub(super) async fn desktop(shared: Arc<Shared>, global: usize) {
         rng: Rng::new(global as u64 ^ 0xD35C_70B0),
         fetcher: Fetcher::default(),
         situation: Situation::Cold,
-        roster_at: Instant::now(),
-        unread_at: Instant::now(),
+        req_timeout,
+        next_tick: Instant::now() + Duration::from_secs_f64(profile.tick_secs),
+        unread_at: None,
+        caught_up: Vec::new(),
         generation: 0,
         first_renewal: true,
         last_message: None,
@@ -724,7 +1063,7 @@ pub(super) async fn desktop(shared: Arc<Shared>, global: usize) {
         let _ = conn.disconnect().await;
         client.situation = match end {
             End::Stopped => break,
-            End::Renewal => renewal(profile.mode, client.reader.channels.len()),
+            End::Renewal => renewal(profile.mode),
             End::Dropped => {
                 backoff = Backoff::new();
                 Situation::Reconnect
@@ -745,8 +1084,13 @@ struct Client {
     rng: Rng,
     fetcher: Fetcher,
     situation: Situation,
-    roster_at: Instant,
-    unread_at: Instant,
+    req_timeout: Duration,
+    /// The recovery tick runs on the client's clock, across connections.
+    next_tick: Instant,
+    /// When a full unread repair was last asked for.
+    unread_at: Option<Instant>,
+    /// The routes the last connection had caught up.
+    caught_up: Vec<Route>,
     generation: u64,
     first_renewal: bool,
     last_message: Option<Seen>,
@@ -754,6 +1098,15 @@ struct Client {
 }
 
 impl Client {
+    /// Starts `fetches`. Asking for a full unread repair restarts its
+    /// backstop; a covered repair reads no snapshot, so it does not.
+    fn fetch(&mut self, fetches: Vec<Fetch>) {
+        if fetches.contains(&FULL_REPAIR) {
+            self.unread_at = Some(Instant::now());
+        }
+        self.fetcher.start(&self.reader, fetches);
+    }
+
     /// One connection: establishes per the situation, then runs ticks,
     /// presence and the human's own traffic until it ends.
     async fn session(&mut self, conn: &mut NostrWsConnection, since: u64) -> End {
@@ -765,33 +1118,27 @@ impl Client {
         let reader = self.reader.clone();
         let channels = &reader.channels;
         let community = &shared.communities[reader.community];
+        let (windows, threads) = (reader.windows, profile.threads);
 
         self.generation += 1;
         let reqs = connect_reqs(mode, &reader.viewer, channels, since, self.generation);
         let mut batches: Vec<String> = reqs
             .iter()
-            .filter(|r| r.id.starts_with("batch-"))
+            .filter(|r| r.route == Route::Channels)
             .map(|r| r.id.clone())
             .collect();
-        let mut batches_at = Instant::now();
-        let mut setup: VecDeque<Req> = reqs.into();
-        let reads = connect_fetches(self.situation, reader.windows, profile.threads);
-        if reads.contains(&Fetch::Roster) {
-            self.roster_at = Instant::now();
-        }
-        if reads.contains(&Fetch::Unread) {
-            self.unread_at = Instant::now();
-        }
-        self.fetcher.start(&reader, reads);
+        // `None` once a replacement missed its deadline: the next tick retries.
+        let mut batches_at = Some(Instant::now());
+        let mut setup: VecDeque<(Req, Option<usize>)> =
+            reqs.into_iter().map(|r| (r, None)).collect();
+        self.fetch(connect_fetches(mode, self.situation, windows, threads));
+        let mut establishment = Establishment::new(self.situation, &self.caught_up);
 
         let mut waiting: HashMap<String, Waiting<'_>> = HashMap::new();
         let mut open: HashSet<String> = HashSet::new();
-        // New batch id to the batch it replaces, closed at the new one's EOSE.
-        let mut replacing: HashMap<String, String> = HashMap::new();
         let mut activity = Activity::new(&scenario.human, &mut self.rng, self.split);
         let tick_every = Duration::from_secs_f64(profile.tick_secs);
         let backstop = Duration::from_secs_f64(profile.backstop_secs);
-        let mut next_tick = Instant::now() + tick_every;
         let next_renewal = (profile.renewal_secs > 0.0).then(|| {
             // Clients connecting together do not renew together.
             let mut secs = profile.renewal_secs;
@@ -810,46 +1157,56 @@ impl Client {
                 break End::Stopped;
             }
             while waiting.len() < SETUP_CONCURRENCY {
-                let Some(req) = setup.pop_front() else {
+                let Some((req, slot)) = setup.pop_front() else {
                     break;
                 };
                 if let Err(e) = conn.send_raw(&req.frame()).await {
                     break 'session disconnected(e);
                 }
-                let op = if req.replay {
-                    Op::DesktopReplay
-                } else {
-                    Op::DesktopLive
+                let op = match req.route {
+                    Route::Replay => Op::DesktopReplay,
+                    _ => Op::DesktopLive,
                 };
                 let waited = Waiting {
-                    replay: req.replay,
+                    route: req.route,
+                    cut: req.cut_by_design(),
+                    slot,
+                    events: 0,
                     pending: stats.begin(op),
                     sent: Instant::now(),
                 };
                 waiting.insert(req.id, waited);
             }
+
+            // A REQ past its deadline: a replay or a replacement is closed (a
+            // replacement keeps the batch it would have replaced, and the next
+            // tick tries again); a connection's live route stays open, and
+            // establishes as cut, since it may have missed history.
             let expired: Vec<String> = waiting
                 .iter()
-                .filter(|(_, w)| w.sent.elapsed() >= REQ_TIMEOUT)
+                .filter(|(_, w)| w.sent.elapsed() >= self.req_timeout)
                 .map(|(id, _)| id.clone())
                 .collect();
+            let mut established = Vec::new();
             for id in expired {
                 let Some(w) = waiting.remove(&id) else {
                     continue;
                 };
                 w.pending.err("EOSE timeout");
-                // A late live subscription may still deliver; a replay is abandoned.
-                if w.replay {
+                if w.route == Route::Replay || w.slot.is_some() {
+                    if w.slot.is_some() {
+                        batches_at = None;
+                    }
                     if let Err(e) = close(conn, &id).await {
                         break 'session disconnected(e);
                     }
                 } else {
                     open.insert(id);
+                    established.extend(establishment.eose(w.route, true));
                 }
             }
-            self.fetcher.poll(&reader);
 
-            let due = [activity.due(), Some(next_tick), next_renewal]
+            let due = [activity.due(), Some(self.next_tick), next_renewal]
                 .into_iter()
                 .flatten()
                 .min();
@@ -861,14 +1218,20 @@ impl Client {
                 Ok(RelayMessage::Eose { subscription_id }) => {
                     if let Some(w) = waiting.remove(&subscription_id) {
                         w.pending.ok();
-                        let retired = if w.replay {
-                            Some(subscription_id)
-                        } else {
-                            let old = replacing.remove(&subscription_id);
-                            open.insert(subscription_id);
-                            old.inspect(|old| {
-                                open.remove(old);
-                            })
+                        let retired = match (w.route, w.slot) {
+                            (Route::Replay, _) => Some(subscription_id),
+                            (_, Some(slot)) => {
+                                open.insert(subscription_id.clone());
+                                let old = std::mem::replace(&mut batches[slot], subscription_id);
+                                open.remove(&old);
+                                Some(old)
+                            }
+                            (route, None) => {
+                                open.insert(subscription_id);
+                                let cut = limited(w.cut, w.events);
+                                established.extend(establishment.eose(route, cut));
+                                None
+                            }
                         };
                         if let Some(id) = retired {
                             if let Err(e) = close(conn, &id).await {
@@ -885,7 +1248,7 @@ impl Client {
                     // as for the basic human; a refused replay is an error.
                     if let Some(w) = waiting.remove(&subscription_id) {
                         w.pending.err(&message);
-                        if !w.replay {
+                        if w.route != Route::Replay {
                             break End::Failed;
                         }
                     } else if open.remove(&subscription_id) {
@@ -897,19 +1260,40 @@ impl Client {
                     }
                 }
                 Ok(message) => {
-                    // Only live events after EOSE are delivery; replays are history.
-                    let live = matches!(
-                        &message,
-                        RelayMessage::Event { subscription_id, .. } if open.contains(subscription_id)
-                    );
-                    if live {
-                        if let Some(target) = observe(stats, &message) {
-                            self.last_message = Some(target);
+                    // An event before EOSE is replay, which the app counts
+                    // against its limit; only events after EOSE are delivery.
+                    if let RelayMessage::Event {
+                        subscription_id, ..
+                    } = &message
+                    {
+                        if let Some(w) = waiting.get_mut(subscription_id) {
+                            w.events += 1;
+                        } else if open.contains(subscription_id) {
+                            if let Some(target) = observe(stats, &message) {
+                                self.last_message = Some(target);
+                            }
                         }
                     }
                 }
                 Err(WsClientError::Timeout) => {}
                 Err(e) => break disconnected(e),
+            }
+
+            // `legacy` read everything when it connected.
+            if mode == DesktopMode::Current {
+                let mut reads = Vec::new();
+                for (route, continuous) in established {
+                    reads.extend(establish_fetches(
+                        route,
+                        continuous,
+                        reader.owed(),
+                        windows,
+                        threads,
+                    ));
+                }
+                if !reads.is_empty() {
+                    self.fetch(reads);
+                }
             }
 
             let step = activity
@@ -930,33 +1314,33 @@ impl Client {
             }
 
             let now = Instant::now();
-            if now >= next_tick {
-                next_tick = now + tick_every;
-                let due = tick(
-                    mode,
-                    backstop,
-                    batches_at.elapsed(),
-                    self.roster_at.elapsed(),
-                    self.unread_at.elapsed(),
-                );
+            if now >= self.next_tick {
+                self.next_tick = now + tick_every;
+                let (owed, roster_read) = {
+                    let ledger = lock(&reader.ledger);
+                    (ledger.owed, ledger.roster_read)
+                };
+                let clocks = Clocks {
+                    batches: batches_at.map(|t| now.saturating_duration_since(t)),
+                    roster: roster_read.map(|t| now.saturating_duration_since(t)),
+                    unread: self.unread_at.map(|t| now.saturating_duration_since(t)),
+                };
+                let due = tick(mode, backstop, clocks, owed);
                 // A replacement still waiting for its EOSE is not replaced again.
-                if due.batches && replacing.is_empty() {
+                let replacing = setup.iter().any(|(_, slot)| slot.is_some())
+                    || waiting.values().any(|w| w.slot.is_some());
+                if due.batches && !replacing {
                     self.generation += 1;
                     let fresh = batch_reqs(mode, channels, unix_now(), 0, self.generation);
-                    for (new, old) in fresh.iter().zip(&batches) {
-                        replacing.insert(new.id.clone(), old.clone());
-                    }
-                    batches = fresh.iter().map(|r| r.id.clone()).collect();
-                    setup.extend(fresh);
-                    batches_at = now;
+                    setup.extend(
+                        fresh
+                            .into_iter()
+                            .zip(0..batches.len())
+                            .map(|(r, i)| (r, Some(i))),
+                    );
+                    batches_at = Some(now);
                 }
-                if due.roster {
-                    self.roster_at = now;
-                }
-                if due.unread {
-                    self.unread_at = now;
-                }
-                self.fetcher.start(&reader, tick_fetches(due));
+                self.fetch(tick_fetches(due));
             }
             if next_renewal.is_some_and(|t| now >= t) {
                 break End::Renewal;
@@ -966,6 +1350,7 @@ impl Client {
         for (_, w) in waiting.drain() {
             w.pending.forget();
         }
+        self.caught_up = establishment.caught_up();
         end
     }
 }
@@ -982,7 +1367,8 @@ mod tests {
         (0..n).map(|i| format!("c{i}")).collect()
     }
 
-    /// (filters, limit of the first filter, `#h` ids of the first filter) per REQ.
+    /// (filters, limit of the first filter, `#h` ids of the first filter,
+    /// replay) per REQ.
     fn shape(reqs: &[Req]) -> Vec<(usize, u64, usize, bool)> {
         reqs.iter()
             .map(|r| {
@@ -991,7 +1377,7 @@ mod tests {
                     r.filters.len(),
                     first["limit"].as_u64().unwrap(),
                     first["#h"].as_array().map_or(0, Vec::len),
-                    r.replay,
+                    r.route == Route::Replay,
                 )
             })
             .collect()
@@ -1006,6 +1392,7 @@ mod tests {
             assert_eq!(shape(&reqs[2..]), [(5, 500, 1, false)], "{mode:?}");
             assert_eq!(reqs[2].filters[0]["since"], 100);
             assert_eq!(reqs[2].filters[0]["kinds"], json!(CHANNEL_KINDS));
+            assert!(reqs.iter().all(|r| !r.cut_by_design()), "{mode:?}");
         }
     }
 
@@ -1016,6 +1403,7 @@ mod tests {
             shape(&legacy[2..]),
             [(10, 500, 1, false), (10, 500, 1, false), (5, 500, 1, false)]
         );
+        assert!(legacy.iter().all(|r| !r.cut_by_design()));
         let current = connect_reqs(DesktopMode::Current, "v", &ids(25), 100, 1);
         assert_eq!(
             shape(&current[2..]),
@@ -1026,9 +1414,15 @@ mod tests {
                 (5, 500, 1, true)
             ]
         );
+        // The live-only batch replays nothing, so its window counts as cut.
+        let cut: Vec<_> = current.iter().map(Req::cut_by_design).collect();
+        assert_eq!(cut, [false, false, true, false, false, false]);
         // One live-only filter holds up to 2048 channels.
         let wide = connect_reqs(DesktopMode::Current, "v", &ids(2049), 100, 1);
-        let live: Vec<_> = wide[2..].iter().filter(|r| !r.replay).collect();
+        let live: Vec<_> = wide[2..]
+            .iter()
+            .filter(|r| r.route == Route::Channels)
+            .collect();
         assert_eq!(live.len(), 2);
         assert_eq!(wide.len(), 2 + 2 + 205);
     }
@@ -1048,9 +1442,27 @@ mod tests {
     }
 
     #[test]
+    fn a_replay_is_limited_at_the_apps_cap() {
+        assert!(!limited(false, REPLAY_LIMIT - 1));
+        assert!(limited(false, REPLAY_LIMIT));
+        assert!(limited(true, 0));
+    }
+
+    const NO_OWED: Owed = Owed {
+        roster: false,
+        profiles: false,
+        unread: false,
+    };
+
+    #[test]
     fn legacy_ticks_do_everything_and_current_ticks_wait_for_the_backstop() {
         let backstop = Duration::from_secs(900);
-        let minute = Duration::from_secs(60);
+        let minute = Some(Duration::from_secs(60));
+        let clocks = |batches, roster, unread| Clocks {
+            batches,
+            roster,
+            unread,
+        };
         let all = Due {
             batches: true,
             roster: true,
@@ -1061,51 +1473,159 @@ mod tests {
             roster: false,
             unread: false,
         };
-        assert_eq!(
-            tick(DesktopMode::Legacy, backstop, minute, minute, minute),
-            all
-        );
-        assert_eq!(
-            tick(DesktopMode::Current, backstop, minute, minute, minute),
-            none
-        );
-        assert_eq!(
-            tick(DesktopMode::Current, backstop, backstop, backstop, backstop),
-            all
-        );
+        let fresh = clocks(minute, minute, minute);
+        assert_eq!(tick(DesktopMode::Legacy, backstop, fresh, NO_OWED), all);
+        assert_eq!(tick(DesktopMode::Current, backstop, fresh, NO_OWED), none);
+        let stale = clocks(Some(backstop), Some(backstop), Some(backstop));
+        assert_eq!(tick(DesktopMode::Current, backstop, stale, NO_OWED), all);
+        // Never done counts as stale.
+        let never = clocks(None, None, None);
+        assert_eq!(tick(DesktopMode::Current, backstop, never, NO_OWED), all);
         // Each backstop runs on its own clock.
-        let roster_only = tick(DesktopMode::Current, backstop, minute, backstop, minute);
-        assert_eq!(tick_fetches(roster_only), [Fetch::Roster]);
-        assert_eq!(
-            tick_fetches(all),
-            [Fetch::Roster, Fetch::ReadState, Fetch::Unread]
+        let roster_only = tick(
+            DesktopMode::Current,
+            backstop,
+            clocks(minute, Some(backstop), minute),
+            NO_OWED,
         );
+        assert_eq!(tick_fetches(roster_only), [Fetch::Roster]);
+        assert_eq!(tick_fetches(all), [Fetch::Roster, FULL_REPAIR]);
         assert!(tick_fetches(none).is_empty());
     }
 
     #[test]
-    fn renewals_reconnect_before_and_carry_or_limit_after() {
-        assert_eq!(renewal(DesktopMode::Legacy, 5), Situation::Reconnect);
-        assert_eq!(renewal(DesktopMode::Legacy, 25), Situation::Reconnect);
-        assert_eq!(renewal(DesktopMode::Current, 10), Situation::QuietRenewal);
-        assert_eq!(renewal(DesktopMode::Current, 11), Situation::LimitedRenewal);
+    fn owed_reads_retry_on_the_next_tick_before_their_backstop() {
+        let backstop = Duration::from_secs(900);
+        let minute = Some(Duration::from_secs(60));
+        let fresh = Clocks {
+            batches: minute,
+            roster: minute,
+            unread: minute,
+        };
+        let owed = Owed {
+            roster: true,
+            unread: true,
+            ..NO_OWED
+        };
+        let due = tick(DesktopMode::Current, backstop, fresh, owed);
+        assert!(!due.batches);
+        assert_eq!(tick_fetches(due), [Fetch::Roster, FULL_REPAIR]);
+    }
 
-        assert!(connect_fetches(Situation::QuietRenewal, 2, 1).is_empty());
-        assert_eq!(
-            connect_fetches(Situation::LimitedRenewal, 2, 1),
-            [
-                Fetch::Unread,
-                Fetch::Window(0),
-                Fetch::Window(1),
-                Fetch::Thread(0)
-            ]
-        );
-        let cold = connect_fetches(Situation::Cold, 2, 1);
-        assert_eq!(cold.len(), 10 + 3);
-        let reconnect = connect_fetches(Situation::Reconnect, 2, 1);
+    #[test]
+    fn renewals_reconnect_before_and_carry_routes_after() {
+        assert_eq!(renewal(DesktopMode::Legacy), Situation::Reconnect);
+        assert_eq!(renewal(DesktopMode::Current), Situation::Renewal);
+
+        let cold = connect_fetches(DesktopMode::Legacy, Situation::Cold, 2, 1);
+        assert_eq!(cold.len(), 9 + 3);
+        let reconnect = connect_fetches(DesktopMode::Legacy, Situation::Reconnect, 2, 1);
         // A reconnect rereads everything but names and sidebar preferences.
         let skipped: Vec<_> = cold.iter().filter(|r| !reconnect.contains(r)).collect();
         assert_eq!(skipped, [&Fetch::Metadata, &Fetch::Sidebar]);
+
+        // `current` reads up front only what no route covers.
+        let current = |s| connect_fetches(DesktopMode::Current, s, 2, 1);
+        assert_eq!(
+            current(Situation::Cold),
+            [Fetch::Nip11, Fetch::Metadata, Fetch::Sidebar]
+        );
+        assert_eq!(current(Situation::Reconnect), [Fetch::Nip11]);
+        assert!(current(Situation::Renewal).is_empty());
+    }
+
+    #[test]
+    fn a_route_establishes_its_reads_by_continuity() {
+        let channels = [Fetch::Window(0), Fetch::Window(1), Fetch::Thread(0)];
+        let est = |route, continuous, owed| establish_fetches(route, continuous, owed, 2, 1);
+        assert_eq!(
+            est(Route::Profiles, false, NO_OWED),
+            [Fetch::Profiles, Fetch::Statuses, Fetch::Emoji]
+        );
+        assert!(est(Route::Profiles, true, NO_OWED).is_empty());
+        let profiles_owed = Owed {
+            profiles: true,
+            ..NO_OWED
+        };
+        assert_eq!(est(Route::Profiles, true, profiles_owed), [Fetch::Profiles]);
+        assert_eq!(
+            est(Route::Membership, false, NO_OWED),
+            [Fetch::Roster, FULL_REPAIR, Fetch::Reminders]
+        );
+        assert_eq!(est(Route::Membership, true, NO_OWED), [COVERED_REPAIR]);
+        let roster_owed = Owed {
+            roster: true,
+            ..NO_OWED
+        };
+        assert_eq!(
+            est(Route::Membership, true, roster_owed),
+            [Fetch::Roster, COVERED_REPAIR]
+        );
+        assert_eq!(est(Route::Channels, true, NO_OWED), channels);
+        assert_eq!(est(Route::Channels, false, NO_OWED), channels);
+        assert!(est(Route::Replay, false, NO_OWED).is_empty());
+        assert!(FULL_REPAIR.covers(COVERED_REPAIR));
+        assert!(!COVERED_REPAIR.covers(FULL_REPAIR));
+    }
+
+    #[test]
+    fn routes_establish_once_and_a_renewal_holds_them_until_a_cut() {
+        let all = [Route::Profiles, Route::Membership, Route::Channels];
+        // Cold: every route establishes at its EOSE, not continuous.
+        let mut cold = Establishment::new(Situation::Cold, &all);
+        assert_eq!(
+            cold.eose(Route::Profiles, false),
+            [(Route::Profiles, false)]
+        );
+        assert!(cold.eose(Route::Replay, false).is_empty());
+        assert_eq!(
+            cold.eose(Route::Channels, false),
+            [(Route::Channels, false)]
+        );
+        assert!(cold.eose(Route::Channels, false).is_empty());
+        assert_eq!(cold.caught_up(), [Route::Profiles, Route::Channels]);
+
+        // Reconnect: each route by its own replay, and only if the last
+        // connection had it caught up.
+        let mut reconnect = Establishment::new(Situation::Reconnect, &all[..2]);
+        assert_eq!(
+            reconnect.eose(Route::Membership, false),
+            [(Route::Membership, true)]
+        );
+        assert_eq!(
+            reconnect.eose(Route::Profiles, true),
+            [(Route::Profiles, false)]
+        );
+        assert_eq!(
+            reconnect.eose(Route::Channels, false),
+            [(Route::Channels, false)]
+        );
+
+        // Renewal without a cut: nothing establishes, all stay caught up.
+        let mut quiet = Establishment::new(Situation::Renewal, &all);
+        for route in all {
+            assert!(quiet.eose(route, false).is_empty());
+        }
+        assert_eq!(quiet.caught_up(), all);
+
+        // Renewal with a cut: the held routes establish with it.
+        let mut cut = Establishment::new(Situation::Renewal, &all);
+        assert!(cut.eose(Route::Profiles, false).is_empty());
+        assert_eq!(
+            cut.eose(Route::Channels, true),
+            [(Route::Profiles, true), (Route::Channels, false)]
+        );
+        assert_eq!(
+            cut.eose(Route::Membership, false),
+            [(Route::Membership, true)]
+        );
+
+        // A renewal before a route ever caught up reads it in full.
+        let mut early = Establishment::new(Situation::Renewal, &all[..1]);
+        assert_eq!(
+            early.eose(Route::Membership, false),
+            [(Route::Membership, false)]
+        );
     }
 
     #[test]
@@ -1113,6 +1633,66 @@ mod tests {
         assert_eq!(resume_since(10_000, None, 20_000), 19_700);
         assert_eq!(resume_since(10_000, Some(15_000), 20_000), 14_040);
         assert_eq!(resume_since(10_000, Some(10_100), 20_000), 9_700);
+    }
+
+    fn hex(c: char) -> String {
+        std::iter::repeat_n(c, 64).collect()
+    }
+
+    fn bound(d: &str, content: Value) -> Value {
+        json!({
+            "kind": 39006, "pubkey": "relay", "content": content.to_string(),
+            "tags": [["d", d], ["h", "c0"]],
+        })
+    }
+
+    #[test]
+    fn window_pages_follow_the_relays_bounds() {
+        let next = json!({"has_more": true, "next_cursor": {"created_at": 1000, "id": hex('b')}});
+        let row = json!({"kind": 9, "created_at": 1000, "id": hex('a')});
+        let head = [row.clone(), bound("c0:head", next.clone())];
+        let cursor = (1000, hex('b'));
+        assert_eq!(
+            window_bounds(&head, "c0", None, Some("relay")),
+            Ok(Some(cursor.clone()))
+        );
+        // Exhausted.
+        let done = json!({"has_more": false, "next_cursor": null});
+        let d = format!("c0:1000:{}", hex('b'));
+        let last = [bound(&d, done.clone())];
+        assert_eq!(window_bounds(&last, "c0", Some(&cursor), None), Ok(None));
+        // No bounds, two bounds, another signer, or the wrong cursor.
+        assert!(window_bounds(&[row], "c0", None, None).is_err());
+        let twice = [
+            bound("c0:head", next.clone()),
+            bound("c0:head", next.clone()),
+        ];
+        assert!(window_bounds(&twice, "c0", None, None).is_err());
+        assert!(window_bounds(&head, "c0", None, Some("other")).is_err());
+        assert!(window_bounds(&last, "c0", None, None).is_err());
+        // Contradictions and a cursor that does not move on.
+        let contradict =
+            json!({"has_more": false, "next_cursor": {"created_at": 1000, "id": hex('b')}});
+        assert!(window_bounds(&[bound("c0:head", contradict)], "c0", None, None).is_err());
+        let back = [bound(
+            &d,
+            json!({"has_more": true, "next_cursor": {"created_at": 1000, "id": hex('a')}}),
+        )];
+        assert!(window_bounds(&back, "c0", Some(&cursor), None).is_err());
+        let short = json!({"has_more": true, "next_cursor": {"created_at": 1000, "id": "ab"}});
+        assert!(window_bounds(&[bound("c0:head", short)], "c0", None, None).is_err());
+    }
+
+    #[test]
+    fn the_last_row_is_the_oldest_then_the_highest_id() {
+        let page = [
+            json!({"created_at": 1000, "id": "b"}),
+            json!({"created_at": 999, "id": "a"}),
+            json!({"created_at": 999, "id": "c"}),
+            json!({"created_at": 1001, "id": "z"}),
+        ];
+        assert_eq!(last_row(&page), Some((999, "c")));
+        assert_eq!(last_row(&[]), None);
     }
 
     // The client against loopback fakes: every connect, REQ, CLOSE and HTTP
@@ -1123,15 +1703,27 @@ mod tests {
     use super::super::scenario::Scenario;
     use super::super::seed::tests::fake_http;
     use super::super::stats::Stats;
-    use nostr::EventBuilder;
+    use nostr::{EventBuilder, Tag};
     use tokio::sync::watch;
 
-    /// `(verb, subscription id)` of every REQ and CLOSE the fake relay got.
-    type Frames = Arc<std::sync::Mutex<Vec<(String, String)>>>;
+    type Shared2<T> = Arc<std::sync::Mutex<T>>;
+
+    /// `(connection, verb, subscription id)` of every REQ and CLOSE the fake
+    /// relay got, connections numbered as accepted.
+    type Frames = Shared2<Vec<(usize, String, String)>>;
+
+    /// How the fake relay answers a REQ on a connection: events replayed
+    /// before its EOSE, and how long the EOSE waits.
+    type Plan = Arc<dyn Fn(usize, &str) -> (usize, Duration) + Send + Sync>;
+
+    fn instant() -> Plan {
+        Arc::new(|_, _| (0, Duration::ZERO))
+    }
 
     /// A loopback relay that challenges, accepts AUTH and every EVENT, answers
-    /// each REQ with EOSE and records REQs and CLOSEs.
-    async fn fake_ws_relay() -> (String, Frames) {
+    /// each REQ per `plan` and records REQs and CLOSEs. With `drop_first`, it
+    /// closes its first connection that long after accepting it.
+    async fn fake_ws_relay(plan: Plan, drop_first: Option<Duration>) -> (String, Frames) {
         use futures_util::SinkExt;
         use tokio_tungstenite::tungstenite::Message;
 
@@ -1139,36 +1731,62 @@ mod tests {
         let addr = listener.local_addr().unwrap().to_string();
         let frames = Frames::default();
         let seen = frames.clone();
+        let replayed = EventBuilder::new(kind(9), "replayed")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let replayed = serde_json::to_value(replayed).unwrap();
         tokio::spawn(async move {
+            let mut conn = 0;
             while let Ok((stream, _)) = listener.accept().await {
-                let seen = seen.clone();
+                let (seen, plan, replayed) = (seen.clone(), plan.clone(), replayed.clone());
+                let index = conn;
+                conn += 1;
                 tokio::spawn(async move {
-                    let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                    let Ok(ws) = tokio_tungstenite::accept_async(stream).await else {
                         return;
                     };
-                    let challenge = json!(["AUTH", "challenge"]).to_string();
-                    if ws.send(Message::Text(challenge.into())).await.is_err() {
-                        return;
-                    }
-                    while let Some(Ok(Message::Text(text))) = ws.next().await {
-                        let frame: Value = serde_json::from_str(&text).unwrap();
-                        let verb = frame[0].as_str().unwrap_or_default().to_string();
-                        let reply = match verb.as_str() {
-                            "AUTH" | "EVENT" => json!(["OK", frame[1]["id"], true, ""]),
-                            "REQ" => json!(["EOSE", frame[1]]),
-                            _ => Value::Null,
-                        };
-                        if verb == "REQ" || verb == "CLOSE" {
-                            let id = frame[1].as_str().unwrap_or_default().to_string();
-                            seen.lock().unwrap().push((verb, id));
+                    let (mut sink, mut stream) = ws.split();
+                    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
+                    tokio::spawn(async move {
+                        while let Some(message) = rx.recv().await {
+                            let close = matches!(message, Message::Close(_));
+                            if sink.send(message).await.is_err() || close {
+                                return;
+                            }
                         }
-                        if !reply.is_null()
-                            && ws
-                                .send(Message::Text(reply.to_string().into()))
-                                .await
-                                .is_err()
-                        {
-                            return;
+                    });
+                    let text = |v: Value| Message::Text(v.to_string().into());
+                    let _ = tx.send(text(json!(["AUTH", "challenge"])));
+                    if let Some(after) = drop_first.filter(|_| index == 0) {
+                        let tx = tx.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(after).await;
+                            let _ = tx.send(Message::Close(None));
+                        });
+                    }
+                    while let Some(Ok(Message::Text(raw))) = stream.next().await {
+                        let frame: Value = serde_json::from_str(&raw).unwrap();
+                        let verb = frame[0].as_str().unwrap_or_default().to_string();
+                        let id = frame[1].as_str().unwrap_or_default().to_string();
+                        match verb.as_str() {
+                            "AUTH" | "EVENT" => {
+                                let _ = tx.send(text(json!(["OK", frame[1]["id"], true, ""])));
+                            }
+                            "REQ" => {
+                                let (events, delay) = plan(index, &id);
+                                let (tx, replayed, id) = (tx.clone(), replayed.clone(), id.clone());
+                                tokio::spawn(async move {
+                                    for _ in 0..events {
+                                        let _ = tx.send(text(json!(["EVENT", id, replayed])));
+                                    }
+                                    tokio::time::sleep(delay).await;
+                                    let _ = tx.send(text(json!(["EOSE", id])));
+                                });
+                            }
+                            _ => {}
+                        }
+                        if verb == "REQ" || verb == "CLOSE" {
+                            seen.lock().unwrap().push((index, verb, id));
                         }
                     }
                 });
@@ -1177,58 +1795,108 @@ mod tests {
         (addr, frames)
     }
 
-    /// A loopback HTTP API: NIP-11 names a relay key, the owner's root search
-    /// finds one seeded root, a window head page is full and the page before
-    /// it empty, the read-state snapshot answers in its own shape, and every
-    /// other query is empty. Like the relay, it refuses a top-level page
-    /// cursor without both `until` and `before_id`.
-    async fn fake_api(run_id: &str) -> String {
-        let owner = identity::keys(run_id, Role::Owner, 0);
-        let root = EventBuilder::new(kind(9), "lg-root 0")
-            .sign_with_keys(&owner)
+    /// Reads the fake API fails once each, by name: `roster`, `unread`.
+    type FailOnce = &'static [&'static str];
+
+    fn signed(keys: &Keys, k: u32, content: &str, at: u64, tags: Vec<Tag>) -> Value {
+        let event = EventBuilder::new(kind(k), content)
+            .custom_created_at(nostr::Timestamp::from(at))
+            .tags(tags)
+            .sign_with_keys(keys)
             .unwrap();
-        let root = serde_json::to_string(&[root]).unwrap();
-        let head: Vec<_> = (0..WINDOW_PAGE as u64)
-            .map(|i| {
-                EventBuilder::new(kind(9), "w")
-                    .custom_created_at(nostr::Timestamp::from(1_000 + i))
-                    .sign_with_keys(&owner)
-                    .unwrap()
-            })
-            .collect();
-        let head = serde_json::to_string(&head).unwrap();
+        serde_json::to_value(event).unwrap()
+    }
+
+    fn tag(name: &str, value: &str) -> Tag {
+        Tag::parse([name, value]).unwrap()
+    }
+
+    /// A loopback HTTP API, recording every query's first filter. NIP-11
+    /// names the relay's key; the owner's root search finds one seeded root.
+    /// A window head page holds a full page of rows at one timestamp, an
+    /// older aux event and a summary; its relay-signed bounds point after the
+    /// last row. The page there is full too, and its bounds say history is
+    /// exhausted. Any other window cursor is refused. The read-state snapshot
+    /// answers in its own shape; `fail` reads fail the first time.
+    async fn fake_api(run_id: &str, fail: FailOnce) -> (String, Shared2<Vec<Value>>) {
+        let owner = identity::keys(run_id, Role::Owner, 0);
+        let relay = Keys::generate();
+        let root = Value::Array(vec![signed(&owner, 9, "lg-root 0", 2_000, vec![])]);
+        let rows = |at: u64| -> Vec<Value> {
+            (0..WINDOW_PAGE)
+                .map(|i| signed(&owner, 9, &format!("w{i}"), at, vec![]))
+                .collect()
+        };
+        let head_rows = rows(1_000);
+        let last = head_rows
+            .iter()
+            .filter_map(|e| e["id"].as_str())
+            .max()
+            .unwrap()
+            .to_string();
+        let older = rows(990);
+        let info = json!({"self": relay.public_key().to_hex()}).to_string();
+        let owner_hex = owner.public_key().to_hex();
+        let queries = Shared2::<Vec<Value>>::default();
+        let recorded = queries.clone();
+        let failed = Shared2::<Vec<&'static str>>::default();
         let snapshot =
             json!({"read_state_snapshot": 1, "complete": true, "events": []}).to_string();
-        let info = json!({"self": Keys::generate().public_key().to_hex()}).to_string();
-        let owner = owner.public_key().to_hex();
-        fake_http(move |method, target, body| {
+        let http = fake_http(move |method, target, body| {
             if method == "GET" && target == "/" {
                 return (200, info.clone());
             }
             let filters: Value = serde_json::from_slice(body).unwrap_or_default();
-            let filter = &filters[0];
+            let filter = filters[0].clone();
+            recorded.lock().unwrap().push(filter.clone());
+            let name = if filter["kinds"] == json!([39002]) {
+                "roster"
+            } else if filter["kinds"] == json!([9, 40002, 40008]) {
+                "unread"
+            } else {
+                ""
+            };
+            if fail.contains(&name) && !failed.lock().unwrap().contains(&name) {
+                failed.lock().unwrap().push(name);
+                return (500, r#"{"error":"once"}"#.into());
+            }
             if filter.get("read_state_snapshot").is_some() {
                 return (200, snapshot.clone());
             }
             if filter.get("top_level").is_some() {
-                return match (filter.get("until"), filter.get("before_id")) {
-                    (None, None) => (200, head.clone()),
-                    (Some(_), Some(_)) => (200, "[]".into()),
-                    _ => (400, r#"{"error":"top_level cursor requires both"}"#.into()),
+                let channel = filter["#h"][0].as_str().unwrap_or_default();
+                let (d, mut page, next) = match (filter.get("until"), filter.get("before_id")) {
+                    (None, None) => {
+                        let mut page = head_rows.clone();
+                        page.push(signed(&owner, 7, "+", 900, vec![tag("h", channel)]));
+                        page.push(signed(&relay, 39005, "{}", 1_000, vec![tag("h", channel)]));
+                        let next = json!({"created_at": 1_000, "id": last});
+                        (format!("{channel}:head"), page, next)
+                    }
+                    (Some(until), Some(id)) if *until == json!(1_000) && *id == json!(last) => {
+                        (format!("{channel}:1000:{last}"), older.clone(), Value::Null)
+                    }
+                    _ => return (400, r#"{"error":"unknown window cursor"}"#.into()),
                 };
+                let content = json!({"has_more": !next.is_null(), "next_cursor": next});
+                let tags = vec![tag("d", &d), tag("h", channel)];
+                page.push(signed(&relay, 39006, &content.to_string(), 1_000, tags));
+                return (200, Value::Array(page).to_string());
             }
-            if filter["kinds"] == json!([9]) && filter["authors"] == json!([owner]) {
-                (200, root.clone())
+            if filter["kinds"] == json!([9]) && filter["authors"] == json!([owner_hex]) {
+                (200, root.to_string())
             } else {
                 (200, "[]".into())
             }
         })
-        .await
+        .await;
+        (http, queries)
     }
 
-    /// Two desktop humans in one community of 25 channels, each in `joined`,
-    /// with two windows and one thread open and no traffic of their own.
-    fn two_desktops(ws: &str, http: &str, joined: usize, desktop: &str) -> Scenario {
+    /// `humans` desktop humans in one community of 25 channels, each in
+    /// `joined`, with two windows and one thread open and no traffic of
+    /// their own.
+    fn desktops(ws: &str, http: &str, humans: usize, joined: usize, desktop: &str) -> Scenario {
         Scenario::parse(&format!(
             r#"
 run_id = "d"
@@ -1239,7 +1907,7 @@ http_url = "http://{http}"
 communities = 1
 channels_per_community = 25
 [population]
-humans = 2
+humans = {humans}
 agents = 0
 channels_per_member = {joined}
 [human]
@@ -1261,10 +1929,12 @@ hold_secs = 1
         .unwrap()
     }
 
-    /// Per-op `(count, errors)` by op name, plus the relay's frames.
+    /// Per-op `(count, errors)` by op name, plus the relay's frames and the
+    /// API's queries.
     struct Outcome {
         ops: HashMap<&'static str, (u64, u64)>,
-        frames: Vec<(String, String)>,
+        frames: Vec<(usize, String, String)>,
+        queries: Vec<Value>,
     }
 
     impl Outcome {
@@ -1272,8 +1942,19 @@ hold_secs = 1
             self.ops.get(op).map_or(0, |c| c.0)
         }
 
+        fn errors(&self, op: &str) -> u64 {
+            self.ops.get(op).map_or(0, |c| c.1)
+        }
+
         fn saw(&self, verb: &str, id: &str) -> bool {
-            self.frames.iter().any(|(v, i)| v == verb && i == id)
+            self.at(verb, id).is_some()
+        }
+
+        /// Where a frame came in the relay's record.
+        fn at(&self, verb: &str, id: &str) -> Option<usize> {
+            self.frames
+                .iter()
+                .position(|(_, v, i)| v == verb && i == id)
         }
 
         /// Counts of the desktop ops, the ones the model owns.
@@ -1284,9 +1965,18 @@ hold_secs = 1
                 .map(|(op, c)| (*op, c.0))
                 .collect()
         }
+
+        /// Desktop op counts beyond `before`, zeroes dropped.
+        fn since(&self, before: &HashMap<&'static str, u64>) -> HashMap<&'static str, u64> {
+            self.desktop()
+                .into_iter()
+                .map(|(op, n)| (op, n - before.get(op).copied().unwrap_or(0)))
+                .filter(|(_, n)| *n > 0)
+                .collect()
+        }
     }
 
-    fn outcome(stats: &Stats, frames: &Frames) -> Outcome {
+    fn outcome(stats: &Stats, frames: &Frames, queries: &Shared2<Vec<Value>>) -> Outcome {
         let ops = stats
             .snapshot()
             .since(&Default::default())
@@ -1297,30 +1987,61 @@ hold_secs = 1
         Outcome {
             ops,
             frames: frames.lock().unwrap().clone(),
+            queries: queries.lock().unwrap().clone(),
         }
     }
 
-    /// Runs both clients for at least `min`, until `done` holds, then stops
-    /// them and returns what they did. Fails after 15 s without `done`.
-    async fn drive(
+    /// One loopback run.
+    struct Rig {
+        /// Humans in the scenario, whose profiles a client reads.
+        humans: usize,
+        /// Clients that run: the first `clients` humans.
+        clients: usize,
         joined: usize,
-        desktop_toml: &str,
-        min: Duration,
-        done: impl Fn(&Outcome) -> bool,
-    ) -> Outcome {
-        let (ws, frames) = fake_ws_relay().await;
-        let http = fake_api("d").await;
-        let scenario = two_desktops(&ws, &http, joined, desktop_toml);
+        desktop: String,
+        plan: Plan,
+        drop_first: Option<Duration>,
+        fail: FailOnce,
+        req_timeout: Duration,
+    }
+
+    /// One client, with a co-member whose profile it reads.
+    fn solo(joined: usize, desktop: &str) -> Rig {
+        Rig {
+            clients: 1,
+            ..rig(2, joined, desktop)
+        }
+    }
+
+    fn rig(humans: usize, joined: usize, desktop: &str) -> Rig {
+        Rig {
+            humans,
+            clients: humans,
+            joined,
+            desktop: desktop.into(),
+            plan: instant(),
+            drop_first: None,
+            fail: &[],
+            req_timeout: REQ_TIMEOUT,
+        }
+    }
+
+    /// Runs the clients for at least `min`, until `done` holds, then stops
+    /// them and returns what they did. Fails after 15 s without `done`.
+    async fn drive(rig: Rig, min: Duration, done: impl Fn(&Outcome) -> bool) -> Outcome {
+        let (ws, frames) = fake_ws_relay(rig.plan, rig.drop_first).await;
+        let (http, queries) = fake_api("d", rig.fail).await;
+        let scenario = desktops(&ws, &http, rig.humans, rig.joined, &rig.desktop);
         let net = Net::new(&scenario).await.unwrap();
         let stats = Arc::new(Stats::default());
         let (stop_tx, stop) = watch::channel(false);
         let shared = Arc::new(Shared::new(scenario, net, stats.clone(), stop));
-        let clients: Vec<_> = (0..2)
-            .map(|g| tokio::spawn(desktop(shared.clone(), g)))
+        let clients: Vec<_> = (0..rig.clients)
+            .map(|g| tokio::spawn(run_client(shared.clone(), g, rig.req_timeout)))
             .collect();
         let started = Instant::now();
         loop {
-            let now = outcome(&stats, &frames);
+            let now = outcome(&stats, &frames, &queries);
             if started.elapsed() >= min && done(&now) {
                 break;
             }
@@ -1339,10 +2060,12 @@ hold_secs = 1
                 .expect("a stopped client returns")
                 .unwrap();
         }
-        let out = outcome(&stats, &frames);
+        outcome(&stats, &frames, &queries)
+    }
+
+    fn no_errors(out: &Outcome) {
         let failed: Vec<_> = out.ops.iter().filter(|(_, c)| c.1 > 0).collect();
         assert!(failed.is_empty(), "errors: {failed:?}");
-        out
     }
 
     /// What one cold start reads over HTTP with two windows and a thread.
@@ -1358,7 +2081,7 @@ hold_secs = 1
             ("desktop_read_state", 1),
             ("desktop_unread", 1),
             ("desktop_reminders", 1),
-            // Per window, a full head page and the empty page before it.
+            // Per window, the head page and the page its bounds point to.
             ("desktop_window", 4),
             ("desktop_notices", 2),
             ("desktop_thread_root", 1),
@@ -1376,6 +2099,19 @@ hold_secs = 1
         ops.extend(extra.iter().copied());
         ops
     }
+
+    fn ops(list: &[(&'static str, u64)]) -> HashMap<&'static str, u64> {
+        list.iter().copied().collect()
+    }
+
+    /// What a channel route's establishment reads: both windows (two pages
+    /// and notices each) and the thread.
+    const CHANNEL_RECOVERY: [(&str, u64); 4] = [
+        ("desktop_window", 4),
+        ("desktop_notices", 2),
+        ("desktop_thread_root", 1),
+        ("desktop_thread_window", 1),
+    ];
 
     const QUIET: &str = "tick_secs = 3600.0";
 
@@ -1396,24 +2132,287 @@ hold_secs = 1
         for (mode, joined, subs) in cases {
             let want = with(cold_reads(2), &subs);
             let toml = format!("mode = \"{mode}\"\n{QUIET}");
-            let out = drive(joined, &toml, Duration::from_millis(300), |o| {
+            let out = drive(rig(2, joined, &toml), Duration::from_millis(300), |o| {
                 o.desktop() == want
             })
             .await;
+            no_errors(&out);
             assert_eq!(out.desktop(), want, "{mode} J={joined}");
             assert_eq!(out.count("ws_connect_auth"), 2, "{mode} J={joined}");
         }
     }
 
     #[tokio::test]
+    async fn a_window_catch_up_follows_the_relays_cursor_until_it_is_exhausted() {
+        let toml = format!("mode = \"current\"\n{QUIET}");
+        let out = drive(solo(5, &toml), Duration::ZERO, |o| {
+            o.count("desktop_notices") == 2
+        })
+        .await;
+        no_errors(&out);
+        let top: Vec<&Value> = out
+            .queries
+            .iter()
+            .filter(|f| f.get("top_level").is_some())
+            .collect();
+        let channel = &top[0]["#h"];
+        let windows: Vec<&Value> = top.into_iter().filter(|f| f["#h"] == *channel).collect();
+        // The head, then the page after the head's last row (not after its
+        // older aux event), and no third read of an exhausted history,
+        // though that page came back full.
+        assert_eq!(windows.len(), 2, "{windows:?}");
+        assert!(windows[0].get("until").is_none());
+        assert_eq!(windows[1]["until"], 1_000);
+        let ids: Vec<&str> = out
+            .queries
+            .iter()
+            .filter(|f| f.get("before_id").is_some())
+            .filter_map(|f| f["before_id"].as_str())
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.iter().all(|id| id.len() == 64 && *id == ids[0]));
+        assert_eq!(out.count("desktop_window"), 4);
+    }
+
+    /// Holds once `ready` has held for `settle`: what a connection reads has
+    /// had time to finish.
+    fn settled(ready: impl Fn(&Outcome) -> bool, settle: Duration) -> impl Fn(&Outcome) -> bool {
+        let since = std::cell::Cell::new(None::<Instant>);
+        move |o| {
+            if !ready(o) {
+                return false;
+            }
+            let at = since.get().unwrap_or_else(Instant::now);
+            since.set(Some(at));
+            at.elapsed() >= settle
+        }
+    }
+
+    /// The reads beyond its cold start of a `current` client in 5 channels,
+    /// once its first renewal's connection established with each replay
+    /// sending 499 events, except 500 on subscriptions whose id starts
+    /// with `cut`.
+    async fn renewed(cut: &'static str) -> HashMap<&'static str, u64> {
+        let mut rig = solo(
+            5,
+            "mode = \"current\"\nrenewal_secs = 4.0\ntick_secs = 3600.0",
+        );
+        rig.plan = Arc::new(move |conn, id| {
+            let events = match conn {
+                0 => 0,
+                _ if id.starts_with(cut) => REPLAY_LIMIT,
+                _ => REPLAY_LIMIT - 1,
+            };
+            (events, Duration::ZERO)
+        });
+        let cold = with(cold_reads(1), &[("desktop_live_eose", 3)]);
+        let out = drive(
+            rig,
+            Duration::ZERO,
+            settled(
+                |o| o.count("desktop_live_eose") >= 6,
+                Duration::from_millis(800),
+            ),
+        )
+        .await;
+        no_errors(&out);
+        assert_eq!(out.count("ws_connect_auth"), 2, "{cut}");
+        out.since(&cold)
+            .into_iter()
+            .filter(|(op, _)| *op != "desktop_live_eose")
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_renewal_recovers_only_what_a_cut_replay_lost() {
+        // 499 events everywhere: every route kept continuity.
+        assert_eq!(renewed("none").await, ops(&[]));
+        // A cut channel replay: the windows and the thread recover, and the
+        // carried membership route only repairs unreads.
+        assert_eq!(
+            renewed("batch").await,
+            ops(&[CHANNEL_RECOVERY.as_slice(), &[("desktop_unread", 1)]].concat())
+        );
+        // A cut membership replay: its full refresh, and the channels.
+        assert_eq!(
+            renewed("membership").await,
+            ops(&[
+                CHANNEL_RECOVERY.as_slice(),
+                &[
+                    ("desktop_roster", 1),
+                    ("desktop_read_state", 1),
+                    ("desktop_unread", 1),
+                    ("desktop_reminders", 1),
+                ]
+            ]
+            .concat())
+        );
+        // A cut profiles replay: its refresh, the channels, and the covered
+        // membership route's repair.
+        assert_eq!(
+            renewed("profiles").await,
+            ops(&[
+                CHANNEL_RECOVERY.as_slice(),
+                &[
+                    ("desktop_profiles", 1),
+                    ("desktop_statuses", 1),
+                    ("desktop_emoji", 1),
+                    ("desktop_unread", 1),
+                ]
+            ]
+            .concat())
+        );
+    }
+
+    /// The reads beyond its cold start of a `current` client in 5 channels
+    /// whose first connection drops after it established, once the next
+    /// connection established; its global replays send `globals` events.
+    async fn reconnected(globals: usize) -> HashMap<&'static str, u64> {
+        let mut rig = solo(5, &format!("mode = \"current\"\n{QUIET}"));
+        rig.drop_first = Some(Duration::from_millis(700));
+        rig.plan = Arc::new(move |conn, id| {
+            let global = id == "profiles" || id == "membership";
+            let events = if conn > 0 && global { globals } else { 0 };
+            (events, Duration::ZERO)
+        });
+        let cold = with(cold_reads(1), &[("desktop_live_eose", 3)]);
+        let out = drive(
+            rig,
+            Duration::ZERO,
+            settled(
+                |o| o.count("ws_connect_auth") >= 2 && o.count("desktop_live_eose") >= 6,
+                Duration::from_millis(800),
+            ),
+        )
+        .await;
+        // The drop is the only error.
+        let failed: Vec<_> = out
+            .ops
+            .iter()
+            .filter(|(op, c)| c.1 > 0 && **op != "ws_connect_auth")
+            .collect();
+        assert!(failed.is_empty(), "errors: {failed:?}");
+        assert_eq!(out.count("ws_connect_auth"), 2);
+        out.since(&cold)
+            .into_iter()
+            .filter(|(op, _)| *op != "desktop_live_eose")
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_reconnect_rereads_a_global_only_when_its_replay_was_cut() {
+        // Complete replays: the globals resume, unreads are only repaired,
+        // and the channels recover.
+        assert_eq!(
+            reconnected(REPLAY_LIMIT - 1).await,
+            ops(&[
+                CHANNEL_RECOVERY.as_slice(),
+                &[("desktop_nip11", 1), ("desktop_unread", 1)]
+            ]
+            .concat())
+        );
+        // Truncated global replays: both globals refresh in full.
+        assert_eq!(
+            reconnected(REPLAY_LIMIT).await,
+            ops(&[
+                CHANNEL_RECOVERY.as_slice(),
+                &[
+                    ("desktop_nip11", 1),
+                    ("desktop_profiles", 1),
+                    ("desktop_statuses", 1),
+                    ("desktop_emoji", 1),
+                    ("desktop_roster", 1),
+                    ("desktop_read_state", 1),
+                    ("desktop_unread", 1),
+                    ("desktop_reminders", 1),
+                ]
+            ]
+            .concat())
+        );
+    }
+
+    #[tokio::test]
+    async fn read_state_snapshots_recur_under_renewals_shorter_than_the_backstop() {
+        // Every renewal of 25 channels establishes (the live-only batch is
+        // cut by design) and repairs unreads without a snapshot; that must
+        // not hold off the snapshot's backstop.
+        let toml = "mode = \"current\"\ntick_secs = 1.0\nbackstop_secs = 2.0\nrenewal_secs = 1.0";
+        let out = drive(solo(25, toml), Duration::ZERO, |o| {
+            o.count("desktop_read_state") >= 2 && o.count("ws_connect_auth") >= 3
+        })
+        .await;
+        no_errors(&out);
+        assert!(out.count("desktop_unread") > out.count("desktop_read_state"));
+    }
+
+    #[tokio::test]
+    async fn a_replacement_past_its_deadline_is_closed_and_the_next_tick_retries() {
+        let mut rig = solo(
+            25,
+            "mode = \"current\"\ntick_secs = 1.0\nbackstop_secs = 1.0",
+        );
+        rig.req_timeout = Duration::from_millis(300);
+        rig.plan = Arc::new(|_, id| {
+            let late = if id == "batch-2-0" {
+                Duration::from_secs(1)
+            } else {
+                Duration::ZERO
+            };
+            (0, late)
+        });
+        let out = drive(rig, Duration::ZERO, |o| o.saw("CLOSE", "batch-1-0")).await;
+        assert_eq!(out.errors("desktop_live_eose"), 1);
+        // The late replacement is closed; the next tick replaces the batch.
+        let closed = out
+            .at("CLOSE", "batch-2-0")
+            .expect("late replacement closed");
+        let next = out.at("REQ", "batch-3-0").expect("next tick replaced");
+        let retired = out.at("CLOSE", "batch-1-0").expect("old batch closed");
+        assert!(closed < next && next < retired, "{:?}", out.frames);
+        // One batch wire stays open.
+        let opened = |verb: &str| {
+            out.frames
+                .iter()
+                .filter(|(_, v, id)| v == verb && id.starts_with("batch-"))
+                .count()
+        };
+        assert_eq!(opened("REQ") - opened("CLOSE"), 1, "{:?}", out.frames);
+    }
+
+    #[tokio::test]
+    async fn a_failed_read_retries_on_the_next_tick_and_a_good_one_does_not() {
+        let mut rig = solo(25, "mode = \"current\"\ntick_secs = 1.0");
+        rig.fail = &["roster", "unread"];
+        let out = drive(rig, Duration::from_millis(3_500), |o| {
+            o.count("desktop_roster") == 1 && o.count("desktop_unread") == 1
+        })
+        .await;
+        let ops = &out.ops;
+        assert_eq!(
+            (out.count("desktop_roster"), out.errors("desktop_roster")),
+            (1, 1),
+            "{ops:?}"
+        );
+        assert_eq!(
+            (out.count("desktop_unread"), out.errors("desktop_unread")),
+            (1, 1),
+            "{ops:?}"
+        );
+        // The retry reread the snapshot with its repair; nothing else reran.
+        assert_eq!(out.count("desktop_read_state"), 2);
+        assert_eq!(out.count("desktop_reminders"), 1);
+        assert_eq!(out.count("desktop_profiles"), 1);
+    }
+
+    #[tokio::test]
     async fn legacy_ticks_reread_and_replace_batches_every_tick() {
         let out = drive(
-            25,
-            "mode = \"legacy\"\ntick_secs = 1.0",
+            rig(2, 25, "mode = \"legacy\"\ntick_secs = 1.0"),
             Duration::ZERO,
             |o| o.count("desktop_roster") >= 4 && o.saw("CLOSE", "batch-1-2"),
         )
         .await;
+        no_errors(&out);
         // Each replacement is sent before the batch it replaces is closed.
         assert!(out.saw("REQ", "batch-2-0") && out.saw("CLOSE", "batch-1-0"));
         assert!(out.count("desktop_read_state") >= 4);
@@ -1426,12 +2425,12 @@ hold_secs = 1
     #[tokio::test]
     async fn current_ticks_wait_for_the_backstop() {
         let before = drive(
-            25,
-            "mode = \"current\"\ntick_secs = 1.0",
+            rig(2, 25, "mode = \"current\"\ntick_secs = 1.0"),
             Duration::from_millis(2500),
             |o| o.count("desktop_thread_window") == 2,
         )
         .await;
+        no_errors(&before);
         assert_eq!(
             before.desktop(),
             with(
@@ -1442,15 +2441,19 @@ hold_secs = 1
         assert!(!before
             .frames
             .iter()
-            .any(|(_, id)| id.starts_with("batch-2")));
+            .any(|(_, _, id)| id.starts_with("batch-2")));
 
         let after = drive(
-            25,
-            "mode = \"current\"\ntick_secs = 1.0\nbackstop_secs = 1.0",
+            rig(
+                2,
+                25,
+                "mode = \"current\"\ntick_secs = 1.0\nbackstop_secs = 1.0",
+            ),
             Duration::ZERO,
             |o| o.count("desktop_roster") >= 4 && o.saw("CLOSE", "batch-1-0"),
         )
         .await;
+        no_errors(&after);
         assert!(after.saw("REQ", "batch-2-0"));
         assert!(after.count("desktop_unread") >= 4);
         // A replacement is live-only: no replays after the connect's three.
@@ -1460,12 +2463,12 @@ hold_secs = 1
     #[tokio::test]
     async fn legacy_renewals_are_full_reconnects() {
         let out = drive(
-            25,
-            "mode = \"legacy\"\nrenewal_secs = 1.0\n",
+            rig(2, 25, "mode = \"legacy\"\nrenewal_secs = 1.0\n"),
             Duration::ZERO,
             |o| o.count("desktop_nip11") >= 4 && o.count("desktop_roster") >= 4,
         )
         .await;
+        no_errors(&out);
         assert!(out.count("ws_connect_auth") >= 4);
         // A reconnect keeps channel names and sidebar preferences.
         assert_eq!(out.count("desktop_metadata"), 2);
@@ -1473,40 +2476,47 @@ hold_secs = 1
     }
 
     #[tokio::test]
-    async fn current_renewals_carry_small_sessions_and_limit_large_ones() {
-        // More than ten channels: replays and channel catch-up again, no globals.
+    async fn current_renewals_carry_small_sessions_and_recover_channels_in_large_ones() {
+        // More than ten channels: the live-only batch is cut, so replays,
+        // channel catch-up and an unread repair again, but no global reads.
         let large = drive(
-            25,
-            "mode = \"current\"\nrenewal_secs = 1.0\n",
+            rig(2, 25, "mode = \"current\"\nrenewal_secs = 1.0\n"),
             Duration::ZERO,
             |o| o.count("desktop_replay_eose") >= 12 && o.count("desktop_unread") >= 4,
         )
         .await;
+        no_errors(&large);
         assert!(large.count("ws_connect_auth") >= 4);
         for op in [
             "desktop_nip11",
             "desktop_roster",
             "desktop_metadata",
             "desktop_profiles",
+            "desktop_read_state",
         ] {
             assert_eq!(large.count(op), 2, "{op}");
         }
         assert!(large.count("desktop_window") >= 16);
 
-        // Up to ten channels: subscriptions are re-sent and nothing is read.
+        // Up to ten channels: subscriptions are re-sent and nothing is read,
+        // but for one unread repair when a client's first renewal (jittered)
+        // came before its cold connection caught up.
         let small = drive(
-            5,
-            "mode = \"current\"\nrenewal_secs = 1.0\n",
+            rig(2, 5, "mode = \"current\"\nrenewal_secs = 1.0\n"),
             Duration::ZERO,
             |o| o.count("desktop_live_eose") >= 12 && o.count("desktop_thread_window") == 2,
         )
         .await;
+        no_errors(&small);
         assert!(small.count("ws_connect_auth") >= 4);
         let reads: HashMap<_, _> = small
             .desktop()
             .into_iter()
-            .filter(|(op, _)| *op != "desktop_live_eose")
+            .filter(|(op, _)| *op != "desktop_live_eose" && *op != "desktop_unread")
             .collect();
-        assert_eq!(reads, cold_reads(2));
+        let mut cold = cold_reads(2);
+        cold.remove("desktop_unread");
+        assert_eq!(reads, cold);
+        assert!(small.count("desktop_unread") <= 4);
     }
 }

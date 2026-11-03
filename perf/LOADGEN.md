@@ -143,28 +143,60 @@ On a **cold start** it:
    (`desktop_emoji`), read state (`desktop_read_state`), unread repair in
    chunks of 128 channels (`desktop_unread`), reminders
    (`desktop_reminders`), and for each of `windows` open channels a window
-   catch-up (`desktop_window`, up to five older pages while pages come back
-   full) and its notices (`desktop_notices`), and for each of `threads` open
-   threads a seeded root lookup and its first thread page
-   (`desktop_thread_root`, `desktop_thread_window`).
+   catch-up (`desktop_window`) and its notices (`desktop_notices`), and for
+   each of `threads` open threads a seeded root lookup and its first thread
+   page (`desktop_thread_root`, `desktop_thread_window`). A window catch-up
+   reads the head page, then follows the cursor in the relay's window
+   bounds (kind 39006) for up to five older pages, until the bounds say
+   history is exhausted.
 
-Every `tick_secs` the client runs a recovery tick. In `legacy` each tick
-replaces its channel subscriptions and rereads roster, read state and unread.
-In `current` each of the three waits `backstop_secs` since it last ran, and
-a replacement is live-only. A replacement is opened before the subscription
-it replaces is closed.
+`legacy` makes all of these reads as it connects. `current` reads only
+NIP-11, names and sidebar preferences then, and the rest as each
+subscription reaches its EOSE ("establishes"): profiles, statuses and emoji
+with the profile subscription; roster, read state, unread repair and
+reminders with the membership subscription; windows and threads with the
+channel subscriptions.
+
+A subscription's replay is cut when it replays 500 events, or, for the
+live-only subscription, always: it replays nothing itself. A subscription
+that misses its EOSE deadline counts as cut, and so does one the previous
+connection never caught up. When a `current` client reconnects, a profile
+or membership subscription whose replay was not cut resumed every change,
+so it skips its full read: profiles read nothing unless an earlier read is
+still owed, and membership only repairs unreads, without the read-state
+snapshot. A cut one reads as on a cold start. The
+channel subscriptions always recover the windows and threads.
+
+Every `tick_secs` the client runs a recovery tick, on its own clock across
+connections. In `legacy` each tick replaces its channel subscriptions and
+rereads roster, read state and unread. In `current` each of the three waits
+`backstop_secs` since it last ran: since the batches were last replaced,
+since the roster was last read in full, and since a full unread repair (with
+its read-state snapshot) was last asked for. A failed roster or unread read
+is owed and runs again on the next tick; an owed profile read runs again
+when the profile subscription next establishes. A replacement is live-only
+and is opened before the subscription it replaces is closed. A replacement
+that misses its EOSE deadline is closed, the subscription it would have
+replaced stays, and the next tick tries again.
 
 Every `renewal_secs` (0 disables it; the first is jittered) the client renews
 its identity and reconnects. In `legacy` that is an ordinary reconnect, which
 rereads everything but channel names and sidebar preferences. In `current`
-with up to ten channels the subscriptions are re-sent and nothing is read;
-with more, the replays, unread repair, windows and threads run again. A
-human's session end (`human.mean_session_secs`) is an ordinary reconnect in
-both modes. Resumed subscriptions start 960 s before the previous session
-ended, but not before 300 s before the client started.
+the subscriptions are carried over: none establishes while their replays
+keep continuity, so nothing is read. Once any replay is cut, every
+subscription establishes as on a reconnect. With more than ten channels the
+live-only subscription is always cut, so the replays, windows, threads and
+an unread repair run again. A human's session end
+(`human.mean_session_secs`) is an ordinary reconnect in both modes. Resumed
+subscriptions start 960 s before the previous session ended, but not before
+300 s before the client started.
 
-Reads that come due while earlier ones are still running wait for them, once
-each, so a slow relay does not pile reads up behind it.
+Reads run in one task at a time per client. A read that comes due while the
+same read is running or queued is not added again, so a slow relay does not
+pile reads up behind it.
+
+The app also establishes the channel subscriptions when a tick's replacement
+reaches its EOSE; the generator does not model that.
 
 ## Sharding
 
