@@ -149,6 +149,13 @@ const SEARCH_TEXT_MAX_CHARS: usize = 4096;
 /// bridge uses page 1), but clamp here too so a future caller cannot accidentally
 /// wire untrusted input into a multi-trillion-row OFFSET.
 const PAGE_MAX: u32 = 1000;
+/// How many of the newest matches a prefix-mode relevance search ranks.
+/// The GIN index returns matches in no useful order, so ranking every match
+/// before `LIMIT` costs time proportional to the match count, and a short
+/// typeahead prefix matches most of a community. Reading candidates newest
+/// first lets Postgres stop at this many instead. Every page ranks the same
+/// window, so pages stay consistent and end with it.
+const PREFIX_RANK_WINDOW: i64 = 1000;
 
 fn push_tsquery(qb: &mut QueryBuilder<sqlx::Postgres>, mode: SearchMode, search_text: &str) {
     match mode {
@@ -210,15 +217,18 @@ fn normalized_search_text(q: &str) -> Option<String> {
 
 /// Execute a community-scoped FTS query.
 ///
-/// SQL shape (always):
+/// The mode-specific tsquery is resolved first and bound as a value, so the
+/// planner estimates its selectivity instead of assuming a rare match. The
+/// search itself is a one-shot statement, planned for that value every time.
+///
+/// SQL shape:
 /// ```sql
 /// SELECT id, kind, pubkey, channel_id, EXTRACT(EPOCH FROM created_at)::bigint AS created_at_s,
-///        ts_rank_cd(search_tsv, query) AS rank
-/// FROM events,
-///      <mode-specific tsquery> AS query
+///        ts_rank_cd(search_tsv, $q) AS rank
+/// FROM events            -- prefix relevance: the newest PREFIX_RANK_WINDOW matches
 /// WHERE community_id = $ctx
 ///   AND deleted_at IS NULL
-///   AND search_tsv @@ query
+///   AND search_tsv @@ $q
 ///   [+ channel scope, kinds, authors, since, until]
 /// ORDER BY rank DESC, created_at DESC, id   -- SearchSort::Newest: created_at DESC, id
 /// LIMIT $per_page OFFSET (($page - 1) * $per_page)
@@ -248,21 +258,43 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
     // short exact display name off the bounded first page. Keep the same result
     // set and pagination contract, but put rows containing the whole lexeme
     // first for this one narrow caller shape.
+    let profile_only = query.kinds.as_deref() == Some(&[0][..]);
     let prioritize_exact_profile_lexeme = query.sort == SearchSort::Relevance
         && query.mode == SearchMode::Prefix
-        && query.kinds.as_deref() == Some(&[0][..])
+        && profile_only
         && search_text.chars().count() <= 2;
+    // Profiles are few, so profile typeahead keeps ranking every match.
+    let rank_window =
+        (query.sort == SearchSort::Relevance && query.mode == SearchMode::Prefix && !profile_only)
+            .then_some(PREFIX_RANK_WINDOW);
+
+    let mut resolve: QueryBuilder<sqlx::Postgres> = QueryBuilder::new("SELECT (");
+    push_tsquery(&mut resolve, query.mode, &search_text);
+    resolve.push(")::text");
+    let tsquery: String = resolve.build_query_scalar().fetch_one(pool).await?;
+    if tsquery.is_empty() {
+        // Nothing searchable survived normalization; an empty tsquery matches nothing.
+        return Ok(SearchResult {
+            hits: Vec::new(),
+            page,
+        });
+    }
 
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
         "SELECT id, kind, pubkey, channel_id, \
          EXTRACT(EPOCH FROM created_at)::bigint AS created_at_s, \
-         ts_rank_cd(search_tsv, search_query.query) AS rank \
-         FROM events CROSS JOIN LATERAL (SELECT ",
+         ts_rank_cd(search_tsv, ",
     );
-    push_tsquery(&mut qb, query.mode, &search_text);
-    qb.push(" AS query) AS search_query WHERE community_id = ");
+    qb.push_bind(&tsquery);
+    qb.push("::tsquery) AS rank FROM ");
+    if rank_window.is_some() {
+        qb.push("(SELECT id, kind, pubkey, channel_id, created_at, search_tsv FROM ");
+    }
+    qb.push("events WHERE community_id = ");
     qb.push_bind(*query.community.as_uuid());
-    qb.push(" AND deleted_at IS NULL AND search_tsv @@ search_query.query");
+    qb.push(" AND deleted_at IS NULL AND search_tsv @@ ");
+    qb.push_bind(&tsquery);
+    qb.push("::tsquery");
 
     // Search is a current-state surface; old artifact snapshots cannot match.
     qb.push(" AND (events.kind <> 45010 OR EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id=events.community_id AND ah.event_id=events.id AND NOT ah.deleted))");
@@ -318,6 +350,14 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
         qb.push(")");
     }
 
+    if let Some(window) = rank_window {
+        // Matches the backward scan of each partition's primary key, so the
+        // newest candidates stream in order and the scan stops at `window`.
+        qb.push(" ORDER BY created_at DESC, id DESC LIMIT ");
+        qb.push_bind(window);
+        qb.push(") AS candidates");
+    }
+
     if query.sort == SearchSort::Newest {
         qb.push(" ORDER BY created_at DESC, id LIMIT ");
     } else if prioritize_exact_profile_lexeme {
@@ -331,7 +371,9 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
     qb.push(" OFFSET ");
     qb.push_bind(offset);
 
-    let rows = crate::cancel::fetch_all(pool, qb.build()).await?;
+    // Not a cached prepared statement: after five runs Postgres may switch a
+    // cached statement to a generic plan, which cannot see the tsquery.
+    let rows = crate::cancel::fetch_all(pool, qb.build().persistent(false)).await?;
 
     let mut hits = Vec::with_capacity(rows.len());
     for row in rows {
