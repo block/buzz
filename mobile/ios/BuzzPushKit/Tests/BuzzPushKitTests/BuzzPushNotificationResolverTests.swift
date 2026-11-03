@@ -386,6 +386,155 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     )
   }
 
+  /// A push carries no event reference. Each push must show a message not shown before,
+  /// including after the extension process restarts, instead of the newest match again.
+  func testEachPushShowsANewMessageAndNeverRepeatsOne() throws {
+    let snapshot = try snapshotData([community()])
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+    let scope = try XCTUnwrap(BuzzNotificationCacheScope(community: community()))
+    let now = Date(timeIntervalSince1970: TimeInterval(Self.now))
+    // A fresh cache instance per push models a fresh extension process.
+    func push() -> String? {
+      resolve(makeResolver(communitiesData: snapshot,
+        cacheOverride: BuzzNotificationCache(directory: root, now: { now }, isCurrent: { $0 == scope }),
+        now: now))?.body
+    }
+    var relayEvents: [VerifiedNostrEvent] = []
+    URLProtocolStub.handler = { request in
+      Self.response(request, status: 200, data: try JSONEncoder().encode(relayEvents))
+    }
+    func message(_ content: String, secondsAgo: Int) throws -> VerifiedNostrEvent {
+      try Self.signedEvent(privateKey: Self.profilePrivateKey, createdAt: Self.now - secondsAgo,
+        kind: 9, tags: [["h", Self.channelID]], content: content)
+    }
+    let window = BuzzNotificationCache.presentationReorderWindow
+
+    let history = try message("Last week", secondsAgo: 7 * 24 * 3600)
+    let first = try message("First", secondsAgo: 3600)
+    relayEvents = [history, first]
+    XCTAssertEqual(push(), "First", "with nothing shown yet, the newest message")
+    XCTAssertNil(push(), "a push for a non-message event must not repeat it")
+
+    // Two messages whose pushes resolve out of order: the later push wins the first
+    // resolution, so the earlier push must still find its own message.
+    let early = try message("Early", secondsAgo: 60)
+    let late = try message("Late", secondsAgo: 59)
+    relayEvents = [late, early, first, history]
+    XCTAssertEqual(push(), "Late")
+    XCTAssertEqual(push(), "Early")
+    XCTAssertNil(push())
+
+    // Older history is never surfaced by a later push.
+    let stale = try message("Stale", secondsAgo: 59 + window + 1)
+    relayEvents = [late, early, stale, first, history]
+    XCTAssertNil(push(), "a message older than the reorder window is history")
+
+    // A future-dated message is shown once and doesn't hide messages that follow it.
+    let future = try message("Future", secondsAgo: -3600)
+    relayEvents = [future, late]
+    XCTAssertEqual(push(), "Future")
+    let next = try message("Next", secondsAgo: 0)
+    relayEvents = [future, next, late]
+    XCTAssertEqual(push(), "Next")
+    XCTAssertNil(push())
+  }
+
+  func testShownMessagesStayShownAcrossCommunitiesFailuresAndBursts() throws {
+    let a = community(id: "community-a", relayUrl: "https://a.example")
+    let b = community(id: "community-b", relayUrl: "https://b.example")
+    let snapshot = try snapshotData([a, b])
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+    let scopes = [a, b].compactMap { BuzzNotificationCacheScope(community: $0) }
+    var clock = Self.now
+    func push() -> String? {
+      let now = Date(timeIntervalSince1970: TimeInterval(clock))
+      return resolve(makeResolver(communitiesData: snapshot,
+        privateKeys: ["community-a": Self.privateKey, "community-b": Self.privateKey],
+        cacheOverride: BuzzNotificationCache(
+          directory: root, now: { now }, isCurrent: { scopes.contains($0) }),
+        now: now))?.body
+    }
+    var relayEvents: [String: [VerifiedNostrEvent]] = [:]
+    var failingHosts: Set<String> = []
+    URLProtocolStub.handler = { request in
+      let host = request.url?.host ?? ""
+      return Self.response(request, status: failingHosts.contains(host) ? 500 : 200,
+        data: try JSONEncoder().encode(relayEvents[host] ?? []))
+    }
+    func message(_ content: String, createdAt: Int) throws -> VerifiedNostrEvent {
+      try Self.signedEvent(privateKey: Self.profilePrivateKey, createdAt: createdAt,
+        kind: 9, tags: [["h", Self.channelID]], content: content)
+    }
+
+    // B has shown nothing yet, but A's shown message still marks B's last week as
+    // history, even when A's query fails.
+    let mention = try message("A mention", createdAt: clock - 60)
+    relayEvents["a.example"] = [mention]
+    relayEvents["b.example"] = [try message("B last week", createdAt: clock - 7 * 24 * 3600)]
+    XCTAssertEqual(push(), "A mention")
+    XCTAssertNil(push(), "an old message in another community is not new")
+    failingHosts = ["a.example"]
+    XCTAssertNil(push(), "a failed query doesn't drop its community's history")
+    failingHosts = []
+
+    // A burst of newer messages doesn't evict one the relay still returns.
+    var newest = mention
+    for index in 0..<100 {
+      clock += 1
+      newest = try message("Burst \(index)", createdAt: clock)
+      relayEvents["a.example"] = [newest, mention]
+      XCTAssertEqual(push(), "Burst \(index)")
+    }
+    XCTAssertNil(push(), "a shown message is not shown again after a burst")
+
+    // A store that can't be written still remembers what it already shows.
+    let directory = root.appendingPathComponent(scopes[0].directoryName, isDirectory: true)
+    try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: directory.path)
+    addTeardownBlock {
+      try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
+    }
+    XCTAssertNil(push(), "a read-only store does not repeat a shown message")
+    relayEvents["a.example"] = [try message("Unrecorded", createdAt: clock), newest, mention]
+    XCTAssertEqual(push(), "Unrecorded", "an unwritable store never hides a new message")
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
+
+    // A future-dated message stays remembered while the relay keeps returning it first,
+    // even after later messages push its capped time out of the window.
+    let future = try message("Future", createdAt: clock + 3600)
+    relayEvents["a.example"] = [future]
+    XCTAssertEqual(push(), "Future")
+    for index in 0..<40 {
+      clock += 30
+      relayEvents["a.example"] = [future, try message("Later \(index)", createdAt: clock)]
+      XCTAssertEqual(push(), "Later \(index)")
+    }
+    XCTAssertNil(push(), "a future-dated message is not shown again")
+  }
+
+  func testFutureDatedEntriesDoNotEvictAClaimedMessage() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+    let scope = try XCTUnwrap(BuzzNotificationCacheScope(community: community()))
+    let cache = BuzzNotificationCache(
+      directory: root, now: { Date(timeIntervalSince1970: TimeInterval(Self.now)) },
+      isCurrent: { $0 == scope })
+    func claim(_ event: VerifiedNostrEvent) throws -> Bool {
+      try cache.claimFirstUnpresented([(event: event, scope: scope)], scopes: [scope]) == 0
+    }
+    for index in 0..<(BuzzNotificationCache.maximumPresentedMessages + 1) {
+      let ahead = try Self.signedEvent(privateKey: Self.profilePrivateKey,
+        createdAt: Self.now + 600 + index, kind: 9, tags: [["h", Self.channelID]],
+        content: "Ahead \(index)")
+      XCTAssertTrue(try claim(ahead))
+    }
+    let current = try Self.signedEvent(privateKey: Self.profilePrivateKey, createdAt: Self.now,
+      kind: 9, tags: [["h", Self.channelID]], content: "Current")
+    XCTAssertTrue(try claim(current))
+    XCTAssertFalse(try claim(current), "a claimed message survives retention")
+  }
+
   func testFreshVerifiedCacheResolvesSenderAvatarAndChannelWithoutRefresh() throws {
     let message = try Self.signedEvent(
       privateKey: Self.profilePrivateKey,

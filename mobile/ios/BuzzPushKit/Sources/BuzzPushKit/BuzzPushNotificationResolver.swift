@@ -54,7 +54,7 @@ public protocol BuzzPushNotificationResolving {
   func cancel()
 }
 
-/// Reads configured Buzz communities and resolves their newest unread event.
+/// Reads configured Buzz communities and resolves their newest message not yet shown.
 public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
   // Each independent refresh has a hard transfer limit, allowing bounded
   // content plus JSON escaping, tags, and envelopes.
@@ -108,24 +108,49 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     var candidates: [(VerifiedNostrEvent, PushLeaseCommunity)] = []
     for community in communities {
       group.enter()
-      query(community) { candidate in
-        if let candidate {
-          lock.lock()
-          candidates.append(candidate)
-          lock.unlock()
-        }
+      query(community) { messages in
+        lock.lock()
+        candidates += messages.map { ($0, community) }
+        lock.unlock()
         group.leave()
       }
     }
     group.notify(queue: .global(qos: .userInitiated)) {
-      let newest = candidates.max {
-        $0.0.createdAt == $1.0.createdAt ? $0.0.id > $1.0.id : $0.0.createdAt < $1.0.createdAt
+      let newestFirst = candidates.sorted {
+        $0.0.createdAt == $1.0.createdAt ? $0.0.id < $1.0.id : $0.0.createdAt > $1.0.createdAt
       }
-      guard let newest else {
+      guard let newest = self.firstUnpresented(newestFirst, communities: communities) else {
         completion(nil)
         return
       }
       self.resolvePresentation(event: newest.0, community: newest.1, completion: completion)
+    }
+  }
+
+  /// The push doesn't say which event it is for, so take the newest message not yet
+  /// shown, in any community. Without extension storage, fall back to the newest message.
+  /// The claim is made before presentation: if presenting then fails or expires, that
+  /// push shows the generic text and the message isn't offered again, which is better
+  /// than repeating a message in later notifications.
+  private func firstUnpresented(
+    _ newestFirst: [(VerifiedNostrEvent, PushLeaseCommunity)],
+    communities: [PushLeaseCommunity]
+  ) -> (VerifiedNostrEvent, PushLeaseCommunity)? {
+    guard let notificationCache else { return newestFirst.first }
+    let candidates = newestFirst.compactMap { event, community in
+      BuzzNotificationCacheScope(community: community).map { (candidate: (event, community), scope: $0) }
+    }
+    do {
+      // Every community's history bounds the others, even one whose query failed, so a
+      // community with nothing shown yet can't surface its old messages.
+      return try notificationCache.claimFirstUnpresented(
+        candidates.map { (event: $0.candidate.0, scope: $0.scope) },
+        scopes: communities.compactMap(BuzzNotificationCacheScope.init(community:))
+      ).map { candidates[$0].candidate }
+    } catch {
+      // Unusable storage must not hide new messages; it can only fail to dedupe them.
+      NSLog("Notification dedupe unavailable: %@", String(describing: error))
+      return candidates.first?.candidate
     }
   }
 
@@ -147,10 +172,10 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
 
   private func query(
     _ community: PushLeaseCommunity,
-    completion: @escaping ((VerifiedNostrEvent, PushLeaseCommunity)?) -> Void
+    completion: @escaping ([VerifiedNostrEvent]) -> Void
   ) {
     guard let privateKey = accountPrivateKey(for: community), community.pubkey?.isEmpty == false else {
-      completion(nil)
+      completion([])
       return
     }
     guard
@@ -161,7 +186,7 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
         withJSONObject: community.policies.map { $0.filter.queryFilter(since: nil, limit: 10) }
       )
     else {
-      completion(nil)
+      completion([])
       return
     }
     send(
@@ -172,19 +197,19 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
         let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode),
         let data, let events = try? JSONDecoder().decode([VerifiedNostrEvent].self, from: data)
       else {
-        completion(nil)
+        completion([])
         return
       }
-      let candidate = Self.newestMessage(
-        events: events.filter { event in
-          event.hasValidIDAndSignature()
-            && community.policies.contains { policy in
-              PushLeaseMatcher.matches(event: event, policy: policy)
-            }
-        },
-        community: community
-      )
-      completion(candidate.map { ($0, community) })
+      completion(
+        Self.messages(
+          events: events.filter { event in
+            event.hasValidIDAndSignature()
+              && community.policies.contains { policy in
+                PushLeaseMatcher.matches(event: event, policy: policy)
+              }
+          },
+          community: community
+        ))
     }
   }
 
@@ -382,12 +407,20 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     events: [VerifiedNostrEvent],
     community: PushLeaseCommunity
   ) -> VerifiedNostrEvent? {
-    guard let mine = community.pubkey?.lowercased() else { return nil }
+    messages(events: events, community: community).first
+  }
+
+  /// Messages from others that a notification can show, newest first.
+  private static func messages(
+    events: [VerifiedNostrEvent],
+    community: PushLeaseCommunity
+  ) -> [VerifiedNostrEvent] {
+    guard let mine = community.pubkey?.lowercased() else { return [] }
     return events.filter {
       $0.pubkey.lowercased() != mine && [9, 40002, 45001, 45003].contains($0.kind)
     }.sorted {
       $0.createdAt == $1.createdAt ? $0.id < $1.id : $0.createdAt > $1.createdAt
-    }.first
+    }
   }
 
   static func makeResolution(
