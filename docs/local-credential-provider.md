@@ -167,6 +167,7 @@ and signs. `sign_event` is subject to the [operation policy](#operation-policy).
 | `describe` | `[]` | JSON: identity, role, bound relays and methods |
 | `federated_identity` | `[<relay URL>]` | NIP-FI assertion, or empty string |
 | `auth_tag` | `[]` | JSON-encoded NIP-OA `auth` tag, or empty string |
+| `engram_d_tag` | `[<peer pubkey hex>, <slug>]` | NIP-AE `d` tag for that slug |
 | `pair` | `[<client name>, <relay URL>]` | JSON: token and identity |
 
 `describe` returns:
@@ -199,6 +200,17 @@ it has lapsed. A caller SHOULD cache the assertion until shortly before its
 `auth_tag` returns the agent's NIP-OA `auth` tag as a JSON array, for example
 `["auth","<owner>","<conditions>","<sig>"]`, or an empty string for an `owner`
 token.
+
+`engram_d_tag` returns the 64-hex `d` tag that [NIP-AE](nips/NIP-AE.md#addressing)
+derives from the identity's NIP-44 conversation key with `peer` and the slug.
+The provider MUST answer `invalid_request` for a slug outside NIP-AE's grammar,
+so the method is not a general keyed-hash oracle. Engram content uses
+`nip44_encrypt` and `nip44_decrypt` with the same peer, so no method exposes the
+conversation key itself.
+
+The provider never returns the private key or a NIP-44 conversation key. A
+caller feature that needs either one, rather than an operation built on it,
+needs an explicit key.
 
 `pair` is described under [Pairing](#pairing).
 
@@ -237,7 +249,8 @@ when fresh: `created_at` within 60 seconds of the provider's clock.
 | `24242` Blossom auth | Exactly one `server` tag equal to a bound relay's host, a `t` tag of `upload` or `get`, and an `expiration` no later than `created_at + 60` |
 
 A NIP-98 event for any other origin is denied. This rules out using the desktop
-to sign in to other services.
+to sign in to other services, including a NIP-FA adapter: a caller using the
+provider gets NIP-FI evidence from `federated_identity` and never mints its own.
 
 ### Ordinary content
 
