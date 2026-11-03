@@ -1528,9 +1528,7 @@ impl Config {
             web_dir,
             serve_git_web_gui,
             nip_fi_provision_binding,
-            nip_fi_upgrades_enabled: std::env::var("BUZZ_NIP_FI_UPGRADES_ENABLED")
-                .map(|value| value == "true")
-                .unwrap_or(false),
+            nip_fi_upgrades_enabled: parse_bool("BUZZ_NIP_FI_UPGRADES_ENABLED", false)?,
             nip_fi_resolver_bounds,
             nip_fi,
         })
@@ -1609,10 +1607,25 @@ mod tests {
         let before = std::env::var("BUZZ_NIP_FI_UPGRADES_ENABLED").ok();
         std::env::remove_var("BUZZ_NIP_FI_UPGRADES_ENABLED");
         assert!(!Config::from_env().unwrap().nip_fi_upgrades_enabled);
-        std::env::set_var("BUZZ_NIP_FI_UPGRADES_ENABLED", "true");
-        assert!(Config::from_env().unwrap().nip_fi_upgrades_enabled);
-        std::env::set_var("BUZZ_NIP_FI_UPGRADES_ENABLED", "false");
-        assert!(!Config::from_env().unwrap().nip_fi_upgrades_enabled);
+        for value in ["true", "TRUE", "1", "on", " On "] {
+            std::env::set_var("BUZZ_NIP_FI_UPGRADES_ENABLED", value);
+            assert!(
+                Config::from_env().unwrap().nip_fi_upgrades_enabled,
+                "{value}"
+            );
+        }
+        for value in ["false", "FALSE", "0", "off", "", " Off "] {
+            std::env::set_var("BUZZ_NIP_FI_UPGRADES_ENABLED", value);
+            assert!(
+                !Config::from_env().unwrap().nip_fi_upgrades_enabled,
+                "{value}"
+            );
+        }
+        std::env::set_var("BUZZ_NIP_FI_UPGRADES_ENABLED", "treu");
+        assert!(
+            matches!(Config::from_env(), Err(ConfigError::InvalidValue(message))
+            if message.contains("BUZZ_NIP_FI_UPGRADES_ENABLED must be true or false"))
+        );
         match before {
             Some(value) => std::env::set_var("BUZZ_NIP_FI_UPGRADES_ENABLED", value),
             None => std::env::remove_var("BUZZ_NIP_FI_UPGRADES_ENABLED"),
