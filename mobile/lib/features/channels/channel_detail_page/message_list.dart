@@ -809,34 +809,17 @@ class _MessageList extends HookConsumerWidget {
       },
     );
 
-    // A loaded page can hold only hidden self-joins and leaves, leaving no
-    // row to scroll for older history. Keep paging until something renders.
-    final onlyHiddenLoaded =
-        entries.isEmpty &&
-        !notifier.reachedOldest &&
-        allMessages.any(isHiddenMembershipNotice);
-    useEffect(() {
-      if (!onlyHiddenLoaded || isLoadingOlder.value || olderFetchPaused.value) {
-        return null;
-      }
-      var cancelled = false;
-      // After this build: fetching updates providers and this widget's state.
-      unawaited(
-        Future<void>(() async {
-          if (cancelled || !context.mounted) return;
-          isLoadingOlder.value = true;
-          try {
-            final loaded = await notifier.fetchOlder();
-            if (context.mounted) {
-              olderFetchPaused.value = !loaded && !notifier.reachedOldest;
-            }
-          } finally {
-            if (context.mounted) isLoadingOlder.value = false;
-          }
-        }),
-      );
-      return () => cancelled = true;
-    }, [onlyHiddenLoaded, allMessages.length, isLoadingOlder.value]);
+    final hiddenHistory = _useHiddenHistoryPaging(
+      context: context,
+      active:
+          entries.isEmpty &&
+          !notifier.reachedOldest &&
+          allMessages.any(isHiddenMembershipNotice),
+      notifier: notifier,
+      loadedCount: allMessages.length,
+      isLoadingOlder: isLoadingOlder,
+      olderFetchPaused: olderFetchPaused,
+    );
 
     if (entries.isEmpty &&
         welcomeAgent == null &&
@@ -886,15 +869,7 @@ class _MessageList extends HookConsumerWidget {
           ),
         );
       }
-      if (onlyHiddenLoaded && !olderFetchPaused.value) {
-        return const Center(
-          child: BuzzLoadingIndicator(
-            size: 24,
-            semanticLabel: 'Loading older messages',
-          ),
-        );
-      }
-      return const _EmptyMessages();
+      return hiddenHistory ?? const _EmptyMessages();
     }
 
     final channelNamesMap = ref.watch(channelIdsByNameProvider);
