@@ -61,3 +61,23 @@ is not a string, never matches. Content that PostgreSQL cannot read as `jsonb`
 (for example a `\u0000` escape or very deep nesting) has no names, so it
 never matches and never makes the search fail
 (`schema/functions/profile_name_fields.sql`).
+
+## Deployment
+
+Verified-name matching reads `idx_nip_fi_profile_heads_names`. Migration
+`0081` builds it only while `nip_fi_profile_heads` is empty; on a populated
+database it fails until the index exists. Build it first, outside a
+transaction:
+
+```sql
+CREATE INDEX CONCURRENTLY idx_nip_fi_profile_heads_names
+    ON public.nip_fi_profile_heads USING GIN (
+    to_tsvector('simple',
+        COALESCE(jsonb_path_query_first(event, 'strict $.tags[*] ? (@[0] == "display_name")[1]', '{}', true) #>> '{}', '')
+        || ' ' || COALESCE(jsonb_path_query_first(event, 'strict $.tags[*] ? (@[0] == "username")[1]', '{}', true) #>> '{}', '')
+        || ' ' || COALESCE(jsonb_path_query_first(event, 'strict $.tags[*] ? (@[0] == "full_name")[1]', '{}', true) #>> '{}', ''))
+);
+```
+
+If the build fails, drop the invalid index and build it again. The migration
+then checks that the index is valid and has this definition.

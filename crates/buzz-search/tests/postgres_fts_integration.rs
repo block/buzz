@@ -2292,6 +2292,67 @@ async fn profile_names_match_verified_names() {
     teardown(pool, &schema).await;
 }
 
+/// Verified-name search reads `idx_nip_fi_profile_heads_names`.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn profile_names_use_verified_name_index() {
+    let (setup_pool, schema) = setup().await;
+    let c = mk_community(&setup_pool, "profile-names-verified-index.example").await;
+    let relay = rand_bytes32();
+    for i in 0..2_000 {
+        put_verified(
+            &setup_pool,
+            c,
+            relay,
+            rand_bytes32(),
+            &[("full_name", &format!("Person{i} Name{i}"))],
+            1_700_000_000 + i,
+        )
+        .await;
+    }
+    sqlx::query("ANALYZE nip_fi_profile_heads")
+        .execute(&setup_pool)
+        .await
+        .expect("analyze heads");
+    // One connection, so this backend's statistics hold the search's scans.
+    let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .expect("connect test database");
+    let scans = || async {
+        sqlx::query("SELECT pg_stat_force_next_flush()")
+            .execute(&pool)
+            .await
+            .expect("flush statistics");
+        sqlx::query("SELECT pg_stat_clear_snapshot()")
+            .execute(&pool)
+            .await
+            .expect("clear statistics snapshot");
+        sqlx::query_scalar::<_, i64>(
+            "SELECT idx_scan FROM pg_stat_user_indexes \
+             WHERE indexrelname = 'idx_nip_fi_profile_heads_names'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("index statistics")
+    };
+    let before = scans().await;
+    let found = SearchService::new(pool.clone())
+        .search_profile_names(c, "name1234", Some(relay), 1, 10)
+        .await
+        .expect("profile name search")
+        .hits;
+    assert_eq!(found.len(), 1);
+    assert!(
+        scans().await > before,
+        "verified-name search did not use its index"
+    );
+    pool.close().await;
+    teardown(setup_pool, &schema).await;
+}
+
 /// Connect the way the relay does: [`buzz_search::pool_options`].
 async fn search_pool() -> PgPool {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());

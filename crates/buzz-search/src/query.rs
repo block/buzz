@@ -606,8 +606,7 @@ fn verified_name(tag: &str) -> String {
 }
 
 /// The expression `idx_nip_fi_profile_heads_names` indexes
-/// (migrations/0081_nip_fi_profile_head_names.sql). It must stay identical,
-/// or verified-name search scans every head in the community.
+/// (migrations/0081_nip_fi_profile_head_names.sql).
 fn verified_names_tsv() -> String {
     let names = VERIFIED_NAME_TAGS
         .iter()

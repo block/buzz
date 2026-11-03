@@ -7,8 +7,8 @@ CREATE TABLE nip_fi_profile_heads (
     PRIMARY KEY (community_id, pubkey)
 );
 
--- Profile name search over verified names; the query repeats this
--- expression exactly (crates/buzz-search/src/query.rs, verified_names_tsv).
+-- Profile name search over verified names
+-- (crates/buzz-search/src/query.rs, verified_names_tsv).
 CREATE INDEX idx_nip_fi_profile_heads_names ON nip_fi_profile_heads USING GIN (
     to_tsvector('simple',
         COALESCE(jsonb_path_query_first(event, 'strict $.tags[*] ? (@[0] == "display_name")[1]', '{}', true) #>> '{}', '')
