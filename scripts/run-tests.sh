@@ -429,6 +429,7 @@ run_unit_tests() {
     state::tests::nip_fi_disconnect_does_not_close_different_pubkey_audio_socket
     state::tests::nip_fi_disconnect_does_not_close_unproven_audio_socket
     state::tests::community_disconnect_then_nip_fi_keeps_community_deleted_reason
+    state::tests::enforce_end_is_recorded_only_by_the_winning_terminal
     state::tests::disconnect_community_wins_reason_losing_nip_fi_does_not_enqueue_frame
     state::tests::manager_disconnect_sets_reason_enqueues_frame_then_cancels
   )

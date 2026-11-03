@@ -333,6 +333,7 @@ pub(crate) async fn upload_blob(
     // as the read path. [FI-TRACE-AUTHORITY-UNIFORM]
     let strictness = blossom_strictness_from_state(&state);
     let tenant_host = ctx.tenant.host().to_owned();
+    let proof = crate::nip_fi_shadow::EnforcedProof::new(&state, &headers, "blossom");
     crate::nip_fi_shadow::observe_strict_proof(&state, &headers, "blossom", || {
         let event = extract_blossom_auth(&headers).map_err(drop)?;
         let strict = BlossomStrictness::Strict;
@@ -342,10 +343,17 @@ pub(crate) async fn upload_blob(
     .await;
     let headers_clone = headers.clone();
     let admission = match admit_nip_fi_http_on_state(&state, &headers, move || {
-        let auth_event = extract_blossom_auth(&headers_clone).map_err(|e| e.into_response())?;
         // Pre-body check: freshness, cardinality, and server tag. The x-tag
         // hash binding is checked after body completion.
-        buzz_media::auth::verify_blossom_auth_event(&auth_event, Some(&tenant_host), strictness)
+        let auth_event = proof
+            .record(extract_blossom_auth(&headers_clone).and_then(|auth_event| {
+                buzz_media::auth::verify_blossom_auth_event(
+                    &auth_event,
+                    Some(&tenant_host),
+                    strictness,
+                )
+                .map(|()| auth_event)
+            }))
             .map_err(|e| e.into_response())?;
         let pubkey = auth_event.pubkey;
         Ok(Nip98Proof::new(pubkey, auth_event))
@@ -817,6 +825,7 @@ pub(crate) async fn get_blob(
     // In Enforce mode: extraction failure → NIP-FI denial bytes (MissingEvidence/
     // EvidenceRejected).  In Off mode: MediaError propagates unchanged [FI-INV-15].
     use crate::nip_fi_http::admit_nip_fi_http_on_state;
+    let proof = crate::nip_fi_shadow::EnforcedProof::new(&state, &req_headers, "blossom");
     crate::nip_fi_shadow::observe_strict_proof(&state, &req_headers, "blossom", || {
         extract_blossom_read_proof(
             &req_headers,
@@ -828,7 +837,13 @@ pub(crate) async fn get_blob(
     })
     .await;
     let admission = match admit_nip_fi_http_on_state(&state, &req_headers, move || {
-        extract_blossom_read_proof(&headers_clone, &sha256, &tenant_host, strictness)
+        proof
+            .record(extract_blossom_read_proof(
+                &headers_clone,
+                &sha256,
+                &tenant_host,
+                strictness,
+            ))
             .map_err(|e| e.into_response())
     })
     .await
@@ -1128,13 +1143,20 @@ pub(crate) async fn head_blob(
     let tenant_host = tenant.host().to_owned();
     let headers_clone = headers.clone();
     use crate::nip_fi_http::admit_nip_fi_http_on_state;
+    let proof = crate::nip_fi_shadow::EnforcedProof::new(&state, &headers, "blossom");
     crate::nip_fi_shadow::observe_strict_proof(&state, &headers, "blossom", || {
         extract_blossom_read_proof(&headers, &sha256, &tenant_host, BlossomStrictness::Strict)
             .map(drop)
     })
     .await;
     let admission = match admit_nip_fi_http_on_state(&state, &headers, move || {
-        extract_blossom_read_proof(&headers_clone, &sha256, &tenant_host, strictness)
+        proof
+            .record(extract_blossom_read_proof(
+                &headers_clone,
+                &sha256,
+                &tenant_host,
+                strictness,
+            ))
             .map_err(|e| e.into_response())
     })
     .await

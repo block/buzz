@@ -394,6 +394,13 @@ pub(crate) async fn handle_connection(
     };
     let (pre_terminal_ctrl_tx, pre_terminal_ctrl_rx) = mpsc::channel::<WsMessage>(1);
     let control = CommunityConnectionControl::new(cancel);
+    if let Some(assertion) = &nip_fi_assertion {
+        control.attach_nip_fi_enforce(crate::nip_fi_shadow::EnforceSession::new(
+            "ws",
+            crate::nip_fi_shadow::enforce_label(&state, tenant.host()),
+            assertion.asserted_key(),
+        ));
+    }
     control.attach_nip_fi_shadow(nip_fi_shadow);
     // Its first verified AUTH writes it; else the read loop's end does.
     let shadow_line = shadow_line.map(Arc::new);
@@ -1530,6 +1537,16 @@ pub(crate) mod tests {
         nip_fi_assertion: Option<buzz_auth::VerifiedAssertion>,
         community: buzz_core::tenant::CommunityId,
     ) -> TestConn {
+        test_conn_gated(auth, nip_fi_assertion, community, None)
+    }
+
+    /// [`test_conn_in`] whose effect gate has `deadline` (`None`: off mode).
+    pub(crate) fn test_conn_gated(
+        auth: AuthState,
+        nip_fi_assertion: Option<buzz_auth::VerifiedAssertion>,
+        community: buzz_core::tenant::CommunityId,
+        deadline: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> TestConn {
         let (send_tx, send_rx) = mpsc::channel(4);
         let (ctrl_tx, ctrl_rx) = mpsc::channel(8);
         let (terminal_ctrl_tx, terminal_rx) = mpsc::channel(1);
@@ -1548,7 +1565,12 @@ pub(crate) mod tests {
             grace_limit: 3,
             nip_fi_assertion,
             session_deadline: None,
-            nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone()),
+            nip_fi_gate: match deadline {
+                Some(deadline) => {
+                    crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel.clone())
+                }
+                None => crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone()),
+            },
             community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
         };
         TestConn {

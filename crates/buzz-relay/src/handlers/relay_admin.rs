@@ -537,6 +537,7 @@ mod postgres_tests {
     fn banned_actor_is_not_admitted_to_a_relay_admin_command() {
         let banned = buzz_db::moderation::RestrictionState {
             banned: true,
+            own_banned: true,
             muted_until: None,
         };
         assert_eq!(
@@ -553,6 +554,7 @@ mod postgres_tests {
     fn timed_out_actor_is_still_admitted() {
         let timed_out = buzz_db::moderation::RestrictionState {
             banned: false,
+            own_banned: false,
             muted_until: Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
         };
         assert!(

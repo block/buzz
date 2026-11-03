@@ -85,6 +85,79 @@ pub(crate) async fn with_resolved_community<F: std::future::Future>(
     GUARD_COMMUNITY.scope(community, next).await
 }
 
+tokio::task_local! {
+    /// Enforce: the one verdict of the guarded request in flight.
+    static ENFORCE_VERDICT: RequestVerdict;
+}
+
+/// An enforced HTTP request's single NIP-FI verdict. An agent token's
+/// admission ends at its owner step, which may run in several rechecks (or
+/// none, on an early exit or Git success): the first owner-decided refusal
+/// is the verdict, else the request was admitted. Recorded once, when the
+/// request ends.
+#[derive(Default)]
+struct RequestVerdict(std::sync::Mutex<Option<AgentVerdict>>);
+
+struct AgentVerdict {
+    community: metrics::SharedString,
+    pubkey: PublicKey,
+    refusal: Option<(DenialClass, &'static str)>,
+}
+
+/// Run an enforced, guarded request inside its verdict.
+pub(crate) async fn with_enforce_verdict<F: std::future::Future>(next: F) -> F::Output {
+    ENFORCE_VERDICT.scope(RequestVerdict::default(), next).await
+}
+
+/// Defer an admitted agent token's verdict to the end of its request.
+/// `false` outside a guarded request: the caller records the admit now.
+fn defer_agent_verdict(community: &metrics::SharedString, pubkey: PublicKey) -> bool {
+    ENFORCE_VERDICT
+        .try_with(|verdict| {
+            *verdict.lock() = Some(AgentVerdict {
+                community: community.clone(),
+                pubkey,
+                refusal: None,
+            });
+        })
+        .is_ok()
+}
+
+/// An owner-decided refusal of the request's agent token, with shadow's
+/// `owner` reason. Only the first refusal of a request is its verdict; a
+/// request with no deferred agent verdict records nothing.
+pub(crate) fn owner_refused(class: DenialClass, reason: &'static str) {
+    let _ = ENFORCE_VERDICT.try_with(|verdict| {
+        if let Some(agent) = verdict.lock().as_mut() {
+            agent.refusal.get_or_insert((class, reason));
+        }
+    });
+}
+
+impl RequestVerdict {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<AgentVerdict>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl Drop for RequestVerdict {
+    fn drop(&mut self) {
+        let Some(agent) = self.lock().take() else {
+            return;
+        };
+        match agent.refusal {
+            Some((class, reason)) => crate::nip_fi_shadow::record_denial(
+                "http",
+                agent.community,
+                WouldDeny::new(Stage::Owner, class, reason).by(Some(agent.pubkey)),
+            ),
+            None => crate::nip_fi_shadow::record_admit("http", &agent.community),
+        }
+    }
+}
+
 /// Enforce step 1 for one HTTP admission: the guard's resolution when the
 /// request passed through the guard, else one resolution (guard-exempt routes).
 pub(crate) async fn resolve_for_admission(
@@ -376,6 +449,17 @@ where
     }
 
     let community = resolve_for_admission(communities, headers).await;
+    // Every denial names the verified NIP-98 key, as shadow's does.
+    let signed = std::cell::Cell::new(None);
+    let extract_nip98 = || {
+        let proof = extract_nip98();
+        signed.set(proof.as_ref().ok().filter(|p| p.signed).map(|p| p.pubkey));
+        proof
+    };
+    let record = |deny: WouldDeny| {
+        let label = crate::nip_fi_shadow::label(&community);
+        crate::nip_fi_shadow::record_denial("http", label, deny.by(signed.get()));
+    };
     let (proof, assertion) = evaluate_enforce_steps(
         headers,
         community.as_deref(),
@@ -384,6 +468,7 @@ where
         extract_nip98,
     )
     .map_err(|deny| {
+        record(deny);
         let reason = match deny.stage {
             Stage::Pairing => Some("nip_fi_http_key_mismatch"),
             Stage::DenySet => Some("nip_fi_http_denied_pubkey"),
@@ -397,10 +482,22 @@ where
     // The handler may have awaited (tenant lookup) since the guard resolved
     // the community; a snapshot that went stale meanwhile admits nothing.
     if let Ok(community) = &community {
-        community.deadline().check().map_err(http_denial)?;
+        community.deadline().check().map_err(|class| {
+            record(WouldDeny::new(
+                Stage::Deadline,
+                class,
+                crate::nip_fi_shadow::STALE,
+            ));
+            http_denial(class)
+        })?;
     }
 
-    // Step 8: admit.
+    // Step 8: admit. An agent token's admission ends at its owner step, so
+    // its verdict is recorded when the request ends.
+    let label = crate::nip_fi_shadow::label(&community);
+    if assertion.owner().is_none() || !defer_agent_verdict(&label, proof.pubkey) {
+        crate::nip_fi_shadow::record_admit("http", &label);
+    }
     Ok(NipFiAdmission {
         proven_pubkey: proof.pubkey,
         assertion: Some(assertion),
@@ -1345,6 +1442,41 @@ mod tests {
         }
     }
 
+    // HTTP admission records enforce's refusal once, naming the verified
+    // NIP-98 key, else `absent`. Mutations: dropping the `record` call, or
+    // attributing an unsigned proof → RED.
+    #[tokio::test(flavor = "current_thread")]
+    async fn enforce_http_denial_is_recorded_with_the_signed_key() {
+        use crate::nip_fi_core::test_support::TEST_COMMUNITY_URI;
+        use crate::nip_fi_shadow::tests::{enforce_count, enforce_records};
+        let signer = nostr::Keys::generate().public_key();
+        let verifier = ScriptedVerifier::new(Ok(Some(nostr::Keys::generate().public_key())));
+        let mut headers = host_headers();
+        headers.insert(
+            CLIENT_ATTACHED_HEADER,
+            HeaderValue::from_static("Bearer any.valid.looking.token"),
+        );
+        let ((), lines, counts) = enforce_records(async {
+            let map = communities();
+            let verifier = Some(&verifier as &dyn VerifyAssertion);
+            let mode = NipFiMode::Enforce;
+            let deny = &AlwaysAdmitStubDenyMap;
+            let signed = || Ok(Nip98Proof::new(signer, ()));
+            let unsigned = || Ok(Nip98Proof::unsigned(signer, ()));
+            let _ = admit_stateless(&headers, signed, &map, verifier, mode, deny).await;
+            let _ = admit_stateless(&headers, unsigned, &map, verifier, mode, deny).await;
+        })
+        .await;
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(
+            lines[0].contains(&format!("pubkey=\"{}\"", signer.to_hex())),
+            "{lines:?}"
+        );
+        assert!(lines[1].contains("pubkey=\"absent\""), "{lines:?}");
+        let pairing = enforce_count(["http", "pairing", "denied", TEST_COMMUNITY_URI]);
+        assert_eq!(counts, [pairing.clone(), pairing]);
+    }
+
     // ── R3 regression: Authorization cardinality ─────────────────────────────
     //
     // Thufir R3 / Carl F2: duplicate Authorization headers must be rejected in
@@ -1366,6 +1498,59 @@ mod tests {
     // Mutation evidence (Off branch): if Off-mode also checked cardinality, the
     // Off duplicate test would receive 403 instead of the legacy NIP-98 closure
     // result (401 from the always-failing closure below).  The assert fires.
+
+    /// Enforce's strict proof is the deciding check's own result, counted
+    /// once where admission runs it: a pass and a rejection each record their
+    /// outcome and pass the result through unchanged, and a request refused
+    /// at cardinality, before its proof, records none. Mutation: recording
+    /// in `EnforcedProof::new` instead (a side check) counts the duplicate.
+    #[test]
+    fn enforce_strict_proof_records_the_deciding_check_once() {
+        use crate::nip_fi_shadow::EnforcedProof;
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        metrics::with_local_recorder(&recorder, || {
+            let proof = EnforcedProof::for_test("bridge");
+            assert_eq!(proof.record(Ok::<_, ()>(7)), Ok(7));
+            assert_eq!(proof.record(Err::<(), _>("bad")), Err("bad"));
+            let mut headers = host_headers();
+            for token in ["Nostr first.token", "Nostr second.token"] {
+                headers.append(
+                    axum::http::header::AUTHORIZATION,
+                    HeaderValue::from_static(token),
+                );
+            }
+            let pubkey = any_pubkey();
+            let outcome = admit_stateless::<_, (), _>(
+                &headers,
+                || proof.record(Ok(Nip98Proof::new(pubkey, ()))),
+                &communities(),
+                None::<&dyn VerifyAssertion>,
+                NipFiMode::Enforce,
+                &AlwaysAdmitStubDenyMap,
+            )
+            .now_or_never()
+            .expect("env resolution never waits");
+            assert!(outcome.is_err(), "cardinality refuses");
+        });
+        let mut strict: Vec<String> = recorder
+            .snapshotter()
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, ..)| key.key().name() == "buzz_nip_fi_enforce_strict_proof_total")
+            .map(|(key, _, _, value)| {
+                let outcome = key
+                    .key()
+                    .labels()
+                    .find(|l| l.key() == "outcome")
+                    .map(|l| l.value().to_owned())
+                    .unwrap_or_default();
+                format!("{outcome}={value:?}")
+            })
+            .collect();
+        strict.sort();
+        assert_eq!(strict, ["pass=Counter(1)", "rejected=Counter(1)"]);
+    }
 
     #[test]
     fn enforce_duplicate_authorization_header_denied_403() {

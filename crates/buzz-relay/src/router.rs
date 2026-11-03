@@ -204,11 +204,15 @@ async fn nip_fi_assertion_guard(
     }
     match (verdict, community) {
         (Ok(()), Ok(community)) => {
-            crate::nip_fi_http::with_resolved_community(Ok(community), next.run(request)).await
+            let run = crate::nip_fi_http::with_resolved_community(Ok(community), next.run(request));
+            crate::nip_fi_http::with_enforce_verdict(run).await
         }
-        (Err(crate::nip_fi_shadow::WouldDeny { class, .. }), _) | (Ok(()), Err(class)) => {
-            http_denial(class)
+        (Err(deny), community) => {
+            let label = crate::nip_fi_shadow::label(&community);
+            crate::nip_fi_shadow::record_denial("http", label, deny);
+            http_denial(deny.class)
         }
+        (Ok(()), Err(class)) => http_denial(class),
     }
 }
 
@@ -717,6 +721,11 @@ async fn nip11_or_ws_handler(
     if let Some(assertion) = &nip_fi_assertion {
         if let Some(deny_map) = state.nip_fi_deny_map.as_deref() {
             if crate::nip_fi_core::assertion_denied(deny_map, assertion, chrono::Utc::now()) {
+                crate::nip_fi_shadow::record_denial(
+                    "ws",
+                    crate::nip_fi_shadow::enforce_label(&state, raw_host),
+                    crate::nip_fi_shadow::DENY_SET.by(assertion.asserted_key()),
+                );
                 return http_denial(buzz_auth::DenialClass::AuthorizationDenied).into_response();
             }
         }
@@ -751,6 +760,12 @@ async fn nip11_or_ws_handler(
     // The tenant lookup awaited since the community resolved; a snapshot
     // that went stale meanwhile accepts no socket.
     if let Err(class) = nip_fi_deadline.check() {
+        crate::nip_fi_upgrade::record_stale(
+            crate::nip_fi_session::NipFiWsRoute::Root,
+            crate::nip_fi_shadow::enforce_label(&state, raw_host),
+            nip_fi_assertion.as_ref(),
+            class,
+        );
         return http_denial(class).into_response();
     }
     let shadow_assertion = crate::nip_fi_upgrade::observe_deadline(
@@ -4433,6 +4448,26 @@ mod tests {
                 "guard verifies exactly once and the handler never runs: {err:?}"
             );
         }
+    }
+
+    // The guard records its refusal once, as `absent`: no handler runs to
+    // prove a key. Mutation: dropping the guard's `record_denial` → RED.
+    #[tokio::test(flavor = "current_thread")]
+    async fn enforce_guard_denial_is_recorded_once() {
+        use crate::nip_fi_shadow::tests::enforce_records;
+        let (state, _verifier) =
+            guard_state_with(Err(buzz_auth::VerifierError::InvalidSignatureOrClaims)).await;
+        let (_resp, lines, counts) = enforce_records(nip_fi_gate_response(
+            state,
+            GUARD_PROTECTED_PATH,
+            Some("Nostr-Federated-Identity"),
+            Some("Bearer a.b.c"),
+        ))
+        .await;
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("pubkey=\"absent\""), "{lines:?}");
+        assert_eq!(counts.len(), 1, "{counts:?}");
+        assert_eq!(counts[0][..3], ["http", "assertion", "rejected"]);
     }
 
     // Pins ruling: in enforce, an unmapped Host is 503 at the router guard

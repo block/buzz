@@ -633,6 +633,7 @@ mod tests {
     fn banned_admin_cannot_reach_an_unban_command() {
         let banned = buzz_db::moderation::RestrictionState {
             banned: true,
+            own_banned: true,
             muted_until: None,
         };
         assert_eq!(
@@ -644,6 +645,7 @@ mod tests {
         // ban, so an authorized moderator can still lift it.
         let timed_out = buzz_db::moderation::RestrictionState {
             banned: false,
+            own_banned: false,
             muted_until: Some(Utc::now() + Duration::minutes(5)),
         };
         assert!(ensure_actor_not_banned(&timed_out).is_ok());
