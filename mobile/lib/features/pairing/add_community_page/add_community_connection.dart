@@ -170,6 +170,9 @@ class _AddCommunityConnection extends HookWidget {
                     opacity: 1 - progress,
                     child: FilledButton(
                       onPressed: busy ? null : onScan,
+                      onLongPress: busy || scannerProgress > 0
+                          ? null
+                          : revealPairing,
                       child: const Text('Scan a QR code'),
                     ),
                   ),
