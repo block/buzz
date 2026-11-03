@@ -542,10 +542,9 @@ fn admin_api_advertisement(admin: Option<&crate::config::AdminConfig>) -> Option
 /// DB/search/audit inputs", so an unauthenticated NIP-11 read can never become
 /// an enumeration oracle for *other* communities. `build` takes only static
 /// and scalar inputs — the per-deployment facts arrive pre-derived through
-/// [`nip11_facts`] (config + relay keypair), and the one host-scoped fact
-/// (the workspace `icon`) arrives as a scalar from
-/// [`workspace_icon_for_host`], whose DB lookup is scoped through
-/// [`crate::tenant::bind_community`] and can therefore only ever surface the
+/// [`nip11_facts`] (config + relay keypair). Host-scoped policy and optional
+/// presentation fields are resolved before construction or assigned afterward
+/// as scalars by [`nip11_document`]. These lookups can surface only the
 /// requesting host's own community state.
 ///
 /// This const binds `RelayInfo::build` to its **exact** allowed signature. The
