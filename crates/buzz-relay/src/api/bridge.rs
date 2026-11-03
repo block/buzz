@@ -7176,6 +7176,103 @@ pub(crate) mod postgres_tests {
         );
     }
 
+    // ── Profile name search — verified names, end to end ───────────────────
+    //
+    // Where the community advertises verified profiles, a member finds a
+    // person by a name only their relay-signed kind:30382 carries, and gets
+    // their kind:0 and that kind:30382. Without the advertisement, the same
+    // query finds nobody.
+    #[test]
+    #[ignore = "requires Postgres"]
+    fn profile_search_matches_verified_names_where_advertised() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current_thread runtime");
+
+        let Some(unadvertised) = rt.block_on(nip_fi_enforce_test_state_with_verifier()) else {
+            panic!("local Postgres not reachable");
+        };
+        let mut advertised = (*unadvertised).clone();
+        let mut config = (*advertised.config).clone();
+        config.relay_private_key = Some(advertised.relay_keypair.secret_key().to_secret_hex());
+        config.nip_fi.profile_policies = vec![buzz_db::verified_profiles::ProfilePolicy {
+            issuer: "https://issuer.test".to_owned(),
+            label: Some("Example".to_owned()),
+            refresh_seconds: 3600,
+        }];
+        advertised.config = Arc::new(config);
+        let advertised = Arc::new(advertised);
+
+        let host = format!(
+            "nip-fi-verified-search-{}.local",
+            uuid::Uuid::new_v4().simple()
+        );
+        let community = rt
+            .block_on(advertised.db.ensure_configured_community(&host))
+            .expect("ensure community")
+            .id;
+        let subject = Keys::generate();
+        let profile = nostr::EventBuilder::new(nostr::Kind::Metadata, r#"{"name":"Fake"}"#)
+            .sign_with_keys(&subject)
+            .expect("sign profile");
+        rt.block_on(
+            advertised
+                .db
+                .replace_addressable_event(community, &profile, None),
+        )
+        .expect("store profile");
+        let now = chrono::Utc::now();
+        let verified = rt
+            .block_on(advertised.db.publish_verified_profile(
+                buzz_db::verified_profiles::ProfileAdmission {
+                    community,
+                    issuer: "https://issuer.test",
+                    pubkey: &subject.public_key().to_hex(),
+                    issued_at: now,
+                    admitted_at: now,
+                    display_name: "fname",
+                    username: "fname",
+                    full_name: Some("Fake Name"),
+                    label: "Example",
+                    refresh_seconds: 3600,
+                    membership_required: false,
+                },
+                &advertised.relay_keypair,
+            ))
+            .expect("publish verified profile")
+            .expect("verified profile written");
+
+        let search = |state: &Arc<crate::state::AppState>| {
+            let keys = Keys::generate();
+            let body = br#"{"query":"name"}"#;
+            let url = format!("https://{host}{}", crate::api::profiles::SEARCH_PATH);
+            let headers = same_key_nip98_and_assertion_headers(&keys, &url, "POST", body);
+            let (status, _resp_headers, resp) = rt.block_on(oneshot_request_full(
+                Arc::clone(state),
+                "POST",
+                crate::api::profiles::SEARCH_PATH,
+                &host,
+                headers,
+                body,
+            ));
+            assert_eq!(
+                status,
+                axum::http::StatusCode::OK,
+                "body: {:?}",
+                String::from_utf8_lossy(&resp)
+            );
+            serde_json::from_slice::<Vec<nostr::Event>>(&resp)
+                .expect("response is a JSON array of events")
+        };
+
+        let events = search(&advertised);
+        assert_eq!(events, vec![profile, verified]);
+        assert_eq!(events[1].pubkey, advertised.relay_keypair.public_key());
+        assert!(events.iter().all(|event| event.verify().is_ok()));
+        assert!(search(&unadvertised).is_empty());
+    }
+
     // ── Moderation reports — Enforce mode, same-key admission → reaches handler ─
     //
     // Positive control: a valid NIP-FI assertion + same-key NIP-98 on the

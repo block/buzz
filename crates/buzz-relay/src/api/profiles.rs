@@ -3,8 +3,10 @@
 //! NIP-50 search over kind:0 matches the full profile JSON, so text inside
 //! avatar data URLs, `about` and `nip05` competes with real names. This
 //! endpoint keeps NIP-50 prefix matching and paging but applies them only to
-//! the `name` and `display_name` fields of each current profile, and returns
-//! the signed kind:0 events.
+//! the `name` and `display_name` fields of each current profile and, where
+//! the community advertises verified profiles, to the names in each current
+//! relay-signed kind:30382. Pages count people; each person returns their
+//! signed kind:0 and, when they have one, their kind:30382.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -72,8 +74,9 @@ fn parse_request(body: &[u8]) -> Result<Search, (StatusCode, Json<Value>)> {
     Ok((query.to_owned(), limit, page))
 }
 
-/// Search current profiles by `name` and `display_name` for an authenticated
-/// member. Responds with one page of signed kind:0 events, best match first.
+/// Search people by profile and verified names for an authenticated member.
+/// Responds with one page of signed kind:0 and kind:30382 events, best match
+/// first.
 pub async fn search(
     State(state): State<Arc<AppState>>,
     slot: crate::access::AccessSlot,
@@ -98,9 +101,13 @@ async fn search_inner(
         bridge::authenticate_member_post(&state, &slot, &headers, SEARCH_PATH, &body).await?;
     let (query, limit, page) = parse_request(&body).map_err(IntoResponse::into_response)?;
 
+    // Verified profiles count only where this community advertises them.
+    let verified_by = crate::verified_profiles::discovery(&state, &tenant)
+        .await
+        .map(|_| state.relay_keypair.public_key().to_bytes());
     let hits = state
         .search
-        .search_profile_names(tenant.community(), &query, page, limit)
+        .search_profile_names(tenant.community(), &query, verified_by, page, limit)
         .await
         .map_err(|e| search_read_error("profile search error", &e).into_response())?
         .hits;
