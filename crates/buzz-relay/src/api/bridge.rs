@@ -10344,6 +10344,12 @@ pub(crate) mod postgres_tests {
             use axum::body::Body;
             use axum::http::{header, Request};
             use tower::ServiceExt;
+            // Keep the deliberately divergent replica selected for each
+            // cancellation probe, independent of earlier probes' elapsed time.
+            self.state
+                .db
+                .fence()
+                .force_open_for_tests(chrono::Utc::now());
             let mut request = Request::builder()
                 .method("POST")
                 .uri(uri)
@@ -10373,6 +10379,10 @@ pub(crate) mod postgres_tests {
             F: FnOnce(Arc<crate::connection::ConnectionState>) -> Fut,
             Fut: std::future::Future<Output = ()>,
         {
+            self.state
+                .db
+                .fence()
+                .force_open_for_tests(chrono::Utc::now());
             let (conn, mut send_rx) = self.ws_conn();
             drive(conn).await;
             match send_rx.try_recv().expect("handler sent a frame") {
