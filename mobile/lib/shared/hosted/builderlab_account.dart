@@ -362,12 +362,19 @@ class BuilderlabAccountClient {
     _credential = null;
     _account = null;
     if (!_disposed) _subject.value = null;
+    // Attempt both removals so one failure never leaves the other copy live.
+    var failed = false;
     try {
       await _storage.delete(key: _storageKey);
     } catch (_) {
-      throw AccountFailure.storage;
+      failed = true;
     }
-    await _unshare();
+    try {
+      await _unshare();
+    } on AccountFailure {
+      failed = true;
+    }
+    if (failed) throw AccountFailure.storage;
   }
 
   Future<void> _unshare() async {

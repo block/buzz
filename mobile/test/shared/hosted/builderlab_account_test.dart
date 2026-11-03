@@ -62,12 +62,22 @@ void main() {
         (await client.exchange(code: 'one-use', verifier: verifier)).subject,
         'account-1',
       );
+      final storage = _FailingDeleteStorage();
       final restored = BuilderlabAccountClient(
         httpClient: transport,
+        storage: storage,
         onSessionChanged: share,
       );
       expect((await restored.restore())!.subject, 'account-1');
       expect(requests.length, 3);
+      // A failed local deletion still unshares before failing the sign-out.
+      storage.deleteFails = true;
+      await expectLater(
+        restored.clearLocalSession(),
+        throwsA(AccountFailure.storage),
+      );
+      expect(shared, ['secret', 'secret', null]);
+      storage.deleteFails = false;
       // A failed removal fails the sign-out instead of leaving it shared, and
       // the next restore retries it.
       unshareFails = true;
@@ -75,7 +85,7 @@ void main() {
         restored.clearLocalSession(),
         throwsA(AccountFailure.storage),
       );
-      expect(shared, ['secret', 'secret']);
+      expect(shared, ['secret', 'secret', null]);
       unshareFails = false;
       expect(
         await BuilderlabAccountClient(
@@ -84,9 +94,9 @@ void main() {
         ).restore(),
         isNull,
       );
-      expect(shared, ['secret', 'secret', null]);
-      await restored.clearLocalSession();
       expect(shared, ['secret', 'secret', null, null]);
+      await restored.clearLocalSession();
+      expect(shared, ['secret', 'secret', null, null, null]);
       expect(
         await BuilderlabAccountClient(httpClient: transport).restore(),
         isNull,
@@ -389,4 +399,32 @@ void main() {
       throwsA(AccountFailure.signedOut),
     );
   });
+}
+
+class _FailingDeleteStorage extends FlutterSecureStorage {
+  _FailingDeleteStorage();
+
+  bool deleteFails = false;
+
+  @override
+  Future<void> delete({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) {
+    if (deleteFails) throw StateError('keychain');
+    return super.delete(
+      key: key,
+      iOptions: iOptions,
+      aOptions: aOptions,
+      lOptions: lOptions,
+      webOptions: webOptions,
+      mOptions: mOptions,
+      wOptions: wOptions,
+    );
+  }
 }
