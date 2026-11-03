@@ -49,8 +49,10 @@ void main() {
       // The notification extension's copy follows every adopt and clear.
       final shared = <String?>[];
       var unshareFails = false;
+      var shareFails = true;
       Future<void> share(String? credential) async {
         if (credential == null && unshareFails) throw StateError('keychain');
+        if (credential != null && shareFails) throw StateError('keychain');
         shared.add(credential);
       }
 
@@ -62,6 +64,16 @@ void main() {
         (await client.exchange(code: 'one-use', verifier: verifier)).subject,
         'account-1',
       );
+      // A failed share never blocks sign-in, and the next request retries it.
+      await Future<void>.delayed(Duration.zero);
+      expect(shared, isEmpty);
+      shareFails = false;
+      await client.post('/v1/buzz/known-communities/list', {});
+      await Future<void>.delayed(Duration.zero);
+      expect(shared, ['secret']);
+      await client.post('/v1/buzz/known-communities/list', {});
+      await Future<void>.delayed(Duration.zero);
+      expect(shared, ['secret']);
       final storage = _FailingDeleteStorage();
       final restored = BuilderlabAccountClient(
         httpClient: transport,
@@ -69,7 +81,7 @@ void main() {
         onSessionChanged: share,
       );
       expect((await restored.restore())!.subject, 'account-1');
-      expect(requests.length, 3);
+      expect(requests.length, 5);
       // A failed local deletion still unshares before failing the sign-out.
       storage.deleteFails = true;
       await expectLater(

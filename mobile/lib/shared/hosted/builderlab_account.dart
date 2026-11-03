@@ -105,6 +105,9 @@ class BuilderlabAccountClient {
   final http.Client _http;
   final FlutterSecureStorage _storage;
   String? _credential;
+  // The adopted credential while the notification extension lacks its copy.
+  String? _unshared;
+  bool _sharing = false;
   BuilderlabAccount? _account;
   final _queue = SerialQueue();
   bool _disposed = false;
@@ -239,16 +242,29 @@ class BuilderlabAccountClient {
     // Assigned before notifying, so subject listeners see the new account.
     _account = verified;
     _subject.value = verified.subject;
-    final share = onSessionChanged;
-    if (share != null) {
-      // Sharing is push enrichment and must never gate sign-in.
-      unawaited(
-        share(credential).catchError(
-          (Object error) => debugPrint('Session share failed: $error'),
-        ),
-      );
-    }
+    _unshared = credential;
+    _share();
     return verified;
+  }
+
+  /// Shares the adopted credential with the notification extension. Sharing is
+  /// push enrichment and must never gate sign-in, so a failure is retried by
+  /// the next account request instead of being thrown.
+  void _share() {
+    final share = onSessionChanged;
+    final credential = _unshared;
+    if (share == null || credential == null || _sharing) return;
+    _sharing = true;
+    unawaited(
+      share(credential)
+          .then((_) {
+            if (_unshared == credential) _unshared = null;
+          })
+          .catchError(
+            (Object error) => debugPrint('Session share failed: $error'),
+          )
+          .whenComplete(() => _sharing = false),
+    );
   }
 
   Future<BuilderlabAccount> _verify(String credential) async {
@@ -312,6 +328,7 @@ class BuilderlabAccountClient {
     return _serial(() async {
       final credential = _credential;
       if (credential == null) throw AccountFailure.signedOut;
+      _share();
       if (expectedSubject != null && _account?.subject != expectedSubject) {
         throw AccountFailure.denied;
       }
@@ -360,6 +377,7 @@ class BuilderlabAccountClient {
   Future<void> clearLocalSession() => _serial(_clear);
   Future<void> _clear() async {
     _credential = null;
+    _unshared = null;
     _account = null;
     if (!_disposed) _subject.value = null;
     // Attempt both removals so one failure never leaves the other copy live.
