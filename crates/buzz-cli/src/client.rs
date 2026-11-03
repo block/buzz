@@ -2876,14 +2876,16 @@ mod federated_identity_route_tests {
         exercise_every_route(&plain).await;
         plain.get_public("/info").await.unwrap();
 
-        let log = log.lock().unwrap();
-        assert_eq!(log.mints, 0);
-        assert!(log.requests.len() >= PROTECTED.len());
-        for (method, path, headers) in &log.requests {
-            assert!(
-                headers.get("nostr-federated-identity").is_none(),
-                "{method} {path}"
-            );
+        {
+            let log = log.lock().unwrap();
+            assert_eq!(log.mints, 0);
+            assert!(log.requests.len() >= PROTECTED.len());
+            for (method, path, headers) in &log.requests {
+                assert!(
+                    headers.get("nostr-federated-identity").is_none(),
+                    "{method} {path}"
+                );
+            }
         }
 
         // An exempt route never mints or presents evidence, even with a source.
