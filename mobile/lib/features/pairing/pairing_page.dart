@@ -451,6 +451,19 @@ class PairingPage extends HookConsumerWidget {
             const CommunityLoadingSurface(
               key: Key('pairing-community-loading'),
             ),
+          if (pairingState.status == PairingStatus.connecting)
+            SafeArea(
+              child: Align(
+                alignment: Alignment.topLeft,
+                child: Material(
+                  color: Colors.transparent,
+                  child: TextButton(
+                    onPressed: () => ref.read(pairingProvider.notifier).reset(),
+                    child: const Text('Cancel'),
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );

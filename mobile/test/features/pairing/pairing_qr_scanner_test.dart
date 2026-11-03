@@ -37,8 +37,13 @@ void main() {
     MobileScannerPlatform.instance = defaultScannerPlatform;
   });
 
-  for (final paste in [false, true]) {
-    testWidgets('pairing entry paste=$paste keeps progress and permits retry', (
+  for (final (paste, cancel) in [
+    (false, false),
+    (true, false),
+    (false, true),
+    (true, true),
+  ]) {
+    testWidgets('pairing entry paste=$paste cancel=$cancel permits retry', (
       tester,
     ) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
@@ -101,12 +106,20 @@ void main() {
         findsOneWidget,
       );
       expect(find.text('Scan a QR code'), findsNothing);
+      if (cancel) {
+        await tester.tap(find.text('Cancel'));
+        await tester.pump();
+        expect(
+          find.byKey(const Key('pairing-community-loading')),
+          findsNothing,
+        );
+      }
       readiness.completeError(const SocketException('Network is unreachable'));
       await tester.pump();
       await tester.pump();
       expect(
         find.textContaining('Could not reach the pairing relay'),
-        findsOneWidget,
+        cancel ? findsNothing : findsOneWidget,
       );
       if (paste) {
         expect(
