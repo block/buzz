@@ -22,6 +22,7 @@ use buzz_audit::{AuditAction, NewAuditEntry};
 use buzz_auth::DenialClass;
 use buzz_core::tenant::TenantContext;
 use buzz_media::auth::BlossomStrictness;
+use buzz_media::thumbnail::{Thumb, JPEG};
 use buzz_media::{
     BlobDescriptor, BlossomDenialKind, MediaError, UploadAttribution, UploadNetworkInfo,
 };
@@ -645,8 +646,13 @@ fn rewrite_descriptor_urls_for_tenant(
         .filter(|ext| is_safe_ext(ext))
         .unwrap_or("bin");
     descriptor.url = format!("{base}/{}.{ext}", descriptor.sha256);
-    if descriptor.thumb.is_some() {
-        descriptor.thumb = Some(format!("{base}/{}.thumb.jpg", descriptor.sha256));
+    if let Some(thumb) = &descriptor.thumb {
+        let variant = thumb
+            .rsplit('/')
+            .next()
+            .and_then(Thumb::parse)
+            .map_or(JPEG, |(_, t)| t);
+        descriptor.thumb = Some(format!("{base}/{}", variant.key(&descriptor.sha256)));
     }
 }
 
@@ -732,7 +738,7 @@ pub(crate) fn is_safe_ext(ext: &str) -> bool {
 /// Accepted forms (max 3 segments):
 ///   - `{sha256}`                   — bare 64-char lowercase hex
 ///   - `{sha256}.{ext}`             — hash + extension
-///   - `{sha256}.thumb.jpg`          — hash + thumb variant (always JPEG)
+///   - `{sha256}.thumb.{webp,jpg}`   — hash + thumb variant (see [`buzz_media::thumbnail::THUMBS`])
 ///
 /// `{ext}` must be a safe token (see [`is_safe_ext`]); the sidecar comparison
 /// downstream enforces the actual canonical extension.
@@ -761,8 +767,7 @@ fn validate_media_path(sha256_ext: &str) -> Result<(), MediaError> {
             }
         }
         3 => {
-            // {hash}.thumb.jpg — thumbnails are always JPEG
-            if segments[1] != "thumb" || segments[2] != "jpg" {
+            if Thumb::parse(sha256_ext).is_none() {
                 return Err(MediaError::NotFound);
             }
         }
@@ -784,7 +789,7 @@ const MAX_RANGE_CHUNK: u64 = 16 * 1024 * 1024;
 /// `sha256_ext` is either:
 ///   - `<sha256>.<ext>` — direct key (e.g. `abc123.jpg`)
 ///   - `<sha256>` — bare hash; extension resolved from sidecar
-///   - `<sha256>.thumb.jpg` — thumbnail variant
+///   - `<sha256>.thumb.<webp|jpg>` — thumbnail variant
 ///
 /// Range request behaviour (RFC 9110 §14.2):
 ///   - No `Range` header → 200 with full body
@@ -868,14 +873,13 @@ pub(crate) async fn serve_blob_for_tenant(
     let cache_control = blob_cache_control();
 
     // Sidecar gate FIRST — reject before any blob I/O. Storage is not authoritative.
-    let content_type = if sha256_ext.ends_with(".thumb.jpg") {
-        let parent_hash = sha256_ext.strip_suffix(".thumb.jpg").unwrap_or(sha256_ext);
+    let content_type = if let Some((parent_hash, thumb)) = Thumb::parse(sha256_ext) {
         let _ = state
             .media_storage
             .read_sidecar_mime(tenant, parent_hash)
             .await
             .ok_or(MediaError::NotFound)?;
-        "image/jpeg".to_string()
+        thumb.mime.to_string()
     } else {
         // For explicit paths (hash.ext), verify the requested extension matches
         // the sidecar's canonical extension — sidecar is authoritative.
@@ -1156,14 +1160,13 @@ pub(crate) async fn head_blob(
     let cache_control = blob_cache_control();
 
     // Sidecar gate FIRST — reject before any blob I/O.
-    let content_type = if sha256_ext.ends_with(".thumb.jpg") {
-        let parent_hash = sha256_ext.strip_suffix(".thumb.jpg").unwrap_or(&sha256_ext);
+    let content_type = if let Some((parent_hash, thumb)) = Thumb::parse(&sha256_ext) {
         let _ = state
             .media_storage
             .read_sidecar_mime(&tenant, parent_hash)
             .await
             .ok_or(MediaError::NotFound)?;
-        "image/jpeg".to_string()
+        thumb.mime.to_string()
     } else {
         let sidecar_mime = state
             .media_storage
@@ -1713,11 +1716,11 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_media_path_thumb_jpg_only() {
+    fn test_validate_media_path_thumb_variants_only() {
         assert!(validate_media_path(&format!("{VALID_HASH}.thumb.jpg")).is_ok());
-        // Other thumb extensions rejected — thumbnails are always JPEG
+        assert!(validate_media_path(&format!("{VALID_HASH}.thumb.webp")).is_ok());
+        // Other thumb extensions rejected: only stored variants are served
         assert!(validate_media_path(&format!("{VALID_HASH}.thumb.png")).is_err());
-        assert!(validate_media_path(&format!("{VALID_HASH}.thumb.webp")).is_err());
     }
 
     #[test]
@@ -1820,7 +1823,7 @@ mod tests {
             uploaded: 1700000000,
             dim: Some("1x1".to_string()),
             blurhash: None,
-            thumb: Some(format!("https://primary.example/media/{hash}.thumb.jpg")),
+            thumb: Some(format!("https://primary.example/media/{hash}.thumb.webp")),
             duration: None,
         };
 
@@ -1836,7 +1839,8 @@ mod tests {
         );
         assert_eq!(
             descriptor.thumb,
-            Some(format!("https://tenant-b.example/media/{hash}.thumb.jpg"))
+            Some(format!("https://tenant-b.example/media/{hash}.thumb.webp")),
+            "the rewrite keeps the descriptor's thumbnail variant"
         );
     }
 
