@@ -163,10 +163,27 @@ pub(crate) async fn apply_kick_live_side_effects(
     // The removal is committed: refresh the channel's discovery roster, then
     // tell the kicked member, as a kind:9001 removal does. The notice tells a
     // client to re-read that roster, so a failed refresh returns before it and
-    // the moderation driver retries the action. A recovery re-drive repeats
-    // both; the refresh is replaceable and a repeated notice is a harmless
-    // hint. A failed notice is logged and does not undo the kick.
-    emit_group_discovery_events(tenant, state, channel_id).await?;
+    // the moderation driver retries the action. A channel deleted since the
+    // kick has no roster to refresh: that is convergence, once its discovery
+    // is gone. A recovery re-drive repeats both; the refresh is replaceable
+    // and a repeated notice is a harmless hint. A failed notice is logged and
+    // does not undo the kick.
+    if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
+        if !matches!(
+            e.downcast_ref::<buzz_db::DbError>(),
+            Some(buzz_db::DbError::ChannelNotFound(_))
+        ) {
+            return Err(e);
+        }
+        state
+            .db
+            .soft_delete_discovery_events(
+                tenant.community(),
+                channel_id,
+                state.relay_keypair.public_key().as_bytes(),
+            )
+            .await?;
+    }
     if let Err(e) = emit_membership_notification(
         tenant,
         state,

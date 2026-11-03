@@ -364,8 +364,8 @@ async fn moderation_dm_notifies_the_recipient_once_visible() {
     assert_eq!(seen, (true, false), "listed and visible on receipt");
     let latest_snapshot = live_events(&mut rx)
         .into_iter()
-        .filter(|(kind, _)| *kind == KIND_DM_VISIBILITY as u64)
-        .last()
+        .rev()
+        .find(|(kind, _)| *kind == KIND_DM_VISIBILITY as u64)
         .expect("live visibility snapshot");
     assert!(
         !latest_snapshot.1.contains(&dm),
