@@ -1,4 +1,5 @@
 import '../storage/serial_queue.dart';
+
 import 'dart:async';
 import 'dart:convert';
 
@@ -37,10 +38,12 @@ class BuilderlabAccount {
   const BuilderlabAccount({
     required this.subject,
     required this.expiresAt,
+    this.email,
     this.needsAccountSetup = false,
   });
   final bool needsAccountSetup;
   final String subject;
+  final String? email;
   final DateTime expiresAt;
 }
 
@@ -241,6 +244,7 @@ class BuilderlabAccountClient {
         result['account_status'] == 'ACCOUNT_STATUS_NEEDS_DETAILS';
     return BuilderlabAccount(
       subject: subject,
+      email: result['email'] is String ? result['email'] as String : null,
       expiresAt: parsed,
       needsAccountSetup: needsSetup,
     );
@@ -336,14 +340,14 @@ class BuilderlabAccountClient {
 
   Future<void> clearLocalSession() => _serial(_clear);
   Future<void> _clear() async {
-    _credential = null;
-    _account = null;
-    if (!_disposed) _subject.value = null;
     try {
       await _storage.delete(key: _storageKey);
     } catch (_) {
       throw AccountFailure.storage;
     }
+    _credential = null;
+    _account = null;
+    if (!_disposed) _subject.value = null;
   }
 
   Future<Map<String, dynamic>> _request(
