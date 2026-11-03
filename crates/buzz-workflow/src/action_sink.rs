@@ -74,4 +74,39 @@ pub trait ActionSink: Send + Sync {
         author_pubkey: &str,
         reply_to: Option<&str>,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
+
+    /// Send a direct message from the workflow owner to a recipient.
+    ///
+    /// Finds or creates the owner/recipient DM channel (the same idempotent
+    /// path as a kind:41010 DM-open command) and posts a relay-signed kind:9
+    /// there, `p`-tagging the owner and the recipient (hex pubkeys). Fails
+    /// with [`ActionSinkError::InvalidInput`] when the recipient is the owner.
+    ///
+    /// Returns the event ID hex string on success.
+    fn send_dm(
+        &self,
+        community_id: CommunityId,
+        recipient_pubkey: &str,
+        text: &str,
+        author_pubkey: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
+
+    /// Edit a message previously posted by a workflow of `author_pubkey`.
+    ///
+    /// Publishes a relay-signed kind:40003 edit in the target's channel.
+    /// Fails with [`ActionSinkError::InvalidInput`] unless the target is in
+    /// `community_id`, relay-signed, and tagged as posted by a workflow of the
+    /// same owner. `@Name` mentions of channel members get `p` tags; only those
+    /// also in the owner's stored `authored_text` get authority-bearing
+    /// provenance, as in [`ActionSink::send_message`].
+    ///
+    /// Returns the edit event ID hex string on success.
+    fn edit_message(
+        &self,
+        community_id: CommunityId,
+        message_id: &str,
+        text: &str,
+        authored_text: &str,
+        author_pubkey: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
 }

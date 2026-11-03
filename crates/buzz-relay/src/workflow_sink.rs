@@ -8,7 +8,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 
-use buzz_core::kind::KIND_STREAM_MESSAGE;
+use buzz_core::kind::{KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_EDIT};
 use buzz_core::tenant::CommunityId;
 use buzz_workflow::action_sink::{ActionSink, ActionSinkError};
 use chrono::Utc;
@@ -178,6 +178,55 @@ fn append_workflow_mention_tags(
     Ok(())
 }
 
+/// The run's owning community as a full tenant context. The host is for
+/// labelling only; fail closed if the community no longer maps to one.
+async fn tenant_for(
+    state: &AppState,
+    community_id: CommunityId,
+) -> Result<buzz_core::tenant::TenantContext, ActionSinkError> {
+    let host = state
+        .db
+        .lookup_community_host(community_id)
+        .await
+        .map_err(|e| ActionSinkError::Database(e.to_string()))?
+        .ok_or_else(|| {
+            ActionSinkError::Database(format!(
+                "workflow run community {community_id} is not mapped to a host"
+            ))
+        })?;
+    Ok(buzz_core::tenant::TenantContext::resolved(
+        community_id,
+        host,
+    ))
+}
+
+/// `(display name, pubkey hex)` for every named member of a channel — the
+/// candidates for `@Name` mention resolution.
+async fn named_channel_members(
+    state: &AppState,
+    tenant: &buzz_core::tenant::TenantContext,
+    channel_id: Uuid,
+) -> Result<Vec<(String, String)>, ActionSinkError> {
+    let members = state
+        .db
+        .get_members_for_event_write(tenant.community(), channel_id)
+        .await
+        .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+    let member_pubkeys: Vec<Vec<u8>> = members.iter().map(|m| m.pubkey.clone()).collect();
+    let users = state
+        .db
+        .get_users_bulk_for_event_write(tenant.community(), &member_pubkeys)
+        .await
+        .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+    Ok(users
+        .into_iter()
+        .filter_map(|u| {
+            let name = u.display_name?;
+            Some((name, nostr::PublicKey::from_slice(&u.pubkey).ok()?.to_hex()))
+        })
+        .collect())
+}
+
 /// Relay-side action sink — executes workflow side-effects directly.
 ///
 /// Holds a **weak** reference to `AppState` to avoid an `Arc` reference cycle:
@@ -230,17 +279,7 @@ impl ActionSink for RelayActionSink {
             // form a complete TenantContext (host is for labelling only — the
             // community is already fixed and is never re-derived from it). Fail
             // closed if the community no longer maps to a host.
-            let host = state
-                .db
-                .lookup_community_host(community_id)
-                .await
-                .map_err(|e| ActionSinkError::Database(e.to_string()))?
-                .ok_or_else(|| {
-                    ActionSinkError::Database(format!(
-                        "workflow run community {community_id} is not mapped to a host"
-                    ))
-                })?;
-            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+            let tenant = tenant_for(&state, community_id).await?;
 
             // 1. Validate content is not empty/whitespace-only
             if text.trim().is_empty() {
@@ -376,24 +415,7 @@ impl ActionSink for RelayActionSink {
             // render an `@Name` into visible output, but it cannot borrow the
             // workflow owner's authority to wake that agent. A resolution failure
             // must not drop the message, so log and proceed with the base tags.
-            let members = state
-                .db
-                .get_members_for_event_write(tenant.community(), channel_uuid)
-                .await
-                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
-            let member_pubkeys: Vec<Vec<u8>> = members.iter().map(|m| m.pubkey.clone()).collect();
-            let users = state
-                .db
-                .get_users_bulk_for_event_write(tenant.community(), &member_pubkeys)
-                .await
-                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
-            let named_members: Vec<(String, String)> = users
-                .into_iter()
-                .filter_map(|u| {
-                    let name = u.display_name?;
-                    Some((name, nostr::PublicKey::from_slice(&u.pubkey).ok()?.to_hex()))
-                })
-                .collect();
+            let named_members = named_channel_members(&state, &tenant, channel_uuid).await?;
             append_workflow_mention_tags(&mut tags, &text, &authored_text, &named_members)?;
 
             let kind = Kind::from(KIND_STREAM_MESSAGE as u16);
@@ -478,6 +500,272 @@ impl ActionSink for RelayActionSink {
                 }
             }
 
+            Ok(event_id_hex)
+        })
+    }
+
+    fn send_dm(
+        &self,
+        community_id: CommunityId,
+        recipient_pubkey: &str,
+        text: &str,
+        author_pubkey: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
+        let recipient_pubkey = recipient_pubkey.to_owned();
+        let text = text.to_owned();
+        let author_pubkey = author_pubkey.to_owned();
+
+        Box::pin(async move {
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+
+            let tenant = tenant_for(&state, community_id).await?;
+
+            if text.trim().is_empty() {
+                return Err(ActionSinkError::EmptyContent);
+            }
+
+            let author = nostr::PublicKey::from_hex(&author_pubkey).map_err(|e| {
+                ActionSinkError::InvalidInput(format!("invalid author pubkey: {e}"))
+            })?;
+            let recipient = nostr::PublicKey::from_hex(&recipient_pubkey).map_err(|e| {
+                ActionSinkError::InvalidInput(format!("invalid recipient pubkey: {e}"))
+            })?;
+            if recipient == author {
+                return Err(ActionSinkError::InvalidInput(
+                    "SendDm: recipient is the workflow owner".into(),
+                ));
+            }
+            let author_bytes = author.to_bytes().to_vec();
+            let recipient_bytes = recipient.to_bytes().to_vec();
+            let (author_hex, recipient_hex) = (author.to_hex(), recipient.to_hex());
+
+            // Same idempotent open path as the kind:41010 handler
+            // (`handle_dm_open`); the relay-signed post below skips ingest, so
+            // the open side effects the recipient needs to see the DM run here.
+            let (channel, was_created) = state
+                .db
+                .open_dm(
+                    tenant.community(),
+                    &[recipient_bytes.as_slice()],
+                    &author_bytes,
+                )
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+
+            crate::handlers::side_effects::dm_open_side_effects(
+                &tenant,
+                &state,
+                channel.id,
+                &[author_bytes.clone(), recipient_bytes.clone()],
+                &author_bytes,
+                was_created,
+            )
+            .await;
+
+            // The `p` tag on the recipient is what wakes agents and drives push.
+            let channel_id = channel.id.to_string();
+            let tags = vec![
+                Tag::parse(["p", &author_hex, "", "owner"])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
+                Tag::parse(["p", &recipient_hex])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("recipient p tag: {e}")))?,
+                Tag::parse(["h", &channel_id])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
+                Tag::parse(["buzz:workflow", "true"])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
+                Tag::parse(["buzz:workflow-owner", &author_hex])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow owner tag: {e}")))?,
+            ];
+            let event = EventBuilder::new(Kind::from(KIND_STREAM_MESSAGE as u16), &text)
+                .tags(tags)
+                .sign_with_keys(&state.relay_keypair)
+                .map_err(|e| ActionSinkError::EventBuild(format!("signing: {e}")))?;
+            let event_id_hex = event.id.to_hex();
+            let event_id_bytes = event.id.as_bytes().to_vec();
+            let event_created_at =
+                chrono::DateTime::from_timestamp(event.created_at.as_secs() as i64, 0)
+                    .unwrap_or_else(Utc::now);
+
+            // No message body in the log: DMs are private.
+            info!(
+                event_id = %event_id_hex,
+                channel_id = %channel_id,
+                "Workflow SendDm: posting kind {KIND_STREAM_MESSAGE} event"
+            );
+
+            let (stored_event, was_inserted) = state
+                .db
+                .insert_event_with_thread_metadata(
+                    tenant.community(),
+                    &event,
+                    Some(channel.id),
+                    Some(buzz_db::event::ThreadMetadataParams {
+                        event_id: &event_id_bytes,
+                        event_created_at,
+                        channel_id: channel.id,
+                        parent_event_id: None,
+                        parent_event_created_at: None,
+                        root_event_id: None,
+                        root_event_created_at: None,
+                        depth: 0,
+                        broadcast: false,
+                    }),
+                )
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+
+            if was_inserted {
+                let _ = dispatch_persistent_event(
+                    &tenant,
+                    &state,
+                    &stored_event,
+                    KIND_STREAM_MESSAGE,
+                    &author_hex,
+                    None,
+                )
+                .await;
+            }
+
+            Ok(event_id_hex)
+        })
+    }
+
+    fn edit_message(
+        &self,
+        community_id: CommunityId,
+        message_id: &str,
+        text: &str,
+        authored_text: &str,
+        author_pubkey: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
+        let message_id = message_id.to_owned();
+        let text = text.to_owned();
+        let authored_text = authored_text.to_owned();
+        let author_pubkey = author_pubkey.to_owned();
+
+        Box::pin(async move {
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+            let tenant = tenant_for(&state, community_id).await?;
+
+            if text.trim().is_empty() {
+                return Err(ActionSinkError::EmptyContent);
+            }
+            let author = nostr::PublicKey::from_hex(&author_pubkey).map_err(|e| {
+                ActionSinkError::InvalidInput(format!("invalid author pubkey: {e}"))
+            })?;
+            let author_bytes = author.to_bytes().to_vec();
+            let author_hex = author.to_hex();
+            let target_id = nostr::EventId::from_hex(&message_id)
+                .map_err(|e| ActionSinkError::InvalidInput(format!("invalid message id: {e}")))?;
+
+            // Only messages workflows of this same owner posted are editable:
+            // in this community, relay-signed, and tagged accordingly. Every
+            // refusal reads the same so a probe learns nothing about the target.
+            let denied = || {
+                ActionSinkError::InvalidInput(
+                    "target is not a message posted by this workflow owner".into(),
+                )
+            };
+            let target = state
+                .db
+                .get_event_by_id_for_event_write(tenant.community(), target_id.as_bytes())
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .ok_or_else(denied)?;
+            let tag_value = |name: &str| {
+                target.event.tags.iter().find_map(|t| {
+                    let t = t.as_slice();
+                    (t.first().map(String::as_str) == Some(name))
+                        .then(|| t.get(1).cloned().unwrap_or_default())
+                })
+            };
+            if target.event.kind.as_u16() as u32 != KIND_STREAM_MESSAGE
+                || target.event.pubkey != state.relay_keypair.public_key()
+                || tag_value("buzz:workflow").is_none()
+                || tag_value("buzz:workflow-owner").as_deref() != Some(author_hex.as_str())
+            {
+                return Err(denied());
+            }
+            let channel_uuid = target.channel_id.ok_or_else(denied)?;
+
+            let channel = state
+                .db
+                .get_channel_for_event_write(tenant.community(), channel_uuid)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            if channel.archived_at.is_some() {
+                return Err(ActionSinkError::ChannelArchived(channel_uuid.to_string()));
+            }
+            let is_member = state
+                .is_member_cached(tenant.community(), channel_uuid, &author_bytes)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            if !crate::handlers::ingest::may_post(
+                &state,
+                tenant.community(),
+                channel_uuid,
+                &author_bytes,
+                &channel,
+                is_member,
+            )
+            .await
+            .map_err(|e| ActionSinkError::Database(e.to_string()))?
+            {
+                return Err(ActionSinkError::InvalidInput(
+                    "workflow owner cannot post in the message's channel".into(),
+                ));
+            }
+
+            let channel_id = channel_uuid.to_string();
+            let mut tags = vec![
+                Tag::parse(["h", &channel_id])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
+                Tag::parse(["e", &target_id.to_hex()])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("e tag: {e}")))?,
+                Tag::parse(["buzz:workflow", "true"])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
+                Tag::parse(["buzz:workflow-owner", &author_hex])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow owner tag: {e}")))?,
+            ];
+            // Clients overlay an edit's `p` tags onto the original, which is
+            // how an `@Name` in the new text renders as a mention.
+            let named_members = named_channel_members(&state, &tenant, channel_uuid).await?;
+            append_workflow_mention_tags(&mut tags, &text, &authored_text, &named_members)?;
+
+            let event = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE_EDIT as u16), &text)
+                .tags(tags)
+                .sign_with_keys(&state.relay_keypair)
+                .map_err(|e| ActionSinkError::EventBuild(format!("signing: {e}")))?;
+            let event_id_hex = event.id.to_hex();
+            info!(
+                event_id = %event_id_hex,
+                channel_id = %channel_id,
+                target = %target_id,
+                "Workflow EditMessage: posting kind {KIND_STREAM_MESSAGE_EDIT} event"
+            );
+
+            let (stored_event, was_inserted) = state
+                .db
+                .insert_event(tenant.community(), &event, Some(channel_uuid))
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            if was_inserted {
+                let _ = dispatch_persistent_event(
+                    &tenant,
+                    &state,
+                    &stored_event,
+                    KIND_STREAM_MESSAGE_EDIT,
+                    &author_hex,
+                    None,
+                )
+                .await;
+            }
             Ok(event_id_hex)
         })
     }
@@ -1536,5 +1824,219 @@ mod postgres_tests {
         reply(owner_hex.clone(), owner_only)
             .await
             .expect("owner replies to a parent only they can read");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_send_dm_opens_then_reuses_dm_and_p_tags_recipient() {
+        let state = test_state().await;
+        let owner = nostr::Keys::generate().public_key().to_hex();
+        let recipient = nostr::Keys::generate().public_key().to_hex();
+        let host = format!("wf-dm-{}.example", uuid::Uuid::new_v4().simple());
+        let community = match state
+            .db
+            .create_community_with_owner(&host, &owner, &nostr::Keys::generate())
+            .await
+            .map(|write| write.outcome)
+            .expect("create community")
+        {
+            CreateCommunityWithOwnerResult::Created(rec) => rec.id,
+            other => panic!("expected fresh community, got {other:?}"),
+        };
+        let sink = RelayActionSink::new(&state);
+
+        let mut channels = Vec::new();
+        for text in ["hi", "again"] {
+            let id = sink
+                .send_dm(community, &recipient, text, &owner)
+                .await
+                .expect("send_dm");
+            let id_bytes = nostr::EventId::from_hex(&id)
+                .expect("id")
+                .as_bytes()
+                .to_vec();
+            let stored = state
+                .db
+                .get_event_by_id(community, &id_bytes)
+                .await
+                .expect("query")
+                .expect("persisted");
+            let tag = |name: &str| -> Vec<String> {
+                stored
+                    .event
+                    .tags
+                    .iter()
+                    .filter(|t| t.as_slice().first().map(String::as_str) == Some(name))
+                    .filter_map(|t| t.as_slice().get(1).cloned())
+                    .collect()
+            };
+            assert!(tag("p").contains(&recipient), "recipient must be p-tagged");
+            channels.push(tag("h").remove(0));
+        }
+        assert_eq!(
+            channels[0], channels[1],
+            "repeat DMs must reuse the DM channel"
+        );
+        let channel = state
+            .db
+            .get_channel_for_event_write(
+                community,
+                uuid::Uuid::parse_str(&channels[0]).expect("uuid"),
+            )
+            .await
+            .expect("dm channel");
+        assert_eq!(channel.channel_type, "dm");
+
+        let err = sink
+            .send_dm(community, &owner, "me", &owner)
+            .await
+            .expect_err("self-DM");
+        assert!(matches!(err, ActionSinkError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_edit_message_only_edits_own_workflow_messages() {
+        let state = test_state().await;
+        let owner = nostr::Keys::generate();
+        let owner_hex = owner.public_key().to_hex();
+        let reactor = nostr::Keys::generate();
+        let reactor_bytes = reactor.public_key().to_bytes().to_vec();
+        let mut communities = Vec::new();
+        for _ in 0..2 {
+            let host = format!("wf-edit-{}.example", uuid::Uuid::new_v4().simple());
+            communities.push(
+                match state
+                    .db
+                    .create_community_with_owner(&host, &owner_hex, &nostr::Keys::generate())
+                    .await
+                    .map(|write| write.outcome)
+                    .expect("create community")
+                {
+                    CreateCommunityWithOwnerResult::Created(rec) => rec.id,
+                    other => panic!("expected fresh community, got {other:?}"),
+                },
+            );
+        }
+        let (community, other_community) = (communities[0], communities[1]);
+        state
+            .db
+            .ensure_user(community, &owner.public_key().to_bytes())
+            .await
+            .expect("owner");
+        state
+            .db
+            .ensure_user(community, &reactor_bytes)
+            .await
+            .expect("reactor");
+        state
+            .db
+            .update_user_profile(community, &reactor_bytes, Some("Robby"), None, None, None)
+            .await
+            .expect("name");
+        let channel = state
+            .db
+            .create_channel(
+                community,
+                "wf-edit",
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                &owner.public_key().to_bytes(),
+                None,
+            )
+            .await
+            .expect("create channel");
+        state
+            .db
+            .add_member(
+                community,
+                channel.id,
+                &reactor_bytes,
+                MemberRole::Member,
+                Some(&owner.public_key().to_bytes()),
+            )
+            .await
+            .expect("add reactor");
+        let sink = RelayActionSink::new(&state);
+
+        let posted = sink
+            .send_message(
+                community,
+                &channel.id.to_string(),
+                "offer",
+                "offer",
+                &owner_hex,
+                None,
+            )
+            .await
+            .expect("post");
+        let edit_id = sink
+            .edit_message(
+                community,
+                &posted,
+                "claimed by @Robby",
+                "claimed by @Robby",
+                &owner_hex,
+            )
+            .await
+            .expect("edit own workflow message");
+        let edit = state
+            .db
+            .get_event_by_id(
+                community,
+                nostr::EventId::from_hex(&edit_id).expect("id").as_bytes(),
+            )
+            .await
+            .expect("query")
+            .expect("edit persisted")
+            .event;
+        assert_eq!(edit.kind.as_u16() as u32, KIND_STREAM_MESSAGE_EDIT);
+        assert_eq!(edit.content, "claimed by @Robby");
+        assert_eq!(edit.pubkey, state.relay_keypair.public_key());
+        let tags: Vec<Vec<String>> = edit.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+        assert!(tags.contains(&vec!["e".to_owned(), posted.clone()]));
+        assert!(tags.contains(&vec!["h".to_owned(), channel.id.to_string()]));
+        assert!(tags.contains(&vec!["p".to_owned(), reactor.public_key().to_hex()]));
+
+        let user_event = nostr::EventBuilder::new(Kind::Custom(9), "user message")
+            .tags([Tag::parse(["h", &channel.id.to_string()]).expect("h")])
+            .sign_with_keys(&reactor)
+            .expect("sign");
+        state
+            .db
+            .insert_event(community, &user_event, Some(channel.id))
+            .await
+            .expect("insert user message");
+        let other_owner = nostr::Keys::generate().public_key().to_hex();
+        for (label, c, target, who) in [
+            (
+                "user message",
+                community,
+                user_event.id.to_hex(),
+                owner_hex.as_str(),
+            ),
+            (
+                "other community",
+                other_community,
+                posted.clone(),
+                owner_hex.as_str(),
+            ),
+            (
+                "other owner",
+                community,
+                posted.clone(),
+                other_owner.as_str(),
+            ),
+        ] {
+            let err = sink
+                .edit_message(c, &target, "x", "x", who)
+                .await
+                .expect_err(label);
+            assert!(
+                matches!(err, ActionSinkError::InvalidInput(_)),
+                "{label}: {err:?}"
+            );
+        }
     }
 }
