@@ -129,8 +129,10 @@ class _MessageList extends HookConsumerWidget {
       chronologicalIndex += 1
     ) {
       final message = displayEntries[chronologicalIndex].first.message;
+      // A membership group can span days; it sits under its first change's
+      // day, so the next row compares against that same change.
       final previousMessage = chronologicalIndex > 0
-          ? displayEntries[chronologicalIndex - 1].last.message
+          ? displayEntries[chronologicalIndex - 1].first.message
           : null;
       final startsDay =
           previousMessage == null ||
@@ -807,6 +809,35 @@ class _MessageList extends HookConsumerWidget {
       },
     );
 
+    // A loaded page can hold only hidden self-joins and leaves, leaving no
+    // row to scroll for older history. Keep paging until something renders.
+    final onlyHiddenLoaded =
+        entries.isEmpty &&
+        !notifier.reachedOldest &&
+        allMessages.any(isHiddenMembershipNotice);
+    useEffect(() {
+      if (!onlyHiddenLoaded || isLoadingOlder.value || olderFetchPaused.value) {
+        return null;
+      }
+      var cancelled = false;
+      // After this build: fetching updates providers and this widget's state.
+      unawaited(
+        Future<void>(() async {
+          if (cancelled || !context.mounted) return;
+          isLoadingOlder.value = true;
+          try {
+            final loaded = await notifier.fetchOlder();
+            if (context.mounted) {
+              olderFetchPaused.value = !loaded && !notifier.reachedOldest;
+            }
+          } finally {
+            if (context.mounted) isLoadingOlder.value = false;
+          }
+        }),
+      );
+      return () => cancelled = true;
+    }, [onlyHiddenLoaded, allMessages.length, isLoadingOlder.value]);
+
     if (entries.isEmpty &&
         welcomeAgent == null &&
         (displayedTyping.isNotEmpty || TypingMotionPreview.enabled)) {
@@ -852,6 +883,14 @@ class _MessageList extends HookConsumerWidget {
                   knownAgents: workingAgents,
                 ),
             ],
+          ),
+        );
+      }
+      if (onlyHiddenLoaded && !olderFetchPaused.value) {
+        return const Center(
+          child: BuzzLoadingIndicator(
+            size: 24,
+            semanticLabel: 'Loading older messages',
           ),
         );
       }
@@ -946,8 +985,10 @@ class _MessageList extends HookConsumerWidget {
                 final message = entry.message;
 
                 // Day boundary check — applies to all messages including system.
+                // Compare with the change that dates the previous group (see
+                // the day index above).
                 final prevEntry = chronIdx > 0
-                    ? displayEntries[chronIdx - 1].last
+                    ? displayEntries[chronIdx - 1].first
                     : null;
                 final prevMessage = prevEntry?.message;
                 final showDayDivider =
