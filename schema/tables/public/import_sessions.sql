@@ -13,6 +13,8 @@ CREATE TABLE import_sessions (
     requires_admin BOOLEAN NOT NULL,
     admin_consent TEXT,
     status TEXT NOT NULL,
+    activated_at BIGINT,
+    accepts_after BIGINT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (community_id, proposal_id)

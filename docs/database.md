@@ -236,6 +236,23 @@ write-blocking lock. Scans that do not block writes, such as
   floor guard lets it through (`migrations/0021`). Its PR MUST document a
   reviewed procedure that keeps replica routing closed from before the first
   batch until its WAL has replayed on every replica.
+- NIP-CI conversation imports are the one in-band writer of old channel rows.
+  `Db::insert_import_event` blanks `buzz.created_at_floor` for its own
+  transaction only (`set_config(.., true)`), so the pool connection is armed
+  again after COMMIT or ROLLBACK and every other write on it stays guarded.
+  This is safe without holding the fence closed for two reasons. First, a
+  covered read whose snapshot shows an active import session for its channel
+  (until `expires_at` plus the accept delay) is routed to the writer by
+  `Db::guard_covered_route`. Second, imports commit only from the session's
+  `accepts_after`, which is activation plus `replica_fence::PROOF_MAX_AGE`
+  plus a margin; a reader session never proves an entry older than
+  `PROOF_MAX_AGE`, so any replica snapshot trusted while imports can exist
+  already contains the activation and the guard sees it. This holds only if
+  the activation commits within the margin (15 s) of the clock read that
+  fixed `activated_at`, so a transaction that can activate a session sets
+  `SET LOCAL lock_timeout` and `statement_timeout` to 10 s, below the
+  margin, so no single lock wait or statement can use it up. No other code path
+  may blank the floor; a new one needs the same review.
 - A script MUST NOT disable triggers or set `session_replication_role`.
 - The normal write path that maintains the new invariant MUST be fully rolled
   out, with old writers drained, before the backfill starts. The backfill spec

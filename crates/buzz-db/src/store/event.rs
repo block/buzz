@@ -2378,14 +2378,26 @@ impl Db {
             return answer;
         }
         let predicate = crate::RoutePredicate::for_query(q, self.replica_read_max_age.is_some());
-        match self
+        let decision = self
             .route_read(
                 path,
                 predicate,
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
-        {
+            .await;
+        let decision = match q.channel_id {
+            Some(channel) => {
+                self.guard_covered_route(
+                    path,
+                    q.community_id,
+                    crate::import_session::CoveredScope::Channel(channel),
+                    decision,
+                )
+                .await
+            }
+            None => decision,
+        };
+        match decision {
             crate::RouteDecision::Replica(mut tx, _entry, reason) => {
                 match crate::event::query_events_on(&mut tx, q).await {
                     Ok(events) => {

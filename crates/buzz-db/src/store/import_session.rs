@@ -27,6 +27,28 @@ use uuid::Uuid;
 use crate::event::{insert_event_with_thread_metadata_tx, ThreadMetadataParams};
 use crate::{AdmittedTx, Db, DbError, Result};
 
+/// Seconds past the replica proof age cap before a newly active session
+/// accepts imports. Absorbs the gap between `activated_at` and the
+/// activation's commit, and clock skew between relay and database hosts.
+const ACCEPT_DELAY_MARGIN_SECS: i64 = 15;
+
+/// Lock and statement deadline, in seconds, for a transaction that can
+/// activate a session. Kept below [`ACCEPT_DELAY_MARGIN_SECS`] so no single
+/// stalled lock wait or statement can use up the margin.
+const ACTIVATION_TIMEOUT_SECS: i64 = 10;
+const _: () = assert!(ACTIVATION_TIMEOUT_SECS < ACCEPT_DELAY_MARGIN_SECS);
+
+/// Seconds from activation until a session accepts imported events.
+///
+/// A replica session proves a heartbeat at most
+/// [`crate::replica_fence::PROOF_MAX_AGE`] old, so once this has passed every
+/// covered snapshot already shows the session active and
+/// [`Db::guard_covered_route`] sends its reads to the writer. The same span
+/// keeps an expired session pinning its channel to the writer, so a lagging
+/// snapshot cannot miss imports committed just before expiry.
+pub const IMPORT_ACCEPT_DELAY_SECS: i64 =
+    crate::replica_fence::PROOF_MAX_AGE.as_secs() as i64 + ACCEPT_DELAY_MARGIN_SECS;
+
 /// Outcome of an import control event (kinds 42110 to 42113).
 #[derive(Debug)]
 pub enum ImportControlOutcome {
@@ -114,6 +136,11 @@ struct SessionRow {
     requires_admin: bool,
     admin_consent: Option<ImportDecision>,
     status: ImportSessionStatus,
+    /// Unix second from which imports are accepted; set at activation.
+    accepts_after: Option<i64>,
+    /// Database clock at the read, in whole unix seconds (floored). Every
+    /// expiry and warm-up decision on the session uses this clock.
+    db_now: i64,
 }
 
 struct ParticipantRow {
@@ -231,11 +258,13 @@ async fn read_session(
 ) -> Result<Option<SessionRow>> {
     let sql = if lock {
         "SELECT channel_id, proposer, manifest, source_type, is_dm, range_from, range_to, \
-         expires_at, requires_admin, admin_consent, status FROM import_sessions \
+         expires_at, requires_admin, admin_consent, status, accepts_after, \
+         floor(extract(epoch FROM clock_timestamp()))::bigint AS db_now FROM import_sessions \
          WHERE community_id = $1 AND proposal_id = $2 FOR UPDATE"
     } else {
         "SELECT channel_id, proposer, manifest, source_type, is_dm, range_from, range_to, \
-         expires_at, requires_admin, admin_consent, status FROM import_sessions \
+         expires_at, requires_admin, admin_consent, status, accepts_after, \
+         floor(extract(epoch FROM clock_timestamp()))::bigint AS db_now FROM import_sessions \
          WHERE community_id = $1 AND proposal_id = $2"
     };
     let Some(row) = sqlx::query(sql)
@@ -261,6 +290,8 @@ async fn read_session(
         requires_admin: row.try_get("requires_admin")?,
         admin_consent: parse_decision(row.try_get("admin_consent")?)?,
         status: ImportSessionStatus::parse(&status).ok_or_else(|| invalid("status value"))?,
+        accepts_after: row.try_get("accepts_after")?,
+        db_now: row.try_get("db_now")?,
     }))
 }
 
@@ -337,13 +368,44 @@ async fn store_status(
     status: ImportSessionStatus,
 ) -> Result<()> {
     let community = tx.community();
+    // A session becomes active at most once; the first activation fixes
+    // `activated_at` and `accepts_after`. The clock is read once and floored,
+    // like `db_now`, so `accepts_after` is exactly the delay past
+    // `activated_at`.
     sqlx::query(
-        "UPDATE import_sessions SET status = $3, updated_at = now() \
-         WHERE community_id = $1 AND proposal_id = $2",
+        "UPDATE import_sessions s SET status = $3, updated_at = now(), \
+         activated_at = CASE WHEN $3 = 'active' \
+             THEN COALESCE(s.activated_at, c.at) ELSE s.activated_at END, \
+         accepts_after = CASE WHEN $3 = 'active' \
+             THEN COALESCE(s.accepts_after, COALESCE(s.activated_at, c.at) + $4) \
+             ELSE s.accepts_after END \
+         FROM (SELECT floor(extract(epoch FROM clock_timestamp()))::bigint AS at) c \
+         WHERE s.community_id = $1 AND s.proposal_id = $2",
     )
     .bind(community.as_uuid())
     .bind(proposal_id)
     .bind(status.as_str())
+    .bind(IMPORT_ACCEPT_DELAY_SECS)
+    .execute(tx.conn())
+    .await?;
+    Ok(())
+}
+
+/// Bound a transaction that can activate a session (a proposal that needs no
+/// other consent, or a consent).
+///
+/// `activated_at` is read when the activation's UPDATE runs, and covered
+/// replica reads stay sound only if the activation commits within
+/// [`ACCEPT_DELAY_MARGIN_SECS`] of that read (see [`crate::replica_fence`]).
+/// `SET LOCAL` deadlines of [`ACTIVATION_TIMEOUT_SECS`] keep any single lock
+/// wait or statement of the transaction from using up that margin.
+async fn bound_activation(tx: &mut AdmittedTx) -> Result<()> {
+    let timeout = format!("{ACTIVATION_TIMEOUT_SECS}s");
+    sqlx::query(
+        "SELECT set_config('lock_timeout', $1, true), \
+         set_config('statement_timeout', $1, true)",
+    )
+    .bind(timeout)
     .execute(tx.conn())
     .await?;
     Ok(())
@@ -435,6 +497,10 @@ async fn publish_snapshot(
         .map(|p| hex::encode(&p.pubkey))
         .collect();
     values.extend(pubkeys.iter().map(|p| ["p", p.as_str()]));
+    let accepts_after = session.accepts_after.map(|at| at.to_string());
+    if let Some(at) = &accepts_after {
+        values.push([import::ACCEPTS_AFTER_TAG, at.as_str()]);
+    }
     let tags = values
         .into_iter()
         .map(|v| Tag::parse(v).map_err(|_| invalid("snapshot tag")))
@@ -516,7 +582,6 @@ async fn session_cap_reached(
     channel_id: Uuid,
     proposer: &[u8],
     limits: import::ImportLimits,
-    now: i64,
 ) -> Result<Option<&'static str>> {
     let community = tx.community();
     for key in [
@@ -536,12 +601,12 @@ async fn session_cap_reached(
         "SELECT count(*) FILTER (WHERE channel_id = $2), count(*) FILTER (WHERE proposer = $3) \
          FROM import_sessions \
          WHERE community_id = $1 AND (channel_id = $2 OR proposer = $3) \
-           AND status IN ('proposed', 'active') AND expires_at > $4",
+           AND status IN ('proposed', 'active') \
+           AND expires_at > floor(extract(epoch FROM clock_timestamp()))::bigint",
     )
     .bind(community.as_uuid())
     .bind(channel_id)
     .bind(proposer)
-    .bind(now)
     .fetch_one(tx.conn())
     .await?;
     if count(in_channel) >= limits.max_active_sessions_per_channel {
@@ -568,7 +633,95 @@ async fn is_channel_admin(tx: &mut AdmittedTx, channel_id: Uuid, pubkey: &[u8]) 
     .await?)
 }
 
+/// What a covered replica read is scoped to, for [`Db::guard_covered_route`].
+pub(crate) enum CoveredScope<'a> {
+    /// A channel window or a channel-pinned query.
+    Channel(Uuid),
+    /// A thread page, keyed by its root event id.
+    ThreadRoot(&'a [u8]),
+}
+
 impl Db {
+    /// Send a covered replica read back to the writer while its channel has
+    /// an active import session.
+    ///
+    /// A covered page relies on the commit-time floor guard (migration 0021):
+    /// no row older than the fence wall commits after the proving token.
+    /// Imported events are the one sanctioned exception (see
+    /// [`Db::insert_import_event`]), and they commit only under an active
+    /// session. A reader snapshot that shows the session active may lack
+    /// imports the writer already has, so the page goes to the writer. A
+    /// snapshot that shows it terminal already holds every import, since the
+    /// terminal transition commits after the last import under the same row
+    /// lock. Bounded reads never rely on the floor and pass through.
+    ///
+    /// A snapshot that predates the activation sees no session, but then the
+    /// writer holds no imports either: imports commit only from
+    /// `accepts_after`, which is [`IMPORT_ACCEPT_DELAY_SECS`] past activation,
+    /// longer than any proved snapshot can lag
+    /// ([`crate::replica_fence::PROOF_MAX_AGE`]). A session past its expiry
+    /// keeps counting for the same span, so a lagging snapshot cannot miss
+    /// imports committed just before expiry, and then stops pinning the
+    /// channel even if its expiry was never stored.
+    pub(crate) async fn guard_covered_route(
+        &self,
+        path: &'static str,
+        community: CommunityId,
+        scope: CoveredScope<'_>,
+        decision: crate::RouteDecision,
+    ) -> crate::RouteDecision {
+        let crate::RouteDecision::Replica(mut tx, entry, reason) = decision else {
+            return decision;
+        };
+        if reason != "covered" {
+            return crate::RouteDecision::Replica(tx, entry, reason);
+        }
+        let active = match scope {
+            CoveredScope::Channel(channel_id) => {
+                sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM import_sessions \
+                     WHERE community_id = $1 AND channel_id = $2 AND status = 'active' \
+                       AND expires_at > extract(epoch FROM now())::bigint - $3)",
+                )
+                .bind(community.as_uuid())
+                .bind(channel_id)
+                .bind(IMPORT_ACCEPT_DELAY_SECS)
+                .fetch_one(&mut *tx)
+                .await
+            }
+            // A root the snapshot lacks stays on the replica: replies commit
+            // only after their parent, so the snapshot holds none of them, and
+            // the short page is re-run on the writer by the thread reader's
+            // own under-limit check.
+            CoveredScope::ThreadRoot(root) => {
+                sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM events e \
+                     JOIN import_sessions s ON s.community_id = e.community_id \
+                          AND s.channel_id = e.channel_id \
+                     WHERE e.community_id = $1 AND e.id = $2 AND s.status = 'active' \
+                       AND s.expires_at > extract(epoch FROM now())::bigint - $3)",
+                )
+                .bind(community.as_uuid())
+                .bind(root)
+                .bind(IMPORT_ACCEPT_DELAY_SECS)
+                .fetch_one(&mut *tx)
+                .await
+            }
+        };
+        match active {
+            Ok(false) => crate::RouteDecision::Replica(tx, entry, reason),
+            Ok(true) => {
+                Self::record_route(path, "writer", "import_active");
+                crate::RouteDecision::Writer
+            }
+            Err(e) => {
+                tracing::warn!(path, "replica import guard failed; routing to writer: {e}");
+                Self::record_route(path, "writer", "replica_error");
+                crate::RouteDecision::Writer
+            }
+        }
+    }
+
     /// Open a session from a validated kind:42110 proposal.
     ///
     /// `content` must already pass [`import::validate_proposal_content`] and
@@ -596,6 +749,8 @@ impl Db {
             crate::observability::WriterOperation::EventWrite,
         )
         .await?;
+        // A proposal whose participants have all consented activates here.
+        bound_activation(&mut tx).await?;
         // Checked before the session caps so a resent stored proposal is
         // answered as a duplicate even when the channel is at its cap.
         if event_is_stored(tx.conn(), community, event).await? {
@@ -695,15 +850,7 @@ impl Db {
             .is_some_and(|role| role == "owner" || role == "admin");
         let requires_admin = !is_dm && admin_count > 0 && !proposer_is_admin;
 
-        if let Some(reason) = session_cap_reached(
-            &mut tx,
-            channel_id,
-            &proposer,
-            limits,
-            Utc::now().timestamp(),
-        )
-        .await?
-        {
+        if let Some(reason) = session_cap_reached(&mut tx, channel_id, &proposer, limits).await? {
             tx.rollback().await?;
             return Ok(ImportControlOutcome::Rejected(reason));
         }
@@ -758,14 +905,8 @@ impl Db {
             .await?
             .ok_or_else(|| invalid("session insert"))?;
         let participants = load_participants(&mut tx, proposal_id).await?;
-        refresh_status(
-            &mut tx,
-            proposal_id,
-            &mut session,
-            &participants,
-            Utc::now().timestamp(),
-        )
-        .await?;
+        let now = session.db_now;
+        refresh_status(&mut tx, proposal_id, &mut session, &participants, now).await?;
         let snapshot = publish_snapshot(self, &mut tx, proposal_id, keys).await?;
         tx.commit().await?;
         Ok(ImportControlOutcome::Applied {
@@ -798,6 +939,7 @@ impl Db {
             crate::observability::WriterOperation::EventWrite,
         )
         .await?;
+        bound_activation(&mut tx).await?;
         let author = event.pubkey.to_bytes().to_vec();
         let Some(mut session) = load_session(&mut tx, proposal_id, true).await? else {
             tx.rollback().await?;
@@ -818,7 +960,7 @@ impl Db {
             return Ok(ImportControlOutcome::Rejected(reason::CONSENT_MISMATCH));
         }
         let mut participants = load_participants(&mut tx, proposal_id).await?;
-        let now = Utc::now().timestamp();
+        let now = session.db_now;
         if refresh_status(&mut tx, proposal_id, &mut session, &participants, now).await? {
             // Persist the lazy transition even though this consent is refused.
             let snapshot = publish_snapshot(self, &mut tx, proposal_id, keys).await?;
@@ -918,7 +1060,7 @@ impl Db {
             tx.rollback().await?;
             return Ok(ImportControlOutcome::Rejected(reason::NOT_PARTICIPANT));
         }
-        let now = Utc::now().timestamp();
+        let now = session.db_now;
         if refresh_status(&mut tx, proposal_id, &mut session, &participants, now).await? {
             let snapshot = publish_snapshot(self, &mut tx, proposal_id, keys).await?;
             tx.commit().await?;
@@ -976,7 +1118,7 @@ impl Db {
             return Ok(ImportControlOutcome::Duplicate);
         }
         let mut participants = load_participants(&mut tx, proposal_id).await?;
-        let now = Utc::now().timestamp();
+        let now = session.db_now;
         if refresh_status(&mut tx, proposal_id, &mut session, &participants, now).await? {
             let snapshot = publish_snapshot(self, &mut tx, proposal_id, keys).await?;
             tx.commit().await?;
@@ -1041,7 +1183,7 @@ impl Db {
         let participants = read_participants(&mut conn, community, proposal_id).await?;
         let already_stored = event_is_stored(&mut conn, community, event).await?;
         drop(conn);
-        let status = import::derive_status(&facts(&session, &participants), Utc::now().timestamp());
+        let status = import::derive_status(&facts(&session, &participants), session.db_now);
         Ok(Some(ImportPreflight {
             channel_id: session.channel_id,
             range: session.range,
@@ -1081,6 +1223,16 @@ impl Db {
             crate::observability::WriterOperation::EventWrite,
         )
         .await?;
+        // Imported events keep their original created_at, which is older than
+        // the replica-fence floor (migration 0021). Disarm the floor for this
+        // transaction only; it commits nothing but this event and its session
+        // bookkeeping, and only while the session is active and past
+        // `accepts_after`. Covered replica reads stay sound through
+        // Db::guard_covered_route, which sends a channel with an active
+        // session to the writer.
+        sqlx::query("SELECT set_config('buzz.created_at_floor', '', true)")
+            .execute(tx.conn())
+            .await?;
         let reject = |reason| ImportInsertOutcome::Rejected {
             reason,
             snapshot: None,
@@ -1104,7 +1256,7 @@ impl Db {
             return Ok(ImportInsertOutcome::Duplicate);
         }
         let participants = load_participants(&mut tx, &proposal_id).await?;
-        let now = Utc::now().timestamp();
+        let now = session.db_now;
         if refresh_status(&mut tx, &proposal_id, &mut session, &participants, now).await? {
             let snapshot = publish_snapshot(self, &mut tx, &proposal_id, keys).await?;
             tx.commit().await?;
@@ -1129,6 +1281,14 @@ impl Db {
             tx.rollback().await?;
             return Ok(reject(reason::NOT_CONSENTING));
         };
+        // Measured on the database clock, the clock `accepts_after` was set by.
+        if session
+            .accepts_after
+            .is_none_or(|accepts_after| session.db_now < accepts_after)
+        {
+            tx.rollback().await?;
+            return Ok(reject(reason::SESSION_WARMING));
+        }
         // An account linked to an owner after the proposal is an agent now.
         if any_agent(&mut tx, std::slice::from_ref(&author)).await? {
             tx.rollback().await?;
@@ -1306,6 +1466,8 @@ mod tests {
             requires_admin: true,
             admin_consent: Some(ImportDecision::Accept),
             status: ImportSessionStatus::Active,
+            accepts_after: Some(50),
+            db_now: 60,
         };
         let participants = vec![
             ParticipantRow {

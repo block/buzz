@@ -3,6 +3,15 @@ SET LOCAL statement_timeout = '30s';
 
 -- NIP-CI conversation import sessions. One row per accepted kind:42110
 -- proposal; status is the relay-derived session state.
+--
+-- Replica-fence floor (migration 0021): imported events keep their original
+-- created_at, so the relay blanks buzz.created_at_floor for each import
+-- transaction only (set_config(.., true)). 0021 is checksum-frozen, so the
+-- exception is recorded here. It stays sound because imports commit only
+-- under an active session and only from accepts_after (activated_at plus the
+-- replica proof age cap plus a margin), and a covered replica read whose
+-- snapshot shows an active, unexpired session for its channel is served by
+-- the writer. See replica_fence.rs and docs/database.md.
 CREATE TABLE import_sessions (
     community_id UUID NOT NULL,
     proposal_id BYTEA NOT NULL,
@@ -17,6 +26,8 @@ CREATE TABLE import_sessions (
     requires_admin BOOLEAN NOT NULL,
     admin_consent TEXT,
     status TEXT NOT NULL,
+    activated_at BIGINT,
+    accepts_after BIGINT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (community_id, proposal_id)

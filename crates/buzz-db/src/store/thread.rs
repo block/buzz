@@ -893,14 +893,22 @@ impl Db {
             ),
             None => ("thread_head", RoutePredicate::Bounded),
         };
-        if let RouteDecision::Replica(mut tx, entry, reason) = self
+        let decision = self
             .route_read(
                 path,
                 predicate,
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
-        {
+            .await;
+        let decision = self
+            .guard_covered_route(
+                path,
+                community_id,
+                crate::import_session::CoveredScope::ThreadRoot(root_event_id),
+                decision,
+            )
+            .await;
+        if let RouteDecision::Replica(mut tx, entry, reason) = decision {
             match crate::thread::get_thread_replies_on(
                 &mut tx,
                 community_id,
@@ -1076,11 +1084,19 @@ impl Db {
         } else {
             "channel_head"
         };
-        match self
+        let decision = self
             .route_read(
                 path,
                 RoutePredicate::from_channel_cursor(channel_id, &cursor),
                 crate::observability::ReaderOperation::SubscriptionHistory,
+            )
+            .await;
+        match self
+            .guard_covered_route(
+                path,
+                community_id,
+                crate::import_session::CoveredScope::Channel(channel_id),
+                decision,
             )
             .await
         {
