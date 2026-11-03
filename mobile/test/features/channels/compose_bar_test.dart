@@ -1215,6 +1215,48 @@ void main() {
       expect(sentContent, 'First line\nSecond line');
     });
 
+    testWidgets('hardware Enter sends and Shift+Enter does not', (
+      tester,
+    ) async {
+      var sendCount = 0;
+      String? sentContent;
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                sendCount += 1;
+                sentContent = content;
+              },
+        ),
+      );
+
+      await _expandComposer(tester);
+
+      // Enter on an empty composer is swallowed without sending.
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pumpAndSettle();
+      expect(sendCount, 0);
+
+      await tester.enterText(find.byType(TextField), 'Hello');
+      await tester.pumpAndSettle();
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.pumpAndSettle();
+      expect(sendCount, 0);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pumpAndSettle();
+      expect(sendCount, 1);
+      expect(sentContent, 'Hello');
+    });
+
     testWidgets('clears text before the optimistic send completes', (
       tester,
     ) async {

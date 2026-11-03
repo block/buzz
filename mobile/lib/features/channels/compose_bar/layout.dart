@@ -329,7 +329,41 @@ class _ComposeBarLayout extends HookWidget {
     );
   }
 
+  /// A hardware-keyboard Enter sends the message; Shift+Enter falls through
+  /// to the text field and inserts a newline. The on-screen return key goes
+  /// through the platform text input, not key events, so it still adds a
+  /// newline. Enter while an IME is composing is left alone so it can commit.
+  KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    final key = event.logicalKey;
+    if (key != LogicalKeyboardKey.enter &&
+        key != LogicalKeyboardKey.numpadEnter) {
+      return KeyEventResult.ignored;
+    }
+    final keyboard = HardwareKeyboard.instance;
+    if (keyboard.isShiftPressed ||
+        keyboard.isAltPressed ||
+        keyboard.isControlPressed ||
+        keyboard.isMetaPressed) {
+      return KeyEventResult.ignored;
+    }
+    if (readOnly || controller.value.composing.isValid) {
+      return KeyEventResult.ignored;
+    }
+    if (canSend && !hasPendingUploads && !isSending) onSend();
+    return KeyEventResult.handled;
+  }
+
   Widget _buildTextField(BuildContext context) {
+    return Focus(
+      canRequestFocus: false,
+      skipTraversal: true,
+      onKeyEvent: _handleKeyEvent,
+      child: _buildTextFieldInner(context),
+    );
+  }
+
+  Widget _buildTextFieldInner(BuildContext context) {
     return TextField(
       controller: controller,
       focusNode: focusNode,
