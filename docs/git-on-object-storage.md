@@ -164,10 +164,12 @@ HTTP API.
   apply. Direct signer authority does not depend on an optional owner's channel
   membership. A stored agent-owner relationship is an ownership lookup, not a
   live delegation credential.
-- Authorization is **admission-time**: later membership/maintainer removal,
-  rebinding or archival does not cancel an already admitted write. This is
-  narrower than the vision's instantaneous-revocation aspiration. The shared
-  serving-write lease separately fences community deletion through the write.
+- Authorization is **admission-time**: later membership/maintainer removal, or
+  rebinding to another active channel, does not cancel an already admitted
+  write. This is narrower than the vision's instantaneous-revocation
+  aspiration. Archive and the announcement's current binding are checked again
+  immediately before the CAS (§Channel archive). The shared serving-write lease
+  separately fences community deletion through the write.
 
 GET returns `{branch, head, manifest}`. POST accepts only
 `{branch, expected_manifest}` (maximum 4096 bytes) and returns the same snapshot
@@ -187,6 +189,52 @@ else's later decision. A conflict is exit code 5.
 Deploy relay support **before** using an updated CLI against that relay. This
 requires no schema migration and changes no live repository merely by deploying.
 See the [CLI examples](../crates/buzz-cli/README.md#default-branch).
+
+### Channel archive
+
+This applies to repositories hosted by the relay. It does not apply to local
+clones or to repositories on other hosts, such as GitHub. Archive does not
+strictly freeze Git: one exception applies (below).
+
+- **Last check.** A push and a default-branch change each run a last check
+  after their uploads and immediately before the pointer CAS (§Push step 7).
+  The check re-reads the current kind:30617 announcement and resolves its
+  binding. For a bound channel, it takes that channel's write gate shared in a
+  short database transaction with no object-store call. An archive that is
+  running holds the gate exclusive, so the check waits for it and then refuses.
+- **Outcomes.** A refused write does not change the pointer and stores no
+  kind:30618.
+
+  | Announcement at the last check | Push | Default-branch change |
+  |---|---|---|
+  | Bound to an archived channel | 403 `channel is archived (read-only)` | 403, same reason |
+  | Deleted | 403 `repository not found` | 404 `repository not found` |
+  | Invalid binding | 403 `invalid channel binding` | 404 `repository not found` |
+  | Not bound | Proceeds | 404 `repository not found` |
+  | Bound to an active channel | Proceeds | Proceeds |
+
+  For a bound repository, the check's transaction uses the same admission as
+  event writes, so it also refuses the write while the community is being
+  deleted. A database error refuses the write.
+- **Exception: late write.** The check and the CAS are not atomic. A write
+  whose last check passed before the archive committed may still apply its
+  pointer write after the commit. It is not undone, and its kind:30618 is
+  stored. The S3 client library allows about 121 seconds for that write: a
+  60-second request, its one built-in re-send after 1 second, and a second
+  60-second request. That is a client timeout budget, not a server-side bound:
+  the object store may apply a received write after the client gives up. Every
+  write whose last check starts after the archive commits is refused.
+- **Announcements stay ungated.** Archive does not gate kind:30617
+  announcements or their deletions. A repository may be bound to an archived
+  channel; its pushes are then refused. A repository may be moved out of an
+  archived channel, or unbound, and then accepts pushes under its new binding.
+
+**Possible future improvement.** A strict storage fence would close the
+late-write exception. Archive would move the pointer of each repository bound
+to the archived channels inside its transaction, so a CAS with an older ETag
+fails. Announcement changes would also take the gates of the old and new
+channel. The cost is that archive then calls the object store, so archive
+depends on object-storage availability and latency. This is not implemented.
 
 ## Axioms
 

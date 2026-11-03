@@ -28,7 +28,10 @@ use super::{
     manifest::{is_safe_refname, pointer_key, Manifest},
     manifest_event::{build_ref_state_event, RefStateInputs},
     store::{CasOutcome, ETag, GitStore, Precond},
-    transport::{authorize_git_read, deny_banned_git_principal, validate_repo_id},
+    transport::{
+        authorize_git_read, deny_banned_git_principal, repo_archive_state, validate_repo_id,
+        LastCheck,
+    },
 };
 use crate::{
     api::{api_error, bridge, relay_members},
@@ -102,6 +105,7 @@ impl DefaultBranchSnapshot {
         mut self,
         store: &GitStore,
         request: SetDefaultBranch,
+        last_check: impl std::future::Future<Output = Result<(), Response>>,
     ) -> Result<(Self, bool), Response> {
         if self.digest != request.expected_manifest {
             return Err(conflict());
@@ -140,6 +144,8 @@ impl DefaultBranchSnapshot {
                 .ok_or_else(|| backend("invalid manifest key"))?
                 .to_string();
         }
+        // The last archive check, immediately before the CAS (NEXUS-4111).
+        last_check.await?;
         // Even a no-op checks the observed ETag: concurrent deletion/push must
         // not be reported as a successful setting of a now-missing branch.
         match store
@@ -389,8 +395,25 @@ async fn set_default_branch(
         )
     })?;
     serving_write.verify().await.map_err(backend)?;
+    // It re-reads the binding and refuses with `authorize_management`'s
+    // outcomes.
+    let last_check = async {
+        #[cfg(test)]
+        crate::nip_fi_test_hooks::before_git_settings_last_check(auth.tenant.community()).await;
+        match repo_archive_state(&state.db, auth.tenant.community(), &owner, repo_name).await {
+            Ok(LastCheck::Bound(false)) => Ok(()),
+            Ok(LastCheck::Bound(true)) => Err(error(
+                StatusCode::FORBIDDEN,
+                "channel is archived (read-only)",
+            )),
+            Ok(LastCheck::Missing | LastCheck::NotBound | LastCheck::Broken) => {
+                Err(error(StatusCode::NOT_FOUND, "repository not found"))
+            }
+            Err(e) => Err(backend(e)),
+        }
+    };
     let (snapshot, changed) = serving_write
-        .protect(snapshot.set(&state.git_store, request))
+        .protect(snapshot.set(&state.git_store, request, last_check))
         .await
         .map_err(backend)??;
     let publication = async {

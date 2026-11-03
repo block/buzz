@@ -1341,6 +1341,7 @@ mod external_infra {
                 &self.repo,
                 &super::super::super::cas_publish::ParentState::fresh(),
                 limits(0),
+                std::future::ready(Ok(())),
             )
             .await
             .unwrap();
@@ -1746,6 +1747,134 @@ mod external_infra {
         );
     }
 
+    /// NEXUS-4111, Git option A: the last check before the pointer CAS reads
+    /// the announcement again and the channel's archive state under its
+    /// gate. A change made after `authorize_management` passed meets that
+    /// check and gets `authorize_management`'s reply; nothing is written.
+    #[tokio::test]
+    #[ignore = "requires isolated Postgres, Redis and MinIO"]
+    async fn default_branch_last_archive_check_refuses() {
+        enum Change {
+            Bind(Option<&'static str>),
+            Delete,
+            Archive,
+        }
+        let f = Fixture::new().await;
+        let community = f.tenant.community();
+        let before = f.snapshot().await;
+        let channel = f.channel.to_string();
+        let mut at = nostr::Timestamp::now().as_secs() + 10;
+        let mut announce = |binding: Option<&str>| {
+            let mut tags = vec![
+                Tag::parse(["d", &f.repo]).unwrap(),
+                Tag::parse(["maintainers", &f.maintainer.public_key().to_hex()]).unwrap(),
+            ];
+            if let Some(binding) = binding {
+                tags.push(Tag::parse(["buzz-channel", binding]).unwrap());
+            }
+            at += 1;
+            EventBuilder::new(Kind::Custom(30617), "")
+                .tags(tags)
+                .custom_created_at(nostr::Timestamp::from(at))
+                .sign_with_keys(&f.owner)
+                .unwrap()
+        };
+        let exempt = buzz_db::ArchiveGate::Exempt;
+        for (change, status, reason) in [
+            (
+                Change::Bind(None),
+                StatusCode::NOT_FOUND,
+                "repository not found",
+            ),
+            (
+                Change::Bind(Some("not-a-uuid")),
+                StatusCode::NOT_FOUND,
+                "repository not found",
+            ),
+            (
+                Change::Delete,
+                StatusCode::NOT_FOUND,
+                "repository not found",
+            ),
+            (
+                Change::Archive,
+                StatusCode::FORBIDDEN,
+                "channel is archived (read-only)",
+            ),
+        ] {
+            let rebound = announce(Some(&channel));
+            let replaced = f
+                .state
+                .db
+                .replace_parameterized_event(community, &rebound, &f.repo, None, exempt);
+            assert!(replaced.await.unwrap().1, "bound again before the row");
+            let changed = match &change {
+                Change::Bind(binding) => Some(announce(*binding)),
+                Change::Delete | Change::Archive => None,
+            };
+            let (arrived, release) =
+                crate::nip_fi_test_hooks::git_settings_last_check_hook::arm(community);
+            let change_at_check = async {
+                let reached = tokio::time::timeout(std::time::Duration::from_secs(10), arrived);
+                reached
+                    .await
+                    .expect("the change reaches its last check")
+                    .unwrap();
+                match (&change, &changed) {
+                    (Change::Bind(_), Some(event)) => {
+                        let replaced = f
+                            .state
+                            .db
+                            .replace_parameterized_event(community, event, &f.repo, None, exempt);
+                        assert!(replaced.await.unwrap().1);
+                    }
+                    (Change::Delete, _) => {
+                        sqlx::query(
+                            "UPDATE events SET deleted_at = NOW() \
+                             WHERE community_id = $1 AND kind = 30617 AND d_tag = $2",
+                        )
+                        .bind(community.as_uuid())
+                        .bind(&f.repo)
+                        .execute(&f.pool)
+                        .await
+                        .unwrap();
+                    }
+                    _ => {
+                        sqlx::query(
+                            "UPDATE channels SET archived_at = NOW() \
+                             WHERE community_id = $1 AND id = $2",
+                        )
+                        .bind(community.as_uuid())
+                        .bind(f.channel)
+                        .execute(&f.pool)
+                        .await
+                        .unwrap();
+                    }
+                }
+                release.notify_one();
+            };
+            let (reply, ()) = tokio::join!(f.set(&f.owner, "main", None), change_at_check);
+            assert_eq!(
+                (reply.0, reply.1["error"].as_str()),
+                (status, Some(reason)),
+                "{reply:?}"
+            );
+            let after = f.snapshot().await;
+            assert_eq!(
+                (after.etag, after.digest),
+                (before.etag.clone(), before.digest.clone())
+            );
+        }
+        let notifications = buzz_db::EventQuery {
+            kinds: Some(vec![30618]),
+            d_tag: Some(f.repo.clone()),
+            global_only: true,
+            ..buzz_db::EventQuery::for_community(community)
+        };
+        let notifications = f.state.db.query_events(&notifications).await.unwrap();
+        assert!(notifications.is_empty(), "refused: {notifications:?}");
+    }
+
     #[tokio::test]
     #[ignore = "requires isolated Postgres, Redis and MinIO"]
     async fn default_branch_push_races_and_fresh_clone() {
@@ -1760,6 +1889,7 @@ mod external_infra {
                     branch: "main".into(),
                     expected_manifest: old_digest.clone(),
                 },
+                std::future::ready(Ok(())),
             )
             .await
             .unwrap();
@@ -1771,6 +1901,7 @@ mod external_infra {
                     branch: "legacy".into(),
                     expected_manifest: old_digest,
                 },
+                std::future::ready(Ok(())),
             )
             .await
             .err()
@@ -1805,6 +1936,7 @@ mod external_infra {
             &f.repo,
             &parent,
             limits(push.hydrated_bytes()),
+            std::future::ready(Ok(())),
         )
         .await;
         assert!(matches!(
@@ -1832,6 +1964,7 @@ mod external_infra {
             &f.repo,
             &parent,
             limits(push.hydrated_bytes()),
+            std::future::ready(Ok(())),
         )
         .await
         .unwrap();
@@ -1842,7 +1975,8 @@ mod external_infra {
                     SetDefaultBranch {
                         branch: "main".into(),
                         expected_manifest: digest
-                    }
+                    },
+                    std::future::ready(Ok(())),
                 )
                 .await
                 .err()
@@ -1882,6 +2016,7 @@ mod external_infra {
             &f.repo,
             &parent,
             limits(push.hydrated_bytes()),
+            std::future::ready(Ok(())),
         )
         .await
         .unwrap();
@@ -1908,6 +2043,7 @@ mod external_infra {
             &f.repo,
             &parent,
             limits(push.hydrated_bytes()),
+            std::future::ready(Ok(())),
         )
         .await
         .unwrap();

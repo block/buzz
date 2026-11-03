@@ -215,6 +215,10 @@ make_hook!(auto_join_done_hook, after_auto_join);
 // shared membership check passes, immediately before the fresh ban reread.
 // A ban or closed pool here makes only the reread refuse.
 make_hook!(http_ban_recheck_hook, before_http_ban_recheck);
+// `before_git_settings_last_check`: fires in the Git default-branch change
+// after the manifest upload, immediately before the last archive check and
+// the pointer CAS. An archive or a re-announcement here meets that check.
+make_hook!(git_settings_last_check_hook, before_git_settings_last_check);
 // `before_write_ban_check`: fires in ingest's write-restriction gates (plain
 // and cached) immediately before the restriction read.
 // `before_command_ban_check`: fires in the moderation and relay-admin command
