@@ -373,3 +373,149 @@ async fn signed_unsigned_free_controls_and_required_discovery_use_real_host_rows
     }
     eprintln!("100 primary policy queries: {:?}", start.elapsed());
 }
+
+/// A host-cache entry must not choose data under another row's optional policy.
+/// Mutation: ignore request_tenant in bind_tenant => the A-only member is admitted.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn remapped_host_uses_one_policy_tenant_for_query_and_discovery() {
+    let base = crate::api::bridge::postgres_tests::bridge_handler_test_state()
+        .await
+        .expect("isolated Postgres and local Redis");
+    let host = format!("policy-remap-{}.example", uuid::Uuid::new_v4().simple());
+    let old_host = format!("old-{host}");
+    let old = base.db.ensure_configured_community(&host).await.unwrap();
+    sqlx::query(
+        "UPDATE communities SET requires_nip_fi = true, policy_generation = 1 WHERE id = $1",
+    )
+    .bind(old.id.as_uuid())
+    .execute(base.db.pool())
+    .await
+    .unwrap();
+    let caller = Keys::generate();
+    let _ = base
+        .db
+        .add_relay_member(
+            old.id,
+            &caller.public_key().to_hex(),
+            "member",
+            None,
+            &base.relay_keypair,
+        )
+        .await
+        .unwrap();
+    let secret = EventBuilder::new(Kind::TextNote, "old required community data")
+        .sign_with_keys(&caller)
+        .unwrap();
+    base.db.insert_event(old.id, &secret, None).await.unwrap();
+    // Prime the actual trunk cache before the operator remaps the same host.
+    let bound = crate::tenant::bind_community(&*base, &host).await.unwrap();
+    assert_eq!(bound.community(), old.id);
+    let mut tx = base.db.pool().begin().await.unwrap();
+    sqlx::query("UPDATE communities SET host = $1 WHERE id = $2")
+        .bind(&old_host)
+        .bind(old.id.as_uuid())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let new = base.db.ensure_configured_community(&host).await.unwrap();
+    assert_ne!(old.id, new.id);
+    // Refresh only the witness's cache age: this models an unexpired entry
+    // deterministically, without requiring database setup to finish inside 1s.
+    base.tenant_host_cache
+        .insert(host.clone(), (old.id, std::time::Instant::now()));
+    let mut state = (*base).clone();
+    let config = Arc::make_mut(&mut state.config);
+    config.nip_fi.mode = NipFiMode::Off;
+    config.require_relay_membership = true;
+    config.require_auth_token = true;
+    config.relay_url = "wss://relay.example".into();
+    state.nip98_replay = Arc::new(Replay(Mutex::new(HashSet::new())));
+    let state = Arc::new(state);
+    let app = crate::router::build_router(state.clone());
+    let body = serde_json::to_vec(&serde_json::json!([{"ids":[secret.id.to_hex()]}])).unwrap();
+    for is_new_member in [false, true] {
+        if is_new_member {
+            let _ = state
+                .db
+                .add_relay_member(
+                    new.id,
+                    &caller.public_key().to_hex(),
+                    "member",
+                    None,
+                    &state.relay_keypair,
+                )
+                .await
+                .unwrap();
+        }
+        state
+            .tenant_host_cache
+            .insert(host.clone(), (old.id, std::time::Instant::now()));
+        let proof = EventBuilder::new(Kind::Custom(27235), "")
+            .tags([
+                Tag::parse(["u", &format!("https://{host}/query")]).unwrap(),
+                Tag::parse(["method", "POST"]).unwrap(),
+                Tag::parse(["payload", &hex::encode(Sha256::digest(&body))]).unwrap(),
+                Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()]).unwrap(),
+            ])
+            .sign_with_keys(&caller)
+            .unwrap();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/query")
+                    .header(header::HOST, &host)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!(
+                            "Nostr {}",
+                            base64::engine::general_purpose::STANDARD.encode(proof.as_json())
+                        ),
+                    )
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 65536).await.unwrap();
+        assert_eq!(
+            status,
+            if is_new_member {
+                StatusCode::OK
+            } else {
+                StatusCode::FORBIDDEN
+            },
+            "membership must belong to the policy tenant: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        if is_new_member {
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+                serde_json::json!([]),
+                "new community membership must never expose the old community's event"
+            );
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/info")
+                    .header(header::HOST, &host)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let doc: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+        assert_eq!(doc["requires_nip_fi"], false);
+        assert_eq!(
+            doc["read_state_snapshot"]["community_id"],
+            new.id.as_uuid().to_string(),
+            "discovery must describe the same row as its fresh optional policy"
+        );
+    }
+}

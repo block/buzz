@@ -34,6 +34,7 @@ impl PolicySource for Source {
             }
             let required = host == "required.example" && self.required.load(Ordering::SeqCst);
             Ok(Some(CommunityAuthPolicy {
+                community_id: uuid::Uuid::nil(),
                 requires_nip_fi: required,
                 policy_generation: i64::from(required),
             }))
@@ -386,12 +387,27 @@ async fn request_scope_reuses_one_read_without_publishing_optional_cache_entries
 async fn unmapped_legacy_rejection_scope_never_yields_an_admission_proof() {
     let (state, _, key, _) = fixture(NipFiMode::Off).await;
     let policy = Policy {
+        community_id: uuid::Uuid::nil(),
         mode: NipFiMode::Off,
         required: false,
         stored_required: false,
         mapped: false,
     };
     with_policy(policy, async {
+        state.tenant_host_cache.insert(
+            "unknown.example".into(),
+            (
+                buzz_core::CommunityId::from_uuid(uuid::Uuid::new_v4()),
+                std::time::Instant::now(),
+            ),
+        );
+        assert!(
+            crate::nip_fi_shadow::bind_tenant(&state, &headers("unknown.example", false))
+                .await
+                .is_none(),
+            "an authoritative miss cannot reuse a cached tenant"
+        );
+
         let mut called = false;
         let response =
             admit_nip_fi_http_on_state(&state, &headers("unknown.example", false), || {

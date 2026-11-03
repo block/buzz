@@ -198,6 +198,7 @@ async fn nip_fi_assertion_guard(
             // this is never an optional-policy fallback or a data admission.
             let mode = state.config.nip_fi.mode;
             let policy = crate::nip_fi_policy::Policy {
+                community_id: uuid::Uuid::nil(),
                 mode,
                 required: mode.enforces(),
                 stored_required: false,

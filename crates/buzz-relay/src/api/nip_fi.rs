@@ -2506,6 +2506,7 @@ mod route_integration_tests {
         > {
             Box::pin(async {
                 Ok(Some(buzz_db::community_auth::CommunityAuthPolicy {
+                    community_id: uuid::Uuid::nil(),
                     requires_nip_fi: true,
                     policy_generation: 1,
                 }))

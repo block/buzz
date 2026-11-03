@@ -205,7 +205,7 @@ impl RelayInfo {
     /// `self`. Pass `Some` whenever the relay has a stable signing key.
     ///
     /// `icon` is the community's workspace icon (see
-    /// [`workspace_icon_for_host`]) — a host-scoped scalar, pre-fetched by
+    /// [`workspace_icon_for_tenant`]) — a host-scoped scalar, pre-fetched by
     /// the caller so `build` itself stays static-input.
     ///
     /// `advertise_nip43` controls whether NIP-43 (relay membership) is added
@@ -422,7 +422,11 @@ pub(crate) async fn nip11_document(
         }
     }
     let (relay_self, advertise_nip43) = nip11_facts(state);
-    let icon = workspace_icon_for_host(state, raw_host).await;
+    let tenant = policy.tenant(raw_host);
+    let icon = match tenant.as_ref() {
+        Some(tenant) => workspace_icon_for_tenant(state, tenant).await,
+        None => None,
+    };
     let admin_api = admin_api_advertisement(state.config.admin.as_ref());
     let advertise_fi = state.config.nip_fi.mode.evaluates() || policy.required;
     let mut info = RelayInfo::build(
@@ -439,8 +443,8 @@ pub(crate) async fn nip11_document(
     );
     info.requires_nip_fi = policy.required;
     info.artifacts["incremental"] = crate::api::artifact_sync::capability();
-    if let Ok(tenant) = crate::tenant::bind_community(state, raw_host).await {
-        if let Some(profile) = crate::verified_profiles::discovery(state, &tenant).await {
+    if let Some(tenant) = tenant.as_ref() {
+        if let Some(profile) = crate::verified_profiles::discovery(state, tenant).await {
             if let Some(fi) = info.federated_identity.as_mut() {
                 fi["public_profile"] = profile;
             }
@@ -464,10 +468,7 @@ pub(crate) async fn nip11_document(
         }));
     }
     let tenant_host = if state.config.push_enabled {
-        crate::tenant::bind_community(state, raw_host)
-            .await
-            .ok()
-            .map(|tenant| tenant.host().to_owned())
+        tenant.as_ref().map(|tenant| tenant.host().to_owned())
     } else {
         None
     };
@@ -486,17 +487,12 @@ pub(crate) async fn nip11_document(
     Ok(info)
 }
 
-/// Fetches the workspace icon for the community bound to `raw_host`, as the
-/// host-scoped scalar consumed by [`RelayInfo::build`].
-///
-/// The icon is per-community state (`communities.icon`, set by relay
-/// admins/owners via the kind:9033 command) served in the standard NIP-11
-/// `icon` field. The lookup is scoped through
-/// [`crate::tenant::bind_community`] — never an unscoped query. An icon failure
-/// omits this optional decoration; authoritative host policy has already been
-/// checked by [`nip11_document`].
-async fn workspace_icon_for_host(state: &crate::state::AppState, raw_host: &str) -> Option<String> {
-    let tenant = crate::tenant::bind_community(state, raw_host).await.ok()?;
+/// Fetch the icon for the same immutable tenant that supplied NIP-11 policy.
+/// A decoration lookup failure omits the icon.
+async fn workspace_icon_for_tenant(
+    state: &crate::state::AppState,
+    tenant: &buzz_core::TenantContext,
+) -> Option<String> {
     state
         .db
         .get_community_icon(tenant.community())

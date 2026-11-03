@@ -36,6 +36,7 @@ impl PolicySource for buzz_db::Db {
 
 #[derive(Clone, Copy)]
 pub(crate) struct Policy {
+    pub community_id: uuid::Uuid,
     pub mode: NipFiMode,
     pub required: bool,
     pub stored_required: bool,
@@ -44,7 +45,28 @@ pub(crate) struct Policy {
     pub mapped: bool,
 }
 
+impl Policy {
+    /// Bind tenant-scoped data to the row that supplied admission policy.
+    pub(crate) fn tenant(self, raw_host: &str) -> Option<buzz_core::TenantContext> {
+        let host = buzz_core::tenant::normalize_host(raw_host);
+        (self.mapped && !host.is_empty()).then(|| {
+            buzz_core::TenantContext::resolved(
+                buzz_core::CommunityId::from_uuid(self.community_id),
+                host,
+            )
+        })
+    }
+}
+
 tokio::task_local! { static REQUEST_POLICY: Policy; }
+
+/// None outside a guarded request; Some(None) is an authoritative host miss.
+/// A guarded request must never fall back to another host-cache snapshot.
+pub(crate) fn request_tenant(raw_host: &str) -> Option<Option<buzz_core::TenantContext>> {
+    REQUEST_POLICY
+        .try_with(|policy| policy.tenant(raw_host))
+        .ok()
+}
 
 pub(crate) async fn with_policy<F: std::future::Future>(policy: Policy, next: F) -> F::Output {
     REQUEST_POLICY.scope(policy, next).await
@@ -90,6 +112,7 @@ pub(crate) async fn resolve(
         "resolved community auth policy"
     );
     Ok(Policy {
+        community_id: policy.community_id,
         mode: effective(global, policy.requires_nip_fi),
         required: policy.requires_nip_fi || global.enforces(),
         stored_required: policy.requires_nip_fi,
@@ -133,6 +156,7 @@ pub(crate) async fn bind_for_upgrade(
         _ => return Err(not_found()),
     };
     let policy = Policy {
+        community_id: policy.community_id,
         mode: effective(state.config.nip_fi.mode, policy.requires_nip_fi),
         required: policy.requires_nip_fi || state.config.nip_fi.mode.enforces(),
         stored_required: policy.requires_nip_fi,
@@ -197,6 +221,7 @@ impl PolicySource for OptionalPolicy {
     ) -> BoxFuture<'a, Result<Option<CommunityAuthPolicy>, ()>> {
         async {
             Ok(Some(CommunityAuthPolicy {
+                community_id: uuid::Uuid::nil(),
                 requires_nip_fi: false,
                 policy_generation: 0,
             }))

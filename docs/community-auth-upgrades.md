@@ -200,6 +200,13 @@ audio WebSocket admission use the same policy source. There is no cross-request
 policy cache, positive or negative: an older read cannot overwrite a newer cached
 generation. This adds one writer query per protected request or discovery request;
 `buzz_nip_fi_policy_reads_total` and `buzz_nip_fi_policy_read_seconds` measure it.
+Protected HTTP handlers use the immutable tenant ID from the same primary row
+that supplied the request's policy. They do not resolve tenant-scoped data from
+another host-cache snapshot. NIP-11 uses that policy tenant for its descriptors
+and optional decorations too, so a remapped host cannot combine one community's
+optional policy with another community's data. Exempt and unguarded routes keep
+their existing host-cache behavior.
+
 Issuer-binding/JWKS caches keep their existing bounds; unavailable dependencies
 refuse required admission, rather than treating it as optional.
 

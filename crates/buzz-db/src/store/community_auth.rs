@@ -82,6 +82,9 @@ pub enum UpgradeOutcome {
 /// Authoritative policy for a community in the active lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FromRow)]
 pub struct CommunityAuthPolicy {
+    /// Immutable identity from the same row as this policy.
+    #[sqlx(rename = "id")]
+    pub community_id: Uuid,
     /// Durable monotonic requirement. Global enforce remains an additional floor.
     pub requires_nip_fi: bool,
     /// Zero for legacy optional communities; positive after the first enable.
@@ -130,6 +133,7 @@ impl Db {
                     host: row.try_get("host")?,
                 },
                 CommunityAuthPolicy {
+                    community_id: row.try_get("id")?,
                     requires_nip_fi: row.try_get("requires_nip_fi")?,
                     policy_generation: row.try_get("policy_generation")?,
                 },
@@ -166,7 +170,7 @@ impl Db {
             crate::observability::WriterOperation::Authorization,
         )
         .await?;
-        Ok(sqlx::query_as("SELECT requires_nip_fi, policy_generation FROM communities
+        Ok(sqlx::query_as("SELECT id, requires_nip_fi, policy_generation FROM communities
             WHERE id = $1 AND archived_at IS NULL AND deleted_at IS NULL AND deletion_state = 'active'")
             .bind(community.as_uuid()).fetch_optional(&mut *connection).await?)
     }
