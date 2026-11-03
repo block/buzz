@@ -373,6 +373,17 @@ pub const KIND_REPORT: u32 = 1984;
 /// deployment feedback table, and never stored or fanned out as an event.
 pub const KIND_PRODUCT_FEEDBACK: u32 = 42000;
 
+// Conversation import (42100-42199). See `docs/nips/NIP-CI.md`.
+/// NIP-CI: import proposal. Proposer-signed, scoped to one channel `h`; opens an
+/// import session whose id is this event's id.
+pub const KIND_IMPORT_PROPOSAL: u32 = 42110;
+/// NIP-CI: import consent (accept or decline) from one proposal participant.
+pub const KIND_IMPORT_CONSENT: u32 = 42111;
+/// NIP-CI: import withdraw. Ends the session; sent by the proposer or a participant.
+pub const KIND_IMPORT_WITHDRAW: u32 = 42112;
+/// NIP-CI: import complete. A participant marks its own publishing as finished.
+pub const KIND_IMPORT_COMPLETE: u32 = 42113;
+
 // NIP-29 group admin events
 /// NIP-29: Add a user to a group.
 pub const KIND_NIP29_PUT_USER: u32 = 9000;
@@ -492,6 +503,12 @@ pub const KIND_WORKFLOW_DEF: u32 = 30620;
 /// the latest event is always the authoritative hidden set. The relay knows
 /// `hidden_at` per viewer; this is the only Nostr-visible projection of it.
 pub const KIND_DM_VISIBILITY: u32 = 30622;
+
+/// NIP-CI: import session snapshot (relay-signed, parameterized replaceable,
+/// d=proposal event id). Republished by the relay after every accepted import
+/// control event, every 50 accepted imported events per participant, and on
+/// completion. Readable by channel members only.
+pub const KIND_IMPORT_SESSION_SNAPSHOT: u32 = 30623;
 
 /// Lower bound of the NIP-33 parameterized replaceable range (30000–39999).
 pub const PARAM_REPLACEABLE_KIND_MIN: u32 = 30000;
@@ -713,6 +730,10 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_PRIVATE_MANAGED_AGENT,
     KIND_REPORT,
     KIND_PRODUCT_FEEDBACK,
+    KIND_IMPORT_PROPOSAL,
+    KIND_IMPORT_CONSENT,
+    KIND_IMPORT_WITHDRAW,
+    KIND_IMPORT_COMPLETE,
     KIND_NIP29_PUT_USER,
     KIND_NIP29_REMOVE_USER,
     KIND_NIP29_EDIT_METADATA,
@@ -769,6 +790,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_CHANNEL_SUMMARY,
     KIND_PRESENCE_SNAPSHOT,
     KIND_DM_VISIBILITY,
+    KIND_IMPORT_SESSION_SNAPSHOT,
     KIND_DM_OPEN,
     KIND_DM_ADD_MEMBER,
     KIND_DM_HIDE,
@@ -885,6 +907,15 @@ pub const fn is_command_kind(kind: u32) -> bool {
     )
 }
 
+/// Returns `true` if `kind` is a NIP-CI conversation import control kind
+/// (proposal, consent, withdraw, complete).
+pub const fn is_import_control_kind(kind: u32) -> bool {
+    matches!(
+        kind,
+        KIND_IMPORT_PROPOSAL | KIND_IMPORT_CONSENT | KIND_IMPORT_WITHDRAW | KIND_IMPORT_COMPLETE
+    )
+}
+
 /// NIP-85 relay-signed NIP-FI verified profile (output only).
 pub const KIND_VERIFIED_PROFILE: u32 = 30382;
 
@@ -899,6 +930,7 @@ pub const fn is_relay_only_kind(kind: u32) -> bool {
             | KIND_CHANNEL_SUMMARY
             | KIND_PRESENCE_SNAPSHOT
             | KIND_DM_VISIBILITY
+            | KIND_IMPORT_SESSION_SNAPSHOT
             | KIND_THREAD_SUMMARY
             | KIND_WINDOW_BOUNDS
             | KIND_THREAD_WINDOW_BOUNDS
@@ -927,6 +959,14 @@ const _: () = assert!(is_parameterized_replaceable(KIND_PRIVATE_MANAGED_AGENT));
 const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 30300 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999
+
+// 30623 is parameterized replaceable; the NIP-CI control kinds are regular
+// stored events.
+const _: () = assert!(is_parameterized_replaceable(KIND_IMPORT_SESSION_SNAPSHOT));
+const _: () = assert!(!is_parameterized_replaceable(KIND_IMPORT_PROPOSAL));
+const _: () = assert!(!is_replaceable(KIND_IMPORT_PROPOSAL));
+const _: () = assert!(!is_ephemeral(KIND_IMPORT_COMPLETE));
+const _: () = assert!(KIND_IMPORT_COMPLETE <= u16::MAX as u32);
 const _: () = assert!(is_parameterized_replaceable(KIND_PROJECT)); // 30621 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_THREAD_SUMMARY)); // 39005 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WINDOW_BOUNDS)); // 39006 ∈ 30000–39999
@@ -983,6 +1023,22 @@ mod tests {
     fn thread_window_bounds_is_relay_only() {
         assert_eq!(KIND_THREAD_WINDOW_BOUNDS, 39007);
         assert!(is_relay_only_kind(KIND_THREAD_WINDOW_BOUNDS));
+    }
+
+    #[test]
+    fn import_kinds_are_registered() {
+        assert!(is_relay_only_kind(KIND_IMPORT_SESSION_SNAPSHOT));
+        for kind in [
+            KIND_IMPORT_PROPOSAL,
+            KIND_IMPORT_CONSENT,
+            KIND_IMPORT_WITHDRAW,
+            KIND_IMPORT_COMPLETE,
+        ] {
+            assert!(is_import_control_kind(kind));
+            assert!(!is_relay_only_kind(kind));
+            assert!(ALL_KINDS.contains(&kind));
+        }
+        assert!(!is_import_control_kind(KIND_IMPORT_SESSION_SNAPSHOT));
     }
 
     #[test]
