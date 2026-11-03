@@ -141,6 +141,11 @@ pub enum CasError {
     /// The push would make the repo exceed the relay's configured byte budget.
     #[error("resource limit: {0}")]
     ResourceLimit(String),
+
+    /// The caller's last check before the CAS refused the write. Pre-CAS:
+    /// the pointer was never written.
+    #[error("refused before CAS: {0}")]
+    Refused(&'static str),
 }
 
 /// Resource limits carried from hydration into the publish step.
@@ -994,6 +999,10 @@ fn record_compaction(
 /// at step 7 is the *only* writer serialization (`Inv_NoFork`). No
 /// advisory lock — adding one would hide exactly the interleavings the
 /// model proves safe.
+///
+/// `before_cas` is the caller's last check. It runs after every upload and
+/// immediately before the pointer CAS; an error refuses the write.
+#[allow(clippy::too_many_arguments)]
 pub async fn cas_publish(
     store: &GitStore,
     ctx: &TenantContext,
@@ -1002,6 +1011,7 @@ pub async fn cas_publish(
     repo: &str,
     parent_state: &ParentState,
     limits: PublishLimits,
+    before_cas: impl std::future::Future<Output = Result<(), CasError>>,
 ) -> Result<CasSuccess, CasError> {
     cas_publish_inner(
         store,
@@ -1014,10 +1024,12 @@ pub async fn cas_publish(
             limits,
             compaction_threshold: PACK_COMPACTION_THRESHOLD,
         },
+        before_cas,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cas_publish_inner(
     store: &GitStore,
     ctx: &TenantContext,
@@ -1026,6 +1038,7 @@ async fn cas_publish_inner(
     repo: &str,
     parent_state: &ParentState,
     options: PublishOptions,
+    before_cas: impl std::future::Future<Output = Result<(), CasError>>,
 ) -> Result<CasSuccess, CasError> {
     let limits = options.limits;
     let pkey = pointer_key(ctx.community(), owner, repo);
@@ -1207,6 +1220,10 @@ async fn cas_publish_inner(
         }
     };
     let manifest_digest = digest_from_manifest_key(&manifest_key)?;
+
+    // The caller's last check, after the uploads and immediately before the
+    // CAS (NEXUS-4111): the window it leaves is only the pointer PUT.
+    before_cas.await?;
 
     // Step 7: CAS the pointer.
     let precond = match &parent_state.if_match {
@@ -1772,6 +1789,7 @@ mod tests {
             repo,
             &parent_state,
             test_options,
+            std::future::ready(Ok(())),
         )
         .await
         .expect("compaction publish");
@@ -1791,6 +1809,7 @@ mod tests {
             repo,
             &parent_state,
             test_options,
+            std::future::ready(Ok(())),
         )
         .await
         .expect_err("stale parent must lose CAS");

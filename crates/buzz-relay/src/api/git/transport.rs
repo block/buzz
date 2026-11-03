@@ -726,6 +726,67 @@ fn read_role_allows(role: Option<&str>) -> bool {
     }
 }
 
+/// A repository's state at the last check before a pointer CAS (NEXUS-4111).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LastCheck {
+    /// No current kind:30617 for this repo.
+    Missing,
+    /// The announcement has no `buzz-channel` tag.
+    NotBound,
+    /// The first `buzz-channel` tag is not a UUID.
+    Broken,
+    /// Bound to a channel; `true` when that channel is archived.
+    Bound(bool),
+}
+
+/// Read the repo's current kind:30617 again, resolve its binding, and read
+/// the bound channel's archive state under its archive gate.
+///
+/// The gate read is a short admitted transaction that takes the channel's
+/// gate shared (see `buzz_db::lifecycle`), so an archive that holds the gate
+/// is waited for and then seen. It does no I/O under the gate. A write that
+/// passes may still land after a later archive commits, until its pointer
+/// PUT completes: see `docs/git-on-object-storage.md`.
+pub(super) async fn repo_archive_state(
+    db: &buzz_db::Db,
+    community: buzz_core::CommunityId,
+    owner_hex: &str,
+    repo_name: &str,
+) -> buzz_db::Result<LastCheck> {
+    let owner = hex::decode(owner_hex)
+        .map_err(|_| buzz_db::DbError::InvalidData("invalid repo owner".into()))?;
+    let query = buzz_db::EventQuery {
+        kinds: Some(vec![30617]),
+        pubkey: Some(owner),
+        d_tag: Some(repo_name.to_string()),
+        global_only: true,
+        limit: Some(1),
+        ..buzz_db::EventQuery::for_community(community)
+    };
+    let Some(repo) = db.query_events(&query).await?.pop() else {
+        return Ok(LastCheck::Missing);
+    };
+    let channel = match resolve_repo_binding(&repo.event) {
+        RepoBinding::NotBound => return Ok(LastCheck::NotBound),
+        RepoBinding::Broken => return Ok(LastCheck::Broken),
+        RepoBinding::Bound(channel) => channel,
+    };
+    let mut tx = db.begin_event_write_transaction(community).await?;
+    let gated =
+        buzz_db::lifecycle::lock_write_gates(&mut tx, buzz_db::ArchiveGate::Refuse, &[channel])
+            .await;
+    tx.rollback().await?;
+    match gated {
+        Ok(_) => Ok(LastCheck::Bound(false)),
+        Err(buzz_db::DbError::AccessDenied(reason))
+            if reason == buzz_db::lifecycle::CHANNEL_ARCHIVED =>
+        {
+            Ok(LastCheck::Bound(true))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 #[derive(Deserialize)]
 /// Query parameters for the `info/refs` endpoint.
 pub struct InfoRefsQuery {
@@ -1952,6 +2013,9 @@ struct FinalizePushHooks {
     post_cas_gate: Option<Arc<PostCasGate>>,
     #[cfg(test)]
     fail_ref_state_insert: bool,
+    /// Pauses after the last archive check passes, before the pointer CAS.
+    #[cfg(test)]
+    pre_cas_gate: Option<Arc<PostCasGate>>,
 }
 
 #[cfg(test)]
@@ -2042,6 +2106,32 @@ async fn finalize_push_inner(
             .into_response();
     }
 
+    // The last archive check, immediately before the CAS. It re-reads the
+    // binding and refuses with the pre-receive's outcomes (policy.rs).
+    let last_check = async {
+        let community = ctx.tenant.community();
+        let refused = match repo_archive_state(&state.db, community, &ctx.owner, &ctx.repo_id).await
+        {
+            Ok(LastCheck::NotBound | LastCheck::Bound(false)) => None,
+            Ok(LastCheck::Bound(true)) => Some("channel is archived (read-only)"),
+            Ok(LastCheck::Missing) => Some("repository not found"),
+            Ok(LastCheck::Broken) => Some("invalid channel binding"),
+            Err(error) => {
+                error!(owner = %ctx.owner, repo = %ctx.repo, %error, "push: last archive check failed");
+                Some("internal error")
+            }
+        };
+        if let Some(reason) = refused {
+            return Err(CasError::Refused(reason));
+        }
+        #[cfg(test)]
+        if let Some(gate) = &hooks.pre_cas_gate {
+            gate.reached.notify_one();
+            gate.resume.notified().await;
+        }
+        Ok(())
+    };
+
     // Step 7 (CAS). The PushContext binds `parent_state` (observed at
     // hydrate) to the CAS predicate here — no re-reading of the pointer
     // between hydrate and CAS. Observe serving-lease loss throughout the
@@ -2058,6 +2148,7 @@ async fn finalize_push_inner(
             max_pack_bytes: state.config.git_max_pack_bytes,
             max_repo_bytes: state.config.git_max_repo_bytes,
         },
+        last_check,
     );
     let success = match serving_write.protect(publish).await {
         Ok(result) => match result {
@@ -2094,6 +2185,10 @@ async fn finalize_push_inner(
                     "push produced invalid manifest state",
                 )
                     .into_response();
+            }
+            Err(CasError::Refused(reason)) => {
+                warn!(owner = %ctx.owner, repo = %ctx.repo, reason, "push refused at the last check before CAS");
+                return (StatusCode::FORBIDDEN, reason).into_response();
             }
             Err(CasError::ResourceLimit(e)) => {
                 warn!(
@@ -2700,8 +2795,8 @@ mod track_c_tests {
             .id;
         let (request, claim) = approved_deletion(&state, &host).await;
         let scratch = TempDir::new().expect("scratch");
-        let owner = format!("owner-{}", uuid::Uuid::new_v4().simple());
         let repo = format!("repo-{}", uuid::Uuid::new_v4().simple());
+        let owner = announce(&state, community, &Keys::generate(), &repo, None, 1).await;
         let ctx = pushed_context(
             &state,
             community,
@@ -2716,6 +2811,7 @@ mod track_c_tests {
         let hooks = FinalizePushHooks {
             post_cas_gate: Some(Arc::clone(&gate)),
             fail_ref_state_insert: false,
+            pre_cas_gate: None,
         };
         let finalize_state = Arc::clone(&state);
         let finalize =
@@ -2793,12 +2889,14 @@ mod track_c_tests {
             .expect("create test community")
             .id;
         let scratch = TempDir::new().expect("scratch");
+        let repo = format!("repo-{}", uuid::Uuid::new_v4().simple());
+        let owner = announce(&state, community, &Keys::generate(), &repo, None, 1).await;
         let ctx = pushed_context(
             &state,
             community,
             &host,
-            format!("owner-{}", uuid::Uuid::new_v4().simple()),
-            format!("repo-{}", uuid::Uuid::new_v4().simple()),
+            owner,
+            repo,
             Keys::generate().public_key(),
             scratch.path(),
         )
@@ -2806,6 +2904,7 @@ mod track_c_tests {
         let hooks = FinalizePushHooks {
             post_cas_gate: None,
             fail_ref_state_insert: true,
+            pre_cas_gate: None,
         };
 
         let response = finalize_push_inner(&state, ctx, &hooks).await;
@@ -2816,6 +2915,274 @@ mod track_c_tests {
             .serving_writes_drained(community)
             .await
             .expect("serving lease released on failure"));
+        drop(state);
+        pool.close().await;
+    }
+
+    /// Announce `repo` as `owner` at `created_at`, replacing any earlier
+    /// announcement, with an optional `buzz-channel` value. Returns the
+    /// owner's hex key.
+    async fn announce(
+        state: &AppState,
+        community: CommunityId,
+        owner: &Keys,
+        repo: &str,
+        binding: Option<&str>,
+        created_at: u64,
+    ) -> String {
+        let mut tags = vec![Tag::parse(["d", repo]).expect("d tag")];
+        if let Some(binding) = binding {
+            tags.push(Tag::parse(["buzz-channel", binding]).expect("binding tag"));
+        }
+        let event = EventBuilder::new(Kind::Custom(30617), "")
+            .tags(tags)
+            .custom_created_at(nostr::Timestamp::from(created_at))
+            .sign_with_keys(owner)
+            .expect("sign 30617");
+        let exempt = buzz_db::ArchiveGate::Exempt;
+        let replaced = state
+            .db
+            .replace_parameterized_event(community, &event, repo, None, exempt);
+        assert!(
+            replaced.await.expect("announce").1,
+            "the announcement is current"
+        );
+        owner.public_key().to_hex()
+    }
+
+    /// One community, one repo owner, and fresh repos and channels for the
+    /// last-archive-check journey (NEXUS-4111, Git option A).
+    struct LastCheckFixture {
+        state: Arc<AppState>,
+        pool: sqlx::PgPool,
+        community: CommunityId,
+        host: String,
+        owner: Keys,
+        clock: std::sync::atomic::AtomicU64,
+    }
+
+    impl LastCheckFixture {
+        async fn new() -> Self {
+            let (state, pool) = finalize_test_state().await;
+            let host = format!("git-last-check-{}.example", uuid::Uuid::new_v4().simple());
+            let community = state.db.ensure_configured_community(&host).await;
+            let community = community.expect("create test community").id;
+            let owner = Keys::generate();
+            let owner_key = owner.public_key().to_bytes();
+            let user = state.db.ensure_user(community, &owner_key).await;
+            user.expect("owner user");
+            Self {
+                state,
+                pool,
+                community,
+                host,
+                owner,
+                clock: std::sync::atomic::AtomicU64::new(1),
+            }
+        }
+
+        async fn channel(&self) -> uuid::Uuid {
+            let channel = uuid::Uuid::new_v4();
+            self.state
+                .db
+                .create_channel_with_id(
+                    self.community,
+                    channel,
+                    &format!("git-last-check-{channel}"),
+                    buzz_db::channel::ChannelType::Stream,
+                    buzz_db::channel::ChannelVisibility::Open,
+                    None,
+                    &self.owner.public_key().to_bytes(),
+                    None,
+                )
+                .await
+                .expect("create channel");
+            channel
+        }
+
+        async fn archive(&self, channel: uuid::Uuid) {
+            sqlx::query(
+                "UPDATE channels SET archived_at = NOW() WHERE community_id = $1 AND id = $2",
+            )
+            .bind(self.community.as_uuid())
+            .bind(channel)
+            .execute(&self.pool)
+            .await
+            .expect("archive");
+        }
+
+        async fn announce(&self, repo: &str, binding: Option<&str>) {
+            let at = self
+                .clock
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            announce(&self.state, self.community, &self.owner, repo, binding, at).await;
+        }
+
+        /// A new repo announced with `binding`, and its pushed workspace.
+        async fn pushed(&self, binding: Option<&str>) -> (String, TempDir, PushContext) {
+            let repo = format!("repo-{}", uuid::Uuid::new_v4().simple());
+            self.announce(&repo, binding).await;
+            let scratch = TempDir::new().expect("scratch");
+            let ctx = pushed_context(
+                &self.state,
+                self.community,
+                &self.host,
+                self.owner.public_key().to_hex(),
+                repo.clone(),
+                self.owner.public_key(),
+                scratch.path(),
+            )
+            .await;
+            (repo, scratch, ctx)
+        }
+
+        /// Whether the repo's pointer exists, and its count of kind:30618.
+        async fn published(&self, repo: &str) -> (bool, usize) {
+            let owner = self.owner.public_key().to_hex();
+            let key = crate::api::git::manifest::pointer_key(self.community, &owner, repo);
+            let pointer = self.state.git_store.get_pointer(&key).await;
+            let mut query = buzz_db::event::EventQuery::for_community(self.community);
+            query.kinds = Some(vec![30_618]);
+            query.d_tag = Some(repo.to_string());
+            let events = self.state.db.query_events(&query).await;
+            (
+                pointer.expect("read pointer").is_some(),
+                events.expect("query 30618").len(),
+            )
+        }
+    }
+
+    /// Finalize on its own task (a debug-build finalize future is too large
+    /// for the test thread's stack) and read its status and body.
+    async fn finalize_reply(
+        state: Arc<AppState>,
+        ctx: PushContext,
+        hooks: FinalizePushHooks,
+    ) -> (StatusCode, String) {
+        let finalize = tokio::spawn(async move {
+            let response = finalize_push_inner(&state, ctx, &hooks).await;
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await;
+            let body = String::from_utf8_lossy(&body.expect("response body")).into_owned();
+            (status, body)
+        });
+        finalize.await.expect("finalize task")
+    }
+
+    /// The last archive check runs immediately before the pointer CAS. It
+    /// re-reads the announcement, keeps the pre-receive's outcomes, and waits
+    /// for an archive that holds the channel's gate. A push whose check
+    /// passed before the archive committed still lands: the documented
+    /// exception.
+    async fn finalize_push_last_archive_check_refuses_or_lands() {
+        const ARCHIVED: &str = "channel is archived (read-only)";
+        let f = LastCheckFixture::new().await;
+        let no_hooks = FinalizePushHooks::default;
+        let refused = |reason: &str| (StatusCode::FORBIDDEN, reason.to_string());
+
+        // An unbound repo has no channel to check and proceeds.
+        let (repo, _scratch, ctx) = f.pushed(None).await;
+        let reply = finalize_reply(f.state.clone(), ctx, no_hooks()).await;
+        assert_eq!(reply.0, StatusCode::OK, "{reply:?}");
+        assert_eq!(f.published(&repo).await, (true, 1));
+
+        // A1: the channel is archived after the pre-receive passed.
+        let archived = f.channel().await;
+        let (repo, _scratch, ctx) = f.pushed(Some(&archived.to_string())).await;
+        f.archive(archived).await;
+        let reply = finalize_reply(f.state.clone(), ctx, no_hooks()).await;
+        assert_eq!(reply, refused(ARCHIVED));
+        assert_eq!(f.published(&repo).await, (false, 0));
+
+        // A4: a re-bind into an archived channel commits before the check.
+        let active = f.channel().await;
+        let (repo, _scratch, ctx) = f.pushed(Some(&active.to_string())).await;
+        f.announce(&repo, Some(&archived.to_string())).await;
+        let reply = finalize_reply(f.state.clone(), ctx, no_hooks()).await;
+        assert_eq!(reply, refused(ARCHIVED));
+        assert_eq!(f.published(&repo).await, (false, 0));
+
+        // A5: a deleted or broken announcement keeps its pre-receive refusal.
+        let (repo, _scratch, ctx) = f.pushed(Some(&active.to_string())).await;
+        sqlx::query(
+            "UPDATE events SET deleted_at = NOW() \
+             WHERE community_id = $1 AND kind = 30617 AND d_tag = $2",
+        )
+        .bind(f.community.as_uuid())
+        .bind(&repo)
+        .execute(&f.pool)
+        .await
+        .expect("delete the announcement");
+        let reply = finalize_reply(f.state.clone(), ctx, no_hooks()).await;
+        assert_eq!(reply, refused("repository not found"));
+        assert_eq!(f.published(&repo).await, (false, 0));
+        let (repo, _scratch, ctx) = f.pushed(Some(&active.to_string())).await;
+        f.announce(&repo, Some("not-a-uuid")).await;
+        let reply = finalize_reply(f.state.clone(), ctx, no_hooks()).await;
+        assert_eq!(reply, refused("invalid channel binding"));
+        assert_eq!(f.published(&repo).await, (false, 0));
+
+        // A3: an archive that holds the gate exclusive is waited for, then
+        // seen. A second session holds it; the check queues SHARED on it.
+        let gated = f.channel().await;
+        let (repo, _scratch, ctx) = f.pushed(Some(&gated.to_string())).await;
+        let gate = format!("buzz_channel_gate:{}:{gated}", f.community.as_uuid());
+        let mut holder = f.pool.begin().await.expect("holder");
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(&gate)
+            .execute(&mut *holder)
+            .await
+            .expect("hold the gate exclusive");
+        sqlx::query("UPDATE channels SET archived_at = NOW() WHERE community_id = $1 AND id = $2")
+            .bind(f.community.as_uuid())
+            .bind(gated)
+            .execute(&mut *holder)
+            .await
+            .expect("archive in the holder");
+        let push = tokio::spawn(finalize_reply(f.state.clone(), ctx, no_hooks()));
+        let queued = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let modes: Vec<String> = sqlx::query_scalar(
+                    "SELECT mode FROM pg_locks \
+                     WHERE locktype = 'advisory' AND NOT granted AND objsubid = 1 \
+                       AND ((classid::bigint << 32) | objid::bigint) = hashtextextended($1, 0)",
+                )
+                .bind(&gate)
+                .fetch_all(&f.pool)
+                .await
+                .expect("inspect gate waiters");
+                if modes == ["ShareLock"] {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        queued
+            .await
+            .expect("the last check queues SHARED on the gate");
+        holder.commit().await.expect("commit the archive");
+        assert_eq!(push.await.expect("push task"), refused(ARCHIVED));
+        assert_eq!(f.published(&repo).await, (false, 0));
+
+        // The exception: the check passed, then the archive committed, and
+        // the pointer write still lands with its kind:30618.
+        let late = f.channel().await;
+        let (repo, _scratch, ctx) = f.pushed(Some(&late.to_string())).await;
+        let paused = Arc::new(PostCasGate::default());
+        let hooks = FinalizePushHooks {
+            pre_cas_gate: Some(Arc::clone(&paused)),
+            ..FinalizePushHooks::default()
+        };
+        let push = tokio::spawn(finalize_reply(f.state.clone(), ctx, hooks));
+        let reached = tokio::time::timeout(Duration::from_secs(10), paused.reached.notified());
+        reached.await.expect("the push reaches its last check");
+        f.archive(late).await;
+        paused.resume.notify_one();
+        let reply = push.await.expect("push task");
+        assert_eq!(reply.0, StatusCode::OK, "{reply:?}");
+        assert_eq!(f.published(&repo).await, (true, 1));
+
+        let LastCheckFixture { state, pool, .. } = f;
         drop(state);
         pool.close().await;
     }
@@ -2837,6 +3204,12 @@ mod track_c_tests {
         #[ignore = "requires Postgres and MinIO"]
         async fn finalize_push_db_failure_after_cas_is_not_success_and_releases_lease() {
             super::finalize_push_db_failure_after_cas_is_not_success_and_releases_lease().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres and MinIO"]
+        async fn finalize_push_last_archive_check_refuses_or_lands() {
+            super::finalize_push_last_archive_check_refuses_or_lands().await;
         }
     }
 
