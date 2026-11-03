@@ -369,11 +369,13 @@ class _ThreadMessage extends HookConsumerWidget {
                                             },
                                           ),
                                       onChannelTap: (targetChannelId) {
-                                        openChannelLink(
-                                          context: context,
-                                          ref: ref,
-                                          channelId: targetChannelId,
-                                          currentChannelId: channelId,
+                                        unawaited(
+                                          openChannelLink(
+                                            context: context,
+                                            ref: ref,
+                                            channelId: targetChannelId,
+                                            currentChannelId: channelId,
+                                          ),
                                         );
                                       },
                                       onMentionTap: (pubkey) =>

@@ -894,7 +894,7 @@ async fn handle_search_req(
                     super::close::close_if_owner(
                         sub_id,
                         owner,
-                        Some(SEARCH_FAILED_CLOSED),
+                        Some(search_closed_reason(&e)),
                         conn,
                         state,
                     )
@@ -1664,6 +1664,17 @@ fn history_read_closed_reason(e: &buzz_db::DbError) -> &'static str {
 /// CLOSED reason for a NIP-50 search the search service could not answer
 /// (e.g. the read replica it queries is down).
 pub(crate) const SEARCH_FAILED_CLOSED: &str = "error: search failed";
+
+/// CLOSED reason for a failed NIP-50 search: a search cancelled by the search
+/// pool's statement timeout gets the stable timeout reason, like any other
+/// cancelled read; anything else is the retryable [`SEARCH_FAILED_CLOSED`].
+fn search_closed_reason(e: &buzz_search::SearchError) -> &'static str {
+    if e.is_statement_cancelled() {
+        QUERY_TIMED_OUT_CLOSED
+    } else {
+        SEARCH_FAILED_CLOSED
+    }
+}
 
 /// CLOSED reason for a failed one-shot DB read (COUNT): a statement cancel gets
 /// the stable timeout reason; anything else keeps the raw error.

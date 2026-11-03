@@ -14030,12 +14030,95 @@ void main() {
       expect(observer.pushCount, initialPushCount + 1);
     });
 
-    testWidgets('missing channel link shows an error', (tester) async {
-      final randomChannel = _channel(id: 'random-channel', name: 'random');
-      final channelsNotifier = _FakeChannelsNotifier([
-        _testChannel,
-        randomChannel,
-      ]);
+    // A link can name a channel the loaded list lacks, such as an open
+    // channel the user hasn't joined. It opens from the channel's own
+    // metadata when the relay shares it, and otherwise says why it can't.
+    for (final (name, metaVisibility, fail, toast) in [
+      ('unjoined open channel opens', 'public', false, null),
+      ('channel the relay withholds', null, false, 'Channel not found here'),
+      (
+        'private channel stays closed',
+        'private',
+        false,
+        'Channel not found here',
+      ),
+      ('failed lookup', 'public', true, 'Could not open the channel'),
+    ]) {
+      testWidgets('unlisted channel link: $name', (tester) async {
+        final relay = _ChannelMetadataRelaySession(
+          metas: [
+            if (metaVisibility != null)
+              _channelMetadataEvent(
+                '8c1d2e3f-0000-4000-8000-00000000000a',
+                'random',
+                private: metaVisibility == 'private',
+              ),
+          ],
+          fail: fail,
+        );
+        final observer = _TestNavigatorObserver();
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _textMsg(
+                id: 'msg1',
+                pubkey: 'alice',
+                content:
+                    '[#random](buzz://channel/8c1d2e3f-0000-4000-8000-00000000000a)',
+                createdAt: 1000,
+              ),
+            ],
+            users: {
+              'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+            relaySessionNotifier: relay,
+            navigatorObservers: [observer],
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final initialPushCount = observer.pushCount;
+        await tester.tap(find.text('#random', findRichText: true));
+        await tester.pump();
+        // A second tap while the first is still resolving is ignored.
+        await tester.tap(find.text('#random', findRichText: true));
+        await tester.pump();
+        expect(relay.metadataLookups, ['8c1d2e3f-0000-4000-8000-00000000000a']);
+
+        relay.gate.complete();
+        await tester.pump();
+        await tester.pump();
+        if (toast == null) {
+          await tester.pumpAndSettle();
+          expect(observer.pushCount, initialPushCount + 1);
+          final opened = tester.widget<ChannelDetailPage>(
+            find.byType(ChannelDetailPage).last,
+          );
+          expect(opened.channel.id, '8c1d2e3f-0000-4000-8000-00000000000a');
+          expect(opened.channel.isMember, isFalse);
+        } else {
+          expect(find.text(toast), findsOneWidget);
+          expect(observer.pushCount, initialPushCount);
+          // The failed tap releases its lock, so tapping again retries.
+          await tester.tap(find.text('#random', findRichText: true));
+          await tester.pump();
+          expect(relay.metadataLookups, hasLength(2));
+        }
+      });
+    }
+
+    testWidgets('a channel link lookup that settles after the user moved on '
+        'opens nothing', (tester) async {
+      final relay = _ChannelMetadataRelaySession(
+        metas: [
+          _channelMetadataEvent(
+            _ChannelMetadataRelaySession.unlistedId,
+            'random',
+          ),
+        ],
+      );
+      final observer = _TestNavigatorObserver();
 
       await tester.pumpWidget(
         _buildTestable(
@@ -14043,24 +14126,115 @@ void main() {
             _textMsg(
               id: 'msg1',
               pubkey: 'alice',
-              content: 'Take this to #random',
+              content:
+                  '[#random](buzz://channel/${_ChannelMetadataRelaySession.unlistedId})',
               createdAt: 1000,
             ),
           ],
           users: {
             'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
           },
-          channelsNotifier: channelsNotifier,
+          relaySessionNotifier: relay,
+          navigatorObservers: [observer],
         ),
       );
       await tester.pumpAndSettle();
 
-      channelsNotifier.setChannels([_testChannel]);
-      await tester.tap(find.text('random'));
+      await tester.tap(find.text('#random', findRichText: true));
       await tester.pump();
+      // The user opens something else while the lookup is pending.
+      final page = find.byType(ChannelDetailPage);
+      Navigator.of(tester.element(page)).push(
+        MaterialPageRoute<void>(builder: (_) => const Text('somewhere else')),
+      );
+      await tester.pumpAndSettle();
+      final pushCount = observer.pushCount;
 
-      expect(find.text('Channel could not be opened'), findsOneWidget);
+      relay.gate.complete();
+      await tester.pumpAndSettle();
+      expect(observer.pushCount, pushCount);
+      expect(find.text('somewhere else'), findsOneWidget);
     });
+
+    // A tap whose lookup will be discarded must not block the next tap: one
+    // made after a community switch away and back, or from another page after
+    // the first page closed.
+    for (final interruption in ['community switch', 'closed page']) {
+      testWidgets('a channel link tap after a $interruption opens once', (
+        tester,
+      ) async {
+        final relay = _ChannelMetadataRelaySession(
+          metas: [
+            _channelMetadataEvent(
+              _ChannelMetadataRelaySession.unlistedId,
+              'random',
+            ),
+          ],
+        );
+        final relayConfig = _SwitchableRelayConfigNotifier();
+        final observer = _TestNavigatorObserver();
+        final link = find.text('#random', findRichText: true);
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _textMsg(
+                id: 'msg1',
+                pubkey: 'alice',
+                content:
+                    '[#random](buzz://channel/${_ChannelMetadataRelaySession.unlistedId})',
+                createdAt: 1000,
+              ),
+            ],
+            users: {
+              'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+            relaySessionNotifier: relay,
+            relayConfigNotifier: relayConfig,
+            navigatorObservers: [observer],
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final initialPushCount = observer.pushCount;
+        var extraPushes = 0;
+        if (interruption == 'community switch') {
+          await tester.tap(link);
+          await tester.pump();
+          relayConfig.switchTo('https://other.example');
+          await tester.pump();
+          relayConfig.switchTo('https://relay.example');
+          await tester.pump();
+        } else {
+          final page = find.byType(ChannelDetailPage);
+          final channel = tester.widget<ChannelDetailPage>(page).channel;
+          Navigator.of(tester.element(page)).push(
+            MaterialPageRoute<void>(
+              builder: (_) => ChannelDetailPage(channel: channel),
+            ),
+          );
+          extraPushes = 1;
+          await tester.pumpAndSettle();
+          await tester.tap(link.last);
+          await tester.pump();
+          Navigator.of(
+            tester.element(find.byType(ChannelDetailPage).last),
+          ).pop();
+          await tester.pumpAndSettle();
+        }
+        await tester.tap(link);
+        await tester.pump();
+        expect(relay.metadataLookups, [
+          _ChannelMetadataRelaySession.unlistedId,
+          _ChannelMetadataRelaySession.unlistedId,
+        ]);
+
+        relay.gate.complete();
+        await tester.pumpAndSettle();
+        // The discarded lookup opens nothing; the new tap opens once.
+        expect(observer.pushCount, initialPushCount + extraPushes + 1);
+      });
+    }
 
     testWidgets('tapping a channel link inside a thread opens that channel', (
       tester,
@@ -18149,6 +18323,69 @@ class _MutableHuddleMembersNotifier extends Notifier<List<ChannelMember>> {
 
   void replace(List<ChannelMember> members) => state = members;
 }
+
+/// Answers kind:39000 lookups for channels outside the loaded list.
+class _SwitchableRelayConfigNotifier extends RelayConfigNotifier {
+  @override
+  RelayConfig build() => const RelayConfig(baseUrl: 'https://relay.example');
+
+  // Each switch is a new config, as the app makes one per connection.
+  void switchTo(String baseUrl) => state = RelayConfig(baseUrl: baseUrl);
+}
+
+class _ChannelMetadataRelaySession extends _IdentityUpdateRelaySession {
+  _ChannelMetadataRelaySession({required this.metas, this.fail = false});
+
+  final List<NostrEvent> metas;
+  final bool fail;
+  final metadataLookups = <String>[];
+
+  /// Holds each lookup until completed, so a test can tap again mid-lookup.
+  final gate = Completer<void>();
+
+  static const unlistedId = '8c1d2e3f-0000-4000-8000-00000000000a';
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    if (!(filter.kinds.length == 1 && filter.kinds.single == 39000)) {
+      return super.fetchHistory(filter, timeout: timeout);
+    }
+    final ids = filter.tags['#d'] ?? const <String>[];
+    // The open page's own metadata reads pass through.
+    if (!ids.contains(unlistedId)) {
+      return super.fetchHistory(filter, timeout: timeout);
+    }
+    metadataLookups.addAll(ids);
+    await gate.future;
+    if (fail) throw StateError('relay unavailable');
+    return [
+      for (final event in metas)
+        if (ids.contains(event.getTagValue('d'))) event,
+    ];
+  }
+}
+
+NostrEvent _channelMetadataEvent(
+  String id,
+  String name, {
+  bool private = false,
+}) => NostrEvent(
+  id: 'meta-$id',
+  pubkey: 'relay',
+  createdAt: 2,
+  kind: 39000,
+  tags: [
+    ['d', id],
+    ['name', name],
+    ['t', 'stream'],
+    [private ? 'private' : 'public'],
+  ],
+  content: '',
+  sig: 'sig',
+);
 
 class _FakeChannelsNotifier extends ChannelsNotifier {
   List<Channel> _channels;

@@ -41,7 +41,24 @@ pub(crate) fn db_read_error(
     context: &str,
     e: &buzz_db::DbError,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if e.is_statement_cancelled() {
+    read_error(context, e.is_statement_cancelled(), e)
+}
+
+/// [`db_read_error`] for a search: a search cancelled by the search pool's
+/// statement timeout gets the same 503 `query timed out`.
+pub(crate) fn search_read_error(
+    context: &str,
+    e: &buzz_search::SearchError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    read_error(context, e.is_statement_cancelled(), e)
+}
+
+fn read_error(
+    context: &str,
+    statement_cancelled: bool,
+    e: &dyn std::fmt::Display,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if statement_cancelled {
         tracing::warn!("{context}: {e}");
         return api_error(StatusCode::SERVICE_UNAVAILABLE, QUERY_TIMED_OUT);
     }
@@ -766,6 +783,16 @@ mod db_read_error_tests {
     #[test]
     fn non_cancel_db_error_stays_generic_500() {
         let (status, body) = db_read_error("ctx", &buzz_db::DbError::NotFound("x".into()));
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body.0["error"], "internal server error");
+    }
+
+    #[test]
+    fn non_cancel_search_error_stays_generic_500() {
+        let (status, body) = search_read_error(
+            "ctx",
+            &buzz_search::SearchError::Db(sqlx::Error::PoolTimedOut),
+        );
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(body.0["error"], "internal server error");
     }

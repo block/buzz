@@ -20,10 +20,17 @@ Future<bool?> showInviteJoinSheet(BuildContext context) async {
       name: state.host ?? 'Unknown community',
       dark: Theme.of(context).brightness == Brightness.dark,
       primaryArgb: Theme.of(context).colorScheme.primary.toARGB32(),
+      onPrimaryArgb: Theme.of(context).colorScheme.onPrimary.toARGB32(),
       choices: const [],
       connect: (_, _, _, _) async {},
       confirmInvite: () async {
         final before = container.read(inviteJoinProvider);
+        final notifier = container.read(inviteJoinProvider.notifier);
+        if (before.requiresPolicyAcceptance) {
+          return await notifier.openPolicyAcceptance()
+              ? {'redirected': true}
+              : {'error': container.read(inviteJoinProvider).errorMessage};
+        }
         if (before.requiresFreshInvite) {
           return {
             'error': before.errorMessage ?? 'Open a fresh invite to continue.',
@@ -31,9 +38,19 @@ Future<bool?> showInviteJoinSheet(BuildContext context) async {
         }
         await container.read(inviteJoinProvider.notifier).confirmJoin();
         final result = container.read(inviteJoinProvider);
+        if (result.requiresPolicyAcceptance &&
+            await notifier.openPolicyAcceptance()) {
+          return {'redirected': true};
+        }
         return result.status == InviteJoinStatus.success
             ? {'joined': true}
-            : {'error': result.errorMessage ?? 'Could not join. Try again.'};
+            : {
+                'error':
+                    container.read(inviteJoinProvider).errorMessage ??
+                    'Could not join. Try again.',
+                if (result.requiresPolicyAcceptance)
+                  'actionTitle': 'Review requirements',
+              };
       },
     );
     if (joined == false) return false;
@@ -74,17 +91,15 @@ class InviteJoinSheet extends ConsumerWidget {
     final isStarterSetupRecovery = state.isStarterSetupRecovery;
     final host = state.host ?? 'unknown host';
     final derivedName = state.communityName;
-    final primaryLabel = switch ((
-      isClaiming,
-      isStarterSetupRecovery,
-      state.status,
-    )) {
-      (true, true, _) => 'Finishing setup…',
-      (true, false, _) => 'Joining…',
-      (false, true, InviteJoinStatus.error) => 'Retry setup',
-      (false, true, _) => 'Finish setting up',
-      _ => 'Join',
-    };
+    final primaryLabel = state.requiresPolicyAcceptance
+        ? 'Review requirements'
+        : switch ((isClaiming, isStarterSetupRecovery, state.status)) {
+            (true, true, _) => 'Finishing setup…',
+            (true, false, _) => 'Joining…',
+            (false, true, InviteJoinStatus.error) => 'Retry setup',
+            (false, true, _) => 'Finish setting up',
+            _ => 'Join',
+          };
 
     if (state.status == InviteJoinStatus.success) {
       return _InviteJoinSuccess(
@@ -183,11 +198,26 @@ class InviteJoinSheet extends ConsumerWidget {
                 const SizedBox(width: Grid.sm),
                 Expanded(
                   child: FilledButton.icon(
-                    onPressed: isClaiming || state.requiresFreshInvite
+                    onPressed:
+                        isClaiming ||
+                            (state.requiresFreshInvite &&
+                                !state.requiresPolicyAcceptance)
                         ? null
-                        : () async => ref
-                              .read(inviteJoinProvider.notifier)
-                              .confirmJoin(),
+                        : () async {
+                            final notifier = ref.read(
+                              inviteJoinProvider.notifier,
+                            );
+                            if (!state.requiresPolicyAcceptance) {
+                              await notifier.confirmJoin();
+                            }
+                            if (ref
+                                    .read(inviteJoinProvider)
+                                    .requiresPolicyAcceptance &&
+                                await notifier.openPolicyAcceptance() &&
+                                context.mounted) {
+                              Navigator.of(context).pop(false);
+                            }
+                          },
                     icon: isClaiming
                         ? SizedBox(
                             width: 16,

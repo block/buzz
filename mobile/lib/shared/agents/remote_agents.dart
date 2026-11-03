@@ -196,6 +196,10 @@ class RemoteAgentController extends ChangeNotifier {
     return _keys.forSubject(subject);
   }
 
+  /// Whether the signed-in account's saved state (its binding and any
+  /// unfinished setup) has been read since it signed in.
+  bool get loadedForCurrentAccount => _scope != null && _scope == _currentScope;
+
   /// Empty until the signed-in account's own registry has loaded.
   Set<String> get activeAgents => _scope == null || _scope != _currentScope
       ? const {}

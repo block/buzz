@@ -1,4 +1,5 @@
 import '../message_media.dart';
+import 'markdown_escapes.dart';
 
 /// Splits top-level media from text without breaking Markdown blocks.
 /// Fenced code, lists and quotes retain their nested content.
@@ -44,7 +45,9 @@ List<({String text, bool attachment})> messageBubbleSegments(
         : embed.firstMatch(line.trimRight());
     final isAttachment =
         match != null &&
-        (line.trim().startsWith('!') || imeta.containsKey(match.group(1)));
+        (line.trim().startsWith('!') ||
+            // Content arrives with escapes shielded; imeta keys are plain.
+            imeta.containsKey(unshieldMarkdownEscapes(match.group(1)!)));
     if (attachment != null &&
         isAttachment != attachment &&
         line.trim().isNotEmpty) {

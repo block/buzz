@@ -1,10 +1,14 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app.dart';
 import 'features/age_gate/age_signal_push_bootstrap.dart';
+import 'features/agents/agents_page.dart';
 import 'features/invites/invite_join_provider.dart';
+import 'shared/agents/agents_surface.dart';
 import 'shared/push/push_bridge.dart';
 import 'shared/relay/relay_closed_policy.dart';
 import 'shared/theme/theme_provider.dart';
@@ -33,6 +37,9 @@ ProviderScope buildRootProviderScope({
   // everything else.
   retry: relayProviderRetry,
   overrides: [
+    agentCreationSurfaceProvider.overrideWithValue(
+      (context, link) async => unawaited(showAgents(context, draft: link)),
+    ),
     savedPrefsProvider.overrideWithValue(prefs),
     inviteJoinRecoveryProvider.overrideWith(
       (ref) =>

@@ -462,6 +462,12 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       channelType: metadataEvent.map {
         BuzzPushPresentationCacheStore.normalizedChannelType(tagValue("t", in: $0))
       } ?? cached?.channelType,
+      isSolo: metadataEvent.map {
+        BuzzPushPresentationCacheStore.isSoloChannel($0)
+      } ?? cached?.isSolo,
+      creatorPubkey: metadataEvent.map {
+        BuzzPushPresentationCacheStore.normalizedCreator($0)
+      } ?? cached?.creatorPubkey,
       memberCount: membership?.count ?? cached?.memberCount,
       memberDigests: membership?.digests ?? cached?.memberDigests,
       membershipEventID: acceptedMembershipEvent?.id ?? cached?.membershipEventID,
@@ -508,6 +514,12 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       ["stream", "forum"].contains(channelType),
       let displayName = channel.displayName
     else { return nil }
+    // Your own Solo chats are personal conversations, not channels, so they
+    // get no `#`. Like the app (`Channel.isPersonalChat`), someone else's
+    // Solo chat you belong to stays an ordinary channel.
+    if channel.isSolo == true, channel.creatorPubkey == currentUser {
+      return (displayName, recipientCount)
+    }
     return (displayName.hasPrefix("#") ? displayName : "#\(displayName)", recipientCount)
   }
 
