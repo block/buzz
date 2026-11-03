@@ -17008,6 +17008,111 @@ void main() {
       },
     );
 
+    testWidgets('a sent reply stays above the composer as it grows in', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = previousPlatform);
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      tester.view.viewPadding = const FakeViewPadding(bottom: 20);
+      addTearDown(tester.view.reset);
+
+      final rootEvent = _textMsg(
+        id: threadIdThreadDashRoot,
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 30; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', threadIdThreadDashRoot, '', 'reply'],
+            ],
+          ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          threadReplies: {threadIdThreadDashRoot: replies},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Reply in thread…').hitTestable());
+      await tester.pumpAndSettle();
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      await tester.pumpAndSettle();
+
+      // Production adds a signed reply this way before the relay answers, and
+      // its row then grows to full height over the entrance transition.
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ThreadDetailPage)),
+      );
+      final sent = _textMsg(
+        id: 'sent-reply',
+        pubkey: 'self',
+        content: 'A sent reply\nwith a second line\nand a third line',
+        createdAt: 1200,
+        extraTags: const [
+          ['e', threadIdThreadDashRoot, '', 'reply'],
+        ],
+      );
+      container
+          .read(localMessageSendAnimationProvider(_channelId).notifier)
+          .mark(sent.id);
+      container
+          .read(
+            threadLocalRepliesProvider(
+              const ThreadRepliesArgs(
+                channelId: _channelId,
+                rootId: threadIdThreadDashRoot,
+              ),
+            ).notifier,
+          )
+          .add(sent);
+      await tester.pumpAndSettle();
+      debugDefaultTargetPlatformOverride = previousPlatform;
+
+      final sentReply = find.byKey(
+        const ValueKey('thread-message-group-sent-reply'),
+      );
+      final composerTop = tester
+          .getTopLeft(find.byKey(const ValueKey('composer-surface')))
+          .dy;
+      expect(
+        tester.getBottomLeft(sentReply).dy,
+        lessThanOrEqualTo(composerTop),
+        reason: 'The fully grown reply must not end under the composer.',
+      );
+      expect(find.byKey(const ValueKey('thread-jump-to-latest')), findsNothing);
+    });
+
     testWidgets('thread hides initial tail placement until it is settled', (
       tester,
     ) async {
