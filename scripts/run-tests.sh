@@ -348,6 +348,9 @@ run_unit_tests() {
   run_test_step "buzz-relay profile search request tests" \
     cargo test -p buzz-relay --lib api::profiles:: -- --nocapture
 
+  run_test_step "buzz-relay per-user search cap tests" \
+    cargo test -p buzz-relay --lib api::bridge::search_slots::tests:: -- --nocapture
+
   run_test_step "buzz-relay Git transport Off-mode precedence tests" \
     cargo test -p buzz-relay --lib api::git::transport::off_mode_precedence_tests:: -- --nocapture
 

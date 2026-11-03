@@ -36,8 +36,10 @@ pub struct Target {
     /// one community at `ws_url`'s host.
     #[serde(default)]
     pub community_host_template: Option<String>,
-    /// Open TCP connections here (`host:port`) instead of resolving community
-    /// hosts, e.g. the relay's in-cluster service. Host headers still name the community.
+    /// Dial community hosts here (`host:port`) in plaintext instead of
+    /// resolving them, e.g. the relay's in-cluster service. `ws_url` and
+    /// `http_url` keep the community's public scheme: Host headers and signed
+    /// NIP-98 and NIP-42 URLs still name the community at that scheme.
     #[serde(default)]
     pub connect_addr: Option<String>,
     /// Deployment-root HTTP URL serving `POST /operator/communities`.

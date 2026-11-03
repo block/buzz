@@ -57,29 +57,26 @@ const _starterChannels = [
   ),
 ];
 
-final _inviteRelayConnectedProvider = FutureProvider.family<void, String>((
-  ref,
-  expectedRelayUrl,
-) async {
-  final currentConfig = ref.read(relayConfigProvider);
-  if (currentConfig.baseUrl != expectedRelayUrl) {
-    throw StateError('Active community changed before invite recovery');
-  }
-  if (ref.read(relaySessionProvider).status == SessionStatus.connected) return;
-
+/// Waits for this attempt's community to hold an authenticated connection.
+///
+/// Each attempt observes the live session, so a retry never reuses an earlier
+/// attempt's failure or a connection that has since been lost.
+Future<void> _waitForInviteRelay(Ref ref, bool Function() isScopeCurrent) {
   final connected = Completer<void>();
-  ref.listen(relaySessionProvider, (_, next) {
+  final sub = ref.listen(relaySessionProvider, (_, next) {
     if (connected.isCompleted) return;
-    if (ref.read(relayConfigProvider).baseUrl != expectedRelayUrl) {
+    if (!isScopeCurrent()) {
       connected.completeError(
         StateError('Active community changed during invite recovery'),
       );
     } else if (next.status == SessionStatus.connected) {
       connected.complete();
     }
-  });
-  await connected.future;
-});
+  }, fireImmediately: true);
+  return connected.future
+      .timeout(const Duration(seconds: 15))
+      .whenComplete(sub.close);
+}
 
 /// App-level bridge from invite joining to the channels feature.
 class MobileInviteJoinRecovery implements InviteJoinRecovery {
@@ -241,9 +238,7 @@ InviteJoinRecovery buildMobileInviteJoinRecovery(
       ensureScopeCurrent();
       await ref.read(activeCommunityProvider.future);
       ensureScopeCurrent();
-      await ref
-          .read(_inviteRelayConnectedProvider(scope.relayHttpOrigin).future)
-          .timeout(const Duration(seconds: 15));
+      await _waitForInviteRelay(ref, isScopeCurrent);
       ensureScopeCurrent();
       final channels = await ref
           .read(channelsProvider.notifier)

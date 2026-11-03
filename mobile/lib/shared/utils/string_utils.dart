@@ -4,7 +4,24 @@ import 'package:nostr/nostr.dart' as nostr;
 /// public key — malformed identities never leak truncated raw hex into the UI.
 const String unknownIdentityLabel = 'Unknown identity';
 
-final RegExp _hexPubkeyPattern = RegExp(r'^[0-9a-fA-F]{64}$');
+/// Whether [value] is a 64-character hex public key (any case).
+///
+/// A character loop rather than a regular expression: AOT builds on iOS run
+/// regular expressions in an interpreter, and identity views check every key
+/// of a large roster on each rebuild.
+bool isHexPubkey(String value) {
+  if (value.length != 64) return false;
+  for (var i = 0; i < 64; i++) {
+    final c = value.codeUnitAt(i);
+    if (!((c >= 0x30 && c <= 0x39) || // 0-9
+        (c >= 0x61 && c <= 0x66) || // a-f
+        (c >= 0x41 && c <= 0x46))) {
+      // A-F
+      return false;
+    }
+  }
+  return true;
+}
 
 /// The canonical full NIP-19 npub for [identity], or null when [identity] is
 /// not a valid public key.
@@ -18,12 +35,12 @@ final RegExp _hexPubkeyPattern = RegExp(r'^[0-9a-fA-F]{64}$');
 String? fullNpub(String identity) {
   final trimmed = identity.trim();
   try {
-    if (_hexPubkeyPattern.hasMatch(trimmed)) {
+    if (isHexPubkey(trimmed)) {
       return _encodeNpub(trimmed.toLowerCase());
     }
     final decoded = nostr.Nip19.decode(payload: trimmed);
     if (decoded.prefix != nostr.Nip19Prefix.npub ||
-        !_hexPubkeyPattern.hasMatch(decoded.data)) {
+        !isHexPubkey(decoded.data)) {
       return null;
     }
     return _encodeNpub(decoded.data.toLowerCase());
