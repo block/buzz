@@ -21,43 +21,52 @@ import 'hpke_backup.dart';
 ///
 /// A tenant without backups answers 404, and a definitive refusal cannot
 /// succeed unchanged, so either ends attempts for that account and key until
-/// the app restarts. Any other failure is retried at the next assertion, up
-/// to [maxAttempts] in a row.
+/// the app restarts. Any other failure is retried at a later assertion, after
+/// a delay that doubles from [firstRetryDelay] up to [maxRetryDelay]. The
+/// tenant's listing is the durable record: every launch, and every assertion
+/// renewal in a long-running one, checks it again until the key is listed.
 class OrganizationKeyBackup {
   OrganizationKeyBackup(
     this.account, {
     HpkeBackup? hpke,
     FlutterSecureStorage? storage,
     Future<bool> Function()? supportsSealing,
+    DateTime Function()? now,
   }) : _hpke = hpke,
        _storage = storage,
-       _supportsSealing = supportsSealing ?? HpkeBackup.supportsSealing;
+       _supportsSealing = supportsSealing ?? HpkeBackup.supportsSealing,
+       _now = now ?? DateTime.now;
 
   final BuilderlabAccountClient account;
   final HpkeBackup? _hpke;
   final FlutterSecureStorage? _storage;
   final Future<bool> Function() _supportsSealing;
+  final DateTime Function() _now;
 
   /// Account and key pairs that are backed up, or that cannot be here.
   final _settled = <String>{};
   final _running = <String, Future<void>>{};
   final _failures = <String, int>{};
+  final _retryAt = <String, DateTime>{};
 
-  /// Consecutive failed attempts after which a key waits for the next launch.
-  /// A relay refusal re-issues at once, so retries need their own end.
-  static const maxAttempts = 3;
+  /// A relay refusal re-issues an assertion at once, so retries wait between
+  /// attempts instead of following every assertion.
+  static const firstRetryDelay = Duration(minutes: 1);
+  static const maxRetryDelay = Duration(hours: 1);
 
   /// The latest attempt's failure, cleared by a completed attempt.
   @visibleForTesting
   Enum? lastFailure;
 
-  /// Completes without error. A failure is recorded and retried at the next
-  /// assertion, up to [maxAttempts] times per launch.
+  /// Completes without error. A failure is recorded and retried at the first
+  /// assertion after its retry delay.
   Future<void> afterAssertion(String nsec, String pubkey) {
     final subject = account.account?.subject;
     if (subject == null) return Future.value();
     final scope = '$subject\n$pubkey';
     if (_settled.contains(scope)) return Future.value();
+    final retryAt = _retryAt[scope];
+    if (retryAt != null && _now().isBefore(retryAt)) return Future.value();
     return _running[scope] ??= _attempt(subject, nsec, pubkey, scope)
         .whenComplete(() {
           // Not `=> remove`: whenComplete would await the removed future, itself.
@@ -78,6 +87,7 @@ class OrganizationKeyBackup {
       }
       _settled.add(scope);
       _failures.remove(scope);
+      _retryAt.remove(scope);
       lastFailure = null;
     } on AccountFailure catch (failure) {
       _failed(scope, failure);
@@ -103,19 +113,21 @@ class OrganizationKeyBackup {
   void _failed(String scope, Enum failure) {
     debugPrint('Organization key backup failed: ${failure.name}');
     lastFailure = failure;
-    final attempts = (_failures[scope] ?? 0) + 1;
-    _failures[scope] = attempts;
     // A tenant without backups (404) and other definitive refusals cannot
     // succeed unchanged.
-    if (attempts >= maxAttempts ||
-        const {
-          AccountFailure.rejected,
-          HostedBackupFailure.unavailable,
-          HostedBackupFailure.rejected,
-          HpkeBackupFailure.invalidEnrollment,
-        }.contains(failure)) {
+    if (const {
+      AccountFailure.rejected,
+      HostedBackupFailure.unavailable,
+      HostedBackupFailure.rejected,
+      HpkeBackupFailure.invalidEnrollment,
+    }.contains(failure)) {
       _settled.add(scope);
+      return;
     }
+    final failures = (_failures[scope] ?? 0) + 1;
+    _failures[scope] = failures;
+    final delay = firstRetryDelay * (1 << (failures - 1).clamp(0, 6));
+    _retryAt[scope] = _now().add(delay > maxRetryDelay ? maxRetryDelay : delay);
   }
 
   Future<void> _backUp(String subject, String nsec, String pubkey) async {

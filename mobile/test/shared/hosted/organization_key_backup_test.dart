@@ -56,6 +56,7 @@ void main() {
   late List<String> listed;
   late String current;
   late int uploadCode;
+  late DateTime now;
   late _FakeHpke hpke;
 
   BuilderlabAccountClient organizationClient() => BuilderlabAccountClient(
@@ -146,6 +147,7 @@ void main() {
         account,
         hpke: hpke,
         supportsSealing: () async => true,
+        now: () => now,
       );
 
   setUp(() async {
@@ -159,6 +161,7 @@ void main() {
         'expires_at': expiry.toIso8601String(),
       }),
     );
+    now = DateTime.utc(2026, 11, 3);
     paths = [];
     uploads = [];
     statusCode = 200;
@@ -189,9 +192,11 @@ void main() {
       expect(backup.lastFailure, AccountFailure.unavailable);
       expect(await const FlutterSecureStorage().read(key: pending), isNotNull);
 
-      // The next assertion retries with the saved envelope, not a new one.
+      // The next assertion after the retry delay replays the saved envelope,
+      // not a new one.
       uploadCode = 200;
       paths.clear();
+      now = now.add(OrganizationKeyBackup.firstRetryDelay);
       await connect(backup);
       expect(backupPaths(), [
         '/v1/buzz/nsec-backups/status',
@@ -241,38 +246,40 @@ void main() {
     expect(backupPaths(), isEmpty);
   });
 
-  test(
-    'failures retry at the next assertion, a few times per launch',
-    () async {
-      final backup = backupFor(organizationClient());
+  test('failures retry after a growing delay and never stop', () async {
+    final backup = backupFor(organizationClient());
 
-      statusCode = 503;
-      await connect(backup);
-      expect(backup.lastFailure, AccountFailure.unavailable);
-      statusCode = 200;
-      await connect(backup);
-      expect(uploads, hasLength(1));
-      expect(backup.lastFailure, isNull);
+    statusCode = 503;
+    await connect(backup);
+    expect(backup.lastFailure, AccountFailure.unavailable);
+    statusCode = 200;
+    // A relay refusal re-issues at once; that assertion waits.
+    await connect(backup);
+    expect(backupPaths(), ['/v1/buzz/nsec-backups/status']);
+    now = now.add(OrganizationKeyBackup.firstRetryDelay);
+    await connect(backup);
+    expect(uploads, hasLength(1));
+    expect(backup.lastFailure, isNull);
 
-      // A key bound to someone else's account is never uploaded, and repeated
-      // failures stop until the next launch.
-      final other = backupFor(organizationClient());
-      current = 'f' * 64;
-      paths.clear();
-      for (var i = 0; i < OrganizationKeyBackup.maxAttempts + 2; i++) {
-        await connect(other);
+    // A key bound to someone else's account is never uploaded. Its retries
+    // slow down to the longest delay but continue in a long-running app.
+    final other = backupFor(organizationClient());
+    current = 'f' * 64;
+    paths.clear();
+    var delay = OrganizationKeyBackup.firstRetryDelay;
+    for (var i = 0; i < 10; i++) {
+      await connect(other);
+      await connect(other);
+      now = now.add(delay);
+      if (delay < OrganizationKeyBackup.maxRetryDelay) delay *= 2;
+      if (delay > OrganizationKeyBackup.maxRetryDelay) {
+        delay = OrganizationKeyBackup.maxRetryDelay;
       }
-      expect(other.lastFailure, HostedBackupFailure.identityMismatch);
-      expect(
-        backupPaths(),
-        List.filled(
-          OrganizationKeyBackup.maxAttempts,
-          '/v1/buzz/nsec-backups/status',
-        ),
-      );
-      expect(uploads, hasLength(1));
-    },
-  );
+    }
+    expect(other.lastFailure, HostedBackupFailure.identityMismatch);
+    expect(backupPaths(), List.filled(10, '/v1/buzz/nsec-backups/status'));
+    expect(uploads, hasLength(1));
+  });
 
   test('a native sealing check that fails sends nothing', () async {
     final backup = OrganizationKeyBackup(
