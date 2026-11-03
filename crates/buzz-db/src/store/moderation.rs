@@ -1040,13 +1040,15 @@ impl Db {
 
     /// Fetch the effective (own or agent-owner) ban/timeout restriction state
     /// for enforcement hot paths.
-    #[datastore_span(name = "moderation_restriction_state", system = "postgresql")]
     pub async fn moderation_restriction_state(
         &self,
         community: CommunityId,
         pubkey: &[u8],
     ) -> Result<RestrictionState> {
-        restriction_state(&self.pool, community, pubkey).await
+        Ok(self
+            .moderation_restriction_state_read_at(community, pubkey)
+            .await?
+            .value)
     }
 
     /// [`Self::moderation_restriction_state`], with when its connection was

@@ -2410,12 +2410,14 @@ impl Db {
     }
 
     /// A community's listed open channel IDs. See [`get_listed_open_channel_ids`].
-    #[datastore_span(name = "get_listed_open_channel_ids", system = "postgresql")]
     pub async fn get_listed_open_channel_ids(
         &self,
         community_id: CommunityId,
     ) -> Result<Vec<Uuid>> {
-        get_listed_open_channel_ids(&self.pool, community_id).await
+        Ok(self
+            .get_listed_open_channel_ids_read_at(community_id)
+            .await?
+            .value)
     }
 
     /// [`Self::get_listed_open_channel_ids`], with when its connection was
