@@ -159,6 +159,26 @@ pub(crate) async fn apply_kick_live_side_effects(
             return Err(e.into());
         }
     }
+
+    // The removal is committed: refresh the channel's discovery roster, then
+    // tell the kicked member, as a kind:9001 removal does. A recovery re-drive
+    // repeats both; the refresh is replaceable and a repeated notice is a
+    // harmless hint. Failures are logged and do not undo the kick.
+    if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
+        warn!(channel = %channel_id, error = %e, "NIP-29 group discovery emission failed");
+    }
+    if let Err(e) = emit_membership_notification(
+        tenant,
+        state,
+        channel_id,
+        target_pubkey,
+        state.relay_keypair.public_key().as_bytes(),
+        KIND_MEMBER_REMOVED_NOTIFICATION,
+    )
+    .await
+    {
+        warn!(channel = %channel_id, error = %e, "membership notification emission failed");
+    }
     Ok(())
 }
 
@@ -2713,6 +2733,20 @@ async fn handle_delete_group(
         extract_h_tag_channel(event).ok_or_else(|| anyhow::anyhow!("missing h tag"))?;
     let actor_bytes = event.pubkey.to_bytes().to_vec();
 
+    // Read the members and type before the delete: `get_members` omits a
+    // deleted channel. The notices go out only after the delete and discovery
+    // cleanup, so a client that re-reads on the notice no longer sees it.
+    let members = state
+        .db
+        .get_members(tenant.community(), channel_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("get_members failed: {e}"))?;
+    let channel_type = state
+        .db
+        .channel_type_of(tenant.community(), channel_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("channel_type_of failed: {e}"))?;
+
     // Soft-delete the channel.
     let deleted = state
         .db
@@ -2752,6 +2786,24 @@ async fn handle_delete_group(
         chrono::Utc::now(),
     )
     .await?;
+
+    if let (true, Some(channel_type)) = (deleted, channel_type) {
+        for member in &members {
+            if let Err(e) = emit_typed_membership_notification(
+                tenant,
+                state,
+                channel_id,
+                &channel_type,
+                &member.pubkey,
+                &actor_bytes,
+                KIND_MEMBER_REMOVED_NOTIFICATION,
+            )
+            .await
+            {
+                warn!(channel = %channel_id, error = %e, "membership notification emission failed");
+            }
+        }
+    }
 
     info!(channel = %channel_id, "NIP-29 DELETE_GROUP processed");
     Ok(())

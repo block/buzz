@@ -25,11 +25,11 @@ use nostr::{EventBuilder, Kind, Tag};
 use tracing::warn;
 use uuid::Uuid;
 
-use buzz_core::kind::{event_kind_u32, KIND_STREAM_MESSAGE};
+use buzz_core::kind::{event_kind_u32, KIND_MEMBER_ADDED_NOTIFICATION, KIND_STREAM_MESSAGE};
 use buzz_core::tenant::TenantContext;
 
 use super::event::dispatch_persistent_event;
-use super::side_effects::emit_group_discovery_events;
+use super::side_effects::{emit_group_discovery_events, emit_membership_notification};
 use crate::state::AppState;
 
 /// Tag naming the moderation source row (report/action) a notice was derived
@@ -148,6 +148,22 @@ pub async fn send_moderation_notice(
         warn!(error = %e, "moderation profile publish failed (continuing)");
     }
     emit_group_discovery_events(tenant, state, dm_channel_id).await?;
+
+    // The DM is now readable in the recipient's channel list: tell them, as
+    // opening a DM does. Sent on every delivery so a new, existing or hidden
+    // DM resurfaces live; a repeated notice is a harmless hint.
+    if let Err(e) = emit_membership_notification(
+        tenant,
+        state,
+        dm_channel_id,
+        recipient_pubkey,
+        relay_pubkey_bytes.as_slice(),
+        KIND_MEMBER_ADDED_NOTIFICATION,
+    )
+    .await
+    {
+        warn!(channel = %dm_channel_id, error = %e, "membership notification emission failed");
+    }
 
     // 4. Insert the relay-signed kind:9 notice with `h=<dm_channel_id>` and a
     //    `moderation_source` tag naming the source row id (idempotency +
