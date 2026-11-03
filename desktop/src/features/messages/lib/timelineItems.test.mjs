@@ -242,7 +242,7 @@ test("buildTimelineItems: prepending membership history preserves the loaded suf
   assert.deepEqual(prependedKeys.slice(-loadedKeys.length), loadedKeys);
 });
 
-test("buildTimelineItems: contiguous member additions extend a group outside one hour", () => {
+test("buildTimelineItems: contiguous member additions keep one group past an hour", () => {
   const start = dayAt(2026, 6, 14);
   const entries = [
     memberAddedEntry({ id: "a", target: "target-a", createdAt: start }),
@@ -332,19 +332,29 @@ test("buildTimelineItems: arrival cohorts stop at non-membership rows", () => {
   ]);
 });
 
-test("buildTimelineItems: arrival cohorts stop at >1 hour adjacent gaps", () => {
-  const start = dayAt(2026, 6, 14);
+test("buildTimelineItems: arrival cohorts span long adjacent gaps within a day", () => {
+  const start = dayAt(2026, 6, 14, 8);
   const entries = [
     memberAddedEntry({ id: "a", target: "target-a", createdAt: start }),
     memberJoinedEntry({
       id: "b",
       target: "target-b",
-      createdAt: start + 3_601,
+      createdAt: start + 5 * 3_600,
+    }),
+    memberJoinedEntry({
+      id: "c",
+      target: "target-c",
+      createdAt: start + 9 * 3_600,
     }),
   ];
 
   const { items } = buildTimelineItems(entries, null);
-  assert.deepEqual(kinds(items), ["day-divider", "system", "system"]);
+  assert.deepEqual(kinds(items), ["day-divider", "system-group"]);
+  const group = items.find((item) => item.kind === "system-group");
+  assert.deepEqual(
+    group?.entries.map((groupEntry) => groupEntry.message.id),
+    ["a", "b", "c"],
+  );
 });
 
 test("buildTimelineItems: a member joining then leaving is one lifecycle group", () => {

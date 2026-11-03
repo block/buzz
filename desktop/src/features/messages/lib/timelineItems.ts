@@ -137,8 +137,9 @@ function membershipChangesCanGroup(
  * absorbed, since the relay re-emits `member_joined` on each PUT_USER.
  * `buildGroupedMembershipPayload` must describe every group this emits;
  * `membershipGroupPayload.test.mjs` pins that with a matrix invariant.
- * Each adjacent event must fall within the one-hour activity window, so
- * uninterrupted activity can extend beyond an hour overall.
+ * Time between adjacent events does not split a group: only a message, a day
+ * boundary, or the unread divider does, so a slow trickle of joins over a quiet
+ * day still reads as one row.
  */
 function buildMembershipGroups(
   entries: readonly MainTimelineEntry[],
@@ -157,14 +158,12 @@ function buildMembershipGroups(
     let start = end;
     while (start > 0) {
       const candidate = entries[start - 1];
-      const nextEntry = entries[start];
       const candidatePayload = parseMembershipChangePayload(candidate);
       if (
         barrierIndexes.has(start) ||
         !candidatePayload ||
         !membershipChangesCanGroup(candidatePayload, newestPayload) ||
-        newestEntry.message.createdAt < candidate.message.createdAt ||
-        nextEntry.message.createdAt - candidate.message.createdAt > 60 * 60
+        newestEntry.message.createdAt < candidate.message.createdAt
       ) {
         break;
       }

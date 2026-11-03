@@ -186,14 +186,14 @@ test("an ordinary message between membership bursts yields two rows", () => {
   );
 });
 
-test("membership events more than an hour apart do not group", () => {
+test("membership events hours apart still group when nothing interrupts them", () => {
   const entries = [
     systemEntry("first", DAY_START, {
       type: "member_joined",
       actor: "admin",
       target: "first",
     }),
-    systemEntry("second", DAY_START + 60 * 60 + 1, {
+    systemEntry("second", DAY_START + 6 * 60 * 60, {
       type: "member_removed",
       actor: "admin",
       target: "second",
@@ -202,8 +202,8 @@ test("membership events more than an hour apart do not group", () => {
 
   const { items } = buildTimelineItems(entries, null);
 
-  assert.equal(items.filter((item) => item.kind === "system-group").length, 0);
-  assert.equal(items.filter((item) => item.kind === "system").length, 2);
+  assert.equal(items.filter((item) => item.kind === "system-group").length, 1);
+  assert.equal(items.filter((item) => item.kind === "system").length, 0);
 });
 
 test("a lifecycle group needs every arrival to be a self-join by the departing member", () => {
