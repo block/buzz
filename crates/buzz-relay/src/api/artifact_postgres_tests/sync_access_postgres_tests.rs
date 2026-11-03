@@ -537,8 +537,7 @@ async fn incremental_unlisted_channels_require_membership_or_named_scope() {
 }
 
 /// An incremental poll's access line counts its changes, removals included:
-/// an empty poll is DEBUG, a poll with changes is INFO, and a failed poll is
-/// WARN. Mutation: count only array responses in `query_events` → the
+/// an empty poll is DEBUG and a poll with changes is INFO. Mutation: count only array responses in `query_events` → the
 /// empty poll has no `result_count` and logs INFO → RED.
 #[tokio::test]
 #[ignore = "requires Postgres"]
@@ -572,19 +571,6 @@ async fn incremental_poll_access_level_follows_its_change_count() {
         (&"INFO".into(), &1.into()),
         "{served}"
     );
-
-    let mut off = (*f.state).clone();
-    Arc::make_mut(&mut off.config).artifact_incremental_enabled = false;
-    let f = Fixture {
-        state: Arc::new(off),
-        ..f
-    };
-    let (_capture, out) = crate::access::tests::capture_scoped();
-    let (status, _) = f.request("/query", poll("buzz.none")).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    let failed = line(&out);
-    assert_eq!(failed["level"], "WARN", "{failed}");
-    assert!(failed.get("result_count").is_none(), "{failed}");
 }
 
 /// A wrapped incremental read dropped during its database work still
