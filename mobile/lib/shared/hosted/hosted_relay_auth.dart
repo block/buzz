@@ -9,6 +9,7 @@ import 'builderlab_account.dart';
 import 'account_identity_store.dart';
 import 'hosted_environment.dart';
 import 'organization_environment.dart';
+import 'organization_key_backup.dart';
 import '../push/push_bridge.dart';
 
 final builderlabAccountProvider = Provider<BuilderlabAccountClient>((ref) {
@@ -36,9 +37,13 @@ final organizationAccountProvider = Provider<BuilderlabAccountClient?>((ref) {
 });
 
 final hostedRelayAuthProvider = Provider<HostedRelayAuth>((ref) {
+  final organization = ref.watch(organizationAccountProvider);
   final auth = HostedRelayAuth(
     ref.watch(builderlabAccountProvider),
-    organization: ref.watch(organizationAccountProvider),
+    organization: organization,
+    organizationBackup: organization == null
+        ? null
+        : OrganizationKeyBackup(organization),
   );
   ref.onDispose(auth.dispose);
   return auth;
@@ -59,6 +64,7 @@ class HostedRelayAuth extends ChangeNotifier {
   HostedRelayAuth(
     this.account, {
     this.organization,
+    this.organizationBackup,
     this.organizationRelay = OrganizationEnvironment.protects,
     this.enabled = const bool.fromEnvironment('BUZZ_HOSTED_RELAY_AUTH'),
     DateTime Function()? now,
@@ -66,6 +72,9 @@ class HostedRelayAuth extends ChangeNotifier {
 
   final BuilderlabAccountClient account;
   final BuilderlabAccountClient? organization;
+
+  /// Backs up each organization relay key once its assertion has bound it.
+  final OrganizationKeyBackup? organizationBackup;
   final bool Function(Uri relay) organizationRelay;
   final bool enabled;
   final DateTime Function() _now;
@@ -254,6 +263,9 @@ class HostedRelayAuth extends ChangeNotifier {
       );
       // Issuance alone cannot prove admission after a relay refusal.
       if (failure != AccountFailure.denied) connected(config);
+      if (identical(account, organization)) {
+        unawaited(organizationBackup?.afterAssertion(config.nsec!));
+      }
     } on AccountFailure catch (error) {
       // Issuers run in parallel, so a failure that started before another
       // relay's unresolved failure was recorded must not replace it.

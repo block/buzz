@@ -35,6 +35,7 @@ class FakeAccount extends BuilderlabAccountClient {
     expect(
       await const FlutterSecureStorage().read(
         key: HostedBackupService.pendingKey(
+          BuilderlabAccountClient.origin.origin,
           subject,
           envelope['nostr_pubkey'] as String,
         ),
@@ -107,6 +108,7 @@ void main() {
     await identity.create(nostr.Keys('42' * 32).nsec);
     await const FlutterSecureStorage().write(
       key: HostedBackupService.pendingKey(
+        BuilderlabAccountClient.origin.origin,
         'subject',
         envelope['nostr_pubkey'] as String,
       ),
@@ -156,6 +158,7 @@ void main() {
       final identity = AccountIdentityStore();
       await identity.create(nostr.Keys('42' * 32).nsec);
       final oldKey = HostedBackupService.pendingKey(
+        BuilderlabAccountClient.origin.origin,
         'other',
         envelope['nostr_pubkey'] as String,
       );
