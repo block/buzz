@@ -1,4 +1,5 @@
 import 'package:buzz/features/channels/default_agent_launcher.dart';
+import 'package:buzz/features/channels/bestie_welcome.dart';
 import 'package:buzz/shared/me/default_agent.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/features/channels/send_message_provider.dart';
@@ -694,56 +695,100 @@ void main() {
     );
   }
   for (final creates in [true, false]) {
-    testWidgets('empty Bestie launcher opens a new Bestie: creates=$creates', (
-      tester,
-    ) async {
-      String? chosen;
-      final dm = Channel(
-        id: _channelId,
-        name: 'Bestie',
-        channelType: 'dm',
-        visibility: 'private',
-        description: '',
-        createdBy: 'self',
-        createdAt: DateTime(2026),
-        memberCount: 2,
-        participantPubkeys: const ['self', 'agent'],
-        isMember: true,
-      );
-      await tester.pumpWidget(
-        _buildTestable(
-          personalChat: true,
-          signingPubkey: 'self',
-          currentBestie: () => chosen,
-          organization: Stream.value(const MeGroups()),
-          channel: dm,
-          messages: [
-            _textMsg(id: threadIdRoot, pubkey: 'agent', content: 'Hello!'),
-          ],
-          home: Consumer(
-            builder: (context, ref, _) => Scaffold(
-              body: DefaultAgentLauncher(
-                onChooseAgent: () {
-                  // Creation selects a first agent as Bestie before closing.
-                  if (creates) chosen = 'agent';
-                  ref.invalidate(defaultAgentProvider);
-                },
+    for (final hasHistory in [true, false]) {
+      testWidgets(
+        'empty Bestie launcher opens a new Bestie: creates=$creates history=$hasHistory',
+        (tester) async {
+          String? chosen;
+          final dm = Channel(
+            id: _channelId,
+            name: 'Bestie',
+            channelType: 'dm',
+            visibility: 'private',
+            description: '',
+            createdBy: 'self',
+            createdAt: DateTime(2026),
+            memberCount: 2,
+            participantPubkeys: const ['self', 'agent'],
+            isMember: true,
+          );
+          await tester.pumpWidget(
+            _buildTestable(
+              personalChat: true,
+              signingPubkey: 'self',
+              currentBestie: () => chosen,
+              organization: Stream.value(const MeGroups()),
+              channel: dm,
+              messages: [
+                if (hasHistory)
+                  _textMsg(
+                    id: threadIdRoot,
+                    pubkey: 'agent',
+                    content: 'Hello!',
+                  ),
+              ],
+              home: Consumer(
+                builder: (context, ref, _) => Scaffold(
+                  body: DefaultAgentLauncher(
+                    onChooseAgent: () {
+                      // Creation selects a first agent as Bestie before closing.
+                      if (creates) chosen = 'agent';
+                      ref.invalidate(defaultAgentProvider);
+                    },
+                  ),
+                ),
               ),
             ),
-          ),
-        ),
+          );
+          await tester.pumpAndSettle();
+          expect(find.byTooltip('Create your Bestie'), findsOneWidget);
+          await tester.tap(find.byType(IconButton));
+          await tester.pumpAndSettle();
+          expect(
+            find.byType(ChannelDetailPage),
+            creates ? findsOneWidget : findsNothing,
+          );
+          expect(
+            find.text('Hello!'),
+            creates && hasHistory ? findsOneWidget : findsNothing,
+          );
+          expect(
+            find.byType(BestieWelcome),
+            creates ? findsOneWidget : findsNothing,
+          );
+          if (creates && !hasHistory) {
+            final container = ProviderScope.containerOf(
+              tester.element(find.byType(BestieWelcome)),
+            );
+            final messages =
+                container.read(meMessagesProvider(_channelId).notifier)
+                    as _FakeMessagesNotifier;
+            messages.setMessages([
+              _textMsg(
+                id: threadIdRoot,
+                pubkey: 'self',
+                content: 'My first message',
+              ),
+            ]);
+            await tester.pumpAndSettle();
+            expect(find.byType(BestieWelcome), findsOneWidget);
+            expect(find.text('My first message'), findsOneWidget);
+            tester.state<NavigatorState>(find.byType(Navigator).first).pop();
+            await tester.pumpAndSettle();
+            await tester.tap(
+              find.descendant(
+                of: find.byType(DefaultAgentLauncher),
+                matching: find.byType(IconButton),
+              ),
+            );
+            await tester.pumpAndSettle();
+            expect(find.byType(BestieWelcome), findsOneWidget);
+            expect(find.text('My first message'), findsOneWidget);
+          }
+          expect(tester.takeException(), isNull);
+        },
       );
-      await tester.pumpAndSettle();
-      expect(find.byTooltip('Create your Bestie'), findsOneWidget);
-      await tester.tap(find.byType(IconButton));
-      await tester.pumpAndSettle();
-      expect(
-        find.byType(ChannelDetailPage),
-        creates ? findsOneWidget : findsNothing,
-      );
-      expect(find.text('Hello!'), creates ? findsOneWidget : findsNothing);
-      expect(tester.takeException(), isNull);
-    });
+    }
   }
   testWidgets(
     'refresh replaces stale Solo details before opening and sending',

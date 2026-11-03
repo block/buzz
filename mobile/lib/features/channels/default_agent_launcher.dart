@@ -18,6 +18,7 @@ import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/preset_agent_avatar.dart';
 import '../../shared/widgets/navigation_button_surface.dart';
 import 'empty_bestie_avatar.dart';
+import 'bestie_welcome_storage.dart';
 import 'channel.dart';
 import 'channel_detail_page.dart';
 import 'channels_provider.dart';
@@ -49,7 +50,7 @@ class DefaultAgentLauncher extends HookConsumerWidget {
         : preference.hasError
         ? 'Retry Bestie'
         : 'Bestie';
-    Future<void> openChat(String agent) async {
+    Future<void> openChat(String agent, {bool welcome = false}) async {
       final channelState = ref.read(channelsProvider);
       // AsyncValue may retain the previous community's list during reload.
       final channels = channelState.isLoading || channelState.hasError
@@ -77,6 +78,16 @@ class DefaultAgentLauncher extends HookConsumerWidget {
           ref.read(defaultAgentProvider).isLoading ||
           ref.read(defaultAgentProvider).value != agent) {
         return;
+      }
+      if (welcome) {
+        await saveBestieWelcome(
+          ref.read(savedPrefsProvider),
+          scope,
+          channel.id,
+          agent,
+        );
+        if (!context.mounted || ref.read(meSyncProvider) != scope) return;
+        ref.invalidate(bestieWelcomeProvider(channel.id));
       }
       await Navigator.of(context).push<void>(
         MaterialPageRoute(
@@ -110,7 +121,9 @@ class DefaultAgentLauncher extends HookConsumerWidget {
         // Creating a first agent makes it Bestie, so continue into its chat.
         if (!context.mounted || ref.read(meSyncProvider) != scope) return;
         final created = await ref.read(defaultAgentProvider.future);
-        if (created != null && context.mounted) await openChat(created);
+        if (created != null && context.mounted) {
+          await openChat(created, welcome: true);
+        }
       } catch (error) {
         if (context.mounted) {
           ScaffoldMessenger.of(context).showFeedbackSnackBar(
