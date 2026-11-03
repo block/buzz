@@ -170,6 +170,34 @@ to manufacture activation. If a dead boot cannot acknowledge, use only BUZZ-512'
 reviewed permanent-non-serving recovery procedure and retain its audited proof.
 An absent pod, a replacement, a readiness change and elapsed time are insufficient.
 
+## Stop and cleanup
+
+Name every isolated fixture with a run-specific prefix such as
+`auth-upgrade-<run-id>-<scenario>`. Before creating it, record its owner, immutable
+ID, host, dependent trust and intended supported retirement action in the run
+record. Keep a resource ledger of fault injectors, sessions, Jobs and fixtures;
+never reuse a normal community as a disposable target.
+
+Stop issuing upgrades or starting new injections immediately if a free/enforced
+control regresses, an unrelated community drains, scope no longer matches the
+allowlist, or evidence shows a false active result. Apply the recorded inverse
+of each reversible fault, stop the fixture traffic and record the run as failed.
+Notify the operator and reviewer with affected scope, operation/generation and
+the current recovery status. Recovery does not erase the failed observation.
+If the inverse fails, preserve its error and escalate the unresolved fault;
+do not proceed to another scenario.
+
+Fault restoration is separate from the permanent authentication upgrade. Never
+clear the requirement or edit operation/generation/ACK rows to reset a fixture.
+Retire isolated upgraded communities through their supported archive/deletion
+lifecycle, preserving required audit records. Close test sessions and remove
+only run-owned temporary Jobs and fault resources. Do not remove issuer trust
+while any active fixture or other community depends on it. Record each cleanup
+command and result, and list retained resources with owner, reason and next
+action. Stop before cleanup actions outside the run's separately authorized
+scope and report them as retained; drafting this document authorizes no cleanup
+against live infrastructure.
+
 ## Completion evidence
 
 For every operation retain its community/host, actor, operation ID, policy
