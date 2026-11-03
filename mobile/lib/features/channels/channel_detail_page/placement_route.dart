@@ -50,6 +50,9 @@ class ChannelDetailPage extends ConsumerWidget {
       key: ValueKey((channel.id, placed)),
       channel: current,
       personalChat: placed,
+      welcomeAgent: current.isDm
+          ? ref.watch(bestieWelcomeProvider(channel.id))
+          : null,
       placementKnown:
           placed ||
           groups != null ||

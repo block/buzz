@@ -20,8 +20,11 @@ import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/agent_navigation_icon.dart';
+import '../../shared/me/me_sync.dart';
+import '../channels/bestie_welcome_storage.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
+import '../channels/channel_management_provider.dart';
 import '../profile/user_profile_sheet.dart';
 import 'agent_creation_draft.dart';
 import 'create_agent_page.dart';
@@ -96,9 +99,15 @@ Future<void> showAgents(
     _openAgentsRoute = null;
     _openAgentsNavigator = null;
   }
-  if (channel != null && context.mounted) {
-    await Navigator.of(context).push<void>(
-      MaterialPageRoute(builder: (_) => ChannelDetailPage(channel: channel)),
+  // The caller's context can be gone by now: iOS Home drops the Bestie
+  // shortcut while another route covers it. The navigator outlives it.
+  if (channel != null && navigator.mounted) {
+    await navigator.push<void>(
+      MaterialPageRoute(
+        // Native glass and video layers must track the live route.
+        allowSnapshotting: false,
+        builder: (_) => ChannelDetailPage(channel: channel),
+      ),
     );
   }
 }
@@ -142,6 +151,52 @@ class _AgentsNavigation extends HookConsumerWidget {
               draft: draft,
               createOnOpen: createOnOpen,
               onClose: () => Navigator.of(context).pop(),
+              onCreated: (pubkey) async {
+                // Only a first agent becomes Bestie; continue into its chat.
+                final scope = ref.read(meSyncProvider);
+                bool current() =>
+                    context.mounted && ref.read(meSyncProvider) == scope;
+                final Channel channel;
+                try {
+                  if (await ref.read(defaultAgentProvider.future) != pubkey ||
+                      !current()) {
+                    return;
+                  }
+                  channel = await ref
+                      .read(channelActionsProvider)
+                      .openDm(pubkeys: [pubkey]);
+                } catch (error) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+                      SnackBar(
+                        content: Text(
+                          'Could not open the agent conversation. $error',
+                        ),
+                      ),
+                      kind: ToastKind.error,
+                    );
+                  }
+                  return;
+                }
+                if (!current()) return;
+                // The welcome is local decoration; never let it block the chat.
+                try {
+                  await saveBestieWelcome(
+                    ref.read(savedPrefsProvider),
+                    scope,
+                    channel.id,
+                    pubkey,
+                  );
+                  ref.invalidate(bestieWelcomeProvider(channel.id));
+                } catch (error) {
+                  debugPrint('agents: Bestie welcome not saved: $error');
+                }
+                // Close only the Agents stack, never a route opened above it.
+                if (!context.mounted || !current()) return;
+                if (ModalRoute.of(context)?.isCurrent ?? false) {
+                  Navigator.of(context).pop(channel);
+                }
+              },
               onSelect: (pubkey) async {
                 final channel = await showBuzzModalBottomSheet<Channel>(
                   context: listContext,
@@ -201,6 +256,7 @@ class AgentsPage extends HookConsumerWidget {
     required this.controller,
     required this.onClose,
     required this.onSelect,
+    this.onCreated,
     this.draft,
     this.createOnOpen = false,
     super.key,
@@ -213,6 +269,10 @@ class AgentsPage extends HookConsumerWidget {
   final bool createOnOpen;
   final VoidCallback onClose;
   final ValueChanged<String> onSelect;
+
+  /// With [createOnOpen], called with the agent a creation here finished.
+  /// The list stays busy until it completes.
+  final Future<void> Function(String pubkey)? onCreated;
   final RemoteAgentController controller;
 
   @override
@@ -309,7 +369,7 @@ class AgentsPage extends HookConsumerWidget {
       if (community == null) return;
       creating.value = true;
       try {
-        await Navigator.of(context).push<bool>(
+        final done = await Navigator.of(context).push<bool>(
           MaterialPageRoute(
             builder: (_) => CreateAgentPage(
               controller: controller,
@@ -322,6 +382,10 @@ class AgentsPage extends HookConsumerWidget {
             ),
           ),
         );
+        final agent = controller.created;
+        if (createOnOpen && done == true && agent != null && context.mounted) {
+          await onCreated?.call(agent);
+        }
       } finally {
         if (context.mounted) creating.value = false;
       }
