@@ -1,6 +1,7 @@
 import 'package:flutter/scheduler.dart';
 import 'dart:async';
 import 'package:buzz/features/channels/composer_send_origin.dart';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
@@ -695,6 +696,37 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
   void notifyWithCopy() {
     state = AsyncData([..._channels]);
   }
+
+  void replaceChannels(List<Channel> channels) {
+    state = AsyncData(channels);
+  }
+}
+
+/// A channel list that counts how many times it is iterated.
+class _IterationCountingChannels extends ListBase<Channel> {
+  _IterationCountingChannels(this._channels);
+
+  final List<Channel> _channels;
+  int iterations = 0;
+
+  @override
+  Iterator<Channel> get iterator {
+    iterations++;
+    return _channels.iterator;
+  }
+
+  @override
+  int get length => _channels.length;
+
+  @override
+  set length(int value) => throw UnsupportedError('read-only');
+
+  @override
+  Channel operator [](int index) => _channels[index];
+
+  @override
+  void operator []=(int index, Channel value) =>
+      throw UnsupportedError('read-only');
 }
 
 void main() {
@@ -3803,6 +3835,86 @@ void main() {
             .style
             .decoration,
         TextDecoration.underline,
+      );
+    });
+
+    testWidgets('builds channel names once per channel list, not per build', (
+      tester,
+    ) async {
+      final channels = _IterationCountingChannels([
+        _makeChannel(name: 'engineering', channelType: 'stream'),
+      ]);
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          channels: channels,
+          onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+        ),
+      );
+      await _expandComposer(tester);
+      await tester.pump();
+      expect(channels.iterations, greaterThan(0));
+      final settled = channels.iterations;
+
+      // Typing and keyboard frames rebuild the composer without changing the
+      // channel list.
+      addTearDown(tester.view.resetViewInsets);
+      for (var i = 1; i <= 5; i++) {
+        tester.view.viewInsets = FakeViewPadding(bottom: i * 40.0);
+        await tester.enterText(find.byType(TextField), 'draft $i');
+        await tester.pump();
+      }
+
+      expect(channels.iterations, settled);
+    });
+
+    testWidgets('composer channel chips follow channel list changes', (
+      tester,
+    ) async {
+      const channelId = '580ca78b-9dae-46f3-8854-bd671853ba32';
+      Channel named(String name) => Channel(
+        id: channelId,
+        name: name,
+        channelType: 'stream',
+        visibility: 'open',
+        description: '',
+        createdBy: 'creator',
+        createdAt: DateTime(2026),
+        memberCount: 1,
+        isMember: true,
+      );
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          channels: [named('engineering')],
+          onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+        ),
+      );
+      await _expandComposer(tester);
+      await tester.enterText(
+        find.byType(TextField),
+        'buzz://channel/$channelId',
+      );
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('composer-buzz-link-chip:engineering')),
+        findsOneWidget,
+      );
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
+      );
+      (container.read(channelsProvider.notifier) as _FakeChannelsNotifier)
+          .replaceChannels([named('platform')]);
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey('composer-buzz-link-chip:platform')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('composer-buzz-link-chip:engineering')),
+        findsNothing,
       );
     });
 

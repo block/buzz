@@ -33,6 +33,50 @@ Future<GptMarkdownThemeData> _markdownTheme(
 }
 
 void main() {
+  testWidgets('keeps one theme object until the app theme changes', (
+    tester,
+  ) async {
+    final theme = ValueNotifier(AppTheme.light());
+    final revision = ValueNotifier(0);
+    addTearDown(theme.dispose);
+    addTearDown(revision.dispose);
+    final reads = <GptMarkdownThemeData>[];
+    await tester.pumpWidget(
+      ValueListenableBuilder<ThemeData>(
+        valueListenable: theme,
+        builder: (_, data, _) => MaterialApp(
+          theme: data,
+          home: ValueListenableBuilder<int>(
+            valueListenable: revision,
+            // A fresh subtree each time, as an ordinary ancestor rebuild gives.
+            builder: (_, generation, _) => AppMarkdownTheme(
+              child: Builder(
+                key: ValueKey(generation),
+                builder: (context) {
+                  reads.add(GptMarkdownTheme.of(context));
+                  return const SizedBox.shrink();
+                },
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final first = reads.last;
+    for (var i = 0; i < 3; i++) {
+      revision.value++;
+      await tester.pump();
+      // GptMarkdownTheme notifies by identity: a new object would make every
+      // GptMarkdown in the app parse its text again.
+      expect(reads.last, same(first));
+    }
+    theme.value = AppTheme.dark();
+    await tester.pumpAndSettle();
+    expect(reads.last, isNot(same(first)));
+    expect(reads.last.inlineCode.color, AppTheme.dark().colorScheme.onSurface);
+  });
+
   testWidgets('states inline code and leaves the rest of Markdown alone', (
     tester,
   ) async {

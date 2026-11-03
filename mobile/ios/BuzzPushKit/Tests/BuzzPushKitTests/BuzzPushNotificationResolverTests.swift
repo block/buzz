@@ -753,6 +753,58 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertEqual(URLProtocolStub.requests.count, 4)
   }
 
+  func testOnlyOwnSoloChatConversationNameDropsChannelHash() throws {
+    let message = try Self.signedEvent(
+      privateKey: Self.profilePrivateKey,
+      createdAt: Self.now,
+      kind: 9,
+      tags: [["h", Self.channelID]],
+      content: "Agent reply"
+    )
+    // Like the app's Channel.isPersonalChat: only the viewer's own Solo chat
+    // is personal; someone else's Solo chat stays an ordinary channel.
+    for (creator, expected) in [
+      (Self.ownPubkey, "Trip planning"), (message.pubkey, "#Trip planning"),
+    ] {
+      URLProtocolStub.requests = []
+      let channel = try Self.signedEvent(
+        privateKey: Self.relayPrivateKey,
+        createdAt: Self.now,
+        kind: 39_000,
+        tags: [
+          ["d", Self.channelID], ["name", "Trip planning"], ["t", "stream"],
+          ["t", "buzz.solo"], ["P", creator], ["private"],
+        ]
+      )
+      let membership = try Self.signedEvent(
+        privateKey: Self.relayPrivateKey,
+        createdAt: Self.now,
+        kind: 39_002,
+        tags: [["d", Self.channelID], ["p", Self.ownPubkey], ["p", message.pubkey]]
+      )
+      URLProtocolStub.handler = { request in
+        if URLProtocolStub.requests.count == 1 {
+          return Self.response(request, status: 200, data: try JSONEncoder().encode([message]))
+        }
+        return Self.response(
+          request, status: 200, data: try JSONEncoder().encode([channel, membership]))
+      }
+
+      let result = try XCTUnwrap(
+        resolve(
+          makeResolver(
+            communitiesData: try snapshotData([
+              community(relayMetadataPubkey: channel.pubkey)
+            ]),
+            now: Date(timeIntervalSince1970: TimeInterval(Self.now))
+          )
+        )
+      )
+
+      XCTAssertEqual(result.conversationDisplayName, expected)
+    }
+  }
+
   func testMalformedAndUnverifiedRefreshFallsBackWithoutBlockingMessage() throws {
     let message = try Self.signedEvent(
       privateKey: Self.profilePrivateKey,

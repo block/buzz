@@ -16,6 +16,7 @@ abstract final class NativeCommunityEntry {
     required String name,
     required bool dark,
     required int primaryArgb,
+    int? onPrimaryArgb,
     required List<DeviceIdentityChoice> choices,
     Future<Map<String, dynamic>> Function()? confirmInvite,
     required Future<void> Function(
@@ -101,6 +102,7 @@ abstract final class NativeCommunityEntry {
             'name': name,
             'dark': dark,
             'primaryArgb': primaryArgb,
+            'onPrimaryArgb': ?onPrimaryArgb,
             'invite': confirmInvite != null,
             'choices': [
               for (final choice in choices)

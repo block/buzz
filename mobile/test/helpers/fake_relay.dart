@@ -40,10 +40,15 @@ class FakeRelay {
   final sockets = <FakeRelaySocket>[];
   final unanswerable = <String>[];
   final _rejections = <({bool Function(NostrEvent) match, String message})>[];
+  final _refusals =
+      <({bool Function(Map<String, dynamic>) match, String message})>[];
+  final _queryFailures =
+      <({bool Function(Map<String, dynamic>) match, String body})>[];
   Completer<void>? _okHold;
   Completer<void>? _echoHold;
   Completer<void>? _reqHold;
   Completer<void>? _authHold;
+  Completer<void>? _queryHold;
   final DateTime Function()? _now;
 
   String get pubkey => keys.public;
@@ -67,7 +72,36 @@ class FakeRelay {
     authProvider.overrideWith(_SignedInAuth.new),
   ];
 
+  /// Answers the next REQ with a filter [match] accepts with CLOSED [message]
+  /// instead of admitting it.
+  void refuseReq(
+    bool Function(Map<String, dynamic> filter) match,
+    String message,
+  ) => _refusals.add((match: match, message: message));
+
   /// Stores history without notifying live subscriptions.
+  /// Closes the live subscriptions a filter [match] accepts with CLOSED
+  /// [message], as a relay does when it drops an admitted REQ.
+  void closeLive(
+    bool Function(Map<String, dynamic> filter) match,
+    String message,
+  ) {
+    for (final socket in sockets) {
+      for (final entry in socket._live.entries.toList()) {
+        if (!entry.value.any(match)) continue;
+        socket._live.remove(entry.key);
+        scheduleMicrotask(() => socket._reply(['CLOSED', entry.key, message]));
+      }
+    }
+  }
+
+  /// Fails the next HTTP query with a filter [match] accepts, answering 503
+  /// with [body].
+  void failQuery(
+    bool Function(Map<String, dynamic> filter) match, {
+    String body = 'unavailable',
+  }) => _queryFailures.add((match: match, body: body));
+
   void seed(Iterable<NostrEvent> events) => stored.addAll(events);
 
   /// Another client published [event]: store it and fan it out.
@@ -111,6 +145,9 @@ class FakeRelay {
   /// would: they read stored events, start live fan-out and reach EOSE only
   /// once admitted. Events committed meanwhile reach them only through replay.
   Completer<void> holdReq() => _reqHold = Completer<void>();
+
+  /// Holds HTTP queries until the completer completes, as a slow relay would.
+  Completer<void> holdQuery() => _queryHold = Completer<void>();
 
   /// Keeps the next connection unauthenticated until the completer completes.
   /// Like the relay, it answers a REQ sent before AUTH with CLOSED.
@@ -161,6 +198,12 @@ class FakeRelay {
         }
         reqs.add(message);
         final filters = message.skip(2).cast<Map<String, dynamic>>().toList();
+        final refusal = _refusals.indexWhere((r) => filters.any(r.match));
+        if (refusal >= 0) {
+          final reason = _refusals.removeAt(refusal).message;
+          scheduleMicrotask(() => socket._reply(['CLOSED', subId, reason]));
+          return;
+        }
         void admit() {
           if (!socket._authenticated) return;
           final history = _query(filters);
@@ -307,6 +350,15 @@ class FakeRelay {
     final filters = (jsonDecode(request.body) as List)
         .cast<Map<String, dynamic>>();
     queries.add(filters);
+    final hold = _queryHold;
+    if (hold != null) {
+      await hold.future;
+      if (identical(_queryHold, hold)) _queryHold = null;
+    }
+    final failure = _queryFailures.indexWhere((f) => filters.any(f.match));
+    if (failure >= 0) {
+      return http.Response(_queryFailures.removeAt(failure).body, 503);
+    }
     final events = filters.length == 1 && filters.single['top_level'] == true
         ? _channelWindow(filters.single)
         : _query(filters);

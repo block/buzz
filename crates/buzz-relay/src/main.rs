@@ -61,7 +61,7 @@ fn connect_search_pool(config: &DbConfig) -> anyhow::Result<sqlx::PgPool> {
         .read_database_url
         .as_deref()
         .unwrap_or(&config.database_url);
-    sqlx::postgres::PgPoolOptions::new()
+    buzz_search::pool_options()
         .acquire_timeout(std::time::Duration::from_secs(config.acquire_timeout_secs))
         .connect_lazy(url)
         .map_err(|e| anyhow::anyhow!("Search DB URL is invalid: {e}"))

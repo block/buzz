@@ -140,6 +140,11 @@ run_unit_tests() {
   run_test_step "buzz-db source-policy tests" \
     cargo test -p buzz-db --test observability_source -- --nocapture
 
+  # buzz-search unit tests (no infra); its Postgres suite runs in the
+  # PostgreSQL lane.
+  run_test_step "buzz-search unit tests" \
+    cargo test -p buzz-search --lib -- --nocapture
+
   run_test_step "buzz-media storage snapshot serialization test" \
     cargo test -p buzz-media --lib bucket_index::tests::bucket_snapshot_json_round_trip_preserves_community_keys -- --exact --nocapture
 
@@ -328,6 +333,13 @@ run_unit_tests() {
   run_test_step "buzz-relay community close suppresses losing denial frame test" \
     cargo test -p buzz-relay --lib state::tests::disconnect_community_wins_reason_losing_nip_fi_does_not_enqueue_frame -- --exact --nocapture
 
+  run_test_step "buzz-relay read cache tests" \
+    cargo test -p buzz-relay --lib -- --exact --nocapture \
+      state::tests::admitted_index_follows_every_key_change \
+      state::tests::concurrent_open_channel_misses_share_the_in_flight_read \
+      tenant::tests::app_state_resolver_serves_fresh_cached_hosts_only \
+      state::tests::disconnect_drops_the_cached_restriction_row
+
   run_test_step "buzz-relay router tests" \
     cargo test -p buzz-relay --lib router::tests:: -- --nocapture
 
@@ -342,6 +354,9 @@ run_unit_tests() {
 
   run_test_step "buzz-relay profile search request tests" \
     cargo test -p buzz-relay --lib api::profiles:: -- --nocapture
+
+  run_test_step "buzz-relay per-user search cap tests" \
+    cargo test -p buzz-relay --lib api::bridge::search_slots::tests:: -- --nocapture
 
   run_test_step "buzz-relay Git transport Off-mode precedence tests" \
     cargo test -p buzz-relay --lib api::git::transport::off_mode_precedence_tests:: -- --nocapture

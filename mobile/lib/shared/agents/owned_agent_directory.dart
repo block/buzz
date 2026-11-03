@@ -1,8 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
-import 'package:nostr/nostr.dart' as nostr;
+
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../crypto/event_signing.dart';
 import '../crypto/nip_oa.dart';
 import '../mentions/agent_identity_provider.dart';
 import '../relay/relay.dart';
@@ -104,7 +105,9 @@ Future<List<OwnedAgentDirectoryEntry>> loadOwnedAgentDirectory(
         String? runtime;
         try {
           final registration = registrations[event.pubkey]!;
-          nostr.Event.fromJson(jsonEncode(registration.toJson()));
+          // Native libsecp256k1 verification; the pure-Dart codec took
+          // several milliseconds per registration on the UI isolate.
+          verifiedNostrEventFromJson(jsonEncode(registration.toJson()));
           runtime = _tagValue(registration, 'runtime');
           final data = jsonDecode(registration.content);
           if (data is Map && data['model'] is String) {

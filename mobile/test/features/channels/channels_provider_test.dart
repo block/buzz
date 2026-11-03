@@ -3277,6 +3277,10 @@ class _FakeRelaySession extends RelaySessionNotifier {
   final List<NostrFilter> directoryQueryFilters = [];
   final List<NostrFilter> membershipQueryFilters = [];
   final List<NostrFilter> subscribeFilters = [];
+  // The channel list notice subscription, kept apart from the live channel
+  // subscriptions these tests count.
+  final List<NostrFilter> listNoticeFilters = [];
+  final Map<int, void Function(NostrEvent)> _listNoticeListeners = {};
   final Map<
     int,
     (NostrFilter, void Function(NostrEvent), void Function(String message)?)
@@ -3706,11 +3710,29 @@ class _FakeRelaySession extends RelaySessionNotifier {
   }
 
   @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus) onStatusChanged,
+  }) => subscribe(filter, onEvent, onClosed: onClosed);
+
+  @override
   Future<void Function()> subscribe(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
   }) async {
+    if (filter.kinds.contains(EventKind.memberAddedNotification)) {
+      final key = ++_nextSubscriptionKey;
+      listNoticeFilters.add(filter);
+      _listNoticeListeners[key] = onEvent;
+      return () {
+        if (_listNoticeListeners.remove(key) != null) {
+          listNoticeFilters.remove(filter);
+        }
+      };
+    }
     totalSubscribeCount++;
     subscribeFilters.add(filter);
     final paused = _pausedSubscribe;
@@ -3754,6 +3776,9 @@ class _FakeRelaySession extends RelaySessionNotifier {
   /// Emit a live event to all subscribers.
   void emit(NostrEvent event) {
     for (final (_, listener, _) in List.of(_subscriptions.values)) {
+      listener(event);
+    }
+    for (final listener in List.of(_listNoticeListeners.values)) {
       listener(event);
     }
   }
