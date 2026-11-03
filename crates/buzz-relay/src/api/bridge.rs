@@ -103,7 +103,7 @@ pub(crate) async fn enforce_http_admission(
     pubkey: &nostr::PublicKey,
 ) -> Result<(), (StatusCode, Json<Value>)> {
     let limit = state.auth.config().rate_limits.human_api_calls_per_min;
-    match crate::admission::check_principal(
+    let result = crate::admission::check_principal(
         state.admission_rate_limiter.as_ref(),
         tenant,
         pubkey,
@@ -111,18 +111,128 @@ pub(crate) async fn enforce_http_admission(
         60,
         limit,
     )
-    .await
-    {
+    .await;
+    http_admission_result(result, "api_calls")
+}
+
+/// Charges a non-ephemeral event an agent publishes over HTTP to its owner's
+/// budgets, the same ones its WebSocket events spend, so the choice of
+/// transport adds no capacity. A key with no owner is not charged here.
+///
+/// `linked_owner` is `Ok(Some(owner))` for an owner this request proved and
+/// recorded for `pubkey`. With `Ok(None)` the stored owner is used, so a key
+/// without its auth tag still spends its owner's budgets, and a key cannot
+/// move to a second owner by presenting that owner's attestation: the first
+/// stored owner is permanent. `Err(())` means the request proved an owner
+/// whose link could not be read or written; the owner to charge is unknown,
+/// so the event is refused.
+pub(crate) async fn enforce_http_agent_event_admission(
+    state: &AppState,
+    tenant: &TenantContext,
+    pubkey: &nostr::PublicKey,
+    linked_owner: Result<Option<nostr::PublicKey>, ()>,
+    event: &nostr::Event,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if buzz_core::kind::is_ephemeral(buzz_core::kind::event_kind_u32(event)) {
+        return Ok(());
+    }
+    let owner = match linked_owner {
+        Ok(None) => stored_agent_owner(state, tenant, pubkey).await,
+        proven => proven,
+    };
+    let owner = match owner {
+        Ok(Some(owner)) => owner,
+        Ok(None) => return Ok(()),
+        Err(()) => {
+            return http_admission_result(
+                Err(crate::admission::AdmissionError::Unavailable),
+                "agent_events",
+            )
+        }
+    };
+    let (result, bucket) = crate::admission::check_agent_event(
+        state.admission_rate_limiter.as_ref(),
+        tenant,
+        &owner,
+        event,
+        &state.auth.config().rate_limits,
+    )
+    .await;
+    http_admission_result(result, bucket)
+}
+
+/// The owner a `POST /events` request proved, in the form
+/// [`enforce_http_agent_event_admission`] takes. A token owner reached here
+/// linked: membership refuses one that is not. A NIP-OA owner counts once it
+/// is the agent's stored owner. On a conflict the first stored owner stays
+/// the one charged; when the link cannot be read or written, the owner to
+/// charge is unknown.
+pub(crate) fn linked_agent_owner(
+    token_owner: Option<nostr::PublicKey>,
+    nip_oa_link: Option<(nostr::PublicKey, super::relay_members::OwnerLink)>,
+) -> Result<Option<nostr::PublicKey>, ()> {
+    use super::relay_members::OwnerLink;
+    match nip_oa_link {
+        None | Some((_, OwnerLink::Conflict)) => Ok(token_owner),
+        Some((owner, OwnerLink::Linked)) => Ok(Some(owner)),
+        Some((_, OwnerLink::Unavailable)) => Err(()),
+    }
+}
+
+/// The stored owner of `pubkey` in `tenant`'s community, through
+/// [`AppState::agent_owner_cache`]. Only a found owner is cached: it is
+/// first-write-wins, so it cannot change, while "no owner" can end on any
+/// relay instance at any time. A failed read is `Err`.
+async fn stored_agent_owner(
+    state: &AppState,
+    tenant: &TenantContext,
+    pubkey: &nostr::PublicKey,
+) -> Result<Option<nostr::PublicKey>, ()> {
+    let key = (tenant.community(), pubkey.to_bytes());
+    let owner = match state.agent_owner_cache.get(&key) {
+        Some(owner) => Some(owner),
+        None => {
+            let row = state
+                .db
+                .get_agent_channel_policy(key.0, &key.1)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(%error, "stored agent owner lookup failed");
+                })?;
+            let owner = row
+                .and_then(|(_, owner)| owner)
+                .and_then(|owner| <[u8; 32]>::try_from(owner).ok());
+            if let Some(owner) = owner {
+                state.agent_owner_cache.insert(key, owner);
+            }
+            owner
+        }
+    };
+    owner
+        .map(|owner| nostr::PublicKey::from_slice(&owner))
+        .transpose()
+        .map_err(|error| {
+            tracing::warn!(%error, "stored agent owner is not a valid public key");
+        })
+}
+
+/// Maps an HTTP admission verdict to its wire refusal, counting it under
+/// `bucket`.
+fn http_admission_result(
+    result: Result<(), crate::admission::AdmissionError>,
+    bucket: &'static str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    match result {
         Ok(()) => Ok(()),
         Err(crate::admission::AdmissionError::Exceeded { reset_in_secs }) => {
-            metrics::counter!("buzz_admission_rejections_total", "transport" => "http", "reason" => "quota", "bucket" => "api_calls").increment(1);
+            metrics::counter!("buzz_admission_rejections_total", "transport" => "http", "reason" => "quota", "bucket" => bucket).increment(1);
             Err(api_error(
                 StatusCode::TOO_MANY_REQUESTS,
                 &format!("rate-limited: quota exceeded; retry in {reset_in_secs}s"),
             ))
         }
         Err(crate::admission::AdmissionError::Unavailable) => {
-            metrics::counter!("buzz_admission_rejections_total", "transport" => "http", "reason" => "unavailable", "bucket" => "api_calls").increment(1);
+            metrics::counter!("buzz_admission_rejections_total", "transport" => "http", "reason" => "unavailable", "bucket" => bucket).increment(1);
             Err(api_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "rate-limited: shared admission unavailable",
@@ -1256,8 +1366,21 @@ async fn submit_event_authed(
             };
         }
     };
-    if let Some(owner) = nip_oa_owner {
-        super::relay_members::materialize_nip_oa_owner(state, tenant, &pubkey, &owner).await;
+    let nip_oa_link = match nip_oa_owner {
+        Some(owner) => Some((
+            owner,
+            super::relay_members::link_agent_owner(state, tenant, &pubkey, &owner).await,
+        )),
+        None => None,
+    };
+    let linked_owner = linked_agent_owner(token_owner, nip_oa_link);
+    if let Err(e) =
+        enforce_http_agent_event_admission(state, tenant, &pubkey, linked_owner, &event).await
+    {
+        return SubmitOutcome::Err {
+            status: e.0,
+            response: e.into(),
+        };
     }
 
     let auth = IngestAuth::Http {

@@ -41,7 +41,9 @@ pub use nip98_replay::{
     MAX_REPLAY_TTL_SECS,
 };
 pub use rate_limit::{
-    ip_rate_limit_key, rate_limit_key, LimitType, RateLimitConfig, RateLimitResult, RateLimiter,
+    agent_channel_budget_key, agent_owner_budget_key, ip_rate_limit_key, rate_limit_key,
+    AgentBudgetScope, AgentEventBudget, AgentEventVerdict, LimitType, RateLimitConfig,
+    RateLimitResult, RateLimiter,
 };
 pub use scope::{parse_scopes, Scope};
 

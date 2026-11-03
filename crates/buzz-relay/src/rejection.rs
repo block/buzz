@@ -65,11 +65,9 @@ pub(crate) async fn enforce_ws_admission(
         return true;
     }
 
-    let (pubkey, is_agent) = {
-        match conn.auth_state_snapshot() {
-            AuthState::Authenticated(ctx) => (ctx.pubkey, ctx.agent_owner_pubkey.is_some()),
-            _ => return true,
-        }
+    let pubkey = match conn.auth_state_snapshot() {
+        AuthState::Authenticated(ctx) => ctx.pubkey,
+        _ => return true,
     };
 
     let limits = &state.auth.config().rate_limits;
@@ -88,30 +86,51 @@ pub(crate) async fn enforce_ws_admission(
         return false;
     }
 
-    if matches!(msg, ClientMessage::Event(event) if !buzz_core::kind::is_ephemeral(event.kind.as_u16() as u32))
-    {
-        let message_limit = if is_agent {
-            limits.agent_standard_messages_per_min
-        } else {
-            limits.human_messages_per_min
-        };
-        let message_result = crate::admission::check_principal(
-            state.admission_rate_limiter.as_ref(),
-            &conn.tenant,
-            &pubkey,
-            LimitType::Messages,
-            60,
-            message_limit,
-        )
-        .await;
-        // Only persistable EVENT attempts consume the minute quota. Ephemeral activity
-        // still passes the shared WS flood limit above and normal event auth.
-        if !send_admission_result(conn, state, message_result, msg, "messages").await {
-            return false;
-        }
+    // Only persistable EVENT attempts consume the minute quota. Ephemeral activity
+    // still passes the shared WS flood limit above and normal event auth.
+    let ClientMessage::Event(event) = msg else {
+        return true;
+    };
+    if buzz_core::kind::is_ephemeral(event.kind.as_u16() as u32) {
+        return true;
     }
-
-    true
+    // An agent spends its owner's budgets, shared by every agent key that
+    // owner has, on every relay instance. The owner is the one AUTH recorded
+    // for revoking this socket: a proven NIP-OA or token owner, else the
+    // stored one, so reconnecting without the auth tag changes nothing.
+    let owner = state
+        .conn_manager
+        .admitted_owner(conn.conn_id)
+        .map(|owner| nostr::PublicKey::from_slice(&owner));
+    let (result, bucket) = match owner {
+        Some(Ok(owner)) => {
+            crate::admission::check_agent_event(
+                state.admission_rate_limiter.as_ref(),
+                &conn.tenant,
+                &owner,
+                event,
+                limits,
+            )
+            .await
+        }
+        Some(Err(error)) => {
+            tracing::warn!(%error, "admitted agent owner is not a valid public key");
+            (Err(AdmissionError::Unavailable), "agent_events")
+        }
+        None => (
+            crate::admission::check_principal(
+                state.admission_rate_limiter.as_ref(),
+                &conn.tenant,
+                &pubkey,
+                LimitType::Messages,
+                60,
+                limits.human_messages_per_min,
+            )
+            .await,
+            "messages",
+        ),
+    };
+    send_admission_result(conn, state, result, msg, bucket).await
 }
 
 /// Forwards an admission verdict to the client, returning whether the frame was

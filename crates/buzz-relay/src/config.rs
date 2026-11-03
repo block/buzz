@@ -475,9 +475,20 @@ fn rate_limit_config_from_env() -> Result<buzz_auth::RateLimitConfig, ConfigErro
             "BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC",
             defaults.human_ws_events_per_sec,
         )?,
-        agent_standard_messages_per_min: positive_u64_from_env(
-            "BUZZ_RATE_LIMIT_AGENT_STANDARD_MESSAGES_PER_MIN",
-            defaults.agent_standard_messages_per_min,
+        // Without the new variable, the variable this budget replaced, which
+        // set one agent key's allowance; for one agent in one channel the
+        // meaning is unchanged. It is not read when the new variable is set.
+        agent_channel_events_per_min: positive_u64_from_env(
+            if std::env::var_os("BUZZ_RATE_LIMIT_AGENT_CHANNEL_EVENTS_PER_MIN").is_some() {
+                "BUZZ_RATE_LIMIT_AGENT_CHANNEL_EVENTS_PER_MIN"
+            } else {
+                "BUZZ_RATE_LIMIT_AGENT_STANDARD_MESSAGES_PER_MIN"
+            },
+            defaults.agent_channel_events_per_min,
+        )?,
+        agent_owner_events_per_min: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_AGENT_OWNER_EVENTS_PER_MIN",
+            defaults.agent_owner_events_per_min,
         )?,
         agent_standard_api_calls_per_min: positive_u64_from_env(
             "BUZZ_RATE_LIMIT_AGENT_STANDARD_API_CALLS_PER_MIN",
@@ -2610,6 +2621,60 @@ mod tests {
         assert_eq!(config.auth.rate_limits.gif_searches_per_min, 1004);
         assert_eq!(config.auth.rate_limits.human_api_calls_per_min, 1002);
         assert_eq!(config.auth.rate_limits.human_ws_events_per_sec, 1003);
+    }
+
+    #[test]
+    fn agent_event_budgets_are_configurable_and_honor_the_legacy_variable() {
+        const CHANNEL: &str = "BUZZ_RATE_LIMIT_AGENT_CHANNEL_EVENTS_PER_MIN";
+        const OWNER: &str = "BUZZ_RATE_LIMIT_AGENT_OWNER_EVENTS_PER_MIN";
+        const LEGACY: &str = "BUZZ_RATE_LIMIT_AGENT_STANDARD_MESSAGES_PER_MIN";
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                for var in [CHANNEL, OWNER, LEGACY] {
+                    std::env::remove_var(var);
+                }
+            }
+        }
+        let _guards = env_guards();
+        let _clear = Clear;
+        let limits = || Config::from_env().expect("config").auth.rate_limits;
+
+        let defaults = limits();
+        assert_eq!(
+            (
+                defaults.agent_channel_events_per_min,
+                defaults.agent_owner_events_per_min
+            ),
+            (120, 600)
+        );
+
+        std::env::set_var(LEGACY, "90");
+        assert_eq!(limits().agent_channel_events_per_min, 90);
+
+        std::env::set_var(CHANNEL, "45");
+        std::env::set_var(OWNER, "300");
+        let overridden = limits();
+        assert_eq!(
+            (
+                overridden.agent_channel_events_per_min,
+                overridden.agent_owner_events_per_min
+            ),
+            (45, 300),
+            "the new variable wins over the legacy one"
+        );
+        std::env::set_var(LEGACY, "not-a-number");
+        assert_eq!(
+            limits().agent_channel_events_per_min,
+            45,
+            "the legacy variable is not read once the new one is set"
+        );
+
+        std::env::set_var(OWNER, "0");
+        assert!(matches!(
+            Config::from_env(),
+            Err(ConfigError::InvalidValue(ref message)) if message.contains(OWNER)
+        ));
     }
 
     #[test]

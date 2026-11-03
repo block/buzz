@@ -1134,13 +1134,14 @@ async fn check_sibling_via_profile(
 /// accumulates between ticks waits in [`ObserverPublishQueue`] as events and
 /// is packed greedily into that single frame. One update per second is smooth
 /// enough for a human watching the session viewer, and the global budget is
-/// what makes the relay cost model flat: observer frames bill the agent's
-/// `LimitType::Messages` quota (`agent_standard_messages_per_min` = 120,
-/// enforced in relay `connection.rs::enforce_ws_admission`), shared with the
-/// agent's real chat messages. At 1 frame/s telemetry spends at most 60/min —
-/// half that budget — regardless of how many channels are active. A slower
-/// tick (e.g. 2s → 30/min) would leave more quota headroom for chat at the
-/// price of doubled viewer latency; this constant is the knob.
+/// what makes the relay cost model flat: each observer frame is one operation
+/// against the agent key's WebSocket flood budget (`human_ws_events_per_sec`
+/// = 10, enforced in relay `rejection.rs::enforce_ws_admission`), shared with
+/// the agent's REQs and chat messages. Observer frames are ephemeral (kind
+/// 24200), so they do not spend the owner's agent event budgets. At 1 frame/s
+/// telemetry spends at most a tenth of the flood budget, regardless of how
+/// many channels are active. A slower tick (e.g. 2s) would leave more headroom
+/// at the price of doubled viewer latency; this constant is the knob.
 const OBSERVER_PUBLISH_TICK: Duration = Duration::from_secs(1);
 
 /// Byte budget for EVERYTHING retained while awaiting a publish slot: the
