@@ -110,9 +110,22 @@ pub(crate) async fn community_ban_verdict(
 /// Whose ban row decided a [`BanOutcome`]: the key's own, or an owner's
 /// (its stored agent owner, or the NIP-OA or token owner checked after it).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BanSource {
+pub enum BanSource {
+    /// The key's own row.
     Own,
+    /// Its owner's row.
     Owner,
+}
+
+impl BanSource {
+    /// Whose row decided a banned restriction snapshot.
+    pub(crate) fn of(restriction: &buzz_db::moderation::RestrictionState) -> Self {
+        if restriction.own_banned {
+            Self::Own
+        } else {
+            Self::Owner
+        }
+    }
 }
 
 /// A ban decision with the row that decided it.

@@ -1273,18 +1273,24 @@ async fn submit_event_authed(
     // token-less request, keeps its existing response.
     let result = match result {
         Err(IngestError::Ban { refusal, .. }) if token_owner.is_some() => {
+            use crate::handlers::{auth::BanSource, ingest::BanRefusal};
             crate::handlers::ingest::reject_with_transport("http", "auth");
-            let (class, reason) = match refusal {
-                crate::handlers::ingest::BanRefusal::Banned => {
-                    (buzz_auth::DenialClass::AuthorizationDenied, "owner_banned")
-                }
-                crate::handlers::ingest::BanRefusal::Unavailable => (
-                    buzz_auth::DenialClass::AuthorizationUnavailable,
-                    "owner_ban_unavailable",
-                ),
+            let class = match refusal {
+                BanRefusal::Banned(_) => buzz_auth::DenialClass::AuthorizationDenied,
+                BanRefusal::Unavailable => buzz_auth::DenialClass::AuthorizationUnavailable,
             };
-            // The late refusal is the request's verdict, not its earlier admit.
-            crate::nip_fi_http::owner_refused(class, reason);
+            // An owner-decided late refusal is the request's verdict, not its
+            // earlier admit. The agent's own ban is not its owner's, as at
+            // every other seam.
+            match refusal {
+                BanRefusal::Banned(BanSource::Owner) => {
+                    crate::nip_fi_http::owner_refused(class, "owner_banned");
+                }
+                BanRefusal::Unavailable => {
+                    crate::nip_fi_http::owner_refused(class, "owner_ban_unavailable");
+                }
+                BanRefusal::Banned(BanSource::Own) => {}
+            }
             let refusal = MembershipRefusal::NipFi(class);
             return SubmitOutcome::Err {
                 status: refusal.status(),
@@ -7148,15 +7154,17 @@ pub(crate) mod postgres_tests {
         // (check, kind, refusal, token): refusal is "banned", "unavailable"
         // or "timeout"; token-less rows publish as the member owner.
         let mut cases = Vec::new();
+        // `who`: whose row a ban lands on, the agent's, its owner's or both.
         for check in ["write", "typing", "moderation", "relay_admin"] {
-            for refusal in ["banned", "unavailable"] {
-                cases.push((check, refusal, true));
+            for who in ["agent", "owner", "both"] {
+                cases.push((check, "banned", who, true));
             }
-            cases.push((check, "banned", false));
+            cases.push((check, "unavailable", "agent", true));
+            cases.push((check, "banned", "agent", false));
         }
-        cases.push(("write", "timeout", true));
+        cases.push(("write", "timeout", "agent", true));
 
-        for (check, refusal, token) in cases {
+        for (check, refusal, who, token) in cases {
             let fixture = nip_fi_enforce_test_state().await.expect("local Postgres");
             let mut state = (*fixture).clone();
             let config = Arc::make_mut(&mut state.config);
@@ -7217,14 +7225,23 @@ pub(crate) mod postgres_tests {
                 let state = state.clone();
                 let target = author.public_key().to_bytes();
                 let actor = owner.public_key().to_bytes();
+                // Without a token the author is the owner, so `agent` bans it.
+                let banned = match who {
+                    "agent" => vec![target],
+                    "owner" => vec![actor],
+                    _ => vec![target, actor],
+                };
                 tokio::spawn(async move {
                     arrived.await.expect("ban check reached");
                     if refusal == "banned" {
-                        state
-                            .db
-                            .ban_community_member(community, &target, &actor, None, None)
-                            .await
-                            .expect("ban");
+                        for key in banned {
+                            state
+                                .db
+                                .ban_community_member(community, &key, &actor, None, None)
+                                .await
+                                .expect("ban");
+                            state.invalidate_restriction_cache(community, &key);
+                        }
                         state.invalidate_restriction_cache(community, &target);
                     } else {
                         state.invalidate_restriction_cache(community, &target);
@@ -7284,11 +7301,14 @@ pub(crate) mod postgres_tests {
 
             let content_type = headers[header::CONTENT_TYPE].to_str().unwrap_or_default();
             let body = std::str::from_utf8(&body).expect("utf-8 body");
-            let case = format!("{check} {refusal} token={token}");
-            // A late token refusal is the request's one verdict, never an admit.
-            let expected = match (refusal, token) {
-                ("banned", true) => Some("http owner/denied"),
-                ("unavailable", true) => Some("http owner/unavailable"),
+            let case = format!("{check} {refusal} {who} token={token}");
+            // A late owner-decided token refusal is the request's one verdict,
+            // never an admit. The agent's own ban, alone or with its owner's,
+            // is not its owner's refusal, as at every other seam.
+            let expected = match (refusal, who, token) {
+                ("banned", "owner", true) => Some("http owner/denied"),
+                ("banned", _, true) => Some("http admit/admit"),
+                ("unavailable", _, true) => Some("http owner/unavailable"),
                 _ => None,
             };
             if let Some(expected) = expected {

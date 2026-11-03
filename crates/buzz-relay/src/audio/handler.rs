@@ -619,6 +619,11 @@ async fn run_active_audio_connection(
                 channel_id = %channel_id,
                 "NIP-FI session deadline already expired at audio upgrade — rejecting before auth"
             );
+            // Claim the expiry first, so this session ends as its deadline
+            // even when this branch beats the expiry worker.
+            if let Some(session) = control.nip_fi_enforce() {
+                session.expire();
+            }
             deny_audio_authorization(&mut ws_send, &control, &mut terminal_ctrl_rx).await;
             return;
         }
@@ -6248,6 +6253,93 @@ mod tests {
         let _ = server.await;
     }
 
+    /// The already-expired bootstrap fast path claims the deadline before
+    /// its terminal denial, so a pending enforced session ends as its
+    /// deadline even with no expiry worker to win the race.
+    /// Mutation: dropping that branch's `session.expire()` records
+    /// `audio deny_set/denied`.
+    #[tokio::test]
+    async fn already_expired_audio_bootstrap_records_the_deadline() {
+        use chrono::{Duration, Utc};
+        use std::sync::Arc;
+
+        let key = nostr::Keys::generate();
+        let deadline = Utc::now() - Duration::milliseconds(50);
+        let assertion =
+            buzz_auth::VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+        let state = audio_test_state().await;
+        let tenant = buzz_core::tenant::TenantContext::resolved(
+            buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
+            "test.local".to_string(),
+        );
+        let cancel = CancellationToken::new();
+        let control = crate::state::CommunityConnectionControl::new(cancel.clone());
+        control.attach_nip_fi_enforce(crate::nip_fi_shadow::EnforceSession::new(
+            "audio",
+            crate::nip_fi_shadow::BOUND.into(),
+            Some(key.public_key()),
+        ));
+        // No expiry worker: the fast path alone ends the session.
+        let gate = crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel);
+        let (terminal_tx, terminal_rx) =
+            tokio::sync::mpsc::channel::<axum::extract::ws::Message>(1);
+        let pre_built = Arc::new(std::sync::Mutex::new(Some((
+            gate,
+            terminal_tx,
+            terminal_rx,
+        ))));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let ((), records, lines) = crate::nip_fi_shadow::tests::enforce_records_during(async {
+            let server = tokio::spawn(async move {
+                let app = Router::new().route(
+                    "/",
+                    get(move |ws: WebSocketUpgrade| {
+                        let (state, tenant, control, assertion, pre_built) = (
+                            Arc::clone(&state),
+                            tenant.clone(),
+                            control.clone(),
+                            assertion.clone(),
+                            Arc::clone(&pre_built),
+                        );
+                        async move {
+                            ws.on_upgrade(move |socket| async move {
+                                let (gate, tx, rx) =
+                                    pre_built.lock().expect("slot").take().expect("one socket");
+                                handle_active_audio_connection(
+                                    socket,
+                                    state,
+                                    tenant,
+                                    uuid::Uuid::new_v4(),
+                                    control,
+                                    Some(assertion),
+                                    Utc::now(),
+                                    Some((gate, tx, rx, None)),
+                                )
+                                .await
+                            })
+                        }
+                    }),
+                );
+                axum::serve(listener, app).await.expect("test server");
+            });
+            let (mut client, _) = connect_async(format!("ws://{addr}/"))
+                .await
+                .expect("connect");
+            // The denial frame, then the close.
+            for _ in 0..2 {
+                tokio::time::timeout(std::time::Duration::from_secs(2), client.next())
+                    .await
+                    .expect("the expired session is denied");
+            }
+            server.abort();
+            let _ = server.await;
+        })
+        .await;
+        assert_eq!(records, ["audio deadline/rejected"], "{lines:?}");
+    }
+
     /// Fix 3 (F3): bootstrap-drain through the real outer wrapper (`handle_audio_connection`).
     ///
     /// The `run_registered_community_connection` wrapper in `handle_audio_connection`
@@ -8558,7 +8650,8 @@ mod tests {
 
         /// Enforce's audio verdict is the join commit, as shadow's is: a
         /// committed join counts its admit before publication, so a deadline
-        /// after it ends the session `expired` with no pending denial; a join
+        /// while publication is held ends the session `expired` once with no
+        /// pending denial; a join
         /// refused for an ordinary reason (archived) retires the session
         /// before its rollback, so an expiry held inside that rollback records
         /// nothing; and a deadline the commit's effect gate sees first is
@@ -8566,8 +8659,8 @@ mod tests {
         /// Mutations: dropping enforce from `retire_shadow` records
         /// `audio deadline/rejected` for `Archived`; dropping the commit
         /// seam's `session.expire()` records nothing for `GateFirst`;
-        /// dropping the commit's admit records `audio deadline/rejected` for
-        /// `Committed`.
+        /// dropping the commit's admit, or moving it after publication,
+        /// records `audio deadline/rejected` for `Committed`.
         #[test]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         fn enforce_join_commit_is_the_audio_admission() {
@@ -8617,9 +8710,21 @@ mod tests {
                             crate::nip_fi_test_hooks::join_refusal_rollback_hook::arm(
                                 tenant.community(),
                             );
+                        // A committed join holds publication so the deadline
+                        // lands before the commit returns.
+                        let fanout = (case == Case::Committed).then(|| {
+                            crate::nip_fi_test_hooks::audio_participant_fanout_hook::arm(
+                                tenant.community(),
+                            )
+                        });
                         let held = async {
                             if case == Case::Archived {
                                 arrived.await.expect("the join is refused");
+                                session.expire();
+                                release.notify_one();
+                            }
+                            if let Some((published, release)) = fanout {
+                                published.await.expect("the join is published");
                                 session.expire();
                                 release.notify_one();
                             }

@@ -134,8 +134,9 @@ fn may_set_workspace_profile(
 /// [`super::push_lease::AcceptError`] and its `map_push_accept_error` seam.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum RelayAdminError {
-    /// Sender is under a durable community ban — `blocked:` / HTTP 403.
-    Banned,
+    /// Sender is under a durable community ban — `blocked:` / HTTP 403. The
+    /// source says whether its own row or its owner's decided it.
+    Banned(crate::handlers::auth::BanSource),
     /// Legacy command rejection — `invalid:` / HTTP 400. This is whatever
     /// [`execute_relay_admin_command`] returned as a `String`, which is mostly
     /// validation and authorization but also still includes that function's own
@@ -162,7 +163,9 @@ fn admits_relay_admin_command(
     restriction: &buzz_db::moderation::RestrictionState,
 ) -> Result<(), RelayAdminError> {
     if restriction.banned {
-        return Err(RelayAdminError::Banned);
+        return Err(RelayAdminError::Banned(
+            crate::handlers::auth::BanSource::of(restriction),
+        ));
     }
     Ok(())
 }
@@ -542,7 +545,9 @@ mod postgres_tests {
         };
         assert_eq!(
             admits_relay_admin_command(&banned),
-            Err(RelayAdminError::Banned),
+            Err(RelayAdminError::Banned(
+                crate::handlers::auth::BanSource::Own
+            )),
             "a durably banned admin must never reach a relay-admin command"
         );
     }

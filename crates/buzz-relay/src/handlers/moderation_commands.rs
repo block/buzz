@@ -115,8 +115,9 @@ pub async fn handle_moderation_command(
                 ))),
             )
         })?;
-    ensure_actor_not_banned(&restriction)
-        .map_err(|e| IngestError::ban(BanRefusal::Banned, IngestError::Rejected(e)))?;
+    ensure_actor_not_banned(&restriction).map_err(|e| {
+        IngestError::ban(BanRefusal::banned(&restriction), IngestError::Rejected(e))
+    })?;
     execute_moderation_command(tenant, state, event, &actor)
         .await
         .map_err(IngestError::Rejected)
