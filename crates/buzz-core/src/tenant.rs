@@ -97,6 +97,10 @@ impl TenantContext {
     }
 }
 
+/// Longest host a community can have, in characters: `communities.host` is
+/// `VARCHAR(255)`. A longer host maps to no community.
+pub const MAX_HOST_LEN: usize = 255;
+
 /// Normalize a connection `Host` into the canonical form used as the community
 /// lookup key.
 ///

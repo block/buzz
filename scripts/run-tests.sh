@@ -341,6 +341,7 @@ run_unit_tests() {
       state::tests::concurrent_open_channel_misses_share_the_in_flight_read \
       state::tests::concurrent_restriction_and_host_misses_share_the_in_flight_read \
       tenant::tests::app_state_resolver_serves_fresh_cached_hosts_only \
+      tenant::tests::an_overlong_host_fails_closed_before_the_resolver \
       state::tests::disconnect_drops_the_cached_restriction_row
 
   run_test_step "buzz-relay router tests" \

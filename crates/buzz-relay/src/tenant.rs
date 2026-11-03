@@ -14,7 +14,7 @@
 //! (`Db::resolve_host`); the relay depends on the trait, not the query, so the
 //! binding is testable without a database.
 
-use buzz_core::tenant::{normalize_host, CommunityId, TenantContext};
+use buzz_core::tenant::{normalize_host, CommunityId, TenantContext, MAX_HOST_LEN};
 
 /// Resolves a normalized connection host to its community, or `None` when the
 /// host maps to no community on this deployment.
@@ -81,7 +81,10 @@ pub async fn bind_community<R: HostResolver>(
     // bind to a misconfigured empty-host community. Reuse `UnmappedHost` (not a
     // distinct variant) so the rejection is byte-identical to any other unmapped
     // host — an unauthenticated caller cannot probe for an empty-host row.
-    if host.is_empty() {
+    // A host longer than any `communities.host` can hold maps to nothing
+    // either; rejecting it here keeps an unauthenticated caller's arbitrarily
+    // long host out of the resolver's caches and off the database.
+    if host.is_empty() || host.chars().count() > MAX_HOST_LEN {
         return Err(BindError::UnmappedHost);
     }
     match resolver.resolve_host(&host).await {
@@ -377,6 +380,34 @@ mod tests {
             let r = resolver_with("", 0xdeadbeef);
             let err = bind_community(&r, "evil.example").await.unwrap_err();
             assert!(matches!(err, BindError::UnmappedHost));
+        }
+    }
+
+    /// A host longer than `communities.host` can hold fails closed as
+    /// unmapped before the request-path resolver sees it: no cache or gate
+    /// entry and no lookup. The database is unreachable, so a lookup would
+    /// fail as `Lookup`, as it does for a host at the limit.
+    /// Mutation: drop the length check, or count bytes past the column's
+    /// characters → RED.
+    #[tokio::test]
+    async fn an_overlong_host_fails_closed_before_the_resolver() {
+        let state = crate::state::tests::test_state_with_unreachable_database_url(
+            "postgres://buzz@127.0.0.1:1/buzz",
+        )
+        .await;
+        let overlong = "a".repeat(MAX_HOST_LEN + 1);
+        assert!(matches!(
+            bind_community(&*state, &overlong).await,
+            Err(BindError::UnmappedHost)
+        ));
+        assert!(state.tenant_host_reads.gate(&overlong).is_none());
+
+        // At the limit, even in multibyte characters, the host is looked up.
+        for longest in ["a".repeat(MAX_HOST_LEN), "é".repeat(MAX_HOST_LEN)] {
+            assert!(matches!(
+                bind_community(&*state, &longest).await,
+                Err(BindError::Lookup(_))
+            ));
         }
     }
 
