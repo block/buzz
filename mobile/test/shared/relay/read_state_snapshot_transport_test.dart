@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:buzz/shared/auth/auth_provider.dart';
+import 'package:buzz/shared/hosted/builderlab_account.dart';
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -219,6 +221,80 @@ void main() {
   }
 
   for (final stage in ['GET', 'POST']) {
+    test('$stage carries hosted auth alongside snapshot proof', () async {
+      final auth = _SnapshotAuth();
+      final session = RelaySessionNotifier(
+        httpClient: MockClient((request) async {
+          if (request.method == stage &&
+              request.headers['Nostr-Federated-Identity'] != 'assertion') {
+            return http.Response('Hosted auth required', 401);
+          }
+          if (request.method == 'POST') {
+            expect(request.headers['Authorization'], startsWith('Nostr '));
+          }
+          return http.Response(
+            request.method == 'GET' ? discovery : jsonEncode(envelope()),
+            200,
+          );
+        }),
+      );
+      _container(session, _Config(keys.nsec), auth: auth);
+      expect(await session.fetchReadStateSnapshot(), hasLength(1));
+    });
+
+    for (final retirement in ['dispose', 'context change', 'timeout']) {
+      test('$stage cannot send after $retirement during hosted auth', () async {
+        final entered = Completer<void>();
+        final release = Completer<void>();
+        var authCalls = 0;
+        final auth = _SnapshotAuth(
+          beforeHeaders: () async {
+            authCalls++;
+            if (authCalls == (stage == 'GET' ? 1 : 2)) {
+              entered.complete();
+              await release.future;
+            }
+          },
+        );
+        final sent = <String>[];
+        final session = RelaySessionNotifier(
+          httpClient: MockClient((request) async {
+            sent.add(request.method);
+            return http.Response(
+              request.method == 'GET' ? discovery : jsonEncode(envelope()),
+              200,
+            );
+          }),
+        );
+        final config = _Config(keys.nsec);
+        _container(session, config, auth: auth);
+        final result = expectLater(
+          session.fetchReadStateSnapshot(
+            timeout: retirement == 'timeout'
+                ? const Duration(milliseconds: 100)
+                : const Duration(seconds: 5),
+          ),
+          retirement == 'timeout'
+              ? throwsA(isA<TimeoutException>())
+              : throwsStateError,
+        );
+        await entered.future;
+        switch (retirement) {
+          case 'dispose':
+            session.debugDispose();
+          case 'context change':
+            config.change(keys.nsec, 'https://other.example');
+            await Future<void>.delayed(Duration.zero);
+          case 'timeout':
+            await result;
+        }
+        release.complete();
+        await result;
+        // Let late auth completion reach the transport after a timeout.
+        await Future<void>.delayed(Duration.zero);
+        expect(sent, stage == 'GET' ? isEmpty : ['GET']);
+      });
+    }
     for (final status in [302, 400, 403, 413, 503]) {
       test('$stage $status is failure, never empty success', () async {
         final h = harness(
@@ -386,10 +462,15 @@ class _Harness {
   }
 }
 
-void _container(RelaySessionNotifier session, _Config config) {
+void _container(
+  RelaySessionNotifier session,
+  _Config config, {
+  HostedRelayAuth? auth,
+}) {
   final container = ProviderContainer(
     overrides: [
       authProvider.overrideWith(_PendingAuth.new),
+      if (auth != null) hostedRelayAuthProvider.overrideWithValue(auth),
       relayConfigProvider.overrideWith(() => config),
       relaySessionProvider.overrideWith(() => session),
     ],
@@ -423,5 +504,24 @@ class _StreamClient extends http.BaseClient {
   @override
   void close() {
     closed = true;
+  }
+}
+
+class _SnapshotAuth extends HostedRelayAuth {
+  _SnapshotAuth({this.beforeHeaders}) : super(BuilderlabAccountClient()) {
+    addTearDown(() {
+      dispose();
+      account.dispose();
+    });
+  }
+  final Future<void> Function()? beforeHeaders;
+
+  @override
+  bool protects(RelayConfig config) => true;
+
+  @override
+  Future<Map<String, String>> headers(RelayConfig config) async {
+    await beforeHeaders?.call();
+    return {'Nostr-Federated-Identity': 'assertion'};
   }
 }

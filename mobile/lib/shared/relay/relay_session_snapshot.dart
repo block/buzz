@@ -29,6 +29,13 @@ extension on RelaySessionNotifier {
         request,
         maxBytes: maxBytes,
         timeout: timeout,
+        decorate: (client, active) => HostedRelayHttpClient(
+          ref.read(hostedRelayAuthProvider),
+          config,
+          inner: client,
+          canSend: () =>
+              active() && !_disposed && generation == _contextGeneration,
+        ),
       );
       checkContext();
       final text = utf8.decode(response.bodyBytes);

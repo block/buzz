@@ -74,6 +74,7 @@ class RelayHttpQueryClient {
     http.Request request, {
     required int maxBytes,
     required Duration timeout,
+    http.Client Function(http.Client, bool Function())? decorate,
   }) async {
     request.followRedirects = false;
     final generation = _injectedClient == null
@@ -83,9 +84,9 @@ class RelayHttpQueryClient {
     StreamIterator<List<int>>? iterator;
     var finished = false;
     Future<http.Response> receive() async {
-      final response = await (_injectedClient ?? generation!.client).send(
-        request,
-      );
+      final transport = _injectedClient ?? generation!.client;
+      final client = decorate?.call(transport, () => !finished) ?? transport;
+      final response = await client.send(request);
       if (finished) {
         await response.stream.listen(null).cancel();
         throw StateError('Relay request already timed out');
