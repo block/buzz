@@ -73,6 +73,7 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | **NIP-17 DMs (gift wrap)** | ✅ | kind:1059 accepted with ephemeral signing keys. Stored community-globally (`channel_id=None` inside the connected community). Delivered via `#p`-filtered subscriptions. Not indexed in search. |
 | **DM discovery** | ✅ | DM creation emits kind:39000 (with `hidden` tag) + kind:44100 membership notifications. NIP-29 clients discover DMs via standard group discovery flow. |
 | **Join request (kind:9021)** | ✅ | Open channels only. Adds the joiner with the channel's `join_role` (`member` by default), emits system message + group discovery events + kind:44100 membership notification. Private channels rejected at ingest. The same body joins new community members to [default channels](#default-channels). |
+| **Conversation import (kinds 42110 to 42113, 30623)** | ✅ | [NIP-CI](docs/nips/NIP-CI.md). Each participant signs their own history as kind:9 and kind:7 with `import` and `source` tags; the relay accepts original timestamps only inside a session every participant consented to. Relay-signed kind:30623 snapshot (`d` = proposal id) carries status, consents and counts and is readable like the channel's messages. Imported events never notify, mention, mark unread, push or trigger workflows and agents. |
 | **Edits (kind:40003)** | ⚠️ | Works on the wire but Buzz-only — no standard NIP-29 client renders these |
 | **Rich content (kind:40002)** | ⚠️ | Works on the wire but Buzz-only — no standard NIP-29 client renders these |
 
@@ -577,6 +578,7 @@ but only admins/owners can set it. Full spec:
 - **kind:7 derives channel from target.** Reactions look up the target event's channel via `#e` — client-supplied `#h` tags are ignored. Reactions to unknown events are rejected (fail-closed).
 - **kind:5 uses `#h` if present, but doesn't require it.** Deletions validate author-match against target events via `#e` tags. Only self-authored events can be deleted (admin deletions use kind:9005).
 - **Client-submitted kind:44100/44101 rejected.** Membership notifications can only be signed by the relay keypair.
+- **Backdated kind:9 and kind:7 need a consented import session.** An `import` tag skips the timestamp drift check only when every [NIP-CI](docs/nips/NIP-CI.md) rule holds; client-submitted kind:30623 is rejected.
 
 ---
 

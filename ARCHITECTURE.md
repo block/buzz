@@ -182,8 +182,10 @@ The `kind` integer is the only dispatch switch. The relay routes, stores, and fa
 |------|------|-------------|
 | 7 | KIND_REACTION | Emoji reaction (standard NIP-25) |
 | 9 | KIND_STREAM_MESSAGE | Chat message in a Stream channel (NIP-29 group chat) |
+| 30623 | KIND_IMPORT_SESSION_SNAPSHOT | Relay-signed import session state (NIP-CI) |
 | 40002 | KIND_STREAM_MESSAGE_V2 | Stream message v2 format |
 | 40003 | KIND_STREAM_MESSAGE_EDIT | Edit of a stream message |
+| 42110 to 42113 | KIND_IMPORT_* | Conversation import proposal, consent, withdraw and complete (NIP-CI) |
 | 43001 | KIND_JOB_REQUEST | Agent job request |
 | 45001 | KIND_FORUM_POST | Forum thread root |
 | 45003 | KIND_FORUM_COMMENT | Forum thread reply |
