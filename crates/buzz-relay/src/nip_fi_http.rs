@@ -460,7 +460,7 @@ async fn observe_owner(
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let tenant = match crate::tenant::bind_community(&state.db, host).await {
+    let tenant = match crate::tenant::bind_community(state, host).await {
         Ok(tenant) => tenant,
         Err(crate::tenant::BindError::UnmappedHost) => return None,
         Err(crate::tenant::BindError::Lookup(_)) => {
