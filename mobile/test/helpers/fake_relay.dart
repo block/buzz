@@ -49,6 +49,7 @@ class FakeRelay {
   Completer<void>? _echoHold;
   Completer<void>? _reqHold;
   Completer<void>? _authHold;
+  Completer<void>? _queryHold;
   final DateTime Function()? _now;
 
   String get pubkey => keys.public;
@@ -146,6 +147,9 @@ class FakeRelay {
   /// would: they read stored events, start live fan-out and reach EOSE only
   /// once admitted. Events committed meanwhile reach them only through replay.
   Completer<void> holdReq() => _reqHold = Completer<void>();
+
+  /// Holds HTTP queries until the completer completes, as a slow relay would.
+  Completer<void> holdQuery() => _queryHold = Completer<void>();
 
   /// Keeps the next connection unauthenticated until the completer completes.
   /// Like the relay, it answers a REQ sent before AUTH with CLOSED.
@@ -357,6 +361,11 @@ class FakeRelay {
     final filters = (jsonDecode(request.body) as List)
         .cast<Map<String, dynamic>>();
     queries.add(filters);
+    final hold = _queryHold;
+    if (hold != null) {
+      await hold.future;
+      if (identical(_queryHold, hold)) _queryHold = null;
+    }
     final failure = _queryFailures.indexWhere((f) => filters.any(f.match));
     if (failure >= 0) {
       return http.Response(_queryFailures.removeAt(failure).body, 503);
