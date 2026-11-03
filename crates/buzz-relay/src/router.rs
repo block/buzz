@@ -735,7 +735,7 @@ async fn nip11_or_ws_handler(
     //
     // The NIP-FI upgrade gate runs above (before bind_community) so denied
     // upgrades skip the tenant lookup; the `Ok(ws)` backstop runs below.
-    let tenant = match crate::tenant::bind_community(&state.db, raw_host).await {
+    let tenant = match crate::tenant::bind_community(&*state, raw_host).await {
         Ok(ctx) => ctx,
         Err(_) => {
             // Generic rejection: do not distinguish "unmapped" from "lookup

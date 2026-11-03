@@ -398,7 +398,7 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
     if state.config.artifact_incremental_enabled {
         info.artifacts["incremental"] = crate::api::artifact_sync::capability();
     }
-    if let Ok(tenant) = crate::tenant::bind_community(&state.db, raw_host).await {
+    if let Ok(tenant) = crate::tenant::bind_community(state, raw_host).await {
         if let Some(profile) = crate::verified_profiles::discovery(state, &tenant).await {
             if let Some(fi) = info.federated_identity.as_mut() {
                 fi["public_profile"] = profile;
@@ -423,7 +423,7 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
         }));
     }
     let tenant_host = if state.config.push_enabled {
-        crate::tenant::bind_community(&state.db, raw_host)
+        crate::tenant::bind_community(state, raw_host)
             .await
             .ok()
             .map(|tenant| tenant.host().to_owned())
@@ -455,9 +455,7 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
 /// `None` (no `icon` field): NIP-11 is intentionally served to unmapped hosts
 /// too, and an icon lookup failure must not break that.
 async fn workspace_icon_for_host(state: &crate::state::AppState, raw_host: &str) -> Option<String> {
-    let tenant = crate::tenant::bind_community(&state.db, raw_host)
-        .await
-        .ok()?;
+    let tenant = crate::tenant::bind_community(state, raw_host).await.ok()?;
     state
         .db
         .get_community_icon(tenant.community())

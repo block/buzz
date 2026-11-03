@@ -209,6 +209,32 @@ class MessageContent extends HookConsumerWidget {
     // Own-bubble links share the bubble ink; markdown marks them by underline.
     final linkColor = ownMessage ? ownTextColor : context.colors.tertiary;
     final bubbleInk = ownMessage ? ownTextColor : context.colors.onSurface;
+    final onSurface = context.colors.onSurface;
+    // GptMarkdownTheme notifies its dependents whenever the data object
+    // changes (the data has no value equality), and each notification makes
+    // every GptMarkdown below re-parse its text. Reuse one bubble theme while
+    // its inputs are unchanged so an ordinary rebuild does not re-parse.
+    final bubbleMarkdownTheme = useMemoized(
+      () => markdownTheme.copyWith(
+        linkColor: linkColor,
+        // A neutral chip would put white ink on a light fill; tint the accent
+        // instead.
+        inlineCode: ownMessage
+            ? markdownTheme.inlineCode.copyWith(
+                color: ownTextColor,
+                backgroundColor: chatCodeTint(ownTextColor, 0.18),
+                borderColor: ownTextColor.withValues(alpha: 0.3),
+              )
+            : null,
+        h1: markdownTheme.h1?.copyWith(color: bubbleInk),
+        h2: markdownTheme.h2?.copyWith(color: bubbleInk),
+        h3: markdownTheme.h3?.copyWith(color: bubbleInk),
+        h4: markdownTheme.h4?.copyWith(color: bubbleInk),
+        h5: markdownTheme.h5?.copyWith(color: bubbleInk),
+        h6: markdownTheme.h6?.copyWith(color: bubbleInk),
+      ),
+      [markdownTheme, linkColor, ownMessage, ownTextColor, onSurface],
+    );
     final baseTextStyle =
         (baseStyle ??
                 context.textTheme.bodyMedium?.copyWith(
@@ -474,53 +500,7 @@ class MessageContent extends HookConsumerWidget {
                             ),
                           ),
                           child: GptMarkdownTheme(
-                            gptThemeData: markdownTheme.copyWith(
-                              linkColor: linkColor,
-                              // A neutral chip would put white ink on a light
-                              // fill; tint the accent instead.
-                              inlineCode: ownMessage
-                                  ? markdownTheme.inlineCode.copyWith(
-                                      color: ownTextColor,
-                                      backgroundColor: chatCodeTint(
-                                        ownTextColor,
-                                        0.18,
-                                      ),
-                                      borderColor: ownTextColor.withValues(
-                                        alpha: 0.3,
-                                      ),
-                                    )
-                                  : null,
-                              h1: markdownTheme.h1?.copyWith(
-                                color: ownMessage
-                                    ? ownTextColor
-                                    : context.colors.onSurface,
-                              ),
-                              h2: markdownTheme.h2?.copyWith(
-                                color: ownMessage
-                                    ? ownTextColor
-                                    : context.colors.onSurface,
-                              ),
-                              h3: markdownTheme.h3?.copyWith(
-                                color: ownMessage
-                                    ? ownTextColor
-                                    : context.colors.onSurface,
-                              ),
-                              h4: markdownTheme.h4?.copyWith(
-                                color: ownMessage
-                                    ? ownTextColor
-                                    : context.colors.onSurface,
-                              ),
-                              h5: markdownTheme.h5?.copyWith(
-                                color: ownMessage
-                                    ? ownTextColor
-                                    : context.colors.onSurface,
-                              ),
-                              h6: markdownTheme.h6?.copyWith(
-                                color: ownMessage
-                                    ? ownTextColor
-                                    : context.colors.onSurface,
-                              ),
-                            ),
+                            gptThemeData: bubbleMarkdownTheme,
                             child: renderMarkdown(segment.text),
                           ),
                         ),
