@@ -1,5 +1,7 @@
 import 'dart:async';
+
 import 'hosted_http_fixture.dart';
+
 import 'dart:convert';
 
 import 'package:buzz/shared/hosted/builderlab_account.dart';
@@ -42,18 +44,39 @@ void main() {
         }
         expect(request.headers['X-BB-Session-Credential'], 'secret');
         return http.Response(
-          jsonEncode({'subject': 'account-1', 'expires_at': expiry}),
+          jsonEncode({
+            'subject': 'account-1',
+            'email': 'owner@example.com',
+            'expires_at': expiry,
+          }),
           200,
         );
       });
-      final client = BuilderlabAccountClient(httpClient: transport);
+      final storage = _SessionStorage();
+      final client = BuilderlabAccountClient(
+        httpClient: transport,
+        storage: storage,
+      );
       expect(
         (await client.exchange(code: 'one-use', verifier: verifier)).subject,
         'account-1',
       );
-      final restored = BuilderlabAccountClient(httpClient: transport);
-      expect((await restored.restore())!.subject, 'account-1');
+      final restored = BuilderlabAccountClient(
+        httpClient: transport,
+        storage: storage,
+      );
+      final restoredAccount = (await restored.restore())!;
+      expect(restoredAccount.subject, 'account-1');
+      expect(restoredAccount.email, 'owner@example.com');
       expect(requests.length, 3);
+      storage.failDelete = true;
+      await expectLater(
+        restored.clearLocalSession(),
+        throwsA(AccountFailure.storage),
+      );
+      expect(restored.account?.subject, 'account-1');
+      expect(await client.restore(), isNotNull);
+      storage.failDelete = false;
       await restored.clearLocalSession();
       expect(
         await BuilderlabAccountClient(httpClient: transport).restore(),
@@ -357,4 +380,22 @@ void main() {
       throwsA(AccountFailure.signedOut),
     );
   });
+}
+
+class _SessionStorage extends FlutterSecureStorage {
+  bool failDelete = false;
+
+  @override
+  Future<void> delete({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    if (failDelete) throw StateError('storage unavailable');
+    await super.delete(key: key);
+  }
 }

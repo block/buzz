@@ -1078,12 +1078,7 @@ void main() {
       await f.tap(tester, 'Try again');
       expect(f.flow.stage, HostedFlowStage.idle);
       expect(f.probes, isEmpty);
-      expect(
-        find.text(
-          'No communities available to add. Scan a QR code or use an invite link.',
-        ),
-        findsOneWidget,
-      );
+      expect(find.text('Signed in to BuilderLab'), findsOneWidget);
       expect(find.text('Scan a QR code'), findsOneWidget);
       expect(find.text('Use pairing code'), findsNothing);
       f.rows.addAll([f.row('one'), f.row('two')]);
