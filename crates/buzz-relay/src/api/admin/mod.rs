@@ -376,7 +376,7 @@ async fn serve_feedback_attachment_checked(
     // Resolve the tenant from server-owned feedback provenance, then assert the
     // resolved row still agrees with the feedback FK. Client input never names
     // a community, host, object key, extension, or upstream URL.
-    let tenant = crate::tenant::bind_community(&*state, community_host)
+    let tenant = crate::tenant::bind_community(state, community_host)
         .await
         .map_err(|_| ApiError::not_found())?;
     if tenant.community().as_uuid() != &community_id {
