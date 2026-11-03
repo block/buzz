@@ -880,7 +880,11 @@ mod postgres_tests {
                     .iter()
                     .map(|d| Tag::parse(["d", d.as_str()]).expect("d tag"))
                     .collect();
-                tags.extend(extra_tags.iter().map(|t| Tag::parse(*t).expect("extra tag")));
+                tags.extend(
+                    extra_tags
+                        .iter()
+                        .map(|t| Tag::parse(*t).expect("extra tag")),
+                );
                 tags.extend(p_tags.iter().map(|p| {
                     let mut parts = vec!["p"];
                     parts.extend(p.iter().copied());
