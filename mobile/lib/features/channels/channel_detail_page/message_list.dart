@@ -851,13 +851,16 @@ class _MessageList extends HookConsumerWidget {
             Grid.gutter,
             composerBottomInset,
           ),
-          child: TypingMotionPreview.enabled
-              ? TypingMotionPreview(channelId: channelId)
-              : InlineAgentTyping(
-                  channelId: channelId,
-                  entries: displayedTyping,
-                  knownAgents: workingAgents,
-                ),
+          child: _aboveHiddenHistory(
+            hiddenHistory,
+            TypingMotionPreview.enabled
+                ? TypingMotionPreview(channelId: channelId)
+                : InlineAgentTyping(
+                    channelId: channelId,
+                    entries: displayedTyping,
+                    knownAgents: workingAgents,
+                  ),
+          ),
         ),
       );
     }

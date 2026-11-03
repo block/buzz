@@ -59,6 +59,13 @@ Widget? _useHiddenHistoryPaging({
   );
 }
 
+/// Keeps the [hiddenHistory] spinner or button above [child], so another
+/// empty-state widget doesn't hide the way to older history.
+Widget _aboveHiddenHistory(Widget? hiddenHistory, Widget child) =>
+    hiddenHistory == null
+    ? child
+    : Column(mainAxisSize: MainAxisSize.min, children: [hiddenHistory, child]);
+
 /// Resumes paging older history when automatic paging stopped.
 class _LoadEarlierButton extends StatelessWidget {
   const _LoadEarlierButton({required this.onPressed});
