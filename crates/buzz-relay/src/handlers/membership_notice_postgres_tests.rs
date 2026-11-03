@@ -232,7 +232,12 @@ async fn channel_delete_notifies_every_member_after_cleanup() {
 
     // The 9008 is accepted while the member's notice is still held, so the
     // notices are off the request path.
-    publish(&state, &tenant, &owner, 9008, &[&["h", &h]]).await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        publish(&state, &tenant, &owner, 9008, &[&["h", &h]]),
+    )
+    .await
+    .expect("9008 OK waited on the held notice");
     assert!(
         notices(&mut member_rx).is_empty(),
         "notice delivered before the OK"
