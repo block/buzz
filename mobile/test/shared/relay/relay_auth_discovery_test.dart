@@ -52,6 +52,13 @@ void main() {
       (capable, true),
       (<String, Object?>{}, false),
       ({...capable, 'limitation': null}, false),
+      (
+        {
+          ...capable,
+          'limitation': {'federated_identity': false},
+        },
+        false,
+      ),
       ({...capable, 'federated_identity': null}, false),
       for (final freshness in ['current-status', 'unknown-class', null])
         (
@@ -67,7 +74,10 @@ void main() {
       (
         {
           ...capable,
-          'federated_identity': {'core': 'another-protocol'},
+          'federated_identity': {
+            'core': 'another-protocol',
+            'assertion_freshness': {'class': 'offline-jwt'},
+          },
         },
         false,
       ),
