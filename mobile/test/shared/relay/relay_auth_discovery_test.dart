@@ -156,7 +156,11 @@ void main() {
         'invalid',
         '[]',
         '{"requires_nip_fi":null}',
-        ' ' * (256 * 1024 + 1),
+        jsonEncode({
+          ...capable,
+          'requires_nip_fi': true,
+          'padding': 'a' * (256 * 1024),
+        }),
       ]) {
         final client = MockClient((_) async => http.Response(body, 200));
         addTearDown(client.close);
