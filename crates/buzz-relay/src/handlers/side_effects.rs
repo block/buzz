@@ -1201,7 +1201,8 @@ async fn publish_live_thread_summary(
 
 /// Test-only barrier at the point a membership notice is sent: a test parks
 /// the producer there, reads what a client would read on receipt, then lets
-/// it continue. Keyed by recipient so parallel tests do not interfere.
+/// it continue. It can also pin the notices' clock. Keyed by recipient so
+/// parallel tests do not interfere.
 #[cfg(test)]
 pub(crate) mod notice_barrier {
     use std::collections::HashMap;
@@ -1224,6 +1225,24 @@ pub(crate) mod notice_barrier {
         let (tx, rx) = mpsc::unbounded_channel();
         waiters().lock().unwrap().insert(recipient.to_vec(), tx);
         rx
+    }
+
+    fn pins() -> &'static Mutex<HashMap<Vec<u8>, u64>> {
+        static PINS: OnceLock<Mutex<HashMap<Vec<u8>, u64>>> = OnceLock::new();
+        PINS.get_or_init(Default::default)
+    }
+
+    /// Sign every later notice to `recipient` at `created_at`, as if all were
+    /// sent in the same second.
+    pub(crate) fn pin_created_at(recipient: &[u8], created_at: u64) {
+        pins()
+            .lock()
+            .unwrap()
+            .insert(recipient.to_vec(), created_at);
+    }
+
+    pub(super) fn pinned_created_at(recipient: &[u8]) -> Option<u64> {
+        pins().lock().unwrap().get(recipient).copied()
     }
 
     pub(super) async fn reached(channel_id: Uuid, recipient: &[u8]) {
@@ -1255,6 +1274,30 @@ pub async fn emit_membership_notification(
     actor_pubkey: &[u8],
     notification_kind: u32,
 ) -> anyhow::Result<()> {
+    emit_membership_notification_tagged(
+        tenant,
+        state,
+        channel_id,
+        target_pubkey,
+        actor_pubkey,
+        notification_kind,
+        &[],
+    )
+    .await
+}
+
+/// [`emit_membership_notification`] with `extra_tags` after the standard
+/// ones. A tag that differs per cause, such as a moderation source, keeps two
+/// notices in the same second from sharing one event id.
+pub(crate) async fn emit_membership_notification_tagged(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    target_pubkey: &[u8],
+    actor_pubkey: &[u8],
+    notification_kind: u32,
+    extra_tags: &[Tag],
+) -> anyhow::Result<()> {
     // No channel row means no type to tag. Send nothing rather than an
     // untagged notice, which every client would treat as a legacy type.
     let Some(channel_type) = state
@@ -1273,6 +1316,7 @@ pub async fn emit_membership_notification(
         target_pubkey,
         actor_pubkey,
         notification_kind,
+        extra_tags,
     )
     .await
 }
@@ -1287,6 +1331,7 @@ async fn emit_typed_membership_notification(
     target_pubkey: &[u8],
     actor_pubkey: &[u8],
     notification_kind: u32,
+    extra_tags: &[Tag],
 ) -> anyhow::Result<()> {
     let target_hex = hex::encode(target_pubkey);
     let actor_hex = hex::encode(actor_pubkey);
@@ -1319,8 +1364,15 @@ async fn emit_typed_membership_notification(
     #[cfg(test)]
     notice_barrier::reached(channel_id, target_pubkey).await;
 
-    let event = EventBuilder::new(Kind::Custom(notification_kind as u16), content)
+    let builder = EventBuilder::new(Kind::Custom(notification_kind as u16), content)
         .tags([p_tag, h_tag, type_tag])
+        .tags(extra_tags.iter().cloned());
+    #[cfg(test)]
+    let builder = match notice_barrier::pinned_created_at(target_pubkey) {
+        Some(at) => builder.custom_created_at(nostr::Timestamp::from(at)),
+        None => builder,
+    };
+    let event = builder
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign membership notification: {e}"))?;
 
@@ -2126,6 +2178,7 @@ pub(crate) async fn persist_put_user(
                 &target.pubkey,
                 &actor_bytes,
                 KIND_MEMBER_ADDED_NOTIFICATION,
+                &[],
             )
             .await
             {
@@ -2844,6 +2897,7 @@ async fn handle_delete_group(
                 member,
                 &actor_bytes,
                 KIND_MEMBER_REMOVED_NOTIFICATION,
+                &[],
             )
             .await
             {

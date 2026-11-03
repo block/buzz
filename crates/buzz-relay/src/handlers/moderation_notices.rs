@@ -30,7 +30,8 @@ use buzz_core::tenant::TenantContext;
 
 use super::event::dispatch_persistent_event;
 use super::side_effects::{
-    emit_group_discovery_events, emit_membership_notification, publish_dm_visibility_snapshot,
+    emit_group_discovery_events, emit_membership_notification_tagged,
+    publish_dm_visibility_snapshot,
 };
 use crate::state::AppState;
 
@@ -156,14 +157,17 @@ pub async fn send_moderation_notice(
 
     // The DM is now readable in the recipient's channel list: tell them, as
     // opening a DM does. Sent on every delivery so a new, existing or hidden
-    // DM resurfaces live; a repeated notice is a harmless hint.
-    if let Err(e) = emit_membership_notification(
+    // DM resurfaces live; a repeated notice is a harmless hint. The source tag
+    // keeps two deliveries in the same second from sharing one notice.
+    let source_id = notice.source_id();
+    if let Err(e) = emit_membership_notification_tagged(
         tenant,
         state,
         dm_channel_id,
         recipient_pubkey,
         relay_pubkey_bytes.as_slice(),
         KIND_MEMBER_ADDED_NOTIFICATION,
+        &[Tag::parse([MODERATION_SOURCE_TAG, &source_id.to_string()])?],
     )
     .await
     {
@@ -180,7 +184,6 @@ pub async fn send_moderation_notice(
     //    (same pubkey + created_at + kind + tags + content = same SHA256 event ID).
     //    `insert_event`'s ON CONFLICT DO NOTHING ensures exactly one row is
     //    durably persisted regardless of how many workers reach this point.
-    let source_id = notice.source_id();
     let tags = vec![
         Tag::parse(["h", &dm_channel_id.to_string()])?,
         Tag::parse([MODERATION_SOURCE_TAG, &source_id.to_string()])?,

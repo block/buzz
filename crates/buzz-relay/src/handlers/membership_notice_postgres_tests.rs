@@ -89,42 +89,36 @@ fn subscribe_notices(
         tenant.community(),
         conn_id,
         "notices".into(),
-        vec![
-            serde_json::from_value(filter).expect("filter"),
-            serde_json::from_value(json!({
-                "kinds": [KIND_DM_VISIBILITY],
-                "#p": [reader.public_key().to_hex()],
-            }))
-            .expect("filter"),
-        ],
+        vec![serde_json::from_value(filter).expect("filter")],
         None,
     );
     rx
 }
 
-/// The `(kind, h tags)` of every live event delivered so far.
-fn live_events(rx: &mut Receiver<axum::extract::ws::Message>) -> Vec<(u64, Vec<String>)> {
-    let mut events = Vec::new();
+/// The `(kind, h, id)` of every live notice delivered so far.
+fn live_notices(rx: &mut Receiver<axum::extract::ws::Message>) -> Vec<(u64, String, String)> {
+    let mut notices = Vec::new();
     while let Ok(frame) = rx.try_recv() {
         let axum::extract::ws::Message::Text(text) = frame else {
             continue;
         };
         let message: Value = serde_json::from_str(&text).expect("relay frame");
         if message[0] == "EVENT" {
-            events.push((
-                message[2]["kind"].as_u64().unwrap(),
-                tag_values(&message[2], "h"),
+            let event = &message[2];
+            notices.push((
+                event["kind"].as_u64().unwrap(),
+                tag_values(event, "h").concat(),
+                event["id"].as_str().unwrap().to_owned(),
             ));
         }
     }
-    events
+    notices
 }
 
 fn notices(rx: &mut Receiver<axum::extract::ws::Message>) -> Vec<(u64, String)> {
-    live_events(rx)
+    live_notices(rx)
         .into_iter()
-        .filter(|(kind, _)| *kind != KIND_DM_VISIBILITY as u64)
-        .map(|(kind, h)| (kind, h.concat()))
+        .map(|(kind, h, _)| (kind, h))
         .collect()
 }
 
@@ -175,7 +169,8 @@ async fn listed_channels(
     read_tags(state, tenant, reader, filter, "d").await
 }
 
-/// The DMs `reader`'s current NIP-DV snapshot hides from its sidebar.
+/// The DMs `reader`'s current NIP-DV snapshot hides from its sidebar, read
+/// as a client does after its channel list refreshes.
 async fn hidden_dms(state: &Arc<AppState>, tenant: &TenantContext, reader: &Keys) -> Vec<String> {
     let filter = json!({"kinds": [KIND_DM_VISIBILITY], "#p": [reader.public_key().to_hex()]});
     read_tags(state, tenant, reader, filter, "h").await
@@ -302,8 +297,8 @@ async fn moderation_kick_notifies_the_kicked_member_after_cleanup() {
 
 /// A moderation DM resurfaces the DM, and on receipt of its notice the
 /// channel list shows it and the NIP-DV snapshot no longer hides it. The
-/// second delivery follows a real hide without waiting a second: its notice
-/// may coalesce with the first, but the live snapshot still unhides it.
+/// second delivery follows a real hide in the same (pinned) second and still
+/// sends its own notice, so a client that only hears notices sees it return.
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
 async fn moderation_dm_notifies_the_recipient_once_visible() {
@@ -312,6 +307,7 @@ async fn moderation_dm_notifies_the_recipient_once_visible() {
     let recipient_bytes = recipient.public_key().to_bytes();
     let mut rx = subscribe_notices(&state, &tenant, &recipient);
     let mut barrier = notice_barrier::install(&recipient_bytes);
+    notice_barrier::pin_created_at(&recipient_bytes, nostr::Timestamp::now().as_secs());
     let deliver = || {
         let (state, tenant) = (state.clone(), tenant.clone());
         tokio::spawn(async move {
@@ -341,9 +337,11 @@ async fn moderation_dm_notifies_the_recipient_once_visible() {
     let (dm, seen) = at_receipt(&mut barrier, on_receipt).await;
     first.await.expect("task").expect("first notice");
     assert_eq!(seen, (true, false), "listed and visible on receipt");
+    let first_notice = live_notices(&mut rx);
+    assert_eq!(first_notice.len(), 1, "{first_notice:?}");
     assert_eq!(
-        notices(&mut rx),
-        vec![(KIND_MEMBER_ADDED_NOTIFICATION as u64, dm.clone())]
+        (first_notice[0].0, &first_notice[0].1),
+        (KIND_MEMBER_ADDED_NOTIFICATION as u64, &dm)
     );
 
     publish(
@@ -355,20 +353,21 @@ async fn moderation_dm_notifies_the_recipient_once_visible() {
     )
     .await;
     assert!(hidden_dms(&state, &tenant, &recipient).await.contains(&dm));
-    live_events(&mut rx);
 
     let second = deliver();
     let (again, seen) = at_receipt(&mut barrier, on_receipt).await;
     second.await.expect("task").expect("second notice");
     assert_eq!(again, dm);
     assert_eq!(seen, (true, false), "listed and visible on receipt");
-    let latest_snapshot = live_events(&mut rx)
-        .into_iter()
-        .rev()
-        .find(|(kind, _)| *kind == KIND_DM_VISIBILITY as u64)
-        .expect("live visibility snapshot");
-    assert!(
-        !latest_snapshot.1.contains(&dm),
-        "client still hides the DM"
+    let second_notice = live_notices(&mut rx);
+    assert_eq!(
+        second_notice.len(),
+        1,
+        "the second delivery's notice coalesced"
     );
+    assert_eq!(
+        (second_notice[0].0, &second_notice[0].1),
+        (KIND_MEMBER_ADDED_NOTIFICATION as u64, &dm)
+    );
+    assert_ne!(second_notice[0].2, first_notice[0].2);
 }
