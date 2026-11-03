@@ -96,7 +96,8 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         // missing credentials → 401 + WWW-Authenticate challenge;
         // malformed credentials (bad base64, bad UTF-8) → 401 without challenge;
         // regardless of whether the Host resolves to a known community.  No
-        // database work for syntactically bad requests in Off mode.
+        // tenant-binding work for syntactically bad requests. The policy read
+        // still comes first so a required row cannot take the legacy path.
         //
         // Enforce: the header syntax is validated
         // inside the NIP-FI admission closure below, where proof failures are
@@ -4588,7 +4589,7 @@ mod off_mode_precedence_tests {
         // and bad-UTF8 do NOT (those use `into_response()` without the header).
         #[tokio::test]
         #[ignore = "requires Postgres"]
-        async fn off_mode_unmapped_host_missing_auth_returns_401_before_db() {
+        async fn off_mode_unmapped_host_missing_auth_returns_401_before_tenant_binding() {
             let Some(state) = off_mode_state().await else {
                 panic!("local Postgres not reachable");
             };
@@ -4631,7 +4632,7 @@ mod off_mode_precedence_tests {
         // Falsifying mutation: delete transport.rs:101-104 → 404.
         #[tokio::test]
         #[ignore = "requires Postgres"]
-        async fn off_mode_unmapped_host_wrong_scheme_returns_401_before_db() {
+        async fn off_mode_unmapped_host_wrong_scheme_returns_401_before_tenant_binding() {
             let Some(state) = off_mode_state().await else {
                 panic!("local Postgres not reachable");
             };
@@ -4671,7 +4672,7 @@ mod off_mode_precedence_tests {
         // Falsifying mutation: delete transport.rs:101-104 → 404.
         #[tokio::test]
         #[ignore = "requires Postgres"]
-        async fn off_mode_unmapped_host_invalid_base64_returns_401_before_db() {
+        async fn off_mode_unmapped_host_invalid_base64_returns_401_before_tenant_binding() {
             let Some(state) = off_mode_state().await else {
                 panic!("local Postgres not reachable");
             };
@@ -4705,7 +4706,7 @@ mod off_mode_precedence_tests {
         // Falsifying mutation: delete transport.rs:101-104 → 404.
         #[tokio::test]
         #[ignore = "requires Postgres"]
-        async fn off_mode_unmapped_host_bad_utf8_returns_401_before_db() {
+        async fn off_mode_unmapped_host_bad_utf8_returns_401_before_tenant_binding() {
             let Some(state) = off_mode_state().await else {
                 panic!("local Postgres not reachable");
             };

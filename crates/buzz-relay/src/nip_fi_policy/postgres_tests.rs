@@ -57,7 +57,7 @@ async fn signed_unsigned_free_controls_and_required_discovery_use_real_host_rows
     state.nip_fi_deny_map = Some(Arc::new(buzz_auth::NipFiDenyMap::new(100, vec![])));
     let state = Arc::new(state);
     let app = crate::router::build_router(state.clone());
-    let body = br#"{"kinds":[1]}"#;
+    let body = br#"[{"kinds":[1]}]"#;
     for host in [&free, &required] {
         for signed in [false, true] {
             let mut request = Request::post("/count")

@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)] // Test closures return the real Axum admission response.
+
 use super::*;
 use crate::nip_fi_core::tests::ScriptedVerifier;
 use crate::nip_fi_http::{admit_nip_fi_http_on_state, Nip98Proof};

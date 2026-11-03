@@ -2514,6 +2514,7 @@ mod route_integration_tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::result_large_err)] // Real Axum admission closure.
     async fn required_off_and_shadow_validate_real_assertion_crypto() {
         use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
         for mode in [buzz_auth::NipFiMode::Off, buzz_auth::NipFiMode::Shadow] {

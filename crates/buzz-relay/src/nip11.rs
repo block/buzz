@@ -398,6 +398,7 @@ pub(crate) async fn nip11_response(
     response
 }
 
+#[allow(clippy::result_large_err)] // Axum responses carry the discovery denial contract.
 pub(crate) async fn nip11_document(
     state: &crate::state::AppState,
     raw_host: &str,

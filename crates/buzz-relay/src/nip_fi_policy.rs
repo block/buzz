@@ -51,6 +51,7 @@ pub(crate) fn effective(global: NipFiMode, required: bool) -> NipFiMode {
     global.with_requirement(required)
 }
 
+#[allow(clippy::result_large_err)] // Axum responses are the ingress error contract.
 pub(crate) async fn resolve(
     state: &crate::state::AppState,
     headers: &HeaderMap,
@@ -96,29 +97,49 @@ pub(crate) async fn resolve(
     })
 }
 
-/// An unmapped request may retain legacy pre-auth error ordering, but must
-/// never obtain a shared admission proof if a handler omits its host check.
-pub(crate) fn unmapped_request() -> bool {
-    REQUEST_POLICY.try_with(|p| !p.mapped).unwrap_or(false)
-}
-
-/// Admission callers share the router's decision. Direct callers fail closed
-/// when policy is unavailable, even if the global rollout mode is Off/Shadow.
+/// Preserve route-specific rejection ordering for an authoritative host miss.
+/// This is not admission: the full gate below still requires a mapped policy.
 pub(crate) async fn mode(state: &crate::state::AppState, headers: &HeaderMap) -> NipFiMode {
     if state.config.nip_fi.mode.denies_unconditionally() {
         return NipFiMode::unavailable();
     }
     match resolve(state, headers).await {
-        Ok(p)
-            if p.stored_required
-                && (state.nip_fi_verifier.is_none()
-                    || state.nip_fi_deny_map.is_none()
-                    || state.config.nip_fi.max_connection_lifetime().is_none()) =>
-        {
-            NipFiMode::unavailable()
-        }
-        Ok(p) => p.mode,
+        Ok(policy) => configured_mode(state, policy),
+        Err(response) if response.status() == StatusCode::NOT_FOUND => state.config.nip_fi.mode,
         Err(_) => NipFiMode::unavailable(),
+    }
+}
+
+/// A shared admission proof is impossible without a serving host policy,
+/// even when a route preserves legacy unauthenticated error precedence.
+#[allow(clippy::result_large_err)] // Axum responses are the ingress error contract.
+pub(crate) async fn admission_mode(
+    state: &crate::state::AppState,
+    headers: &HeaderMap,
+) -> Result<NipFiMode, Response<Body>> {
+    if state.config.nip_fi.mode.denies_unconditionally() {
+        return Ok(NipFiMode::unavailable());
+    }
+    let policy = resolve(state, headers)
+        .await
+        .map_err(|_| crate::nip_fi_core::http_denial(DenialClass::AuthorizationUnavailable))?;
+    if !policy.mapped {
+        return Err(crate::nip_fi_core::http_denial(
+            DenialClass::AuthorizationUnavailable,
+        ));
+    }
+    Ok(configured_mode(state, policy))
+}
+
+fn configured_mode(state: &crate::state::AppState, policy: Policy) -> NipFiMode {
+    if policy.stored_required
+        && (state.nip_fi_verifier.is_none()
+            || state.nip_fi_deny_map.is_none()
+            || state.config.nip_fi.max_connection_lifetime().is_none())
+    {
+        NipFiMode::unavailable()
+    } else {
+        policy.mode
     }
 }
 
