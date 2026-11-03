@@ -30,7 +30,7 @@ extension on RelaySessionNotifier {
         maxBytes: maxBytes,
         timeout: timeout,
         decorate: (client, active) => HostedRelayHttpClient(
-          ref.read(hostedRelayAuthProvider),
+          _snapshotAuth,
           config,
           inner: client,
           canSend: () =>

@@ -149,6 +149,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   );
 
   RelayConfig get _snapshotConfig => ref.read(relayConfigProvider);
+  HostedRelayAuth get _snapshotAuth => ref.read(hostedRelayAuthProvider);
 
   /// Fetches a complete, validated own-author kind-30078 snapshot.
   /// Throws if discovery, completeness, scope or event validation fails.
