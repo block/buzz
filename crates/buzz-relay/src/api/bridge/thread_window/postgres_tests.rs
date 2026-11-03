@@ -536,15 +536,14 @@ mod review_postgres_tests;
 /// A deletion of an author-only event is private by its `k` tag alone. Neither
 /// window's aux closure returns one to anyone but its signer, and a read by id
 /// stays author-only after its target is physically gone. Ordinary ingest can
-/// build neither case, so both use stored fixtures. The thread window reaches
-/// its deletions on the deletion-of-aux hop; the channel window has no such
-/// hop, so its deletions target the row directly.
+/// build neither case, so both use stored fixtures.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn private_deletions_reach_only_their_signer_through_windows_and_id_reads() {
     let f = Fixture::new().await;
     let reply = f.reply(0).await;
     let reply_reaction = f.aux(7, &reply, Some(f.channel)).await;
+    let root_reaction = f.aux(7, &f.root, Some(f.channel)).await;
     let signer = Keys::generate();
     let deletion = |target: &str, k: &str| {
         EventBuilder::new(Kind::EventDeletion, "")
@@ -559,8 +558,8 @@ async fn private_deletions_reach_only_their_signer_through_windows_and_id_reads(
     let reminder = buzz_core::kind::KIND_EVENT_REMINDER.to_string();
     let thread_private = deletion(&reply_reaction.id.to_hex(), &reminder);
     let thread_public = deletion(&reply_reaction.id.to_hex(), "7");
-    let channel_private = deletion(&f.root.id.to_hex(), &reminder);
-    let channel_public = deletion(&f.root.id.to_hex(), "9");
+    let channel_private = deletion(&root_reaction.id.to_hex(), &reminder);
+    let channel_public = deletion(&root_reaction.id.to_hex(), "7");
     let orphan_private = deletion(&"ab".repeat(32), &reminder);
     for event in [
         &thread_private,
@@ -592,5 +591,46 @@ async fn private_deletions_reach_only_their_signer_through_windows_and_id_reads(
         let (status, body) = f.post(reader, "/query", by_id.clone()).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(ids(&body, Some(5)).len(), usize::from(visible), "{body}");
+    }
+}
+
+/// A deletion stored before deletions applied atomically can sit beside a
+/// target that is still live. Neither window may serve that reaction or edit
+/// without the deletion that cancels it, and no resend can repair the row once
+/// it is older than the ingest timestamp window. The fixtures store each
+/// deletion without soft-deleting its target, the state such a write left.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn torn_deletions_still_cancel_live_targets_in_both_windows() {
+    let f = Fixture::new().await;
+    let reply = f.reply(0).await;
+    let reaction = f.aux(7, &f.root, Some(f.channel)).await;
+    let edit = f.aux(40003, &f.root, Some(f.channel)).await;
+    let reply_reaction = f.aux(7, &reply, Some(f.channel)).await;
+    let reaction_deletion = f.aux(5, &reaction, None).await;
+    let edit_deletion = f.aux(9005, &edit, Some(f.channel)).await;
+    let reply_reaction_deletion = f.aux(5, &reply_reaction, None).await;
+
+    let window = json!({"top_level":true,"#h":[f.channel],"kinds":[9],"include_aux":true});
+    let legacy = json!({"#h":[f.channel],"#e":[f.root.id.to_hex()],"kinds":[9],
+        "depth_limit":2147483647,"include_aux":true});
+    let mut pairs = vec![(&reaction, &reaction_deletion), (&edit, &edit_deletion)];
+    for (filter, path) in [(&window, "channel window"), (&legacy, "legacy thread")] {
+        if path == "legacy thread" {
+            pairs.push((&reply_reaction, &reply_reaction_deletion));
+        }
+        let page = f.query(filter).await;
+        let all = ids(&page, None);
+        for (target, deletion) in &pairs {
+            assert!(
+                all.contains(&target.id.to_hex().as_str()),
+                "{path}: fixture target must still be live: {page}"
+            );
+            assert!(
+                all.contains(&deletion.id.to_hex().as_str()),
+                "{path}: live kind {} served without its deletion: {page}",
+                target.kind.as_u16()
+            );
+        }
     }
 }

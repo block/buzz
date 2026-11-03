@@ -1910,9 +1910,8 @@ async fn test_channel_window_rows_overlays_and_exact_multiple_exhaustion() {
     expected.sort();
     assert_eq!(paged, expected, "paged union != inserted top-level set");
 
-    // The closure is one hop: deleting the reaction removes it from reads,
-    // so it is absent from the closure and no deletion-of-aux lookup is
-    // needed to cancel it.
+    // Deleting the reaction soft-deletes it in the deletion's own commit, so
+    // it leaves the closure.
     let unreact = EventBuilder::new(Kind::EventDeletion, "")
         .tags([
             Tag::parse(["h", &channel]).unwrap(),

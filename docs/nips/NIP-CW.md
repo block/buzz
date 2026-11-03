@@ -101,7 +101,7 @@ For a valid window filter on an accessible channel (§Channel-mode Access Scopin
 1. **Select rows.** From the target channel, take events that are top-level (§Channel-mode Top-level Classification), not deleted, and matching `kinds` if present, in the total order `created_at DESC, id ASC` (`id` compared bytewise). With a cursor `(ts, id)`, retain only events where `created_at < ts OR (created_at = ts AND id > id)`.
 2. **Probe exhaustion.** Evaluate the query with an internal budget of `limit + 1` rows *after all predicates*. If `limit + 1` rows match, `has_more = true` and the sentinel row is discarded — it MUST NOT appear on the wire, in overlays, or in the aux closure. Otherwise `has_more = false`.
 3. **Derive the next cursor.** If `has_more`, `next_cursor` is the **scan position**: the composite cursor of the last retained candidate, captured *before* any serving-time reconstruction or filtering of individual events. Otherwise `next_cursor = null`. The invariant `next_cursor = null ⇔ has_more = false` MUST hold. Because it is a scan position, `next_cursor` MAY reference an event that does not appear in the response (e.g. one skipped by the relay as unreconstructable); it is authoritative regardless, and deriving it from delivered rows instead would stall pagination on every skipped event.
-4. **Append the aux closure** (if `include_aux` and at least one row): non-deleted reactions (`kind:7`), deletions (`kind:5`, `kind:9005`), and edits (Buzz `kind:40003`) whose `e` tag is a row id. A relay that keeps serving an event after accepting a deletion of it MUST also append the deletions whose `e` tag is one of those aux events (a delete-of-a-reaction), so clients can apply them. A relay that removes the target from reads in the same commit that accepts the deletion, as Buzz does, has nothing to add there and MAY skip that second lookup. Each event appears at most once; access-scoped events the requester cannot read are omitted. Relays MAY cap each lookup (Buzz: 1000 events per page, drained across pages).
+4. **Append the aux closure** (if `include_aux` and at least one row): two hops of events referencing the rows by `e` tag. Hop 1: reactions (`kind:7`), deletions (`kind:5`, `kind:9005`), and edits (Buzz `kind:40003`) whose `e` tag is a row id. Hop 2: deletions whose `e` tag is a hop-1 event id (a delete-of-a-reaction). Each event appears at most once; access-scoped events the requester cannot read are omitted. Relays MAY cap each hop (Buzz: 1000 events per hop).
 5. **Append thread summaries** (if `include_summaries`): one `kind:39005` per row that has at least one reply. Rows without replies get none.
 6. **Append window bounds**: exactly one `kind:39006` per served window response, always — including empty and exhausted pages.
 
@@ -204,8 +204,8 @@ with `thread_window` absent or false:
 - This path traverses stored thread metadata, not the newest-first mode's strict
   row-kind filter. Clients SHOULD supply explicit `kinds` for query authorization
   but MUST NOT assume this legacy thread path restricts its reply rows by them.
-- `include_aux` appends the live root/reply reactions, edits and deletions, as
-  in newest-first step 4. These do not count against the reply limit.
+- `include_aux` appends root/reply reactions, edits and deletions, followed by
+  deletions of auxiliary events. These do not count against the reply limit.
 - There is **no signed bounds event or server-issued continuation cursor**.
   A full reply page can be the final page, so continuation may require one more
   request. A short/empty reply page is the legacy stop heuristic, not a signed

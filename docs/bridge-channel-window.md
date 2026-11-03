@@ -84,13 +84,12 @@ The existing flat bridge shape: a JSON array of signed nostr events.
 Clients **partition by kind before any cursor math**:
 
 1. **Rows** — the top-level events, in keyset order.
-2. **Aux closure** (`include_aux`) — live reactions (7), deletions (5,
-   9005), and edits (40003) targeting the retained rows by `#e`. One round
-   trip; no client `#e` fan-out. The closure is drained server-side across
-   the DB page clamp, so it is complete rather than newest-1000. The
-   relay soft-deletes a deletion's targets in the same commit that stores
-   the deletion, so a deleted reaction or edit is simply absent; there is
-   no deletion-of-aux hop.
+2. **Aux closure** (`include_aux`) — reactions (7), deletions (5, 9005),
+   and edits (40003) targeting the retained rows by `#e`, **plus**
+   deletions targeting those aux events (the transitive second hop, e.g.
+   a delete-of-a-reaction). One round trip; no client `#e` fan-out. Each
+   hop is drained server-side across the DB page clamp, so the closure is
+   complete rather than newest-1000.
 3. **Thread summaries** (`include_summaries`) — one relay-signed
    `kind:39005` per row that has replies.
 4. **Window bounds** — exactly one relay-signed `kind:39006` per window
@@ -130,7 +129,7 @@ Both kinds are relay-only: client submission is rejected at ingest.
   (`since: now`); deeper pages need no repair path.
 - Replies never enter the channel timeline; the thread panel uses the
   existing `thread_cursor` surface (#1418). Thread filters may opt into
-  `include_aux` to append the same authorized reactions, edits, and
+  `include_aux` to append the same authorized two-hop reactions, edits, and
   deletions closure as a channel-window response.
 
 ## Siblings

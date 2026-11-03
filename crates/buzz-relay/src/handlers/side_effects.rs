@@ -3270,11 +3270,12 @@ pub(crate) fn is_atomic_deletion(kind: u32, event: &Event) -> bool {
 
 /// Store a kind 5 / 9005 deletion and soft-delete its targets in one commit.
 ///
-/// Readers rely on an accepted deletion having removed its target: the bridge
-/// aux closure returns only live events and never looks up deletions of them.
 /// A failure stores nothing, so the client is told and can resend. A resend of
 /// a stored deletion soft-deletes any target still live and then reports
-/// itself as inserted, like a workflow deletion that repairs its target.
+/// itself as inserted, like a workflow deletion that repairs its target. That
+/// repair reaches only a deletion still inside the ingest timestamp window:
+/// rows torn by the earlier, non-atomic write stay torn, and the bridge aux
+/// closure's deletion-of-aux hop is what still cancels their targets.
 ///
 /// Projections of a deleted target (live thread counts, the reaction table and
 /// the 9005 system message) run after the commit and stay best-effort.

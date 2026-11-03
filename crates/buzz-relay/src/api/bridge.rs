@@ -659,22 +659,13 @@ const BRIDGE_WINDOW_DEFAULT_LIMIT: u32 = 50;
 const BRIDGE_WINDOW_MAX_LIMIT: u32 = 200;
 
 /// Aux closure kinds: reactions, deletions (NIP-09 + NIP-29), edits.
-///
-/// The `/query` window and thread-reply closures read these in ONE hop. A
-/// kind 5 / 9005 deletion soft-deletes its targets in the transaction that
-/// stores it (`handlers::side_effects::persist_deletion`), and that hop reads
-/// only live events, so a deleted reaction or edit never comes back and no
-/// deletion-of-aux hop is needed. That hop cost one GIN probe per aux id per
-/// partition and could only match a deletion whose target was still live.
 const WINDOW_AUX_KINDS: [u32; 4] = [
     buzz_core::kind::KIND_DELETION,
     buzz_core::kind::KIND_REACTION,
     buzz_core::kind::KIND_NIP29_DELETE_EVENT,
     buzz_core::kind::KIND_STREAM_MESSAGE_EDIT,
 ];
-/// Second-hop kinds for the strict thread window
-/// (`thread_window`), which keeps deleted aux IDs so it
-/// can return deletions targeting them.
+/// Second-hop kinds: deletions targeting aux events (delete-of-a-reaction).
 const WINDOW_AUX_DELETE_KINDS: [u32; 2] = [
     buzz_core::kind::KIND_DELETION,
     buzz_core::kind::KIND_NIP29_DELETE_EVENT,
@@ -848,32 +839,50 @@ async fn handle_channel_window_filter(
         events.push(v);
     }
 
-    // 2. Aux closure: reactions/deletions/edits targeting retained rows.
+    // 2. Aux closure: reactions/deletions/edits targeting retained rows, plus
+    //    deletions targeting those aux events (the transitive second hop).
     //    One round trip for the client instead of an #e fan-out. Runs in the
     //    SAME request transaction that served the window: when the page came
     //    from a proved replica session, the heartbeat observation anchored a
-    //    REPEATABLE READ snapshot, so the aux read sees exactly the state the
+    //    REPEATABLE READ snapshot, so the aux hops see exactly the state the
     //    proof covered — another pooled session (or even another autocommit
     //    statement) could sit at a different replay position.
     if extension_flag(raw, "include_aux") && !row_ids_hex.is_empty() {
-        let aux_events = query_all_pages(
-            build_aux_query(tenant.community(), row_ids_hex, &WINDOW_AUX_KINDS),
-            AUX_PAGE_LIMIT,
-            &mut AuxReader::Session(&mut session),
-        )
-        .await
-        .map_err(|e| db_read_error("window aux error", &e))?;
-        for se in aux_events {
-            // Deletions can be stored channel-less; access-check instead
-            // of channel-constraining so they aren't silently dropped.
-            if !event_in_accessible_channel(&se, accessible_channels)
-                || !crate::handlers::req::event_visible_to_reader(&se.event, reader_pubkey_bytes)
-            {
-                continue;
+        let mut seen_aux: std::collections::HashSet<nostr::EventId> =
+            std::collections::HashSet::new();
+        let mut hop_ids = row_ids_hex.clone();
+        for hop_kinds in [&WINDOW_AUX_KINDS[..], &WINDOW_AUX_DELETE_KINDS[..]] {
+            let aux_query =
+                build_aux_query(tenant.community(), std::mem::take(&mut hop_ids), hop_kinds);
+            let aux_events = query_all_pages(
+                aux_query,
+                AUX_PAGE_LIMIT,
+                &mut AuxReader::Session(&mut session),
+            )
+            .await
+            .map_err(|e| db_read_error("window aux error", &e))?;
+            for se in aux_events {
+                if !seen_aux.insert(se.event.id) {
+                    continue;
+                }
+                // Deletions can be stored channel-less; access-check instead
+                // of channel-constraining so they aren't silently dropped.
+                if !event_in_accessible_channel(&se, accessible_channels)
+                    || !crate::handlers::req::event_visible_to_reader(
+                        &se.event,
+                        reader_pubkey_bytes,
+                    )
+                {
+                    continue;
+                }
+                hop_ids.push(se.event.id.to_hex());
+                let v = serde_json::to_value(&se.event)
+                    .map_err(|e| internal_error(&format!("window aux serialize: {e}")))?;
+                events.push(v);
             }
-            let v = serde_json::to_value(&se.event)
-                .map_err(|e| internal_error(&format!("window aux serialize: {e}")))?;
-            events.push(v);
+            if hop_ids.is_empty() {
+                break;
+            }
         }
     }
 
@@ -1827,24 +1836,35 @@ async fn query_member_events(
         }
 
         if extension_flag(raw, "include_aux") && !thread_row_ids.is_empty() {
-            let aux_events = query_all_pages(
-                build_aux_query(tenant.community(), thread_row_ids, &WINDOW_AUX_KINDS),
-                AUX_PAGE_LIMIT,
-                &mut AuxReader::Routed(&state.db, "bridge_thread_aux"),
-            )
-            .await
-            .map_err(|e| db_read_error("thread aux query error", &e))?;
-            for se in aux_events {
-                if !event_in_accessible_channel(&se, &accessible_channels)
-                    || !buzz_core::filter::reader_authorized_for_event(
-                        &se.event,
-                        &authed_pubkey_hex,
-                    )
-                {
-                    continue;
+            let mut seen_aux = std::collections::HashSet::new();
+            let mut hop_ids = thread_row_ids;
+            for hop_kinds in [&WINDOW_AUX_KINDS[..], &WINDOW_AUX_DELETE_KINDS[..]] {
+                let aux_query =
+                    build_aux_query(tenant.community(), std::mem::take(&mut hop_ids), hop_kinds);
+                let aux_events = query_all_pages(
+                    aux_query,
+                    AUX_PAGE_LIMIT,
+                    &mut AuxReader::Routed(&state.db, "bridge_thread_aux"),
+                )
+                .await
+                .map_err(|e| db_read_error("thread aux query error", &e))?;
+                for se in aux_events {
+                    if !seen_aux.insert(se.event.id)
+                        || !event_in_accessible_channel(&se, &accessible_channels)
+                        || !buzz_core::filter::reader_authorized_for_event(
+                            &se.event,
+                            &authed_pubkey_hex,
+                        )
+                    {
+                        continue;
+                    }
+                    hop_ids.push(se.event.id.to_hex());
+                    if let Ok(value) = serde_json::to_value(&se.event) {
+                        events.push(value);
+                    }
                 }
-                if let Ok(value) = serde_json::to_value(&se.event) {
-                    events.push(value);
+                if hop_ids.is_empty() {
+                    break;
                 }
             }
         }

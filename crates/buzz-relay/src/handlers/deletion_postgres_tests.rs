@@ -140,7 +140,9 @@ async fn failed_target_soft_delete_stores_nothing() {
 
 /// A resend of a deletion stored without its target's soft-delete (a row an
 /// earlier, non-atomic write left torn) applies it and is not answered as a
-/// bare duplicate; a further resend changes nothing. Mutation: skip the
+/// bare duplicate; a further resend changes nothing. Only a resend inside the
+/// ingest timestamp window gets here; older torn rows rely on the read path
+/// (`torn_deletions_still_cancel_live_targets_in_both_windows`). Mutation: skip the
 /// target soft-delete for a duplicate deletion → RED.
 #[tokio::test]
 #[ignore = "requires Postgres"]

@@ -2847,7 +2847,9 @@ impl Db {
     /// transaction, so an accepted deletion never leaves its target live.
     ///
     /// The targets are soft-deleted even when the deletion is a duplicate, so
-    /// resending a deletion repairs a target an earlier write left live.
+    /// resending a deletion repairs a target an earlier write left live. Ingest
+    /// accepts the resend only within its timestamp window, so this does not
+    /// repair older rows.
     /// Returns `(StoredEvent, was_inserted, deleted)`, where `deleted[i]`
     /// tells whether `targets[i]` was soft-deleted by this call.
     #[datastore_span(name = "insert_deletion_event", system = "postgresql")]
