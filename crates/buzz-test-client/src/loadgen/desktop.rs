@@ -2867,7 +2867,11 @@ hold_secs = 1
                 "mode = \"current\"\ntick_secs = 1.0\nbackstop_secs = 1.0",
             ),
             Duration::ZERO,
-            |o| o.count("desktop_roster") >= 4 && o.saw("CLOSE", "batch-1-0"),
+            |o| {
+                o.count("desktop_roster") >= 4
+                    && o.count("desktop_unread") >= 4
+                    && o.saw("CLOSE", "batch-1-0")
+            },
         )
         .await;
         no_errors(&after);
@@ -2899,7 +2903,12 @@ hold_secs = 1
         let large = drive(
             rig(2, 25, "mode = \"current\"\nrenewal_secs = 1.0\n"),
             Duration::ZERO,
-            |o| o.count("desktop_replay_eose") >= 12 && o.count("desktop_unread") >= 4,
+            |o| {
+                o.count("desktop_replay_eose") >= 12
+                    && o.count("desktop_unread") >= 4
+                    && o.count("ws_connect_auth") >= 4
+                    && o.count("desktop_window") >= 16
+            },
         )
         .await;
         no_errors(&large);
@@ -2921,7 +2930,11 @@ hold_secs = 1
         let small = drive(
             rig(2, 5, "mode = \"current\"\nrenewal_secs = 1.0\n"),
             Duration::ZERO,
-            |o| o.count("desktop_live_eose") >= 12 && o.count("desktop_thread_window") == 2,
+            |o| {
+                o.count("desktop_live_eose") >= 12
+                    && o.count("ws_connect_auth") >= 4
+                    && o.count("desktop_thread_window") == 2
+            },
         )
         .await;
         no_errors(&small);
