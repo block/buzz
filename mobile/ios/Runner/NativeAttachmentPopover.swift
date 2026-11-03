@@ -9,6 +9,7 @@ final class NativeAttachmentPopoverViewController:
   UIViewController,
   PHPickerViewControllerDelegate,
   UIPopoverPresentationControllerDelegate,
+  UIGestureRecognizerDelegate,
   AVCapturePhotoCaptureDelegate
 {
   private enum Surface {
@@ -49,6 +50,7 @@ final class NativeAttachmentPopoverViewController:
   private var isFinishing = false
   private var didNotifyDismissal = false
   private var keyboardDismissalOffset: CGFloat = 0
+  private var outsideTouchRecognizer: UIGestureRecognizer?
   var menuStackHeightConstraint: NSLayoutConstraint?
 
   var onDismiss: (() -> Void)?
@@ -132,8 +134,14 @@ final class NativeAttachmentPopoverViewController:
     cameraPreviewLayer?.frame = cameraPreviewView?.bounds ?? .zero
   }
 
+  override func viewDidAppear(_ animated: Bool) {
+    super.viewDidAppear(animated)
+    installOutsideTouchRecognizer()
+  }
+
   override func viewWillDisappear(_ animated: Bool) {
     super.viewWillDisappear(animated)
+    removeOutsideTouchRecognizer()
     invalidateCameraCapture()
     stopCamera()
   }
@@ -162,6 +170,47 @@ final class NativeAttachmentPopoverViewController:
     _ presentationController: UIPresentationController
   ) {
     notifyDismissalIfNeeded()
+  }
+
+  // UIKit lets touches outside this popover reach the Flutter view and
+  // dismisses only for some of them: a touch on a platform view, such as the
+  // composer's glass surface, leaves the popover open. Watch the window so a
+  // touch anywhere outside the popover dismisses it. The recognizer never
+  // begins, so the touch still reaches whatever is under it.
+  private func installOutsideTouchRecognizer() {
+    guard outsideTouchRecognizer == nil else { return }
+    guard let window = presentingViewController?.view.window else {
+      assertionFailure("The attachment popover's presenter has no window.")
+      return
+    }
+    let recognizer = UITapGestureRecognizer()
+    recognizer.cancelsTouchesInView = false
+    recognizer.delaysTouchesBegan = false
+    recognizer.delaysTouchesEnded = false
+    recognizer.delegate = self
+    window.addGestureRecognizer(recognizer)
+    outsideTouchRecognizer = recognizer
+  }
+
+  private func removeOutsideTouchRecognizer() {
+    guard let recognizer = outsideTouchRecognizer else { return }
+    recognizer.view?.removeGestureRecognizer(recognizer)
+    outsideTouchRecognizer = nil
+  }
+
+  func gestureRecognizer(
+    _ gestureRecognizer: UIGestureRecognizer,
+    shouldReceive touch: UITouch
+  ) -> Bool {
+    guard gestureRecognizer === outsideTouchRecognizer else { return true }
+    // An alert presented from the popover shares the window; its buttons
+    // sit outside the popover but belong to it.
+    if presentedViewController == nil,
+      !view.bounds.contains(touch.location(in: view))
+    {
+      dismissAndNotify()
+    }
+    return false
   }
 
   private func updateMenuLayout() {
