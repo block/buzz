@@ -637,6 +637,11 @@ test-unit:
                 + test(/^api::nip_fi::/)'
         # Invitation drain/cutoff boundary contracts are infra-free.
         cargo nextest run -p buzz-relay --lib -E 'test(/^invite_token::/) + test(/^config::invite_cutoff_tests::/)'
+        # Relay read caches: the admitted-connection index, open-set
+        # single-flight, tenant host cache and the ban disconnect's
+        # restriction-cache drop. Infra-free; the database URL
+        # refuses at once. Keep scripts/run-tests.sh in step.
+        cargo nextest run -p buzz-relay --lib -E 'test(=state::tests::admitted_index_follows_every_key_change) + test(=state::tests::concurrent_open_channel_misses_share_the_in_flight_read) + test(=tenant::tests::app_state_resolver_serves_fresh_cached_hosts_only) + test(=state::tests::disconnect_drops_the_cached_restriction_row)'
         # Retain partially consumed mesh receives across housekeeping ticks.
         cargo nextest run -p buzz-relay --lib -E 'test(=mesh_boot::tests::demo_echo_retains_pending_receive_across_housekeeping_ticks)'
         # boot_lifecycle spawns the real relay binary and asserts its startup

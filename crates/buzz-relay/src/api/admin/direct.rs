@@ -118,7 +118,7 @@ async fn direct_action(
     let target = decode_hex_pubkey(&target_hex)?;
     let host = buzz_core::tenant::validate_community_host(&q.community_host)
         .map_err(|msg| ApiError::bad_request("invalid_community_host", msg))?;
-    let tenant = match crate::tenant::bind_community(&state.db, &host).await {
+    let tenant = match crate::tenant::bind_community(&*state, &host).await {
         Ok(t) => t,
         Err(crate::tenant::BindError::UnmappedHost) => {
             return Err(ApiError::bad_request(
