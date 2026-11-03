@@ -17,14 +17,23 @@ void main() {
 
   test('capability alone never establishes a host requirement', () {
     for (final info in [<String, Object?>{}, capable]) {
-      expect(parseRelayAuthRequirement(info), RelayAuthRequirement.legacy);
       expect(
-        parseRelayAuthRequirement({...info, 'requires_nip_fi': false}),
+        parseRelayAuthDiscovery(info).requirement,
+        RelayAuthRequirement.legacy,
+      );
+      expect(
+        parseRelayAuthDiscovery({
+          ...info,
+          'requires_nip_fi': false,
+        }).requirement,
         RelayAuthRequirement.optional,
       );
     }
     expect(
-      parseRelayAuthRequirement({...capable, 'requires_nip_fi': true}),
+      parseRelayAuthDiscovery({
+        ...capable,
+        'requires_nip_fi': true,
+      }).requirement,
       RelayAuthRequirement.required,
     );
     for (final info in [
@@ -33,16 +42,40 @@ void main() {
       {'requires_nip_fi': null},
       {'requires_nip_fi': 'true'},
       {'requires_nip_fi': 1},
-      {'requires_nip_fi': true},
-      {...capable, 'requires_nip_fi': true, 'limitation': null},
-      {...capable, 'requires_nip_fi': true, 'federated_identity': null},
-      {
-        ...capable,
-        'requires_nip_fi': true,
-        'federated_identity': {'core': 'another-protocol'},
-      },
     ]) {
-      expect(() => parseRelayAuthRequirement(info), throwsFormatException);
+      expect(() => parseRelayAuthDiscovery(info), throwsFormatException);
+    }
+  });
+
+  test('required policy survives unsupported or absent descriptors', () {
+    for (final (descriptor, compatible) in [
+      (capable, true),
+      (<String, Object?>{}, false),
+      ({...capable, 'limitation': null}, false),
+      ({...capable, 'federated_identity': null}, false),
+      for (final freshness in ['current-status', 'unknown-class', null])
+        (
+          {
+            ...capable,
+            'federated_identity': {
+              'core': 'client-attached',
+              'assertion_freshness': {'class': freshness},
+            },
+          },
+          false,
+        ),
+      (
+        {
+          ...capable,
+          'federated_identity': {'core': 'another-protocol'},
+        },
+        false,
+      ),
+    ]) {
+      expect(
+        parseRelayAuthDiscovery({...descriptor, 'requires_nip_fi': true}),
+        (requirement: RelayAuthRequirement.required, compatible: compatible),
+      );
     }
   });
 
@@ -70,19 +103,19 @@ void main() {
       addTearDown(client.close);
       final target = Uri.parse('https://required.example/info');
       expect(
-        await fetchRelayAuthRequirement(client, target),
+        (await fetchRelayAuthDiscovery(client, target)).requirement,
         RelayAuthRequirement.optional,
       );
       upgraded = true;
       expect(
-        await fetchRelayAuthRequirement(client, target),
+        (await fetchRelayAuthDiscovery(client, target)).requirement,
         RelayAuthRequirement.required,
       );
       expect(
-        await fetchRelayAuthRequirement(
+        (await fetchRelayAuthDiscovery(
           client,
           Uri.parse('https://free.example/info'),
-        ),
+        )).requirement,
         RelayAuthRequirement.optional,
       );
     },
@@ -95,7 +128,7 @@ void main() {
         final client = MockClient((_) async => http.Response('', status));
         addTearDown(client.close);
         await expectLater(
-          fetchRelayAuthRequirement(
+          fetchRelayAuthDiscovery(
             client,
             Uri.parse('https://community.example/info'),
           ),
@@ -113,7 +146,7 @@ void main() {
       );
       addTearDown(unavailable.close);
       await expectLater(
-        fetchRelayAuthRequirement(
+        fetchRelayAuthDiscovery(
           unavailable,
           Uri.parse('https://community.example/info'),
         ),
@@ -128,7 +161,7 @@ void main() {
         final client = MockClient((_) async => http.Response(body, 200));
         addTearDown(client.close);
         await expectLater(
-          fetchRelayAuthRequirement(
+          fetchRelayAuthDiscovery(
             client,
             Uri.parse('https://community.example/info'),
           ),
@@ -142,7 +175,7 @@ void main() {
     final client = _StalledDiscoveryClient();
     addTearDown(client.close);
     await expectLater(
-      fetchRelayAuthRequirement(
+      fetchRelayAuthDiscovery(
         client,
         Uri.parse('https://community.example/info'),
         deadline: Duration.zero,
@@ -165,7 +198,7 @@ void main() {
       'wss://community.example',
     ]) {
       await expectLater(
-        fetchRelayAuthRequirement(client, Uri.parse(url)),
+        fetchRelayAuthDiscovery(client, Uri.parse(url)),
         throwsFormatException,
       );
     }

@@ -6,30 +6,44 @@ import 'package:http/http.dart' as http;
 /// Host policy, independent of whether a relay supports optional NIP-FI.
 enum RelayAuthRequirement { legacy, optional, required }
 
-/// Parses the additive host requirement; missing fields retain legacy behavior.
-/// Malformed discovery is a failure, never evidence that an upgrade is needed.
-RelayAuthRequirement parseRelayAuthRequirement(Object? info) {
+/// Protocol compatibility is separate from host policy. It does not establish
+/// a trusted sign-in origin or prove this build is configured for the host.
+typedef RelayAuthDiscovery = ({
+  RelayAuthRequirement requirement,
+  bool compatible,
+});
+
+/// Reads explicit policy even when this client cannot use the auth descriptor.
+/// Missing fields retain legacy behavior; malformed policy remains a failure.
+RelayAuthDiscovery parseRelayAuthDiscovery(Object? info) {
   if (info is! Map) throw const FormatException('NIP-11 is not an object');
-  if (!info.containsKey('requires_nip_fi')) return RelayAuthRequirement.legacy;
-  final required = info['requires_nip_fi'];
-  if (required is! bool) {
-    throw const FormatException('Invalid NIP-FI requirement');
+  final RelayAuthRequirement requirement;
+  if (!info.containsKey('requires_nip_fi')) {
+    requirement = RelayAuthRequirement.legacy;
+  } else {
+    final required = info['requires_nip_fi'];
+    if (required is! bool) {
+      throw const FormatException('Invalid NIP-FI requirement');
+    }
+    requirement = required
+        ? RelayAuthRequirement.required
+        : RelayAuthRequirement.optional;
   }
-  if (!required) return RelayAuthRequirement.optional;
   final limitation = info['limitation'];
   final federation = info['federated_identity'];
   final freshness = federation is Map
       ? federation['assertion_freshness']
       : null;
-  if (limitation is! Map ||
-      limitation['federated_identity'] != true ||
-      federation is! Map ||
-      federation['core'] != 'client-attached' ||
-      freshness is! Map ||
-      freshness['class'] != 'offline-jwt') {
-    throw const FormatException('Incomplete required NIP-FI discovery');
-  }
-  return RelayAuthRequirement.required;
+  return (
+    requirement: requirement,
+    compatible:
+        limitation is Map &&
+        limitation['federated_identity'] == true &&
+        federation is Map &&
+        federation['core'] == 'client-attached' &&
+        freshness is Map &&
+        freshness['class'] == 'offline-jwt',
+  );
 }
 
 /// A failed discovery request is distinct from a successfully discovered policy.
@@ -45,7 +59,7 @@ class RelayAuthDiscoveryFailure implements Exception {
 
 /// Reads this host's public policy without credentials, redirects or caching.
 /// The caller owns [client]; one deadline bounds headers and the entire body.
-Future<RelayAuthRequirement> fetchRelayAuthRequirement(
+Future<RelayAuthDiscovery> fetchRelayAuthDiscovery(
   http.Client client,
   Uri uri, {
   Duration deadline = const Duration(seconds: 10),
@@ -63,7 +77,7 @@ Future<RelayAuthRequirement> fetchRelayAuthRequirement(
     ..followRedirects = false
     ..headers['Accept'] = 'application/nostr+json';
   StreamIterator<List<int>>? body;
-  Future<RelayAuthRequirement> read() async {
+  Future<RelayAuthDiscovery> read() async {
     final response = await client.send(request);
     final iterator = body = StreamIterator(response.stream);
     if (response.statusCode != 200) {
@@ -76,7 +90,7 @@ Future<RelayAuthRequirement> fetchRelayAuthRequirement(
       }
       bytes.addAll(iterator.current);
     }
-    return parseRelayAuthRequirement(jsonDecode(utf8.decode(bytes)));
+    return parseRelayAuthDiscovery(jsonDecode(utf8.decode(bytes)));
   }
 
   try {
