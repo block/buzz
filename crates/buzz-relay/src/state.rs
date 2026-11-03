@@ -1534,9 +1534,9 @@ pub struct AppState {
     pub(crate) restriction_reads: Arc<crate::shared_reads::SharedReads<(CommunityId, Vec<u8>)>>,
     /// Normalized request host → community, from the row-zero host binding
     /// ([`crate::tenant::bind_community`]). Only mapped hosts are cached, and
-    /// an entry is served only for [`TENANT_HOST_CACHE_MAX_AGE`] after its read's
-    /// connection checkout: a host remapped, archived or deleted elsewhere resolves to its
-    /// old community for at most that long.
+    /// an entry is served only for [`TENANT_HOST_CACHE_MAX_AGE`] after its
+    /// read's connection checkout: a host remapped, archived or deleted
+    /// elsewhere resolves to its old community for at most that long.
     pub tenant_host_cache: Arc<moka::sync::Cache<String, (CommunityId, Instant)>>,
     /// Lets concurrent misses on [`Self::tenant_host_cache`] share one read.
     pub(crate) tenant_host_reads: Arc<crate::shared_reads::SharedReads<String>>,
@@ -1969,8 +1969,9 @@ impl AppState {
 
     /// `moderation_restriction_state` served from [`Self::restriction_cache`]
     /// for [`RESTRICTION_CACHE_MAX_AGE`] after the read that produced it
-    /// checked out its connection. For per-request gates (HTTP requests, publishes, ephemeral
-    /// pulses) whose grant ends with the request. Errors are not cached.
+    /// checked out its connection. For per-request gates (HTTP requests,
+    /// publishes, ephemeral pulses) whose grant ends with the request. Errors
+    /// are not cached.
     ///
     /// Concurrent misses for one pubkey share a read through
     /// [`Self::restriction_reads`].
