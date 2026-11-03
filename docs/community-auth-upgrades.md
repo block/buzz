@@ -22,6 +22,22 @@ principal checks and payload conflicts are unchanged. Enabling this deployment
 switch is an explicit operator action after the enforcement and activation fleet
 baseline is verified; caller release discipline alone cannot enable acceptance.
 
+## Generation storage
+
+`communities.policy_generation` is `BIGINT NOT NULL DEFAULT 0`, without a
+nonnegative database CHECK. Supported writers retain the current generation
+when the community already requires FI, or increment it by one on acceptance.
+Starting from zero, those writes preserve the nonnegative invariant. Direct SQL
+can insert a negative community generation and is outside that writer contract.
+Positive-generation CHECKs on acceptance receipts remain in place; activation
+and receipt matching still require the exact accepted generation.
+
+The community CHECK is omitted to avoid validating existing rows while adding
+the column. The current schema planner folds a column and its CHECK together,
+and can rebuild and validate a CHECK when its validation metadata differs.
+Migration, fresh desired-state creation and later reconciliation therefore all
+omit this community CHECK. No bootstrap or schema-tooling workaround is required.
+
 ## Enable
 
 `POST /operator/communities/nip-fi-upgrade`

@@ -3,7 +3,7 @@ SET LOCAL statement_timeout = '30s';
 
 ALTER TABLE communities
     ADD COLUMN requires_nip_fi BOOLEAN NOT NULL DEFAULT false,
-    ADD COLUMN policy_generation BIGINT NOT NULL DEFAULT 0 CHECK (policy_generation >= 0);
+    ADD COLUMN policy_generation BIGINT NOT NULL DEFAULT 0;
 
 -- Operator-global acceptance receipts. Retained across community deletion so
 -- lost-response retries cannot reuse an old operation ID for a different target.

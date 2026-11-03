@@ -414,3 +414,42 @@ async fn migration_schema_expansion_preserves_existing_optional_rows_with_and_wi
         .fetch_one(&pool).await.unwrap();
     assert!(global);
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn supported_writer_maintains_generation_while_direct_sql_is_not_constrained() {
+    let (db, mut request, _) = fixture().await;
+    assert_eq!(policy(&db, &request).await.policy_generation, 0);
+    sqlx::query("UPDATE communities SET policy_generation = -1 WHERE id = $1")
+        .bind(request.community_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(policy(&db, &request).await.policy_generation, -1);
+    sqlx::query("UPDATE communities SET policy_generation = DEFAULT WHERE id = $1")
+        .bind(request.community_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(policy(&db, &request).await.policy_generation, 0);
+    let first = accepted(&db, &request).await;
+    assert_eq!(first.policy_generation, 1);
+    request.operation_id = Uuid::new_v4();
+    assert_eq!(accepted(&db, &request).await.policy_generation, 1);
+    let invalid_receipt = sqlx::query(
+        "UPDATE community_auth_upgrades SET policy_generation = 0 WHERE operation_id = $1",
+    )
+    .bind(request.operation_id)
+    .execute(db.pool())
+    .await
+    .unwrap_err();
+    assert_eq!(
+        invalid_receipt
+            .as_database_error()
+            .unwrap()
+            .code()
+            .as_deref(),
+        Some("23514")
+    );
+    assert_eq!(policy(&db, &request).await.policy_generation, 1);
+}
