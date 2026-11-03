@@ -587,6 +587,54 @@ double? effectiveFontSizeForText(
 }
 
 void main() {
+  testWidgets(
+    'renders recorded access in real membership rows and separates mixed roles',
+    (tester) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _systemMsg(
+              id: 'guest',
+              payload: {
+                'type': 'member_joined',
+                'actor': 'bob',
+                'target': 'bob',
+                'role': 'guest',
+              },
+            ),
+            _systemMsg(
+              id: 'participant',
+              payload: {
+                'type': 'member_joined',
+                'actor': 'alice',
+                'target': 'alice',
+                'role': 'member',
+              },
+            ),
+            _systemMsg(
+              id: 'addition',
+              payload: {
+                'type': 'member_joined',
+                'actor': 'alice',
+                'target': 'carol',
+                'role': 'admin',
+              },
+            ),
+          ],
+          users: {
+            'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'carol': const UserProfile(pubkey: 'carol', displayName: 'Carol'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(findRichText('joined with view-only access'), findsOneWidget);
+      expect(findRichText('joined as a participant'), findsOneWidget);
+      expect(findRichText('to the channel as an admin'), findsOneWidget);
+    },
+  );
+
   for (final fromLauncher in [false, true]) {
     testWidgets(
       'Bestie DM preserves thread replies and ordinary sends: launcher=$fromLauncher',

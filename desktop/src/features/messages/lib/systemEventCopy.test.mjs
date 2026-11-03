@@ -111,3 +111,23 @@ test("the reader is lowercased whatever their profile name says", () => {
   // so it does not matter what the label happens to be.
   assert.equal(toInlineName("Alice Chen", true), "you");
 });
+
+test("membership roles are historical, allowlisted copy", async () => {
+  const { membershipRole, membershipRoleSuffix } = await import(
+    "./systemEventCopy.ts"
+  );
+  for (const [role, suffix] of [
+    ["guest", " with view-only access"],
+    ["member", " as a participant"],
+    ["bot", " as a participant"],
+    ["admin", " as an admin"],
+    ["owner", " as an owner"],
+    [undefined, ""],
+    ["future", ""],
+    [{}, ""],
+    [7, ""],
+  ]) {
+    assert.equal(membershipRoleSuffix(role), suffix);
+    assert.equal(membershipRole(role), suffix ? role : undefined);
+  }
+});

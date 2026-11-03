@@ -113,7 +113,9 @@ async fn create_adds_its_p_tags_as_members() {
         .filter(|stored| {
             let content: serde_json::Value =
                 serde_json::from_str(&stored.event.content).unwrap_or_default();
-            content["type"] == "member_joined" && content["target"] == agent.public_key().to_hex()
+            content["type"] == "member_joined"
+                && content["target"] == agent.public_key().to_hex()
+                && content["role"] == "member"
         })
         .count();
     assert_eq!(joined, 1, "one joined notice for the agent");

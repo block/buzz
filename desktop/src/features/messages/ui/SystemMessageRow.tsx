@@ -31,6 +31,7 @@ import {
   type SystemMessagePayload,
 } from "../lib/membershipGroupPayload";
 import {
+  membershipRoleSuffix,
   addedActionPrefix,
   addedByActionPrefix,
   describeChannelTextFieldChange,
@@ -551,8 +552,8 @@ function describeSystemEvent(
   );
 
   switch (payload.type) {
-    case "members_arrived":
-      return describeGroupedArrivals({
+    case "members_arrived": {
+      const description = describeGroupedArrivals({
         agentPubkeys,
         currentPubkey,
         isTargetCurrentUser,
@@ -561,18 +562,32 @@ function describeSystemEvent(
         personaLookup,
         profiles,
       });
+      return description
+        ? {
+            ...description,
+            action: (
+              <>
+                {description.action}
+                {membershipRoleSuffix(payload.role)}
+              </>
+            ),
+          }
+        : null;
+    }
     case "member_joined_then_left":
       if (!payload.target) return null;
       return {
         title: membershipTitle,
-        action: "joined, then left the channel",
+        action: `joined${membershipRoleSuffix(payload.role)}, then left the channel`,
       };
     case "member_joined": {
       if (!payload.actor || !payload.target) return null;
       if (normalizePubkey(payload.actor) === normalizePubkey(payload.target)) {
         return {
           title: membershipTitle,
-          action: "joined the channel",
+          action: membershipRoleSuffix(payload.role)
+            ? `joined${membershipRoleSuffix(payload.role)}`
+            : "joined the channel",
         };
       }
       return {
@@ -587,6 +602,7 @@ function describeSystemEvent(
                 profiles,
               )}
             </ProfileName>
+            {membershipRoleSuffix(payload.role)}
           </>
         ),
       };

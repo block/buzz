@@ -14,10 +14,12 @@
 
 import type { TimelineMessage } from "@/features/messages/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { membershipRole, type MembershipRole } from "./systemEventCopy";
 
 /** Parsed body of a kind:40099 system message, plus the synthetic group kinds. */
 export type SystemMessagePayload = {
   type: string;
+  role?: MembershipRole;
   actor?: string;
   arrivals?: Array<{ actor: string; target: string }>;
   target?: string;
@@ -77,6 +79,9 @@ export function buildGroupedMembershipPayload(
   }>;
   const targets = [...new Set(membershipArrivals.map(({ target }) => target))];
   return {
+    ...(membershipRole(payloads[0]?.role)
+      ? { role: membershipRole(payloads[0]?.role) }
+      : {}),
     arrivals: membershipArrivals,
     type: "members_arrived",
     target: targets[0],
@@ -123,5 +128,10 @@ function buildJoinedThenLeftPayload(
   });
   if (!everyArrivalIsSelfJoinByDeparture) return null;
 
-  return { type: "member_joined_then_left", target: arrivalTarget };
+  const role = membershipRole(arrivals[0]?.role);
+  return {
+    type: "member_joined_then_left",
+    target: arrivalTarget,
+    ...(role ? { role } : {}),
+  };
 }

@@ -324,12 +324,14 @@ class _SystemMessageRow extends HookConsumerWidget {
 
 class _MembershipDisplayEvent {
   final String? actorPubkey;
+  final String? role;
   final List<String> targetPubkeys;
   final bool isSelfJoin;
   final bool isRemoval;
 
   const _MembershipDisplayEvent({
     required this.actorPubkey,
+    required this.role,
     required this.targetPubkeys,
     required this.isSelfJoin,
     required this.isRemoval,
@@ -361,6 +363,7 @@ _MembershipDisplayEvent? _membershipDisplayEvent(
     final actor = event?.actorPubkey?.trim().toLowerCase();
     final target = event?.targetPubkey?.trim().toLowerCase();
     if (event?.type != first.type ||
+        (!isRemoval && event?.role != first.role) ||
         actor == null ||
         actor.isEmpty ||
         target == null ||
@@ -374,6 +377,7 @@ _MembershipDisplayEvent? _membershipDisplayEvent(
   }
 
   return _MembershipDisplayEvent(
+    role: isRemoval ? null : first.role,
     actorPubkey: isSelfJoin ? null : firstActor,
     targetPubkeys: targets.toSet().toList(),
     isSelfJoin: isSelfJoin,
@@ -444,7 +448,9 @@ class _MembershipSystemMessageContent extends StatelessWidget {
     final actionSpans = <InlineSpan>[
       TextSpan(
         text: event.isSelfJoin
-            ? 'joined the channel'
+            ? (membershipRoleSuffix(event.role).isEmpty
+                  ? 'joined the channel'
+                  : 'joined${membershipRoleSuffix(event.role)}')
             : event.isRemoval
             ? 'removed '
             : 'added ',
@@ -471,7 +477,9 @@ class _MembershipSystemMessageContent extends StatelessWidget {
         ),
       if (!event.isSelfJoin)
         TextSpan(
-          text: event.isRemoval ? ' from the channel' : ' to the channel',
+          text: event.isRemoval
+              ? ' from the channel'
+              : ' to the channel${membershipRoleSuffix(event.role, plural: event.targetPubkeys.length > 1)}',
         ),
       if (hiddenCount > 0) ...[
         const TextSpan(text: '. '),

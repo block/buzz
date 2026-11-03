@@ -74,3 +74,36 @@ export function describeChannelTextFieldChange(
 export function toInlineName(label: string, isSelf: boolean): string {
   return isSelf ? "you" : label;
 }
+
+/** The role recorded by a membership operation, never the current roster role. */
+export type MembershipRole = "guest" | "member" | "bot" | "admin" | "owner";
+
+export function membershipRole(value: unknown): MembershipRole | undefined {
+  switch (value) {
+    case "guest":
+    case "member":
+    case "bot":
+    case "admin":
+    case "owner":
+      return value;
+    default:
+      return undefined;
+  }
+}
+
+/** Unknown and historical roles retain the existing generic caption. */
+export function membershipRoleSuffix(value: unknown): string {
+  switch (membershipRole(value)) {
+    case "guest":
+      return " with view-only access";
+    case "member":
+    case "bot":
+      return " as a participant";
+    case "admin":
+      return " as an admin";
+    case "owner":
+      return " as an owner";
+    default:
+      return "";
+  }
+}

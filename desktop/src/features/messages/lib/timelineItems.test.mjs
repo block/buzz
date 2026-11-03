@@ -615,3 +615,45 @@ test("buildTimelineDayGroups: preserves leading rows without a day divider", () 
     },
   ]);
 });
+
+test("arrival groups retain role and legacy boundaries, including before a departure", () => {
+  const arrival = (id, role) =>
+    entry({
+      id,
+      kind: KIND_SYSTEM_MESSAGE,
+      body: JSON.stringify({
+        type: "member_joined",
+        actor: "alice",
+        target: "alice",
+        role,
+      }),
+    });
+  const entries = [
+    arrival("a", "guest"),
+    arrival("b", "member"),
+    arrival("c", "member"),
+    memberLeftEntry({
+      id: "leave",
+      target: "alice",
+      createdAt: dayAt(2026, 6, 14),
+    }),
+  ];
+  const result = buildTimelineItems(entries, null);
+  assert.equal(
+    result.items.filter((item) => item.kind === "system-group").length,
+    1,
+  );
+  const group = result.items.find((item) => item.kind === "system-group");
+  assert.deepEqual(
+    group.entries.map((entry) => entry.message.id),
+    ["b", "c", "leave"],
+  );
+  const legacy = buildTimelineItems(
+    [arrival("legacy"), arrival("guest", "guest")],
+    null,
+  );
+  assert.equal(
+    legacy.items.filter((item) => item.kind === "system-group").length,
+    0,
+  );
+});

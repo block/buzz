@@ -27,6 +27,7 @@ class SystemEvent {
   final SystemEventType type;
   final String? actorPubkey;
   final String? targetPubkey;
+  final String? role;
   final String? topic;
   final String? purpose;
   final String? ephemeralChannelId;
@@ -35,6 +36,7 @@ class SystemEvent {
     required this.type,
     this.actorPubkey,
     this.targetPubkey,
+    this.role,
     this.topic,
     this.purpose,
     this.ephemeralChannelId,
@@ -72,6 +74,7 @@ class SystemEvent {
       type: type,
       actorPubkey: _readString(json, 'actor'),
       targetPubkey: _readString(json, 'target'),
+      role: membershipRole(json['role']),
       topic: _readString(json, 'topic'),
       purpose: _readString(json, 'purpose'),
     );
@@ -112,10 +115,12 @@ class SystemEvent {
     return switch (type) {
       SystemEventType.memberJoined => () {
         if (actorPubkey != null && actorPubkey == targetPubkey) {
-          return '$actor joined the channel';
+          return membershipRoleSuffix(role).isEmpty
+              ? '$actor joined the channel'
+              : '$actor joined${membershipRoleSuffix(role)}';
         }
         final target = resolveLabel(targetPubkey);
-        return '$actor added $target to the channel';
+        return '$actor added $target to the channel${membershipRoleSuffix(role)}';
       }(),
       SystemEventType.memberLeft => '$actor left the channel',
       SystemEventType.memberRemoved => () {
@@ -134,6 +139,22 @@ class SystemEvent {
     };
   }
 }
+
+/// Valid historical role values; unknown or malformed values stay generic.
+String? membershipRole(Object? value) => switch (value) {
+  'guest' || 'member' || 'bot' || 'admin' || 'owner' => value as String,
+  _ => null,
+};
+
+/// Describes admission, never current authority. Mirrors desktop system copy.
+String membershipRoleSuffix(String? role, {bool plural = false}) =>
+    switch (role) {
+      'guest' => ' with view-only access',
+      'member' || 'bot' => plural ? ' as participants' : ' as a participant',
+      'admin' => plural ? ' as admins' : ' as an admin',
+      'owner' => plural ? ' as owners' : ' as an owner',
+      _ => '',
+    };
 
 /// Caption fragment for a channel topic or purpose change, e.g.
 /// `changed the topic to "Release planning"` or `cleared the topic`.
@@ -262,11 +283,13 @@ const _membershipGroupWindowSeconds = 5 * 60;
 @immutable
 class _MembershipChange {
   final String? actor;
+  final String? role;
   final bool isSelfJoin;
   final SystemEventType type;
 
   const _MembershipChange({
     required this.actor,
+    required this.role,
     required this.isSelfJoin,
     required this.type,
   });
@@ -289,6 +312,7 @@ _MembershipChange? _membershipChange(MainTimelineEntry entry) {
   final isSelfJoin =
       event!.type == SystemEventType.memberJoined && actor == target;
   return _MembershipChange(
+    role: event.type == SystemEventType.memberJoined ? event.role : null,
     type: event.type,
     actor: isSelfJoin ? null : actor,
     isSelfJoin: isSelfJoin,
@@ -300,6 +324,7 @@ bool _membershipChangesCanGroup(
   _MembershipChange second,
 ) {
   return first.type == second.type &&
+      first.role == second.role &&
       first.isSelfJoin == second.isSelfJoin &&
       (first.isSelfJoin || first.actor == second.actor);
 }

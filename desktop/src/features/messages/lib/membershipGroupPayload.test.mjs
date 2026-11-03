@@ -153,3 +153,28 @@ test("a lifecycle group needs every arrival to be a self-join by the departing m
     );
   }
 });
+
+test("role survives grouped arrivals and joined-then-left summaries", () => {
+  const join = (id) =>
+    systemEntry(id, DAY_START, {
+      type: "member_joined",
+      actor: "alice",
+      target: "alice",
+      role: "guest",
+    });
+  const arrivals = [join("a"), join("b")];
+  assert.equal(
+    buildGroupedMembershipPayload(arrivals.map((entry) => entry.message)).role,
+    "guest",
+  );
+  const leave = systemEntry("leave", DAY_START, {
+    type: "member_left",
+    actor: "alice",
+  });
+  assert.equal(
+    buildGroupedMembershipPayload(
+      [...arrivals, leave].map((entry) => entry.message),
+    ).role,
+    "guest",
+  );
+});

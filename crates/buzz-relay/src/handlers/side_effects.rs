@@ -2181,6 +2181,7 @@ pub(crate) async fn persist_put_user(
                         "type": "member_joined",
                         "actor": actor_hex,
                         "target": target_hex,
+                        "role": put.member.role,
                     }),
                     chrono::Utc::now(),
                 )
@@ -2819,6 +2820,7 @@ async fn handle_create_group(
                 "type": "member_joined",
                 "actor": actor_hex,
                 "target": hex::encode(&member),
+                "role": MemberRole::Member.as_str(),
             }),
             chrono::Utc::now(),
         )
@@ -2980,11 +2982,11 @@ pub(crate) async fn join_channel_as_self(
     // also decides visibility and archive state again under its locks, so a
     // channel made private or archived since the checks above is refused
     // here, with no side effects.
-    state
+    let member = state
         .db
         .put_member(tenant.community(), channel_id, pubkey, None, None)
         .await?;
-    announce_self_join(tenant, state, channel_id, pubkey).await?;
+    announce_self_join(tenant, state, channel_id, pubkey, &member.role).await?;
     Ok(SelfJoinOutcome::Joined)
 }
 
@@ -2996,6 +2998,7 @@ async fn announce_self_join(
     state: &Arc<AppState>,
     channel_id: Uuid,
     pubkey: &[u8],
+    role: &str,
 ) -> anyhow::Result<()> {
     state.invalidate_membership(tenant, channel_id, pubkey);
 
@@ -3008,6 +3011,7 @@ async fn announce_self_join(
             "type": "member_joined",
             "actor": actor_hex,
             "target": actor_hex,
+            "role": role,
         }),
         chrono::Utc::now(),
     )
@@ -3168,7 +3172,9 @@ async fn join_never_joined_channels(
             .await
         {
             Ok(None) => continue,
-            Ok(Some(_)) => announce_self_join(tenant, state, channel_id, pubkey).await,
+            Ok(Some(member)) => {
+                announce_self_join(tenant, state, channel_id, pubkey, &member.role).await
+            }
             Err(e) => Err(e.into()),
         };
         match joined {

@@ -747,3 +747,115 @@ async fn put_user_refused_under_the_lock_stores_nothing() {
     assert!(retry.accepted, "{}", retry.message);
     assert_eq!(put_user_events(&state, &tenant, channel_id).await, 1);
 }
+
+/// Notices record the committed write, including defaulted self/automatic joins.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn admission_notices_record_the_effective_role() {
+    let state = state().await;
+    let tenant = community(&state, "admission-roles").await;
+    let owner = Keys::generate();
+    let channel = create_channel(&state, &tenant, &owner, &[&["visibility", "open"]]).await;
+    for role in ["guest", "member", "bot", "admin", "owner"] {
+        let target = Keys::generate();
+        let event = put_user(
+            &owner,
+            channel,
+            &[&[&target.public_key().to_hex(), "", role]],
+            &[],
+        );
+        assert!(
+            ingest(&state, &tenant, event, &owner)
+                .await
+                .unwrap()
+                .accepted
+        );
+        let notices = state
+            .db
+            .query_events(&EventQuery {
+                kinds: Some(vec![40099]),
+                channel_id: Some(channel),
+                ..EventQuery::for_community(tenant.community())
+            })
+            .await
+            .unwrap();
+        assert!(
+            notices.iter().any(|stored| {
+                let content: serde_json::Value =
+                    serde_json::from_str(&stored.event.content).unwrap();
+                content["target"] == target.public_key().to_hex() && content["role"] == role
+            }),
+            "missing {role} notice"
+        );
+    }
+    sqlx::query("UPDATE channels SET auto_join = TRUE WHERE community_id = $1 AND id = $2")
+        .bind(tenant.community().as_uuid())
+        .bind(channel)
+        .execute(state.db.pool())
+        .await
+        .unwrap();
+    for role in ["guest", "member"] {
+        let edit = EventBuilder::new(Kind::Custom(9002), "")
+            .tags([
+                Tag::parse(["h", &channel.to_string()]).unwrap(),
+                Tag::parse(["join_role", role]).unwrap(),
+            ])
+            .sign_with_keys(&owner)
+            .unwrap();
+        assert!(
+            ingest(&state, &tenant, edit, &owner)
+                .await
+                .unwrap()
+                .accepted
+        );
+        let target = Keys::generate();
+        super::side_effects::join_channel_as_self(
+            &tenant,
+            &state,
+            channel,
+            &target.public_key().to_bytes(),
+        )
+        .await
+        .unwrap();
+        let automatic = Keys::generate();
+        let gate = crate::nip_fi_gate::SessionAdmissionGate::off_mode(
+            tokio_util::sync::CancellationToken::new(),
+        );
+        super::side_effects::auto_join_never_joined_channels(
+            &tenant,
+            &state,
+            &automatic.public_key().to_bytes(),
+            &gate,
+        )
+        .await;
+        let community_joiner = Keys::generate();
+        super::side_effects::auto_join_default_channels(
+            &tenant,
+            &state,
+            &community_joiner.public_key().to_hex(),
+            None,
+        )
+        .await;
+        let notices = state
+            .db
+            .query_events(&EventQuery {
+                kinds: Some(vec![40099]),
+                channel_id: Some(channel),
+                ..EventQuery::for_community(tenant.community())
+            })
+            .await
+            .unwrap();
+        for joiner in [&target, &automatic, &community_joiner] {
+            assert!(
+                notices.iter().any(|stored| {
+                    let content: serde_json::Value =
+                        serde_json::from_str(&stored.event.content).unwrap();
+                    content["actor"] == joiner.public_key().to_hex()
+                        && content["target"] == joiner.public_key().to_hex()
+                        && content["role"] == role
+                }),
+                "missing self-join {role} notice"
+            );
+        }
+    }
+}

@@ -565,3 +565,51 @@ test("removing a reaction from a duplicate self-join lifecycle group targets eve
     ["c", "👍"],
   ]);
 });
+
+test("renders the recorded role for self-joins, additions and lifecycle summaries", async () => {
+  const { screen, cleanup } = await import("@testing-library/react");
+  const target = "11".repeat(32),
+    actor = "12".repeat(32);
+  const join = (adder = target) => ({
+    ...systemMessage({ actor: adder, id: "join", target }),
+    body: JSON.stringify({
+      type: "member_joined",
+      actor: adder,
+      target,
+      role: "guest",
+    }),
+  });
+  for (const currentPubkey of [target, actor]) {
+    await renderSystemMessageRow({
+      currentPubkey,
+      message: join(),
+      profiles: { ...profileFor(target, "Alex"), ...profileFor(actor, "Sam") },
+    });
+    assert.match(
+      screen.getByTestId("system-message-row").textContent,
+      /joined with view-only access/,
+    );
+    cleanup();
+    await renderSystemMessageRow({
+      currentPubkey,
+      message: join(actor),
+      profiles: { ...profileFor(target, "Alex"), ...profileFor(actor, "Sam") },
+    });
+    assert.match(
+      screen.getByTestId("system-message-row").textContent,
+      /added by .*with view-only access/,
+    );
+    cleanup();
+  }
+  await renderSystemMessageRow({
+    groupedMessages: [
+      join(),
+      memberLeftMessage({ actor: target, id: "leave" }),
+    ],
+    profiles: profileFor(target, "Alex"),
+  });
+  assert.match(
+    screen.getByTestId("system-message-row").textContent,
+    /joined with view-only access, then left/,
+  );
+});

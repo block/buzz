@@ -164,6 +164,59 @@ NostrEvent _huddleEvent({
 );
 
 void main() {
+  test(
+    'admission role is optional, validated and retained by timeline grouping',
+    () {
+      final cases = <Object?, String>{
+        'guest': ' with view-only access',
+        'member': ' as a participant',
+        'bot': ' as a participant',
+        'admin': ' as an admin',
+        'owner': ' as an owner',
+        null: '',
+        'future': '',
+        7: '',
+        <String>[]: '',
+      };
+      for (final entry in cases.entries) {
+        final content = jsonEncode({
+          'type': 'member_joined',
+          'actor': 'alice',
+          'target': 'alice',
+          'role': entry.key,
+        });
+        final event = SystemEvent.fromContent(content)!;
+        expect(
+          event.describe((_) => 'Alice'),
+          entry.value.isEmpty
+              ? 'Alice joined the channel'
+              : 'Alice joined${entry.value}',
+        );
+      }
+      MainTimelineEntry join(String id, Object? role) => MainTimelineEntry(
+        message: formatTimeline([
+          _systemMsg(
+            id: id,
+            payload: {
+              'type': 'member_joined',
+              'actor': 'alice',
+              'target': 'alice',
+              'role': role,
+            },
+          ),
+        ]).single,
+      );
+      final groups = groupMembershipTimelineEntries([
+        join('a', 'guest'),
+        join('b', 'guest'),
+        join('c', 'member'),
+        join('d', null),
+      ]);
+      expect(groups.map((group) => group.length), [2, 1, 1]);
+      expect(groups.first.first.message.systemEvent!.role, 'guest');
+    },
+  );
+
   group('SystemEvent.fromContent', () {
     test('parses all known event types', () {
       final types = {

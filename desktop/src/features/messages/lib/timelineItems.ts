@@ -18,6 +18,7 @@ import {
   startsNewMessageGroup,
 } from "@/features/messages/lib/messageGrouping";
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
+import { membershipRole, type MembershipRole } from "./systemEventCopy";
 
 /**
  * One renderable row in the flattened timeline. Dividers carry no message and
@@ -63,10 +64,11 @@ function entryRenderKey(entry: MainTimelineEntry): string {
   return entry.message.renderKey ?? entry.message.id;
 }
 
-type MembershipChangePayload =
+type MembershipChangePayload = (
   | { mode: "self-arrival"; target: string }
   | { actor: string; mode: "addition"; target: string }
-  | { mode: "departure"; target: string };
+  | { mode: "departure"; target: string }
+) & { role?: MembershipRole };
 
 function parseMembershipChangePayload(
   entry: MainTimelineEntry,
@@ -78,6 +80,7 @@ function parseMembershipChangePayload(
       type?: unknown;
       actor?: unknown;
       target?: unknown;
+      role?: unknown;
     };
     if (payload.type === "member_left" && typeof payload.actor === "string") {
       const target = payload.actor.trim().toLowerCase();
@@ -94,9 +97,10 @@ function parseMembershipChangePayload(
     const actor = payload.actor.trim().toLowerCase();
     const target = payload.target.trim().toLowerCase();
     if (!actor || !target) return null;
+    const role = membershipRole(payload.role);
     return actor === target
-      ? { mode: "self-arrival", target }
-      : { actor, mode: "addition", target };
+      ? { mode: "self-arrival", target, role }
+      : { actor, mode: "addition", target, role };
   } catch {
     return null;
   }
@@ -142,6 +146,12 @@ function buildMembershipGroups(
       continue;
     }
 
+    const role =
+      newestPayload.mode === "departure"
+        ? end > 0
+          ? parseMembershipChangePayload(entries[end - 1])?.role
+          : undefined
+        : newestPayload.role;
     let start = end;
     while (start > 0) {
       const candidate = entries[start - 1];
@@ -150,6 +160,7 @@ function buildMembershipGroups(
       if (
         barrierIndexes.has(start) ||
         !candidatePayload ||
+        candidatePayload.role !== role ||
         !membershipChangesCanGroup(candidatePayload, newestPayload) ||
         newestEntry.message.createdAt < candidate.message.createdAt ||
         nextEntry.message.createdAt - candidate.message.createdAt > 60 * 60
