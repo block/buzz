@@ -4,6 +4,8 @@
 /// query finds the same channels, in the same order, as desktop search.
 library;
 
+import '../../shared/text/fold_for_match.dart';
+
 /// How well a name matches typed text, best first. Ranks are whole numbers,
 /// so callers can order them and add fractional tie-breaks.
 abstract final class MatchRank {
@@ -31,9 +33,10 @@ List<String> _codePoints(String value) =>
     value.runes.map(String.fromCharCode).toList();
 
 /// Returns how well [label] matches [needle] as a [MatchRank], or null for no
-/// match. [needle] must already be lowercased.
+/// match. [needle] must already be folded by [foldForMatch], so accents and
+/// case are ignored.
 int? matchRank(String label, String needle) {
-  final text = label.toLowerCase();
+  final text = foldForMatch(label);
   if (text == needle) return MatchRank.exact;
 
   var substring = false;

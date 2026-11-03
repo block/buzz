@@ -24,6 +24,7 @@ import {
   truncateNpub,
   UNAVAILABLE_KEY_LABEL,
 } from "@/shared/lib/pubkey";
+import { foldForMatch } from "@/shared/lib/foldForMatch";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -273,13 +274,13 @@ export function CommunityMembersSettingsCard({
   const [search, setSearch] = React.useState("");
 
   const filteredMembers = React.useMemo(() => {
-    const q = search.trim().toLowerCase();
+    const q = foldForMatch(search.trim());
     if (!q) return members;
     return members.filter((member) => {
       const normalizedPubkey = normalizePubkey(member.pubkey);
       const profile = profiles?.[normalizedPubkey];
-      const displayName = profile?.displayName?.toLowerCase() ?? "";
-      const nip05 = profile?.nip05Handle?.toLowerCase() ?? "";
+      const displayName = foldForMatch(profile?.displayName ?? "");
+      const nip05 = foldForMatch(profile?.nip05Handle ?? "");
       const npub = npubFromPubkey(member.pubkey)?.toLowerCase() ?? "";
       return (
         displayName.includes(q) ||

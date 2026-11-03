@@ -119,3 +119,18 @@ test("mixed list keeps only active, non-DM matches", () => {
     ["s3", "f3"],
   );
 });
+
+test("ignores accents in channel names and queries", () => {
+  const channels = [
+    channel({ id: "r", name: "réunion" }),
+    channel({ id: "e", name: "equipe" }),
+  ];
+  assert.deepEqual(
+    selectChannelSuggestions(channels, "reunion").map((c) => c.name),
+    ["réunion"],
+  );
+  assert.deepEqual(
+    selectChannelSuggestions(channels, "Équ").map((c) => c.name),
+    ["equipe"],
+  );
+});

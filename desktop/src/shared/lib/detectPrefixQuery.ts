@@ -1,3 +1,5 @@
+import { foldForMatch } from "@/shared/lib/foldForMatch";
+
 /**
  * Shared helper for detecting prefix-based queries (e.g. @mention, #channel)
  * within a text input, used by both useMentions and useChannelLinks hooks.
@@ -53,18 +55,22 @@ export function detectPrefixQuery(
       if (candidate.length === 0) {
         break;
       }
-      const lowerCandidate = candidate.toLowerCase();
+      // Known names and the typed text are compared folded, so "@elodie d"
+      // keeps the query open for "Élodie Dupont".
+      const lowerCandidate = foldForMatch(candidate);
       // A trailing space after an exact known name means the mention is
       // complete — don't keep the query open just because a longer name
       // (e.g. a team) shares the prefix.
       if (
         lowerCandidate.endsWith(" ") &&
-        knownNamesLower.includes(lowerCandidate.trimEnd())
+        knownNamesLower.some(
+          (name) => foldForMatch(name) === lowerCandidate.trimEnd(),
+        )
       ) {
         break;
       }
       const isPrefix = knownNamesLower.some((name) =>
-        name.startsWith(lowerCandidate),
+        foldForMatch(name).startsWith(lowerCandidate),
       );
       if (isPrefix) {
         return { query: candidate, startIndex: i };

@@ -14,6 +14,7 @@ import { resolveChannelDisplayLabel } from "@/features/sidebar/lib/channelLabels
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { foldForMatch } from "@/shared/lib/foldForMatch";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { PortalledScrollArea } from "@/shared/ui/PortalledScrollArea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -116,10 +117,10 @@ export function ChannelCombobox({
 
   const filtered = React.useMemo(() => {
     if (!query) return channels;
-    const q = query.toLowerCase();
+    const q = foldForMatch(query);
     return channels.filter(
       (c) =>
-        (channelLabels.get(c.id) ?? c.name).toLowerCase().includes(q) ||
+        foldForMatch(channelLabels.get(c.id) ?? c.name).includes(q) ||
         c.channelType?.toLowerCase().includes(q) ||
         c.id.toLowerCase().includes(q),
     );

@@ -161,3 +161,33 @@ test("getKeyboardSearchSelection ignores stale ranked results", () => {
     null,
   );
 });
+
+test("scoreUserCandidate ignores accents in both the label and the query", () => {
+  const user = makeUser({ displayName: "Élodie Dupont" });
+  for (const [label, query, expected] of [
+    ["Élodie Dupont", "elodie", 0],
+    ["Élodie Dupont", "ELO", 0],
+    ["Elodie Dupont", "élo", 0],
+    ["Hélène Lefèvre", "lefevre", 1],
+    ["Jérôme", "rome", 2],
+    ["Jérôme Martin", "jeromr", 5],
+  ]) {
+    assert.equal(
+      scoreUserCandidate({ label, query, user }),
+      expected,
+      `${label} / ${query}`,
+    );
+  }
+  assert.deepEqual(
+    rankUserCandidatesBySearch({
+      candidates: [
+        makeUser({ displayName: "Bob", pubkey: "b".repeat(64) }),
+        user,
+      ],
+      getLabel: (candidate) => candidate.displayName ?? "",
+      limit: 5,
+      query: "elodie",
+    }).map((candidate) => candidate.displayName),
+    ["Élodie Dupont"],
+  );
+});

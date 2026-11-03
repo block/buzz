@@ -24,6 +24,8 @@ void main() {
       ('build_and_deploy', 'bd', MatchRank.wordRuns),
       ('dev', 'd e v', MatchRank.wordRuns),
       ('general', 'genral', MatchRank.inOrder),
+      ('Réunion', 'reunion', MatchRank.exact),
+      ('équipe-café', 'cafe', MatchRank.wordStart),
       ('release-notes', 'budget', null),
       ('abc', 'ca', null),
     ];

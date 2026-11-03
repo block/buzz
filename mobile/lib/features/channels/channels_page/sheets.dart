@@ -372,6 +372,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
     final selectedPubkeys = selectedUsers.value
         .map((user) => user.pubkey.toLowerCase())
         .toSet();
+    final foldedQuery = foldForMatch(normalizedQuery);
     final availableResults =
         directoryAsync.asData?.value.where((user) {
           final normalizedPubkey = user.pubkey.toLowerCase();
@@ -382,8 +383,8 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
           if (normalizedQuery.isEmpty) {
             return true;
           }
-          return user.label.toLowerCase().contains(normalizedQuery) ||
-              user.secondaryLabel.toLowerCase().contains(normalizedQuery) ||
+          return foldForMatch(user.label).contains(foldedQuery) ||
+              foldForMatch(user.secondaryLabel).contains(foldedQuery) ||
               normalizedPubkey.contains(normalizedQuery);
         }).toList() ??
         const <DirectoryUser>[];

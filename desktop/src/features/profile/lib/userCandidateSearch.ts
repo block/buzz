@@ -1,4 +1,5 @@
 import type { UserSearchResult } from "@/shared/api/types";
+import { foldForMatch } from "@/shared/lib/foldForMatch";
 import { hasTypoTolerantPrefixMatch } from "@/shared/lib/fuzzyText";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
@@ -29,7 +30,7 @@ export function scoreUserCandidate({
   query,
   user,
 }: ScoreUserCandidateInput) {
-  const normalizedQuery = query.trim().toLowerCase();
+  const normalizedQuery = foldForMatch(query.trim());
 
   if (normalizedQuery.length === 0) {
     return allowEmptyQuery ? 0 : null;
@@ -42,7 +43,7 @@ export function scoreUserCandidate({
   ];
 
   for (const candidateLabel of labels) {
-    const lower = candidateLabel.toLowerCase();
+    const lower = foldForMatch(candidateLabel);
     if (lower.startsWith(normalizedQuery)) return 0;
     if (
       lower.split(/[\s\-_]+/).some((word) => word.startsWith(normalizedQuery))

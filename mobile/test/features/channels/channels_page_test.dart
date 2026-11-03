@@ -2861,6 +2861,8 @@ void main() {
       DirectoryUser(pubkey: 'bob', displayName: 'Bob'),
       DirectoryUser(pubkey: 'charlie', displayName: 'Charlie'),
       DirectoryUser(pubkey: 'danielle', displayName: 'Danielle'),
+      DirectoryUser(pubkey: 'elodie', displayName: 'Élodie'),
+      DirectoryUser(pubkey: 'rene', displayName: 'Rene'),
     ];
     await tester.pumpWidget(
       buildTestable(
@@ -2869,14 +2871,11 @@ void main() {
           relayDirectoryUsersProvider.overrideWith(
             (ref) async => directoryUsers,
           ),
-          relayDirectorySearchProvider.overrideWith((ref, query) async {
-            return directoryUsers
-                .where(
-                  (user) =>
-                      user.label.toLowerCase().contains(query.toLowerCase()),
-                )
-                .toList();
-          }),
+          // Every user comes back, so the sheet's own filter decides which
+          // rows show.
+          relayDirectorySearchProvider.overrideWith(
+            (ref, query) async => directoryUsers,
+          ),
           channelActionsProvider.overrideWith(
             (ref) => _PendingDmActions(waits),
           ),
@@ -2913,6 +2912,18 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('new-dm-person-alice')), findsNothing);
     expect(find.byKey(const Key('new-dm-person-bob')), findsOneWidget);
+
+    // Accents are ignored in both directions.
+    for (final (query, shown, hidden) in [
+      ('elodie', 'elodie', 'rene'),
+      ('RENÉ', 'rene', 'elodie'),
+    ]) {
+      await tester.enterText(find.byKey(const Key('new-dm-search')), query);
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pumpAndSettle();
+      expect(find.byKey(Key('new-dm-person-$shown')), findsOneWidget);
+      expect(find.byKey(Key('new-dm-person-$hidden')), findsNothing);
+    }
 
     await tester.enterText(find.byKey(const Key('new-dm-search')), '');
     await tester.pump(const Duration(milliseconds: 300));

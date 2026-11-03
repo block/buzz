@@ -52,6 +52,7 @@ import {
 } from "@/shared/ui/dialog";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
+import { foldForMatch } from "@/shared/lib/foldForMatch";
 import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
 import {
   MODAL_SEARCH_INPUT_CLASS,
@@ -202,7 +203,7 @@ export function MembersSidebar({
   const memberProfilesQuery = useUsersBatchQuery(allMemberPubkeys, {
     enabled: open && rawMembers.length > 0,
   });
-  const normalizedSearchQuery = searchQuery.trim().toLowerCase();
+  const normalizedSearchQuery = foldForMatch(searchQuery.trim());
   const deferredSearchQuery = React.useDeferredValue(searchQuery.trim());
   const normalizedDeferredSearchQuery = deferredSearchQuery.toLowerCase();
   const filteredActiveMembers = React.useMemo(() => {
@@ -224,7 +225,7 @@ export function MembersSidebar({
       ];
 
       return labels.some((label) =>
-        label.toLowerCase().includes(normalizedSearchQuery),
+        foldForMatch(label).includes(normalizedSearchQuery),
       );
     });
   }, [
@@ -427,7 +428,7 @@ export function MembersSidebar({
       ];
 
       return labels.some((label) =>
-        label.toLowerCase().includes(normalizedSearchQuery),
+        foldForMatch(label).includes(normalizedSearchQuery),
       );
     });
   }, [

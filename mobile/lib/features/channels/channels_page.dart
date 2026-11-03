@@ -62,6 +62,7 @@ import 'channels_provider.dart';
 import '../../shared/read_state/deferred_read_state_update.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
+import '../../shared/text/fold_for_match.dart';
 
 part 'channels_page/body.dart';
 part 'channels_page/sections.dart';

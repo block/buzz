@@ -230,12 +230,12 @@ abstract final class _MentionSuggestionInfo {
 @visibleForTesting
 List<Channel> filterChannels(List<Channel> channels, String? query) {
   if (query == null) return const [];
-  final q = query.toLowerCase();
+  final q = foldForMatch(query);
   return channels
       .where((c) => c.channelType != 'dm')
       .where((c) {
         if (q.isEmpty) return true;
-        return c.name.toLowerCase().contains(q);
+        return foldForMatch(c.name).contains(q);
       })
       .take(8)
       .toList();

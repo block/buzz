@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart';
 
+import '../text/fold_for_match.dart';
+
 /// One key the user can mention. The fields are the inputs of the portable
 /// mention rules (buzz-app `src/bundled/mentions/README.md`, version 1).
 @immutable
@@ -36,12 +38,16 @@ class MentionChoice {
 
 String _normalized(String text) => text.trim().toLowerCase();
 
+/// Matching also ignores accents, so `elodie` finds `Élodie`. Sort keys and
+/// the Space rule ([exactMention]) stay on [_normalized].
+String _folded(String text) => foldForMatch(text.trim());
+
 final _whitespace = RegExp(r'\s+', unicode: true);
 
 /// Tier 0 to 3 from section 3, or null for no match.
 int? _nameMatch(String text, String needle) {
   if (needle.isEmpty) return 0;
-  final name = _normalized(text);
+  final name = _folded(text);
   if (name == needle) return 0;
   if (name.startsWith(needle)) return 1;
   final words = name.split(_whitespace);
@@ -65,7 +71,7 @@ int? _baseMatch(MentionChoice choice, String needle) =>
 /// tier. Null means the choice does not match. Keys are never searchable.
 @visibleForTesting
 int? mentionMatch(MentionChoice choice, String query) {
-  final needle = _normalized(query);
+  final needle = _folded(query);
   if (needle.isEmpty) return 0;
   // No known name: the label is only a key fallback.
   if (choice.aliases.isEmpty) return null;
@@ -86,7 +92,7 @@ List<MentionChoice> rankMentions(
   Map<String, int> history = const {},
   String Function(String pubkey)? presence,
 }) {
-  final needle = _normalized(query);
+  final needle = _folded(query);
   final keyed = <_Keyed>[];
   for (final choice in choices) {
     final match = mentionMatch(choice, query);
@@ -214,10 +220,10 @@ MentionQuery? findMentionQuery(String text, int caret) {
 /// is prose.
 bool matchesMentionQuery(String query, Iterable<String> names) {
   if (!query.contains(' ')) return true;
-  final lower = query.toLowerCase();
-  if (lower.endsWith(' ') &&
-      names.any((name) => name.toLowerCase() == lower.trimRight())) {
+  final folded = foldForMatch(query);
+  if (folded.endsWith(' ') &&
+      names.any((name) => foldForMatch(name) == folded.trimRight())) {
     return false;
   }
-  return names.any((name) => name.toLowerCase().startsWith(lower));
+  return names.any((name) => foldForMatch(name).startsWith(folded));
 }

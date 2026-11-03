@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
+import '../../shared/text/fold_for_match.dart';
 import '../channels/channel.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/channels_provider.dart';
@@ -101,10 +102,10 @@ class SearchState {
   );
 }
 
-/// The channel name text a search [query] matches: lowercased, without a
-/// leading "#".
+/// The channel name text a search [query] matches: folded by [foldForMatch],
+/// without a leading "#".
 String _channelNeedle(String query) =>
-    query.trim().toLowerCase().replaceFirst(RegExp(r'^#'), '');
+    foldForMatch(query.trim()).replaceFirst(RegExp(r'^#'), '');
 
 /// Whether [query] searches open channels. A bare "#" does not, as on desktop.
 bool _searchesOpenChannels(String query) => _channelNeedle(query).isNotEmpty;

@@ -126,3 +126,24 @@ test("scoreChannelMatch: no match anywhere returns null", () => {
     null,
   );
 });
+
+test("scoreChannelName / scoreChannelMatch ignore accents on both sides", () => {
+  for (const [name, query] of [
+    ["réunion", "reunion"],
+    ["réunion-équipe", "equipe"],
+    ["reunion", "réunion"],
+    ["Café-Crème", "cafecreme"],
+    ["référence", "referense"],
+  ]) {
+    assert.notEqual(scoreChannelName(name, query), null, `${name} / ${query}`);
+  }
+  assert.equal(scoreChannelName("réunion", "reunion"), 0);
+  assert.equal(scoreChannelName("reunion", "réunion"), 0);
+  assert.notEqual(
+    scoreChannelMatch(
+      { name: "general", description: "Les comptes rendus de réunion" },
+      "reunion",
+    ),
+    null,
+  );
+});

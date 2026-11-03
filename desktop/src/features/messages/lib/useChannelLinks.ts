@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
+import { foldForMatch } from "@/shared/lib/foldForMatch";
 import type { Channel } from "@/shared/api/types";
 import type { AutocompleteEdit } from "./useRichTextEditor";
 
@@ -30,11 +31,11 @@ export function selectChannelSuggestions(
   channels: Channel[],
   query: string,
 ): ChannelSuggestion[] {
-  const lowerQuery = query.toLowerCase();
+  const lowerQuery = foldForMatch(query);
   return channels
     .filter(
       (ch) =>
-        isChannelSuggestable(ch) && ch.name.toLowerCase().includes(lowerQuery),
+        isChannelSuggestable(ch) && foldForMatch(ch.name).includes(lowerQuery),
     )
     .slice(0, 8)
     .map((ch) => ({

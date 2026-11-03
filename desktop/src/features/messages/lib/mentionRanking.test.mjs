@@ -247,3 +247,22 @@ test("pickDefaultAgentCandidate: returns null without an addressable agent", () 
   assert.equal(pickDefaultAgentCandidate([]), null);
   assert.equal(pickDefaultAgentCandidate([candidate()]), null);
 });
+
+test("rankMentionCandidates ignores accents but keeps the original label", () => {
+  const elodie = candidate({ displayName: "Élodie", pubkey: "3".repeat(64) });
+  const plain = candidate({ displayName: "Elodie", pubkey: "4".repeat(64) });
+  for (const query of ["elodie", "élo", "ELO", "Élodie"]) {
+    const ranked = rankMentionCandidates([elodie, plain], query);
+    assert.deepEqual(
+      ranked.map((item) => item.label),
+      ["Élodie", "Elodie"],
+      query,
+    );
+  }
+  const persona = candidate({
+    displayName: "Builder",
+    personaName: "Hélène",
+    pubkey: "5".repeat(64),
+  });
+  assert.equal(rankMentionCandidates([persona], "helene")[0]?.label, "Builder");
+});

@@ -42,6 +42,7 @@ import '../../shared/profile/user_profile.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/deeplink/deep_link.dart';
+import '../../shared/text/fold_for_match.dart';
 import '../activity/compose_drafts_provider.dart';
 import 'camera_capture_cleanup.dart';
 import 'channel.dart';
