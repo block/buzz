@@ -137,6 +137,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i tables/public/relay_admin_outbox.sql
 \i tables/public/operator_listener_pubkeys.sql
 \i tables/public/operator_listener_outbox.sql
+\i tables/public/operator_listener_threads.sql
 \i tables/public/relay_operator_audit.sql
 \i tables/public/storage_accounting_snapshots.sql
 \i tables/public/artifact_heads.sql

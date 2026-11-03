@@ -4,6 +4,12 @@
 //! request signing and replay protection, but they do not run through event
 //! ingest, relay membership, channel scoping, storage, or fan-out.
 
+mod listener_threads;
+#[cfg(test)]
+#[path = "operator/listener_threads_postgres_tests.rs"]
+mod listener_threads_postgres_tests;
+pub use listener_threads::{register_listener_threads, remove_listener_threads};
+
 use std::sync::Arc;
 
 use axum::{
@@ -1199,7 +1205,7 @@ mod postgres_tests {
             Box::pin(async move { Ok(inserted) })
         }
     }
-    const INGRESS_HOST: &str = "operator-ingress.example";
+    pub(super) const INGRESS_HOST: &str = "operator-ingress.example";
 
     fn nip98_auth_header(keys: &Keys, url: &str, method: &str, body: Option<&[u8]>) -> String {
         let mut tags = vec![
@@ -1234,7 +1240,7 @@ mod postgres_tests {
         format!("Nostr {encoded}")
     }
 
-    async fn operator_test_state(operator_keys: &[Keys]) -> Option<Arc<AppState>> {
+    pub(super) async fn operator_test_state(operator_keys: &[Keys]) -> Option<Arc<AppState>> {
         operator_test_state_with_policy(operator_keys, None).await
     }
 
@@ -1291,14 +1297,14 @@ mod postgres_tests {
         Some(Arc::new(state))
     }
 
-    async fn read_json(response: axum::response::Response) -> Value {
+    pub(super) async fn read_json(response: axum::response::Response) -> Value {
         let bytes = to_bytes(response.into_body(), 1024 * 1024)
             .await
             .expect("read response body");
         serde_json::from_slice(&bytes).expect("response JSON")
     }
 
-    async fn signed_operator_request(
+    pub(super) async fn signed_operator_request(
         state: Arc<AppState>,
         keys: &Keys,
         method: &str,

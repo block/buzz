@@ -42,6 +42,7 @@ pub mod git_repo;
 pub mod moderation;
 /// Deployment-global operator-listener mention registrations and delivery queues.
 pub mod operator_listener;
+pub mod operator_listener_threads;
 /// Monthly table partition management.
 pub mod partition;
 /// Private signer-owned accessory read progress.

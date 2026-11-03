@@ -2886,6 +2886,8 @@ mod postgres_tests {
             .expect("apply migrations for schema parity");
 
         for table in [
+            "operator_listener_threads",
+            "operator_listener_outbox",
             "relay_admin_actions",
             "relay_admin_outbox",
             "relay_operator_audit",

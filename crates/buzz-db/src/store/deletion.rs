@@ -78,6 +78,7 @@ pub const RELAY_ADMIN_TABLES: &[(&str, &str)] = &[
 /// approval and again before PostgreSQL purge. A new tenant table therefore
 /// blocks deletion until this manifest is intentionally updated.
 pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
+    "operator_listener_threads",
     "nip_fi_profile_heads",
     "api_tokens",
     "archived_identities",
@@ -130,6 +131,7 @@ const EXCLUDED_SCOPED_TABLES: &[&str] = &[
 
 /// Foreign-key-safe child-before-parent order for the PostgreSQL purge.
 pub const PURGE_SCOPED_TABLES: &[&str] = &[
+    "operator_listener_threads",
     "nip_fi_profile_heads",
     "personal_read_frontiers",
     "personal_read_accounts",
@@ -8636,6 +8638,13 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .as_uuid()
             .to_owned();
         seed_relay_admin_rows(&db, bystander).await;
+        // Thread watches are tenant-owned and must be purged without touching
+        // the bystander's same listener/agent/channel/root tuple.
+        for tenant in [community, bystander] {
+            sqlx::query("INSERT INTO operator_listener_threads (community_id,listener_pubkey,target_pubkey,channel_id,root_event_id,expires_at) VALUES ($1,decode(repeat('ab',32),'hex'),decode(repeat('cd',32),'hex'),'00000000-0000-0000-0000-000000000001',decode(repeat('ef',32),'hex'),now()+interval '1 day')")
+                .bind(tenant).execute(&db.pool).await.unwrap();
+        }
+
         // Operator workflow history is retained even when its provenance
         // community is purged; it is not a tenant-owned serving table.
         let entity = db
@@ -8699,6 +8708,15 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .await
             .expect("bindings");
         let deleted = store.purge_postgres(&token).await.expect("purge postgres");
+        let retained_watches: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT community_id FROM operator_listener_threads WHERE community_id IN ($1,$2)",
+        )
+        .bind(community)
+        .bind(bystander)
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(retained_watches, vec![bystander]);
 
         let retained: Uuid = sqlx::query_scalar(
             "SELECT target_community_id FROM entity_deletion_stage_history WHERE id = $1",
@@ -8834,6 +8852,7 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .await
             .expect("bindings");
         store.purge_postgres(&token).await.expect("purge postgres");
+
         store
             .mark_cache_purged(&token, serde_json::json!({"keys": 0}))
             .await

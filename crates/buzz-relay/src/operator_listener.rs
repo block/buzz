@@ -29,6 +29,8 @@ struct MentionNotification<'a> {
     community_host: String,
     event_id: String,
     event_kind: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_root_event_id: Option<String>,
     event_created_at: i64,
     event: &'a nostr::Event,
 }
@@ -55,6 +57,9 @@ pub async fn run_reaper(state: Arc<AppState>) {
             loop {
                 if let Err(error) = state.db.reap_operator_listener_deliveries().await {
                     warn!(%error, "operator-listener outbox reap failed");
+                }
+                if let Err(error) = state.db.reap_operator_listener_threads().await {
+                    warn!(%error, "operator-listener thread cleanup failed");
                 }
                 tokio::time::sleep(OUTBOX_REAP_INTERVAL).await;
             }
@@ -279,6 +284,7 @@ async fn deliver_one<T: DeliveryTransport, S: DeliveryStore>(
         community_host: delivery.community_host.clone(),
         event_id: hex::encode(&delivery.event_id),
         event_kind: delivery.event_kind,
+        thread_root_event_id: delivery.thread_root_event_id.as_ref().map(hex::encode),
         event_created_at: delivery.event_created_at.timestamp(),
         event: &stored.event,
     }) {
@@ -574,6 +580,7 @@ mod tests {
                 community_host: "community.example".to_owned(),
                 event_id: vec![0x22; 32],
                 event_kind: 9,
+                thread_root_event_id: None,
                 event_created_at: DateTime::from_timestamp(1_700_000_000, 0)
                     .expect("test timestamp"),
                 attempt,
@@ -804,62 +811,72 @@ mod tests {
 
     #[tokio::test]
     async fn successful_http_delivery_is_signed_and_completes_claim() {
-        use nostr::nips::nip98::{verify_auth_header, HttpMethod};
+        for root in [None, Some(vec![0x33; 32])] {
+            use nostr::nips::nip98::{verify_auth_header, HttpMethod};
 
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("HTTP listener");
-        let endpoint = url::Url::parse(&format!(
-            "http://{}/mentions",
-            listener.local_addr().expect("listener address")
-        ))
-        .expect("HTTP endpoint");
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.expect("accept delivery");
-            let request = read_http_request(&mut stream).await;
-            stream
-                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+            let listener = TcpListener::bind("127.0.0.1:0")
                 .await
-                .expect("write success response");
-            request
-        });
-        let (_, relay_keypair, delivery) = delivery_fixture(1);
-        let routes = HashMap::from([(hex::encode(&delivery.listener_pubkey), endpoint.clone())]);
-        let store = MockStore::default();
-        let http = build_delivery_http_client(Duration::from_secs(2)).expect("delivery client");
-        let transport = ReqwestDeliveryTransport { http: &http };
+                .expect("HTTP listener");
+            let endpoint = url::Url::parse(&format!(
+                "http://{}/mentions",
+                listener.local_addr().expect("listener address")
+            ))
+            .expect("HTTP endpoint");
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept delivery");
+                let request = read_http_request(&mut stream).await;
+                stream
+                    .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                    .await
+                    .expect("write success response");
+                request
+            });
+            let (_, relay_keypair, mut delivery) = delivery_fixture(1);
+            delivery.thread_root_event_id = root.clone();
+            let routes =
+                HashMap::from([(hex::encode(&delivery.listener_pubkey), endpoint.clone())]);
+            let store = MockStore::default();
+            let http = build_delivery_http_client(Duration::from_secs(2)).expect("delivery client");
+            let transport = ReqwestDeliveryTransport { http: &http };
 
-        deliver_one(
-            &routes,
-            &relay_keypair,
-            &store,
-            &transport,
-            delivery.clone(),
-        )
-        .await;
+            deliver_one(
+                &routes,
+                &relay_keypair,
+                &store,
+                &transport,
+                delivery.clone(),
+            )
+            .await;
 
-        let (request_line, body, authorization) =
-            tokio::time::timeout(Duration::from_secs(2), server)
-                .await
-                .expect("HTTP server completed")
-                .expect("HTTP server task");
-        assert!(request_line.starts_with("POST /mentions HTTP/1.1"));
-        let signer = verify_auth_header(
-            &authorization,
-            &endpoint,
-            HttpMethod::POST,
-            nostr::Timestamp::now(),
-            Some(&body),
-        )
-        .expect("valid signature binding the HTTP endpoint and body");
-        assert_eq!(signer, relay_keypair.public_key());
-        let payload: serde_json::Value = serde_json::from_slice(&body).expect("notification JSON");
-        assert_eq!(payload["pubkey"], hex::encode(&delivery.target_pubkey));
-        assert_eq!(payload["event_id"], hex::encode(&delivery.event_id));
-        assert_eq!(
-            store.calls(),
-            [StoreCall::Complete(delivery.id, delivery.claim_id)]
-        );
+            let (request_line, body, authorization) =
+                tokio::time::timeout(Duration::from_secs(2), server)
+                    .await
+                    .expect("HTTP server completed")
+                    .expect("HTTP server task");
+            assert!(request_line.starts_with("POST /mentions HTTP/1.1"));
+            let signer = verify_auth_header(
+                &authorization,
+                &endpoint,
+                HttpMethod::POST,
+                nostr::Timestamp::now(),
+                Some(&body),
+            )
+            .expect("valid signature binding the HTTP endpoint and body");
+            assert_eq!(signer, relay_keypair.public_key());
+            let payload: serde_json::Value =
+                serde_json::from_slice(&body).expect("notification JSON");
+            assert_eq!(payload["pubkey"], hex::encode(&delivery.target_pubkey));
+            assert_eq!(payload["event_id"], hex::encode(&delivery.event_id));
+            match &root {
+                Some(root) => assert_eq!(payload["thread_root_event_id"], hex::encode(root)),
+                None => assert!(payload.get("thread_root_event_id").is_none()),
+            }
+
+            assert_eq!(
+                store.calls(),
+                [StoreCall::Complete(delivery.id, delivery.claim_id)]
+            );
+        }
     }
 
     #[tokio::test]
