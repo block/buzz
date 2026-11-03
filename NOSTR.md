@@ -338,7 +338,7 @@ The relay emits relay-signed notifications when members are added or removed:
 | Kind | Meaning | Tags | Scope |
 |------|---------|------|-------|
 | **44100** | Member added | `p` = target pubkey, `h` = channel UUID | Community-global |
-| **44101** | Member removed | `p` = target pubkey, `h` = channel UUID | Community-global |
+| **44101** | Member removed (also sent on a moderation kick, and to every member when the channel is deleted) | `p` = target pubkey, `h` = channel UUID | Community-global |
 
 Each notice also has `t` = the channel type (`stream`, `forum`, `dm`,
 `workflow`, `system`). A filter with `#t` gets only the types it names. A

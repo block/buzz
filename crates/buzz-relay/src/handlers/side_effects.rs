@@ -159,6 +159,22 @@ pub(crate) async fn apply_kick_live_side_effects(
             return Err(e.into());
         }
     }
+    // Tell the member, as a kind:9001 removal does. Eviction drops the channel
+    // from a multi-channel subscription without a CLOSED, so this is the
+    // member's only signal. A recovery re-drive may send it again; a repeated
+    // 44101 only makes the client read its channel list again.
+    if let Err(e) = emit_membership_notification(
+        tenant,
+        state,
+        channel_id,
+        target_pubkey,
+        &state.relay_keypair.public_key().to_bytes(),
+        KIND_MEMBER_REMOVED_NOTIFICATION,
+    )
+    .await
+    {
+        warn!(channel = %channel_id, error = %e, "kick live effects: membership notification failed");
+    }
     Ok(())
 }
 
@@ -2713,12 +2729,14 @@ async fn handle_delete_group(
         extract_h_tag_channel(event).ok_or_else(|| anyhow::anyhow!("missing h tag"))?;
     let actor_bytes = event.pubkey.to_bytes().to_vec();
 
-    // Soft-delete the channel.
-    let deleted = state
+    // Soft-delete the channel. The members come from the same transaction,
+    // so they are exactly the members at the delete.
+    let members = state
         .db
-        .soft_delete_channel(tenant.community(), channel_id)
+        .soft_delete_channel_with_members(tenant.community(), channel_id)
         .await
         .map_err(|e| anyhow::anyhow!("soft_delete_channel failed: {e}"))?;
+    let deleted = members.is_some();
 
     if !deleted {
         warn!(channel = %channel_id, "channel already deleted or not found");
@@ -2740,6 +2758,41 @@ async fn handle_delete_group(
     // Deleted channel: clear both membership and accessible-channels caches.
     // Stale is_member=true entries would bypass the DB's deleted_at guard.
     state.invalidate_channel_deleted(tenant);
+
+    // Tell each member the channel left their list. The deleted channel
+    // already fails every channel read and fan-out, so a 44101 is the only
+    // signal a member's client gets, live or in a reconnect replay.
+    if let Some(members) = members.filter(|members| !members.is_empty()) {
+        match state
+            .db
+            .channel_type_of(tenant.community(), channel_id)
+            .await
+        {
+            Ok(Some(channel_type)) => {
+                for member in &members {
+                    if let Err(e) = emit_typed_membership_notification(
+                        tenant,
+                        state,
+                        channel_id,
+                        &channel_type,
+                        member,
+                        &actor_bytes,
+                        KIND_MEMBER_REMOVED_NOTIFICATION,
+                    )
+                    .await
+                    {
+                        warn!(channel = %channel_id, error = %e, "channel delete: membership notification failed");
+                    }
+                }
+            }
+            Ok(None) => {
+                warn!(channel = %channel_id, "channel delete: no channel type; membership notifications skipped")
+            }
+            Err(e) => {
+                warn!(channel = %channel_id, error = %e, "channel delete: channel type read failed; membership notifications skipped")
+            }
+        }
+    }
 
     let actor_hex = hex::encode(&actor_bytes);
     emit_system_message(

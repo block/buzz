@@ -1453,3 +1453,106 @@ async fn a_relay_operator_may_not_rename_an_unlisted_channel() {
         assert_eq!(after.name, before.name, "{label}");
     }
 }
+
+/// Deleting a channel sends each member a 44101 naming it. Nothing else
+/// reaches them: the deleted channel fails every channel read and fan-out, so
+/// its own `channel_deleted` message is never delivered and a reconnect replay
+/// simply leaves the channel out. Someone who was not a member gets nothing.
+/// Mutation: remove the 44101 loop in `handle_delete_group` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn deleting_a_channel_tells_each_member() {
+    let state = state().await;
+    let tenant = community(&state, "delete-notices").await;
+    let owner = Keys::generate();
+    let member = Keys::generate();
+    let outsider = Keys::generate();
+    let former = Keys::generate();
+    let channel = create_channel(&state, &tenant, &owner, &[]).await;
+    let h = channel.to_string();
+    let publish = |keys: &Keys, kind: u16, tags: Vec<Vec<String>>| {
+        let tags: Vec<Tag> = tags.into_iter().map(|t| Tag::parse(t).unwrap()).collect();
+        let event = EventBuilder::new(Kind::Custom(kind), "")
+            .tags(tags)
+            .sign_with_keys(keys)
+            .expect("sign");
+        let state = state.clone();
+        let tenant = tenant.clone();
+        let auth = http_auth(keys);
+        async move {
+            let result = ingest_event(&state, &tenant, event, auth)
+                .await
+                .unwrap_or_else(|error| panic!("ingest kind:{kind}: {error:?}"));
+            assert!(result.accepted, "kind:{kind} refused: {}", result.message);
+        }
+    };
+    publish(
+        &owner,
+        9000,
+        vec![
+            vec!["h".into(), h.clone()],
+            vec!["p".into(), member.public_key().to_hex()],
+        ],
+    )
+    .await;
+    // A member who left before the delete already got its 44101. The leave
+    // names `former` as the actor, so a second notice from the delete would
+    // have another event id and could not be dropped as a duplicate.
+    publish(
+        &owner,
+        9000,
+        vec![
+            vec!["h".into(), h.clone()],
+            vec!["p".into(), former.public_key().to_hex()],
+        ],
+    )
+    .await;
+    publish(&former, 9022, vec![vec!["h".into(), h.clone()]]).await;
+    let removals =
+        |keys: &Keys| serde_json::json!({"kinds": [44101], "#p": [keys.public_key().to_hex()]});
+    let notices_for = |keys: &Keys| {
+        let state = state.clone();
+        let query = EventQuery {
+            kinds: Some(vec![44101]),
+            p_tag_hex: Some(keys.public_key().to_hex()),
+            ..EventQuery::for_community(tenant.community())
+        };
+        async move { state.db.query_events(&query).await.expect("query notices") }
+    };
+    assert_eq!(notices_for(&former).await.len(), 1, "the 9022 sent one");
+    for keys in [&owner, &member] {
+        assert!(req_event_ids(&state, &tenant, keys, removals(keys))
+            .await
+            .is_empty());
+    }
+
+    publish(&owner, 9008, vec![vec!["h".into(), h.clone()]]).await;
+
+    for keys in [&owner, &member] {
+        let notices = notices_for(keys).await;
+        assert_eq!(notices.len(), 1, "each member gets one 44101");
+        assert!(
+            notices[0]
+                .event
+                .tags
+                .iter()
+                .any(|t| t.as_slice() == ["h", h.as_str()]),
+            "the 44101 names the deleted channel"
+        );
+        assert_eq!(
+            req_event_ids(&state, &tenant, keys, removals(keys)).await,
+            [notices[0].event.id.to_hex()],
+            "a reconnect replay of the membership route carries it"
+        );
+    }
+    assert!(
+        req_event_ids(&state, &tenant, &outsider, removals(&outsider))
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        notices_for(&former).await.len(),
+        1,
+        "a member who left before the delete gets no second 44101"
+    );
+}

@@ -9959,6 +9959,22 @@ mod postgres_tests {
             final_rec.state, "succeeded",
             "action must reach succeeded even when re-add fence suppresses eviction"
         );
+
+        // 5. No 44101: the re-added member was not removed by this recovery.
+        let notices: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events WHERE community_id = $1 AND kind = 44101 \
+             AND tags @> $2::jsonb AND tags @> $3::jsonb",
+        )
+        .bind(community_id)
+        .bind(serde_json::json!([["p", hex::encode(&target)]]))
+        .bind(serde_json::json!([["h", channel_id.to_string()]]))
+        .fetch_one(&pool)
+        .await
+        .expect("count removal notices");
+        assert_eq!(
+            notices, 0,
+            "recovery must NOT tell a re-added member it was removed"
+        );
     }
 
     /// Fence ordering: the membership advisory lock is held through eviction and
@@ -11259,6 +11275,23 @@ mod postgres_tests {
                 .channel_subscriber_conns_scoped(cid, channel_id)
                 .contains(&conn_id),
             "kicked user's channel subscription must be evicted after kick side effects"
+        );
+
+        // Assert: the kicked user got a 44101 naming the channel. Eviction
+        // sends no CLOSED for a channel in a multi-channel subscription.
+        let notices: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events WHERE community_id = $1 AND kind = 44101 \
+             AND tags @> $2::jsonb AND tags @> $3::jsonb",
+        )
+        .bind(community_id)
+        .bind(serde_json::json!([["p", hex::encode(&target_pubkey)]]))
+        .bind(serde_json::json!([["h", channel_id.to_string()]]))
+        .fetch_one(&pool)
+        .await
+        .expect("count removal notices");
+        assert_eq!(
+            notices, 1,
+            "kick must send the member one 44101 for the channel"
         );
     }
 

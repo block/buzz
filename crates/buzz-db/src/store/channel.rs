@@ -1655,6 +1655,22 @@ pub async fn soft_delete_channel(
     community_id: CommunityId,
     channel_id: Uuid,
 ) -> Result<bool> {
+    Ok(
+        soft_delete_channel_with_members(pool, community_id, channel_id)
+            .await?
+            .is_some(),
+    )
+}
+
+/// Soft-delete a channel, as [`soft_delete_channel`], and return the pubkeys
+/// of its active members at the delete, or `None` if the channel was already
+/// deleted or not found. The members are read in the delete's transaction,
+/// under its membership lock, so no add or removal can commit in between.
+pub async fn soft_delete_channel_with_members(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+) -> Result<Option<Vec<Vec<u8>>>> {
     let mut tx = crate::begin_community_write_transaction(
         pool,
         community_id,
@@ -1663,12 +1679,21 @@ pub async fn soft_delete_channel(
     .await?;
     let mut writer = match lock_channel_for_delete(&mut tx, channel_id).await {
         Ok(writer) => writer,
-        Err(DbError::ChannelNotFound(_)) => return Ok(false),
+        Err(DbError::ChannelNotFound(_)) => return Ok(None),
         Err(error) => return Err(error),
     };
+    let members: Vec<Vec<u8>> = sqlx::query_scalar(
+        "SELECT pubkey FROM channel_members \
+         WHERE community_id = $1 AND channel_id = $2 AND removed_at IS NULL \
+         ORDER BY joined_at ASC",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_all(writer.tx.conn())
+    .await?;
     soft_delete_on(&mut writer).await?;
     tx.commit().await?;
-    Ok(true)
+    Ok(Some(members))
 }
 
 async fn soft_delete_on(w: &mut ChannelSettingsWriter<'_>) -> Result<()> {
@@ -2059,6 +2084,17 @@ impl Db {
         channel_id: Uuid,
     ) -> Result<bool> {
         soft_delete_channel(&self.pool, community_id, channel_id).await
+    }
+
+    /// Soft-delete a channel and return its active members at the delete.
+    /// See [`soft_delete_channel_with_members`].
+    #[datastore_span(name = "soft_delete_channel_with_members", system = "postgresql")]
+    pub async fn soft_delete_channel_with_members(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+    ) -> Result<Option<Vec<Vec<u8>>>> {
+        soft_delete_channel_with_members(&self.pool, community_id, channel_id).await
     }
 
     /// Archive ephemeral channels whose TTL deadline has passed.
