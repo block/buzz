@@ -761,7 +761,7 @@ async fn admission_notices_record_the_effective_role() {
         let event = put_user(
             &owner,
             channel,
-            &[&[&target.public_key().to_hex(), "", role]],
+            &[&[&target.public_key().to_hex(), role]],
             &[],
         );
         assert!(
@@ -769,6 +769,10 @@ async fn admission_notices_record_the_effective_role() {
                 .await
                 .unwrap()
                 .accepted
+        );
+        assert_eq!(
+            role_of(&state, &tenant, channel, &target).await.as_deref(),
+            Some(role)
         );
         let notices = state
             .db
