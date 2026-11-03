@@ -33,7 +33,6 @@ void main() {
         'Above\n\n* * *',
         'Title\n===',
         r'$$x^2$$',
-        r'\[x^2\]',
         for (final marker in [
           '-',
           '*',

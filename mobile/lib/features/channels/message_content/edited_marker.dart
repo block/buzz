@@ -11,12 +11,13 @@ const editedSlot = '';
 const editedMarkerText = '(edited)';
 
 // Last lines that a following " (edited)" would join or turn into Markdown
-// structure: indented code, a table row, a rule or setext underline, display
-// math, or a bare list, quote, checkbox or radio marker. A heading takes its
-// own line as on desktop, and so does a line ending in a link: links render
-// as widget spans, so screen readers would read a joined marker first.
+// structure: indented code, a table row, a rule or setext underline, `$$`
+// display math, or a bare list, quote, checkbox or radio marker. A heading
+// takes its own line as on desktop, and so does a line ending in a link:
+// links render as widget spans, so screen readers would read a joined marker
+// first. Escapes are already shielded here, so `\]` is text, not math.
 final _block = RegExp(
-  r'^(?:\s{4}|\t)|^\s*\||\|\s*$|\$\$\s*$|\\\]\s*$'
+  r'^(?:\s{4}|\t)|^\s*\||\|\s*$|\$\$\s*$'
   r'|^\s*(?:([-*_])(?:\s*\1){2,}|=+)\s*$'
   r'|^\s*#{1,6}(?:\s|$)'
   r'|[a-zA-Z][a-zA-Z0-9+.-]*://\S*\s*$|\]\([^)]*\)\s*$'
