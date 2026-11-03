@@ -23,7 +23,7 @@ use super::run::{
     connect, observe, roots, stopped, Activity, Backoff, Directory, Rng, Seen, Shared, Step,
     MAX_IDLE,
 };
-use super::scenario::DesktopMode;
+use super::scenario::{DesktopMode, WideSplit};
 use super::stats::{Op, Pending};
 
 /// Kinds the app subscribes to for every joined channel.
@@ -398,7 +398,7 @@ impl Reader {
             Ok(Ok((status, text))) if !status.is_success() => {
                 pending.err(&http_reason(status, &text))
             }
-            Ok(Ok((_, text))) => match serde_json::from_str::<Vec<Value>>(&text) {
+            Ok(Ok((_, text))) => match events(&text) {
                 Ok(events) => {
                     pending.ok();
                     return Some(events);
@@ -420,7 +420,7 @@ impl Reader {
                         break;
                     };
                     match oldest(&page) {
-                        Some(until) if page.len() >= PAGE => filter["until"] = json!(until),
+                        Some(cursor) if page.len() >= PAGE => page_before(&mut filter, cursor),
                         _ => break,
                     }
                 }
@@ -533,7 +533,7 @@ impl Reader {
                 break;
             };
             match oldest(&page) {
-                Some(until) if page.len() >= WINDOW_PAGE => filter["until"] = json!(until),
+                Some(cursor) if page.len() >= WINDOW_PAGE => page_before(&mut filter, cursor),
                 _ => break,
             }
         }
@@ -574,9 +574,29 @@ fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// `created_at` of the oldest event in a page.
-fn oldest(page: &[Value]) -> Option<u64> {
-    page.iter().filter_map(|e| e["created_at"].as_u64()).min()
+/// `(created_at, id)` of the oldest event in a page.
+fn oldest(page: &[Value]) -> Option<(u64, &str)> {
+    page.iter()
+        .filter_map(|e| Some((e["created_at"].as_u64()?, e["id"].as_str()?)))
+        .min()
+}
+
+/// Points `filter` at the page before `cursor`, the oldest event so far. The
+/// relay takes `until` and `before_id` together.
+fn page_before(filter: &mut Value, (until, id): (u64, &str)) {
+    filter["until"] = json!(until);
+    filter["before_id"] = json!(id);
+}
+
+/// The events of a `/query` response: an array, or the object a read-state
+/// snapshot answers with.
+fn events(text: &str) -> serde_json::Result<Vec<Value>> {
+    match serde_json::from_str(text)? {
+        Value::Object(mut body) => {
+            serde_json::from_value(body.remove("events").unwrap_or_default())
+        }
+        other => serde_json::from_value(other),
+    }
 }
 
 /// Runs `fetches`: NIP-11 first, since notices need the relay's pubkey, then
@@ -689,6 +709,7 @@ pub(super) async fn desktop(shared: Arc<Shared>, global: usize) {
         generation: 0,
         first_renewal: true,
         last_message: None,
+        split: scenario.wide_split(Role::Human, global),
     };
     let started = unix_now();
     let mut cursor = None;
@@ -729,6 +750,7 @@ struct Client {
     generation: u64,
     first_renewal: bool,
     last_message: Option<Seen>,
+    split: Option<WideSplit>,
 }
 
 impl Client {
@@ -766,7 +788,7 @@ impl Client {
         let mut open: HashSet<String> = HashSet::new();
         // New batch id to the batch it replaces, closed at the new one's EOSE.
         let mut replacing: HashMap<String, String> = HashMap::new();
-        let mut activity = Activity::new(&scenario.human, &mut self.rng);
+        let mut activity = Activity::new(&scenario.human, &mut self.rng, self.split);
         let tick_every = Duration::from_secs_f64(profile.tick_secs);
         let backstop = Duration::from_secs_f64(profile.backstop_secs);
         let mut next_tick = Instant::now() + tick_every;
@@ -1156,13 +1178,27 @@ mod tests {
     }
 
     /// A loopback HTTP API: NIP-11 names a relay key, the owner's root search
-    /// finds one seeded root, and every other query is empty.
+    /// finds one seeded root, a window head page is full and the page before
+    /// it empty, the read-state snapshot answers in its own shape, and every
+    /// other query is empty. Like the relay, it refuses a top-level page
+    /// cursor without both `until` and `before_id`.
     async fn fake_api(run_id: &str) -> String {
         let owner = identity::keys(run_id, Role::Owner, 0);
         let root = EventBuilder::new(kind(9), "lg-root 0")
             .sign_with_keys(&owner)
             .unwrap();
         let root = serde_json::to_string(&[root]).unwrap();
+        let head: Vec<_> = (0..WINDOW_PAGE as u64)
+            .map(|i| {
+                EventBuilder::new(kind(9), "w")
+                    .custom_created_at(nostr::Timestamp::from(1_000 + i))
+                    .sign_with_keys(&owner)
+                    .unwrap()
+            })
+            .collect();
+        let head = serde_json::to_string(&head).unwrap();
+        let snapshot =
+            json!({"read_state_snapshot": 1, "complete": true, "events": []}).to_string();
         let info = json!({"self": Keys::generate().public_key().to_hex()}).to_string();
         let owner = owner.public_key().to_hex();
         fake_http(move |method, target, body| {
@@ -1171,6 +1207,16 @@ mod tests {
             }
             let filters: Value = serde_json::from_slice(body).unwrap_or_default();
             let filter = &filters[0];
+            if filter.get("read_state_snapshot").is_some() {
+                return (200, snapshot.clone());
+            }
+            if filter.get("top_level").is_some() {
+                return match (filter.get("until"), filter.get("before_id")) {
+                    (None, None) => (200, head.clone()),
+                    (Some(_), Some(_)) => (200, "[]".into()),
+                    _ => (400, r#"{"error":"top_level cursor requires both"}"#.into()),
+                };
+            }
             if filter["kinds"] == json!([9]) && filter["authors"] == json!([owner]) {
                 (200, root.clone())
             } else {
@@ -1312,7 +1358,8 @@ hold_secs = 1
             ("desktop_read_state", 1),
             ("desktop_unread", 1),
             ("desktop_reminders", 1),
-            ("desktop_window", 2),
+            // Per window, a full head page and the empty page before it.
+            ("desktop_window", 4),
             ("desktop_notices", 2),
             ("desktop_thread_root", 1),
             ("desktop_thread_window", 1),
@@ -1373,7 +1420,7 @@ hold_secs = 1
         assert!(out.count("desktop_unread") >= 4);
         // Ticks never reread names or open windows.
         assert_eq!(out.count("desktop_metadata"), 2);
-        assert_eq!(out.count("desktop_window"), 4);
+        assert_eq!(out.count("desktop_window"), 8);
     }
 
     #[tokio::test]
@@ -1444,7 +1491,7 @@ hold_secs = 1
         ] {
             assert_eq!(large.count(op), 2, "{op}");
         }
-        assert!(large.count("desktop_window") >= 8);
+        assert!(large.count("desktop_window") >= 16);
 
         // Up to ten channels: subscriptions are re-sent and nothing is read.
         let small = drive(

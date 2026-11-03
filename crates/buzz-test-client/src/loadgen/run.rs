@@ -19,7 +19,7 @@ use tokio::sync::{watch, Mutex};
 use super::desktop;
 use super::identity::{self, Role};
 use super::net::{http_reason, Net};
-use super::scenario::{Community, HumanProfile, Members, Scenario};
+use super::scenario::{Community, HumanProfile, Members, Scenario, WideSplit};
 use super::seed::{find_roots, hot_root_keys, reply_tags, HOT_ROOT_PREFIX, ROOT_PREFIX};
 use super::stats::{abort_reason, ops_json, Op, Stats};
 
@@ -560,6 +560,7 @@ async fn human(shared: Arc<Shared>, global: usize) {
     let community = &shared.communities[global % shared.communities.len()];
     let keys = identity::keys(&scenario.run_id, Role::Human, global);
     let channels = scenario.member_channels(community.index, Role::Human, global);
+    let split = scenario.wide_split(Role::Human, global);
     let peers: Vec<PublicKey> = (1..=10)
         .map(|k| {
             let peer = (global + k * shared.communities.len()) % scenario.population.humans.max(1);
@@ -653,7 +654,7 @@ async fn human(shared: Arc<Shared>, global: usize) {
             }
         }
 
-        let mut activity = Activity::new(profile, &mut rng);
+        let mut activity = Activity::new(profile, &mut rng, split);
         while ok && !stopped(&shared) {
             let wait = activity
                 .due()
@@ -732,12 +733,34 @@ pub(super) struct Activity {
     next_message: Option<Instant>,
     next_reaction: Option<Instant>,
     session_end: Option<Instant>,
+    /// Set when `population.wide_activity_share` applies to this member.
+    split: Option<WideSplit>,
+    /// With a split, the latest message seen in a wide (0) and a regular (1)
+    /// channel, so reactions follow the split too.
+    recent: [Option<Seen>; 2],
+}
+
+/// Index into `channels` of the channel a member's next typing indicator,
+/// message or reaction goes to. Without a split every channel is equally
+/// likely; with one, a wide channel gets `share` of the picks unless the
+/// member has no regular channels.
+fn pick_channel(split: Option<WideSplit>, channels: &[String], rng: &mut Rng) -> usize {
+    match split {
+        Some(WideSplit { wide, share }) if wide > 0 && wide < channels.len() => {
+            if rng.unit() < share {
+                rng.below(wide)
+            } else {
+                wide + rng.below(channels.len() - wide)
+            }
+        }
+        _ => rng.below(channels.len()),
+    }
 }
 
 impl Activity {
     /// Schedules from now, the first heartbeat at a random point within one
     /// interval so clients connecting together do not beat together.
-    pub(super) fn new(profile: &HumanProfile, rng: &mut Rng) -> Self {
+    pub(super) fn new(profile: &HumanProfile, rng: &mut Rng, split: Option<WideSplit>) -> Self {
         let interval = profile.presence_interval_secs;
         Self {
             interval,
@@ -748,6 +771,8 @@ impl Activity {
             session_end: (profile.mean_session_secs > 0.0)
                 .then(|| rng.after(3600.0 / profile.mean_session_secs))
                 .flatten(),
+            split,
+            recent: [None, None],
         }
     }
 
@@ -778,6 +803,12 @@ impl Activity {
         last_message: &mut Option<Seen>,
     ) -> Result<Step, WsClientError> {
         let profile = &shared.scenario.human;
+        if let Some(split) = self.split {
+            if let Some(seen) = last_message.take() {
+                let wide = channels[..split.wide.min(channels.len())].contains(&seen.channel);
+                self.recent[usize::from(!wide)] = Some(seen);
+            }
+        }
         let now = Instant::now();
         if self.next_presence.is_some_and(|t| t <= now) {
             self.next_presence = Some(now + Duration::from_secs_f64(self.interval));
@@ -786,14 +817,14 @@ impl Activity {
             send(&shared.stats, conn, Op::PublishEphemeral, event).await?;
         } else if self.next_typing.is_some_and(|t| t <= now) {
             self.next_typing = rng.after(profile.typing_per_hour);
-            let channel = &channels[rng.below(channels.len())];
+            let channel = &channels[pick_channel(self.split, channels, rng)];
             let event = EventBuilder::new(kind(KIND_TYPING_INDICATOR), "")
                 .tags([tag(["h", channel])])
                 .sign_with_keys(keys);
             send(&shared.stats, conn, Op::PublishEphemeral, event).await?;
         } else if self.next_message.is_some_and(|t| t <= now) {
             self.next_message = rng.after(profile.messages_per_hour);
-            let channel = &channels[rng.below(channels.len())];
+            let channel = &channels[pick_channel(self.split, channels, rng)];
             let mut tags = vec![tag(["h", channel])];
             if rng.unit() < profile.thread_reply_fraction {
                 let roots = roots(shared, community, keys, channel).await;
@@ -812,7 +843,14 @@ impl Activity {
         } else if self.next_reaction.is_some_and(|t| t <= now) {
             self.next_reaction = rng.after(profile.reactions_per_hour);
             // React to each seen message at most once; the relay rejects duplicates.
-            if let Some(target) = last_message.take() {
+            let target = match self.split {
+                None => last_message.take(),
+                Some(split) => {
+                    let i = pick_channel(self.split, channels, rng);
+                    self.recent[usize::from(i >= split.wide)].take()
+                }
+            };
+            if let Some(target) = target {
                 let event = EventBuilder::new(kind(KIND_REACTION), "+")
                     .tags([tag(["h", &target.channel]), tag(["e", &target.id])])
                     .sign_with_keys(keys);
@@ -1583,6 +1621,11 @@ hold_secs = 1
                                 json!(["EOSE", frame[1]])
                             }
                             Some("EVENT") => {
+                                let tags = frame[1]["tags"].as_array().cloned().unwrap_or_default();
+                                if let Some(h) = tags.iter().find(|t| t[0] == "h") {
+                                    let h = h[1].as_str().unwrap_or_default().to_string();
+                                    seen.channels.lock().unwrap().push(h);
+                                }
                                 let Some(mut delay) = relay.ok_delay else {
                                     continue;
                                 };
@@ -1615,6 +1658,8 @@ hold_secs = 1
     struct Seen {
         reqs: AtomicUsize,
         closed: AtomicUsize,
+        /// The `h` tag of every EVENT that had one.
+        channels: std::sync::Mutex<Vec<String>>,
     }
 
     impl Seen {
@@ -1638,6 +1683,112 @@ hold_secs = 1
         fn drop(&mut self) {
             self.0.closed.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    #[test]
+    fn wide_activity_share_splits_picks_and_unset_keeps_the_uniform_pick() {
+        let channels: Vec<String> = (0..6).map(|i| format!("c{i}")).collect();
+        let draws = 100_000;
+        let wide_share = |split: Option<WideSplit>| {
+            let mut rng = Rng::new(7);
+            let wide = (0..draws)
+                .filter(|_| pick_channel(split, &channels, &mut rng) < 3)
+                .count();
+            wide as f64 / draws as f64
+        };
+        let split = |share| Some(WideSplit { wide: 3, share });
+        // Unset: the same draws as before the knob, so every channel is as likely.
+        let (mut a, mut b) = (Rng::new(7), Rng::new(7));
+        for _ in 0..1_000 {
+            assert_eq!(
+                pick_channel(None, &channels, &mut a),
+                b.below(channels.len())
+            );
+        }
+        assert!((wide_share(None) - 0.5).abs() < 0.01);
+        assert!((wide_share(split(0.1)) - 0.1).abs() < 0.01);
+        assert!((wide_share(split(0.8)) - 0.8).abs() < 0.01);
+        assert_eq!(wide_share(split(1.0)), 1.0);
+        assert_eq!(wide_share(split(0.0)), 0.0);
+        // Regular picks stay uniform over the regular channels.
+        let mut rng = Rng::new(7);
+        let mut per = [0usize; 6];
+        for _ in 0..draws {
+            per[pick_channel(split(0.1), &channels, &mut rng)] += 1;
+        }
+        for n in &per[3..] {
+            assert!((*n as f64 / draws as f64 - 0.3).abs() < 0.01, "{per:?}");
+        }
+        // A member in wide channels only sends everything to them.
+        let mut rng = Rng::new(7);
+        let only_wide = Some(WideSplit {
+            wide: 6,
+            share: 0.1,
+        });
+        let mut seen = [false; 6];
+        for _ in 0..1_000 {
+            seen[pick_channel(only_wide, &channels, &mut rng)] = true;
+        }
+        assert_eq!(seen, [true; 6]);
+    }
+
+    /// One human in three wide and three regular channels that only types,
+    /// ten times a second.
+    fn typing_wide_member(addr: &str, share: &str) -> Scenario {
+        Scenario::parse(&format!(
+            r#"
+run_id = "t"
+[target]
+ws_url = "ws://{addr}"
+http_url = "http://{addr}"
+[shape]
+communities = 1
+channels_per_community = 6
+wide_channels = 3
+[population]
+humans = 1
+agents = 0
+channels_per_member = 3
+wide_member_fraction = 1.0
+{share}
+[human]
+presence_interval_secs = 3600.0
+typing_per_hour = 36000.0
+messages_per_hour = 0.0
+reactions_per_hour = 0.0
+history_limit = 1
+[[ramp]]
+users = 1.0
+hold_secs = 2
+"#
+        ))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn typing_follows_the_wide_activity_share() {
+        let mut wide_counts = Vec::new();
+        for share in ["", "wide_activity_share = 0.0", "wide_activity_share = 1.0"] {
+            let (addr, seen) = fake_ws_relay(FakeRelay::PROMPT).await;
+            let scenario = typing_wide_member(&addr, share);
+            let wide: Vec<String> = scenario.channel_ids(0)[..3].to_vec();
+            run_lone_human(scenario, Duration::from_millis(300))
+                .await
+                .expect("the run passes");
+            let channels = seen.channels.lock().unwrap().clone();
+            assert!(channels.len() >= 5, "{share}: {channels:?}");
+            let in_wide = channels.iter().filter(|c| wide.contains(c)).count();
+            wide_counts.push((in_wide, channels.len()));
+        }
+        let [(unset, n), (none, _), (all, m)] = wide_counts[..] else {
+            unreachable!()
+        };
+        assert!(
+            unset > 0 && unset < n,
+            "unset picks both kinds: {wide_counts:?}"
+        );
+        assert_eq!(none, 0, "{wide_counts:?}");
+        assert_eq!(all, m, "{wide_counts:?}");
     }
 
     /// One human, no agents, one `hold_secs` step, and a presence heartbeat

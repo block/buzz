@@ -114,10 +114,26 @@ pub struct Population {
     /// Fraction of humans that also join every wide channel.
     #[serde(default)]
     pub wide_member_fraction: f64,
+    /// Share of its typing, messages and reactions a member of the wide
+    /// channels sends into them; the rest goes to its regular channels.
+    /// Unset, typing and messages pick any of a member's channels equally and
+    /// reactions go to the latest message it saw.
+    #[serde(default)]
+    pub wide_activity_share: Option<f64>,
     /// Humans whose channel count differs from `channels_per_member`, such
     /// as a few heavy users in many channels. Agents keep `channels_per_member`.
     #[serde(default)]
     pub tiers: Vec<Tier>,
+}
+
+/// A member's split of its own traffic between the wide channels that lead
+/// its channel list and its regular channels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WideSplit {
+    /// Wide channels at the start of the member's channels.
+    pub wide: usize,
+    /// Share of picks that land in a wide channel.
+    pub share: f64,
 }
 
 /// `fraction` of humans join `channels` channels instead of
@@ -468,6 +484,10 @@ impl Scenario {
                 self.population.wide_member_fraction,
             ),
             ("desktop.fraction", self.desktop.fraction),
+            (
+                "population.wide_activity_share",
+                self.population.wide_activity_share.unwrap_or(0.0),
+            ),
         ];
         for (name, value) in fractions {
             if !(0.0..=1.0).contains(&value) {
@@ -517,14 +537,32 @@ impl Scenario {
         let regular = self.shape.channels_per_community - wide;
         let mut channels = Vec::new();
         let mut count = self.population.channels_per_member;
+        if self.joins_wide(role, index) {
+            channels.extend(0..wide);
+        }
         if role == Role::Human {
-            if wide > 0 && draw(index, WIDE_SALT) < self.population.wide_member_fraction {
-                channels.extend(0..wide);
-            }
             count = self.tier_channels(index);
         }
         channels.extend((0..count).map(|k| wide + (index + k) % regular));
         channels
+    }
+
+    /// Whether member `index` of `role` joins the wide channels.
+    fn joins_wide(&self, role: Role, index: usize) -> bool {
+        role == Role::Human
+            && self.shape.wide_channels > 0
+            && draw(index, WIDE_SALT) < self.population.wide_member_fraction
+    }
+
+    /// How member `index` of `role` splits its own traffic, when
+    /// `population.wide_activity_share` applies to it: the number of wide
+    /// channels leading its channel list and the share they get.
+    pub fn wide_split(&self, role: Role, index: usize) -> Option<WideSplit> {
+        let share = self.population.wide_activity_share?;
+        self.joins_wide(role, index).then_some(WideSplit {
+            wide: self.shape.wide_channels,
+            share,
+        })
     }
 
     /// Regular (not wide) channels human `index` joins: its tier's count, or
@@ -846,6 +884,34 @@ hold_secs = 10
     }
 
     #[test]
+    fn wide_activity_share_applies_only_to_members_of_wide_channels() {
+        let wide = "wide_channels = 2";
+        let unset = shaped(6, wide, "wide_member_fraction = 1.0", "").unwrap();
+        assert_eq!(unset.population.wide_activity_share, None);
+        assert_eq!(unset.wide_split(Role::Human, 0), None);
+        let set = shaped(
+            6,
+            wide,
+            "wide_member_fraction = 1.0\nwide_activity_share = 0.25",
+            "",
+        )
+        .unwrap();
+        let split = WideSplit {
+            wide: 2,
+            share: 0.25,
+        };
+        for m in 0..20 {
+            assert_eq!(set.wide_split(Role::Human, m), Some(split));
+            // The wide channels lead the member's channels, as the split assumes.
+            assert_eq!(set.member_channel_indices(Role::Human, m)[..2], [0, 1]);
+            // Agents never join wide channels.
+            assert_eq!(set.wide_split(Role::Agent, m), None);
+        }
+        let outside = shaped(6, wide, "wide_activity_share = 0.25", "").unwrap();
+        assert!((0..20).all(|m| outside.wide_split(Role::Human, m).is_none()));
+    }
+
+    #[test]
     fn shape_and_desktop_knobs_are_validated() {
         let rejected = [
             ("wide_channels = 4", "", ""),
@@ -853,6 +919,9 @@ hold_secs = 10
             ("wide_channels = 3", "", ""),
             ("", "wide_member_fraction = 1.5", ""),
             ("", "wide_member_fraction = nan", ""),
+            ("", "wide_activity_share = 1.5", ""),
+            ("", "wide_activity_share = -0.1", ""),
+            ("", "wide_activity_share = nan", ""),
             ("", "[[population.tiers]]\nfraction = 0.0\nchannels = 1", ""),
             ("", "[[population.tiers]]\nfraction = 1.5\nchannels = 1", ""),
             ("", "[[population.tiers]]\nfraction = 0.6\nchannels = 1\n[[population.tiers]]\nfraction = 0.6\nchannels = 2", ""),

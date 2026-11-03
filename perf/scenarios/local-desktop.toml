@@ -27,6 +27,8 @@ agents = 4
 channels_per_member = 5
 connect_rate_per_sec = 20.0
 wide_member_fraction = 0.5
+# Members of the wide channels send a fifth of their own traffic there.
+wide_activity_share = 0.2
 # A quarter of the humans are in 15 channels instead of 5, so their
 # subscriptions batch past ten channels.
 tiers = [{ fraction = 0.25, channels = 15 }]

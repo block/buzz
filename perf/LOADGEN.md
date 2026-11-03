@@ -24,7 +24,7 @@ cargo run --release -p buzz-test-client --bin buzz-loadgen -- teardown perf/scen
 | Throughput per client | `[human]` and `[agent]` rates |
 | Reconnect churn | `human.mean_session_secs`, `population.connect_rate_per_sec` |
 | Private membership | `shape.private_channels` |
-| Large channels | `shape.wide_channels`, `population.wide_member_fraction` |
+| Large channels | `shape.wide_channels`, `population.wide_member_fraction`, `population.wide_activity_share` |
 | Uneven membership | `population.tiers` |
 | Desktop clients | `[desktop]`: `fraction`, `mode`, `windows`, `threads`, `tick_secs`, `backstop_secs`, `renewal_secs` |
 
@@ -53,6 +53,13 @@ Members are assigned deterministically by global index, so every shard and
   wide channels. Each human joins them with probability
   `population.wide_member_fraction`, on top of its own channels. Agents never
   do.
+- `population.wide_activity_share`, when set, is the share of its typing,
+  messages and reactions a member of the wide channels sends into them; the
+  rest goes to its regular channels. Unset, typing and messages pick any of
+  a member's channels equally, so a member of three wide and three regular
+  channels sends half of them into the wide ones, and reactions go to the
+  latest message the member saw. It has no effect on members outside the wide
+  channels.
 - `population.tiers` is a list of `{ fraction, channels }`. That fraction of
   humans joins `channels` channels instead of `channels_per_member`. Fractions
   sum to at most 1; the rest keep `channels_per_member`.
