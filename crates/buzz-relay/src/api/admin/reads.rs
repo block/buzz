@@ -60,12 +60,13 @@ fn decode_community_cursor(token: &str) -> Result<String, ApiError> {
 /// `limit` is 1–100, default 50.
 pub(super) async fn communities(
     State(state): AppStateRef,
+    slot: crate::access::AccessSlot,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     Query(query): Query<CommunitiesQuery>,
 ) -> Result<Json<CommunitiesPage>, ApiError> {
-    authorize_read(&state, &headers, &method, &uri).await?;
+    authorize_read(&state, &slot, &headers, &method, &uri).await?;
     let limit = limit(query.limit, 50, 100)?;
     let after = query
         .cursor
@@ -116,12 +117,13 @@ pub(super) struct MemberSearchPage {
 /// `limit` is 1–50, default 20.
 pub(super) async fn search_members(
     State(state): AppStateRef,
+    slot: crate::access::AccessSlot,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     Query(query): Query<MemberSearchQuery>,
 ) -> Result<Json<MemberSearchPage>, ApiError> {
-    authorize_read(&state, &headers, &method, &uri).await?;
+    authorize_read(&state, &slot, &headers, &method, &uri).await?;
     let q = query.q.trim();
     if q.is_empty() || q.chars().count() > 100 {
         return Err(ApiError::bad_request(
@@ -180,13 +182,14 @@ async fn is_staff(state: &AppState, pubkey: &[u8]) -> Result<bool, ApiError> {
 /// community.
 pub(super) async fn lookup_member(
     State(state): AppStateRef,
+    slot: crate::access::AccessSlot,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(pubkey_hex): Path<String>,
     Query(query): Query<CommunityQuery>,
 ) -> Result<Json<MemberLookup>, ApiError> {
-    let access = authorize_read(&state, &headers, &method, &uri).await?;
+    let access = authorize_read(&state, &slot, &headers, &method, &uri).await?;
     let pubkey = decode_hex_pubkey(&pubkey_hex)?;
     let pubkey_hex = hex::encode(&pubkey);
     let community = community_for_host(&state, &query.community_host).await?;
@@ -230,13 +233,14 @@ fn event_not_found() -> ApiError {
 /// delete preview. Anything else is [`event_not_found`].
 pub(super) async fn event_preview(
     State(state): AppStateRef,
+    slot: crate::access::AccessSlot,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(id_hex): Path<String>,
     Query(query): Query<CommunityQuery>,
 ) -> Result<Json<AdminEventPreview>, ApiError> {
-    authorize_read(&state, &headers, &method, &uri).await?;
+    authorize_read(&state, &slot, &headers, &method, &uri).await?;
     let id = hex::decode(&id_hex)
         .ok()
         .filter(|id| id.len() == 32)
