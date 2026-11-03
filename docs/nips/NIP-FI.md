@@ -6,7 +6,9 @@ Federated identity authorization — stateless core
 
 `draft` `optional` `relay`
 
-**Protocol dependencies**: NIP-01, NIP-42, NIP-98.
+**Protocol dependencies**: NIP-01, NIP-42, NIP-98.  Discovery uses NIP-11;
+the optional verified profile projection also uses NIP-85.  NIP-40 is referenced
+only to exclude expiration tags from projections.
 
 The key words "MUST", "MUST NOT", "REQUIRED", "SHOULD", "SHOULD NOT", and
 "MAY" in this document are to be interpreted as described in BCP 14 (RFC 2119
@@ -16,14 +18,17 @@ and RFC 8174) when, and only when, they appear in all capitals.
 
 NIP-FI authorizes a Nostr key when two independent facts agree: a valid
 issuer-qualified identity assertion that names the key, and fresh NIP-42 proof
-of possession of that key.  No relay-side identity state is required.  The
-relay verifies the assertion offline against configured per-issuer JWKS
+of possession of that key.  Authorization requires no relay-side identity
+state.  The relay verifies the assertion offline against configured
+per-issuer JWKS
 snapshots and enforces the resolved community's audience and issuer
 authorization policy; other identity decisions remain the assertion issuer's
 responsibility.
 
 This NIP defines the assertion contract, the offline verification procedure,
-session lifetime policy, and an authenticated issuer→relay disconnect API.
+session lifetime policy, an authenticated issuer→relay disconnect API, and an
+optional, operator-enabled verified profile projection: a relay-signed event
+that lets clients show an issuer-verified name for a key.
 Enrollment, rotation, revocation decisions, identity↔key registry, one-identity
 one-key enforcement, audit, and directory integration are issuer concerns outside
 this spec.
@@ -65,6 +70,7 @@ The assertion is a compact JWS carrying the following claims.
 | Claim | Type | Semantics |
 |---|---|---|
 | `nbf` | NumericDate | Not-before time.  When present, the relay enforces `nbf <= now + skew`. |
+| `nostr_public_profile` | object | Publishable `display_name` and `username` for the verified profile projection.  Verified only under an issuer policy with `public_profile` enabled; otherwise an unverified claim.  A malformed value never affects admission.  See "Verified profile projection". |
 
 ### Token type
 
@@ -117,8 +123,9 @@ denies any token whose `nostr_pubkey` does not match the NIP-42 `pubkey`.
 [FI-TRACE-ASSERTION-KEY-MISMATCH]
 
 This is the entire identity-to-key binding.  There is no relay-side binding
-ledger; the assertion is the binding claim, and it is the assertion issuer's
-responsibility to ensure the assertion names the correct key.
+ledger used for authorization; the assertion is the binding claim, and it is
+the assertion issuer's responsibility to ensure the assertion names the
+correct key.
 
 Community resolution MUST precede assertion verification.  The relay MUST resolve the
 connection's `Host` to exactly one community, its expected audience, and its
@@ -158,11 +165,17 @@ relay MUST authorize it if and only if the issuer is trusted for the community
 and the owner is authorized in the community when access is decided.
 [FI-TRACE-AGENT-OWNER]
 
+An agent assertion MUST NOT carry `nostr_public_profile`.  A relay ignores
+the claim on an agent assertion and MUST NOT publish a verified profile
+projection for a key admitted by one.
+
 ### Unverified claims
 
 Relays MUST ignore claims they do not verify.  An unverified claim — including
 `sid`, `jti`, or issuer-private blocks such as `enterprise_identity` — grants no
 authority and MUST NOT be logged or exposed in discovery or error responses.
+`nostr_public_profile` is an unverified claim under an issuer policy without
+`public_profile` enabled.
 Issuers SHOULD minimize claims in assertions visible to relays to reduce
 unnecessary disclosure.
 
@@ -175,8 +188,9 @@ TransportContractId = H(canonical transport contract)
 
 `AssertionPolicyId` covers the canonical issuer, community issuer
 association, audience, token class, allowed algorithms, key-source contract,
-identity/key/claim mapping, time and size rules, and compiled verifier
-behavior.  JWKS key rotation changes the snapshot, not the policy ID.
+identity/key/claim mapping, time and size rules, the `public_profile` setting
+and public issuer label, and compiled verifier behavior.  JWKS key rotation
+changes the snapshot, not the policy ID.
 The key-source contract includes the JWKS transport. A mesh transport tag is
 encoded only when `jwks_transport` is `mesh`; `public_https` is represented by
 the absence of that tag.
@@ -421,6 +435,15 @@ A disconnect call causes the relay to:
    MUST NOT be subsequently admitted.  Connections
    registered under another issuer are not affected.
 
+Access revocation takes priority over verified profile publication.  The relay
+MUST insert the deny entry, close matching sessions, and initiate their
+cross-process propagation without waiting for projection storage, signing,
+retraction, or publication coordination.  Projection failure or unavailability
+MUST NOT delay or roll back those actions, change the disconnect response, or
+require another disconnect to complete profile cleanup.  This applies whether
+publication is enabled, disabled, or has never been enabled.
+[FI-TRACE-PUBLIC-PROFILE-REVOCATION]
+
 The deny set is held **in relay memory only** — no durable storage, no schema
 changes.  A relay restart MAY forget active deny entries.  If the issuer stops
 issuing assertions and re-push completes before any expired-entry reconnection
@@ -597,6 +620,10 @@ with `{"disconnected": true}`.  An `until` value in the past is not an error;
 sessions are closed.  Absent an active same-key deny entry the past-`until`
 creates no future denial; if an active entry already exists it remains unchanged
 under the merge rule.
+
+A successful disconnect returns `200` without waiting for profile cleanup.
+It acknowledges the access-control action, not profile retraction.  Cleanup is
+best effort and runs separately, as described in "Verified profile projection".
 
 ### Response
 
@@ -843,6 +870,330 @@ bytes from the Rejection and privacy table apply.  The response contains no
 free text, reason code, issuer, subject, key, claim, or timing hint.
 [FI-TRACE-DENIAL-ORACLE]
 
+## Verified profile projection
+
+This section is optional.  It lets an operator publish an issuer-verified name
+for each admitted human key, so clients can tell a verified name from a
+self-declared NIP-01 kind `0` name.  A relay that does not implement it treats
+`nostr_public_profile` as an unverified claim.
+
+The projection is a historical record: the relay verified the issuer's
+name-to-key assertion at `verified_at`.  It has no expiration and does not
+assert current account access or that the issuer still endorses the association.
+Authorization never reads it; publishing, replacing, or retracting it changes
+no admission decision.  A failed or lost retraction may leave the record visible indefinitely.
+Operators enabling this feature accept that tradeoff.
+
+### Enabling
+
+An issuer policy MAY enable `public_profile`; it is disabled by default.
+Enabling it is an explicit operator choice for relay-signed verified profiles,
+separate from permission for clients to copy names into kind `0` profiles.
+An issuer policy with `public_profile` enabled MUST configure a public issuer
+label: operator-chosen display text, such as `Block`, subject to the same
+length, NFC, character-category, and surrounding-whitespace constraints as
+`display_name` below.  The label MUST NOT be the issuer URI and MUST NOT
+contain issuer URLs, audiences, tenant IDs, or other deployment-local
+identifiers.
+
+A relay without a stable community NIP-11 `self` pubkey and its signing key
+MUST NOT enable publication or advertise `public_profile`, because clients
+would have no stable key against which to verify projections.  Invalid issuer
+label configuration MUST also prevent publication from that issuer.
+
+Access removal and key rebinding use the existing issuer and disconnect
+contract.  This feature adds no issuer-side durable disconnect journal or retry
+obligation.  Issuers MUST NOT repeat a successful disconnect solely to retry
+profile cleanup.  Stopping assertion issuance alone does not retract a
+historical profile.  [FI-TRACE-PUBLIC-PROFILE-REVOCATION]
+
+### Claim
+
+```json
+{
+  "nostr_public_profile": {
+    "display_name": "Employee Name",
+    "username": "employee"
+  }
+}
+```
+
+- `display_name`: 1 to 64 Unicode scalar values in NFC, with no characters of
+  general category `Cc`, `Cf`, `Cs`, `Co`, `Cn`, `Zl`, or `Zp`, and no
+  `White_Space` character at either end.
+- `username`: 1 to 64 characters from `a`–`z`, `0`–`9`, `.`, `_`, and `-`.
+  The issuer SHOULD keep `username` unique among its identities at any time.
+
+The object has exactly these two members.  A claim that is not an object, has
+a missing or unknown member, or has an invalid value is malformed.  A
+malformed claim MUST NOT affect admission: the relay admits or denies exactly
+as it would without the claim, and treats the claim as absent below.
+[FI-TRACE-PUBLIC-PROFILE-MALFORMED]
+
+### Event
+
+The projection is a NIP-85 user assertion, kind `30382`, signed by the relay
+identity advertised in NIP-11 `self` and stored in the community resolved for
+the admission.  Its address is `(30382, self, subject pubkey)`, the same address
+NIP-85 uses for other assertions about that user.  While using this profile
+format, the relay MUST NOT write a separate assertion format at that address;
+it would replace the profile.  Combining formats would require a future
+protocol change.
+
+```json
+{
+  "kind": 30382,
+  "pubkey": "<relay self pubkey>",
+  "content": "",
+  "tags": [
+    ["d", "<subject pubkey>"],
+    ["p", "<subject pubkey>"],
+    ["active", "true"],
+    ["display_name", "Employee Name"],
+    ["username", "employee"],
+    ["issuer_label", "Example Corp"],
+    ["verified_at", "1793300000"]
+  ]
+}
+```
+
+`d` and `p` are the lowercase hexadecimal subject pubkey.  `verified_at` is
+the Unix time, in decimal seconds, of the latest admission that refreshed the
+projection.  The event MUST NOT carry any other tag, MUST NOT carry a NIP-40
+`expiration`, and MUST NOT carry `iss`, `sub`, email, the assertion, or any
+other claim.  A projection stays published until it is replaced or retracted.
+
+A retraction replaces the projection with an event carrying only `d`, `p`, and
+`["active", "false"]`.  Every replacement and retraction MUST have
+`created_at = max(now, previous_created_at + 1)`, computed against the
+durably stored current event, so that no two versions tie under NIP-01
+replaceable-event ordering.
+[FI-TRACE-PUBLIC-PROFILE-RETRACT]
+
+Projection visibility follows the community's read policy.  The relay MUST NOT
+restrict this kind to readers named in its `p` tag.
+
+### Lifecycle
+
+The relay durably records the producer of each active projection and the
+highest processed assertion `iat` per community, issuer, and subject key.
+The latter advances during serialized profile processing for every eligible
+admission described below, even when unchanged values do not require a refresh,
+a missing claim or agent admission requests retraction, or an agent admission
+finds no active projection.  An admission ignored by the issuer or eligibility
+checks does not advance it.
+Retraction MUST NOT erase it.  These records are private except for the public
+`issuer_label`.
+
+These records order profile updates only; they are not a revocation ledger.
+This feature requires no persistent disconnect cutoff or proof of complete
+disconnect history.  A restart does not retract profiles or require issuer-wide
+recovery.  If projection state is unavailable, the relay skips publication,
+refresh, or retraction without changing admission or disconnect behavior.
+[FI-TRACE-PUBLIC-PROFILE-REVOCATION]
+
+#### Admission-driven publication
+
+On a WebSocket admission ("Admission at connection" step 8) under a
+`nip-fi+jwt`, resource-owner `at+jwt`, or `nip-fi-agent+jwt` assertion from an
+issuer with `public_profile` enabled, the relay first requires that the
+assertion's `iat` is not earlier than the recorded `iat` for this community,
+issuer, and key, including after a retraction.  It then acts only when no active
+projection exists for the key or the admitting issuer
+produced the active projection.  When it acts:
+
+- With a human or resource-owner assertion and a valid claim, when no active
+  projection exists or its `display_name`, `username`, or `issuer_label`
+  differs, the relay MUST publish a projection with `verified_at` set to the
+  admission time.
+- With a human or resource-owner assertion, a valid claim, and unchanged
+  values, the relay MUST refresh `verified_at` when the current value is at
+  least `verified_at_refresh_seconds` old, and MUST NOT refresh it otherwise.
+  `verified_at_refresh_seconds` is a deployment knob accepting integer seconds
+  from `0` to `86400`, defaulting to `3600` when omitted.
+- With a human or resource-owner assertion without a valid claim, or with an
+  agent assertion, the relay MUST initiate an asynchronous retraction attempt
+  for the active projection if one exists, using the cleanup rules below.
+
+[FI-TRACE-PUBLIC-PROFILE] [FI-TRACE-PUBLIC-PROFILE-MALFORMED]
+
+An admission under another issuer while a projection is active changes
+nothing, including an agent admission.  An agent admission never publishes or
+refreshes, and requests retraction only of its issuer's projection after passing
+the same `iat` check above.  A client-subject `at+jwt` admission and a
+protected HTTP request never publish, refresh, or retract.
+[FI-TRACE-PUBLIC-PROFILE-SCOPE]
+
+#### Best-effort retraction
+
+The relay MUST initiate an asynchronous retraction attempt for:
+
+1. every projection for `target_pubkey` that the commanding issuer produced,
+   in every community, when it accepts a disconnect command, including a
+   past-`until` command;
+2. the projection for a key in a community when that community bans the key
+   or removes it from its members;
+3. every projection an issuer produced in a community when that issuer is
+   removed from the community's authorized issuers;
+4. every projection an issuer produced when its policy disables
+   `public_profile` or is removed.
+
+[FI-TRACE-PUBLIC-PROFILE-RETRACT]
+
+Publishing, refreshing, and retracting a projection for a key MUST be
+serialized per community and key with these retraction rules.  The current
+membership and ban state, issuer authorization, `public_profile` policy,
+producer, and recorded assertion `iat` MUST be checked inside that
+serialization boundary before committing a publication or refresh.  The subject
+key MUST be a current, unbanned member of that community, and the issuer MUST
+still be authorized there with publication enabled.  Otherwise the relay MUST
+NOT publish or refresh, even if WebSocket admission succeeded.  Membership here means explicit community
+membership, including when `require_relay_membership = false`; open admission
+alone does not make a key eligible for a verified profile.  The relay MUST
+discard a delayed admission update whose admission time precedes the current
+`verified_at`, rather than move that timestamp backwards.
+Work from an admission that preceded a relevant removal, ban, issuer unbind,
+or policy disable MUST be discarded, even if that state was subsequently
+restored.  A policy or membership generation checked at commit is one way to
+enforce this rule; serializing event writes alone is insufficient.  This ordering
+MUST hold across all relay processes serving the community.  [FI-TRACE-PUBLIC-PROFILE-POLICY-RACE]
+
+After publishing or refreshing, the relay MUST re-check the deny set and
+whether the admitting connection was cancelled by a disconnect close scan.
+If either indicates a disconnect, it MUST initiate an asynchronous retraction
+attempt for that publication.
+Normal socket closure, transport failure, and session TTL expiry alone do not
+request retraction.  [FI-TRACE-PUBLIC-PROFILE-RETRACT]
+
+Cleanup MUST run separately from access-control actions and their responses.
+Initiating an attempt MUST be nonblocking and MUST NOT wait for storage,
+signing, or a projection lock.  The attempt is required; success is best effort.
+If scheduling fails, that is a cleanup failure and MUST NOT change or delay the
+access-control action or its response.  Failed attempts SHOULD be retried with
+bounded backoff; implementations MAY persist cleanup jobs, but recording or
+running them MUST NOT delay access revocation.  Losing a cleanup job, including on restart, does not require mass
+retraction or block later publication.  The historical profile may remain until
+a later replacement or retraction.
+
+A cleanup attempt MUST be scoped to the producing issuer and the projection
+version invalidated by the triggering change.  When initiating the attempt, the
+relay captures the trigger time `T` in Unix seconds, which requires no storage
+read.  The invalidated version is that issuer's active projection with
+`verified_at <= T`.  A retry, bulk worker, or delayed post-publication
+cancellation check MUST re-check that scope inside the serialization boundary
+and MUST NOT retract a projection with `verified_at > T`, which records a later
+admission.  Cleanup that finds no such projection is a no-op.
+[FI-TRACE-PUBLIC-PROFILE-RETRACT-ORDER]
+
+Implementations MAY run bounded background scans at startup or periodically to
+re-check stored profiles against current membership, bans, issuer authorization,
+and publication policy.  A scan may attempt to retract a currently ineligible
+profile, checking that version and its current eligibility inside the same
+serialization boundary.  Scans are optional housekeeping and MUST NOT gate
+admission, disconnect responses, or the start of normal service.
+
+A later successful admission may publish again, including from a still-valid
+assertion issued before a disconnect once the deny entry no longer applies.
+This records a later verification of the presented assertion; it is not proof
+that the issuer restored access.  Profile cleanup MUST NOT issue another
+disconnect or extend a deny entry.  [FI-TRACE-PUBLIC-PROFILE-REVOCATION]
+
+Implementations SHOULD expose aggregate success and failure counts for
+publication, refresh, and retraction so operators can observe cleanup failures.
+These signals MUST NOT include issuer identifiers, subject keys, names, or
+assertion contents.
+
+### Fetching projections
+
+Clients supporting verified profiles SHOULD fetch the current projection for
+each relevant subject, such as conversation participants, visible message
+authors, and a user whose profile is open.  The reader fetches other users'
+projections as well as its own.  Clients SHOULD batch and deduplicate these
+lookups, share a cache scoped to the community and its NIP-11 `self` key, and
+keep subscriptions for updates while the subjects remain relevant.  They MAY
+load subjects lazily and release subscriptions and cache entries when unused.
+
+Use ordinary NIP-01 `REQ` messages on the community connection.  For example,
+a reader viewing Alice and Bob can request both with one subscription:
+
+```json
+["REQ", "verified-profiles", {
+  "kinds": [30382],
+  "authors": ["<community relay self pubkey>"],
+  "#d": ["<Alice pubkey>", "<Bob pubkey>"],
+  "#p": ["<Alice pubkey>", "<Bob pubkey>"],
+  "limit": 2
+}]
+```
+
+`#d` selects the subject's address; the optional, matching `#p` list lets a
+relay use subject-indexed live delivery.  The relay MUST support multi-subject
+filters and return the current event for each matching subject with a stored
+projection, including `active=false` retractions, within the request's result
+limit.  It MUST apply subject matching before the limit.  After the initial
+results and `EOSE`, it MUST deliver matching publications, refreshes, and
+retractions on the same subscription, subject to the community's read policy.
+Historical and live delivery MUST leave no gap; clients deduplicate by event
+ID and apply NIP-01 ordering.  The relay does not infer relevant users or send
+unsolicited profile events.
+
+Clients SHOULD split requests into bounded batches that respect the relay's
+filter, message-size, subscription, and result limits.  Each batch's result
+limit must accommodate one current event per requested subject; omitting
+`limit` does not remove relay caps.  A failed or potentially truncated lookup
+MUST NOT be treated as proof that an omitted subject has no projection.
+Clients SHOULD reconcile the current projections on reconnect or when a
+subject becomes relevant again, including retractions missed while offline.
+They MUST apply newer retractions to cached verified state.  An offline or
+unreconciled cache MUST NOT be presented as freshly checked with the relay;
+clients SHOULD distinguish cached verification from reconciled state.
+[FI-TRACE-PUBLIC-PROFILE-FETCH]
+
+### Client display
+
+Clients MUST NOT show verification marks unless their most recent successful
+NIP-11 discovery for the community advertises `public_profile` with kind `30382`.
+When a successful discovery response omits that field, clients MUST hide all
+such marks, including on cached profiles.  This does not retract or delete the
+historical records.  A failed or malformed discovery response is not an explicit
+disable and MUST NOT replace the last successful discovery state.  With no
+successful discovery yet, clients MUST NOT show marks.  Clients SHOULD refresh
+discovery on reconnect and periodically while displaying verified profiles;
+cached discovery remains subject to the cache disclosure rules above.
+
+Subject to that discovery gate, a client MUST treat a projection as verified
+only when it is the latest kind `30382` event authored by the community's
+NIP-11 `self` pubkey with `d` equal to the subject pubkey, under NIP-01 replaceable-event rules; it has exactly
+one `d` and one `p` tag, both equal to the subject pubkey; `active` is `true`;
+and `display_name`, `username`, `issuer_label`, and `verified_at` each appear
+exactly once and are well-formed.
+
+- Clients MUST NOT show a verification mark derived from NIP-01 kind `0`
+  metadata, NIP-05, or any source other than a verified projection.
+- Clients SHOULD show the verified `display_name` and `username` in place of
+  the kind `0` name wherever they show that person's name, and SHOULD draw the
+  verification mark as interface chrome outside the name text.
+- Clients MUST show `verified_at` wherever a user can inspect the
+  verification, for example "Last verified 2 days ago" in a profile view or
+  the mark's tooltip.  Clients MUST NOT treat an old `verified_at` as
+  retraction.  Verification records the issuer's name-to-key assertion at
+  that time; it does not assert current account access, a current issuer
+  endorsement, or an unexpired login.  Clients MUST present the mark as
+  historical verification and MUST NOT describe it as proof of current access.
+  `active=true` means the profile has not been explicitly retracted; it does
+  not mean the account is active.  Assertion expiry does not expire the profile.
+- Clients MUST show the event's `issuer_label` beside every verified name,
+  regardless of discovery's `multiple_issuers` value.  A historical profile can
+  come from an issuer that no longer publishes; the current issuer count MUST
+  NOT hide or replace that attribution.
+- When a self-declared name in view equals the verified `display_name` of a
+  different key, clients SHOULD qualify the self-declared name.  When two
+  different keys in view share a verified `display_name` or `username`,
+  clients SHOULD qualify both.
+- Clients MUST NOT use a projection for authorization.
+
+[FI-TRACE-PUBLIC-PROFILE-CLIENT]
+
 ## Rejection and privacy
 
 Public class is a function only of evidence the requester supplied, never of
@@ -863,9 +1214,15 @@ A denial decided after a WebSocket connection is established is the Nostr text.
 Responses contain no free text, reason code, issuer, subject, key, claim, or
 timing hint.  [FI-TRACE-DENIAL-ORACLE]
 
-NIP-FI defines no public identity projection.  Raw assertions, `iss`, `sub`,
-email, display name, and private claims MUST NOT appear in public events, tags,
-filters, discovery, logs, metrics, or traces.  [FI-TRACE-PRIVACY-NONPUBLIC]
+Projection failures MUST NOT enter WebSocket or protected HTTP admission denial
+paths and MUST NOT change the disconnect response.
+
+NIP-FI defines one public identity projection: the optional verified profile
+projection, limited to its listed tags and published only under
+`public_profile`.  Raw assertions, `iss`, `sub`, email, and every other claim
+MUST NOT appear in public events, tags, filters, discovery, logs, metrics, or
+traces.  Without `public_profile`, display name is as private as any other
+claim.  [FI-TRACE-PRIVACY-NONPUBLIC]
 
 ## Out of scope
 
@@ -890,7 +1247,8 @@ normative behavior for them:
 
 ## Discovery
 
-A relay SHOULD advertise core support in NIP-11 as:
+A relay SHOULD advertise core support in NIP-11 as follows.  This baseline
+example has verified profile publication disabled:
 
 ```json
 {
@@ -904,6 +1262,27 @@ A relay SHOULD advertise core support in NIP-11 as:
   }
 }
 ```
+
+A relay MUST include `federated_identity.public_profile` when, and only when,
+it implements verified profile projection, advertises the resolved community's
+stable `self` pubkey with its signing key configured, and at least one issuer
+authorized for that community has `public_profile` enabled with a valid public label.
+Otherwise it MUST omit the field.  `multiple_issuers` is `true` when more than
+one issuer meets these conditions.  It describes current publication
+configuration only, not the issuers represented by stored historical profiles,
+and does not control whether clients show `issuer_label`.
+This example shows the additional member of `federated_identity` when exactly
+one issuer can publish:
+
+```json
+{
+  "public_profile": { "kind": 30382, "multiple_issuers": false }
+}
+```
+
+This is the only discovery field that reflects the community's issuer set,
+and it reveals only whether more than one issuer publishes names.
+[FI-TRACE-PUBLIC-PROFILE-DISCOVERY]
 
 `maximum_residual_upstream_revocation_seconds` is `null` for the
 `offline-jwt` class because this spec provides no unconditional finite
@@ -923,6 +1302,11 @@ deployment-local identifiers.  [FI-TRACE-DISCOVERY-PRIVATE]
 
 ## Behavioral oracles
 
+The trace IDs beside normative rules map to the outcomes below.  An
+implementation's conformance tests SHOULD cite these IDs and exercise the
+production admission, publication, and query paths.  These scenarios are
+requirements for those tests, not a claim of existing implementation coverage.
+
 | ID | Required outcome |
 |---|---|
 | `FI-TRACE-TRANSPORT-CLOSED` | Exact one-header input succeeds; missing, repeated, combined, malformed, and fallback variants deny. |
@@ -937,9 +1321,19 @@ deployment-local identifiers.  [FI-TRACE-DISCOVERY-PRIVATE]
 | `FI-TRACE-DENY-SET` | A pubkey in the deny set is denied `authorization_denied` on admission until `now >= until`; an expired or absent entry does not deny; a past-`until` command closes sessions — absent an active same-key entry it creates no future denial, while an active entry remains unchanged under the merge rule; a deny-set-full command is rejected `503` without closing sessions and without removing any existing entry; capacity is evaluated per issuer — one issuer's capacity exhaustion MUST NOT reject another issuer's command; a connection that passes the deny-set check before a concurrent deny-entry insertion but completes admission after MUST still be terminated (the session's proven `k` and admitting issuer are registered before the deny-set check, ensuring the close scan catches it); a registered-but-not-admitted connection caught by the close scan MUST be cancelled terminally and MUST NOT later be admitted; a disconnect command from one issuer MUST NOT close a same-key connection registered under a different issuer, whether or not admission has completed; two overlapping commands for the same `(iss, pubkey)` in either delivery order result in `until = max(until_A, until_B)` — delivery order does not shorten the longer deny; a past-`until` command arriving over an active entry leaves the active entry's `until` unchanged; a successful disconnect responds `{"disconnected": true}` regardless of how many sessions were closed; the deny entry applies across all communities served by the relay under that issuer. |
 | `FI-TRACE-HTTP-INGRESS` | A protected HTTP request with both valid headers and matching pubkeys is admitted; absent, mismatched, or invalid assertion or NIP-98 event denies; a request presenting only one of the two denies; an active deny-set entry denies; a route that cannot be classified as exempt is treated as protected; repeated, comma-combined, wrong-scheme, or alternative-credential `Authorization` fields deny `evidence_rejected`; a missing `Authorization` field denies `missing_evidence`; an authorization-relevant body without exactly one matching `payload` tag denies; the NIP-FI administrative API is not a protected surface.  For kind-24242 (Blossom) proofs on media routes: a `t=upload` proof with valid `x`, `server`, `expiration`, and freshness is admitted on `PUT /upload`; a `t=get` proof with valid `server`, `expiration`, and freshness is admitted on `GET\|HEAD /media/{hash…}`; a kind-24242 proof on any other route denies; an upload proof with absent or mismatched `server` tag denies; a read proof with absent or mismatched `server` tag denies; a proof with a duplicate, missing, or out-of-range `expiration` tag denies; a proof dated more than 5 seconds in the future denies; a proof older than 60 seconds denies; key mismatch between assertion `nostr_pubkey` and the kind-24242 event pubkey denies; an active deny-set entry denies. |
 | `FI-TRACE-DENIAL-ORACLE` | Each public-class row produces its exact fixed bytes; all private-state rows compare byte-identical. |
-| `FI-TRACE-DISCOVERY-PRIVATE` | Complete discovery bytes do not expose issuer, audience, or deployment-private state. |
+| `FI-TRACE-DISCOVERY-PRIVATE` | Complete discovery bytes do not expose issuer, audience, or deployment-private state; `public_profile.multiple_issuers` reveals only whether more than one issuer publishes names. |
 | `FI-TRACE-CROSS-DOMAIN-COLLISION` | Equal `sub` values under different `iss` values remain distinct identities. |
-| `FI-TRACE-PRIVACY-NONPUBLIC` | Private identity does not enter public surfaces. |
+| `FI-TRACE-PRIVACY-NONPUBLIC` | Private identity does not enter public surfaces; only the verified profile projection's listed tags do, and only under `public_profile`. |
+| `FI-TRACE-PUBLIC-PROFILE` | With `public_profile` enabled, an eligible human or resource-owner WebSocket admission with a valid claim publishes a relay-signed historical projection with no expiration; publication and refresh require explicit, unbanned community membership even on an open relay; after ban or member removal, admission alone cannot republish while that state persists; changed values republish at once; unchanged values refresh `verified_at` only once it is at least `verified_at_refresh_seconds` old, defaulting to 3600 seconds; without `public_profile` the claim is ignored and nothing is published. |
+| `FI-TRACE-PUBLIC-PROFILE-MALFORMED` | A missing or malformed claim admits or denies exactly as if absent; an eligible human or resource-owner WebSocket admission with such a claim initiates an asynchronous retraction attempt for its issuer's active projection, subject to the recorded `iat` check; cleanup failure leaves admission unchanged. |
+| `FI-TRACE-PUBLIC-PROFILE-SCOPE` | Protected HTTP requests and client-subject `at+jwt` admissions never publish, refresh, or request retraction; an eligible agent admission requests retraction only of its issuer's active projection and never publishes or refreshes; another issuer's human or agent admission leaves an active projection unchanged; an assertion earlier than the recorded `iat` changes nothing; an eligible agent admission advances recorded `iat` even without an active projection. |
+| `FI-TRACE-PUBLIC-PROFILE-RETRACT` | An accepted disconnect initiates an asynchronous retraction attempt for its issuer's projections for the target in every community; a community ban or member removal, issuer unbind, and policy disable also initiate attempts; publication racing disconnect cancellation initiates an attempt for that version; normal socket closure, transport failure, and session TTL expiry do not; successful retraction replaces the record with `active=false`; successive event versions have strictly increasing `created_at`. |
+| `FI-TRACE-PUBLIC-PROFILE-REVOCATION` | Make projection storage fail, hang, or return an uncertain result: a valid disconnect still inserts its deny entry, consumes its replay identity, closes matching sessions, initiates propagation, and returns `200` without waiting for projection work; repeat for enabled, disabled, and never-enabled issuers, no active projection, and past `until`; cleanup scheduling failure leaves access actions and the response unchanged; deny-set capacity failure still returns `503` before mutation; cleanup retries never issue another disconnect or extend a deny; restart with lost cleanup leaves historical profiles in place without mass retraction or a recovery prerequisite; a still-valid pre-disconnect assertion may publish after denial ends; projection failures never deny WebSocket or protected HTTP admission. |
+| `FI-TRACE-PUBLIC-PROFILE-RETRACT-ORDER` | A cleanup attempt captures its trigger time `T` without a storage read and retracts the producing issuer's active projection with `verified_at <= T`; publish from a later eligible admission (`verified_at > T`), then resume an older cleanup worker or delayed cancellation check: the newer projection remains; repeat with a different producing issuer; cleanup that finds no matching projection is a no-op. |
+| `FI-TRACE-PUBLIC-PROFILE-POLICY-RACE` | Pause publication after admission, disable `public_profile` and complete its retraction, then resume: no projection is published; repeat for issuer unbind, member removal, and ban, across relay processes and with restoration before the paused work resumes; a delayed admission whose admission time precedes the current `verified_at` is discarded. |
+| `FI-TRACE-PUBLIC-PROFILE-FETCH` | A reader distinct from Alice and Bob fetches both current projections in one bounded subscription; subject filtering precedes the result limit; a stored retraction is returned; live changes and retractions arrive without a history/live gap; reconnect reconciles a missed retraction; incomplete results are not treated as absence; another community's cache and events cannot supply verification. |
+| `FI-TRACE-PUBLIC-PROFILE-CLIENT` | Clients reject projections not authored by the NIP-11 `self` key or with mismatched `d`/`p`; never derive a mark from kind `0` metadata or NIP-05; show last verified time and identify verification as historical; assertion expiry and old `verified_at` do not expire a profile; a newer explicit retraction clears the verified state; always show the event's `issuer_label`, including when issuer removal changes `multiple_issuers` from true to false and old profiles remain; a successful discovery response omitting `public_profile` hides cached marks without deleting historical records; failed or malformed discovery preserves the last successful state, including a prior disable; no successful discovery means no marks. |
+| `FI-TRACE-PUBLIC-PROFILE-DISCOVERY` | `public_profile` is disabled by default; discovery omits it when projection support, the community's stable advertised `self` and signing key, or an enabled authorized issuer with a valid label is absent; invalid labels, including non-NFC text, prohibited character categories, and surrounding whitespace, prevent publication from that issuer; otherwise discovery advertises kind 30382 and computes `multiple_issuers` from eligible issuers only. |
 
 ## Security considerations
 
@@ -1013,12 +1407,37 @@ responses, and provide no fallback network path.
 identity but cannot prove possession of the assertion-named Nostr key.  The NIP-42
 proof remains an independent control.
 
+**Verified profile staleness.**  A projection has no expiry and records a past
+verification, not current authorization.  An issuer disconnect, community ban
+or removal, issuer unbind, or policy disable requests best-effort retraction.
+Failed or lost cleanup may leave the profile visible indefinitely, including
+after restart.  A later admission with a still-valid assertion may publish
+again after the deny entry expires or is forgotten.  These are accepted display
+tradeoffs; neither the record nor its absence may authorize access.
+
+`verified_at` shows the age of the recorded verification.  It also discloses
+the key's last WebSocket admission that refreshed the projection to readers of
+the community.  A positive `verified_at_refresh_seconds` limits writes and
+broadcasts for unchanged names; `0` permits one refresh per admission.  A
+relay-side retraction cannot reach an offline client until it reconciles.
+Cached verification describes last-observed state, not proof that no later
+retraction exists.
+
+**Projection forgery.**  Only the relay's NIP-11 `self` key can sign a
+projection clients accept.  A compromised relay key or a compromised issuer
+can assign any verified name; a compromised issuer still cannot prove
+possession of the named key.
+
 **Algorithm confusion.** The verifier enforces asymmetric algorithms only;
 `alg=none` and symmetric algorithms deny.  The exact `kid`-based key selection
 is bounded before any attacker-controlled lookup.
 
 ## Sources
 
+- NIP-01 events, filters, and addressable-event ordering: <https://github.com/nostr-protocol/nips/blob/master/01.md>
+- NIP-11 relay information and `self`: <https://github.com/nostr-protocol/nips/blob/master/11.md>
+- NIP-85 trusted assertions, kind `30382`: <https://github.com/nostr-protocol/nips/blob/master/85.md>
+- NIP-40 expiration (excluded from verified profiles): <https://github.com/nostr-protocol/nips/blob/master/40.md>
 - NIP-42 authentication: <https://github.com/nostr-protocol/nips/blob/6d2979b3f503a8539c983efbcdcf901bbcf9ed23/42.md>
 - NIP-98 HTTP authorization: <https://github.com/nostr-protocol/nips/blob/ae0fd96907d0767f07fb54ca1de9f197c600cb27/98.md>
 - JWT BCP: <https://www.rfc-editor.org/rfc/rfc8725>
