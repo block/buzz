@@ -398,6 +398,10 @@ void editedMarkerTests() {
       );
     }
 
+    // An escaped bracket is text, not display math, so the marker joins it.
+    await show(r'see \[x\]');
+    expect(plainTexts(tester), contains('see [x] (edited)'));
+
     // Inside an unclosed <u> or a heading the marker keeps its own style.
     await show('see <u>this');
     expect(markerSpan(tester)?.style?.decoration, TextDecoration.none);
