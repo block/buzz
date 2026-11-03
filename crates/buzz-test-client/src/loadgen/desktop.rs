@@ -2174,8 +2174,11 @@ mod tests {
     /// of their own that `rig` sets.
     fn desktops(rig: &Rig, ws: &str, http: &str) -> Scenario {
         let (humans, joined, desktop) = (rig.humans, rig.joined, &rig.desktop);
-        let (presence, messages, reactions) =
-            (rig.presence_secs, rig.messages_per_hour, rig.reactions_per_hour);
+        let (presence, messages, reactions) = (
+            rig.presence_secs,
+            rig.messages_per_hour,
+            rig.reactions_per_hour,
+        );
         Scenario::parse(&format!(
             r#"
 run_id = "d"
@@ -2291,6 +2294,8 @@ hold_secs = 1
         /// Their messages, each a thread reply, and reactions.
         messages_per_hour: f64,
         reactions_per_hour: f64,
+        /// A tick shorter than a scenario may ask for.
+        tick_secs: Option<f64>,
     }
 
     /// One client, with a co-member whose profile it reads.
@@ -2316,6 +2321,7 @@ hold_secs = 1
             presence_secs: 3600.0,
             messages_per_hour: 0.0,
             reactions_per_hour: 0.0,
+            tick_secs: None,
         }
     }
 
@@ -2324,7 +2330,10 @@ hold_secs = 1
     async fn drive(rig: Rig, min: Duration, done: impl Fn(&Outcome) -> bool) -> Outcome {
         let (ws, frames) = fake_ws_relay(rig.plan.clone(), rig.drop_first, rig.ok_delay).await;
         let (http, queries) = fake_api("d", rig.fail, rig.slow).await;
-        let scenario = desktops(&rig, &ws, &http);
+        let mut scenario = desktops(&rig, &ws, &http);
+        if let Some(secs) = rig.tick_secs {
+            scenario.desktop.tick_secs = secs;
+        }
         let net = Net::new(&scenario).await.unwrap();
         let stats = Arc::new(Stats::default());
         let (stop_tx, stop) = watch::channel(false);
@@ -3033,7 +3042,8 @@ hold_secs = 1
         // next heartbeat, probes. The probe's EOSE comes 0.3 s later, while
         // that heartbeat waits, and is read once its OK comes, after the
         // probe's 0.7 s deadline.
-        let mut rig = solo(5, "mode = \"current\"\ntick_secs = 0.25");
+        let mut rig = solo(5, "mode = \"current\"");
+        rig.tick_secs = Some(0.25);
         rig.presence_secs = 1.0;
         rig.ok_delay = Duration::from_millis(500);
         rig.req_timeout = Duration::from_millis(700);
@@ -3045,7 +3055,11 @@ hold_secs = 1
         assert_eq!(out.errors("desktop_probe"), 0, "{:?}", out.ops);
         assert!(out.count("desktop_probe") >= 1, "{:?}", out.ops);
         assert_eq!(out.count("ws_connect_auth"), 1, "{:?}", out.ops);
-        assert!(out.frames.iter().all(|(conn, ..)| *conn == 0), "{:?}", out.frames);
+        assert!(
+            out.frames.iter().all(|(conn, ..)| *conn == 0),
+            "{:?}",
+            out.frames
+        );
     }
 
     #[tokio::test]
@@ -3053,7 +3067,8 @@ hold_secs = 1
         // No probe ever gets its EOSE. Ticks every 0.5 s; a heartbeat every
         // second waits 0.2 s for its OK. A probe follows a silent tick, and
         // the next heartbeat's OK comes well inside its 3 s deadline.
-        let mut rig = solo(5, "mode = \"current\"\ntick_secs = 0.5");
+        let mut rig = solo(5, "mode = \"current\"");
+        rig.tick_secs = Some(0.5);
         rig.presence_secs = 1.0;
         rig.ok_delay = Duration::from_millis(200);
         rig.req_timeout = Duration::from_secs(3);
@@ -3072,7 +3087,8 @@ hold_secs = 1
         // Reactions come several times a second but have nothing to react
         // to, so nothing is sent and nothing comes back: a silent tick
         // still probes.
-        let mut rig = solo(5, "mode = \"current\"\ntick_secs = 0.5");
+        let mut rig = solo(5, "mode = \"current\"");
+        rig.tick_secs = Some(0.5);
         rig.reactions_per_hour = 36_000.0;
         let out = drive(rig, Duration::ZERO, |o| o.count("desktop_probe") >= 1).await;
         assert_eq!(out.errors("desktop_probe"), 0, "{:?}", out.ops);
@@ -3087,12 +3103,10 @@ hold_secs = 1
         rig.messages_per_hour = 36_000.0;
         rig.slow = Some(("roots", Duration::from_secs(8)));
         rig.ok_delay = Duration::from_secs(60);
-        let out = drive(rig, Duration::from_millis(500), |o| {
+        let out = drive(rig, Duration::from_secs(1), |o| {
             o.queries
                 .iter()
-                .filter(|f| f["kinds"] == json!([9]) && f.get("authors").is_some())
-                .count()
-                >= 2
+                .any(|f| f["kinds"] == json!([9]) && f.get("authors").is_some())
         })
         .await;
         assert!(!out.saw("EVENT", "9"), "{:?}", out.frames);
