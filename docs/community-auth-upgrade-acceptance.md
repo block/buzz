@@ -118,21 +118,24 @@ Before mutations, capture:
    and keep per-connection receive traces. Pin traffic to individual processes
    while preserving canonical Host, SNI, NIP-98 URL and NIP-42 relay binding.
 8. Reconcile the BUZZ-515 routing companion,
-   [BPCI #3491](https://github.com/squareup/builderbot-platform-core-infrastructure/pull/3491),
+   [squareup/builderbot-platform-core-infrastructure#3491](https://github.com/squareup/builderbot-platform-core-infrastructure/pull/3491),
    with the final BUZZ-514 staged base
    before using its Job renderer. Compare rendered and admitted Service and
    ServiceEntry selectors, Deployment/PDB selectors and security policies.
    Prove serving pods still match routing, while the Job avoids routing and
    workload/PDB selection but retains the labels required by security policies.
    Removing a policy label to escape routing is not a valid substitute. Record
-   the reviewed companion head, render diff and admitted resources; source-only
-   selector tests do not establish the live result.
+   and link the reviewed final companion commit in the run record, together with
+   the render diff and resources admitted by the separately approved server-side
+   dry run. A moving PR reference is insufficient; source-only selector tests do
+   not establish the live result.
 9. Use BUZZ-515's separately approved server-side dry run to verify admitted
    `envFrom` imports the intended `platform-config`. Review later environment
    sources and explicit overrides. After separately authorized Job creation,
    capture effective `CLUSTER_NAME` from the harness's startup check against its
-   expected cell, before any relay mutation. Record only that value, never the
-   whole imported environment. Missing render, selector/policy, platform-config
+   expected cell, before any relay mutation. Record only that cluster identity
+   and check outcome, never the imported environment. Missing render,
+   selector/policy, platform-config
    or startup-check evidence blocks relay mutation; do not infer it from a
    template or desired configuration. Neither dry run nor Job creation is
    authorized by this procedure.
