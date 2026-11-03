@@ -4331,6 +4331,21 @@ pub(crate) mod tests {
             own_banned: false,
             muted_until: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
         };
+        // Every waiter holds a clone of the leader's gate while it waits, so
+        // the gate's count proves all of them reached it before the cache
+        // is filled; none can take the initial cache-hit path instead.
+        async fn enrolled(gate: Option<Arc<tokio::sync::Mutex<()>>>, waiters: usize) {
+            let gate = gate.expect("the leader's gate");
+            let base = Arc::strong_count(&gate);
+            let start = Instant::now();
+            while Arc::strong_count(&gate) < base + waiters {
+                assert!(
+                    start.elapsed() < std::time::Duration::from_millis(500),
+                    "waiters did not reach the gate"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }
 
         let leader = state
             .restriction_reads
@@ -4346,7 +4361,11 @@ pub(crate) mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        tokio::task::yield_now().await;
+        enrolled(
+            state.restriction_reads.gate(&(community, pubkey.clone())),
+            waiters.len(),
+        )
+        .await;
         state.seed_restriction((community, pubkey.clone()), muted.clone());
         drop(leader);
         for waiter in waiters {
@@ -4366,7 +4385,7 @@ pub(crate) mod tests {
                 tokio::spawn(async move { state.resolve_host(&host).await })
             })
             .collect::<Vec<_>>();
-        tokio::task::yield_now().await;
+        enrolled(state.tenant_host_reads.gate(&host), waiters.len()).await;
         state
             .tenant_host_cache
             .insert(host.clone(), (community, Instant::now()));
