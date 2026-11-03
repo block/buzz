@@ -71,6 +71,7 @@ import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/channels/small_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/profile/presence_cache_provider.dart';
+import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/features/profile/user_profile_sheet.dart';
@@ -247,6 +248,7 @@ Widget _buildTestable({
   bool personalChat = false,
   required List<NostrEvent> messages,
   PresenceCacheNotifier? presenceCache,
+  List<OwnedAgentDirectoryEntry>? ownedAgents,
   List<TypingEntry> typing = const [],
   Map<String, UserProfile> users = const {},
   Set<String>? knownAgentPubkeys,
@@ -363,6 +365,8 @@ Widget _buildTestable({
       ),
       if (signingPubkey != null)
         myPubkeyProvider.overrideWithValue(signingPubkey),
+      if (ownedAgents != null)
+        ownedAgentDirectoryProvider.overrideWith((ref) async => ownedAgents),
       if (presenceCache != null)
         presenceCacheProvider.overrideWith(() => presenceCache),
       if (!useRealChannelProviders)
@@ -585,7 +589,7 @@ double? effectiveFontSizeForText(
 void main() {
   for (final fromLauncher in [false, true]) {
     testWidgets(
-      'Bestie DM shows replies inline and sends at top level: launcher=$fromLauncher',
+      'Bestie DM preserves thread replies and ordinary sends: launcher=$fromLauncher',
       (tester) async {
         final sender = _RecordingOrdinarySender();
         final dm = Channel(
@@ -607,7 +611,20 @@ void main() {
             bestie: 'agent',
             organization: Stream.value(const MeGroups()),
             channel: dm,
-            soloSender: sender,
+            sender: sender,
+            threadReplies: {
+              threadIdRoot: [
+                _textMsg(
+                  id: threadIdA,
+                  pubkey: 'agent',
+                  content: 'Existing threaded answer',
+                  createdAt: 1001,
+                  extraTags: [
+                    ['e', threadIdRoot, '', 'reply'],
+                  ],
+                ),
+              ],
+            },
             messages: [
               _textMsg(
                 id: threadIdRoot,
@@ -620,7 +637,7 @@ void main() {
                 content: 'Existing threaded answer',
                 createdAt: 1001,
                 extraTags: [
-                  ['e', threadIdRoot, '', 'root'],
+                  ['e', threadIdRoot, '', 'reply'],
                 ],
               ),
             ],
@@ -628,7 +645,6 @@ void main() {
                 ? Scaffold(body: DefaultAgentLauncher(onChooseAgent: () {}))
                 : ChannelDetailPage(
                     channel: dm,
-                    continuousConversation: true,
                     initialMessageId: threadIdA,
                     initialThreadRootId: threadIdRoot,
                   ),
@@ -639,21 +655,34 @@ void main() {
           await tester.tap(find.byType(IconButton));
           await tester.pumpAndSettle();
         }
+        if (fromLauncher) {
+          expect(find.byType(ThreadDetailPage), findsNothing);
+          final row = find.byKey(const ValueKey('message-row-$threadIdRoot'));
+          await tester.tap(row);
+          await tester.pumpAndSettle();
+        }
+        expect(find.byType(ThreadDetailPage), findsOneWidget);
         expect(find.text('Existing threaded answer'), findsOneWidget);
-        expect(find.byType(ThreadDetailPage), findsNothing);
-        final row = find.byKey(const ValueKey('message-row-$threadIdRoot'));
-        await tester.tap(row);
-        await tester.pumpAndSettle();
-        expect(find.byType(ThreadDetailPage), findsNothing);
-        await tester.drag(row, const Offset(220, 0));
+        await tester
+            .widget<ComposeBar>(find.byType(ComposeBar).last)
+            .onSend('Reply in thread', []);
+        expect(sender.parents, [threadIdRoot]);
+        await tester.pageBack();
         await tester.pumpAndSettle();
         expect(find.byType(ThreadDetailPage), findsNothing);
         await tester
             .widget<ComposeBar>(find.byType(ComposeBar))
             .onSend('Continue here', []);
-        expect(sender.sent, ['Continue here']);
-        expect(sender.parents, [null]);
-        expect(sender.channels.single?.isDm, isTrue);
+        expect(sender.sent, ['Reply in thread', 'Continue here']);
+        expect(sender.parents, [threadIdRoot, null]);
+        expect(
+          sender.channels.every((channel) => channel?.id == dm.id),
+          isTrue,
+        );
+        final row = find.byKey(const ValueKey('message-row-$threadIdRoot'));
+        await tester.drag(row, const Offset(220, 0));
+        await tester.pumpAndSettle();
+        expect(find.byType(ThreadDetailPage), findsOneWidget);
         expect(tester.takeException(), isNull);
       },
     );
@@ -11297,9 +11326,9 @@ void main() {
     for (final scenario in [
       (personal: true, dm: false, agent: true, group: false, visible: true),
       (personal: false, dm: false, agent: true, group: false, visible: false),
-      (personal: false, dm: true, agent: true, group: false, visible: true),
+      (personal: false, dm: true, agent: true, group: false, visible: false),
       (personal: false, dm: true, agent: false, group: false, visible: false),
-      (personal: false, dm: true, agent: true, group: true, visible: true),
+      (personal: false, dm: true, agent: true, group: true, visible: false),
     ]) {
       testWidgets('reply-scoped typing follows conversation scope: $scenario', (
         tester,
@@ -11351,6 +11380,21 @@ void main() {
           scenario.visible ? findsOneWidget : findsNothing,
         );
         expect(find.text('Alice is typing…'), findsNothing);
+        if (scenario.dm && scenario.agent) {
+          expect(
+            find.byKey(const ValueKey('thread-working-dots')),
+            findsOneWidget,
+          );
+          final bubble = find.byWidgetPredicate(
+            (widget) => widget is MessageContent && widget.content == 'Hello',
+          );
+          expect(
+            tester
+                .getRect(find.byKey(const ValueKey('thread-working-container')))
+                .right,
+            closeTo(tester.getRect(bubble).right - 32, 0.1),
+          );
+        }
         typing.setEntries(const []);
         await tester.pumpAndSettle();
         expect(
@@ -11467,15 +11511,15 @@ void main() {
           avatarShape(isAgent: true, side: (shape as OutlinedBorder).side),
         );
       }
-      // As on desktop, the reply branch waits for a reply.
-      expect(connector, findsNothing);
+      // Working activity already belongs to the thread.
+      expect(connector, findsOneWidget);
       expect(
         find.descendant(of: row, matching: find.text('+1')),
         findsOneWidget,
       );
       expect(
         find.descendant(of: row, matching: find.text('View thread')),
-        findsOneWidget,
+        findsNothing,
       );
 
       typing.setEntries([

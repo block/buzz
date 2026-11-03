@@ -1,6 +1,56 @@
 part of '../channel_detail_page_test.dart';
 
 void presenceTests() {
+  testWidgets(
+    'hosted agent DM stays Online when its worker socket is offline',
+    (tester) async {
+      final cache = _PresenceFixture();
+      final channel = Channel(
+        id: _channelId,
+        name: 'DM',
+        channelType: 'dm',
+        description: 'Direct message',
+        visibility: 'private',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Alice'],
+        participantPubkeys: const ['self', 'alice'],
+        isMember: true,
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: channel,
+          presenceCache: cache,
+          ownedAgents: const [
+            OwnedAgentDirectoryEntry(
+              pubkey: 'alice',
+              runtime: 'block.builderlab/builderlab',
+            ),
+          ],
+          users: const {
+            'alice': UserProfile(
+              pubkey: 'alice',
+              displayName: 'Alice',
+              ownerPubkey: 'self',
+            ),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      cache.setPresence('offline');
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<Text>(find.byKey(const ValueKey('dm-header-presence')))
+            .data,
+        'Online',
+      );
+      expect(find.text('Offline'), findsNothing);
+    },
+  );
+
   testWidgets('DM header never substitutes offline for unknown presence', (
     tester,
   ) async {

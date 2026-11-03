@@ -349,6 +349,44 @@ async fn prefix_mode_matches_final_token_prefix_without_changing_full_text() {
         1_700_000_002,
     )
     .await;
+    // Rows whose own parser output contains a short lexeme, so a short
+    // trailing `:*` from punctuation in the query would match them.
+    let contraction = rand_bytes32();
+    let hyphenated = rand_bytes32();
+    let profile = rand_bytes32();
+    insert_event(
+        &pool,
+        c,
+        contraction,
+        rand_bytes32(),
+        9,
+        "don't panic",
+        None,
+        1_700_000_003,
+    )
+    .await;
+    insert_event(
+        &pool,
+        c,
+        hyphenated,
+        rand_bytes32(),
+        9,
+        "pre-processing done",
+        None,
+        1_700_000_004,
+    )
+    .await;
+    insert_event(
+        &pool,
+        c,
+        profile,
+        rand_bytes32(),
+        0,
+        r#"{"display_name":"prof"}"#,
+        None,
+        1_700_000_005,
+    )
+    .await;
 
     let svc = SearchService::new(pool.clone());
     let full_text = svc
@@ -397,6 +435,165 @@ async fn prefix_mode_matches_final_token_prefix_without_changing_full_text() {
     assert!(prefix_ids.contains(&project_plan));
     assert!(prefix_ids.contains(&project_archive));
 
+    // Non-profile prefix search returns no hits, in either sort, whatever the
+    // kinds and whatever completed words precede it, when the trailing token's
+    // `simple` parser output has a lexeme below three characters. Punctuation
+    // must not pad the count: `pr.`, `@pr` and `#pr` still yield `pr`, `don't`
+    // yields `t` and `pre-p` yields `p`. Each row would match without the
+    // minimum. kind:0-only stays one-character typeahead.
+    for (q, kinds, sort, expected) in [
+        (
+            "pr",
+            Some(vec![9]),
+            buzz_search::SearchSort::Relevance,
+            vec![],
+        ),
+        (
+            " p ",
+            Some(vec![9]),
+            buzz_search::SearchSort::Relevance,
+            vec![],
+        ),
+        (
+            "project pr",
+            Some(vec![9]),
+            buzz_search::SearchSort::Relevance,
+            vec![],
+        ),
+        (
+            "project  p ",
+            Some(vec![9]),
+            buzz_search::SearchSort::Relevance,
+            vec![],
+        ),
+        ("pr", None, buzz_search::SearchSort::Relevance, vec![]),
+        (
+            "pr",
+            Some(vec![0, 9]),
+            buzz_search::SearchSort::Relevance,
+            vec![],
+        ),
+        ("pr", Some(vec![9]), buzz_search::SearchSort::Newest, vec![]),
+        (
+            "pr.",
+            Some(vec![9]),
+            buzz_search::SearchSort::Relevance,
+            vec![],
+        ),
+        (
+            "@pr",
+            Some(vec![9]),
+            buzz_search::SearchSort::Relevance,
+            vec![],
+        ),
+        (
+            "#pr",
+            Some(vec![9]),
+            buzz_search::SearchSort::Relevance,
+            vec![],
+        ),
+        (
+            "...p",
+            Some(vec![9]),
+            buzz_search::SearchSort::Relevance,
+            vec![],
+        ),
+        (
+            "don't",
+            Some(vec![9]),
+            buzz_search::SearchSort::Relevance,
+            vec![],
+        ),
+        (
+            "pre-p",
+            Some(vec![9]),
+            buzz_search::SearchSort::Relevance,
+            vec![],
+        ),
+        // Controls: padded but long enough, punctuation-only trailing token
+        // (no `:*` lexeme, so the completed word matches exactly), long
+        // hyphenated parts, a short completed word (exact, so not limited),
+        // and a one-character profile query.
+        (
+            "pro.",
+            Some(vec![9]),
+            buzz_search::SearchSort::Relevance,
+            vec![project_plan, project_archive, projectile_plan, hyphenated],
+        ),
+        (
+            "project ?",
+            Some(vec![9]),
+            buzz_search::SearchSort::Relevance,
+            vec![project_plan, project_archive],
+        ),
+        (
+            "pre-pro",
+            Some(vec![9]),
+            buzz_search::SearchSort::Relevance,
+            vec![hyphenated],
+        ),
+        (
+            "t pan",
+            Some(vec![9]),
+            buzz_search::SearchSort::Relevance,
+            vec![contraction],
+        ),
+        (
+            "p",
+            Some(vec![0]),
+            buzz_search::SearchSort::Relevance,
+            vec![profile],
+        ),
+    ] {
+        let result = svc
+            .search(&SearchQuery {
+                community: c,
+                q: q.into(),
+                channel_scope: ChannelScope::Any,
+                kinds: kinds.clone(),
+                authors: None,
+                since: None,
+                until: None,
+                page: 1,
+                per_page: 10,
+                mode: buzz_search::SearchMode::Prefix,
+                sort,
+            })
+            .await
+            .expect("prefix search ok");
+        let mut got: Vec<[u8; 32]> = result.hits.iter().map(|h| h.event_id).collect();
+        let mut want = expected.clone();
+        got.sort();
+        want.sort();
+        assert_eq!(got, want, "{q:?} {kinds:?} {sort:?}");
+    }
+    // A short trailing lexeme is a prefix-mode rule only; full text still
+    // matches the contraction exactly.
+    let full_text_contraction = svc
+        .search(&SearchQuery {
+            community: c,
+            q: "don't".into(),
+            channel_scope: ChannelScope::Any,
+            kinds: Some(vec![9]),
+            authors: None,
+            since: None,
+            until: None,
+            page: 1,
+            per_page: 10,
+            mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
+        })
+        .await
+        .expect("full text search ok");
+    assert_eq!(
+        full_text_contraction
+            .hits
+            .iter()
+            .map(|h| h.event_id)
+            .collect::<Vec<_>>(),
+        vec![contraction]
+    );
+
     let multi_token_prefix = svc
         .search(&SearchQuery {
             community: c,
@@ -419,7 +616,7 @@ async fn prefix_mode_matches_final_token_prefix_without_changing_full_text() {
     let completed_token_is_exact = svc
         .search(&SearchQuery {
             community: c,
-            q: "project pl".into(),
+            q: "project plan".into(),
             channel_scope: ChannelScope::Any,
             kinds: Some(vec![9]),
             authors: None,
@@ -469,7 +666,7 @@ async fn prefix_mode_handles_tsquery_boundary_punctuation() {
     let result = svc
         .search(&SearchQuery {
             community: c,
-            q: "operators ' : & | ( ) ! alpha be".into(),
+            q: "operators ' : & | ( ) ! alpha bet".into(),
             channel_scope: ChannelScope::Any,
             kinds: Some(vec![9]),
             authors: None,
@@ -544,6 +741,101 @@ async fn prefix_mode_preserves_storage_level_privacy_exclusions() {
 
     assert_eq!(result.hits.len(), 1);
     assert_eq!(result.hits[0].event_id, control_id);
+
+    teardown(pool, &schema).await;
+}
+
+/// Prefix relevance (typeahead) ranks only the newest 1000 matches, so an
+/// older, better-ranked message drops out, and its pages end with that
+/// window; full-text and profile relevance still rank every match.
+/// Mutation: rank every prefix match → the old message tops the first page;
+/// window profiles too → the old profile drops off the first page.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn prefix_relevance_ranks_only_the_newest_matches() {
+    let (pool, schema) = setup().await;
+    let c = mk_community(&pool, "rank-window.example").await;
+    let (old, old_profile) = (rand_bytes32(), rand_bytes32());
+    for (id, kind) in [(old, 9), (old_profile, 0)] {
+        insert_event(
+            &pool,
+            c,
+            id,
+            rand_bytes32(),
+            kind,
+            "planning planning planning planning",
+            None,
+            1_700_000_000,
+        )
+        .await;
+        // 1000 newer, weaker matches fill the window.
+        sqlx::query(
+            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig) \
+             SELECT $1, sha256((g || '/' || $2)::bytea), sha256((g || '/' || $2)::bytea), \
+                    to_timestamp(1700000001 + g), $2, '[]'::jsonb, 'planning notes ' || g, 'signature' \
+             FROM generate_series(1, 1000) g",
+        )
+        .bind(c.as_uuid())
+        .bind(kind)
+        .execute(&pool)
+        .await
+        .expect("insert newer matches");
+    }
+
+    let svc = SearchService::new(pool.clone());
+    let query = |q: &str, mode, page| SearchQuery {
+        community: c,
+        q: q.into(),
+        channel_scope: ChannelScope::Any,
+        kinds: Some(vec![9]),
+        authors: None,
+        since: None,
+        until: None,
+        page,
+        per_page: 20,
+        mode,
+        sort: buzz_search::SearchSort::Relevance,
+    };
+    let ids = |r: buzz_search::SearchResult| r.hits.iter().map(|h| h.event_id).collect::<Vec<_>>();
+
+    let typeahead = ids(svc
+        .search(&query("plan", buzz_search::SearchMode::Prefix, 1))
+        .await
+        .expect("prefix"));
+    assert_eq!(typeahead.len(), 20);
+    assert!(!typeahead.contains(&old), "outside the newest-1000 window");
+
+    let full_text = ids(svc
+        .search(&query("planning", buzz_search::SearchMode::FullText, 1))
+        .await
+        .expect("full text"));
+    assert_eq!(full_text.first(), Some(&old), "full text ranks every match");
+
+    // Every page ranks the same window, so prefix pages end with it.
+    let last = ids(svc
+        .search(&query("plan", buzz_search::SearchMode::Prefix, 50))
+        .await
+        .expect("page 50"));
+    assert_eq!(last.len(), 20);
+    assert!(!last.contains(&old));
+    let past = svc
+        .search(&query("plan", buzz_search::SearchMode::Prefix, 51))
+        .await
+        .expect("page 51");
+    assert!(past.hits.is_empty(), "no page past the window");
+
+    let profiles = ids(svc
+        .search(&SearchQuery {
+            kinds: Some(vec![0]),
+            ..query("plan", buzz_search::SearchMode::Prefix, 1)
+        })
+        .await
+        .expect("profile prefix"));
+    assert_eq!(
+        profiles.first(),
+        Some(&old_profile),
+        "profile typeahead ranks every match"
+    );
 
     teardown(pool, &schema).await;
 }
@@ -1793,7 +2085,7 @@ async fn waiting_searches(pool: &PgPool) -> i64 {
     sqlx::query_scalar(
         "SELECT count(*) FROM pg_stat_activity WHERE pid <> pg_backend_pid() \
          AND datname = current_database() \
-         AND wait_event_type = 'Lock' AND query LIKE '%search_query.query%'",
+         AND wait_event_type = 'Lock' AND query LIKE '%ts_rank_cd(%'",
     )
     .fetch_one(pool)
     .await

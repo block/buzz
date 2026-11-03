@@ -163,7 +163,7 @@ async fn timed_out_member_typing_is_rejected() {
 #[ignore = "requires Postgres and Redis"]
 async fn typing_uses_cached_restriction_row() {
     let f = Fixture::new().await;
-    f.state.restriction_cache.insert(
+    f.state.seed_restriction(
         (f.community, f.member.public_key().to_bytes().to_vec()),
         buzz_db::moderation::RestrictionState {
             banned: true,
@@ -196,7 +196,7 @@ async fn typing_ban_gate_uses_cached_restriction_row() {
         )
         .await
         .unwrap();
-    f.state.restriction_cache.insert(
+    f.state.seed_restriction(
         (f.community, member),
         buzz_db::moderation::RestrictionState {
             banned: false,
@@ -209,14 +209,15 @@ async fn typing_ban_gate_uses_cached_restriction_row() {
     assert_eq!(status, axum::http::StatusCode::OK, "{body}");
 }
 
-/// Only typing uses the cached ban gate: a persistent post reads ban state
-/// fresh, so a stale cached ban does not refuse a member Postgres cleared.
-/// Mutation: use the cached ban gate for every kind → RED.
+/// A persistent post takes the same cached ban gate as typing: a fresh
+/// cached ban refuses a member Postgres never restricted.
+/// Mutation: read ban state fresh in the HTTP membership gate and in ingest
+/// → RED.
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
-async fn persistent_post_ban_gate_reads_fresh() {
+async fn persistent_post_ban_gate_uses_cached_restriction_row() {
     let f = Fixture::new().await;
-    f.state.restriction_cache.insert(
+    f.state.seed_restriction(
         (f.community, f.member.public_key().to_bytes().to_vec()),
         buzz_db::moderation::RestrictionState {
             banned: true,
@@ -228,8 +229,7 @@ async fn persistent_post_ban_gate_reads_fresh() {
         .sign_with_keys(&f.member)
         .unwrap();
     let (status, body) = f.post(&f.member, &message).await;
-    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
-    assert_eq!(body["accepted"], true, "{body}");
+    assert_eq!(status, axum::http::StatusCode::FORBIDDEN, "{body}");
 }
 
 /// HTTP typing reads the cached serving state, like the WebSocket path.

@@ -542,6 +542,7 @@ IosNavigationAction? _nativeAction(Widget? widget) {
       IosGlassNavigationIcon.reply => 'arrowshape.turn.up.left',
       IosGlassNavigationIcon.back => 'chevron.backward',
       IosGlassNavigationIcon.close => 'xmark',
+      IosGlassNavigationIcon.check => 'checkmark',
       IosGlassNavigationIcon.camera => 'camera',
       IosGlassNavigationIcon.photoLibrary => 'photo.on.rectangle',
       IosGlassNavigationIcon.palette => 'paintpalette',

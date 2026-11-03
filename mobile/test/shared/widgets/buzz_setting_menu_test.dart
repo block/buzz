@@ -27,6 +27,55 @@ void main() {
     ),
   );
 
+  testWidgets('form menu preserves keyboard focus through selection', (
+    tester,
+  ) async {
+    final focus = FocusNode();
+    addTearDown(focus.dispose);
+    String? selected;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Column(
+            children: [
+              TextField(focusNode: focus),
+              BuzzSettingMenu<String>(
+                controlKey: const Key('form-menu'),
+                enabled: true,
+                grouped: true,
+                preserveTextInput: true,
+                label: 'Visibility',
+                onSelected: (value) => selected = value,
+                options: const [
+                  BuzzSettingMenuOption(
+                    key: Key('private'),
+                    label: 'Private',
+                    value: 'private',
+                  ),
+                ],
+                value: 'open',
+                valueLabel: 'Public',
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.byType(TextField));
+    await tester.pumpAndSettle();
+    expect(focus.hasFocus, isTrue);
+    expect(tester.testTextInput.isVisible, isTrue);
+    await tester.tap(find.byKey(const Key('form-menu')));
+    await tester.pumpAndSettle();
+    expect(focus.hasFocus, isTrue);
+    expect(tester.testTextInput.isVisible, isTrue);
+    await tester.tap(find.byKey(const Key('private')));
+    await tester.pumpAndSettle();
+    expect(selected, 'private');
+    expect(focus.hasFocus, isTrue);
+    expect(tester.testTextInput.isVisible, isTrue);
+  });
+
   testWidgets('exposes button, expanded and checked semantics', (tester) async {
     final handle = tester.ensureSemantics();
     await tester.pumpWidget(menu(enabled: true));
@@ -111,6 +160,7 @@ void main() {
       ((view.creationParams as Map)['menu'] as List)[1],
       containsPair('checked', true),
     );
+    await tester.pumpAndSettle();
     view.onPlatformViewCreated!(987);
     await tester.pump();
     Future<void> choose(int index) async {

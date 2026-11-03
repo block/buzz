@@ -44,6 +44,7 @@ import os.log
   private var concentricSheetSurfaceChannel: FlutterMethodChannel?
   private var nativeAttachmentPopoverCoordinator: NativeAttachmentPopoverCoordinator?
   private var nativeEmojiPickerCoordinator: NativeEmojiPickerCoordinator?
+  private var nativeCreateChannelSheetCoordinator: NativeCreateChannelSheetCoordinator?
   private var nativeAddMembersSheetCoordinator: NativeAddMembersSheetCoordinator?
   private var nativeConfirmationDialogCoordinator: NativeConfirmationDialogCoordinator?
   private var nativeProfileSetupCoordinator: NativeProfileSetupCoordinator?
@@ -299,6 +300,13 @@ import os.log
 
     engineBridge.pluginRegistry.registrar(forPlugin: "BuzzNativePresenceMenu")?.register(
       NativePresenceMenuFactory(messenger: messenger), withId: "buzz/presence_menu"
+    )
+
+    nativeCreateChannelSheetCoordinator = NativeCreateChannelSheetCoordinator(
+      messenger: messenger,
+      parentViewController: engineBridge.pluginRegistry.registrar(
+        forPlugin: "BuzzNativeCreateChannelSheet"
+      )?.viewController
     )
 
     nativeAddMembersSheetCoordinator = NativeAddMembersSheetCoordinator(

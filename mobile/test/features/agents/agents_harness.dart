@@ -110,7 +110,7 @@ class _Relay extends FakeRelay {
 
 /// Holds creation open so a test can observe the in-flight state.
 class GatedController extends RelayFakeController {
-  GatedController(super.account);
+  GatedController(super.account, {super.onCreated});
   Completer<void>? gate;
   String? submittedName;
   String? submittedInstructions;
@@ -165,14 +165,17 @@ class AgentsHarness {
   List<String> registered = const [];
 
   /// [relayUrl] defaults to a hosted community that supports remote agents.
-  static Future<AgentsHarness> create({String? relayUrl}) async {
+  static Future<AgentsHarness> create({
+    String? relayUrl,
+    Future<void> Function(Community, String)? onCreated,
+  }) async {
     FlutterSecureStorage.setMockInitialValues({});
     SharedPreferences.setMockInitialValues({});
     final registry = FakeRegistry(bound: fakeOwner.public);
     await AccountIdentityStore()
         .forSubject(registry.account!.subject)
         .create(fakeOwner.nsec);
-    final controller = GatedController(registry);
+    final controller = GatedController(registry, onCreated: onCreated);
     addTearDown(() {
       controller.dispose();
       controller.relayAuth.dispose();
@@ -197,6 +200,8 @@ class AgentsHarness {
     WidgetTester tester, {
     required List<String> directory,
     Widget? home,
+    bool createOnOpen = false,
+    bool settle = true,
     List<Override> overrides = const [],
   }) async {
     registered = [...directory, oldAppAgentKeys.public];
@@ -241,7 +246,8 @@ class AgentsHarness {
               Builder(
                 builder: (context) => Scaffold(
                   body: TextButton(
-                    onPressed: () => showAgents(context),
+                    onPressed: () =>
+                        showAgents(context, createOnOpen: createOnOpen),
                     child: const Text('Open Agents'),
                   ),
                 ),
@@ -252,7 +258,12 @@ class AgentsHarness {
     await tester.pumpAndSettle();
     if (home == null) {
       await tester.tap(find.text('Open Agents'));
-      await tester.pumpAndSettle();
+      if (settle) {
+        await tester.pumpAndSettle();
+      } else {
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+      }
     }
   }
 }

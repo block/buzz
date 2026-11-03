@@ -38,10 +38,12 @@ class BuilderlabAccount {
   const BuilderlabAccount({
     required this.subject,
     required this.expiresAt,
+    this.email,
     this.needsAccountSetup = false,
   });
   final bool needsAccountSetup;
   final String subject;
+  final String? email;
   final DateTime expiresAt;
 }
 
@@ -285,6 +287,7 @@ class BuilderlabAccountClient {
         result['account_status'] == 'ACCOUNT_STATUS_NEEDS_DETAILS';
     return BuilderlabAccount(
       subject: subject,
+      email: result['email'] is String ? result['email'] as String : null,
       expiresAt: parsed,
       needsAccountSetup: needsSetup,
     );
@@ -381,10 +384,6 @@ class BuilderlabAccountClient {
 
   Future<void> clearLocalSession() => _serial(_clear);
   Future<void> _clear() async {
-    _credential = null;
-    _unshared = null;
-    _account = null;
-    if (!_disposed) _subject.value = null;
     // Attempt both removals so one failure never leaves the other copy live.
     var failed = false;
     try {
@@ -397,7 +396,16 @@ class BuilderlabAccountClient {
     } on AccountFailure {
       failed = true;
     }
-    if (failed) throw AccountFailure.storage;
+    if (failed) {
+      // The account stays signed in, so the extension gets its copy back.
+      _unshared = _credential;
+      _share();
+      throw AccountFailure.storage;
+    }
+    _credential = null;
+    _unshared = null;
+    _account = null;
+    if (!_disposed) _subject.value = null;
   }
 
   Future<void> _unshare() async {
