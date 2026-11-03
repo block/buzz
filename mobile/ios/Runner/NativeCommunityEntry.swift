@@ -233,7 +233,7 @@ private final class NativeCommunityEntryController: UIViewController, UITextFiel
       ])
       stack.addArrangedSubview(card)
       if invite {
-        addButton("Join community", primary: true) { [weak self] in
+        submit = addButton("Join community", primary: true) { [weak self] in
           self?.request("join", [:])
         }
       } else {
@@ -317,6 +317,9 @@ private final class NativeCommunityEntryController: UIViewController, UITextFiel
     action?(method, args) { [weak self] result in
       guard let self, self.generation == attempt else { return }
       self.setBusy(false)
+      if let title = result["actionTitle"] as? String {
+        self.submit?.configuration?.title = title
+      }
       self.status.text = result["error"] as? String
       self.status.isHidden = self.status.text == nil
       if let error = self.status.text {
@@ -326,6 +329,8 @@ private final class NativeCommunityEntryController: UIViewController, UITextFiel
       if result["joined"] as? Bool == true {
         self.input.text = nil
         self.finish?(true)
+      } else if result["redirected"] as? Bool == true {
+        self.finish?(false)
       } else { completion?(result) }
     }
   }
