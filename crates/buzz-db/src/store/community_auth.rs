@@ -106,6 +106,38 @@ const RECEIPT: &str = "SELECT u.*, true AS requires_nip_fi,
     WHERE u.operation_id = $1";
 
 impl Db {
+    /// Bind a serving host and its authentication policy from one writer row.
+    /// A lifecycle transition between earlier checks and this lookup cannot
+    /// supply a tenant with another snapshot's optional policy.
+    #[datastore_span(name = "community_auth_binding_for_host", system = "postgresql")]
+    pub async fn community_auth_binding_for_host(
+        &self,
+        host: &str,
+    ) -> Result<Option<(crate::CommunityRecord, CommunityAuthPolicy)>> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::TenantResolution,
+        )
+        .await?;
+        let row = sqlx::query(super::community::SERVING_HOST_QUERY)
+            .bind(host)
+            .fetch_optional(&mut *connection)
+            .await?;
+        row.map(|row| {
+            Ok((
+                crate::CommunityRecord {
+                    id: CommunityId::from_uuid(row.try_get("id")?),
+                    host: row.try_get("host")?,
+                },
+                CommunityAuthPolicy {
+                    requires_nip_fi: row.try_get("requires_nip_fi")?,
+                    policy_generation: row.try_get("policy_generation")?,
+                },
+            ))
+        })
+        .transpose()
+    }
+
     /// Resolve active host policy in one writer read. No replica or cross-request cache.
     #[datastore_span(name = "community_auth_policy_for_host", system = "postgresql")]
     pub async fn community_auth_policy_for_host(

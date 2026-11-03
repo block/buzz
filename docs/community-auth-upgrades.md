@@ -203,6 +203,12 @@ generation. This adds one writer query per protected request or discovery reques
 Issuer-binding/JWKS caches keep their existing bounds; unavailable dependencies
 refuse required admission, rather than treating it as optional.
 
+WebSocket upgrades also bind tenant identity and its policy from the same primary
+row. An earlier missing or optional policy result cannot authorize a socket for a
+required row that becomes serving during lookup (for example, on unarchive).
+Before upgrade, enforce that bound row's requirement even when the early check
+ran in Off or Shadow. This changes no discovery fields.
+
 Database-sourced deployments construct the issuer resolver and verifier even in
 `off`, because some rows may require FI. Configure finite
 `BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS`, issuer JWKS and command configuration

@@ -23,6 +23,140 @@ impl buzz_auth::Nip98ReplayGuard for Replay {
     }
 }
 
+struct PausedPolicyRead {
+    db: buzz_db::Db,
+    read: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+impl PolicySource for PausedPolicyRead {
+    fn lookup<'a>(
+        &'a self,
+        host: &'a str,
+    ) -> BoxFuture<'a, Result<Option<CommunityAuthPolicy>, ()>> {
+        async move {
+            let result = self
+                .db
+                .community_auth_policy_for_host(host)
+                .await
+                .map_err(|_| ())?;
+            assert!(
+                result.is_none(),
+                "the initial primary snapshot must miss the archived host"
+            );
+            self.read.notify_one();
+            self.resume.notified().await;
+            Ok(result)
+        }
+        .boxed()
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn bound_row_policy_wins_when_required_host_becomes_serving_after_initial_miss() {
+    use crate::nip_fi_core::test_support::{
+        assertion_verifier, sign_assertion, TEST_COMMUNITY_URI,
+    };
+    use tokio_tungstenite::{
+        connect_async,
+        tungstenite::{client::IntoClientRequest, Error},
+    };
+    let base = crate::api::bridge::postgres_tests::bridge_handler_test_state()
+        .await
+        .unwrap();
+    let host = format!(
+        "unarchive-required-{}.example",
+        uuid::Uuid::new_v4().simple()
+    );
+    let community = base.db.ensure_configured_community(&host).await.unwrap();
+    sqlx::query(
+        "UPDATE communities SET requires_nip_fi = true, policy_generation = 1 WHERE id = $1",
+    )
+    .bind(community.id.as_uuid())
+    .execute(base.db.pool())
+    .await
+    .unwrap();
+    let key = Keys::generate();
+    let token = sign_assertion("nip-fi+jwt", &key.public_key().to_hex(), None);
+    for global in [NipFiMode::Off, NipFiMode::Shadow] {
+        for path in ["/", "/huddle/00000000-0000-4000-8000-000000000001/audio"] {
+            for assertion in [false, true] {
+                sqlx::query("UPDATE communities SET archived_at = now() WHERE id = $1")
+                    .bind(community.id.as_uuid())
+                    .execute(base.db.pool())
+                    .await
+                    .unwrap();
+                let pause = Arc::new(PausedPolicyRead {
+                    db: base.db.clone(),
+                    read: Default::default(),
+                    resume: Default::default(),
+                });
+                let mut state = (*base).clone();
+                let config = Arc::make_mut(&mut state.config);
+                config.nip_fi.mode = global;
+                config.nip_fi.max_connection_lifetime_secs = 3600;
+                config.nip_fi.communities =
+                    crate::nip_fi_core::test_support::any_host(TEST_COMMUNITY_URI);
+                state.nip_fi_policy = pause.clone();
+                state.nip_fi_verifier = Some(Arc::new(assertion_verifier(
+                    buzz_auth::TokenClass::DedicatedNipFi,
+                )));
+                state.nip_fi_deny_map = Some(Arc::new(buzz_auth::NipFiDenyMap::new(100, vec![])));
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let app = crate::router::build_router(Arc::new(state))
+                    .into_make_service_with_connect_info::<std::net::SocketAddr>();
+                let server = tokio::spawn(async move { axum::serve(listener, app).await });
+                let mut request = format!("ws://{address}{path}")
+                    .into_client_request()
+                    .unwrap();
+                request.headers_mut().insert("host", host.parse().unwrap());
+                if assertion {
+                    request.headers_mut().insert(
+                        "nostr-federated-identity",
+                        format!("Bearer {token}").parse().unwrap(),
+                    );
+                }
+                let connect = tokio::spawn(async move { connect_async(request).await });
+                tokio::time::timeout(std::time::Duration::from_secs(5), pause.read.notified())
+                    .await
+                    .unwrap();
+                // The initial primary query already observed no serving row.
+                // Make that SAME required row serving before its result reaches
+                // mode selection and the authoritative row-zero binding.
+                sqlx::query("UPDATE communities SET archived_at = NULL WHERE id = $1")
+                    .bind(community.id.as_uuid())
+                    .execute(base.db.pool())
+                    .await
+                    .unwrap();
+                pause.resume.notify_one();
+                let result = tokio::time::timeout(std::time::Duration::from_secs(5), connect)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if assertion {
+                    let (mut socket, response) = result.expect("valid bound-row evidence upgrades");
+                    assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+                    let _ = socket.close(None).await;
+                } else {
+                    match result {
+                        Err(Error::Http(response)) => assert_eq!(
+                            response.status(),
+                            StatusCode::UNAUTHORIZED,
+                            "{global:?} {path}"
+                        ),
+                        other => panic!(
+                            "bound required row must not become free: {global:?} {path} {other:?}"
+                        ),
+                    }
+                }
+                server.abort();
+                let _ = server.await;
+            }
+        }
+    }
+}
+
 // Exercise actual Hyper upgrades, the primary host policy query and tenant
 // binding together. A deletion request does not fence serving until quiescing.
 #[tokio::test]

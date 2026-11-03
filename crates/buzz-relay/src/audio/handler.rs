@@ -102,7 +102,7 @@ pub async fn ws_audio_handler(
     // WebSocket handshake. Running pre-lookup means a denied request skips the tenant
     // lookup (a resolver miss costs one bounded binding lookup) and the gate is reachable in tests without a live community.
     // [FI-TRACE-TRANSPORT-CLOSED] [NIP-FI.md §Admission pairing sequence]
-    let (nip_fi_assertion, shadow_assertion, nip_fi_deadline, shadow_line) = {
+    let (mut nip_fi_assertion, mut shadow_assertion, mut nip_fi_deadline, mut shadow_line) = {
         use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
         let mode = crate::nip_fi_policy::mode(&state, &headers).await;
         let verifier = state.nip_fi_verifier.as_deref();
@@ -132,16 +132,34 @@ pub async fn ws_audio_handler(
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let tenant = match crate::tenant::bind_community(&*state, raw_host).await {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            return (
-                StatusCode::NOT_FOUND,
-                "relay: no community is configured for this host",
-            )
-                .into_response();
-        }
+    let (tenant, bound_mode) = match crate::nip_fi_policy::bind_for_upgrade(&state, raw_host).await
+    {
+        Ok(binding) => binding,
+        Err(response) => return response,
     };
+    if bound_mode.restricts() && (nip_fi_assertion.is_none() || bound_mode.denies_unconditionally())
+    {
+        match crate::nip_fi_upgrade::check_nip_fi_at_upgrade(
+            crate::nip_fi_session::NipFiWsRoute::Audio,
+            &headers,
+            state.nip_fi_communities(),
+            state.nip_fi_verifier.as_deref(),
+            bound_mode,
+        )
+        .await
+        .into_assertions()
+        {
+            Ok(assertions) => {
+                (
+                    nip_fi_assertion,
+                    shadow_assertion,
+                    nip_fi_deadline,
+                    shadow_line,
+                ) = assertions
+            }
+            Err(response) => return (*response).into_response(),
+        }
+    }
 
     // The tenant lookup awaited since the community resolved; a snapshot
     // that went stale meanwhile accepts no socket.

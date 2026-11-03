@@ -840,7 +840,13 @@ async fn nip11_or_ws_handler(
     //
     // Keying on the header pair (not on `Accept`) means an HTML Accept header
     // on a real WS upgrade is still gated correctly.
-    let (upgrade_checked, nip_fi_assertion, shadow_assertion, nip_fi_deadline, shadow_line) = {
+    let (
+        upgrade_checked,
+        mut nip_fi_assertion,
+        shadow_assertion,
+        mut nip_fi_deadline,
+        mut shadow_line,
+    ) = {
         let is_h1_ws_upgrade = headers
             .get(axum::http::header::UPGRADE)
             .and_then(|v| v.to_str().ok())
@@ -913,7 +919,7 @@ async fn nip11_or_ws_handler(
             }
         }
     }
-    let shadow_assertion = shadow_assertion.filter(|(a, c)| {
+    let mut shadow_assertion = shadow_assertion.filter(|(a, c)| {
         !crate::nip_fi_shadow_session::upgrade_denied(&state, &c.shadow_label(), a)
     });
 
@@ -926,19 +932,39 @@ async fn nip11_or_ws_handler(
     //
     // The NIP-FI upgrade gate runs above (before bind_community) so denied
     // upgrades skip the tenant lookup; the `Ok(ws)` backstop runs below.
-    let tenant = match crate::tenant::bind_community(&*state, raw_host).await {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            // Generic rejection: do not distinguish "unmapped" from "lookup
-            // error", and never echo the host, so an unauthenticated caller
-            // cannot probe which communities exist on this deployment.
-            return (
-                StatusCode::NOT_FOUND,
-                "relay: no community is configured for this host",
-            )
-                .into_response();
-        }
+    let (tenant, bound_mode) = match crate::nip_fi_policy::bind_for_upgrade(&state, raw_host).await
+    {
+        Ok(binding) => binding,
+        Err(response) => return response,
     };
+    // An initially missing/optional host may have become required while the
+    // early gate awaited. Only the policy read with the bound row authorizes
+    // this socket; a shadow observation is not an enforced admission.
+    if upgrade_checked
+        && bound_mode.restricts()
+        && (nip_fi_assertion.is_none() || bound_mode.denies_unconditionally())
+    {
+        match crate::nip_fi_upgrade::check_nip_fi_at_upgrade(
+            crate::nip_fi_session::NipFiWsRoute::Root,
+            &headers,
+            state.nip_fi_communities(),
+            state.nip_fi_verifier.as_deref(),
+            bound_mode,
+        )
+        .await
+        .into_assertions()
+        {
+            Ok(assertions) => {
+                (
+                    nip_fi_assertion,
+                    shadow_assertion,
+                    nip_fi_deadline,
+                    shadow_line,
+                ) = assertions
+            }
+            Err(response) => return (*response).into_response(),
+        }
+    }
     // The tenant lookup awaited since the community resolved; a snapshot
     // that went stale meanwhile accepts no socket.
     if let Err(class) = nip_fi_deadline.check() {
@@ -973,7 +999,7 @@ async fn nip11_or_ws_handler(
                 // Only re-check if the pre-extractor gate did not fire (h2 path).
                 use crate::nip_fi_session::NipFiWsRoute::Root;
                 use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
-                let mode = crate::nip_fi_policy::mode(&state, &headers).await;
+                let mode = bound_mode;
                 let verifier = state.nip_fi_verifier.as_deref();
                 let communities = state.nip_fi_communities();
                 // Resolved after every await of this upgrade: nothing to re-check.

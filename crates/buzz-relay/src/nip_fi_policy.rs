@@ -110,6 +110,40 @@ pub(crate) async fn mode(state: &crate::state::AppState, headers: &HeaderMap) ->
     }
 }
 
+/// Row-zero binding and the policy belonging to that exact primary row.
+/// Early rejection ordering may use `mode`, but cannot authorize an upgrade.
+#[allow(clippy::result_large_err)]
+pub(crate) async fn bind_for_upgrade(
+    state: &crate::state::AppState,
+    raw_host: &str,
+) -> Result<(buzz_core::tenant::TenantContext, NipFiMode), Response<Body>> {
+    let host = buzz_core::tenant::normalize_host(raw_host);
+    if host.is_empty() {
+        return Err(not_found());
+    }
+    let binding = tokio::time::timeout(
+        POLICY_READ_BUDGET,
+        state.db.community_auth_binding_for_host(&host),
+    )
+    .await;
+    let (row, policy) = match binding {
+        Ok(Ok(Some(binding))) => binding,
+        // Row-zero binding preserves its generic refusal on a missing row or
+        // failed lookup. Neither outcome can yield a tenant or an upgrade.
+        _ => return Err(not_found()),
+    };
+    let policy = Policy {
+        mode: effective(state.config.nip_fi.mode, policy.requires_nip_fi),
+        required: policy.requires_nip_fi || state.config.nip_fi.mode.enforces(),
+        stored_required: policy.requires_nip_fi,
+        mapped: true,
+    };
+    Ok((
+        buzz_core::tenant::TenantContext::resolved(row.id, host),
+        configured_mode(state, policy),
+    ))
+}
+
 /// A shared admission proof is impossible without a serving host policy,
 /// even when a route preserves legacy unauthenticated error precedence.
 #[allow(clippy::result_large_err)] // Axum responses are the ingress error contract.
