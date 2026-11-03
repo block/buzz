@@ -10,7 +10,8 @@ The operator HTTP plane is separate from tenant event ingest. These management
 operations extend the existing provisioning API; community clients cannot invoke
 them with ordinary membership credentials. Both routes require an allowlisted
 operator's NIP-98 signature bound to the configured operator API origin, exact
-method, URL (including query), and POST body hash. Each attempt needs a fresh
+method and URL, including the query string on GET, and the POST body hash.
+Operator POST verification does not bind query strings. Each attempt needs a fresh
 signature; operation idempotency does not bypass transport replay protection.
 Responses use `Cache-Control: no-store`.
 
