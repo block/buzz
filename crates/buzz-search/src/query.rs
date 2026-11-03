@@ -62,15 +62,18 @@ pub enum SearchMode {
     /// Prefix-match the trailing normalized query token (`pro` matches `project`).
     ///
     /// Intended for bounded typeahead surfaces such as the desktop topbar. The
-    /// relay still refetches and re-authorizes every hit; this mode changes only
-    /// the candidate tsquery, not the access boundary.
+    /// relay still refetches and re-authorizes every hit; this mode changes the
+    /// candidate tsquery and, for relevance outside profile search, ranks only
+    /// the newest 1000 matches, not the access boundary.
     Prefix,
 }
 
 /// Result ordering for a search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchSort {
-    /// `ts_rank_cd` relevance, newest first among equal ranks.
+    /// `ts_rank_cd` relevance, newest first among equal ranks. In
+    /// [`SearchMode::Prefix`] outside profile search, only the newest 1000
+    /// matches are ranked, so pages end with them.
     Relevance,
     /// Newest first, ignoring relevance; ties ordered by event id.
     Newest,

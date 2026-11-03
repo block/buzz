@@ -550,36 +550,40 @@ async fn prefix_mode_preserves_storage_level_privacy_exclusions() {
 
 /// Prefix relevance (typeahead) ranks only the newest 1000 matches, so an
 /// older, better-ranked message drops out, and its pages end with that
-/// window; full-text relevance still ranks every match.
-/// Mutation: rank every prefix match → the old message tops the first page.
+/// window; full-text and profile relevance still rank every match.
+/// Mutation: rank every prefix match → the old message tops the first page;
+/// window profiles too → the old profile drops off the first page.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn prefix_relevance_ranks_only_the_newest_matches() {
     let (pool, schema) = setup().await;
     let c = mk_community(&pool, "rank-window.example").await;
-    let old = rand_bytes32();
-    insert_event(
-        &pool,
-        c,
-        old,
-        rand_bytes32(),
-        9,
-        "planning planning planning planning",
-        None,
-        1_700_000_000,
-    )
-    .await;
-    // 1000 newer, weaker matches fill the window.
-    sqlx::query(
-        "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig) \
-         SELECT $1, sha256(g::text::bytea), sha256(g::text::bytea), to_timestamp(1700000001 + g), \
-                9, '[]'::jsonb, 'planning notes ' || g, 'signature' \
-         FROM generate_series(1, 1000) g",
-    )
-    .bind(c.as_uuid())
-    .execute(&pool)
-    .await
-    .expect("insert newer matches");
+    let (old, old_profile) = (rand_bytes32(), rand_bytes32());
+    for (id, kind) in [(old, 9), (old_profile, 0)] {
+        insert_event(
+            &pool,
+            c,
+            id,
+            rand_bytes32(),
+            kind,
+            "planning planning planning planning",
+            None,
+            1_700_000_000,
+        )
+        .await;
+        // 1000 newer, weaker matches fill the window.
+        sqlx::query(
+            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig) \
+             SELECT $1, sha256((g || '/' || $2)::bytea), sha256((g || '/' || $2)::bytea), \
+                    to_timestamp(1700000001 + g), $2, '[]'::jsonb, 'planning notes ' || g, 'signature' \
+             FROM generate_series(1, 1000) g",
+        )
+        .bind(c.as_uuid())
+        .bind(kind)
+        .execute(&pool)
+        .await
+        .expect("insert newer matches");
+    }
 
     let svc = SearchService::new(pool.clone());
     let query = |q: &str, mode, page| SearchQuery {
@@ -622,6 +626,19 @@ async fn prefix_relevance_ranks_only_the_newest_matches() {
         .await
         .expect("page 51");
     assert!(past.hits.is_empty(), "no page past the window");
+
+    let profiles = ids(svc
+        .search(&SearchQuery {
+            kinds: Some(vec![0]),
+            ..query("plan", buzz_search::SearchMode::Prefix, 1)
+        })
+        .await
+        .expect("profile prefix"));
+    assert_eq!(
+        profiles.first(),
+        Some(&old_profile),
+        "profile typeahead ranks every match"
+    );
 
     teardown(pool, &schema).await;
 }
