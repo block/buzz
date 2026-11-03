@@ -315,3 +315,15 @@ BEGIN
     END IF;
 END
 $$;
+
+INSERT INTO _operator_global_tables (table_name, reason) VALUES
+    ('community_auth_upgrades', 'operator acceptance receipts retained for idempotency after target deletion')
+ON CONFLICT (table_name) DO NOTHING;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM _operator_global_tables WHERE table_name = 'community_auth_upgrades') THEN
+        RAISE EXCEPTION 'community auth upgrade receipts must be operator-global';
+    END IF;
+END
+$$;

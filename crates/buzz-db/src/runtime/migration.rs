@@ -564,6 +564,7 @@ mod postgres_tests {
             "storage_accounting_snapshots",
             "operator_listener_pubkeys",
             "operator_listener_outbox",
+            "community_auth_upgrades",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -2889,6 +2890,7 @@ mod postgres_tests {
             "relay_admin_actions",
             "relay_admin_outbox",
             "relay_operator_audit",
+            "community_auth_upgrades",
             "entity_deletion_approvals",
             "entity_deletion_requests",
             "artifact_heads",

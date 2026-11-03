@@ -444,6 +444,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(api::operator::community_nip_fi_binding),
         )
         .route(
+            "/operator/communities/nip-fi-upgrade",
+            get(api::operator::community_nip_fi_upgrade_status)
+                .post(api::operator::enable_community_nip_fi)
+                .layer(axum::middleware::map_response(
+                    api::operator::no_store_upgrade_response,
+                )),
+        )
+        .route(
             "/operator/communities/transfer",
             post(api::operator::transfer_community),
         )
