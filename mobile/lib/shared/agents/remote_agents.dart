@@ -118,6 +118,20 @@ final remoteAgentControllerProvider = Provider<RemoteAgentController>((ref) {
   return controller;
 });
 
+/// Changes when this device publishes or removes a remote agent registration,
+/// so caches of the owner's agent inventory can reload.
+final remoteAgentRegistrationRevisionProvider = Provider<int>((ref) {
+  final controller = ref.watch(remoteAgentControllerProvider);
+  final revision = controller.registrationRevision;
+  void changed() {
+    if (controller.registrationRevision != revision) ref.invalidateSelf();
+  }
+
+  controller.addListener(changed);
+  ref.onDispose(() => controller.removeListener(changed));
+  return revision;
+});
+
 /// The active community's remote agents that the signed-in owner's registry
 /// reports ACTIVE. Remote workers wake on messages, so this means available,
 /// not socket presence.
