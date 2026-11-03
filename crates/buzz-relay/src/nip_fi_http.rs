@@ -392,7 +392,11 @@ where
         if let Some(reason) = reason {
             metrics::counter!("buzz_auth_failures_total", "reason" => reason).increment(1);
         }
-        http_denial(deny.class)
+        if deny.stage == Stage::Community {
+            crate::nip_fi_core::unresolved_host_denial(deny.class)
+        } else {
+            http_denial(deny.class)
+        }
     })?;
     // The handler may have awaited (tenant lookup) since the guard resolved
     // the community; a snapshot that went stale meanwhile admits nothing.
@@ -1819,7 +1823,16 @@ mod tests {
             )
             .now_or_never()
             .expect("env resolution never waits");
-            let (status, body) = denial_parts(outcome);
+            let Err(resp) = outcome else {
+                panic!("expected a denial")
+            };
+            assert!(
+                resp.extensions()
+                    .get::<crate::nip_fi_core::UnresolvedHost>()
+                    .is_some(),
+                "unmapped-host denial must be marked for the trace classifier"
+            );
+            let (status, body) = denial_parts(Err(resp));
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(body, b"authorization unavailable\n");
             assert!(

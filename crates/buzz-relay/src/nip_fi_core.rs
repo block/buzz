@@ -294,6 +294,20 @@ pub(crate) fn http_denial(class: DenialClass) -> Response<Body> {
         .unwrap_or_else(|_| status.into_response())
 }
 
+/// Response extension on an enforce denial whose request Host resolved to no
+/// community. The HTTP trace layer reads it to treat the denial as an
+/// expected rejection, not a server failure. It never reaches the wire.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct UnresolvedHost;
+
+/// [`http_denial`] for a request whose Host resolved to no community: the
+/// same wire response, marked with [`UnresolvedHost`].
+pub(crate) fn unresolved_host_denial(class: DenialClass) -> Response<Body> {
+    let mut response = http_denial(class);
+    response.extensions_mut().insert(UnresolvedHost);
+    response
+}
+
 /// Fixtures for tests that drive an enforce-mode adapter against one mapped
 /// community.
 #[cfg(test)]
