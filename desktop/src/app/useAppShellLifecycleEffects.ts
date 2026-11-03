@@ -41,23 +41,6 @@ export function useAppShellLifecycleEffects({
     void startBootWarm(queryClient);
   }, [queryClient]);
 
-  // Prevent webview file:/// navigation on file drop outside the composer.
-  // Scoped to file drags only (text drag-and-drop into inputs still works).
-  // Composer's onDrop fires first (React synthetic before window bubble).
-  React.useEffect(() => {
-    function preventNavigation(e: DragEvent) {
-      if (e.dataTransfer?.types.includes("Files")) {
-        e.preventDefault();
-      }
-    }
-    window.addEventListener("dragover", preventNavigation);
-    window.addEventListener("drop", preventNavigation);
-    return () => {
-      window.removeEventListener("dragover", preventNavigation);
-      window.removeEventListener("drop", preventNavigation);
-    };
-  }, []);
-
   React.useEffect(() => {
     let isCancelled = false;
     void relayClient.preconnect().catch((error) => {
