@@ -110,6 +110,44 @@ void main() {
       },
     );
 
+    testWidgets('legacy pairing hides cancellation during storage', (
+      tester,
+    ) async {
+      final auth = FakeAuthNotifier()
+        ..entered = Completer<void>()
+        ..authentication = Completer<void>();
+      final notifier = PairingNotifier(
+        credentialValidator: ({required relayUrl, required nsec}) async {},
+      );
+      container = ProviderContainer(
+        overrides: [
+          pairingProvider.overrideWith(() => notifier),
+          authProvider.overrideWith(() => auth),
+        ],
+      );
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: const PairingPage(),
+          ),
+        ),
+      );
+      final pending = notifier.pair(
+        _encodePairingCode(nsec: nostr.Keys.generate().nsec),
+      );
+      await auth.entered!.future;
+      await tester.pump();
+      expect(container.read(pairingProvider).status, PairingStatus.storing);
+      expect(find.text('Cancel'), findsNothing);
+      auth.authentication!.complete();
+      await pending;
+      await tester.pump();
+      expect(container.read(pairingProvider).status, PairingStatus.success);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
     test('starts in idle state', () {
       container = createContainer();
       final state = container.read(pairingProvider);
