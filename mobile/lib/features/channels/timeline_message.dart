@@ -257,59 +257,39 @@ class MainTimelineEntry {
   const MainTimelineEntry({required this.message, this.summary});
 }
 
-/// Largest gap between adjacent membership changes that still groups them.
-const _membershipGroupGapSeconds = 60 * 60;
-
-@immutable
-class _MembershipChange {
-  final String actor;
-  final SystemEventType type;
-
-  const _MembershipChange({required this.actor, required this.type});
+/// Whether [message] is a self-join or a voluntary leave. Like desktop, the
+/// timeline leaves these out: only additions by someone else and removals
+/// show as membership notices.
+bool isHiddenMembershipNotice(TimelineMessage message) {
+  final event = message.systemEvent;
+  if (!message.isSystem || event == null) return false;
+  if (event.type == SystemEventType.memberLeft) return true;
+  if (event.type != SystemEventType.memberJoined) return false;
+  final actor = event.actorPubkey?.trim().toLowerCase();
+  return actor != null &&
+      actor.isNotEmpty &&
+      actor == event.targetPubkey?.trim().toLowerCase();
 }
 
-_MembershipChange? _membershipChange(MainTimelineEntry entry) {
+bool _isGroupableMembership(MainTimelineEntry entry) {
   final event = entry.message.systemEvent;
   if (!entry.message.isSystem ||
       (event?.type != SystemEventType.memberJoined &&
-          event?.type != SystemEventType.memberRemoved &&
-          event?.type != SystemEventType.memberLeft)) {
-    return null;
+          event?.type != SystemEventType.memberRemoved)) {
+    return false;
   }
-
-  final actor = event?.actorPubkey?.trim().toLowerCase();
-  final target = event?.targetPubkey?.trim().toLowerCase();
-  if (actor == null || actor.isEmpty || target == null || target.isEmpty) {
-    return null;
-  }
-  return _MembershipChange(type: event!.type, actor: actor);
+  final actor = event?.actorPubkey?.trim();
+  final target = event?.targetPubkey?.trim();
+  return actor != null &&
+      actor.isNotEmpty &&
+      target != null &&
+      target.isNotEmpty;
 }
 
-/// Matches desktop: all arrivals group together whoever added them, all
-/// departures group together, and removals group only under one remover so
-/// the row never attributes a removal to the wrong person.
-bool _membershipChangesCanGroup(
-  _MembershipChange older,
-  _MembershipChange newest,
-) {
-  return older.type == newest.type &&
-      (newest.type != SystemEventType.memberRemoved ||
-          older.actor == newest.actor);
-}
-
-bool _isSameLocalDay(int firstTimestamp, int secondTimestamp) {
-  final first = DateTime.fromMillisecondsSinceEpoch(firstTimestamp * 1000);
-  final second = DateTime.fromMillisecondsSinceEpoch(secondTimestamp * 1000);
-  return first.year == second.year &&
-      first.month == second.month &&
-      first.day == second.day;
-}
-
-/// Groups consecutive compatible arrivals, departures, or removals into one
-/// render item while each adjacent pair is under an hour apart, matching the
-/// desktop timeline. Other events and local day boundaries break the group.
-/// Groups are anchored on the newest change so prepending older history keeps
-/// loaded groups stable.
+/// Groups each uninterrupted run of additions and removals into one render
+/// item, matching the desktop timeline: any other entry breaks a run, but
+/// elapsed time, local day boundaries and different actors do not. Callers
+/// leave out [isHiddenMembershipNotice] entries first.
 ///
 /// Each inner list is one renderable timeline item. Non-grouped entries are
 /// returned as single-item lists.
@@ -319,29 +299,13 @@ List<List<MainTimelineEntry>> groupMembershipTimelineEntries(
   final groupsByStart = <int, int>{};
 
   for (var end = entries.length - 1; end >= 0;) {
-    final newestEntry = entries[end];
-    final newestChange = _membershipChange(newestEntry);
-    if (newestChange == null) {
+    if (!_isGroupableMembership(entries[end])) {
       end -= 1;
       continue;
     }
 
     var start = end;
-    while (start > 0) {
-      final candidate = entries[start - 1];
-      final next = entries[start];
-      final candidateChange = _membershipChange(candidate);
-      if (candidateChange == null ||
-          !_membershipChangesCanGroup(candidateChange, newestChange) ||
-          !_isSameLocalDay(
-            candidate.message.createdAt,
-            next.message.createdAt,
-          ) ||
-          next.message.createdAt < candidate.message.createdAt ||
-          next.message.createdAt - candidate.message.createdAt >
-              _membershipGroupGapSeconds) {
-        break;
-      }
+    while (start > 0 && _isGroupableMembership(entries[start - 1])) {
       start -= 1;
     }
 

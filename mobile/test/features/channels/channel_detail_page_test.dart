@@ -4459,12 +4459,13 @@ void main() {
               payload: {
                 'type': 'member_joined',
                 'actor': 'alice',
-                'target': 'alice',
+                'target': 'bob',
               },
             ),
           ],
           users: const {
             'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
           },
         ),
       );
@@ -4488,7 +4489,7 @@ void main() {
       );
       expect(find.byType(BottomSheet), findsOneWidget);
       expect(find.text('Copy text'), findsNothing);
-      expect(findRichText('joined the channel'), findsOneWidget);
+      expect(findRichText(' added '), findsOneWidget);
       expect(hapticCalls, hasLength(1));
       expect(hapticCalls.single.arguments, 'HapticFeedbackType.mediumImpact');
 
@@ -4508,11 +4509,7 @@ void main() {
           messages: [
             _systemMsg(
               id: 'rebuild-target',
-              payload: {
-                'type': 'member_joined',
-                'actor': 'alice',
-                'target': 'alice',
-              },
+              payload: {'type': 'channel_archived', 'actor': 'alice'},
             ),
           ],
           userCacheNotifier: userCache,
@@ -10023,9 +10020,7 @@ void main() {
       },
     );
 
-    testWidgets('renders member_joined (self-join) system event', (
-      tester,
-    ) async {
+    testWidgets('hides a self-join', (tester) async {
       final messages = [
         _systemMsg(
           id: 'sys1',
@@ -10041,9 +10036,11 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Bob'), findsOneWidget);
-      expect(findRichText('joined the channel'), findsOneWidget);
-      expect(find.byType(CircleAvatar), findsNothing);
+      expect(
+        find.byKey(const ValueKey('system-message-row-sys1')),
+        findsNothing,
+      );
+      expect(findRichText('joined the channel'), findsNothing);
     });
 
     testWidgets('opens a profile sheet from a membership activity name', (
@@ -10648,63 +10645,122 @@ void main() {
       );
     }
 
-    for (final left in [false, true]) {
-      testWidgets('collapses mixed membership runs into one row, left=$left', (
-        tester,
-      ) async {
-        NostrEvent change(String id, String actor, String target, int at) =>
-            _systemMsg(
-              id: id,
-              payload: {
-                'type': left ? 'member_left' : 'member_joined',
-                'actor': actor,
-                'target': target,
-              },
-              createdAt: at,
-            );
-        await tester.pumpWidget(
-          _buildTestable(
-            messages: [
-              change('sys1', 'alice', 'alice', 1000),
-              if (left)
-                change('sys2', 'bob', 'bob', 1600)
-              else
-                change('sys2', 'carol', 'bob', 1600),
-              change('sys3', 'dave', 'dave', 2200),
-              change('sys4', 'erin', 'erin', 2800),
-            ],
-            users: {
-              for (final name in ['alice', 'bob', 'carol', 'dave', 'erin'])
-                name: UserProfile(pubkey: name, displayName: name),
-            },
-          ),
-        );
-        await tester.pumpAndSettle();
+    testWidgets('hides self-joins and leaves and collapses the rest', (
+      tester,
+    ) async {
+      NostrEvent change(String id, Map<String, Object> payload, int at) =>
+          _systemMsg(id: id, payload: payload, createdAt: at);
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            change('sys1', {
+              'type': 'member_joined',
+              'actor': 'alice',
+              'target': 'alice',
+            }, 1000),
+            change('sys2', {
+              'type': 'member_joined',
+              'actor': 'carol',
+              'target': 'bob',
+            }, 1600),
+            // A normal Leave (kind 9022) carries only the actor.
+            change('sys3', {'type': 'member_left', 'actor': 'dave'}, 2200),
+            // Removing yourself (kind 9001) also names the target.
+            change('sys4', {
+              'type': 'member_left',
+              'actor': 'erin',
+              'target': 'erin',
+            }, 2800),
+            // Hours later, by a different adder and a remover.
+            change('sys5', {
+              'type': 'member_joined',
+              'actor': 'alice',
+              'target': 'frank',
+            }, 2800 + 5 * 3600),
+            change('sys6', {
+              'type': 'member_removed',
+              'actor': 'carol',
+              'target': 'gina',
+            }, 2900 + 5 * 3600),
+          ],
+          users: {
+            for (final name in [
+              'alice',
+              'bob',
+              'carol',
+              'dave',
+              'erin',
+              'frank',
+              'gina',
+            ])
+              name: UserProfile(pubkey: name, displayName: name),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
 
-        expect(
-          find.byKey(const ValueKey('system-message-row-sys1')),
-          findsOneWidget,
-        );
-        for (final id in ['sys2', 'sys3', 'sys4']) {
-          expect(find.byKey(ValueKey('system-message-row-$id')), findsNothing);
-        }
-        expect(
-          findRichText(
-            left
-                ? 'left the channel along with '
-                : 'joined the channel along with ',
-          ),
-          findsOneWidget,
-        );
-        expect(findRichText('and 2 others'), findsOneWidget);
-        await tester.tap(find.text('See all'));
-        await tester.pumpAndSettle();
-        expect(
-          find.text(left ? 'Members who left' : 'New members'),
-          findsOneWidget,
-        );
-      });
-    }
+      expect(
+        find.byKey(const ValueKey('system-message-row-sys2')),
+        findsOneWidget,
+      );
+      for (final id in ['sys1', 'sys3', 'sys4', 'sys5', 'sys6']) {
+        expect(find.byKey(ValueKey('system-message-row-$id')), findsNothing);
+      }
+      expect(findRichText('joined the channel'), findsNothing);
+      expect(findRichText('left the channel'), findsNothing);
+      expect(findRichText(' were added · '), findsOneWidget);
+      expect(findRichText(' was removed'), findsOneWidget);
+      for (final name in ['bob', 'gina', '1 other']) {
+        expect(find.text(name), findsOneWidget);
+      }
+
+      await tester.tap(find.text('1 other'));
+      await tester.pumpAndSettle();
+      expect(find.text('Added members'), findsOneWidget);
+      for (final pubkey in ['bob', 'frank']) {
+        expect(find.byKey(ValueKey('activity-member-$pubkey')), findsOneWidget);
+      }
+    });
+
+    testWidgets('names no adder when several people added members', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _systemMsg(
+              id: 'sys1',
+              payload: {
+                'type': 'member_joined',
+                'actor': 'alice',
+                'target': 'bob',
+              },
+              createdAt: 1000,
+            ),
+            _systemMsg(
+              id: 'sys2',
+              payload: {
+                'type': 'member_joined',
+                'actor': 'carol',
+                'target': 'dave',
+              },
+              createdAt: 1060,
+            ),
+          ],
+          users: {
+            for (final name in ['alice', 'bob', 'carol', 'dave'])
+              name: UserProfile(pubkey: name, displayName: name),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(findRichText(' were added to the channel'), findsOneWidget);
+      expect(find.text('bob'), findsOneWidget);
+      expect(find.text('dave'), findsOneWidget);
+      expect(find.text('alice'), findsNothing);
+      expect(find.text('carol'), findsNothing);
+    });
 
     testWidgets('aligns grouped reactions with the system message content', (
       tester,
@@ -10804,7 +10860,7 @@ void main() {
       expect(find.byKey(const ValueKey('add-reaction-pill')), findsNothing);
     });
 
-    testWidgets('renders member_left system event', (tester) async {
+    testWidgets('hides a voluntary leave', (tester) async {
       final messages = [
         _systemMsg(
           id: 'sys1',
@@ -10820,8 +10876,10 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Bob'), findsOneWidget);
-      expect(findRichText('left the channel'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('system-message-row-sys1')),
+        findsNothing,
+      );
     });
 
     testWidgets('renders member_removed system event', (tester) async {
@@ -10893,7 +10951,11 @@ void main() {
         ),
         _systemMsg(
           id: 'sys1',
-          payload: {'type': 'member_joined', 'actor': 'bob', 'target': 'bob'},
+          payload: {
+            'type': 'member_removed',
+            'actor': 'bob',
+            'target': 'carol',
+          },
           createdAt: 1010,
         ),
         _textMsg(
@@ -13009,7 +13071,7 @@ void main() {
         ),
         _systemMsg(
           id: 'sys2',
-          payload: {'type': 'member_joined', 'actor': 'bob', 'target': 'bob'},
+          payload: {'type': 'member_joined', 'actor': 'alice', 'target': 'bob'},
           createdAt: 1100,
         ),
         _textMsg(
@@ -13031,11 +13093,11 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Alice'), findsNWidgets(2));
+      expect(find.text('Alice'), findsNWidgets(3));
       expect(findRichText('created this channel'), findsOneWidget);
       expect(findRichText('Welcome everyone!'), findsOneWidget);
       expect(find.text('Bob'), findsNWidgets(2));
-      expect(findRichText('joined the channel'), findsOneWidget);
+      expect(findRichText(' to the channel'), findsOneWidget);
       expect(findRichText('Thanks for the invite!'), findsOneWidget);
     });
   });
