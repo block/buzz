@@ -1219,7 +1219,15 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(reaper_interval_secs)).await;
 
-                let expired = match reaper_state.db.reap_expired_ephemeral_channels().await {
+                // One reaper transaction holds at most this many channel gates,
+                // the same bound as one guarded lifecycle request.
+                let expired = match reaper_state
+                    .db
+                    .reap_expired_ephemeral_channels(
+                        reaper_state.config.lifecycle_max_subtree_channels,
+                    )
+                    .await
+                {
                     Ok(ids) => ids,
                     Err(e) => {
                         error!("Ephemeral reaper tick failed: {e}");

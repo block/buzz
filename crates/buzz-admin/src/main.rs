@@ -818,8 +818,14 @@ async fn reconcile_channels(
                     .tags(tags)
                     .sign_with_keys(&relay_keys)
                     .map_err(|e| anyhow::anyhow!("sign kind:39000: {e}"))?;
-                db.replace_addressable_event(tenant.community(), &event, Some(channel.id))
-                    .await?;
+                db.replace_addressable_event(
+                    tenant.community(),
+                    &event,
+                    Some(channel.id),
+                    // Relay discovery state: archived channels still describe themselves.
+                    buzz_db::ArchiveGate::Exempt,
+                )
+                .await?;
             }
 
             // kind:39001 — admins
@@ -841,8 +847,14 @@ async fn reconcile_channels(
                     .tags(tags)
                     .sign_with_keys(&relay_keys)
                     .map_err(|e| anyhow::anyhow!("sign kind:39001: {e}"))?;
-                db.replace_addressable_event(tenant.community(), &event, Some(channel.id))
-                    .await?;
+                db.replace_addressable_event(
+                    tenant.community(),
+                    &event,
+                    Some(channel.id),
+                    // Relay discovery state: archived channels still describe themselves.
+                    buzz_db::ArchiveGate::Exempt,
+                )
+                .await?;
             }
         }
 
@@ -862,8 +874,14 @@ async fn reconcile_channels(
                 .tags(tags)
                 .sign_with_keys(&relay_keys)
                 .map_err(|e| anyhow::anyhow!("sign kind:39002: {e}"))?;
-            db.replace_addressable_event(tenant.community(), &event, Some(channel.id))
-                .await?;
+            db.replace_addressable_event(
+                tenant.community(),
+                &event,
+                Some(channel.id),
+                // Relay discovery state: archived channels still describe themselves.
+                buzz_db::ArchiveGate::Exempt,
+            )
+            .await?;
         }
 
         reconciled += 1;

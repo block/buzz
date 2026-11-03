@@ -21,13 +21,13 @@ use buzz_core::kind::*;
 use buzz_core::tenant::{CommunityId, TenantContext};
 use buzz_datastore_tracing::datastore_span;
 use buzz_db::workflow::{ApprovalStatus, RunStatus};
-use buzz_db::DbError;
+use buzz_db::{ArchiveGate, DbError};
 use buzz_workflow::executor::TriggerContext;
 
 use crate::state::AppState;
 use crate::webhook_secret;
 
-use super::ingest::{extract_channel_id, IngestAuth, IngestError, IngestResult};
+use super::ingest::{extract_channel_id, gated_write_error, IngestAuth, IngestError, IngestResult};
 use super::side_effects::{
     emit_group_discovery_events, emit_membership_notification, emit_system_message,
     publish_dm_visibility_snapshot,
@@ -98,16 +98,26 @@ enum PersistResult {
 /// persists without the event record. On retry, the event INSERT succeeds
 /// (no conflict), and the mutation re-executes — which is safe for idempotent
 /// operations (open_dm, hide_dm, update_approval, upsert_workflow).
+///
+/// Under [`ArchiveGate::Refuse`] the transaction first takes the write gate
+/// of the event's channel and of `gate_channels` (and, for a replaceable
+/// command, of the channels of its live versions), so a command into an
+/// archived channel is refused and stores nothing. `gate_channels` does not
+/// change where the event is stored. The mutations that follow take no gate.
 #[datastore_span(name = "persist_command_event", system = "postgresql")]
 async fn persist_command_event(
     db: &buzz_db::Db,
     tenant: &TenantContext,
     event: &Event,
     channel_id_override: Option<Uuid>,
+    gate: ArchiveGate,
+    gate_channels: &[Uuid],
 ) -> Result<PersistResult, IngestError> {
     use buzz_db::replaceable::{ParameterizedReplacePrecondition, ParameterizedReplaceStatus};
 
     let channel_id = channel_id_override.or_else(|| extract_channel_id(event));
+    let mut gated = gate_channels.to_vec();
+    gated.extend(channel_id);
     let mut tx = db
         .begin_event_write_transaction(tenant.community())
         .await
@@ -127,6 +137,11 @@ async fn persist_command_event(
                 buzz_db::event::D_TAG_MAX_LEN,
             )));
         }
+        let gates = buzz_db::replaceable::lock_parameterized_write_gates(
+            &mut tx, gate, event, d_tag, &gated,
+        )
+        .await
+        .map_err(|error| gated_write_error(error, "persist command event: "))?;
 
         let kind = event.kind.as_u16() as i32;
         let (expected_revision, revision_error) = match parse_expected_workflow_revision(
@@ -150,11 +165,10 @@ async fn persist_command_event(
                 d_tag,
                 channel_id,
                 precondition,
+                &gates,
             )
             .await
-            .map_err(|e| {
-                IngestError::Internal(format!("error: replace parameterized event: {e}"))
-            })?;
+            .map_err(|error| gated_write_error(error, "persist command event: "))?;
 
         return match result.status {
             ParameterizedReplaceStatus::Inserted => Ok(PersistResult::Inserted(tx)),
@@ -182,9 +196,12 @@ async fn persist_command_event(
         };
     }
 
+    buzz_db::lifecycle::lock_write_gates(&mut tx, gate, &gated)
+        .await
+        .map_err(|error| gated_write_error(error, "persist command event: "))?;
     let (_, was_inserted) = buzz_db::event::insert_event_in_transaction(&mut tx, event, channel_id)
         .await
-        .map_err(|e| IngestError::Internal(format!("error: insert event: {e}")))?;
+        .map_err(|error| gated_write_error(error, "persist command event: "))?;
     if was_inserted {
         Ok(PersistResult::Inserted(tx))
     } else {
@@ -329,8 +346,13 @@ async fn handle_dm_open(
         }
     }
 
-    // Persist the command event (idempotency) — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
+    // Persist the command event (idempotency) — returns open transaction.
+    // Refuse gates only the event's own h channel. dm_open names its DM by
+    // participants, not by h, so re-opening an archived DM only clears the
+    // caller's own hidden_at (Q2) and is not refused. A new DM is a new channel.
+    let tx = match persist_command_event(&state.db, tenant, event, None, ArchiveGate::Refuse, &[])
+        .await?
+    {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -492,7 +514,9 @@ async fn handle_dm_add_member(
     }
 
     // Persist the command event — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
+    let tx = match persist_command_event(&state.db, tenant, event, None, ArchiveGate::Refuse, &[])
+        .await?
+    {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -597,8 +621,11 @@ async fn handle_dm_hide(
         return Err(IngestError::Rejected("invalid: channel is not a DM".into()));
     }
 
-    // Persist the command event — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
+    // Persist the command event — returns open transaction. Hiding a DM is
+    // the caller's own view state, so an archived DM does not refuse it (Q2).
+    let tx = match persist_command_event(&state.db, tenant, event, None, ArchiveGate::Exempt, &[])
+        .await?
+    {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -750,7 +777,9 @@ async fn handle_workflow_def(
     let hash = compute_definition_hash(&definition_json_final);
 
     // Persist the command event — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
+    let tx = match persist_command_event(&state.db, tenant, event, None, ArchiveGate::Refuse, &[])
+        .await?
+    {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -892,7 +921,16 @@ async fn handle_workflow_trigger(
     // Persist the command event under the workflow channel even though the
     // trigger event itself only carries the workflow UUID. Storing channel
     // triggers as global events leaks workflow IDs to unrelated relay members.
-    let tx = match persist_command_event(&state.db, tenant, event, workflow.channel_id).await? {
+    let mut tx = match persist_command_event(
+        &state.db,
+        tenant,
+        event,
+        workflow.channel_id,
+        ArchiveGate::Refuse,
+        &[],
+    )
+    .await?
+    {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -902,6 +940,10 @@ async fn handle_workflow_trigger(
         }
         PersistResult::Inserted(tx) => tx,
     };
+    // The binding read before T1 may be stale: hold it on T1 and check it.
+    buzz_db::workflow::verify_workflow_channel(&mut tx, workflow_id, wf_channel_id)
+        .await
+        .map_err(|error| gated_write_error(error, "verify workflow channel: "))?;
 
     // 4. Execute: create workflow run
     let mut trigger_ctx = TriggerContext {
@@ -926,6 +968,8 @@ async fn handle_workflow_trigger(
     let trigger_ctx_json = serde_json::to_value(&trigger_ctx).ok();
 
     let event_id_bytes = event.id.as_bytes().to_vec();
+    // Exempt: T1 holds the gate and the binding. A gate on this second
+    // connection could queue behind an archive that waits for T1.
     let run_id = state
         .db
         .create_workflow_run(
@@ -933,6 +977,7 @@ async fn handle_workflow_trigger(
             workflow_id,
             Some(&event_id_bytes),
             trigger_ctx_json.as_ref(),
+            ArchiveGate::Exempt,
         )
         .await
         .map_err(|e| IngestError::Internal(format!("error: db create_workflow_run: {e}")))?;
@@ -1032,6 +1077,34 @@ fn check_approver_spec(approver_spec: &str, requester_hex: &str) -> Result<(), I
     )))
 }
 
+/// The channel of the workflow `approval` belongs to, which the approval
+/// command gates in its first transaction. A missing workflow or one with no
+/// channel fails closed, so no approval takes an empty gate set. No re-read
+/// under the gate: a rebind deletes the workflow, the delete cascades to the
+/// approval row, `update_approval_by_stored_hash` returns false, and the
+/// command fails before the T1 commit and the post-commit spawn.
+async fn approval_gate_channel(
+    state: &AppState,
+    tenant: &TenantContext,
+    approval: &buzz_db::workflow::ApprovalRecord,
+) -> Result<Uuid, IngestError> {
+    match state
+        .db
+        .get_workflow(tenant.community(), approval.workflow_id)
+        .await
+    {
+        Ok(workflow) => workflow.channel_id.ok_or_else(|| {
+            IngestError::Rejected("forbidden: workflow has no channel scope".into())
+        }),
+        Err(DbError::NotFound(_)) => {
+            Err(IngestError::Rejected("invalid: approval not found".into()))
+        }
+        Err(e) => Err(IngestError::Internal(format!(
+            "error: db get_workflow: {e}"
+        ))),
+    }
+}
+
 async fn handle_approval_grant(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -1075,8 +1148,19 @@ async fn handle_approval_grant(
     // 4. Validate caller is authorized approver
     check_approver_spec(&approval.approver_spec, &self_hex)?;
 
-    // Persist the command event — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
+    // Persist the command event — returns open transaction. It gates the
+    // workflow's channel, so an archived channel refuses the approval.
+    let channel = approval_gate_channel(state, tenant, &approval).await?;
+    let tx = match persist_command_event(
+        &state.db,
+        tenant,
+        event,
+        None,
+        ArchiveGate::Refuse,
+        &[channel],
+    )
+    .await?
+    {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -1186,8 +1270,19 @@ async fn handle_approval_deny(
     // 4. Validate caller is authorized approver
     check_approver_spec(&approval.approver_spec, &self_hex)?;
 
-    // Persist the command event — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
+    // Persist the command event — returns open transaction. It gates the
+    // workflow's channel, so an archived channel refuses the approval.
+    let channel = approval_gate_channel(state, tenant, &approval).await?;
+    let tx = match persist_command_event(
+        &state.db,
+        tenant,
+        event,
+        None,
+        ArchiveGate::Refuse,
+        &[channel],
+    )
+    .await?
+    {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -1504,7 +1599,15 @@ mod postgres_tests {
             Some(&missing_revision),
             "missing-revision",
         );
-        let error = match persist_command_event(&db, &tenant, &missing_revision_update, None).await
+        let error = match persist_command_event(
+            &db,
+            &tenant,
+            &missing_revision_update,
+            None,
+            ArchiveGate::Exempt,
+            &[],
+        )
+        .await
         {
             Err(error) => error,
             Ok(_) => panic!("missing revision must not create a workflow"),
@@ -1515,15 +1618,16 @@ mod postgres_tests {
                 if message == "conflict: workflow revision does not exist"
         ));
 
-        let PersistResult::Inserted(tx) = persist_command_event(&db, &tenant, &create, None)
-            .await
-            .expect("persist create")
+        let PersistResult::Inserted(tx) =
+            persist_command_event(&db, &tenant, &create, None, ArchiveGate::Exempt, &[])
+                .await
+                .expect("persist create")
         else {
             panic!("first create must insert");
         };
         tx.commit().await.expect("commit create");
         assert!(matches!(
-            persist_command_event(&db, &tenant, &create, None)
+            persist_command_event(&db, &tenant, &create, None, ArchiveGate::Exempt, &[])
                 .await
                 .expect("replay create"),
             PersistResult::Duplicate
@@ -1557,15 +1661,16 @@ mod postgres_tests {
             .find(|candidate| candidate.id.as_bytes() > update.id.as_bytes())
             .expect("find same-second CAS-matching update dominated by current head");
 
-        let PersistResult::Inserted(tx) = persist_command_event(&db, &tenant, &update, None)
-            .await
-            .expect("persist update")
+        let PersistResult::Inserted(tx) =
+            persist_command_event(&db, &tenant, &update, None, ArchiveGate::Exempt, &[])
+                .await
+                .expect("persist update")
         else {
             panic!("matching update must insert");
         };
         tx.commit().await.expect("commit update");
         assert!(matches!(
-            persist_command_event(&db, &tenant, &update, None)
+            persist_command_event(&db, &tenant, &update, None, ArchiveGate::Exempt, &[])
                 .await
                 .expect("replay update"),
             PersistResult::Duplicate
@@ -1578,7 +1683,16 @@ mod postgres_tests {
             Some(&create_revision),
             "stale-revision",
         );
-        let error = match persist_command_event(&db, &tenant, &stale_revision_update, None).await {
+        let error = match persist_command_event(
+            &db,
+            &tenant,
+            &stale_revision_update,
+            None,
+            ArchiveGate::Exempt,
+            &[],
+        )
+        .await
+        {
             Err(error) => error,
             Ok(_) => panic!("stale revision must not replace the current workflow"),
         };
@@ -1588,7 +1702,16 @@ mod postgres_tests {
                 if message == "conflict: workflow changed since it was loaded"
         ));
 
-        let error = match persist_command_event(&db, &tenant, &dominated_update, None).await {
+        let error = match persist_command_event(
+            &db,
+            &tenant,
+            &dominated_update,
+            None,
+            ArchiveGate::Exempt,
+            &[],
+        )
+        .await
+        {
             Err(error) => error,
             Ok(_) => panic!("distinct dominated CAS update must not report duplicate success"),
         };
@@ -1629,7 +1752,7 @@ mod postgres_tests {
         tx.commit().await.expect("commit legacy seed");
 
         assert!(matches!(
-            persist_command_event(&db, &tenant, &legacy, None)
+            persist_command_event(&db, &tenant, &legacy, None, ArchiveGate::Exempt, &[])
                 .await
                 .expect("exact legacy replay must remain idempotent"),
             PersistResult::Duplicate
@@ -1642,10 +1765,13 @@ mod postgres_tests {
             Some("not-hex"),
             "distinct-malformed",
         );
-        let error = match persist_command_event(&db, &tenant, &distinct, None).await {
-            Err(error) => error,
-            Ok(_) => panic!("distinct malformed revision must remain rejected"),
-        };
+        let error =
+            match persist_command_event(&db, &tenant, &distinct, None, ArchiveGate::Exempt, &[])
+                .await
+            {
+                Err(error) => error,
+                Ok(_) => panic!("distinct malformed revision must remain rejected"),
+            };
         assert!(matches!(
             error,
             IngestError::Rejected(ref message)

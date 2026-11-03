@@ -342,7 +342,12 @@ async fn thread_window_batch_discards_earlier_windows_after_revocation() {
             );
             f.state
                 .db
-                .insert_event(f.community, &root, Some(channel))
+                .insert_event(
+                    f.community,
+                    &root,
+                    Some(channel),
+                    buzz_db::ArchiveGate::Exempt,
+                )
                 .await
                 .unwrap();
             f.aux(7, &root, Some(channel)).await;

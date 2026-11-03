@@ -1,12 +1,11 @@
 //! Keep the executable workflow and its client-visible definition in sync.
 
 use buzz_core::{kind::KIND_WORKFLOW_DEF, CommunityId, StoredEvent};
-use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use nostr::Event;
 use uuid::Uuid;
 
-use crate::AdmittedTx;
+use crate::{AdmittedTx, ArchiveGate, WriteGates};
 use crate::{Db, DbError, Result};
 
 /// Committed changes made by a workflow-coordinate deletion.
@@ -26,7 +25,7 @@ impl Db {
     /// retry can remove definitions left behind by older relay versions.
     /// Reports committed changes independently of the optional workflow channel.
     /// No tombstone is retained: clients may intentionally publish backdated definitions.
-    #[datastore_span(name = "delete_workflow_by_coordinate", system = "postgresql")]
+    #[cfg(test)]
     pub async fn delete_workflow_by_coordinate(
         &self,
         community_id: CommunityId,
@@ -35,9 +34,14 @@ impl Db {
         deletion_created_at_secs: i64,
     ) -> Result<WorkflowDeletionOutcome> {
         let mut tx = self.begin_event_write_transaction(community_id).await?;
-        let outcome =
-            delete_workflow_in_transaction(&mut tx, owner_pubkey, d_tag, deletion_created_at_secs)
-                .await?;
+        let outcome = delete_workflow_in_transaction(
+            &mut tx,
+            owner_pubkey,
+            d_tag,
+            deletion_created_at_secs,
+            &WriteGates::exempt(),
+        )
+        .await?;
         tx.commit().await?;
         Ok(outcome)
     }
@@ -48,14 +52,47 @@ impl Db {
     /// inserted the request, or it repaired an older relay's incomplete deletion.
     /// Concurrent identical requests cannot split those two outcomes across commits.
     /// Authorization of the coordinate is the caller's responsibility.
+    ///
+    /// `gate` decides whether the workflow's archived channel refuses the
+    /// deletion (see [`ArchiveGate`]). The workflow's channel is read first,
+    /// its gate is taken before the replacement lock, and the channel is read
+    /// again under the workflow row lock. If it changed, the deletion is
+    /// retried once and then fails with [`DbError::LifecycleConflict`].
     pub async fn insert_workflow_deletion(
         &self,
         community_id: CommunityId,
         event: &Event,
         owner_pubkey: &[u8],
         d_tag: &str,
+        gate: ArchiveGate,
+    ) -> Result<(StoredEvent, bool, Option<Uuid>)> {
+        match self
+            .insert_workflow_deletion_once(community_id, event, owner_pubkey, d_tag, gate)
+            .await
+        {
+            Err(DbError::LifecycleConflict) => {
+                self.insert_workflow_deletion_once(community_id, event, owner_pubkey, d_tag, gate)
+                    .await
+            }
+            result => result,
+        }
+    }
+
+    async fn insert_workflow_deletion_once(
+        &self,
+        community_id: CommunityId,
+        event: &Event,
+        owner_pubkey: &[u8],
+        d_tag: &str,
+        gate: ArchiveGate,
     ) -> Result<(StoredEvent, bool, Option<Uuid>)> {
         let mut tx = self.begin_event_write_transaction(community_id).await?;
+        let gates = if gate == ArchiveGate::Exempt {
+            WriteGates::exempt()
+        } else {
+            let channel = workflow_channel(&mut tx, owner_pubkey, d_tag).await?;
+            crate::lifecycle::lock_write_gates(&mut tx, gate, channel.as_slice()).await?
+        };
         let (stored, inserted) =
             crate::event::insert_event_in_transaction(&mut tx, event, None).await?;
         if inserted {
@@ -68,6 +105,7 @@ impl Db {
             owner_pubkey,
             d_tag,
             event.created_at.as_secs() as i64,
+            &gates,
         )
         .await?;
         tx.commit().await?;
@@ -75,11 +113,36 @@ impl Db {
     }
 }
 
+/// The SQL that finds the workflow of a coordinate: by its UUID `d` tag, or
+/// by the legacy name. `$1` community, `$2` owner, `$3` UUID, `$4` name.
+const WORKFLOW_OF_COORDINATE: &str = "community_id = $1 AND owner_pubkey = $2 \
+     AND id = COALESCE($3::uuid, (SELECT id FROM workflows \
+     WHERE community_id = $1 AND owner_pubkey = $2 AND name = $4 LIMIT 1))";
+
+/// The channel of the workflow a coordinate names, read without a lock.
+async fn workflow_channel(
+    tx: &mut AdmittedTx,
+    owner_pubkey: &[u8],
+    d_tag: &str,
+) -> Result<Option<Uuid>> {
+    let channel: Option<Option<Uuid>> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT channel_id FROM workflows WHERE {WORKFLOW_OF_COORDINATE}"
+    )))
+    .bind(tx.community().as_uuid())
+    .bind(owner_pubkey)
+    .bind(Uuid::parse_str(d_tag).ok())
+    .bind(d_tag)
+    .fetch_optional(tx.conn())
+    .await?;
+    Ok(channel.flatten())
+}
+
 async fn delete_workflow_in_transaction(
     tx: &mut AdmittedTx,
     owner_pubkey: &[u8],
     d_tag: &str,
     deletion_created_at_secs: i64,
+    gates: &WriteGates,
 ) -> Result<WorkflowDeletionOutcome> {
     let community_id = tx.community();
     let cutoff = DateTime::from_timestamp(deletion_created_at_secs, 0)
@@ -119,19 +182,20 @@ async fn delete_workflow_in_transaction(
     let workflow_id = Uuid::parse_str(d_tag).ok();
     // Lock the workflow first: a concurrent run or fire insert must lock it for
     // its foreign key, so the child deletes below see every committed child.
-    let target: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM workflows WHERE community_id = $1 AND owner_pubkey = $2 \
-             AND id = COALESCE($3::uuid, (SELECT id FROM workflows \
-             WHERE community_id = $1 AND owner_pubkey = $2 AND name = $4 LIMIT 1)) \
-             FOR UPDATE",
-    )
+    let target: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT id, channel_id FROM workflows WHERE {WORKFLOW_OF_COORDINATE} FOR UPDATE"
+    )))
     .bind(community_id.as_uuid())
     .bind(owner_pubkey)
     .bind(workflow_id)
     .bind(d_tag)
     .fetch_optional(tx.conn())
     .await?;
-    let deleted_channel = match target {
+    // The gate was taken for the channel read before the locks.
+    if target.is_some_and(|(_, channel)| channel.is_some_and(|channel| !gates.covers(channel))) {
+        return Err(DbError::LifecycleConflict);
+    }
+    let deleted_channel = match target.map(|(id, _)| id) {
         Some(id) => Some(delete_workflow_with_children(tx, id).await?),
         None => None,
     };

@@ -17,7 +17,7 @@ use buzz_core::{CommunityId, StoredEvent};
 use buzz_datastore_tracing::datastore_span;
 
 use crate::error::{DbError, Result};
-use crate::{AdmittedTx, Db};
+use crate::{AdmittedTx, ArchiveGate, Db};
 
 // Compatibility exports preserve the pre-extraction public event-store paths.
 pub use crate::reminder::{
@@ -425,12 +425,16 @@ pub async fn huddle_started_link_exists_in_transaction(
 /// This raw-pool helper does not start application push production. Serving
 /// callers should use [`Db::insert_event`] with a configured [`Db`].
 ///
+/// `gate` decides whether an archived `channel_id` refuses the write (see
+/// [`ArchiveGate`]).
+///
 /// Returns `(StoredEvent, was_inserted)` — `was_inserted` is `false` on duplicate.
 pub async fn insert_event(
     pool: &PgPool,
     community_id: CommunityId,
     event: &Event,
     channel_id: Option<Uuid>,
+    gate: ArchiveGate,
 ) -> Result<(StoredEvent, bool)> {
     let mut tx = crate::begin_community_event_write_transaction(
         pool,
@@ -438,6 +442,7 @@ pub async fn insert_event(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    crate::lifecycle::lock_write_gates(&mut tx, gate, channel_id.as_slice()).await?;
     let result = insert_event_in_transaction(&mut tx, event, channel_id).await?;
     tx.commit().await?;
     Ok(result)
@@ -1351,9 +1356,25 @@ pub async fn soft_delete_by_coordinate(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    let deleted =
+        soft_delete_by_coordinate_in_tx(&mut tx, kind, pubkey, d_tag, deletion_created_at).await?;
+    tx.commit().await?;
+    Ok(deleted)
+}
+
+/// Transaction-scoped body of [`soft_delete_by_coordinate`]. The caller
+/// owns the commit.
+pub(crate) async fn soft_delete_by_coordinate_in_tx(
+    tx: &mut AdmittedTx,
+    kind: i32,
+    pubkey: &[u8],
+    d_tag: &str,
+    deletion_created_at: DateTime<Utc>,
+) -> Result<bool> {
+    let community_id = tx.community();
     let purged = if may_be_retention_free(kind) {
         purge_retention_free_events(
-            &mut tx,
+            tx,
             RetentionFreeTarget::Coordinate {
                 kind,
                 pubkey,
@@ -1385,8 +1406,6 @@ pub async fn soft_delete_by_coordinate(
     .bind(deletion_created_at)
     .execute(tx.conn())
     .await?;
-
-    tx.commit().await?;
 
     Ok(purged > 0 || result.rows_affected() > 0)
 }
@@ -1856,7 +1875,7 @@ pub(crate) async fn get_events_by_ids_on(
 }
 
 /// Parameters for [`insert_event_with_thread_metadata`].
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct ThreadMetadataParams<'a> {
     /// The Nostr event ID of this message.
     pub event_id: &'a [u8],
@@ -2108,6 +2127,9 @@ async fn acquire_canvas_coordinate_lock(tx: &mut AdmittedTx, channel_id: Uuid) -
 /// writes remain unconditional — they never conflict — but must not race the
 /// head read inside a concurrent tagged transaction.
 ///
+/// `gate` decides whether an archived `channel_id` refuses the write (see
+/// [`ArchiveGate`]).
+///
 /// Returns `(StoredEvent, was_inserted)`.
 pub async fn insert_event_with_thread_metadata(
     pool: &PgPool,
@@ -2115,6 +2137,7 @@ pub async fn insert_event_with_thread_metadata(
     event: &Event,
     channel_id: Option<Uuid>,
     thread_meta: Option<ThreadMetadataParams<'_>>,
+    gate: ArchiveGate,
 ) -> Result<(StoredEvent, bool)> {
     let mut tx = crate::begin_community_event_write_transaction(
         pool,
@@ -2122,6 +2145,7 @@ pub async fn insert_event_with_thread_metadata(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    crate::lifecycle::lock_write_gates(&mut tx, gate, channel_id.as_slice()).await?;
     acquire_canvas_event_write_lock_if_needed(&mut tx, event, channel_id).await?;
     let result =
         insert_event_with_thread_metadata_tx(&mut tx, event, channel_id, thread_meta).await?;
@@ -2190,12 +2214,16 @@ fn candidate_supersedes_head(
 /// strictly ahead of the head; if not, returns `SupersedeFailed`. Re-submitting
 /// the byte-identical live head short-circuits to `Duplicate` without evaluating
 /// the precondition (safe transport-retry semantics).
+///
+/// `gate` decides whether an archived channel refuses the write (see
+/// [`ArchiveGate`]); the gate comes before the coordinate lock.
 pub async fn insert_canvas_head_checked(
     pool: &PgPool,
     community_id: CommunityId,
     event: &Event,
     channel_id: Uuid,
     precondition: ChannelHeadPrecondition<'_>,
+    gate: ArchiveGate,
 ) -> Result<(StoredEvent, ChannelHeadWriteStatus)> {
     let kind_i32 = buzz_core::kind::event_kind_i32(event);
     if kind_i32 != KIND_CANVAS as i32 {
@@ -2212,6 +2240,7 @@ pub async fn insert_canvas_head_checked(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    crate::lifecycle::lock_write_gates(&mut tx, gate, &[channel_id]).await?;
     acquire_canvas_coordinate_lock(&mut tx, channel_id).await?;
 
     let head: Option<(Vec<u8>, DateTime<Utc>)> = sqlx::query_as(
@@ -2285,12 +2314,16 @@ pub async fn insert_canvas_head_checked(
 
 impl Db {
     /// Inserts an event. Returns `(StoredEvent, was_inserted)` — `false` on duplicate.
+    ///
+    /// `gate` decides whether an archived `channel_id` refuses the write (see
+    /// [`ArchiveGate`]).
     #[datastore_span(name = "insert_event", system = "postgresql")]
     pub async fn insert_event(
         &self,
         community_id: CommunityId,
         event: &nostr::Event,
         channel_id: Option<Uuid>,
+        gate: ArchiveGate,
     ) -> Result<(StoredEvent, bool)> {
         let mut tx = crate::begin_community_event_write_transaction(
             &self.pool,
@@ -2299,6 +2332,7 @@ impl Db {
         )
         .await?;
         tx.set_push_enqueue(self.push_enqueue.clone());
+        crate::lifecycle::lock_write_gates(&mut tx, gate, channel_id.as_slice()).await?;
         let result = crate::event::insert_event_in_transaction(&mut tx, event, channel_id).await?;
         if result.1 {
             crate::insert_mentions_in_transaction(&mut tx, event, channel_id).await?;
@@ -2681,6 +2715,8 @@ impl Db {
     /// when it is not newer than the deletion request.
     /// Used by NIP-09 a-tag deletion for parameterized-replaceable kinds;
     /// `deletion_created_at_secs` is the deletion event's `created_at`.
+    ///
+    /// Ungated test fixture, no production caller: use [`Db::insert_coordinate_deletion`].
     #[datastore_span(name = "soft_delete_by_coordinate", system = "postgresql")]
     pub async fn soft_delete_by_coordinate(
         &self,
@@ -2702,6 +2738,8 @@ impl Db {
     }
 
     /// Atomically soft-delete an event and decrement thread reply counters.
+    ///
+    /// Ungated test fixture, no production caller: use [`Db::insert_event_deletion`].
     #[datastore_span(name = "soft_delete_event_and_update_thread", system = "postgresql")]
     pub async fn soft_delete_event_and_update_thread(
         &self,
@@ -2816,6 +2854,9 @@ impl Db {
     }
 
     /// Atomically insert an event AND its thread metadata in a single transaction.
+    ///
+    /// `gate` decides whether an archived `channel_id` refuses the write (see
+    /// [`ArchiveGate`]).
     #[datastore_span(name = "insert_event_with_thread_metadata", system = "postgresql")]
     pub async fn insert_event_with_thread_metadata(
         &self,
@@ -2823,6 +2864,7 @@ impl Db {
         event: &nostr::Event,
         channel_id: Option<Uuid>,
         thread_meta: Option<crate::event::ThreadMetadataParams<'_>>,
+        gate: ArchiveGate,
     ) -> Result<(StoredEvent, bool)> {
         let mut tx = crate::begin_community_event_write_transaction(
             &self.pool,
@@ -2831,6 +2873,7 @@ impl Db {
         )
         .await?;
         tx.set_push_enqueue(self.push_enqueue.clone());
+        crate::lifecycle::lock_write_gates(&mut tx, gate, channel_id.as_slice()).await?;
         crate::event::acquire_canvas_event_write_lock_if_needed(&mut tx, event, channel_id).await?;
         let result = crate::event::insert_event_with_thread_metadata_tx(
             &mut tx,
@@ -2888,8 +2931,17 @@ impl Db {
         event: &nostr::Event,
         channel_id: Uuid,
         precondition: ChannelHeadPrecondition<'_>,
+        gate: ArchiveGate,
     ) -> Result<(StoredEvent, ChannelHeadWriteStatus)> {
-        insert_canvas_head_checked(&self.pool, community_id, event, channel_id, precondition).await
+        insert_canvas_head_checked(
+            &self.pool,
+            community_id,
+            event,
+            channel_id,
+            precondition,
+            gate,
+        )
+        .await
     }
 }
 
@@ -3092,7 +3144,9 @@ mod postgres_tests {
                 .unwrap();
             let pool = pool.clone();
             async move {
-                insert_event(&pool, community, &event, None).await.unwrap();
+                insert_event(&pool, community, &event, None, crate::ArchiveGate::Exempt)
+                    .await
+                    .unwrap();
                 event.id.as_bytes().to_vec()
             }
         };
@@ -3199,7 +3253,9 @@ mod postgres_tests {
                 .custom_created_at(nostr::Timestamp::from(at))
                 .sign_with_keys(&author)
                 .unwrap();
-            insert_event(&pool, community, &event, None).await.unwrap();
+            insert_event(&pool, community, &event, None, crate::ArchiveGate::Exempt)
+                .await
+                .unwrap();
             ids.push(event.id.as_bytes().to_vec());
         }
         let mut q = EventQuery::for_community(community);
@@ -3406,9 +3462,15 @@ mod postgres_tests {
                 .custom_created_at(nostr::Timestamp::from(created))
                 .sign_with_keys(&author)
                 .unwrap();
-            insert_event(&pool, community, &event, Some(channel))
-                .await
-                .unwrap();
+            insert_event(
+                &pool,
+                community,
+                &event,
+                Some(channel),
+                crate::ArchiveGate::Exempt,
+            )
+            .await
+            .unwrap();
             crate::insert_mentions(&pool, community, &event, Some(channel))
                 .await
                 .unwrap();
@@ -3423,9 +3485,15 @@ mod postgres_tests {
             .custom_created_at(nostr::Timestamp::from(now - 150))
             .sign_with_keys(&author)
             .unwrap();
-        insert_event(&pool, community, &unmentioned, Some(channel))
-            .await
-            .unwrap();
+        insert_event(
+            &pool,
+            community,
+            &unmentioned,
+            Some(channel),
+            crate::ArchiveGate::Exempt,
+        )
+        .await
+        .unwrap();
 
         let read = |q: EventQuery| {
             let pool = pool.clone();
@@ -3521,10 +3589,16 @@ mod postgres_tests {
         let permanent = make_test_channel(&pool, community_uuid, None).await;
         let permanent_event = make_text_event("permanent channel event");
         assert!(
-            insert_event(&pool, community, &permanent_event, Some(permanent))
-                .await
-                .expect("insert permanent event")
-                .1
+            insert_event(
+                &pool,
+                community,
+                &permanent_event,
+                Some(permanent),
+                crate::ArchiveGate::Exempt
+            )
+            .await
+            .expect("insert permanent event")
+            .1
         );
         let permanent_deadline: Option<DateTime<Utc>> = sqlx::query_scalar(
             "SELECT ttl_deadline FROM channels WHERE community_id = $1 AND id = $2",
@@ -3548,10 +3622,16 @@ mod postgres_tests {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         let ephemeral_event = make_text_event("ephemeral channel event");
         assert!(
-            insert_event(&pool, community, &ephemeral_event, Some(ephemeral))
-                .await
-                .expect("insert ephemeral event")
-                .1
+            insert_event(
+                &pool,
+                community,
+                &ephemeral_event,
+                Some(ephemeral),
+                crate::ArchiveGate::Exempt
+            )
+            .await
+            .expect("insert ephemeral event")
+            .1
         );
         let bumped_deadline: DateTime<Utc> = sqlx::query_scalar(
             "SELECT ttl_deadline FROM channels WHERE community_id = $1 AND id = $2",
@@ -3563,10 +3643,16 @@ mod postgres_tests {
         .expect("read bumped ephemeral deadline");
         assert!(bumped_deadline > initial_deadline);
         assert!(
-            !insert_event(&pool, community, &ephemeral_event, Some(ephemeral))
-                .await
-                .expect("insert duplicate event")
-                .1
+            !insert_event(
+                &pool,
+                community,
+                &ephemeral_event,
+                Some(ephemeral),
+                crate::ArchiveGate::Exempt
+            )
+            .await
+            .expect("insert duplicate event")
+            .1
         );
         let duplicate_deadline: DateTime<Utc> = sqlx::query_scalar(
             "SELECT ttl_deadline FROM channels WHERE community_id = $1 AND id = $2",
@@ -3616,7 +3702,14 @@ mod postgres_tests {
         let race_pool = pool.clone();
         let racing_event = make_text_event("event after stale permanent prefetch");
         let insert = tokio::spawn(async move {
-            insert_event(&race_pool, community, &racing_event, Some(racing)).await
+            insert_event(
+                &race_pool,
+                community,
+                &racing_event,
+                Some(racing),
+                crate::ArchiveGate::Exempt,
+            )
+            .await
         });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert!(
@@ -3778,10 +3871,10 @@ mod postgres_tests {
             .sign_with_keys(&keys)
             .expect("sign event");
 
-        insert_event(&pool, community_a, &event, None)
+        insert_event(&pool, community_a, &event, None, crate::ArchiveGate::Exempt)
             .await
             .expect("insert in community A");
-        insert_event(&pool, community_b, &event, None)
+        insert_event(&pool, community_b, &event, None, crate::ArchiveGate::Exempt)
             .await
             .expect("insert same event in community B");
 
@@ -3840,19 +3933,37 @@ mod postgres_tests {
         let base = 1_800_000_000;
 
         let older_a = make_event_at(39_000, "older requested A", base + 1);
-        insert_event(&pool, community, &older_a, Some(channel_a))
-            .await
-            .expect("insert requested A candidate");
+        insert_event(
+            &pool,
+            community,
+            &older_a,
+            Some(channel_a),
+            crate::ArchiveGate::Exempt,
+        )
+        .await
+        .expect("insert requested A candidate");
         let requested_b = make_event_at(39_000, "requested B", base + 2);
-        insert_event(&pool, community, &requested_b, Some(channel_b))
-            .await
-            .expect("insert requested B candidate");
+        insert_event(
+            &pool,
+            community,
+            &requested_b,
+            Some(channel_b),
+            crate::ArchiveGate::Exempt,
+        )
+        .await
+        .expect("insert requested B candidate");
         let newer_c = make_event_at(39_000, "newer unrelated C", base + 3);
-        insert_event(&pool, community, &newer_c, Some(unrelated_c))
-            .await
-            .expect("insert unrelated C candidate");
+        insert_event(
+            &pool,
+            community,
+            &newer_c,
+            Some(unrelated_c),
+            crate::ArchiveGate::Exempt,
+        )
+        .await
+        .expect("insert unrelated C candidate");
         let global = make_event_at(39_000, "global candidate", base + 4);
-        insert_event(&pool, community, &global, None)
+        insert_event(&pool, community, &global, None, crate::ArchiveGate::Exempt)
             .await
             .expect("insert global candidate");
 
@@ -3906,18 +4017,30 @@ mod postgres_tests {
         // outnumber the requested page, while the visible match is older.
         for offset in 10..13 {
             let event = make_event_at(39_000, "newer inaccessible", base + offset);
-            insert_event(&pool, community, &event, Some(inaccessible))
-                .await
-                .expect("insert inaccessible candidate");
+            insert_event(
+                &pool,
+                community,
+                &event,
+                Some(inaccessible),
+                crate::ArchiveGate::Exempt,
+            )
+            .await
+            .expect("insert inaccessible candidate");
         }
         let global = make_event_at(39_000, "newer global", base + 2);
-        insert_event(&pool, community, &global, None)
+        insert_event(&pool, community, &global, None, crate::ArchiveGate::Exempt)
             .await
             .expect("insert global candidate");
         let older_accessible = make_event_at(39_000, "older accessible", base + 1);
-        insert_event(&pool, community, &older_accessible, Some(accessible))
-            .await
-            .expect("insert accessible candidate");
+        insert_event(
+            &pool,
+            community,
+            &older_accessible,
+            Some(accessible),
+            crate::ArchiveGate::Exempt,
+        )
+        .await
+        .expect("insert accessible candidate");
 
         let events = query_events(
             &pool,
@@ -4097,10 +4220,16 @@ mod postgres_tests {
 
         for (content, offset) in [("v1", 0), ("v2", 100)] {
             assert!(
-                db.replace_parameterized_event(community, &version(content, offset), d_tag, None)
-                    .await
-                    .expect("store project version")
-                    .1
+                db.replace_parameterized_event(
+                    community,
+                    &version(content, offset),
+                    d_tag,
+                    None,
+                    crate::ArchiveGate::Exempt
+                )
+                .await
+                .expect("store project version")
+                .1
             );
         }
 
@@ -4415,6 +4544,7 @@ mod postgres_tests {
             &event,
             Uuid::new_v4(),
             ChannelHeadPrecondition::ExpectNoHead,
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect_err("non-canvas kinds must be rejected");
@@ -4438,6 +4568,7 @@ mod postgres_tests {
             &event,
             channel,
             ChannelHeadPrecondition::ExpectNoHead,
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("first canvas");
@@ -4457,6 +4588,7 @@ mod postgres_tests {
             &first,
             channel,
             ChannelHeadPrecondition::ExpectNoHead,
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("first canvas");
@@ -4468,6 +4600,7 @@ mod postgres_tests {
             &second,
             channel,
             ChannelHeadPrecondition::ExpectNoHead,
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("second create attempt");
@@ -4497,6 +4630,7 @@ mod postgres_tests {
             &first,
             channel,
             ChannelHeadPrecondition::ExpectNoHead,
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("first canvas");
@@ -4509,6 +4643,7 @@ mod postgres_tests {
             &second,
             channel,
             ChannelHeadPrecondition::ExpectedHead(head.as_slice()),
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("edit against head");
@@ -4528,6 +4663,7 @@ mod postgres_tests {
             &first,
             channel,
             ChannelHeadPrecondition::ExpectNoHead,
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("first canvas");
@@ -4540,6 +4676,7 @@ mod postgres_tests {
             &stale,
             channel,
             ChannelHeadPrecondition::ExpectedHead(&wrong_head),
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("stale edit attempt");
@@ -4561,6 +4698,7 @@ mod postgres_tests {
             &event,
             channel,
             ChannelHeadPrecondition::ExpectedHead(&some_head),
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("edit with no head");
@@ -4580,6 +4718,7 @@ mod postgres_tests {
             &event,
             channel,
             ChannelHeadPrecondition::ExpectNoHead,
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("first canvas");
@@ -4592,6 +4731,7 @@ mod postgres_tests {
             &event,
             channel,
             ChannelHeadPrecondition::ExpectedHead(head.as_slice()),
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("replay head");
@@ -4615,6 +4755,7 @@ mod postgres_tests {
             &event,
             channel,
             ChannelHeadPrecondition::ExpectNoHead,
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("first canvas");
@@ -4627,6 +4768,7 @@ mod postgres_tests {
             &event,
             channel,
             ChannelHeadPrecondition::ExpectNoHead,
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("replay with stale none tag");
@@ -4651,6 +4793,7 @@ mod postgres_tests {
             &lower,
             channel,
             ChannelHeadPrecondition::ExpectNoHead,
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("first canvas is lower-id head");
@@ -4662,6 +4805,7 @@ mod postgres_tests {
             &higher,
             channel,
             ChannelHeadPrecondition::ExpectedHead(lower.id.as_bytes().as_slice()),
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("same-second higher-id edit");
@@ -4695,6 +4839,7 @@ mod postgres_tests {
             &higher,
             channel,
             ChannelHeadPrecondition::ExpectNoHead,
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("first canvas is higher-id head");
@@ -4706,6 +4851,7 @@ mod postgres_tests {
             &lower,
             channel,
             ChannelHeadPrecondition::ExpectedHead(higher.id.as_bytes().as_slice()),
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("same-second lower-id edit");
@@ -4727,6 +4873,7 @@ mod postgres_tests {
             &head,
             channel,
             ChannelHeadPrecondition::ExpectNoHead,
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("head at t=2000");
@@ -4739,6 +4886,7 @@ mod postgres_tests {
             &behind,
             channel,
             ChannelHeadPrecondition::ExpectedHead(head.id.as_bytes().as_slice()),
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("behind-clock edit");
@@ -4828,6 +4976,7 @@ mod postgres_tests {
             &head,
             channel,
             ChannelHeadPrecondition::ExpectNoHead,
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("seed head H");
@@ -4841,6 +4990,7 @@ mod postgres_tests {
             &a,
             channel,
             ChannelHeadPrecondition::ExpectedHead(&head_id),
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("insert A");
@@ -4874,6 +5024,7 @@ mod postgres_tests {
             &a,
             channel,
             ChannelHeadPrecondition::ExpectedHead(&head_id),
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("replay A");
@@ -4950,6 +5101,7 @@ mod postgres_tests {
             &base,
             channel,
             ChannelHeadPrecondition::ExpectNoHead,
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("seed base head");
@@ -4980,6 +5132,7 @@ mod postgres_tests {
                 &a,
                 channel,
                 ChannelHeadPrecondition::ExpectedHead(&id_a),
+                crate::ArchiveGate::Exempt,
             )
             .await
             .map(|(stored, status)| (stored.event.id.to_bytes().to_vec(), status))
@@ -4991,6 +5144,7 @@ mod postgres_tests {
                 &b,
                 channel,
                 ChannelHeadPrecondition::ExpectedHead(&id_b),
+                crate::ArchiveGate::Exempt,
             )
             .await
             .map(|(stored, status)| (stored.event.id.to_bytes().to_vec(), status))
@@ -5104,6 +5258,7 @@ mod postgres_tests {
                 &a,
                 channel,
                 ChannelHeadPrecondition::ExpectNoHead,
+                crate::ArchiveGate::Exempt,
             )
             .await
             .map(|(stored, status)| (stored.event.id.to_bytes().to_vec(), status))
@@ -5115,6 +5270,7 @@ mod postgres_tests {
                 &b,
                 channel,
                 ChannelHeadPrecondition::ExpectNoHead,
+                crate::ArchiveGate::Exempt,
             )
             .await
             .map(|(stored, status)| (stored.event.id.to_bytes().to_vec(), status))
@@ -5216,8 +5372,14 @@ mod postgres_tests {
 
         let event = make_canvas_event_at("# Untagged", 1000);
         let write_task = tokio::spawn(async move {
-            db.insert_event_with_thread_metadata(community, &event, Some(channel), None)
-                .await
+            db.insert_event_with_thread_metadata(
+                community,
+                &event,
+                Some(channel),
+                None,
+                crate::ArchiveGate::Exempt,
+            )
+            .await
         });
 
         wait_for_advisory_waiters(&pool, lock_key, 1, std::time::Duration::from_secs(5)).await;
@@ -5269,6 +5431,7 @@ mod postgres_tests {
             &event,
             channel,
             ChannelHeadPrecondition::ExpectNoHead,
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("seed canvas for deletion test");
@@ -5368,7 +5531,7 @@ mod postgres_tests {
         let event = make_mentioning_event(&mentioned.public_key().to_hex());
 
         let error = db
-            .insert_event(community, &event, None)
+            .insert_event(community, &event, None, crate::ArchiveGate::Exempt)
             .await
             .expect_err("mention-indexing failure must fail the whole event insert");
         assert!(
@@ -5399,7 +5562,7 @@ mod postgres_tests {
         let event = make_mentioning_event(&mentioned.public_key().to_hex());
 
         let (stored, was_inserted) = db
-            .insert_event(community, &event, None)
+            .insert_event(community, &event, None, crate::ArchiveGate::Exempt)
             .await
             .expect("insert event with mention");
         assert!(was_inserted);
@@ -5455,6 +5618,7 @@ mod postgres_tests {
                     depth: 0,
                     broadcast: true,
                 }),
+                crate::ArchiveGate::Exempt,
             )
             .await
             .expect_err("mention-indexing failure must fail the whole event insert");
@@ -5519,6 +5683,7 @@ mod postgres_tests {
                     depth: 0,
                     broadcast: true,
                 }),
+                crate::ArchiveGate::Exempt,
             )
             .await
             .expect("insert thread event with mention");

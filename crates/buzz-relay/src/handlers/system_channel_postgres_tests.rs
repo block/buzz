@@ -947,7 +947,12 @@ async fn membership_notices_reach_only_filters_that_know_their_type() {
     .expect("sign");
     f.state
         .db
-        .insert_event(f.tenant.community(), &legacy, None)
+        .insert_event(
+            f.tenant.community(),
+            &legacy,
+            None,
+            buzz_db::ArchiveGate::Exempt,
+        )
         .await
         .expect("store legacy notice");
     let legacy_id = legacy.id.to_hex();

@@ -195,7 +195,12 @@ async fn accessory_router_signed_url_body_replay_and_actor_boundary() {
         .unwrap();
     state
         .db
-        .insert_event(community, &event, Some(channel))
+        .insert_event(
+            community,
+            &event,
+            Some(channel),
+            buzz_db::ArchiveGate::Exempt,
+        )
         .await
         .unwrap();
     state
@@ -307,7 +312,12 @@ async fn accessory_batch_outcomes_are_independent_and_return_applied_rows() {
                 .unwrap();
             state
                 .db
-                .insert_event(community, &event, Some(channel))
+                .insert_event(
+                    community,
+                    &event,
+                    Some(channel),
+                    buzz_db::ArchiveGate::Exempt,
+                )
                 .await
                 .unwrap();
             event.id.to_hex()
@@ -550,7 +560,12 @@ async fn accessory_write_revocation_is_terminal_before_persistence() {
         .unwrap();
     state
         .db
-        .insert_event(community, &event, Some(channel))
+        .insert_event(
+            community,
+            &event,
+            Some(channel),
+            buzz_db::ArchiveGate::Exempt,
+        )
         .await
         .unwrap();
     let intent = buzz_db::personal_read::ReadIntent::MarkThrough {
@@ -605,13 +620,22 @@ async fn accessory_discovery_is_host_bound_and_opt_in() {
         .unwrap();
     let host = format!("bff-discovery-{}.local", uuid::Uuid::new_v4());
     fixture.db.ensure_configured_community(&host).await.unwrap();
-    for (enabled, guard) in [(false, false), (false, true), (true, false), (true, true)] {
+    // The last row keeps the default subtree limit, which NIP-11 advertises
+    // as 250.
+    let default = crate::config::DEFAULT_LIFECYCLE_SUBTREE_CHANNELS;
+    for (enabled, guard, limit, advertised) in [
+        (false, false, 37, 37),
+        (false, true, 37, 37),
+        (true, false, 37, 37),
+        (true, true, 37, 37),
+        (true, true, default, 250),
+    ] {
         let mut state = (*fixture).clone();
         let config = Arc::make_mut(&mut state.config);
         config.buzz_v1_enabled = enabled;
         config.buzz_v1_retention_seconds = 1234;
         config.lifecycle_guard_enabled = guard;
-        config.lifecycle_max_subtree_channels = 37;
+        config.lifecycle_max_subtree_channels = limit;
         let state = Arc::new(state);
         for known_host in [true, false] {
             let request_host = if known_host {
@@ -650,7 +674,7 @@ async fn accessory_discovery_is_host_bound_and_opt_in() {
                     assert_eq!(
                         doc["lifecycle_guard"],
                         json!({"version":1,"state_path":"/buzz/v1/lifecycle/state",
-                            "max_state_channels":1000,"max_subtree_channels":37})
+                            "max_state_channels":1000,"max_subtree_channels":advertised})
                     );
                 }
                 if enabled && known_host {

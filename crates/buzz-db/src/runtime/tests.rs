@@ -591,7 +591,13 @@ async fn migration_schema_database_guard_covers_legacy_writer_and_nip09_deletion
     let replace_c = c.clone();
     let replace_task = tokio::spawn(async move {
         replace_db
-            .replace_parameterized_event(community, &replace_c, &replace_d_tag, None)
+            .replace_parameterized_event(
+                community,
+                &replace_c,
+                &replace_d_tag,
+                None,
+                crate::ArchiveGate::Exempt,
+            )
             .await
     });
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -930,6 +936,7 @@ async fn insert_top_level(pool: &PgPool, community: Uuid, channel: Uuid, ev: &no
             depth: 0,
             broadcast: true,
         }),
+        crate::ArchiveGate::Exempt,
     )
     .await
     .expect("insert top-level event");
@@ -962,6 +969,7 @@ async fn insert_thread_reply(
             depth: 1,
             broadcast: false,
         }),
+        crate::ArchiveGate::Exempt,
     )
     .await
     .expect("insert reply");
@@ -3283,9 +3291,15 @@ async fn armed_pool_rejects_old_channel_inserts_through_public_api() {
 
     // insert_event (single INSERT, autocommit): old channel row rejected.
     let old = signed_event_at(&author, "old-direct", now_secs - floor - 60);
-    let err = event::insert_event(&db.pool, cid, &old, Some(channel))
-        .await
-        .expect_err("armed pool must reject below-floor channel inserts");
+    let err = event::insert_event(
+        &db.pool,
+        cid,
+        &old,
+        Some(channel),
+        crate::ArchiveGate::Exempt,
+    )
+    .await
+    .expect_err("armed pool must reject below-floor channel inserts");
     assert!(
         err.to_string().contains("below the replica-fence floor"),
         "unexpected error: {err}"
@@ -3311,6 +3325,7 @@ async fn armed_pool_rejects_old_channel_inserts_through_public_api() {
             depth: 0,
             broadcast: true,
         }),
+        crate::ArchiveGate::Exempt,
     )
     .await
     .expect_err("armed pool must reject below-floor thread-metadata inserts");
@@ -3321,9 +3336,15 @@ async fn armed_pool_rejects_old_channel_inserts_through_public_api() {
 
     // Fresh events pass through both APIs.
     let fresh = signed_event_at(&author, "fresh-direct", now_secs);
-    event::insert_event(&db.pool, cid, &fresh, Some(channel))
-        .await
-        .expect("fresh insert passes the armed guard");
+    event::insert_event(
+        &db.pool,
+        cid,
+        &fresh,
+        Some(channel),
+        crate::ArchiveGate::Exempt,
+    )
+    .await
+    .expect("fresh insert passes the armed guard");
 
     // Close before the `scratch` guard force-drops the database on return.
     db.pool.close().await;

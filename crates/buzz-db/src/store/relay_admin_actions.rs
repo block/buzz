@@ -3300,6 +3300,7 @@ mod postgres_tests {
                     depth,
                     broadcast: false,
                 }),
+                crate::ArchiveGate::Exempt,
             )
             .await
             .expect("thread event");

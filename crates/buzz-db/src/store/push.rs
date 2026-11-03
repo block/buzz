@@ -1637,7 +1637,9 @@ mod postgres_tests {
         })
         .await
         .expect("connect application writer");
-        let result = db.insert_event(community, event, channel).await;
+        let result = db
+            .insert_event(community, event, channel, crate::ArchiveGate::Exempt)
+            .await;
         db.push_enqueue
             .as_ref()
             .expect("enabled producer")
@@ -2877,7 +2879,7 @@ mod postgres_tests {
         let raced = nostr::EventBuilder::new(nostr::Kind::Custom(9), "raced enqueue")
             .sign_with_keys(&nostr::Keys::generate())
             .expect("sign raced event");
-        crate::event::insert_event(&pool, community, &raced, None)
+        crate::event::insert_event(&pool, community, &raced, None, crate::ArchiveGate::Exempt)
             .await
             .expect("store event before post-commit enqueue");
         let (held_tx, held_rx) = tokio::sync::oneshot::channel();

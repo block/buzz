@@ -21,7 +21,7 @@ use uuid::Uuid;
 use buzz_core::CommunityId;
 
 use crate::error::{DbError, Result};
-use crate::Db;
+use crate::{AdmittedTx, ArchiveGate, Db};
 use buzz_datastore_tracing::datastore_span;
 
 // -- Token hashing ------------------------------------------------------------
@@ -514,12 +514,14 @@ pub async fn list_all_enabled_workflows(pool: &PgPool) -> Result<Vec<WorkflowRec
 /// allowed, so resolving the owning community from `id` alone is ambiguous and
 /// would fan a single claim across every community holding that UUID. Binding
 /// `(community_id, id)` confines the claim — and its `SELECT`/`INSERT` row — to
-/// exactly the intended tenant.
+/// exactly the intended tenant. The claim is admitted on its workflow's
+/// channel under `gate` (see `lock_workflow_channel`).
 pub async fn claim_scheduled_workflow_fire(
     pool: &PgPool,
     community_id: CommunityId,
     workflow_id: Uuid,
     scheduled_for: DateTime<Utc>,
+    gate: ArchiveGate,
 ) -> Result<Option<ScheduledWorkflowFireClaim>> {
     let mut tx = crate::begin_community_write_transaction(
         pool,
@@ -527,6 +529,7 @@ pub async fn claim_scheduled_workflow_fire(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    lock_workflow_channel(&mut tx, workflow_id, gate).await?;
     let row = sqlx::query(
         r#"
         INSERT INTO scheduled_workflow_fires (community_id, workflow_id, scheduled_for)
@@ -851,17 +854,87 @@ pub async fn disable_workflows_for_owner_in_channel_on_conn(
 
 // -- Workflow Run CRUD --------------------------------------------------------
 
+/// The refusal, as [`DbError::AccessDenied`], of a gated run or schedule claim
+/// whose workflow does not exist or has no channel.
+pub const WORKFLOW_UNBOUND: &str = "workflow has no channel";
+
+/// Admit a run or a schedule claim of `workflow_id` on its channel's write
+/// gate. Call it first in the write's transaction. [`ArchiveGate::Exempt`]
+/// takes nothing. Otherwise it reads the channel without a lock, takes that
+/// gate, and holds the binding with [`verify_workflow_channel`]. No workflow or
+/// no channel fails closed with `AccessDenied(WORKFLOW_UNBOUND)`.
+///
+/// Not gated, because they account for work already admitted:
+/// `attach_scheduled_workflow_run`, `update_workflow_run`, `finalize_run` and
+/// the foreign key cascades. A run's channel posts are gated by the workflow
+/// sink, and an approval command gates its workflow's channel.
+async fn lock_workflow_channel(
+    tx: &mut AdmittedTx,
+    workflow_id: Uuid,
+    gate: ArchiveGate,
+) -> Result<()> {
+    if gate == ArchiveGate::Exempt {
+        return Ok(());
+    }
+    let channel = workflow_channel(tx, workflow_id, false)
+        .await?
+        .ok_or_else(|| DbError::AccessDenied(WORKFLOW_UNBOUND.into()))?;
+    crate::lifecycle::lock_write_gates(tx, gate, &[channel]).await?;
+    verify_workflow_channel(tx, workflow_id, channel).await
+}
+
+/// Hold `workflow_id`'s channel binding under FOR KEY SHARE until commit, and
+/// check that it is still `expected`, the channel whose gate the caller holds.
+///
+/// A workflow's channel never changes in place: a rebind deletes the row and
+/// creates it again with the same id, and the lock blocks that delete. Any
+/// other result is [`DbError::LifecycleConflict`]. That includes no row, which
+/// READ COMMITTED also returns when a rebind commits while this waits.
+pub async fn verify_workflow_channel(
+    tx: &mut AdmittedTx,
+    workflow_id: Uuid,
+    expected: Uuid,
+) -> Result<()> {
+    match workflow_channel(tx, workflow_id, true).await? {
+        Some(channel) if channel == expected => Ok(()),
+        _ => Err(DbError::LifecycleConflict),
+    }
+}
+
+/// The channel of `workflow_id` in the transaction's community, read under
+/// FOR KEY SHARE if `key_share`.
+async fn workflow_channel(
+    tx: &mut AdmittedTx,
+    workflow_id: Uuid,
+    key_share: bool,
+) -> Result<Option<Uuid>> {
+    let sql = if key_share {
+        "SELECT channel_id FROM workflows WHERE community_id = $1 AND id = $2 FOR KEY SHARE"
+    } else {
+        "SELECT channel_id FROM workflows WHERE community_id = $1 AND id = $2"
+    };
+    let community = tx.community();
+    let channel: Option<Option<Uuid>> = sqlx::query_scalar(sql)
+        .bind(community.as_uuid())
+        .bind(workflow_id)
+        .fetch_optional(tx.conn())
+        .await?;
+    Ok(channel.flatten())
+}
+
 /// Insert a new workflow run. Returns the new run's UUID.
 ///
 /// `trigger_context` is the serialized `TriggerContext` for this run. It is stored
 /// so that post-approval resume steps can restore the original trigger data and
-/// correctly resolve `{{trigger.*}}` template variables.
+/// correctly resolve `{{trigger.*}}` template variables. The run is admitted on
+/// its workflow's channel under `gate` (see `lock_workflow_channel`).
 pub async fn create_workflow_run(
     pool: &PgPool,
     community_id: CommunityId,
     workflow_id: Uuid,
     trigger_event_id: Option<&[u8]>,
     trigger_context: Option<&serde_json::Value>,
+    gate: ArchiveGate,
 ) -> Result<Uuid> {
     let mut tx = crate::begin_community_write_transaction(
         pool,
@@ -869,6 +942,7 @@ pub async fn create_workflow_run(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    lock_workflow_channel(&mut tx, workflow_id, gate).await?;
     let id = Uuid::new_v4();
 
     sqlx::query(
@@ -1363,6 +1437,7 @@ impl Db {
         workflow_id: Uuid,
         trigger_event_id: Option<&[u8]>,
         trigger_context: Option<&serde_json::Value>,
+        gate: ArchiveGate,
     ) -> Result<Uuid> {
         crate::workflow::create_workflow_run(
             &self.pool,
@@ -1370,6 +1445,7 @@ impl Db {
             workflow_id,
             trigger_event_id,
             trigger_context,
+            gate,
         )
         .await
     }
@@ -1627,12 +1703,14 @@ impl Db {
         community_id: CommunityId,
         workflow_id: Uuid,
         scheduled_for: chrono::DateTime<chrono::Utc>,
+        gate: ArchiveGate,
     ) -> Result<Option<crate::workflow::ScheduledWorkflowFireClaim>> {
         crate::workflow::claim_scheduled_workflow_fire(
             &self.pool,
             community_id,
             workflow_id,
             scheduled_for,
+            gate,
         )
         .await
     }
@@ -2353,10 +2431,16 @@ mod postgres_tests {
         let scheduled_for = Utc.with_ymd_and_hms(2026, 6, 27, 0, 0, 0).unwrap();
 
         // Claim A/id/t.
-        let claim_a = claim_scheduled_workflow_fire(&pool, community_a, workflow_id, scheduled_for)
-            .await
-            .expect("claim A should not error")
-            .expect("claim A should win");
+        let claim_a = claim_scheduled_workflow_fire(
+            &pool,
+            community_a,
+            workflow_id,
+            scheduled_for,
+            ArchiveGate::Exempt,
+        )
+        .await
+        .expect("claim A should not error")
+        .expect("claim A should win");
         assert_eq!(
             claim_a.community_id, community_a,
             "A-claim must resolve to community A (server provenance)"
@@ -2365,10 +2449,16 @@ mod postgres_tests {
         assert_eq!(claim_a.scheduled_for, scheduled_for);
 
         // B/id/t must still be claimable — A's claim did not touch B's row.
-        let claim_b = claim_scheduled_workflow_fire(&pool, community_b, workflow_id, scheduled_for)
-            .await
-            .expect("claim B should not error")
-            .expect("claim B must still win — A's claim must not have consumed B's instant");
+        let claim_b = claim_scheduled_workflow_fire(
+            &pool,
+            community_b,
+            workflow_id,
+            scheduled_for,
+            ArchiveGate::Exempt,
+        )
+        .await
+        .expect("claim B should not error")
+        .expect("claim B must still win — A's claim must not have consumed B's instant");
         assert_eq!(
             claim_b.community_id, community_b,
             "B-claim must resolve to community B"
@@ -2376,10 +2466,15 @@ mod postgres_tests {
 
         // And a second A-claim for the same instant must now lose (dedup holds
         // within the community).
-        let claim_a_again =
-            claim_scheduled_workflow_fire(&pool, community_a, workflow_id, scheduled_for)
-                .await
-                .expect("second A-claim should not error");
+        let claim_a_again = claim_scheduled_workflow_fire(
+            &pool,
+            community_a,
+            workflow_id,
+            scheduled_for,
+            ArchiveGate::Exempt,
+        )
+        .await
+        .expect("second A-claim should not error");
         assert!(
             claim_a_again.is_none(),
             "the same (A, id, t) instant must not be claimable twice"
@@ -2405,7 +2500,14 @@ mod postgres_tests {
         for _ in 0..N {
             let pool = pool.clone();
             handles.push(tokio::spawn(async move {
-                claim_scheduled_workflow_fire(&pool, community, workflow_id, scheduled_for).await
+                claim_scheduled_workflow_fire(
+                    &pool,
+                    community,
+                    workflow_id,
+                    scheduled_for,
+                    ArchiveGate::Exempt,
+                )
+                .await
             }));
         }
 
@@ -2440,15 +2542,28 @@ mod postgres_tests {
         let scheduled_for = Utc.with_ymd_and_hms(2026, 6, 27, 0, 2, 0).unwrap();
 
         // Win the claim for this instant.
-        claim_scheduled_workflow_fire(&pool, community, workflow_id, scheduled_for)
-            .await
-            .expect("claim ok")
-            .expect("claim wins");
+        claim_scheduled_workflow_fire(
+            &pool,
+            community,
+            workflow_id,
+            scheduled_for,
+            ArchiveGate::Exempt,
+        )
+        .await
+        .expect("claim ok")
+        .expect("claim wins");
 
         // Create the run the won claim is responsible for, then attach it.
-        let run_id = create_workflow_run(&pool, community, workflow_id, None, None)
-            .await
-            .expect("create run ok");
+        let run_id = create_workflow_run(
+            &pool,
+            community,
+            workflow_id,
+            None,
+            None,
+            ArchiveGate::Exempt,
+        )
+        .await
+        .expect("create run ok");
 
         let attached =
             attach_scheduled_workflow_run(&pool, community, workflow_id, scheduled_for, run_id)
@@ -2475,9 +2590,16 @@ mod postgres_tests {
 
         // A second attach is a no-op: the `workflow_run_id IS NULL` guard means
         // an already-linked claim is never re-pointed to a different run.
-        let other_run = create_workflow_run(&pool, community, workflow_id, None, None)
-            .await
-            .expect("create second run ok");
+        let other_run = create_workflow_run(
+            &pool,
+            community,
+            workflow_id,
+            None,
+            None,
+            ArchiveGate::Exempt,
+        )
+        .await
+        .expect("create second run ok");
         let reattached =
             attach_scheduled_workflow_run(&pool, community, workflow_id, scheduled_for, other_run)
                 .await
@@ -2511,10 +2633,16 @@ mod postgres_tests {
         let (workflow_id, _) = make_workflow_in(&pool, community).await;
         let scheduled_for = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
 
-        claim_scheduled_workflow_fire(&pool, community, workflow_id, scheduled_for)
-            .await
-            .expect("claim ok")
-            .expect("first claim wins");
+        claim_scheduled_workflow_fire(
+            &pool,
+            community,
+            workflow_id,
+            scheduled_for,
+            ArchiveGate::Exempt,
+        )
+        .await
+        .expect("claim ok")
+        .expect("first claim wins");
 
         // Backdate this row's `claimed_at` so the global prune below targets
         // only this workflow's row and cannot race-delete other tests' rows.
@@ -2762,12 +2890,26 @@ mod postgres_tests {
         insert_workflow_with_ids(&pool, community_a, workflow_id, channel_id, "wf-A").await;
         insert_workflow_with_ids(&pool, community_b, workflow_id, Uuid::new_v4(), "wf-B").await;
 
-        let run_a = create_workflow_run(&pool, community_a, workflow_id, None, None)
-            .await
-            .expect("run A");
-        let run_b = create_workflow_run(&pool, community_b, workflow_id, None, None)
-            .await
-            .expect("run B");
+        let run_a = create_workflow_run(
+            &pool,
+            community_a,
+            workflow_id,
+            None,
+            None,
+            ArchiveGate::Exempt,
+        )
+        .await
+        .expect("run A");
+        let run_b = create_workflow_run(
+            &pool,
+            community_b,
+            workflow_id,
+            None,
+            None,
+            ArchiveGate::Exempt,
+        )
+        .await
+        .expect("run B");
 
         let token = "shared-approval-token";
         let expires = Utc::now() + chrono::Duration::hours(1);

@@ -1,19 +1,28 @@
 //! Guarded task archive and restore, the `nexus.task` hierarchy projection,
 //! and the authoritative lifecycle state read.
 //!
-//! Every writer here takes its locks in this order and never takes an
+//! Every channel writer takes its locks in this order and never takes an
 //! earlier lock after a later one:
 //!
 //! 1. community admission (the transaction begin);
 //! 2. task family locks, sorted by family root;
-//! 3. channel gates, exclusive, sorted by channel;
-//! 4. channel TTL locks, shared, sorted by channel;
-//! 5. channel rows, sorted by channel;
-//! 6. the artifact coordinate lock, then the artifact head.
+//! 3. channel gates, sorted by channel: EXCLUSIVE for a writer that changes
+//!    archive state, SHARED for a write that [`crate::ArchiveGate::Refuse`] guards;
+//! 4. channel membership locks, sorted by channel;
+//! 5. channel TTL locks, sorted by channel;
+//! 6. channel rows, sorted by channel;
+//! 7. the record, canvas or replacement coordinate lock, then its head.
 //!
-//! A family is keyed by its root. Every edge write takes the family locks of
-//! the child's and the new parent's roots, so a holder of a root's lock sees
-//! a stable topology for that family.
+//! A writer skips the steps it does not need. A family is keyed by its root.
+//! Every edge write takes the family locks of the child's and the new
+//! parent's roots, so a holder of a root's lock sees a stable topology for
+//! that family.
+//!
+//! The gate makes "archived" final for refused writes. An archive writer
+//! holds the gate exclusive until it commits. A refused write takes the gate
+//! shared as the first lock of its own transaction and then re-reads
+//! `archived_at` in a new statement. So the write either commits before the
+//! archive starts, or it sees the archive and stores nothing.
 use crate::{AdmittedTx, DbError, Result};
 use buzz_core::lifecycle::{lifecycle_digest, LifecycleScope, TokenEntry};
 use buzz_core::{CommunityId, StoredEvent};
@@ -48,6 +57,114 @@ pub(crate) fn gate_lock_key(community: CommunityId, channel: Uuid) -> String {
     format!("buzz_channel_gate:{}:{channel}", community.as_uuid())
 }
 
+/// The refusal for a write into an archived channel, as
+/// [`DbError::AccessDenied`].
+pub const CHANNEL_ARCHIVED: &str = "channel is archived";
+
+/// The archive policy of one channel write. Every function that writes
+/// into a channel takes one; there is no default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArchiveGate {
+    /// The write is refused in an archived channel. It takes each channel's
+    /// gate SHARED as the first lock of its transaction, then re-reads
+    /// `archived_at` and fails with [`DbError::AccessDenied`]
+    /// ([`CHANNEL_ARCHIVED`]) if any channel is archived. Client writes use
+    /// this.
+    Refuse,
+    /// The write is allowed in an archived channel and takes no gate: relay
+    /// notices, a member leaving by themselves, per-user view state and
+    /// operator moderation.
+    Exempt,
+}
+
+/// The write gates one transaction holds, from [`lock_write_gates`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WriteGates {
+    gate: ArchiveGate,
+    channels: BTreeSet<Uuid>,
+}
+
+impl WriteGates {
+    /// No gates: an [`ArchiveGate::Exempt`] write.
+    pub fn exempt() -> Self {
+        Self {
+            gate: ArchiveGate::Exempt,
+            channels: BTreeSet::new(),
+        }
+    }
+
+    /// Whether the write is [`ArchiveGate::Exempt`].
+    pub fn is_exempt(&self) -> bool {
+        self.gate == ArchiveGate::Exempt
+    }
+
+    /// Whether this transaction may write into `channel`: the write is
+    /// exempt, or it holds `channel`'s gate.
+    pub fn covers(&self, channel: Uuid) -> bool {
+        self.gate == ArchiveGate::Exempt || self.channels.contains(&channel)
+    }
+}
+
+/// Take the write gates of `channels` on `tx` under `gate`, then refuse if
+/// any of them is archived. [`ArchiveGate::Exempt`] takes nothing.
+///
+/// Call this as the first lock of the write transaction (after the family
+/// locks of a task record), and only once: a gate taken later in the same
+/// transaction could deadlock with an archive writer. A
+/// transaction-scoped primitive, such as
+/// [`crate::event::insert_event_in_transaction`], takes no gate: its
+/// transaction owner calls this first.
+pub async fn lock_write_gates(
+    tx: &mut AdmittedTx,
+    gate: ArchiveGate,
+    channels: &[Uuid],
+) -> Result<WriteGates> {
+    if gate == ArchiveGate::Exempt {
+        return Ok(WriteGates::exempt());
+    }
+    let channels: BTreeSet<Uuid> = channels.iter().copied().collect();
+    lock_shared_gates(tx, &channels).await?;
+    if !archived_among(tx, &channels).await?.is_empty() {
+        return Err(DbError::AccessDenied(CHANNEL_ARCHIVED.into()));
+    }
+    Ok(WriteGates { gate, channels })
+}
+
+/// Take the gates of `channels` SHARED, sorted, in one statement.
+pub(crate) async fn lock_shared_gates(
+    tx: &mut AdmittedTx,
+    channels: &BTreeSet<Uuid>,
+) -> Result<()> {
+    let community = tx.community();
+    let keys: Vec<_> = channels
+        .iter()
+        .map(|channel| gate_lock_key(community, *channel))
+        .collect();
+    advisory_locks(tx, &keys, true).await
+}
+
+/// The archived channels among `channels`. Run it as its own statement
+/// after the gates, so it reads every archive committed before them.
+pub(crate) async fn archived_among(
+    tx: &mut AdmittedTx,
+    channels: &BTreeSet<Uuid>,
+) -> Result<BTreeSet<Uuid>> {
+    if channels.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let community = tx.community();
+    let ids: Vec<Uuid> = channels.iter().copied().collect();
+    let archived: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM channels \
+         WHERE community_id = $1 AND id = ANY($2) AND archived_at IS NOT NULL",
+    )
+    .bind(community.as_uuid())
+    .bind(&ids)
+    .fetch_all(tx.conn())
+    .await?;
+    Ok(archived.into_iter().collect())
+}
+
 /// Take transaction-scoped advisory locks on `keys`, in order, in one
 /// statement.
 async fn advisory_locks(tx: &mut AdmittedTx, keys: &[String], shared: bool) -> Result<()> {
@@ -74,7 +191,9 @@ async fn lock_families(tx: &mut AdmittedTx, roots: &BTreeSet<Uuid>) -> Result<()
     advisory_locks(tx, &keys, false).await
 }
 
-async fn lock_gates(tx: &mut AdmittedTx, channels: &BTreeSet<Uuid>) -> Result<()> {
+/// Take the gates of `channels` EXCLUSIVE, sorted, in one statement. Every
+/// writer that changes archive state holds them until it commits.
+pub(crate) async fn lock_gates(tx: &mut AdmittedTx, channels: &BTreeSet<Uuid>) -> Result<()> {
     let community = tx.community();
     let keys: Vec<_> = channels
         .iter()
@@ -663,14 +782,16 @@ pub(crate) struct EdgeLocks {
 }
 
 /// Lock what a `nexus.task` revision for `child` with parent `parent`
-/// needs: the families of both, the TTL locks and the rows (`FOR SHARE`).
-/// Returns `None` when a family root moved before its lock was taken; the
-/// caller retries once.
+/// needs: the families of both, the write gates `gates` (shared, empty for
+/// an exempt write), the TTL locks and the rows (`FOR SHARE`). Returns `None`
+/// when a family root moved before its lock was taken; the caller retries
+/// once.
 pub(crate) async fn lock_task_edge(
     tx: &mut AdmittedTx,
     child: Uuid,
     parent: Option<Uuid>,
     author: &[u8],
+    gates: &BTreeSet<Uuid>,
 ) -> Result<Option<EdgeLocks>> {
     let roots = |child_walk: &Walk, parent_walk: Option<&Walk>| {
         let mut roots = BTreeSet::from([child_walk.root(child)]);
@@ -694,6 +815,7 @@ pub(crate) async fn lock_task_edge(
     if roots(&child_walk, parent_walk.as_ref()) != locked {
         return Ok(None);
     }
+    lock_shared_gates(tx, gates).await?;
     let mut channels = BTreeSet::from([child]);
     channels.extend(parent);
     lock_ttls_shared(tx, &channels).await?;

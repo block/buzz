@@ -8842,7 +8842,15 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             let event = task(&owner, channel, parent);
             let env = buzz_core::artifact::validate(&event).expect("valid task record");
             let outcome = db
-                .accept_artifact(community, &event, &env, None, &relay, true)
+                .accept_artifact(
+                    community,
+                    &event,
+                    &env,
+                    None,
+                    &relay,
+                    true,
+                    crate::ArchiveGate::Exempt,
+                )
                 .await
                 .expect("accept task record");
             assert!(matches!(outcome, ArtifactOutcome::Accepted(_)));
@@ -8862,7 +8870,15 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         let late = task(&owner, channels[2], Some(channels[0]));
         let env = buzz_core::artifact::validate(&late).expect("valid task record");
         let error = db
-            .accept_artifact(community, &late, &env, None, &relay, true)
+            .accept_artifact(
+                community,
+                &late,
+                &env,
+                None,
+                &relay,
+                true,
+                crate::ArchiveGate::Exempt,
+            )
             .await
             .expect_err("a quiescing community must refuse task edges");
         assert!(

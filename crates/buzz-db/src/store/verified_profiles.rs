@@ -180,6 +180,8 @@ impl Db {
                 input.pubkey,
                 None,
                 crate::replaceable::ParameterizedReplacePrecondition::Unconditional,
+                // A relay-signed profile outside every channel.
+                &crate::WriteGates::exempt(),
             )
             .await?;
         if !matches!(

@@ -71,7 +71,12 @@ impl World {
             .sign_with_keys(author)
             .unwrap();
         self.db
-            .insert_event(self.community, &event, Some(channel))
+            .insert_event(
+                self.community,
+                &event,
+                Some(channel),
+                crate::ArchiveGate::Exempt,
+            )
             .await
             .unwrap();
         event

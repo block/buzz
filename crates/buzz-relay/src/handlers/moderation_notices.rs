@@ -176,7 +176,13 @@ pub async fn send_moderation_notice(
 
     let (stored, _inserted) = state
         .db
-        .insert_event(tenant.community(), &event, Some(dm_channel_id))
+        .insert_event(
+            tenant.community(),
+            &event,
+            Some(dm_channel_id),
+            // An operator moderation notice is never refused (Q6).
+            buzz_db::ArchiveGate::Exempt,
+        )
         .await?;
 
     let kind_u32 = event_kind_u32(&stored.event);
@@ -208,7 +214,12 @@ async fn publish_moderation_profile(
     // every other user profile so it is resolvable by any client.
     let (stored, was_inserted) = state
         .db
-        .replace_addressable_event(tenant.community(), &event, None)
+        .replace_addressable_event(
+            tenant.community(),
+            &event,
+            None,
+            buzz_db::ArchiveGate::Exempt,
+        )
         .await?;
     if was_inserted {
         let kind_u32 = event_kind_u32(&stored.event);

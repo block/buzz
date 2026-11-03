@@ -152,7 +152,7 @@ mod postgres_tests {
         };
         let before = make(1789090000, "before");
         let after = make(1789090001, "after");
-        db.replace_parameterized_event(community, &before, &slot, None)
+        db.replace_parameterized_event(community, &before, &slot, None, crate::ArchiveGate::Exempt)
             .await
             .unwrap();
 
@@ -208,10 +208,16 @@ mod postgres_tests {
         .await
         .expect("snapshot must reach the real metadata read");
         assert!(
-            db.replace_parameterized_event(community, &after, &slot, None)
-                .await
-                .unwrap()
-                .1
+            db.replace_parameterized_event(
+                community,
+                &after,
+                &slot,
+                None,
+                crate::ArchiveGate::Exempt
+            )
+            .await
+            .unwrap()
+            .1
         );
         sqlx::query("SELECT pg_advisory_unlock(81193042)")
             .execute(&mut *blocker)
@@ -249,7 +255,9 @@ mod postgres_tests {
             .tags([Tag::identifier("escape-fixture")])
             .sign_with_keys(&key)
             .unwrap();
-        db.insert_event(community, &event, None).await.unwrap();
+        db.insert_event(community, &event, None, crate::ArchiveGate::Exempt)
+            .await
+            .unwrap();
         let dead_replica = PgPoolOptions::new()
             .connect_lazy("postgres://unused@127.0.0.1:1/absent")
             .unwrap();

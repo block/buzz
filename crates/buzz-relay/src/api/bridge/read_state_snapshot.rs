@@ -225,7 +225,13 @@ mod postgres_tests {
             .unwrap();
         state
             .db
-            .replace_parameterized_event(community, &event, "unrelated-app-without-t-tag", None)
+            .replace_parameterized_event(
+                community,
+                &event,
+                "unrelated-app-without-t-tag",
+                None,
+                buzz_db::ArchiveGate::Exempt,
+            )
             .await
             .unwrap();
         let other_event = EventBuilder::new(Kind::Custom(30078), "other-author")
@@ -234,7 +240,13 @@ mod postgres_tests {
             .unwrap();
         state
             .db
-            .replace_parameterized_event(community, &other_event, "other", None)
+            .replace_parameterized_event(
+                community,
+                &other_event,
+                "other",
+                None,
+                buzz_db::ArchiveGate::Exempt,
+            )
             .await
             .unwrap();
         state
@@ -244,6 +256,7 @@ mod postgres_tests {
                 &event,
                 "unrelated-app-without-t-tag",
                 None,
+                buzz_db::ArchiveGate::Exempt,
             )
             .await
             .unwrap();
@@ -313,7 +326,13 @@ mod postgres_tests {
             .unwrap();
         state
             .db
-            .replace_parameterized_event(community, &event, "fixture", None)
+            .replace_parameterized_event(
+                community,
+                &event,
+                "fixture",
+                None,
+                buzz_db::ArchiveGate::Exempt,
+            )
             .await
             .unwrap();
         let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
@@ -382,7 +401,13 @@ mod postgres_tests {
             );
             state
                 .db
-                .replace_parameterized_event(community, &event, "byte-boundary", None)
+                .replace_parameterized_event(
+                    community,
+                    &event,
+                    "byte-boundary",
+                    None,
+                    buzz_db::ArchiveGate::Exempt,
+                )
                 .await
                 .unwrap();
             let (status, body) = request(state.clone(), &host, Some(&key), filter(&key)).await;
@@ -416,7 +441,7 @@ mod postgres_tests {
                 .unwrap();
             state
                 .db
-                .insert_event(community, &event, None)
+                .insert_event(community, &event, None, buzz_db::ArchiveGate::Exempt)
                 .await
                 .unwrap();
         }

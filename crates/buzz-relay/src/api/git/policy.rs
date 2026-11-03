@@ -885,7 +885,7 @@ printf '%s' "$HMAC_INPUT" | openssl dgst -sha256 -hmac "{secret}" -hex 2>/dev/nu
             .expect("sign 30617");
         state
             .db
-            .insert_event(community, &event, None)
+            .insert_event(community, &event, None, buzz_db::ArchiveGate::Exempt)
             .await
             .expect("insert 30617");
 

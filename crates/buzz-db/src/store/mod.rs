@@ -22,6 +22,8 @@ pub mod dm;
 pub mod entity_deletion;
 /// Event storage and retrieval.
 pub mod event;
+/// Deletion requests stored and applied in one transaction.
+pub mod event_deletion;
 /// App-owned push enqueue and channel TTL refresh for inserted events.
 pub(crate) mod event_follow_up;
 /// Guarded task archive and restore, the task projection and the state read.

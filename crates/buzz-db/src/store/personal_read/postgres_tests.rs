@@ -35,7 +35,7 @@ pub(super) async fn fixture() -> (Db, PgPool, CommunityId, Uuid, Keys, nostr::Ev
     let event = EventBuilder::new(Kind::Custom(9), "read this, not its sibling")
         .sign_with_keys(&Keys::generate())
         .unwrap();
-    db.insert_event(community, &event, Some(channel))
+    db.insert_event(community, &event, Some(channel), crate::ArchiveGate::Exempt)
         .await
         .unwrap();
     start_before_everything(&pool, community, &actor.public_key()).await;
@@ -122,7 +122,7 @@ async fn add_history(db: &Db, community: CommunityId, channel: Uuid, count: usiz
             .custom_created_at(nostr::Timestamp::from(base + i))
             .sign_with_keys(&author)
             .unwrap();
-        db.insert_event(community, &event, Some(channel))
+        db.insert_event(community, &event, Some(channel), crate::ArchiveGate::Exempt)
             .await
             .unwrap();
         last = Some(event);
@@ -173,7 +173,7 @@ async fn personal_read_sidebar_author_window_excludes_expired_and_late_old_messa
             .custom_created_at(nostr::Timestamp::from(now - age))
             .sign_with_keys(&Keys::generate())
             .unwrap();
-        db.insert_event(community, &event, Some(channel))
+        db.insert_event(community, &event, Some(channel), crate::ArchiveGate::Exempt)
             .await
             .unwrap();
         let row = &sidebar(&db, community, &actor).await.channels[0];
@@ -196,9 +196,14 @@ async fn personal_read_sidebar_window_budget_counts_boundary_and_ineligible_tail
     let overflow = EventBuilder::new(Kind::Custom(9), "one beyond the budget")
         .sign_with_keys(&Keys::generate())
         .unwrap();
-    db.insert_event(community, &overflow, Some(channel))
-        .await
-        .unwrap();
+    db.insert_event(
+        community,
+        &overflow,
+        Some(channel),
+        crate::ArchiveGate::Exempt,
+    )
+    .await
+    .unwrap();
     mention_everywhere(&pool, community, &actor).await;
     // The budget bounds the count; the unexamined message is left out.
     assert_eq!(
@@ -290,7 +295,12 @@ async fn personal_read_intent_does_not_lock_shared_conversation_rows() {
         .unwrap();
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        db.insert_event(community, &incoming, Some(channel)),
+        db.insert_event(
+            community,
+            &incoming,
+            Some(channel),
+            crate::ArchiveGate::Exempt,
+        ),
     )
     .await
     .unwrap()
@@ -327,7 +337,7 @@ async fn personal_read_diff_alone_leaves_the_sidebar_row_unchanged() {
                 .tags([nostr::Tag::parse(["p", &actor.public_key().to_hex()]).unwrap()])
                 .sign_with_keys(&Keys::generate())
                 .unwrap();
-            db.insert_event(community, &event, Some(channel))
+            db.insert_event(community, &event, Some(channel), crate::ArchiveGate::Exempt)
                 .await
                 .unwrap();
         }
@@ -347,7 +357,7 @@ async fn personal_read_latest_includes_own_and_excludes_deleted_auxiliary() {
         .custom_created_at(nostr::Timestamp::from(base + 1))
         .sign_with_keys(&actor)
         .unwrap();
-    db.insert_event(community, &own, Some(channel))
+    db.insert_event(community, &own, Some(channel), crate::ArchiveGate::Exempt)
         .await
         .unwrap();
     for (offset, kind) in [(2, 9), (4, 7)] {
@@ -355,7 +365,7 @@ async fn personal_read_latest_includes_own_and_excludes_deleted_auxiliary() {
             .custom_created_at(nostr::Timestamp::from(base + offset))
             .sign_with_keys(&actor)
             .unwrap();
-        db.insert_event(community, &event, Some(channel))
+        db.insert_event(community, &event, Some(channel), crate::ArchiveGate::Exempt)
             .await
             .unwrap();
         if offset == 2 {
@@ -392,9 +402,14 @@ async fn personal_read_latest_skips_a_reply_without_ancestry() {
         .custom_created_at(nostr::Timestamp::from(first.created_at.as_secs() + 1))
         .sign_with_keys(&Keys::generate())
         .unwrap();
-    db.insert_event(community, &orphan, Some(channel))
-        .await
-        .unwrap();
+    db.insert_event(
+        community,
+        &orphan,
+        Some(channel),
+        crate::ArchiveGate::Exempt,
+    )
+    .await
+    .unwrap();
     let latest = |page: SidebarPage| page.channels[0].latest_id.clone();
     assert_eq!(
         latest(sidebar(&db, community, &actor).await),
@@ -498,7 +513,7 @@ async fn personal_read_frontier_is_monotonic_and_rejects_malformed_anchors() {
         .custom_created_at(nostr::Timestamp::from(event.created_at.as_secs() - 10))
         .sign_with_keys(&Keys::generate())
         .unwrap();
-    db.insert_event(community, &later, Some(channel))
+    db.insert_event(community, &later, Some(channel), crate::ArchiveGate::Exempt)
         .await
         .unwrap();
     for (anchor, why) in [
@@ -665,9 +680,14 @@ async fn personal_read_counts_only_arrivals_after_the_account_starts() {
     let elsewhere = EventBuilder::new(Kind::Custom(9), "elsewhere")
         .sign_with_keys(&Keys::generate())
         .unwrap();
-    db.insert_event(community, &elsewhere, Some(other))
-        .await
-        .unwrap();
+    db.insert_event(
+        community,
+        &elsewhere,
+        Some(other),
+        crate::ArchiveGate::Exempt,
+    )
+    .await
+    .unwrap();
     db.apply_personal_read_intent(
         community,
         &actor.public_key(),
@@ -686,7 +706,7 @@ async fn personal_read_counts_only_arrivals_after_the_account_starts() {
         .tags([Tag::public_key(actor.public_key())])
         .sign_with_keys(&Keys::generate())
         .unwrap();
-    db.insert_event(community, &later, Some(channel))
+    db.insert_event(community, &later, Some(channel), crate::ArchiveGate::Exempt)
         .await
         .unwrap();
     assert_eq!(
@@ -727,7 +747,7 @@ async fn personal_read_channel_and_thread_never_inherit_each_other() {
                 .custom_created_at(nostr::Timestamp::from(at))
                 .sign_with_keys(&Keys::generate())
                 .unwrap();
-            db.insert_event(community, &reply, Some(channel))
+            db.insert_event(community, &reply, Some(channel), crate::ArchiveGate::Exempt)
                 .await
                 .unwrap();
             sqlx::query("INSERT INTO thread_metadata (community_id,event_id,event_created_at,channel_id,root_event_id,parent_event_id,depth)
@@ -742,7 +762,7 @@ async fn personal_read_channel_and_thread_never_inherit_each_other() {
         .custom_created_at(nostr::Timestamp::from(base + 20))
         .sign_with_keys(&Keys::generate())
         .unwrap();
-    db.insert_event(community, &top, Some(channel))
+    db.insert_event(community, &top, Some(channel), crate::ArchiveGate::Exempt)
         .await
         .unwrap();
     // Arrives last, and still is not the timeline's latest.
@@ -834,7 +854,7 @@ async fn personal_read_author_horizon_unresolved_ancestry_and_deletion() {
         .tags([mention.clone()])
         .sign_with_keys(&Keys::generate())
         .unwrap();
-    db.insert_event(community, &old, Some(channel))
+    db.insert_event(community, &old, Some(channel), crate::ArchiveGate::Exempt)
         .await
         .unwrap();
     // Claims to reply, with no recorded ancestry: left out, though directed.
@@ -845,9 +865,14 @@ async fn personal_read_author_horizon_unresolved_ancestry_and_deletion() {
         ])
         .sign_with_keys(&Keys::generate())
         .unwrap();
-    db.insert_event(community, &unresolved, Some(channel))
-        .await
-        .unwrap();
+    db.insert_event(
+        community,
+        &unresolved,
+        Some(channel),
+        crate::ArchiveGate::Exempt,
+    )
+    .await
+    .unwrap();
     let row = &sidebar(&db, community, &actor).await.channels[0];
     assert_eq!((row.unread, row.mentions), (true, 1));
     assert!(row.threads.is_empty());

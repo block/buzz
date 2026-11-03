@@ -3572,7 +3572,7 @@ mod sec005_postgres_tests {
             }
         }
         let event = announcement(&owner_keys, tags);
-        db.insert_event(community, &event, None)
+        db.insert_event(community, &event, None, buzz_db::ArchiveGate::Exempt)
             .await
             .expect("30617");
 

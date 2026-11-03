@@ -162,7 +162,11 @@ async fn project_filter_survives_artifact_query_hook() {
         // Newer, unbound: `buzz-channel` and the wanted id sit in an unrelated tag.
         let decoy = event(&["x", "buzz-channel", &home], now);
         for e in [&bound, &decoy] {
-            f.state.db.insert_event(f.community, e, None).await.unwrap();
+            f.state
+                .db
+                .insert_event(f.community, e, None, buzz_db::ArchiveGate::Exempt)
+                .await
+                .unwrap();
         }
         let filter = json!([{"kinds":[kind],"#buzz-channel":[f.home],"limit":1}]);
         let (status, body) = f.request("/query", filter.clone()).await;
@@ -192,7 +196,12 @@ async fn count_honors_buzz_channel_filter() {
             .unwrap();
         f.state
             .db
-            .insert_event(f.community, &event, Some(f.home))
+            .insert_event(
+                f.community,
+                &event,
+                Some(f.home),
+                buzz_db::ArchiveGate::Exempt,
+            )
             .await
             .unwrap();
     }

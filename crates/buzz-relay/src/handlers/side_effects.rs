@@ -350,14 +350,19 @@ pub async fn handle_side_effects(
 ) -> anyhow::Result<()> {
     match kind {
         0 => handle_kind0_profile(tenant, event, state).await,
-        5 => handle_standard_deletion_event(tenant, event, state).await,
+        // kind:5, kind:9005, kind:9021 and a kind:9001 that removes another
+        // member belong to the atomic persistence paths in ingest
+        // (`persist_standard_deletion`, `persist_delete_event`,
+        // `persist_join_request`, `persist_remove_user`).
+        5 => Err(anyhow::anyhow!("kind:5 requires atomic persistence")),
         // kind:9000 belongs to the atomic put-user path in ingest, which
         // reports each person's result.
         9000 => Err(anyhow::anyhow!("kind:9000 requires persist_put_user")),
-        9001 => handle_remove_user(tenant, event, state).await,
+        9001 if is_self_departure(event) => handle_remove_user(tenant, event, state).await,
+        9001 => Err(anyhow::anyhow!("kind:9001 requires atomic persistence")),
         // kind:9002 belongs to the atomic persistence path in ingest.
         9002 => Err(anyhow::anyhow!("kind:9002 requires atomic persistence")),
-        9005 => handle_delete_event_side_effect(tenant, event, state).await,
+        9005 => Err(anyhow::anyhow!("kind:9005 requires atomic persistence")),
         9007 => handle_create_group(tenant, event, state).await,
         9008 => handle_delete_group(tenant, event, state).await,
         9009 => {
@@ -367,7 +372,7 @@ pub async fn handle_side_effects(
             );
             Ok(())
         }
-        9021 => handle_join_request(tenant, event, state).await,
+        9021 => Err(anyhow::anyhow!("kind:9021 requires atomic persistence")),
         9022 => handle_leave_request(tenant, event, state).await,
         // NIP-34: Git repo announcement → reserve name + seed manifest pointer.
         KIND_GIT_REPO_ANNOUNCEMENT => handle_git_repo_announcement(tenant, event, state).await,
@@ -1009,10 +1014,17 @@ pub async fn emit_system_message(
 ) -> anyhow::Result<()> {
     let event = sign_system_message(state, channel_id, content, idempotency_ts)?;
 
-    // Durable insert is the completion boundary — propagate failure.
+    // Durable insert is the completion boundary — propagate failure. A
+    // relay notice records a change that already committed, so an archived
+    // channel does not refuse it.
     state
         .db
-        .insert_event(tenant.community(), &event, Some(channel_id))
+        .insert_event(
+            tenant.community(),
+            &event,
+            Some(channel_id),
+            buzz_db::ArchiveGate::Exempt,
+        )
         .await
         .map_err(|e| anyhow::anyhow!("system message insert failed: {e}"))?;
 
@@ -1258,7 +1270,12 @@ async fn emit_typed_membership_notification(
     // Store with channel_id = None → globally scoped, reachable by global subscribers.
     let (stored, was_inserted) = state
         .db
-        .insert_event(tenant.community(), &event, None)
+        .insert_event(
+            tenant.community(),
+            &event,
+            None,
+            buzz_db::ArchiveGate::Exempt,
+        )
         .await?;
     if !was_inserted {
         return Ok(());
@@ -1407,9 +1424,15 @@ async fn emit_addressable_discovery_event(
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign kind:{kind}: {e}"))?;
 
+    // Relay discovery state: an archived channel still describes itself.
     let (stored, was_inserted) = state
         .db
-        .replace_addressable_event(tenant.community(), &event, Some(channel_id))
+        .replace_addressable_event(
+            tenant.community(),
+            &event,
+            Some(channel_id),
+            buzz_db::ArchiveGate::Exempt,
+        )
         .await?;
     if was_inserted {
         let kind_u32 = event_kind_u32(&stored.event);
@@ -1966,7 +1989,14 @@ pub(crate) async fn persist_put_user(
         .collect();
     let (stored, results) = match state
         .db
-        .put_members_with_event(tenant.community(), channel_id, event, &puts, thread_meta)
+        .put_members_with_event(
+            tenant.community(),
+            channel_id,
+            event,
+            &puts,
+            thread_meta,
+            buzz_db::ArchiveGate::Refuse,
+        )
         .await?
     {
         buzz_db::channel_members::MemberPutEventWrite::Applied { stored, results } => {
@@ -2095,6 +2125,9 @@ fn put_refusal_reason(error: buzz_db::DbError) -> String {
     }
 }
 
+/// The effects of a stored kind:9001 that names its own author (see
+/// [`is_self_departure`]). An archived channel does not refuse it, so it
+/// keeps its own write after the event's.
 async fn handle_remove_user(
     tenant: &TenantContext,
     event: &Event,
@@ -2102,30 +2135,84 @@ async fn handle_remove_user(
 ) -> anyhow::Result<()> {
     let channel_id =
         extract_h_tag_channel(event).ok_or_else(|| anyhow::anyhow!("missing h tag"))?;
-    let target_pubkey = extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
     let actor_bytes = event.pubkey.to_bytes().to_vec();
 
     // Guard: prevent last-owner orphaning on self-removal (kind 9001).
-    if target_pubkey == actor_bytes {
-        let members = state
-            .db
-            .get_members_for_event_write(tenant.community(), channel_id)
-            .await?;
-        if channel_authz::is_sole_owner(&members, &actor_bytes) {
-            return Err(ChannelAuthzError::LastOwnerRemovalTransferFirst.into());
-        }
+    let members = state
+        .db
+        .get_members_for_event_write(tenant.community(), channel_id)
+        .await?;
+    if channel_authz::is_sole_owner(&members, &actor_bytes) {
+        return Err(ChannelAuthzError::LastOwnerRemovalTransferFirst.into());
     }
 
     state
         .db
-        .remove_member(tenant.community(), channel_id, &target_pubkey, &actor_bytes)
+        .remove_member(tenant.community(), channel_id, &actor_bytes, &actor_bytes)
         .await?;
-    state.invalidate_membership(tenant, channel_id, &target_pubkey);
-    evict_live_channel_subscriptions(tenant, state, channel_id, &target_pubkey).await;
-    disable_departed_member_workflows(tenant, state, channel_id, &target_pubkey).await;
+    member_removed_effects(tenant, state, channel_id, &actor_bytes, &actor_bytes).await
+}
 
-    let actor_hex = hex::encode(&actor_bytes);
-    let target_hex = hex::encode(&target_pubkey);
+/// Store a kind:9001 that removes another member and remove them in one
+/// transaction, then run the live effects.
+///
+/// The channel's write gate comes first, so an archived channel refuses the
+/// event and nothing is stored. A refusal decided under the membership lock
+/// ([`buzz_db::DbError::AccessDenied`]) also stores nothing. A target that is
+/// not an active member leaves the event stored with no effect.
+pub(crate) async fn persist_remove_user(
+    tenant: &TenantContext,
+    event: &Event,
+    state: &Arc<AppState>,
+    thread_meta: Option<buzz_db::event::ThreadMetadataParams<'_>>,
+) -> Result<(StoredEvent, bool), buzz_db::DbError> {
+    use buzz_db::channel_members::MemberRemoveEventWrite;
+
+    let channel_id = extract_h_tag_channel(event)
+        .ok_or_else(|| buzz_db::DbError::InvalidData("missing h tag".into()))?;
+    let target = extract_p_tag(event)
+        .ok_or_else(|| buzz_db::DbError::InvalidData("missing p tag".into()))?;
+    let write = state
+        .db
+        .remove_member_with_event(
+            tenant.community(),
+            channel_id,
+            event,
+            &target,
+            thread_meta,
+            buzz_db::ArchiveGate::Refuse,
+        )
+        .await?;
+    let stored = match write {
+        MemberRemoveEventWrite::Duplicate(stored) => return Ok((stored, false)),
+        MemberRemoveEventWrite::NotMember(stored) => {
+            info!(channel = %channel_id, "kind:9001 remove — target is not a member");
+            return Ok((stored, true));
+        }
+        MemberRemoveEventWrite::Removed(stored) => stored,
+    };
+    let actor = event.pubkey.to_bytes();
+    if let Err(e) = member_removed_effects(tenant, state, channel_id, &target, &actor).await {
+        error!(channel = %channel_id, "kind:9001 live effects failed: {e}");
+    }
+    Ok((stored, true))
+}
+
+/// The live effects of `target`'s removal from `channel_id` by `actor`, after
+/// the removal commits.
+async fn member_removed_effects(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    target_pubkey: &[u8],
+    actor_bytes: &[u8],
+) -> anyhow::Result<()> {
+    state.invalidate_membership(tenant, channel_id, target_pubkey);
+    evict_live_channel_subscriptions(tenant, state, channel_id, target_pubkey).await;
+    disable_departed_member_workflows(tenant, state, channel_id, target_pubkey).await;
+
+    let actor_hex = hex::encode(actor_bytes);
+    let target_hex = hex::encode(target_pubkey);
     let msg_type = if target_pubkey == actor_bytes {
         "member_left"
     } else {
@@ -2152,8 +2239,8 @@ async fn handle_remove_user(
         tenant,
         state,
         channel_id,
-        &target_pubkey,
-        &actor_bytes,
+        target_pubkey,
+        actor_bytes,
         KIND_MEMBER_REMOVED_NOTIFICATION,
     )
     .await
@@ -2546,87 +2633,59 @@ pub(crate) fn create_unlisted_from_tags(event: &Event) -> anyhow::Result<bool> {
     Ok(unlisted)
 }
 
-async fn handle_delete_event_side_effect(
+/// Store a kind:9005 and soft-delete its target in one transaction, then
+/// emit the live thread summary and the `message_deleted` tombstone.
+///
+/// The channel's write gate comes first, so an archived channel refuses the
+/// event and nothing is stored. The target must live in the event's `h`
+/// channel; a target in another channel, or none, leaves the event stored
+/// with no effect.
+pub(crate) async fn persist_delete_event(
     tenant: &TenantContext,
     event: &Event,
     state: &Arc<AppState>,
-) -> anyhow::Result<()> {
-    let channel_id =
-        extract_h_tag_channel(event).ok_or_else(|| anyhow::anyhow!("missing h tag"))?;
-
-    // Extract target event ID from e tag
-    let target_id = event
-        .tags
-        .iter()
-        .find_map(|tag| {
-            if tag.kind().to_string() == "e" {
-                tag.content().and_then(|v| {
-                    let bytes = hex::decode(v).ok()?;
-                    if bytes.len() == 32 {
-                        Some(bytes)
-                    } else {
-                        None
-                    }
-                })
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| anyhow::anyhow!("missing e tag for target event"))?;
-
+    thread_meta: Option<buzz_db::event::ThreadMetadataParams<'_>>,
+) -> Result<(StoredEvent, bool), buzz_db::DbError> {
+    let channel_id = extract_h_tag_channel(event)
+        .ok_or_else(|| buzz_db::DbError::InvalidData("missing h tag".into()))?;
+    let target_id = extract_target_event_ids(event).into_iter().next();
     // Verify the target event belongs to the same channel as the h-tag.
     // Without this check, an admin of channel A could delete events in channel B
     // by sending h=A, e=<event-in-B>.
-    if let Some(target_event) = state
+    let target = target_id
+        .as_deref()
+        .map(|event_id| buzz_db::event_deletion::DeletionTarget {
+            event_id,
+            required_channel: Some(channel_id),
+            reaction: None,
+        });
+    let write = state
         .db
-        .get_event_by_id_including_deleted_for_event_write(tenant.community(), &target_id)
-        .await
-        .map_err(|e| anyhow::anyhow!("get_event_by_id failed: {e}"))?
-    {
-        match target_event.channel_id {
-            Some(target_ch) if target_ch != channel_id => {
-                return Err(anyhow::anyhow!(
-                    "target event belongs to a different channel"
-                ));
-            }
-            None => {
-                return Err(anyhow::anyhow!("target event has no channel"));
-            }
-            _ => {} // Same channel — OK
-        }
-    }
-
-    // Look up thread metadata so we can pass parent/root IDs to the
-    // transactional delete function.
-    let meta = state
-        .db
-        .get_thread_metadata_by_event(tenant.community(), &target_id)
-        .await
-        .map_err(|e| anyhow::anyhow!("get_thread_metadata failed: {e}"))?;
-
-    let parent_id = meta.as_ref().and_then(|m| m.parent_event_id.clone());
-    let root_id = meta.as_ref().and_then(|m| m.root_event_id.clone());
-
-    // Atomically soft-delete the event and decrement thread counters in one transaction.
-    let deleted = state
-        .db
-        .soft_delete_event_and_update_thread(
+        .insert_event_deletion(
             tenant.community(),
-            &target_id,
-            parent_id.as_deref(),
-            root_id.as_deref(),
+            event,
+            Some(channel_id),
+            thread_meta,
+            target,
+            buzz_db::ArchiveGate::Refuse,
         )
-        .await
-        .map_err(|e| anyhow::anyhow!("soft_delete_event failed: {e}"))?;
-
-    if !deleted {
-        warn!(target_event = %hex::encode(&target_id), "event already deleted or not found");
-        return Ok(()); // No-op: skip system message to avoid false audit records.
+        .await?;
+    if !write.inserted {
+        return Ok((write.stored, false));
     }
+    let Some(target_id) = target_id.filter(|_| write.deleted) else {
+        // No-op: skip system message to avoid false audit records.
+        warn!(
+            channel = %channel_id,
+            target_channel = ?write.target_channel,
+            "kind:9005 target missing, already deleted, or outside the channel"
+        );
+        return Ok((write.stored, true));
+    };
 
     // Thread counters were decremented in the same transaction — push a fresh
     // relay-signed 39005 so live badge counts also count *down*.
-    if let Some(root_id) = root_id {
+    if let Some(root_id) = write.root_event_id {
         emit_live_thread_summary(tenant, state, channel_id, root_id);
     }
 
@@ -2640,10 +2699,14 @@ async fn handle_delete_event_side_effect(
     copy_optional_string_field(event, &mut tombstone, "reason_code");
     copy_optional_string_field(event, &mut tombstone, "public_reason");
 
-    emit_system_message(tenant, state, channel_id, tombstone, chrono::Utc::now()).await?;
+    if let Err(e) =
+        emit_system_message(tenant, state, channel_id, tombstone, chrono::Utc::now()).await
+    {
+        error!(channel = %channel_id, "kind:9005 tombstone failed: {e}");
+    }
 
     info!(target_event = %hex::encode(&target_id), "NIP-29 DELETE_EVENT processed");
-    Ok(())
+    Ok((write.stored, true))
 }
 
 async fn handle_create_group(
@@ -2813,7 +2876,12 @@ pub(crate) async fn persist_delete_group(
         .ok_or_else(|| buzz_db::DbError::InvalidData("missing h tag".into()))?;
     let write = state
         .db
-        .delete_channel_with_event(tenant.community(), channel_id, event)
+        .delete_channel_with_event(
+            tenant.community(),
+            channel_id,
+            event,
+            buzz_db::ArchiveGate::Refuse,
+        )
         .await?;
     if write.inserted && !write.deleted {
         warn!(channel = %channel_id, "channel already deleted or not found");
@@ -2865,6 +2933,51 @@ async fn handle_delete_group(
     Ok(())
 }
 
+/// Store a kind:9021 and add its author to the open channel in one
+/// transaction, then run the live effects.
+///
+/// The channel's write gate comes first, so an archived channel refuses the
+/// event and nothing is stored. A channel that is not open is refused under
+/// the membership lock with [`buzz_db::channel_members::CHANNEL_PRIVATE`].
+/// An author who is already an active member leaves the event stored with no
+/// effect. A self-join gets the channel's `join_role`: member in a normal
+/// channel, guest in an announce channel, where a member must then make them
+/// a member.
+pub(crate) async fn persist_join_request(
+    tenant: &TenantContext,
+    event: &Event,
+    state: &Arc<AppState>,
+    thread_meta: Option<buzz_db::event::ThreadMetadataParams<'_>>,
+) -> Result<(StoredEvent, bool), buzz_db::DbError> {
+    use buzz_db::channel_members::JoinEventWrite;
+
+    let channel_id = extract_h_tag_channel(event)
+        .ok_or_else(|| buzz_db::DbError::InvalidData("missing h tag".into()))?;
+    let write = state
+        .db
+        .join_with_event(
+            tenant.community(),
+            channel_id,
+            event,
+            thread_meta,
+            buzz_db::ArchiveGate::Refuse,
+        )
+        .await?;
+    let stored = match write {
+        JoinEventWrite::Duplicate(stored) => return Ok((stored, false)),
+        JoinEventWrite::AlreadyMember(stored) => {
+            info!(channel = %channel_id, "kind:9021 join — already a member, skipping");
+            return Ok((stored, true));
+        }
+        JoinEventWrite::Joined { stored, .. } => stored,
+    };
+    if let Err(e) = announce_self_join(tenant, state, channel_id, &event.pubkey.to_bytes()).await {
+        error!(channel = %channel_id, "kind:9021 live effects failed: {e}");
+    }
+    info!(channel = %channel_id, "kind:9021 join processed");
+    Ok((stored, true))
+}
+
 /// What [`join_channel_as_self`] did for the member.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SelfJoinOutcome {
@@ -2876,8 +2989,8 @@ pub(crate) enum SelfJoinOutcome {
 
 /// Join `pubkey` to an open, unarchived channel as a self-join: no inviter,
 /// the channel's `join_role`, and the kind:40099, 39000/39002 and 44100
-/// side effects of a kind:9021. Shared by the kind:9021 handler and the
-/// default-channel auto-join on new community memberships.
+/// side effects of a kind:9021. Used by the default-channel auto-join on new
+/// community memberships; a kind:9021 itself is [`persist_join_request`].
 pub(crate) async fn join_channel_as_self(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -3118,24 +3231,6 @@ async fn join_never_joined_channels(
     }
 }
 
-async fn handle_join_request(
-    tenant: &TenantContext,
-    event: &Event,
-    state: &Arc<AppState>,
-) -> anyhow::Result<()> {
-    let channel_id =
-        extract_h_tag_channel(event).ok_or_else(|| anyhow::anyhow!("missing h tag"))?;
-    match join_channel_as_self(tenant, state, channel_id, &event.pubkey.to_bytes()).await? {
-        SelfJoinOutcome::AlreadyMember => {
-            info!(channel = %channel_id, "kind:9021 join — already a member, skipping");
-        }
-        SelfJoinOutcome::Joined => {
-            info!(channel = %channel_id, "kind:9021 join processed");
-        }
-    }
-    Ok(())
-}
-
 async fn handle_leave_request(
     tenant: &TenantContext,
     event: &Event,
@@ -3220,6 +3315,9 @@ pub(crate) fn is_workflow_deletion(event: &Event) -> bool {
 }
 
 /// Persist an already-authorized workflow deletion and its domain changes atomically.
+///
+/// The workflow's channel gate comes first, so a workflow in an archived
+/// channel refuses the deletion and nothing is stored.
 pub(crate) async fn persist_workflow_deletion(
     tenant: &TenantContext,
     event: &Event,
@@ -3239,7 +3337,13 @@ pub(crate) async fn persist_workflow_deletion(
         .ok_or_else(|| anyhow::anyhow!("invalid workflow coordinate"))?;
     let (stored, dispatch, channel_id) = state
         .db
-        .insert_workflow_deletion(tenant.community(), event, &owner, d_tag)
+        .insert_workflow_deletion(
+            tenant.community(),
+            event,
+            &owner,
+            d_tag,
+            buzz_db::ArchiveGate::Refuse,
+        )
         .await?;
     if let Some(channel_id) = channel_id {
         state
@@ -3249,223 +3353,229 @@ pub(crate) async fn persist_workflow_deletion(
     Ok((stored, dispatch))
 }
 
-/// Handle NIP-09 deletion via `a` tag (addressable/parameterized-replaceable events).
-/// Parses "kind:pubkey:d-tag" and deletes the corresponding DB record.
-async fn handle_a_tag_deletion(
+/// Store a NIP-09 kind:5 and apply it in one transaction, then emit the live
+/// thread summary.
+///
+/// An `e` target is soft-deleted with its thread counters and, for a kind:7
+/// target, its reaction row. An `a` target of a parameterized kind
+/// soft-deletes every version at or before the request (see
+/// [`buzz_db::Db::insert_coordinate_deletion`]). A push lease target is
+/// ignored: its revocation is a higher-generation inactive replacement.
+/// Workflow coordinates use [`persist_workflow_deletion`].
+///
+/// The write gates of the request's channel and of every channel it deletes
+/// from come first, so an archived one refuses the request and nothing is
+/// stored.
+pub(crate) async fn persist_standard_deletion(
     tenant: &TenantContext,
     event: &Event,
     state: &Arc<AppState>,
-) -> anyhow::Result<()> {
-    let a_value = event
-        .tags
-        .iter()
-        .find(|t| t.kind().to_string() == "a")
-        .and_then(|t| t.content().map(|s| s.to_string()))
-        .ok_or_else(|| anyhow::anyhow!("missing a tag for addressable deletion"))?;
-
-    let parts: Vec<&str> = a_value.splitn(3, ':').collect();
-    if parts.len() < 3 {
-        return Err(anyhow::anyhow!("invalid a-tag format: {a_value}"));
-    }
-    let kind_num: u32 = parts[0]
-        .parse()
-        .map_err(|_| anyhow::anyhow!("invalid kind in a-tag"))?;
-    let pubkey_hex = parts[1];
-    let d_tag = parts[2];
-
-    match kind_num {
-        // kind:30350 revocation is exclusively a higher-generation inactive replacement.
-        super::push_lease::KIND_PUSH_LEASE => {
-            tracing::debug!(d_tag, "NIP-09 deletion ignored for push lease");
-        }
-        buzz_core::kind::KIND_WORKFLOW_DEF => {
-            // Workflow deletion belongs to the atomic persistence path in ingest.
-            return Err(anyhow::anyhow!(
-                "workflow deletion requires atomic persistence"
-            ));
-        }
-        // Other NIP-33 events have no executable workflow projection.
-        k if is_parameterized_replaceable(k) => {
-            let pubkey_bytes = match hex::decode(pubkey_hex) {
-                Ok(b) => b,
-                Err(e) => {
-                    return Err(anyhow::anyhow!(
-                        "invalid pubkey hex in a-tag {pubkey_hex}: {e}"
-                    ));
-                }
-            };
-            // Safe cast: NIP-33 kinds are 30000–39999, well within i32.
-            let kind_i32 = k as i32;
-            // NIP-09 scopes an a-tag deletion to versions at or before the
-            // deletion's own created_at, so a stale/replayed tombstone can never
-            // erase a newer replacement head.
-            let deleted = state
-                .db
-                .soft_delete_by_coordinate(
-                    tenant.community(),
-                    kind_i32,
-                    &pubkey_bytes,
-                    d_tag,
-                    event.created_at.as_secs() as i64,
-                )
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "failed to soft-delete by coordinate {kind_i32}:{pubkey_hex}:{d_tag}: {e}"
-                    )
-                })?;
-            if deleted {
-                tracing::info!(
-                    kind = k,
-                    d_tag = d_tag,
-                    "NIP-09 a-tag deletion: soft-deleted addressable event by coordinate"
-                );
-            } else {
-                tracing::debug!(
-                    kind = k,
-                    d_tag = d_tag,
-                    "NIP-09 a-tag deletion: no live row matched coordinate"
-                );
-            }
-        }
-        _ => {
-            tracing::debug!(
-                kind = kind_num,
-                d_tag = d_tag,
-                "NIP-09 a-tag deletion for non-NIP-33 kind — no side effect"
-            );
-        }
-    }
-
-    Ok(())
-}
-
-async fn handle_standard_deletion_event(
-    tenant: &TenantContext,
-    event: &Event,
-    state: &Arc<AppState>,
-) -> anyhow::Result<()> {
-    let target_ids = extract_target_event_ids(event);
+    channel_id: Option<Uuid>,
+    thread_meta: Option<buzz_db::event::ThreadMetadataParams<'_>>,
+) -> Result<(StoredEvent, bool), buzz_db::DbError> {
     if !has_e_tag(event) {
         // NIP-09 a-tag deletion path for addressable events. Keyed on the
         // absence of *any* e tag (not just valid e-ids): a malformed e + a must
         // not route here and silently soft-delete the coordinate.
-        return handle_a_tag_deletion(tenant, event, state).await;
+        return persist_a_tag_deletion(tenant, event, state, channel_id, thread_meta).await;
     }
 
-    for target_id in target_ids {
-        let target_event = match state
-            .db
-            .get_event_by_id_including_deleted_for_event_write(tenant.community(), &target_id)
-            .await?
-        {
-            Some(target) => target,
-            None => continue,
-        };
-        if u32::from(target_event.event.kind.as_u16()) == super::push_lease::KIND_PUSH_LEASE {
+    let target_event = match extract_target_event_ids(event).first() {
+        Some(target_id) => {
+            state
+                .db
+                .get_event_by_id_including_deleted_for_event_write(tenant.community(), target_id)
+                .await?
+        }
+        None => None,
+    };
+    let target_event = target_event.filter(|target| {
+        let push_lease =
+            u32::from(target.event.kind.as_u16()) == super::push_lease::KIND_PUSH_LEASE;
+        if push_lease {
             tracing::debug!(
-                target_id = %hex::encode(&target_id),
+                target_id = %target.event.id,
                 "NIP-09 deletion ignored for push lease"
             );
-            continue;
         }
+        !push_lease
+    });
+    let fallback = match &target_event {
+        Some(target) if u32::from(target.event.kind.as_u16()) == KIND_REACTION => {
+            reaction_row_of(tenant, state, &target.event).await?
+        }
+        _ => None,
+    };
+    let target = target_event
+        .as_ref()
+        .map(|target| buzz_db::event_deletion::DeletionTarget {
+            event_id: target.event.id.as_bytes(),
+            required_channel: None,
+            reaction: Some(fallback.as_ref().map(ReactionRow::key)),
+        });
+    let write = state
+        .db
+        .insert_event_deletion(
+            tenant.community(),
+            event,
+            channel_id,
+            thread_meta,
+            target,
+            buzz_db::ArchiveGate::Refuse,
+        )
+        .await?;
+    // Thread counters were decremented in the same transaction — push a
+    // fresh relay-signed 39005 so live badge counts also count *down*.
+    if let (Some(root_id), Some(target_channel)) = (write.root_event_id, write.target_channel) {
+        emit_live_thread_summary(tenant, state, target_channel, root_id);
+    }
+    Ok((write.stored, write.inserted))
+}
 
-        let meta = state
+/// The NIP-09 `a`-tag path of [`persist_standard_deletion`].
+async fn persist_a_tag_deletion(
+    tenant: &TenantContext,
+    event: &Event,
+    state: &Arc<AppState>,
+    channel_id: Option<Uuid>,
+    thread_meta: Option<buzz_db::event::ThreadMetadataParams<'_>>,
+) -> Result<(StoredEvent, bool), buzz_db::DbError> {
+    let a_value = event
+        .tags
+        .iter()
+        .find(|t| t.kind().to_string() == "a")
+        .and_then(|t| t.content())
+        .unwrap_or_default();
+    let parts: Vec<&str> = a_value.splitn(3, ':').collect();
+    let coordinate = match parts.as_slice() {
+        [kind, pubkey_hex, d_tag] => kind.parse::<u32>().ok().map(|k| (k, *pubkey_hex, *d_tag)),
+        _ => None,
+    };
+    let deleted_coordinate = match coordinate {
+        // Workflow deletion belongs to the atomic persistence path in ingest.
+        Some((buzz_core::kind::KIND_WORKFLOW_DEF, ..)) => {
+            return Err(buzz_db::DbError::InvalidData(
+                "workflow deletion requires atomic persistence".into(),
+            ));
+        }
+        // kind:30350 revocation is exclusively a higher-generation inactive replacement.
+        Some((kind, _, d_tag)) if kind == super::push_lease::KIND_PUSH_LEASE => {
+            tracing::debug!(d_tag, "NIP-09 deletion ignored for push lease");
+            None
+        }
+        Some((kind, pubkey_hex, d_tag)) if is_parameterized_replaceable(kind) => {
+            Some((kind, pubkey_hex, d_tag))
+        }
+        _ => {
+            tracing::debug!(
+                a_value,
+                "NIP-09 a-tag deletion for non-NIP-33 kind — no side effect"
+            );
+            None
+        }
+    };
+    let Some((kind, pubkey_hex, d_tag)) = deleted_coordinate else {
+        return state
             .db
-            .get_thread_metadata_by_event(tenant.community(), &target_id)
-            .await?;
-        let parent_id = meta.as_ref().and_then(|m| m.parent_event_id.clone());
-        let root_id = meta.as_ref().and_then(|m| m.root_event_id.clone());
-
-        let deleted = state
-            .db
-            .soft_delete_event_and_update_thread(
+            .insert_event_with_thread_metadata(
                 tenant.community(),
-                &target_id,
-                parent_id.as_deref(),
-                root_id.as_deref(),
+                event,
+                channel_id,
+                thread_meta,
+                buzz_db::ArchiveGate::Refuse,
             )
-            .await?;
+            .await;
+    };
+    let pubkey = hex::decode(pubkey_hex).map_err(|e| {
+        buzz_db::DbError::InvalidData(format!("invalid pubkey hex in a-tag {pubkey_hex}: {e}"))
+    })?;
+    // NIP-09 scopes an a-tag deletion to versions at or before the
+    // deletion's own created_at, so a stale/replayed tombstone can never
+    // erase a newer replacement head. Safe cast: NIP-33 kinds are
+    // 30000–39999, well within i32.
+    let write = state
+        .db
+        .insert_coordinate_deletion(
+            tenant.community(),
+            event,
+            channel_id,
+            thread_meta,
+            kind as i32,
+            &pubkey,
+            d_tag,
+            buzz_db::ArchiveGate::Refuse,
+        )
+        .await?;
+    tracing::debug!(
+        kind,
+        d_tag,
+        deleted = write.deleted,
+        "NIP-09 a-tag deletion by coordinate"
+    );
+    Ok((write.stored, write.inserted))
+}
 
-        if !deleted {
-            continue;
-        }
+/// The key of the reaction row a kind:7 `reaction` created, read from the
+/// reaction and its target, for a row that does not carry the reaction's id.
+struct ReactionRow {
+    event_id: Vec<u8>,
+    event_created_at: chrono::DateTime<chrono::Utc>,
+    pubkey: Vec<u8>,
+    emoji: String,
+}
 
-        // Thread counters were decremented in the same transaction — push a
-        // fresh relay-signed 39005 so live badge counts also count *down*.
-        if let (Some(root_id), Some(channel_id)) = (root_id, target_event.channel_id) {
-            emit_live_thread_summary(tenant, state, channel_id, root_id);
-        }
-
-        if u32::from(target_event.event.kind.as_u16()) == KIND_REACTION {
-            // Try by reaction_event_id first; fall back to tuple-based removal
-            // if the backfill was missed (set_reaction_event_id is best-effort).
-            let removed = state
-                .db
-                .remove_reaction_by_source_event_id(tenant.community(), &target_id)
-                .await
-                .unwrap_or(false);
-            if !removed {
-                // Derive (target, actor, emoji) from the reaction event itself.
-                // Use effective_message_author to handle legacy relay-signed
-                // reactions where event.pubkey is the relay key, not the user.
-                let actor = super::ingest::effective_message_author(
-                    &target_event.event,
-                    &state.relay_keypair.public_key(),
-                );
-                let emoji = if target_event.event.content.is_empty() {
-                    "+"
-                } else {
-                    &target_event.event.content
-                };
-                if let Some(react_target_hex) = target_event.event.tags.iter().rev().find_map(|t| {
-                    if t.kind().to_string() == "e" {
-                        t.content().and_then(|v| {
-                            if v.len() == 64 && v.chars().all(|c| c.is_ascii_hexdigit()) {
-                                Some(v.to_string())
-                            } else {
-                                None
-                            }
-                        })
-                    } else {
-                        None
-                    }
-                }) {
-                    if let Ok(react_target_id) = hex::decode(&react_target_hex) {
-                        if let Ok(Some(react_target_event)) = state
-                            .db
-                            .get_event_by_id_for_event_write(tenant.community(), &react_target_id)
-                            .await
-                        {
-                            let react_target_ts = chrono::DateTime::from_timestamp(
-                                react_target_event.event.created_at.as_secs() as i64,
-                                0,
-                            )
-                            .unwrap_or_else(chrono::Utc::now);
-                            if let Err(e) = state
-                                .db
-                                .remove_reaction(
-                                    tenant.community(),
-                                    &react_target_id,
-                                    react_target_ts,
-                                    &actor,
-                                    emoji,
-                                )
-                                .await
-                            {
-                                tracing::warn!(
-                                    error = %e,
-                                    "failed to remove reaction from DB during NIP-09 deletion"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+impl ReactionRow {
+    fn key(&self) -> buzz_db::event_deletion::ReactionRowKey<'_> {
+        buzz_db::event_deletion::ReactionRowKey {
+            event_id: &self.event_id,
+            event_created_at: self.event_created_at,
+            pubkey: &self.pubkey,
+            emoji: &self.emoji,
         }
     }
+}
 
-    Ok(())
+/// The [`ReactionRow`] of `reaction`; `None` when its target is missing.
+async fn reaction_row_of(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    reaction: &Event,
+) -> Result<Option<ReactionRow>, buzz_db::DbError> {
+    // Use effective_message_author to handle legacy relay-signed reactions
+    // where event.pubkey is the relay key, not the user.
+    let pubkey =
+        super::ingest::effective_message_author(reaction, &state.relay_keypair.public_key());
+    let emoji = if reaction.content.is_empty() {
+        "+".to_string()
+    } else {
+        reaction.content.clone()
+    };
+    let Some(event_id) = reaction.tags.iter().rev().find_map(|t| {
+        if t.kind().to_string() != "e" {
+            return None;
+        }
+        t.content()
+            .filter(|v| v.len() == 64 && v.chars().all(|c| c.is_ascii_hexdigit()))
+            .and_then(|v| hex::decode(v).ok())
+    }) else {
+        return Ok(None);
+    };
+    let Some(target) = state
+        .db
+        .get_event_by_id_for_event_write(tenant.community(), &event_id)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let event_created_at =
+        chrono::DateTime::from_timestamp(target.event.created_at.as_secs() as i64, 0)
+            .unwrap_or_else(chrono::Utc::now);
+    Ok(Some(ReactionRow {
+        event_id,
+        event_created_at,
+        pubkey,
+        emoji,
+    }))
 }
 
 /// Most members a kind:9007 may add besides its creator.
@@ -4167,7 +4277,12 @@ async fn publish_nip43_delta(
 
     let (stored, was_inserted) = state
         .db
-        .insert_event(tenant.community(), &event, None)
+        .insert_event(
+            tenant.community(),
+            &event,
+            None,
+            buzz_db::ArchiveGate::Exempt,
+        )
         .await?;
     if !was_inserted {
         return Ok(());
@@ -4452,7 +4567,12 @@ pub async fn publish_nipia_archival_list(
 
         let (stored, was_inserted) = state
             .db
-            .replace_addressable_event(tenant.community(), &event, None)
+            .replace_addressable_event(
+                tenant.community(),
+                &event,
+                None,
+                buzz_db::ArchiveGate::Exempt,
+            )
             .await?;
         if !was_inserted {
             continue;
@@ -4557,7 +4677,14 @@ pub async fn publish_dm_visibility_snapshot(
 
     let (stored, was_inserted) = state
         .db
-        .replace_parameterized_event(tenant.community(), &event, &viewer_hex, None)
+        .replace_parameterized_event(
+            tenant.community(),
+            &event,
+            &viewer_hex,
+            None,
+            // The viewer's own DM view state (Q2).
+            buzz_db::ArchiveGate::Exempt,
+        )
         .await?;
     if was_inserted {
         dispatch_persistent_event(
@@ -4624,7 +4751,12 @@ async fn publish_nipia_delta(
 
     let (stored, was_inserted) = state
         .db
-        .insert_event(tenant.community(), &event, None)
+        .insert_event(
+            tenant.community(),
+            &event,
+            None,
+            buzz_db::ArchiveGate::Exempt,
+        )
         .await?;
     if !was_inserted {
         return Ok(());

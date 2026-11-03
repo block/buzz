@@ -303,10 +303,15 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
         let deadline_before_first_insert = reset_deadline(pool, community, channel).await;
         let message = signed_event(&keys, kind, &format!("allowlisted-{kind}"));
         assert!(
-            db.insert_event(community, &message, Some(channel))
-                .await
-                .expect("insert allowlisted event")
-                .1
+            db.insert_event(
+                community,
+                &message,
+                Some(channel),
+                crate::ArchiveGate::Exempt
+            )
+            .await
+            .expect("insert allowlisted event")
+            .1
         );
         assert_eq!(event_count(pool, community, &message).await, 1);
         assert_eq!(match_count(&db, community, &message).await, 1);
@@ -316,10 +321,15 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
             "first insertion of kind {kind} must refresh the channel TTL"
         );
         assert!(
-            !db.insert_event(community, &message, Some(channel))
-                .await
-                .expect("deduplicate event")
-                .1
+            !db.insert_event(
+                community,
+                &message,
+                Some(channel),
+                crate::ArchiveGate::Exempt
+            )
+            .await
+            .expect("deduplicate event")
+            .1
         );
         assert_eq!(match_count(&db, community, &message).await, 1);
         assert_eq!(
@@ -331,20 +341,30 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
 
     let reaction = signed_event(&keys, 7, "not-push-eligible");
     assert!(
-        db.insert_event(community, &reaction, Some(channel))
-            .await
-            .expect("insert reaction")
-            .1
+        db.insert_event(
+            community,
+            &reaction,
+            Some(channel),
+            crate::ArchiveGate::Exempt
+        )
+        .await
+        .expect("insert reaction")
+        .1
     );
     assert_eq!(match_count(&db, community, &reaction).await, 0);
 
     let no_lease_community = create_community(pool).await;
     let no_lease_message = signed_event(&keys, 9, "no-lease");
     assert!(
-        db.insert_event(no_lease_community, &no_lease_message, None)
-            .await
-            .expect("insert without lease")
-            .1
+        db.insert_event(
+            no_lease_community,
+            &no_lease_message,
+            None,
+            crate::ArchiveGate::Exempt
+        )
+        .await
+        .expect("insert without lease")
+        .1
     );
     assert_eq!(
         match_count(&db, no_lease_community, &no_lease_message).await,
@@ -393,10 +413,15 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
         }
         let message = signed_event(&keys, 9, &format!("{state}-lease"));
         assert!(
-            db.insert_event(predicate_community, &message, None)
-                .await
-                .expect("insert event for ineligible lease")
-                .1
+            db.insert_event(
+                predicate_community,
+                &message,
+                None,
+                crate::ArchiveGate::Exempt
+            )
+            .await
+            .expect("insert event for ineligible lease")
+            .1
         );
         assert_eq!(event_count(pool, predicate_community, &message).await, 1);
         assert_eq!(match_count(&db, predicate_community, &message).await, 0);
@@ -449,7 +474,7 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
         .expect("release exclusive push-gate lock");
     let gated_control = signed_event(&keys, 9, "push-gate-released-control");
     assert!(
-        db.insert_event(community, &gated_control, None)
+        db.insert_event(community, &gated_control, None, crate::ArchiveGate::Exempt)
             .await
             .expect("insert after push gate release")
             .1
@@ -518,16 +543,21 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
     let before_skips = reset_deadline(pool, community, channel).await;
     let channel_create = signed_event(&keys, 9007, "channel-create");
     assert!(
-        db.insert_event(community, &channel_create, Some(channel))
-            .await
-            .expect("insert kind 9007")
-            .1
+        db.insert_event(
+            community,
+            &channel_create,
+            Some(channel),
+            crate::ArchiveGate::Exempt
+        )
+        .await
+        .expect("insert kind 9007")
+        .1
     );
     assert_eq!(deadline(pool, community, channel).await, before_skips);
     assert_eq!(match_count(&db, community, &channel_create).await, 0);
     let channelless = signed_event(&keys, 9, "channel-null");
     assert!(
-        db.insert_event(community, &channelless, None)
+        db.insert_event(community, &channelless, None, crate::ArchiveGate::Exempt)
             .await
             .expect("insert channel-less event")
             .1
@@ -538,10 +568,15 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
         channel_with_ttl(pool, community, &keys.public_key().to_bytes(), None).await;
     let no_ttl_message = signed_event(&keys, 7, "ttl-null");
     assert!(
-        db.insert_event(community, &no_ttl_message, Some(no_ttl_channel))
-            .await
-            .expect("insert into channel without TTL")
-            .1
+        db.insert_event(
+            community,
+            &no_ttl_message,
+            Some(no_ttl_channel),
+            crate::ArchiveGate::Exempt
+        )
+        .await
+        .expect("insert into channel without TTL")
+        .1
     );
     assert_eq!(
         optional_deadline(pool, community, no_ttl_channel).await,
@@ -570,10 +605,15 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
             .expect("mark disposable channel inactive");
         let message = signed_event(&keys, 7, &format!("{marker}-channel"));
         assert!(
-            db.insert_event(community, &message, Some(inactive_channel))
-                .await
-                .expect("insert against inactive disposable channel")
-                .1
+            db.insert_event(
+                community,
+                &message,
+                Some(inactive_channel),
+                crate::ArchiveGate::Exempt
+            )
+            .await
+            .expect("insert against inactive disposable channel")
+            .1
         );
         assert_eq!(event_count(pool, community, &message).await, 1);
         assert_eq!(
@@ -668,10 +708,16 @@ async fn assert_entry_points(db: &Db, community: CommunityId, channel: Uuid, key
     let before = reset_deadline(pool, community, channel).await;
     let threaded = signed_event(keys, 9, "thread-metadata-writer");
     assert!(
-        db.insert_event_with_thread_metadata(community, &threaded, Some(channel), None)
-            .await
-            .expect("insert through the thread-metadata writer")
-            .1
+        db.insert_event_with_thread_metadata(
+            community,
+            &threaded,
+            Some(channel),
+            None,
+            crate::ArchiveGate::Exempt
+        )
+        .await
+        .expect("insert through the thread-metadata writer")
+        .1
     );
     assert_eq!(match_count(db, community, &threaded).await, 1);
     assert!(deadline(pool, community, channel).await > before);
@@ -696,10 +742,15 @@ async fn assert_entry_points(db: &Db, community: CommunityId, channel: Uuid, key
     let before = reset_deadline(pool, community, channel).await;
     let replaceable = signed_event(keys, 39000, "replaceable-writer");
     assert!(
-        db.replace_addressable_event(community, &replaceable, Some(channel))
-            .await
-            .expect("insert through the replaceable writer")
-            .1
+        db.replace_addressable_event(
+            community,
+            &replaceable,
+            Some(channel),
+            crate::ArchiveGate::Exempt
+        )
+        .await
+        .expect("insert through the replaceable writer")
+        .1
     );
     assert_eq!(match_count(db, community, &replaceable).await, 0);
     assert!(deadline(pool, community, channel).await > before);
@@ -720,6 +771,7 @@ async fn assert_entry_points(db: &Db, community: CommunityId, channel: Uuid, key
             &d_tag,
             Some(channel),
             ParameterizedReplacePrecondition::Unconditional,
+            &crate::WriteGates::exempt(),
         )
         .await
         .expect("insert through the parameterized writer");
@@ -736,6 +788,7 @@ async fn assert_entry_points(db: &Db, community: CommunityId, channel: Uuid, key
             &d_tag,
             Some(channel),
             ParameterizedReplacePrecondition::Unconditional,
+            &crate::WriteGates::exempt(),
         )
         .await
         .expect("replay through the parameterized writer");
@@ -827,9 +880,14 @@ async fn migration_schema_event_follow_up_contract_app_only() {
 async fn assert_rollback(db: &Db, community: CommunityId, channel: Uuid, keys: &Keys) {
     let pool = db.pool();
     let retained = signed_event(keys, 9, "queued-before-rollback");
-    db.insert_event(community, &retained, Some(channel))
-        .await
-        .unwrap();
+    db.insert_event(
+        community,
+        &retained,
+        Some(channel),
+        crate::ArchiveGate::Exempt,
+    )
+    .await
+    .unwrap();
     assert_eq!(match_count(db, community, &retained).await, 1);
     let lease_before: serde_json::Value =
         sqlx::query_scalar("SELECT to_jsonb(p) FROM push_leases p WHERE community_id=$1")
@@ -895,7 +953,12 @@ async fn assert_rollback(db: &Db, community: CommunityId, channel: Uuid, keys: &
         let message = signed_event(keys, kind, &format!("disabled-{kind}"));
         timeout(
             Duration::from_secs(5),
-            disabled.insert_event(community, &message, Some(channel)),
+            disabled.insert_event(
+                community,
+                &message,
+                Some(channel),
+                crate::ArchiveGate::Exempt,
+            ),
         )
         .await
         .expect("disabled write must not wait for the push gate")
@@ -939,7 +1002,12 @@ async fn assert_rollback(db: &Db, community: CommunityId, channel: Uuid, keys: &
     let legacy = Db::from_pool(legacy_pool);
     let message = signed_event(keys, 9, "legacy-overlap-writer");
     legacy
-        .insert_event(community, &message, Some(channel))
+        .insert_event(
+            community,
+            &message,
+            Some(channel),
+            crate::ArchiveGate::Exempt,
+        )
         .await
         .unwrap();
     let trigger_exists: bool = sqlx::query_scalar(
@@ -957,9 +1025,14 @@ async fn assert_rollback(db: &Db, community: CommunityId, channel: Uuid, keys: &
     // Reactivation is an operator decision about retained queues. Reopening
     // an enabled writer produces only new work, with no lease backfill.
     let message = signed_event(keys, 9, "new-after-reactivation");
-    db.insert_event(community, &message, Some(channel))
-        .await
-        .unwrap();
+    db.insert_event(
+        community,
+        &message,
+        Some(channel),
+        crate::ArchiveGate::Exempt,
+    )
+    .await
+    .unwrap();
     assert_eq!(match_count(db, community, &message).await, 1);
     for message in disabled_events {
         assert_eq!(match_count(db, community, &message).await, 0);
@@ -988,7 +1061,7 @@ async fn assert_async_isolation(db: &Db, community: CommunityId, keys: &Keys) {
     let message = signed_event(keys, 9, "async-queue-lock");
     timeout(
         Duration::from_secs(5),
-        isolated.insert_event(community, &message, None),
+        isolated.insert_event(community, &message, None, crate::ArchiveGate::Exempt),
     )
     .await
     .expect("push table lock must not delay storage")
@@ -1001,7 +1074,7 @@ async fn assert_async_isolation(db: &Db, community: CommunityId, keys: &Keys) {
     assert_eq!(event_count(isolated.pool(), community, &message).await, 1);
     let healthy = signed_event(keys, 9, "async-after-error");
     isolated
-        .insert_event(community, &healthy, None)
+        .insert_event(community, &healthy, None, crate::ArchiveGate::Exempt)
         .await
         .unwrap();
     assert_eq!(match_count(&isolated, community, &healthy).await, 1);
@@ -1018,7 +1091,7 @@ async fn assert_async_isolation(db: &Db, community: CommunityId, keys: &Keys) {
         .unwrap();
     let before_enrollment = signed_event(keys, 9, "before-async-enrollment");
     isolated
-        .insert_event(later, &before_enrollment, None)
+        .insert_event(later, &before_enrollment, None, crate::ArchiveGate::Exempt)
         .await
         .unwrap();
     sqlx::query(
@@ -1065,7 +1138,7 @@ async fn assert_async_isolation(db: &Db, community: CommunityId, keys: &Keys) {
         .unwrap();
     let cancelled = signed_event(keys, 9, "async-cancel-inflight");
     isolated
-        .insert_event(community, &cancelled, None)
+        .insert_event(community, &cancelled, None, crate::ArchiveGate::Exempt)
         .await
         .unwrap();
     timeout(Duration::from_secs(2), async {
@@ -1103,7 +1176,7 @@ async fn assert_async_isolation(db: &Db, community: CommunityId, keys: &Keys) {
     assert_eq!(queued, 0);
     let after_stop = signed_event(keys, 9, "async-message-after-stop");
     isolated
-        .insert_event(community, &after_stop, None)
+        .insert_event(community, &after_stop, None, crate::ArchiveGate::Exempt)
         .await
         .unwrap();
     assert_eq!(

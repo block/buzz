@@ -21,6 +21,8 @@ use crate::handlers::group_state_postgres_tests::{community, create_channel, htt
 use crate::handlers::ingest::{ingest_event, IngestError, IngestResult};
 use crate::state::AppState;
 
+mod archive_gate_postgres_tests;
+
 const GUARD_REQUIRED: &str = "invalid: lifecycle guard required";
 const CHANGED: &str = "conflict: lifecycle changed";
 const NOT_AUTHORIZED_S: &str = "invalid: actor not authorized for name/about/archived/visibility/ttl/label/join_role/unlisted changes";

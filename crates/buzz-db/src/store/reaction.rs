@@ -8,12 +8,12 @@ use nostr::Event;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::AdmittedTx;
 use crate::{
     error::Result,
     event::{insert_event_with_thread_metadata_tx, ThreadMetadataParams},
     Db,
 };
+use crate::{AdmittedTx, ArchiveGate};
 use buzz_core::{CommunityId, StoredEvent};
 
 // -- Public structs -----------------------------------------------------------
@@ -103,6 +103,10 @@ const ADD_REACTION_SQL: &str = r#"
 ///
 /// Uses `INSERT ... ON CONFLICT DO UPDATE` to eliminate the TOCTOU race where
 /// two concurrent adds both see no existing row and then race to INSERT.
+///
+/// Test-only: it takes no write gate. Production stores a reaction with
+/// [`insert_reaction_event_with_thread_metadata`].
+#[cfg(test)]
 pub async fn add_reaction(
     pool: &PgPool,
     community: CommunityId,
@@ -171,6 +175,9 @@ pub(crate) async fn add_reaction_tx(
 /// Ordering is load-bearing: resolve target, upsert/reactivate the reaction row,
 /// check `rows_affected`, then insert the kind:7 event. Active duplicates return
 /// before event insertion so duplicate reactions never store a duplicate kind:7.
+///
+/// `gate` decides whether an archived `channel_id` refuses the write (see
+/// [`ArchiveGate`]); the gate is the first lock.
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_reaction_event_with_thread_metadata(
     pool: &PgPool,
@@ -181,6 +188,7 @@ pub async fn insert_reaction_event_with_thread_metadata(
     target_event_id: &[u8],
     actor_pubkey: &[u8],
     emoji: &str,
+    gate: ArchiveGate,
 ) -> Result<ReactionEventInsertOutcome> {
     let mut tx = crate::begin_community_event_write_transaction(
         pool,
@@ -188,6 +196,7 @@ pub async fn insert_reaction_event_with_thread_metadata(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    crate::lifecycle::lock_write_gates(&mut tx, gate, channel_id.as_slice()).await?;
 
     let target_row = sqlx::query(
         "SELECT created_at FROM events \
@@ -256,6 +265,20 @@ pub async fn remove_reaction(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    let removed = remove_reaction_tx(&mut tx, event_id, event_created_at, pubkey, emoji).await?;
+    tx.commit().await?;
+    Ok(removed)
+}
+
+/// [`remove_reaction`] inside a caller-owned transaction.
+pub(crate) async fn remove_reaction_tx(
+    tx: &mut AdmittedTx,
+    event_id: &[u8],
+    event_created_at: DateTime<Utc>,
+    pubkey: &[u8],
+    emoji: &str,
+) -> Result<bool> {
+    let community = tx.community();
     let result = sqlx::query(
         r#"
         UPDATE reactions
@@ -275,9 +298,6 @@ pub async fn remove_reaction(
     .bind(emoji)
     .execute(tx.conn())
     .await?;
-
-    tx.commit().await?;
-
     Ok(result.rows_affected() > 0)
 }
 
@@ -295,6 +315,17 @@ pub async fn remove_reaction_by_source_event_id(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    let removed = remove_reaction_by_source_event_id_tx(&mut tx, reaction_event_id).await?;
+    tx.commit().await?;
+    Ok(removed)
+}
+
+/// [`remove_reaction_by_source_event_id`] inside a caller-owned transaction.
+pub(crate) async fn remove_reaction_by_source_event_id_tx(
+    tx: &mut AdmittedTx,
+    reaction_event_id: &[u8],
+) -> Result<bool> {
+    let community = tx.community();
     let result = sqlx::query(
         r#"
         UPDATE reactions
@@ -308,9 +339,6 @@ pub async fn remove_reaction_by_source_event_id(
     .bind(reaction_event_id)
     .execute(tx.conn())
     .await?;
-
-    tx.commit().await?;
-
     Ok(result.rows_affected() > 0)
 }
 
@@ -361,6 +389,8 @@ pub async fn get_active_reaction_record(
 ///
 /// Called after the kind:7 event is created and stored, to link the
 /// reaction row to its source event. Returns `true` if the row was updated.
+/// Test-only: it takes no write gate.
+#[cfg(test)]
 pub async fn set_reaction_event_id(
     pool: &PgPool,
     community: CommunityId,
@@ -579,6 +609,7 @@ impl Db {
         target_event_id: &[u8],
         actor_pubkey: &[u8],
         emoji: &str,
+        gate: ArchiveGate,
     ) -> Result<ReactionEventInsertOutcome> {
         crate::reaction::insert_reaction_event_with_thread_metadata(
             &self.pool,
@@ -589,12 +620,13 @@ impl Db {
             target_event_id,
             actor_pubkey,
             emoji,
+            gate,
         )
         .await
     }
 
-    /// Add (or re-activate) a reaction.
-    #[datastore_span(name = "add_reaction", system = "postgresql")]
+    /// Add (or re-activate) a reaction. Test-only (see [`add_reaction`]).
+    #[cfg(test)]
     pub async fn add_reaction(
         &self,
         community: CommunityId,
@@ -616,7 +648,9 @@ impl Db {
         .await
     }
 
-    /// Soft-delete a reaction.
+    /// Soft-delete a reaction. Test-only: production removes a reaction
+    /// with its kind:5 in [`Db::insert_event_deletion`].
+    #[cfg(test)]
     #[datastore_span(name = "remove_reaction", system = "postgresql")]
     pub async fn remove_reaction(
         &self,
@@ -637,7 +671,9 @@ impl Db {
         .await
     }
 
-    /// Soft-delete a reaction by its source event ID.
+    /// Soft-delete a reaction by its source event ID. Test-only: production
+    /// removes a reaction with its kind:5 in [`Db::insert_event_deletion`].
+    #[cfg(test)]
     #[datastore_span(name = "remove_reaction_by_source_event_id", system = "postgresql")]
     pub async fn remove_reaction_by_source_event_id(
         &self,
@@ -673,8 +709,8 @@ impl Db {
         .await
     }
 
-    /// Backfill the source event ID on an active reaction row.
-    #[datastore_span(name = "set_reaction_event_id", system = "postgresql")]
+    /// Backfill the source event ID on an active reaction row. Test-only.
+    #[cfg(test)]
     pub async fn set_reaction_event_id(
         &self,
         community: CommunityId,
@@ -835,7 +871,7 @@ mod postgres_tests {
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let target = make_text_event("long custom emoji target");
-        insert_event(&pool, community, &target, None)
+        insert_event(&pool, community, &target, None, crate::ArchiveGate::Exempt)
             .await
             .expect("insert target");
 
@@ -851,6 +887,7 @@ mod postgres_tests {
             target.id.as_bytes(),
             &actor.public_key().to_bytes(),
             &emoji,
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("store wrapped 64-character shortcode");
@@ -871,7 +908,7 @@ mod postgres_tests {
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let target = make_text_event("reaction target");
-        insert_event(&pool, community, &target, None)
+        insert_event(&pool, community, &target, None, crate::ArchiveGate::Exempt)
             .await
             .expect("insert target");
 
@@ -890,6 +927,7 @@ mod postgres_tests {
             target.id.as_bytes(),
             &actor_pubkey,
             "👍",
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("first reaction insert");
@@ -910,6 +948,7 @@ mod postgres_tests {
             target.id.as_bytes(),
             &actor_pubkey,
             "👍",
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("duplicate reaction insert");
@@ -931,9 +970,15 @@ mod postgres_tests {
         let community_a = CommunityId::from_uuid(make_test_community(&pool).await);
         let community_b = CommunityId::from_uuid(make_test_community(&pool).await);
         let target = make_text_event("community A target only");
-        insert_event(&pool, community_a, &target, None)
-            .await
-            .expect("insert target in A");
+        insert_event(
+            &pool,
+            community_a,
+            &target,
+            None,
+            crate::ArchiveGate::Exempt,
+        )
+        .await
+        .expect("insert target in A");
 
         let actor = Keys::generate();
         let actor_pubkey = actor.public_key().to_bytes();
@@ -948,6 +993,7 @@ mod postgres_tests {
             target.id.as_bytes(),
             &actor_pubkey,
             "👍",
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("cross-community reaction attempt");
@@ -982,7 +1028,7 @@ mod postgres_tests {
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let target = make_text_event("rollback target");
-        insert_event(&pool, community, &target, None)
+        insert_event(&pool, community, &target, None, crate::ArchiveGate::Exempt)
             .await
             .expect("insert target");
 
@@ -1007,6 +1053,7 @@ mod postgres_tests {
             target.id.as_bytes(),
             &actor_pubkey,
             "👍",
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect_err("ephemeral event insert must fail after reaction upsert attempt");
@@ -1034,7 +1081,7 @@ mod postgres_tests {
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let target = make_text_event("reactivation target");
-        insert_event(&pool, community, &target, None)
+        insert_event(&pool, community, &target, None, crate::ArchiveGate::Exempt)
             .await
             .expect("insert target");
 
@@ -1056,6 +1103,7 @@ mod postgres_tests {
                 target.id.as_bytes(),
                 &actor_pubkey,
                 "👍",
+                crate::ArchiveGate::Exempt
             )
             .await
             .expect("first reaction insert"),
@@ -1081,6 +1129,7 @@ mod postgres_tests {
             target.id.as_bytes(),
             &actor_pubkey,
             "👍",
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("reactivate reaction");
@@ -1126,9 +1175,15 @@ mod postgres_tests {
         let channel = make_test_channel(&scratch_pool, community_uuid).await;
 
         let target = make_text_event("reaction mention failure target");
-        insert_event(&scratch_pool, community, &target, Some(channel))
-            .await
-            .expect("insert reaction target");
+        insert_event(
+            &scratch_pool,
+            community,
+            &target,
+            Some(channel),
+            crate::ArchiveGate::Exempt,
+        )
+        .await
+        .expect("insert reaction target");
 
         let actor = Keys::generate();
         let mentioned = Keys::generate();
@@ -1160,6 +1215,7 @@ mod postgres_tests {
                 target.id.as_bytes(),
                 &actor.public_key().to_bytes(),
                 "👍",
+                crate::ArchiveGate::Exempt,
             )
             .await
             .expect_err("mention-indexing failure must fail reaction insert");
@@ -1217,9 +1273,15 @@ mod postgres_tests {
         let channel = make_test_channel(&pool, community_uuid).await;
 
         let target = make_text_event("reaction mention success target");
-        insert_event(&pool, community, &target, Some(channel))
-            .await
-            .expect("insert reaction target");
+        insert_event(
+            &pool,
+            community,
+            &target,
+            Some(channel),
+            crate::ArchiveGate::Exempt,
+        )
+        .await
+        .expect("insert reaction target");
 
         let actor = Keys::generate();
         let actor_pubkey = actor.public_key().to_bytes();
@@ -1254,6 +1316,7 @@ mod postgres_tests {
                 target.id.as_bytes(),
                 &actor_pubkey,
                 "👍",
+                crate::ArchiveGate::Exempt,
             )
             .await
             .expect("insert reaction with thread metadata and mention");
@@ -1458,7 +1521,7 @@ mod postgres_tests {
         let community = CommunityId::from_uuid(community_uuid);
 
         let target = make_text_event("fenced reaction target");
-        insert_event(&pool, community, &target, None)
+        insert_event(&pool, community, &target, None, crate::ArchiveGate::Exempt)
             .await
             .expect("insert target before fencing");
 
@@ -1545,6 +1608,7 @@ mod postgres_tests {
             target.id.as_bytes(),
             &actor_pubkey,
             emoji,
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect_err("fenced community must reject reaction inserts");

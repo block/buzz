@@ -51,6 +51,7 @@ async fn accept(f: &Fixture, event: &Event) {
                 source,
                 &f.state.relay_keypair,
                 f.state.config.lifecycle_guard_enabled,
+                buzz_db::ArchiveGate::Exempt
             )
             .await
             .unwrap(),
