@@ -63,7 +63,9 @@ pub enum SearchMode {
     ///
     /// Intended for bounded typeahead surfaces such as the desktop topbar. The
     /// relay still refetches and re-authorizes every hit; this mode changes only
-    /// the candidate tsquery, not the access boundary.
+    /// the candidate tsquery, not the access boundary. A trailing token that
+    /// yields a lexeme shorter than three characters returns no hits unless the
+    /// query is kind:0-only (see `PREFIX_MIN_CHARS`).
     Prefix,
 }
 
@@ -149,8 +151,26 @@ const SEARCH_TEXT_MAX_CHARS: usize = 4096;
 /// bridge uses page 1), but clamp here too so a future caller cannot accidentally
 /// wire untrusted input into a multi-trillion-row OFFSET.
 const PAGE_MAX: u32 = 1000;
+/// Shortest lexeme [`SearchMode::Prefix`] gives `:*` for anything but a
+/// kind:0-only (profile) query. If the trailing token yields a shorter one,
+/// the tsquery is NULL and the search returns no hits, whatever completed
+/// words precede it. The check runs on Postgres' own `simple` parser output,
+/// so punctuation such as `c++`, `@al` or `don't` cannot slip a short `:*`
+/// past it.
+/// The GIN index cannot stop early or return rows in rank order, so a one- or
+/// two-character `:*` prefix makes Postgres fetch, recheck and rank a large
+/// share of every indexed message before it can apply `LIMIT`, and typeahead
+/// sends one on every typing pause. Profiles are few enough to stay
+/// one-character typeahead.
+const PREFIX_MIN_CHARS: i32 = 3;
 
-fn push_tsquery(qb: &mut QueryBuilder<sqlx::Postgres>, mode: SearchMode, search_text: &str) {
+/// `min_prefix_chars` applies to [`SearchMode::Prefix`] only; 0 disables it.
+fn push_tsquery(
+    qb: &mut QueryBuilder<sqlx::Postgres>,
+    mode: SearchMode,
+    search_text: &str,
+    min_prefix_chars: i32,
+) {
     match mode {
         SearchMode::FullText => {
             qb.push("websearch_to_tsquery('simple', ");
@@ -164,14 +184,20 @@ fn push_tsquery(qb: &mut QueryBuilder<sqlx::Postgres>, mode: SearchMode, search_
             // tsquery construction so query-side normalization matches the
             // `search_tsv` generated column. `quote_literal` prevents tsquery
             // syntax injection from punctuation/operators in the raw topbar input.
+            // A trailing lexeme shorter than `min_prefix_chars` makes the whole
+            // tsquery NULL, which matches nothing (see `PREFIX_MIN_CHARS`).
             qb.push(
-                "(SELECT COALESCE(\
+                "(SELECT CASE WHEN bool_or(token_ord = max_token_ord AND char_length(lexeme) < ",
+            );
+            qb.push_bind(min_prefix_chars);
+            qb.push(
+                ") THEN NULL::tsquery ELSE COALESCE(\
                  string_agg(\
                    quote_literal(lexeme) || CASE WHEN token_ord = max_token_ord THEN ':*' ELSE '' END, \
                    ' & ' ORDER BY token_ord, lex_ord\
                  ), \
                  ''\
-                 )::tsquery \
+                 )::tsquery END \
                  FROM (\
                    SELECT raw_token.token_ord, normalized.lexeme, normalized.lex_ord, raw_token.max_token_ord \
                    FROM (\
@@ -228,6 +254,7 @@ fn normalized_search_text(q: &str) -> Option<String> {
 /// is no code path through this function that omits it.
 #[datastore_span(name = "search", system = "postgresql")]
 pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, SearchError> {
+    let profile_only = query.kinds.as_deref() == Some(&[0][..]);
     let Some(search_text) = normalized_search_text(&query.q) else {
         return Ok(SearchResult {
             hits: Vec::new(),
@@ -250,7 +277,7 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
     // first for this one narrow caller shape.
     let prioritize_exact_profile_lexeme = query.sort == SearchSort::Relevance
         && query.mode == SearchMode::Prefix
-        && query.kinds.as_deref() == Some(&[0][..])
+        && profile_only
         && search_text.chars().count() <= 2;
 
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
@@ -259,7 +286,8 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
          ts_rank_cd(search_tsv, search_query.query) AS rank \
          FROM events CROSS JOIN LATERAL (SELECT ",
     );
-    push_tsquery(&mut qb, query.mode, &search_text);
+    let min_prefix_chars = if profile_only { 0 } else { PREFIX_MIN_CHARS };
+    push_tsquery(&mut qb, query.mode, &search_text, min_prefix_chars);
     qb.push(" AS query) AS search_query WHERE community_id = ");
     qb.push_bind(*query.community.as_uuid());
     qb.push(" AND deleted_at IS NULL AND search_tsv @@ search_query.query");
@@ -331,7 +359,7 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
     qb.push(" OFFSET ");
     qb.push_bind(offset);
 
-    let rows = qb.build().fetch_all(pool).await?;
+    let rows = crate::cancel::fetch_all(pool, qb.build()).await?;
 
     let mut hits = Vec::with_capacity(rows.len());
     for row in rows {
@@ -423,7 +451,7 @@ pub async fn search_profile_names(
         ") AS tier \
          FROM events e CROSS JOIN LATERAL (SELECT ",
     );
-    push_tsquery(&mut qb, SearchMode::Prefix, &search_text);
+    push_tsquery(&mut qb, SearchMode::Prefix, &search_text, 0);
     qb.push(" AS query, ");
     qb.push(TIER_TEXT[0]);
     qb.push_bind(search_text.clone());
@@ -449,7 +477,7 @@ pub async fn search_profile_names(
     qb.push(" OFFSET ");
     qb.push_bind(offset);
 
-    let rows = qb.build().fetch_all(pool).await?;
+    let rows = crate::cancel::fetch_all(pool, qb.build()).await?;
     let mut hits = Vec::with_capacity(rows.len());
     for row in rows {
         let id_bytes: Vec<u8> = row.try_get("id")?;

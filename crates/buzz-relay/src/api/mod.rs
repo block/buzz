@@ -41,7 +41,24 @@ pub(crate) fn db_read_error(
     context: &str,
     e: &buzz_db::DbError,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if e.is_statement_cancelled() {
+    read_error(context, e.is_statement_cancelled(), e)
+}
+
+/// [`db_read_error`] for a search: a search cancelled by the search pool's
+/// statement timeout gets the same 503 `query timed out`.
+pub(crate) fn search_read_error(
+    context: &str,
+    e: &buzz_search::SearchError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    read_error(context, e.is_statement_cancelled(), e)
+}
+
+fn read_error(
+    context: &str,
+    statement_cancelled: bool,
+    e: &dyn std::fmt::Display,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if statement_cancelled {
         tracing::warn!("{context}: {e}");
         return api_error(StatusCode::SERVICE_UNAVAILABLE, QUERY_TIMED_OUT);
     }
@@ -315,31 +332,6 @@ pub mod relay_members {
             auth_tag_header,
             signed_auth_created_at,
             token_owner,
-            false,
-        )
-        .await
-    }
-
-    /// [`enforce_relay_membership`] for HTTP typing pulses: the ban check
-    /// reads through the 30-second ephemeral-path restriction cache, the same
-    /// staleness bound the pulse's own write-restriction check already has.
-    /// Every other HTTP request reads ban state fresh.
-    pub async fn enforce_relay_membership_ephemeral(
-        state: &AppState,
-        tenant: &TenantContext,
-        pubkey_bytes: &[u8],
-        auth_tag_header: Option<&str>,
-        signed_auth_created_at: Option<u64>,
-        token_owner: Option<nostr::PublicKey>,
-    ) -> Result<Option<nostr::PublicKey>, MembershipRefusal> {
-        enforce_membership(
-            state,
-            tenant,
-            pubkey_bytes,
-            auth_tag_header,
-            signed_auth_created_at,
-            token_owner,
-            true,
         )
         .await
     }
@@ -352,7 +344,6 @@ pub mod relay_members {
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
         token_owner: Option<nostr::PublicKey>,
-        cached_ban: bool,
     ) -> Result<Option<nostr::PublicKey>, MembershipRefusal> {
         admit_member(
             state,
@@ -361,7 +352,6 @@ pub mod relay_members {
             auth_tag_header,
             signed_auth_created_at,
             token_owner,
-            cached_ban,
         )
         .await
         .map_err(|refusal| match token_owner {
@@ -380,7 +370,6 @@ pub mod relay_members {
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
         token_owner: Option<nostr::PublicKey>,
-        cached_ban: bool,
     ) -> Result<Option<nostr::PublicKey>, (StatusCode, Json<serde_json::Value>)> {
         let community = tenant.community();
         let owner = match check_relay_membership(
@@ -416,7 +405,6 @@ pub mod relay_members {
             auth_tag_header,
             signed_auth_created_at,
             token_owner,
-            cached_ban,
         )
         .await?;
         if let Some(token_owner) = token_owner {
@@ -441,7 +429,9 @@ pub mod relay_members {
 
     /// Refuse a community-banned principal (own ban or its agent owner's) on
     /// HTTP. Bans only: a timeout blocks writes, and HTTP writes reach the
-    /// ingest gate, while reads stay allowed. Fails closed with 503.
+    /// ingest gate, while reads stay allowed. Each request's grant ends with
+    /// the request, so this reads through the restriction cache (see
+    /// [`AppState::restriction_state_cached`]). Fails closed with 503.
     async fn deny_banned(
         state: &AppState,
         community: CommunityId,
@@ -449,7 +439,6 @@ pub mod relay_members {
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
         token_owner: Option<nostr::PublicKey>,
-        cached: bool,
     ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
         let Ok(pubkey) = nostr::PublicKey::from_slice(pubkey_bytes) else {
             return Err(super::internal_error("invalid pubkey for ban check"));
@@ -461,7 +450,7 @@ pub mod relay_members {
             auth_tag_header,
             signed_auth_created_at,
             token_owner,
-            cached,
+            true,
         )
         .await
         {
@@ -766,6 +755,16 @@ mod db_read_error_tests {
     #[test]
     fn non_cancel_db_error_stays_generic_500() {
         let (status, body) = db_read_error("ctx", &buzz_db::DbError::NotFound("x".into()));
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body.0["error"], "internal server error");
+    }
+
+    #[test]
+    fn non_cancel_search_error_stays_generic_500() {
+        let (status, body) = search_read_error(
+            "ctx",
+            &buzz_search::SearchError::Db(sqlx::Error::PoolTimedOut),
+        );
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(body.0["error"], "internal server error");
     }

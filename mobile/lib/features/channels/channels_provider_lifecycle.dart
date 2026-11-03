@@ -302,16 +302,20 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     } finally {
       if (generation == _buildGeneration) {
         _backgroundRefreshInFlight = false;
-        if (_backgroundRefreshQueued) {
-          _backgroundRefreshQueued = false;
-          unawaited(_refreshInBackground());
-        } else if (_needsSnapshotRevalidation ||
-            _channelListChangesRead < _channelListChanges) {
+        final queued = _backgroundRefreshQueued;
+        _backgroundRefreshQueued = false;
+        if (!_needsSnapshotRevalidation &&
+            _channelListChangesRead >= _channelListChanges) {
+          // This read covered everything, including any read queued behind
+          // it, so the backoff starts over.
+          _listReadRetry.cancel();
+        } else if (queued) {
+          // The queued read still waits out the gap after the read before it.
+          _readListIfChanged();
+        } else {
           // The read failed or was incomplete. Nothing else would retry it
           // before the next change, resume or reconnect.
           _listReadRetry.schedule(_readListIfChanged);
-        } else {
-          _listReadRetry.cancel();
         }
       }
     }

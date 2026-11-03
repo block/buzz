@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -13,10 +14,52 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../helpers/fake_relay.dart';
 import 'verified_profile_fixture.dart';
 
+/// Counts the keys read through [keys], which [entries] and [values] also use.
+class _CountingMap extends MapBase<String, int> {
+  _CountingMap(this.visits);
+
+  final void Function() visits;
+  final Map<String, int> _inner = {};
+
+  @override
+  int? operator [](Object? key) => _inner[key];
+  @override
+  void operator []=(String key, int value) => _inner[key] = value;
+  @override
+  void clear() => _inner.clear();
+  @override
+  int? remove(Object? key) => _inner.remove(key);
+  @override
+  int get length => _inner.length;
+  @override
+  bool get isEmpty => _inner.isEmpty;
+  @override
+  bool get isNotEmpty => _inner.isNotEmpty;
+  @override
+  bool containsKey(Object? key) => _inner.containsKey(key);
+  @override
+  Iterable<String> get keys sync* {
+    for (final key in _inner.keys) {
+      visits();
+      yield key;
+    }
+  }
+}
+
+class _CountingNotifier extends VerifiedProfilesNotifier {
+  _CountingNotifier(this.visits);
+
+  final void Function() visits;
+
+  @override
+  Map<String, int> newInterestMap() => _CountingMap(visits);
+}
+
 class Harness {
-  Harness(this.async) {
+  Harness(this.async, {VerifiedProfilesNotifier Function()? notifier}) {
     container = ProviderContainer(
       overrides: [
+        if (notifier != null) verifiedProfilesProvider.overrideWith(notifier),
         ...relay.overrides,
         verifiedProfileDiscoveryFetchProvider.overrideWith(
           (ref) => () async {
@@ -66,6 +109,26 @@ void journey(String name, void Function(Harness h) body) {
 }
 
 void main() {
+  test('evicting past the interest limit does not scan the interest map', () {
+    fakeAsync((async) {
+      var visits = 0;
+      final h = Harness(
+        async,
+        notifier: () => _CountingNotifier(() => visits++),
+      );
+      addTearDown(h.container.dispose);
+      String key(int i) => i.toRadixString(16).padLeft(64, '0');
+      h.start([for (var i = 0; i < 1024; i++) key(i)]);
+      visits = 0;
+      // Each new subject evicts one: 3,276 evictions. Scanning the map for the
+      // oldest entry each time would visit about a thousand keys apiece.
+      h.container.read(verifiedProfilesProvider.notifier).track([
+        for (var i = 1024; i < 4300; i++) key(i),
+      ]);
+      expect(visits, lessThanOrEqualTo(4300 - 1024));
+    });
+  });
+
   journey('no marks until discovery succeeds and advertises public_profile', (
     h,
   ) {
@@ -100,6 +163,23 @@ void main() {
     h.start(subjects);
     final sizes = [for (final f in h.dFilters) (f['#d'] as List).length];
     expect(sizes..sort(), [2, 128]);
+  });
+
+  journey('a large roster keeps the 1,024 most recently tracked subjects', (h) {
+    String key(int i) => i.toRadixString(16).padLeft(64, '0');
+    h.start([for (var i = 0; i < 10; i++) key(i)]);
+    final before = h.dFilters.length;
+    // Tracking a subject again does not refresh its age.
+    h.container.read(verifiedProfilesProvider.notifier).track([
+      key(0),
+      for (var i = 10; i < 4300; i++) key(i),
+    ]);
+    h.settle();
+    final subscribed = {
+      for (final f in h.dFilters.skip(before))
+        ...(f['#d'] as List).cast<String>(),
+    };
+    expect(subscribed, {for (var i = 4300 - 1024; i < 4300; i++) key(i)});
   });
 
   journey('live updates, retractions and ordering apply on the subscription', (

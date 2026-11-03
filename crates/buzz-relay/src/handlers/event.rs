@@ -715,19 +715,15 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     }
 
     // Observer frames and ephemeral kinds return before ingest, so they take
-    // the ban / timeout write-block here, over a short-TTL cache because it
-    // runs per frame. Persistent kinds get the uncached check in ingest, and
-    // so does NIP-43 leave (28936), which is ephemeral-range but ingested.
+    // the ban / timeout write-block here. Persistent kinds get the same check
+    // in ingest, and so does NIP-43 leave (28936), which is ephemeral-range but
+    // ingested.
     if kind_u32 == KIND_AGENT_OBSERVER_FRAME
         || (is_ephemeral(kind_u32) && kind_u32 != buzz_core::kind::KIND_NIP43_LEAVE_REQUEST)
     {
-        if let Err(e) = super::ingest::enforce_cached_write_restriction(
-            &state,
-            &conn.tenant,
-            kind_u32,
-            &auth_pubkey,
-        )
-        .await
+        if let Err(e) =
+            super::ingest::enforce_write_restriction(&state, &conn.tenant, kind_u32, &auth_pubkey)
+                .await
         {
             let (message, reason) = match e.into_legacy() {
                 // `into_legacy` never returns `Ban`; it would fail closed here.
@@ -1250,15 +1246,10 @@ pub(crate) async fn publish_http_typing(
         Ok(Err(e)) => return Err(IngestError::Rejected(format!("invalid: {e}"))),
         Err(_) => return Err(IngestError::Internal("error: internal error".into())),
     }
-    // Same short-TTL caches as the WebSocket ephemeral path: this runs per
-    // typing pulse, and persistent ingest keeps the uncached durable fence.
-    super::ingest::enforce_cached_write_restriction(
-        state,
-        tenant,
-        KIND_TYPING_INDICATOR,
-        &auth_pubkey,
-    )
-    .await?;
+    // Same restriction gate and serving-fence cache as the WebSocket
+    // ephemeral path: this runs per typing pulse.
+    super::ingest::enforce_write_restriction(state, tenant, KIND_TYPING_INDICATOR, &auth_pubkey)
+        .await?;
     super::ingest::map_serving_fence_state(
         state.is_serving_active_cached(tenant.community()).await,
     )?;
@@ -3870,7 +3861,7 @@ mod tests {
             let (state, tenant, user) = unrestricted_fixture().await;
             let key = (tenant.community(), user.public_key().to_bytes().to_vec());
 
-            state.restriction_cache.insert(
+            state.seed_restriction(
                 key.clone(),
                 buzz_db::moderation::RestrictionState {
                     banned: true,
@@ -3883,7 +3874,7 @@ mod tests {
                 "a cached ban must refuse the ephemeral event; got {frame}"
             );
 
-            state.restriction_cache.insert(
+            state.seed_restriction(
                 key,
                 buzz_db::moderation::RestrictionState {
                     banned: false,
@@ -3924,7 +3915,8 @@ mod tests {
             assert_eq!(
                 state
                     .restriction_cache
-                    .get(&(tenant.community(), user.public_key().to_bytes().to_vec())),
+                    .get(&(tenant.community(), user.public_key().to_bytes().to_vec()))
+                    .map(|cached| cached.state),
                 Some(buzz_db::moderation::RestrictionState::default())
             );
         }
@@ -3935,42 +3927,45 @@ mod tests {
                 .expect("sign text note")
         }
 
-        /// Stored writes, and NIP-43 leave, skip the cached restriction row:
-        /// a cached ban on a sender Postgres has never restricted refuses
-        /// neither. The leave reaches ingest's later membership check, past
-        /// its uncached restriction check.
-        /// Mutation: make ingest call `enforce_cached_write_restriction`, or
-        /// drop the 28936 carve-out from the `handle_event` gate → RED.
+        /// Stored writes read the restriction through the cache, and only
+        /// while the entry is younger than `RESTRICTION_CACHE_MAX_AGE`: a
+        /// fresh cached ban on a sender Postgres has never restricted refuses
+        /// a stored write, and the same row past that age is reread and
+        /// admits it.
+        /// Mutation: make ingest read the restriction uncached, or drop the
+        /// max-age check from `restriction_state_cached` → RED.
         #[tokio::test]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
-        async fn stored_writes_ignore_cached_ban() {
+        async fn stored_writes_honor_cached_ban_until_it_ages_out() {
             let (state, tenant, user) = unrestricted_fixture().await;
-            state.restriction_cache.insert(
-                (tenant.community(), user.public_key().to_bytes().to_vec()),
-                buzz_db::moderation::RestrictionState {
-                    banned: true,
-                    muted_until: None,
-                },
-            );
+            let key = (tenant.community(), user.public_key().to_bytes().to_vec());
+            let banned = buzz_db::moderation::RestrictionState {
+                banned: true,
+                muted_until: None,
+            };
             let scopes = buzz_auth::Scope::all_non_admin();
 
+            state.seed_restriction(key.clone(), banned.clone());
             let frame =
                 ok_frame_scoped(&state, &tenant, &user, text_note(&user), scopes.clone()).await;
             assert!(
-                frame.contains(",true,"),
-                "a stored write must read the restriction from Postgres; got {frame}"
+                frame.contains("blocked: you are banned"),
+                "a fresh cached ban must refuse a stored write; got {frame}"
             );
 
-            let leave = nostr::EventBuilder::new(
-                nostr::Kind::Custom(buzz_core::kind::KIND_NIP43_LEAVE_REQUEST as u16),
-                "",
-            )
-            .sign_with_keys(&user)
-            .expect("sign leave");
-            let frame = ok_frame_scoped(&state, &tenant, &user, leave, scopes).await;
+            state.restriction_cache.insert(
+                key,
+                crate::state::CachedRestriction {
+                    state: banned,
+                    read_at: std::time::Instant::now()
+                        .checked_sub(crate::state::RESTRICTION_CACHE_MAX_AGE)
+                        .expect("instant past max age"),
+                },
+            );
+            let frame = ok_frame_scoped(&state, &tenant, &user, text_note(&user), scopes).await;
             assert!(
-                frame.contains("relay membership is not enabled"),
-                "NIP-43 leave must skip the cached gate and pass ingest's uncached one; got {frame}"
+                frame.contains(",true,"),
+                "an aged-out cached ban must be reread from Postgres; got {frame}"
             );
         }
 

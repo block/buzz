@@ -19,7 +19,7 @@ use serde_json::Value;
 
 use crate::state::AppState;
 
-use super::{api_error, bridge, db_read_error, internal_error};
+use super::{api_error, bridge, db_read_error, search_read_error};
 
 /// Route path for profile name search.
 pub(crate) const SEARCH_PATH: &str = "/profiles/search";
@@ -98,7 +98,7 @@ async fn search_inner(
         .search
         .search_profile_names(tenant.community(), &query, page, limit)
         .await
-        .map_err(|e| internal_error(&format!("profile search error: {e}")).into_response())?
+        .map_err(|e| search_read_error("profile search error", &e).into_response())?
         .hits;
     if hits.is_empty() {
         return Ok(Json(Value::Array(Vec::new())));

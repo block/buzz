@@ -71,11 +71,14 @@ deployment's own configuration.
 ## Targeting and membership
 
 `target.connect_addr` (`host:port`) applies only together with
-`target.community_host_template`: it then replaces host resolution for the
-community hosts, over both WebSocket and HTTP, while TLS names, `Host` headers
-and the NIP-42 relay tag still name the community. Without a host
-template, the generator connects to `ws_url` and `http_url` as written and
-`connect_addr` has no effect.
+`target.community_host_template`: the generator then dials the community
+hosts there in plaintext, over both WebSocket and HTTP, such as a relay's
+in-cluster service. Set `ws_url` and `http_url` to the community's public
+scheme anyway (`wss://` and `https://` for a relay behind TLS): `Host`
+headers, NIP-98 `u` tags and the NIP-42 relay tag keep that scheme, which the
+relay checks against its own relay URL. Without a host template, the
+generator connects to `ws_url` and `http_url` as written and `connect_addr`
+has no effect.
 
 Seeded identities do not join communities or channels. A relay that requires
 membership rejects both `seed` and `run`.
