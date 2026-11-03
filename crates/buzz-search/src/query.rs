@@ -64,9 +64,9 @@ pub enum SearchMode {
     /// Intended for bounded typeahead surfaces such as the desktop topbar. The
     /// relay still refetches and re-authorizes every hit; this mode changes the
     /// candidate tsquery and, for relevance outside profile search, ranks only
-    /// the newest 1000 matches, not the access boundary. A trailing token that
-    /// yields a lexeme shorter than three characters returns no hits unless the
-    /// query is kind:0-only (see `PREFIX_MIN_CHARS`).
+    /// the newest 1000 matches. It does not change the access boundary. A
+    /// trailing token that yields a lexeme shorter than three characters
+    /// returns no hits unless the query is kind:0-only (see `PREFIX_MIN_CHARS`).
     Prefix,
 }
 

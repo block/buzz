@@ -582,12 +582,16 @@ re-authorizes every candidate hit before returning it.
 **Key behaviors:**
 - `SearchService::new(pool)` wraps a `PgPool`; `search(&SearchQuery)` runs a
   parameterized FTS query against the `events.search_tsv` GIN index and returns
-  `SearchResult` (candidate `SearchHit`s).
+  `SearchResult` (candidate `SearchHit`s). Prefix-mode relevance (outside
+  profile search) ranks only the newest 1000 matches, which Postgres may read
+  from the primary key backward instead of the GIN index.
 - `ChannelScope` makes the channel constraint explicit (`Any` /
   `ChannelLessOnly` / `Channels` / `ChannelsOrChannelLess`), closing the
   ambiguity the old `Option<Vec<Uuid>> + bool` matrix could not express.
-- Every query carries `community_id`; the FTS predicate is BitmapAnd-ed with
-  the community-leading btree filters so a query never crosses tenants.
+- Every query carries `community_id`, and every access path leads with it (the
+  FTS predicate BitmapAnd-ed with community-leading btree filters, or the
+  `(community_id, created_at, id)` primary key read backward), so a query never
+  crosses tenants.
 - Permission filtering is **caller's responsibility** — `buzz-search` returns
   candidate hits; the relay re-authorizes each one (channel membership, `#p`,
   owner gates) before delivering it.
@@ -959,7 +963,10 @@ kinds via `CASE WHEN kind IN (1059, 30300, 30622) THEN NULL`, so those rows are
 storage-level unsearchable (a `NULL` tsvector never matches `@@`). A GIN index
 (`idx_events_search_tsv`) backs the `@@` probe; in multi-community mode the
 community-leading btree filters BitmapAnd with the GIN probe so every query is
-fenced to its `community_id`.
+fenced to its `community_id`. Prefix-mode relevance ranks only the newest 1000
+matches; for a common prefix Postgres reads the `(community_id, created_at, id)`
+primary key backward and stops there, still fenced by its leading
+`community_id`.
 
 ---
 
