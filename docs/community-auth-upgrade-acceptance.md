@@ -137,10 +137,17 @@ Before mutations, capture:
    call and emit a bounded `clusterCheck=PASSED|MISMATCH` receipt. Record only
    that check outcome and the reviewed cluster identity, never other environment
    values. A silent check or generic exception is insufficient; missing runtime
-   evidence blocks acceptance. This explicit receipt is a pending BUZZ-515/516
-   execution prerequisite: pin this evidence contract to its implementing harness
-   revision before use. Do not infer a pass from a template or desired config.
-   Neither dry run nor Job creation is authorized by this procedure.
+   evidence blocks acceptance. The receipt implementation is pinned to
+   [cash-server commit a8a01d50070348051e021432c3b6868da263b7c4](https://github.com/squareup/cash-server/blob/a8a01d50070348051e021432c3b6868da263b7c4/kgoose/service/src/main/kotlin/com/squareup/cash/kgoose/CommunityAuthUpgradeHarnessMain.kt)
+   in BUZZ-515 / #145686. It emits
+   `{"evidence":"startup-cluster","clusterCheck":"PASSED"}` (or `MISMATCH`)
+   before input/credential loading, injector construction or relay calls, and
+   retains the outcome in final evidence. Missing or wrong cluster emits
+   `MISMATCH` and stops. The receipt proves the runtime equality check only;
+   admitted ConfigMap/import provenance remains a separate gate. Full-package
+   validation and execution gates remain unverified here. Do not infer a pass
+   from a template or desired config. Neither dry run nor Job creation is
+   authorized by this procedure.
 
 Do not infer process coverage from repeated requests through a load balancer.
 Do not treat unavailable audio or Git fixtures as successful denials. Each
