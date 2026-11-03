@@ -574,8 +574,8 @@ but only admins/owners can set it. Full spec:
 - **Pubkey allowlist is fail-closed.** DB errors deny the connection.
 - **API token users bypass the allowlist.** The allowlist only gates pubkey-only NIP-42.
 - **kind:9 requires `#h` tag.** Messages without a channel-scoped `#h` tag are rejected.
-- **kind:7 derives channel from target.** Reactions look up the target event's channel via `#e` — client-supplied `#h` tags are ignored. Reactions to unknown events are rejected (fail-closed).
-- **kind:5 uses `#h` if present, but doesn't require it.** Deletions validate author-match against target events via `#e` tags. Only self-authored events can be deleted (admin deletions use kind:9005).
+- **kind:7 derives channel from target.** Reactions look up the target event's channel via `#e`. An `#h` tag is optional. When the target is in a channel and the reaction has `#h` tags, one must be that channel's UUID exactly as the relay writes it (lowercase, hyphenated), or the reaction is refused as if its target were missing. A reaction to a global event is not checked. Reactions to unknown events are rejected (fail-closed).
+- **kind:5 derives channel from its `#e` target.** Deletions validate author-match against target events via `#e` tags. An `#h` follows the same rule as on a reaction; a deletion that names its target with an `#a` tag is not checked. Only self-authored events can be deleted (admin deletions use kind:9005).
 - **Client-submitted kind:44100/44101 rejected.** Membership notifications can only be signed by the relay keypair.
 
 ---
