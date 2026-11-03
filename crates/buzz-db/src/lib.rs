@@ -21,6 +21,28 @@
 //! Existing crate-root modules, records, and [`Db`] methods remain the public
 //! API. The internal `runtime` and `store` namespaces are not public APIs.
 
+/// Wrap `$retire`, an `UPDATE`/`DELETE` on `events` that retires a
+/// coordinate's previous head, so the same statement drops those rows' mention
+/// index entries. Mention-index reads (`#p` filters and feeds) never return a
+/// retired row, so its mention rows are dead weight they must walk and
+/// discard: one per member for every kind:39002 roster republish. `$1` must
+/// bind the community.
+///
+/// The three replacement paths that index mentions (NIP-33 parameterized,
+/// addressable, and the relay's member snapshot) go through this, so a head
+/// and its mention rows leave together on those paths.
+macro_rules! superseded_with_mentions_sql {
+    ($retire:literal) => {
+        concat!(
+            "WITH superseded AS (",
+            $retire,
+            " RETURNING id) \
+             DELETE FROM event_mentions mention USING superseded \
+             WHERE mention.community_id = $1 AND mention.event_id = superseded.id"
+        )
+    };
+}
+
 mod runtime;
 mod store;
 
