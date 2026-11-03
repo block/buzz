@@ -892,7 +892,14 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             buzz_relay::api::nip_fi::install_nip_fi_command_components(
                 &mut app_state.nip_fi_deny_map,
                 &mut app_state.nip_fi_command_verifier,
-                nip_fi.mode,
+                if nip_fi.source == buzz_relay::nip_fi_config::CommunitySource::Database
+                    && nip_fi.mode.is_off()
+                    && !nip_fi.command_configs.is_empty()
+                {
+                    buzz_auth::NipFiMode::Enforce
+                } else {
+                    nip_fi.mode
+                },
                 &nip_fi.registry,
                 key_source,
                 &nip_fi.command_configs,

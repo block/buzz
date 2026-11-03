@@ -105,7 +105,7 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         // admission (immediately after this block) because the signed `u` tag
         // must be verified against the tenant-bound host, not a process-global
         // domain.
-        let mode = state.config.nip_fi.mode;
+        let mode = crate::nip_fi_policy::mode(state, &parts.headers).await;
         let slot = AccessSlot::of(parts);
         if !mode.restricts() {
             if let Err(rejection) = parse_git_auth_header(&parts.headers, method) {

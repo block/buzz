@@ -766,7 +766,7 @@ pub(crate) async fn admit_nip_fi_http_on_state<X, F>(
 where
     F: FnOnce() -> Result<Nip98Proof<X>, Response<Body>>,
 {
-    let mode = state.config.nip_fi.mode;
+    let mode = crate::nip_fi_policy::mode(state, &headers).await;
     let verifier = state.nip_fi_verifier.as_deref();
     let communities = state.nip_fi_communities();
     let admission = match state.nip_fi_deny_map.as_deref() {

@@ -106,6 +106,29 @@ const RECEIPT: &str = "SELECT u.*, true AS requires_nip_fi,
     WHERE u.operation_id = $1";
 
 impl Db {
+    /// Resolve active host policy in one writer read. No replica or cross-request cache.
+    #[datastore_span(name = "community_auth_policy_for_host", system = "postgresql")]
+    pub async fn community_auth_policy_for_host(
+        &self,
+        host: &str,
+    ) -> Result<Option<CommunityAuthPolicy>> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
+        Ok(sqlx::query_as(
+            "SELECT requires_nip_fi, policy_generation FROM communities c
+            WHERE lower(host) = $1 AND archived_at IS NULL AND deleted_at IS NULL
+            AND deletion_state = 'active' AND NOT EXISTS (
+                SELECT 1 FROM community_deletion_requests d
+                WHERE d.community_id = c.id AND d.stage <> 'aborted')",
+        )
+        .bind(host)
+        .fetch_optional(&mut *connection)
+        .await?)
+    }
+
     /// Read current active-community policy from the writer, never a replica.
     #[datastore_span(name = "community_auth_policy", system = "postgresql")]
     pub async fn community_auth_policy(

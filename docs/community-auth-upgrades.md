@@ -185,3 +185,42 @@ the issuer recorded by a receipt while another remains makes that receipt
 `unavailable`; it never clears the requirement or destroys the receipt.
 Bulk backfill does not recreate missing bindings for required communities;
 its unbound report still exposes them for explicit operator repair.
+
+## Request enforcement and discovery (BUZZ-511)
+
+Each protected request resolves the normalized Host's active policy from the
+primary database, with a 500 ms budget. The effective requirement is the stored
+`requires_nip_fi` OR global `enforce`. Global `deny_protected` always returns 503
+before evidence checks; neither `off` nor `shadow` exempts a required row.
+Existing Nostr proof, key pairing, deny map, membership and resource checks remain.
+Discovery, pairing, enrollment and operator exceptions keep their own authentication.
+
+The router shares the policy read with HTTP handlers for that request. Root and
+audio WebSocket admission use the same policy source. There is no cross-request
+policy cache, positive or negative: an older read cannot overwrite a newer cached
+generation. This adds one writer query per protected request or discovery request;
+`buzz_nip_fi_policy_reads_total` and `buzz_nip_fi_policy_read_seconds` measure it.
+Issuer-binding/JWKS caches keep their existing bounds; unavailable dependencies
+refuse required admission, rather than treating it as optional.
+
+Database-sourced deployments construct the issuer resolver and verifier even in
+`off`, because some rows may require FI. Configure finite
+`BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS`, issuer JWKS and command configuration
+before enabling any row. Missing required components return 503. An optional row
+still follows global off/shadow behavior, including signed and unsigned legacy
+proofs where the endpoint permits them.
+
+Both `GET /info` and root NIP-11 negotiation return `Cache-Control: no-store`.
+An unknown or non-serving Host returns generic 404; policy lookup failure returns
+503. The top-level `requires_nip_fi` is a host-specific boolean. Existing
+`limitation.federated_identity` and `federated_identity` descriptor fields retain
+capability semantics: advertise when global mode evaluates OR the host requires
+FI. Thus shadow optional hosts still advertise capability, and required off hosts
+advertise capability and requirement together. No issuer, audience or identity
+provider address is added to discovery. Existing clients can keep reading their
+current fields; new clients must use the requirement field to distinguish optional
+capability from mandatory evidence.
+
+This is admission enforcement only. Existing requests and sockets may predate the
+new policy. Only BUZZ-512's application and drain evidence may establish completed
+activation; the operator receipt remains pending until that evidence is recorded.

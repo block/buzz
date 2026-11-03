@@ -498,3 +498,40 @@ async fn supported_writer_maintains_generation_while_direct_sql_is_not_constrain
     );
     assert_eq!(policy(&db, &request).await.policy_generation, 1);
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn host_policy_tracks_primary_requirement_and_serving_lifecycle() {
+    let (db, request, _) = fixture().await;
+    let host = &request.expected_host;
+    assert_eq!(
+        db.community_auth_policy_for_host(host).await.unwrap(),
+        Some(CommunityAuthPolicy {
+            requires_nip_fi: false,
+            policy_generation: 0
+        })
+    );
+    let upgraded = accepted(&db, &request).await;
+    assert_eq!(
+        db.community_auth_policy_for_host(host).await.unwrap(),
+        Some(CommunityAuthPolicy {
+            requires_nip_fi: true,
+            policy_generation: upgraded.policy_generation
+        })
+    );
+    assert!(db
+        .community_auth_policy_for_host("unknown.example")
+        .await
+        .unwrap()
+        .is_none());
+    sqlx::query("UPDATE communities SET archived_at = now() WHERE id = $1")
+        .bind(request.community_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    assert!(db
+        .community_auth_policy_for_host(host)
+        .await
+        .unwrap()
+        .is_none());
+}

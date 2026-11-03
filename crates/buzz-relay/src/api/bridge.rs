@@ -1256,11 +1256,15 @@ pub async fn submit_event(
     // In NIP-FI enforce/deny-protected mode, a real NIP-98 event is mandatory —
     // the X-Pubkey dev-mode fallback must never satisfy the pairing requirement.
     // [NIP-FI.md:594-607, FI-TRACE-HTTP-INGRESS]
-    let nip_fi_active = state.config.nip_fi.mode.restricts();
+    let nip_fi_active = crate::nip_fi_policy::mode(&state, &headers)
+        .await
+        .restricts();
     // POST /events carries an authorization-relevant body (the event determines
     // resource, effect, and state change), so a payload tag is required in
     // NIP-FI enforce mode. [NIP-FI.md:619-637]
-    let nip_fi_enforce = state.config.nip_fi.mode.enforces();
+    let nip_fi_enforce = crate::nip_fi_policy::mode(&state, &headers)
+        .await
+        .enforces();
 
     // NIP-FI admission: NIP-98 extraction runs inside the closure, followed by
     // assertion verify → pair → deny-map in fixed order. The proven pubkey is
@@ -1605,11 +1609,15 @@ pub async fn query_events(
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/query");
     // In NIP-FI enforce/deny-protected mode, a real NIP-98 event is mandatory.
     // [NIP-FI.md:594-607, FI-TRACE-HTTP-INGRESS]
-    let nip_fi_active = state.config.nip_fi.mode.restricts();
+    let nip_fi_active = crate::nip_fi_policy::mode(&state, &headers)
+        .await
+        .restricts();
     // POST /query carries an authorization-relevant body (filter selects the
     // resources returned), so a payload tag is required in enforce mode.
     // [NIP-FI.md:619-637]
-    let nip_fi_enforce = state.config.nip_fi.mode.enforces();
+    let nip_fi_enforce = crate::nip_fi_policy::mode(&state, &headers)
+        .await
+        .enforces();
 
     // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
     let proof = crate::nip_fi_shadow::EnforcedProof::new(&state, &headers, "bridge");
@@ -2294,11 +2302,15 @@ pub async fn count_events(
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/count");
     // In NIP-FI enforce/deny-protected mode, a real NIP-98 event is mandatory.
     // [NIP-FI.md:594-607, FI-TRACE-HTTP-INGRESS]
-    let nip_fi_active = state.config.nip_fi.mode.restricts();
+    let nip_fi_active = crate::nip_fi_policy::mode(&state, &headers)
+        .await
+        .restricts();
     // POST /count carries an authorization-relevant body (filter selects what
     // is counted), so a payload tag is required in enforce mode.
     // [NIP-FI.md:619-637]
-    let nip_fi_enforce = state.config.nip_fi.mode.enforces();
+    let nip_fi_enforce = crate::nip_fi_policy::mode(&state, &headers)
+        .await
+        .enforces();
 
     // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
     let proof = crate::nip_fi_shadow::EnforcedProof::new(&state, &headers, "bridge");
@@ -3147,7 +3159,9 @@ async fn authorize_moderation_read(
     // In NIP-FI enforce/deny-protected mode a real NIP-98 event is mandatory —
     // the X-Pubkey dev-mode fallback must never satisfy the pairing requirement.
     // [NIP-FI.md:594-607, FI-TRACE-HTTP-INGRESS]
-    let nip_fi_active = state.config.nip_fi.mode.restricts();
+    let nip_fi_active = crate::nip_fi_policy::mode(&state, &headers)
+        .await
+        .restricts();
 
     // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
     let proof = crate::nip_fi_shadow::EnforcedProof::new(state, headers, "bridge");

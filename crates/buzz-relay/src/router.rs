@@ -28,7 +28,7 @@ use crate::api;
 use crate::audio;
 use crate::connection::handle_connection;
 use crate::metrics::track_metrics;
-use crate::nip11::{nip11_document, relay_info_handler};
+use crate::nip11::{nip11_response, relay_info_handler};
 use crate::nip_fi_core::http_denial;
 use crate::readiness::{self, DependencySnapshot, ReadinessReason};
 use crate::state::AppState;
@@ -183,9 +183,33 @@ async fn nip_fi_assertion_guard(
     request: Request<Body>,
     next: middleware::Next,
 ) -> axum::response::Response {
-    let mode = state.config.nip_fi.mode;
-    // Off: fully transparent. [FI-INV-15]
-    if mode.is_off() || nip_fi_guard_exempts(&state, &request) {
+    if nip_fi_guard_exempts(&state, &request) {
+        return next.run(request).await;
+    }
+    if state.config.nip_fi.mode.denies_unconditionally() {
+        return http_denial(buzz_auth::DenialClass::AuthorizationUnavailable);
+    }
+    let policy = match crate::nip_fi_policy::resolve(&state, request.headers()).await {
+        Ok(policy) => policy,
+        Err(response) => return response,
+    };
+    if policy.stored_required && state.nip_fi_deny_map.is_none() {
+        return http_denial(buzz_auth::DenialClass::AuthorizationUnavailable);
+    }
+    crate::nip_fi_policy::with_policy(
+        policy,
+        nip_fi_assertion_guard_with_policy(state, request, next, policy.mode),
+    )
+    .await
+}
+
+async fn nip_fi_assertion_guard_with_policy(
+    state: Arc<AppState>,
+    request: Request<Body>,
+    next: middleware::Next,
+    mode: buzz_auth::NipFiMode,
+) -> axum::response::Response {
+    if mode.is_off() {
         return next.run(request).await;
     }
 
@@ -749,7 +773,7 @@ async fn nip11_or_ws_handler(
     }
 
     if accept.contains("application/nostr+json") {
-        return Json(nip11_document(&state, raw_host).await).into_response();
+        return nip11_response(&state, raw_host).await;
     }
 
     // NIP-FI assertion gate at WebSocket upgrade.
@@ -808,7 +832,7 @@ async fn nip11_or_ws_handler(
         if is_h1_ws_upgrade || is_h2_ws_connect {
             use crate::nip_fi_session::NipFiWsRoute::Root;
             use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
-            let mode = state.config.nip_fi.mode;
+            let mode = crate::nip_fi_policy::mode(&state, &headers).await;
             let verifier = state.nip_fi_verifier.as_deref();
             let communities = state.nip_fi_communities();
             match check_nip_fi_at_upgrade(&slot, Root, &headers, communities, verifier, mode)
@@ -864,9 +888,8 @@ async fn nip11_or_ws_handler(
     // BEFORE the WebSocket upgrade, so no frame is ever read on an unbound
     // connection. The host is the authoritative selector; an unmapped host or a
     // lookup failure fails closed with a generic rejection — never a default
-    // tenant. NIP-11 above is served before binding and stays fail-open: an
-    // unmapped host still gets the document (with host-scoped fields like
-    // `icon` simply absent), so the doc cannot leak which hosts are mapped.
+    // tenant. NIP-11 above resolves host policy independently and fails closed
+    // when that policy cannot be loaded.
     //
     // The NIP-FI upgrade gate runs above (before bind_community) so denied
     // upgrades skip the tenant lookup; the `Ok(ws)` backstop runs below.
@@ -917,7 +940,7 @@ async fn nip11_or_ws_handler(
                 // Only re-check if the pre-extractor gate did not fire (h2 path).
                 use crate::nip_fi_session::NipFiWsRoute::Root;
                 use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
-                let mode = state.config.nip_fi.mode;
+                let mode = crate::nip_fi_policy::mode(&state, &headers).await;
                 let verifier = state.nip_fi_verifier.as_deref();
                 let communities = state.nip_fi_communities();
                 // Resolved after every await of this upgrade: nothing to re-check.
@@ -986,7 +1009,7 @@ async fn nip11_or_ws_handler(
                 }
             }
             // Not a WS upgrade request — serve NIP-11 as fallback.
-            Json(nip11_document(&state, raw_host).await).into_response()
+            nip11_response(&state, raw_host).await
         }
     }
 }
@@ -1318,7 +1341,7 @@ mod tests {
             buzz_workflow::WorkflowConfig::default(),
         ));
         let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
-        let (state, _audit_shutdown) = AppState::new(
+        let (mut state, _audit_shutdown) = AppState::new(
             config,
             db,
             redis_pool,
@@ -1365,7 +1388,7 @@ mod tests {
             buzz_workflow::WorkflowConfig::default(),
         ));
         let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
-        let (state, _audit_shutdown) = AppState::new(
+        let (mut state, _audit_shutdown) = AppState::new(
             config,
             db,
             redis_pool,
@@ -2351,7 +2374,7 @@ mod tests {
             buzz_workflow::WorkflowConfig::default(),
         ));
         let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
-        let (state, _audit_shutdown) = AppState::new(
+        let (mut state, _audit_shutdown) = AppState::new(
             config,
             db,
             redis_pool,
@@ -2363,6 +2386,7 @@ mod tests {
             nostr::Keys::generate(),
             media_storage,
         );
+        state.nip_fi_policy = Arc::new(crate::nip_fi_policy::OptionalPolicy);
         Arc::new(state)
     }
 
@@ -3712,7 +3736,7 @@ mod tests {
             buzz_workflow::WorkflowConfig::default(),
         ));
         let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
-        let (state, _audit_shutdown) = AppState::new(
+        let (mut state, _audit_shutdown) = AppState::new(
             config,
             db,
             redis_pool,
@@ -3814,7 +3838,7 @@ mod tests {
             ));
             let media_storage =
                 buzz_media::MediaStorage::new(&config.media).expect("media storage");
-            let (state, _audit_shutdown) = AppState::new(
+            let (mut state, _audit_shutdown) = AppState::new(
                 config,
                 db,
                 redis_pool,
@@ -4275,6 +4299,7 @@ mod tests {
         );
         state.nip_fi_deny_map = Some(deny_map);
 
+        state.nip_fi_policy = Arc::new(crate::nip_fi_policy::OptionalPolicy);
         Arc::new(state)
     }
 

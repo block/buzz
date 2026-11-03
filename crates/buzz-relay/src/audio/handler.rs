@@ -104,7 +104,7 @@ pub async fn ws_audio_handler(
     // [FI-TRACE-TRANSPORT-CLOSED] [NIP-FI.md §Admission pairing sequence]
     let (nip_fi_assertion, shadow_assertion, nip_fi_deadline, shadow_line) = {
         use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
-        let mode = state.config.nip_fi.mode;
+        let mode = crate::nip_fi_policy::mode(&state, &headers).await;
         let verifier = state.nip_fi_verifier.as_deref();
         let communities = state.nip_fi_communities();
         match check_nip_fi_at_upgrade(

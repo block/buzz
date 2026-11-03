@@ -1601,7 +1601,8 @@ pub struct AppState {
     /// NIP-FI federated-identity assertion verifier, shared across all HTTP
     /// ingress and WebSocket upgrade checks.
     ///
-    /// `None` when `config.nip_fi.mode` is `Off`. When present, the verifier
+    /// `None` for unconfigured OSS deployments. Database-sourced deployments
+    /// construct it even in Off, for stored requirements. When present, the verifier
     /// is the single offline authority for assertion validation on every
     /// protected HTTP surface and WebSocket upgrade. The backing `ProductionJwksSource` is also
     /// shared and performs bounded periodic JWKS refresh internally.
@@ -1613,6 +1614,9 @@ pub struct AppState {
     /// erased form costs one vtable dispatch per request, which is negligible
     /// relative to the JWT crypto.
     pub nip_fi_verifier: Option<Arc<dyn buzz_auth::VerifyAssertion>>,
+
+    /// Primary-database policy lookup; tests can substitute the same source seam.
+    pub(crate) nip_fi_policy: Arc<dyn crate::nip_fi_policy::PolicySource>,
 
     /// The shared JWKS source backing `nip_fi_verifier`, exposed so `main.rs`
     /// can warm it at startup and drive the background refresh loop.
@@ -1679,6 +1683,7 @@ impl AppState {
         relay_keypair: nostr::Keys,
         media_storage: MediaStorage,
     ) -> (Self, AuditShutdownHandle) {
+        let nip_fi_policy = Arc::new(db.clone());
         let max_connections = config.max_connections;
         let max_concurrent_handlers = config.max_concurrent_handlers;
         let search_arc = Arc::new(search);
@@ -1895,6 +1900,7 @@ impl AppState {
             tracer: Arc::new(crate::conformance::NoopTracer),
             mesh: Arc::new(std::sync::OnceLock::new()),
             nip_fi_verifier,
+            nip_fi_policy,
             nip_fi_jwks_source,
             // NIP-FI deny map and command verifier are initialized lazily by
             // `build_nip_fi_command_components` in `api::nip_fi`, called from
@@ -2766,10 +2772,9 @@ impl AuditShutdownHandle {
 
 /// Construct the NIP-FI assertion verifier + JWKS source from `config.nip_fi`.
 ///
-/// Returns `(None, None)` when the mode is `Off` or `DenyProtected` (the
-/// verifier is never consulted there; admission always returns 503). In
-/// `Enforce` mode, constructs a `ProductionJwksSource` (shared via `Arc`)
-/// and a `FederatedAssertionVerifier` over a clone of that `Arc`.
+/// Database-sourced deployments construct the verifier in Off too, because
+/// a required community still evaluates assertions. Unconfigured OSS Off and
+/// repair mode need no verifier. The JWKS source is shared via `Arc`.
 /// The source starts empty; HTTP admission returns `authorization_unavailable`
 /// (503) until the startup warm in `main.rs` succeeds. [FI-TRACE-DEPENDENCY-FAIL-CLOSED]
 type NipFiComponents = (
@@ -2780,7 +2785,10 @@ type NipFiComponents = (
 fn build_nip_fi_components(config: &crate::config::Config) -> NipFiComponents {
     use buzz_auth::{FederatedAssertionVerifier, HttpJwksFetcher, ProductionJwksSource};
 
-    if !config.nip_fi.mode.evaluates() {
+    if config.nip_fi.mode.denies_unconditionally()
+        || (!config.nip_fi.mode.evaluates()
+            && config.nip_fi.source != crate::nip_fi_config::CommunitySource::Database)
+    {
         // Off: no enforcement. DenyProtected: verifier never consulted (always 503).
         return (None, None);
     }
@@ -3434,7 +3442,9 @@ pub(crate) mod tests {
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
-        build_test_state(config, pool).await
+        let mut state = (*build_test_state(config, pool).await).clone();
+        state.nip_fi_policy = Arc::new(crate::nip_fi_policy::OptionalPolicy);
+        Arc::new(state)
     }
 
     /// The same test state with an unreachable database target. This lets
@@ -3446,12 +3456,15 @@ pub(crate) mod tests {
     pub(crate) async fn test_state_with_unreachable_database_url(
         database_url: &str,
     ) -> Arc<AppState> {
-        test_state_with_database_url_and_pool_options(
+        let mut state = (*test_state_with_database_url_and_pool_options(
             database_url,
             sqlx::postgres::PgPoolOptions::new()
                 .acquire_timeout(std::time::Duration::from_millis(100)),
         )
-        .await
+        .await)
+            .clone();
+        state.nip_fi_policy = Arc::new(crate::nip_fi_policy::OptionalPolicy);
+        Arc::new(state)
     }
 
     /// Test state whose config and writer pool both target `database_url`,
