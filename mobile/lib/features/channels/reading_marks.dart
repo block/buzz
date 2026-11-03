@@ -101,6 +101,8 @@ MapEntry<String, int>? _catchUpMark({
   final showsNewest = !loaded.any(
     (message) =>
         (threadRootId != null || !isCollapsedHuddleEnding(message, loaded)) &&
+        // The main timeline never renders these, so they can't be its bottom.
+        !isHiddenMembershipNotice(message) &&
         message.createdAt > bottom.createdAt &&
         (threadRootId != null
             ? _threadRootOf(message) == threadRootId
