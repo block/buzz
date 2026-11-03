@@ -466,13 +466,13 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                 channel.id,
               ).select((all) => _threadTypingKey(all, currentPubkey)),
             ),
+      additionalAgents: resolvedChannel.isDm ? agentPubkeys : const {},
     );
     final ownedThreadTypers = {
       for (final agents in threadWorking.values) ...agents,
     };
-    // Agent work is visible in every DM, even when its response is threaded.
-    // Ordinary channels keep other thread activity inside the thread view,
-    // but, as on desktop, show the user's own agents working in any thread.
+    // DM thread activity belongs on its message, not in the main typing row.
+    // Flat Solo chats and ordinary channel typing keep their existing scope.
     final typingEntries = ref
         .watch(
           visibleTypingProvider(
@@ -481,9 +481,8 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
             include: (e) =>
                 personalChat ||
                 e.threadHeadId == null ||
-                ownedThreadTypers.contains(e.pubkey.toLowerCase()) ||
-                (resolvedChannel.isDm &&
-                    agentPubkeys.contains(e.pubkey.toLowerCase())),
+                (!resolvedChannel.isDm &&
+                    ownedThreadTypers.contains(e.pubkey.toLowerCase())),
           ),
         )
         .entries;

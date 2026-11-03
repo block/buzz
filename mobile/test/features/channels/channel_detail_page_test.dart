@@ -11322,9 +11322,9 @@ void main() {
     for (final scenario in [
       (personal: true, dm: false, agent: true, group: false, visible: true),
       (personal: false, dm: false, agent: true, group: false, visible: false),
-      (personal: false, dm: true, agent: true, group: false, visible: true),
+      (personal: false, dm: true, agent: true, group: false, visible: false),
       (personal: false, dm: true, agent: false, group: false, visible: false),
-      (personal: false, dm: true, agent: true, group: true, visible: true),
+      (personal: false, dm: true, agent: true, group: true, visible: false),
     ]) {
       testWidgets('reply-scoped typing follows conversation scope: $scenario', (
         tester,
@@ -11376,6 +11376,21 @@ void main() {
           scenario.visible ? findsOneWidget : findsNothing,
         );
         expect(find.text('Alice is typing…'), findsNothing);
+        if (scenario.dm && scenario.agent) {
+          expect(
+            find.byKey(const ValueKey('thread-working-dots')),
+            findsOneWidget,
+          );
+          final bubble = find.byWidgetPredicate(
+            (widget) => widget is MessageContent && widget.content == 'Hello',
+          );
+          expect(
+            tester
+                .getRect(find.byKey(const ValueKey('thread-working-dots')))
+                .right,
+            closeTo(tester.getRect(bubble).right, 0.1),
+          );
+        }
         typing.setEntries(const []);
         await tester.pumpAndSettle();
         expect(
@@ -11500,7 +11515,7 @@ void main() {
       );
       expect(
         find.descendant(of: row, matching: find.text('View thread')),
-        findsOneWidget,
+        findsNothing,
       );
 
       typing.setEntries([
