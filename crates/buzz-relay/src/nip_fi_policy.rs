@@ -8,7 +8,7 @@ use axum::{
     response::IntoResponse,
 };
 use buzz_auth::{DenialClass, NipFiMode};
-use buzz_db::CommunityAuthPolicy;
+use buzz_db::community_auth::CommunityAuthPolicy;
 use futures_util::future::{BoxFuture, FutureExt};
 
 /// Host policy source, shared by admission and discovery.
@@ -47,13 +47,7 @@ pub(crate) async fn with_policy<F: std::future::Future>(policy: Policy, next: F)
 
 /// Repair mode precedes all policy and evidence failures.
 pub(crate) fn effective(global: NipFiMode, required: bool) -> NipFiMode {
-    if global.denies_unconditionally() {
-        global
-    } else if required {
-        NipFiMode::Enforce
-    } else {
-        global
-    }
+    global.with_requirement(required)
 }
 
 pub(crate) async fn resolve(
@@ -104,7 +98,7 @@ pub(crate) async fn resolve(
 /// when policy is unavailable, even if the global rollout mode is Off/Shadow.
 pub(crate) async fn mode(state: &crate::state::AppState, headers: &HeaderMap) -> NipFiMode {
     if state.config.nip_fi.mode.denies_unconditionally() {
-        return NipFiMode::DenyProtected;
+        return NipFiMode::unavailable();
     }
     match resolve(state, headers).await {
         Ok(p)
@@ -113,10 +107,10 @@ pub(crate) async fn mode(state: &crate::state::AppState, headers: &HeaderMap) ->
                     || state.nip_fi_deny_map.is_none()
                     || state.config.nip_fi.max_connection_lifetime().is_none()) =>
         {
-            NipFiMode::DenyProtected
+            NipFiMode::unavailable()
         }
         Ok(p) => p.mode,
-        Err(_) => NipFiMode::DenyProtected,
+        Err(_) => NipFiMode::unavailable(),
     }
 }
 

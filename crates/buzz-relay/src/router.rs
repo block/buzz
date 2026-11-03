@@ -191,7 +191,22 @@ async fn nip_fi_assertion_guard(
     }
     let policy = match crate::nip_fi_policy::resolve(&state, request.headers()).await {
         Ok(policy) => policy,
-        Err(response) => return response,
+        Err(response) => {
+            if state.config.nip_fi.mode.observes_only() {
+                crate::nip_fi_shadow::record_for(
+                    "http",
+                    crate::nip_fi_shadow::label(&Err(
+                        buzz_auth::DenialClass::AuthorizationUnavailable,
+                    )),
+                    Err(crate::nip_fi_shadow::WouldDeny::new(
+                        crate::nip_fi_shadow::Stage::Community,
+                        buzz_auth::DenialClass::AuthorizationUnavailable,
+                        crate::nip_fi_shadow::UNRESOLVED,
+                    )),
+                );
+            }
+            return response;
+        }
     };
     if policy.stored_required && state.nip_fi_deny_map.is_none() {
         return http_denial(buzz_auth::DenialClass::AuthorizationUnavailable);
@@ -1353,6 +1368,7 @@ mod tests {
             nostr::Keys::generate(),
             media_storage,
         );
+        state.nip_fi_policy = Arc::new(crate::nip_fi_policy::OptionalPolicy);
         Arc::new(state)
     }
 
@@ -1388,7 +1404,7 @@ mod tests {
             buzz_workflow::WorkflowConfig::default(),
         ));
         let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
-        let (mut state, _audit_shutdown) = AppState::new(
+        let (state, _audit_shutdown) = AppState::new(
             config,
             db,
             redis_pool,
@@ -3838,7 +3854,7 @@ mod tests {
             ));
             let media_storage =
                 buzz_media::MediaStorage::new(&config.media).expect("media storage");
-            let (state, _audit_shutdown) = AppState::new(
+            let (mut state, _audit_shutdown) = AppState::new(
                 config,
                 db,
                 redis_pool,
@@ -3850,6 +3866,7 @@ mod tests {
                 nostr::Keys::generate(),
                 media_storage,
             );
+            state.nip_fi_policy = Arc::new(crate::nip_fi_policy::OptionalPolicy);
             Arc::new(state)
         }
 

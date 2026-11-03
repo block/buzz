@@ -4,7 +4,7 @@ use axum::{
     http::{header, Request},
 };
 use base64::Engine;
-use nostr::{EventBuilder, Keys, Kind, Tag};
+use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};

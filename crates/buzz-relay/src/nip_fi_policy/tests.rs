@@ -129,7 +129,7 @@ async fn mixed_required_and_signed_unsigned_optional_admission() {
             if signed {
                 assert!(result.is_ok());
             } else {
-                assert_eq!(result.err().unwrap().status(), StatusCode::FORBIDDEN);
+                assert_eq!(result.err().unwrap().status(), StatusCode::UNAUTHORIZED);
             }
         }
         let h = headers("required.example", false);

@@ -702,6 +702,20 @@ where
     })?;
     let key = Some(proof.pubkey);
 
+    // A legacy dev header is an identity hint, never proof of key possession.
+    // Required rows must reject it even if a caller accidentally returns one.
+    if !proof.signed {
+        return Err(WouldDeny::new(
+            Stage::Nip98,
+            if headers.contains_key("authorization") {
+                DenialClass::EvidenceRejected
+            } else {
+                DenialClass::MissingEvidence
+            },
+            "unsigned_proof",
+        ));
+    }
+
     // Steps 4–5: extract and verify the assertion.
     let assertion =
         evaluate_attached_assertion(headers, community, verifier).map_err(|rejection| {
@@ -766,7 +780,7 @@ pub(crate) async fn admit_nip_fi_http_on_state<X, F>(
 where
     F: FnOnce() -> Result<Nip98Proof<X>, Response<Body>>,
 {
-    let mode = crate::nip_fi_policy::mode(state, &headers).await;
+    let mode = crate::nip_fi_policy::mode(state, headers).await;
     let verifier = state.nip_fi_verifier.as_deref();
     let communities = state.nip_fi_communities();
     let admission = match state.nip_fi_deny_map.as_deref() {

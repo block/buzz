@@ -896,7 +896,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                     && nip_fi.mode.is_off()
                     && !nip_fi.command_configs.is_empty()
                 {
-                    buzz_auth::NipFiMode::Enforce
+                    nip_fi.mode.with_requirement(true)
                 } else {
                     nip_fi.mode
                 },

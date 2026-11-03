@@ -29,6 +29,22 @@ pub enum NipFiMode {
 }
 
 impl NipFiMode {
+    /// Add a durable community requirement without weakening repair mode.
+    pub const fn with_requirement(self, required: bool) -> Self {
+        if self.denies_unconditionally() {
+            self
+        } else if required {
+            Self::Enforce
+        } else {
+            self
+        }
+    }
+
+    /// Fail closed when a dependency needed to decide policy is unavailable.
+    pub const fn unavailable() -> Self {
+        Self::DenyProtected
+    }
+
     /// NIP-FI is disabled.
     pub const fn is_off(self) -> bool {
         matches!(self, Self::Off)

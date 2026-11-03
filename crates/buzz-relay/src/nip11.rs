@@ -584,14 +584,15 @@ mod tests {
             let mut config = (*state.config).clone();
             config.nip_fi.mode = mode;
             state.config = std::sync::Arc::new(config);
-            docs.push(
-                serde_json::to_string(
-                    &super::nip11_document(&state, "relay.example")
-                        .await
-                        .unwrap(),
-                )
-                .unwrap(),
-            );
+            let mut document = serde_json::to_value(
+                super::nip11_document(&state, "relay.example")
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(document["requires_nip_fi"], mode.enforces());
+            document.as_object_mut().unwrap().remove("requires_nip_fi");
+            docs.push(document);
         }
         assert_ne!(docs[0], docs[1], "enforce advertises NIP-FI");
         assert_eq!(docs[2], docs[1]);

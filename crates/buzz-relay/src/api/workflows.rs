@@ -65,9 +65,7 @@ async fn authorize_workflow_read(
     // In NIP-FI enforce/deny-protected mode a real NIP-98 event is mandatory —
     // the X-Pubkey dev-mode fallback must never satisfy the pairing requirement.
     // [NIP-FI.md:594-607, FI-TRACE-HTTP-INGRESS]
-    let nip_fi_active = crate::nip_fi_policy::mode(state, &headers)
-        .await
-        .restricts();
+    let nip_fi_active = crate::nip_fi_policy::mode(state, headers).await.restricts();
 
     // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
     let require_auth = state.config.require_auth_token || nip_fi_active;
