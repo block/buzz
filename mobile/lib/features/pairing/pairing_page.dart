@@ -241,7 +241,6 @@ class PairingPage extends HookConsumerWidget {
         : null;
 
     final showLoading =
-        pairingState.status == PairingStatus.connecting ||
         pairingState.status == PairingStatus.transferring ||
         pairingState.status == PairingStatus.storing ||
         pairingState.status == PairingStatus.success;
@@ -432,7 +431,22 @@ class PairingPage extends HookConsumerWidget {
           ref.read(pairingProvider.notifier).reset();
         }
       },
-      child: pairingScaffold,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          ExcludeFocus(
+            excluding: pairingState.status == PairingStatus.connecting,
+            child: Offstage(
+              offstage: pairingState.status == PairingStatus.connecting,
+              child: pairingScaffold,
+            ),
+          ),
+          if (pairingState.status == PairingStatus.connecting)
+            const CommunityLoadingSurface(
+              key: Key('pairing-community-loading'),
+            ),
+        ],
+      ),
     );
 
     if (!fallbackScannerVisible.value) {

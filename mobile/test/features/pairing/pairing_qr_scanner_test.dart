@@ -37,71 +37,101 @@ void main() {
     MobileScannerPlatform.instance = defaultScannerPlatform;
   });
 
-  testWidgets('a scan shows connection progress before an error', (
-    tester,
-  ) async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(
-          _qrScannerPlatformChannel,
-          (call) async =>
-              call.method == 'usesDynamicIslandQrScannerPortal' ? true : null,
-        );
-    final readiness = Completer<void>();
-    final notifier = PairingNotifier(
-      socketFactory:
-          ({
-            required wsUrl,
-            required ephemeralPrivkey,
-            required onMessage,
-            required onDisconnected,
-          }) => _PendingPairingSocket(
-            readiness.future,
-            ephemeralPrivkey: ephemeralPrivkey,
-            onMessage: onMessage,
-            onDisconnected: onDisconnected,
+  for (final paste in [false, true]) {
+    testWidgets('pairing entry paste=$paste keeps progress and permits retry', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            _qrScannerPlatformChannel,
+            (call) async =>
+                call.method == 'usesDynamicIslandQrScannerPortal' ? true : null,
+          );
+      final readiness = Completer<void>();
+      final notifier = PairingNotifier(
+        socketFactory:
+            ({
+              required wsUrl,
+              required ephemeralPrivkey,
+              required onMessage,
+              required onDisconnected,
+            }) => _PendingPairingSocket(
+              readiness.future,
+              ephemeralPrivkey: ephemeralPrivkey,
+              onMessage: onMessage,
+              onDisconnected: onDisconnected,
+            ),
+      );
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          disableAnimations: true,
+          overrides: [pairingProvider.overrideWith(() => notifier)],
+          child: PairingPage(
+            addingCommunity: paste,
+            existingUser: paste,
+            connectionLanding: true,
+            showConnectionOptions: false,
           ),
-    );
-    await tester.pumpWidget(
-      WidgetHelpers.testable(
-        disableAnimations: true,
-        overrides: [pairingProvider.overrideWith(() => notifier)],
-        child: const PairingPage(
-          connectionLanding: true,
-          showConnectionOptions: false,
         ),
-      ),
-    );
-    await tester.tap(find.text('Scan a QR code'));
-    await tester.pump();
-    await tester.pump();
-    fakeScannerPlatform._barcodes.add(
-      BarcodeCapture(
-        barcodes: [
-          Barcode(
-            rawValue:
-                'nostrpair://79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798'
-                '?secret=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789'
-                '&relay=wss%3A%2F%2Fpairing.example&v=1',
-          ),
-        ],
-      ),
-    );
-    await tester.pump();
-    await tester.pump();
-    await tester.pump();
-    expect(find.byKey(const Key('pairing-community-loading')), findsOneWidget);
-    expect(find.text('Scan a QR code'), findsNothing);
-    readiness.completeError(const SocketException('Network is unreachable'));
-    await tester.pump();
-    await tester.pump();
-    expect(
-      find.textContaining('Could not reach the pairing relay'),
-      findsOneWidget,
-    );
-    expect(find.text('Scan a QR code'), findsOneWidget);
-    debugDefaultTargetPlatformOverride = null;
-  });
+      );
+      const code =
+          'nostrpair://79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798'
+          '?secret=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789'
+          '&relay=wss%3A%2F%2Fpairing.example&v=1';
+      if (paste) {
+        await tester.enterText(
+          find.byKey(const Key('community-pairing-input')),
+          code,
+        );
+        await tester.tap(find.text('Connect'));
+      } else {
+        await tester.tap(find.text('Scan a QR code'));
+        await tester.pump();
+        await tester.pump();
+        fakeScannerPlatform._barcodes.add(
+          BarcodeCapture(barcodes: [Barcode(rawValue: code)]),
+        );
+      }
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      expect(
+        find.byKey(const Key('pairing-community-loading')),
+        findsOneWidget,
+      );
+      expect(find.text('Scan a QR code'), findsNothing);
+      readiness.completeError(const SocketException('Network is unreachable'));
+      await tester.pump();
+      await tester.pump();
+      expect(
+        find.textContaining('Could not reach the pairing relay'),
+        findsOneWidget,
+      );
+      if (paste) {
+        expect(
+          tester
+              .widget<TextField>(
+                find.byKey(const Key('community-pairing-input')),
+              )
+              .controller!
+              .text,
+          code,
+        );
+        expect(
+          tester
+              .widget<FilledButton>(
+                find.widgetWithText(FilledButton, 'Connect'),
+              )
+              .onPressed,
+          isNotNull,
+        );
+      } else {
+        expect(find.text('Scan a QR code'), findsOneWidget);
+      }
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
 
   group('DynamicIslandQrScannerGeometry', () {
     const viewport = Size(393, 852);
