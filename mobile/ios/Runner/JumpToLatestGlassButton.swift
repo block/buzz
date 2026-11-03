@@ -530,6 +530,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     switch icon {
     case "plus": buttonIconName = "plus"
     case "close": buttonIconName = "xmark"
+    case "check": buttonIconName = "checkmark"
     case "camera": buttonIconName = "camera"
     case "photoLibrary": buttonIconName = "photo.on.rectangle.angled"
     case "palette": buttonIconName = "paintpalette"
