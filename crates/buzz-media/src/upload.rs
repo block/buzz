@@ -585,51 +585,54 @@ mod tests {
         }
     }
 
-    /// A 640x640 PNG, so its thumbnail is 320x320, whose left half has the
+    /// A 640x640 image, so its thumbnail is 320x320, whose left half has the
     /// given alpha and right half is opaque red.
-    fn png_with_alpha(alpha: u8) -> Vec<u8> {
+    fn image_with_alpha(alpha: u8, format: image::ImageFormat) -> Vec<u8> {
         let img = image::RgbaImage::from_fn(640, 640, |x, _| {
             image::Rgba([255, 0, 0, if x < 320 { alpha } else { 255 }])
         });
         let mut bytes = Vec::new();
-        img.write_to(
-            &mut std::io::Cursor::new(&mut bytes),
-            image::ImageFormat::Png,
-        )
-        .unwrap();
+        img.write_to(&mut std::io::Cursor::new(&mut bytes), format)
+            .unwrap();
         bytes
     }
 
     #[test]
     fn transparent_image_thumbnail_keeps_alpha() {
-        let (meta, thumb) = generate_image_metadata_sync(
-            &test_config(),
-            &"a".repeat(64),
-            &png_with_alpha(0),
-            "image/png",
-            "png",
-        )
-        .unwrap();
-        let thumb = thumb.unwrap();
-        assert_eq!(
-            image::guess_format(&thumb).unwrap(),
-            image::ImageFormat::Png
-        );
-        let decoded = image::load_from_memory(&thumb).unwrap().to_rgba8();
-        assert_eq!(
-            decoded.get_pixel(0, 0)[3],
-            0,
-            "transparent pixel stays transparent"
-        );
-        assert_eq!(
-            decoded.get_pixel(319, 0)[3],
-            255,
-            "opaque pixel stays opaque"
-        );
-        assert_eq!(
-            meta.thumb_object("s"),
-            ("s.thumb.png".to_string(), "image/png")
-        );
+        for (format, mime, ext) in [
+            (image::ImageFormat::Png, "image/png", "png"),
+            (image::ImageFormat::Gif, "image/gif", "gif"),
+        ] {
+            let (meta, thumb) = generate_image_metadata_sync(
+                &test_config(),
+                &"a".repeat(64),
+                &image_with_alpha(0, format),
+                mime,
+                ext,
+            )
+            .unwrap();
+            let thumb = thumb.unwrap();
+            assert_eq!(
+                image::guess_format(&thumb).unwrap(),
+                image::ImageFormat::Png,
+                "{ext}"
+            );
+            let decoded = image::load_from_memory(&thumb).unwrap().to_rgba8();
+            assert_eq!(
+                decoded.get_pixel(0, 0)[3],
+                0,
+                "{ext}: transparent pixel stays transparent"
+            );
+            assert_eq!(
+                decoded.get_pixel(319, 0)[3],
+                255,
+                "{ext}: opaque pixel stays opaque"
+            );
+            assert_eq!(
+                meta.thumb_object("s"),
+                ("s.thumb.png".to_string(), "image/png")
+            );
+        }
     }
 
     #[test]
@@ -637,7 +640,7 @@ mod tests {
         let (meta, thumb) = generate_image_metadata_sync(
             &test_config(),
             &"a".repeat(64),
-            &png_with_alpha(255),
+            &image_with_alpha(255, image::ImageFormat::Png),
             "image/png",
             "png",
         )
