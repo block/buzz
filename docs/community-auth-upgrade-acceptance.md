@@ -131,14 +131,16 @@ Before mutations, capture:
    not establish the live result.
 9. Use BUZZ-515's separately approved server-side dry run to verify admitted
    `envFrom` imports the intended `platform-config`. Review later environment
-   sources and explicit overrides. After separately authorized Job creation,
-   capture effective `CLUSTER_NAME` from the harness's startup check against its
-   expected cell, before any relay mutation. Record only that cluster identity
-   and check outcome, never the imported environment. Missing render,
-   selector/policy, platform-config
-   or startup-check evidence blocks relay mutation; do not infer it from a
-   template or desired configuration. Neither dry run nor Job creation is
-   authorized by this procedure.
+   sources and explicit overrides. Missing render, selector/policy or
+   platform-config evidence blocks Job creation. During the separately approved
+   Job's startup, the harness must reject a cluster mismatch before any relay
+   call and emit a bounded `clusterCheck=PASSED|MISMATCH` receipt. Record only
+   that check outcome and the reviewed cluster identity, never other environment
+   values. A silent check or generic exception is insufficient; missing runtime
+   evidence blocks acceptance. This explicit receipt is a pending BUZZ-515/516
+   execution prerequisite: pin this evidence contract to its implementing harness
+   revision before use. Do not infer a pass from a template or desired config.
+   Neither dry run nor Job creation is authorized by this procedure.
 
 Do not infer process coverage from repeated requests through a load balancer.
 Do not treat unavailable audio or Git fixtures as successful denials. Each
